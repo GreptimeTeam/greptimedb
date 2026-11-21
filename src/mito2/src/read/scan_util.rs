@@ -1280,7 +1280,10 @@ pub(crate) fn should_split_flat_batches_for_merge(
             let file_index = index.index - stream_ctx.input.num_memtables();
             let file = &stream_ctx.input.files[file_index];
             let file_meta = file.meta_ref();
-            if file_meta.level == 0 {
+            // Only L1 compaction outputs guarantee a published, non-overlapping layout.
+            // L0 and shared inputs may carry short series whose tiny batches
+            // would otherwise be retained by the merge.
+            if file_meta.level != 1 {
                 // Short series can leave too many tiny batches retained by the merge.
                 if file_meta.num_series > 0 {
                     if !can_split_series(file_meta.num_rows, file_meta.num_series) {
@@ -1613,13 +1616,7 @@ pub fn build_flat_file_range_scan_stream(
                 .file_handle()
                 .is_effective_target_sequence_trusted(stream_ctx.input.region_metadata().region_id);
 
-            let mapper = range.compaction_projection_mapper();
             while let Some(record_batch) = reader.next_batch().await? {
-                let record_batch = if let Some(mapper) = mapper {
-                    mapper.project(record_batch)?
-                } else {
-                    record_batch
-                };
                 let Some(record_batch) = filter_flat_batch_by_sequence(
                     record_batch,
                     stream_ctx.input.sequence_range,
@@ -1656,7 +1653,6 @@ pub fn build_flat_file_range_scan_stream(
 
         // Reports metrics.
         reader_metrics.observe_rows(read_type);
-        reader_metrics.filter_metrics.observe();
         part_metrics.merge_reader_metrics(reader_metrics, per_file_metrics.as_ref());
     })
 }

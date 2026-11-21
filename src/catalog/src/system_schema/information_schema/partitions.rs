@@ -32,7 +32,7 @@ use datatypes::vectors::{
     Int64Vector, Int64VectorBuilder, MutableVector, StringVector, StringVectorBuilder,
     TimestampSecondVector, TimestampSecondVectorBuilder, UInt64VectorBuilder,
 };
-use futures::{StreamExt, TryStreamExt};
+use futures::TryStreamExt;
 use partition::manager::PartitionInfo;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{ScanRequest, TableId};
@@ -255,11 +255,11 @@ impl InformationSchemaPartitionsBuilder {
             .upgrade()
             .context(UpgradeWeakCatalogManagerRefSnafu)?;
 
-        let partition_manager = catalog_manager
+        let catalog_manager = catalog_manager
             .as_any()
             .downcast_ref::<KvBackendCatalogManager>()
-            .map(|catalog_manager| catalog_manager.partition_manager())
             .context(PartitionManagerNotFoundSnafu)?;
+        let partition_manager = catalog_manager.partition_manager();
 
         let predicates = Predicates::from_scan_request(&request);
 
@@ -309,24 +309,18 @@ impl InformationSchemaPartitionsBuilder {
         }
 
         for schema_name in catalog_manager.schema_names(&catalog_name, None).await? {
-            let table_info_stream = catalog_manager
-                .tables(&catalog_name, &schema_name, None)
-                .try_filter_map(|t| async move {
-                    let table_info = t.table_info();
-                    if table_info.table_type == TableType::Temporary {
-                        Ok(None)
-                    } else {
-                        Ok(Some(table_info))
-                    }
-                });
-
-            const BATCH_SIZE: usize = 128;
-
-            // Split table infos into chunks
-            let mut table_info_chunks = pin!(table_info_stream.ready_chunks(BATCH_SIZE));
-
-            while let Some(table_infos) = table_info_chunks.next().await {
-                let table_infos = table_infos.into_iter().collect::<Result<Vec<_>>>()?;
+            // A prefetched table batch can own a physical route needed to resolve the
+            // current batch. Finish its partition lookups before polling the next batch.
+            let batches = catalog_manager.sequential_table_batches(&catalog_name, &schema_name);
+            let mut batches = pin!(batches);
+            while let Some(tables) = batches.try_next().await? {
+                let table_infos: Vec<_> = tables
+                    .map(|table| table.table_info())
+                    .filter(|info| info.table_type != TableType::Temporary)
+                    .collect();
+                if table_infos.is_empty() {
+                    continue;
+                }
                 let table_ids: Vec<TableId> =
                     table_infos.iter().map(|info| info.ident.table_id).collect();
 
@@ -481,7 +475,7 @@ mod tests {
     use api::v1::meta::Peer;
     use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, INFORMATION_SCHEMA_NAME};
-    use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
+    use common_meta::cache::{CacheRegistry, CacheRegistryBuilder, LayeredCacheRegistryBuilder};
     use common_meta::key::schema_name::SchemaNameKey;
     use common_meta::key::table_route::TableRouteValue;
     use common_meta::kv_backend::memory::MemoryKvBackend;
@@ -505,10 +499,10 @@ mod tests {
     const REGION_NUMBER_2: u32 = 2;
     const REGION_NUMBER_7: u32 = 7;
 
-    fn kv_catalog_manager() -> Arc<KvBackendCatalogManager> {
+    fn kv_catalog_manager(overrides: CacheRegistry) -> Arc<KvBackendCatalogManager> {
         let backend = Arc::new(MemoryKvBackend::default());
-        let layered_cache_builder = LayeredCacheRegistryBuilder::default()
-            .add_cache_registry(CacheRegistryBuilder::default().build());
+        let layered_cache_builder =
+            LayeredCacheRegistryBuilder::default().add_cache_registry(overrides);
         let fundamental_cache_registry = build_fundamental_cache_registry(backend.clone());
         let layered_cache_registry = Arc::new(
             with_default_composite_cache_registry(
@@ -554,7 +548,7 @@ mod tests {
     /// - `SCHEMA_1.PARTITIONED_TABLE` has two regions.
     /// - `SCHEMA_2.PARTITIONED_TABLE` has one region.
     async fn setup_catalog() -> Arc<KvBackendCatalogManager> {
-        let manager = kv_catalog_manager();
+        let manager = kv_catalog_manager(CacheRegistryBuilder::default().build());
         let metadata = manager.table_metadata_manager_ref().clone();
 
         for schema in [SCHEMA_1, SCHEMA_2] {
@@ -633,6 +627,93 @@ mod tests {
             Operator::NotEq,
             Box::new(lit(value)),
         ))
+    }
+
+    #[tokio::test]
+    async fn test_full_scan_finishes_route_load_for_next_batch() {
+        use std::time::Duration;
+
+        use common_meta::cache::{TableRoute, TableRouteCache};
+        use common_meta::instruction::CacheIdent;
+        use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
+        use tokio::sync::Notify;
+
+        const LOGICAL: TableId = 10_000;
+        const ORDINARY: TableId = LOGICAL + 1;
+        const PHYSICAL: TableId = LOGICAL + 128;
+
+        // Only the partition lookup reads the ordinary table's route. Hold the physical
+        // read until then, so an enumerator that prefetched it must be polled to finish.
+        let gate = Arc::new(Notify::new());
+        let routes = TableRouteCache::new(
+            "test_routes".into(),
+            moka::future::Cache::new(256),
+            Arc::new(move |&id| {
+                let gate = gate.clone();
+                Box::pin(async move {
+                    let value = match id {
+                        LOGICAL => TableRouteValue::logical(PHYSICAL),
+                        ORDINARY => {
+                            gate.notify_one();
+                            TableRouteValue::physical(vec![])
+                        }
+                        PHYSICAL => {
+                            gate.notified().await;
+                            TableRouteValue::physical(vec![region_route(id, REGION_NUMBER_1)])
+                        }
+                        _ => return Ok(None),
+                    };
+                    Ok(Some(Arc::new(TableRoute::from(value))))
+                })
+            }),
+            CacheIdent::table_id_key,
+        );
+        let manager = kv_catalog_manager(
+            CacheRegistryBuilder::default()
+                .add_cache(Arc::new(routes))
+                .build(),
+        );
+        let metadata = manager.table_metadata_manager_ref();
+        metadata
+            .schema_manager()
+            .create(
+                SchemaNameKey::new(DEFAULT_CATALOG_NAME, SCHEMA_1),
+                None,
+                true,
+            )
+            .await
+            .unwrap();
+        // Sorted names place the physical table in batch two. Filtering temporary
+        // tables leaves batch one short, even though its catalog read was full.
+        for id in LOGICAL..=PHYSICAL {
+            let mut info = table_info(SCHEMA_1, &format!("table_{id}"), id);
+            if matches!(id, LOGICAL | PHYSICAL) {
+                info.meta.engine = METRIC_ENGINE_NAME.into();
+            } else if id != ORDINARY {
+                info.table_type = TableType::Temporary;
+            }
+            let route = if id == LOGICAL {
+                TableRouteValue::logical(PHYSICAL)
+            } else {
+                TableRouteValue::physical(vec![])
+            };
+            metadata
+                .create_table_metadata(info, route, Default::default())
+                .await
+                .unwrap();
+        }
+
+        let catalog: Arc<dyn CatalogManager> = manager;
+        let (rows, output) =
+            tokio::time::timeout(Duration::from_secs(5), scan_partitions(&catalog, vec![]))
+                .await
+                .expect(
+                    "partition scan must finish while reading a logical table's physical route",
+                );
+        assert_eq!(rows, 2, "{output}");
+        for id in [LOGICAL, PHYSICAL] {
+            assert!(output.contains(&format!("table_{id}")), "{output}");
+        }
     }
 
     #[tokio::test]

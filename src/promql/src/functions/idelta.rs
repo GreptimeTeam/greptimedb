@@ -140,35 +140,44 @@ impl<const IS_RATE: bool> IDelta<IS_RATE> {
 
             let last_offset = ts_offset + last_position;
             let prev_offset = ts_offset + prev_position;
-            let sampled_interval_ms = ts_values[last_offset] - ts_values[prev_offset];
-            // Sub-millisecond samples round to the same ms; skip instead of dividing by zero.
-            if sampled_interval_ms == 0 {
-                result_builder.append_null();
-                continue;
-            }
-            let sampled_interval = sampled_interval_ms as f64 / 1000.0;
-
-            let last_value = value_values[value_offset + last_position];
-            let prev_value = value_values[value_offset + prev_position];
-
-            if !IS_RATE {
-                result_builder.append_value(last_value - prev_value);
-                continue;
-            }
-
-            let result_value = if last_value < prev_value {
-                // counter reset
-                last_value
-            } else {
-                last_value - prev_value
-            };
-
-            result_builder.append_value(result_value / sampled_interval);
+            result_builder.append_option(instant_delta::<IS_RATE>(
+                (
+                    ts_values[prev_offset],
+                    value_values[value_offset + prev_position],
+                ),
+                (
+                    ts_values[last_offset],
+                    value_values[value_offset + last_position],
+                ),
+            ));
         }
 
         let result = ColumnarValue::Array(Arc::new(result_builder.finish()));
         Ok(result)
     }
+}
+
+/// `irate` (`IS_RATE`) or `idelta` of the last two samples of a window, as
+/// `(timestamp, value)` pairs.
+pub(crate) fn instant_delta<const IS_RATE: bool>(
+    (prev_ts, prev_value): (i64, f64),
+    (last_ts, last_value): (i64, f64),
+) -> Option<f64> {
+    let sampled_interval_ms = last_ts - prev_ts;
+    // Sub-millisecond samples round to the same ms; skip instead of dividing by zero.
+    if sampled_interval_ms == 0 {
+        return None;
+    }
+    if !IS_RATE {
+        return Some(last_value - prev_value);
+    }
+    let result_value = if last_value < prev_value {
+        // counter reset
+        last_value
+    } else {
+        last_value - prev_value
+    };
+    Some(result_value / (sampled_interval_ms as f64 / 1000.0))
 }
 
 /// Locates the last two samples inside `[offset, offset + len)`, returning their positions

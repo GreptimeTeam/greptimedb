@@ -1782,8 +1782,10 @@ mod tests {
             .await
             .unwrap();
         assert!(limiter.used_bytes() >= label.len() as u64);
-        let progress =
-            session::write_progress::WriteProgress::with_reservation(decoded.memory_guard.clone());
+        let progress = session::write_progress::WriteProgress::with_reservation(
+            decoded.memory_guard.granted_bytes(),
+            decoded.memory_guard.clone(),
+        );
         drop(decoded);
         assert!(limiter.used_bytes() >= label.len() as u64);
         drop(progress);
@@ -1816,8 +1818,10 @@ mod tests {
             .unwrap();
         assert_eq!(decoded.exemplar_count, 1);
         assert!(limiter.used_bytes() >= label.len() as u64);
-        let progress =
-            session::write_progress::WriteProgress::with_reservation(decoded.memory_guard.clone());
+        let progress = session::write_progress::WriteProgress::with_reservation(
+            decoded.memory_guard.granted_bytes(),
+            decoded.memory_guard.clone(),
+        );
         drop(decoded);
         assert!(limiter.used_bytes() >= label.len() as u64);
         drop(progress);

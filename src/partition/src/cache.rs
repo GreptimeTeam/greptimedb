@@ -16,9 +16,7 @@ use std::sync::Arc;
 
 use common_base::hash::partition_expr_version;
 use common_error::ext::BoxedError;
-use common_meta::cache::{
-    CacheContainer, InitStrategy, Initializer, TableRoute, TableRouteCacheRef,
-};
+use common_meta::cache::{CacheContainer, Initializer, TableRoute, TableRouteCacheRef};
 use common_meta::instruction::CacheIdent;
 use common_meta::rpc::router::RegionRoute;
 use moka::future::Cache;
@@ -117,25 +115,14 @@ fn init_factory(
 
 pub fn new_partition_info_cache(
     name: String,
-    cache: Cache<TableId, CachedPartitionInfo>,
+    cache: Cache<(usize, TableId), CachedPartitionInfo>,
     table_route_cache: TableRouteCacheRef,
 ) -> PartitionInfoCache {
-    CacheContainer::with_strategy(
+    CacheContainer::new(
         name,
         cache,
-        Box::new(|cache, idents| {
-            Box::pin(async move {
-                for ident in idents {
-                    if let CacheIdent::TableId(table_id) = ident {
-                        cache.invalidate(table_id).await
-                    }
-                }
-                Ok(())
-            })
-        }),
         init_factory(table_route_cache),
-        |ident| matches!(ident, CacheIdent::TableId(_)),
-        InitStrategy::VersionChecked,
+        CacheIdent::table_id_key,
     )
 }
 

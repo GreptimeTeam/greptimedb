@@ -67,7 +67,8 @@ impl InstanceBuilder {
             &dn_opts.tracing,
             dn_opts.node_id.map(|x| x.to_string()),
             None,
-        );
+        )
+        .context(crate::error::InitLoggingSnafu)?;
 
         common_runtime::init_datanode_runtimes(&opts.runtime);
 

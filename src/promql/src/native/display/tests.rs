@@ -1,0 +1,703 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use std::sync::Arc;
+
+use datatypes::series::samples::{FieldSpec, SeriesSchema};
+use datatypes::series::time::{EvalGrid, GridSpec};
+use datatypes::series::{Label, SeriesLabels, SeriesOrdering};
+
+use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+
+use super::super::plan::{
+    AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
+    BoundSetOp, BoundVectorOp, BoundWindow, Grouping, NativeExpr, NativeNode, NativeTree,
+    NativeType, ParameterizedOp,
+};
+use super::child_segments;
+use crate::extension_plan::FieldKind;
+use crate::info::InfoSelector;
+use crate::map::MathOp;
+use crate::native::metrics::{NodeMetrics, NodeMetricsSnapshot};
+use crate::native::plan::{InstantValue, MapOp};
+use crate::range_eval::{RangeFunction, RangeModifier, RangeWindow};
+use crate::select::SortOrder;
+use crate::vector_match::{
+    BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels, SetOp,
+};
+
+fn grid(start: i64, step: i64, len: u64) -> Arc<EvalGrid> {
+    Arc::new(EvalGrid::try_new(GridSpec::try_new(start, step, len).unwrap()).unwrap())
+}
+
+fn fields() -> Arc<[FieldSpec]> {
+    Arc::new([FieldSpec {
+        name: "value".into(),
+    }])
+}
+
+/// The samples a node produces on `grid`.
+fn evaluated(grid: Arc<EvalGrid>) -> NativeType {
+    NativeType::Samples(Arc::new(SeriesSchema {
+        fields: fields(),
+        eval_grid: Some(grid),
+    }))
+}
+
+/// An unqualified scan over raw samples, which is what a compiled query starts from.
+fn raw_input() -> NativeNode {
+    // One allocation shared by the binding and the output: `validate` checks allocation identity.
+    // The fields are the ones a window over this input reports, because a window keeps its input's
+    // layout and `validate` rejects a node that declares a different count.
+    let output = NativeType::Samples(Arc::new(SeriesSchema {
+        fields: fields(),
+        eval_grid: None,
+    }));
+    NativeNode {
+        expr: NativeExpr::Input(BoundInput {
+            output: output.clone(),
+            source_index: 0,
+            ordering: SeriesOrdering::KeyThenTime,
+        }),
+        output,
+    }
+}
+
+fn window_over(
+    inner: NativeNode,
+    function: RangeFunction,
+    range_ms: i64,
+    offset_ms: i64,
+    anchor_ms: Option<i64>,
+    out: Arc<EvalGrid>,
+) -> NativeNode {
+    NativeNode {
+        expr: NativeExpr::Window {
+            input: Box::new(inner),
+            op: BoundWindow {
+                function,
+                window: RangeWindow {
+                    range_ms,
+                    offset_ms,
+                    anchor_ms,
+                    modifier: None,
+                },
+                input_grid: None,
+                output_grid: Arc::clone(&out),
+            },
+        },
+        output: evaluated(out),
+    }
+}
+
+fn map(inner: NativeNode, ops: Vec<MathOp>) -> NativeNode {
+    let out = inner.output.grid().expect("a map needs a grid").clone();
+    NativeNode {
+        expr: NativeExpr::Map {
+            input: Box::new(inner),
+            op: BoundMap {
+                ops: ops.into_iter().map(MapOp::Math).collect(),
+            },
+        },
+        output: evaluated(out),
+    }
+}
+
+/// The expected display of a tree, one string per line, so a change in wording, order or
+/// indentation fails the test rather than passing as a substring.
+fn shown(lines: &[&str]) -> String {
+    lines.join("\n")
+}
+
+/// A tree is plan lines and nothing else: no header above them and no word beside a node, so every
+/// line reads as the operator it is, one level in from the operator line it is drawn under.
+#[test]
+fn a_tree_is_plan_lines_only() {
+    let tree = NativeTree::try_new(raw_input()).unwrap();
+
+    assert_eq!(tree.to_string(), shown(&["Input: raw samples source=0"]));
+    assert_eq!(
+        NativeTree::try_new(window_over(
+            raw_input(),
+            RangeFunction::Rate,
+            300_000,
+            0,
+            None,
+            grid(0, 60_000, 4),
+        ))
+        .unwrap()
+        .to_string(),
+        shown(&[
+            "Window: rate [300000ms] offset 0 anchor - on grid 0/60000x4",
+            "  Input: raw samples source=0",
+        ])
+    );
+}
+
+/// A compiled tree is one line per node, outermost first: the window is the root and the scan it
+/// folds is shown beneath it.
+#[test]
+fn a_window_over_raw_samples_is_shown_once_per_node() {
+    let tree = NativeTree::try_new(window_over(
+        raw_input(),
+        RangeFunction::Rate,
+        300_000,
+        0,
+        None,
+        grid(0, 60_000, 4),
+    ))
+    .unwrap();
+
+    assert_eq!(
+        tree.to_string(),
+        shown(&[
+            "Window: rate [300000ms] offset 0 anchor - on grid 0/60000x4",
+            "  Input: raw samples source=0",
+        ])
+    );
+}
+
+/// A map nests one level deeper than the window it reads, and lists its operations in the order
+/// they are applied.
+#[test]
+fn a_map_nests_below_the_window_it_maps() {
+    let tree = NativeTree::try_new(map(
+        window_over(
+            raw_input(),
+            RangeFunction::Rate,
+            300_000,
+            60_000,
+            None,
+            grid(0, 60_000, 4),
+        ),
+        vec![MathOp::Abs, MathOp::Round { nearest: 3.0 }],
+    ))
+    .unwrap();
+
+    assert_eq!(
+        tree.to_string(),
+        shown(&[
+            "Map: abs, round 3",
+            "  Window: rate [300000ms] offset 60000 anchor - on grid 0/60000x4",
+            "    Input: raw samples source=0",
+        ])
+    );
+}
+
+/// A parameterised window names the constant it was bound to, and an anchored one names its
+/// anchor instead of printing the absent case.
+#[test]
+fn a_window_names_its_constant_argument_and_its_anchor() {
+    let tree = NativeTree::try_new(window_over(
+        raw_input(),
+        RangeFunction::QuantileOverTime(0.9),
+        60_000,
+        0,
+        Some(42),
+        grid(1_000, 60_000, 4),
+    ))
+    .unwrap();
+
+    assert_eq!(
+        tree.to_string(),
+        shown(&[
+            "Window: quantile_over_time 0.9 [60000ms] offset 0 anchor 42 on grid 1000/60000x4",
+            "  Input: raw samples source=0",
+        ])
+    );
+}
+
+/// An input says whether its samples are raw or already evaluated, and reports the ordering it
+/// guarantees when that is weaker than the scan default.
+#[test]
+fn an_input_reports_whether_it_is_raw_and_what_ordering_it_guarantees() {
+    let contiguous = NativeType::Samples(Arc::new(SeriesSchema {
+        fields: fields(),
+        eval_grid: Some(grid(0, 60_000, 4)),
+    }));
+    let evaluated_input = NativeNode {
+        expr: NativeExpr::Input(BoundInput {
+            output: contiguous.clone(),
+            source_index: 0,
+            ordering: SeriesOrdering::Contiguous,
+        }),
+        output: contiguous,
+    };
+    let tree = NativeTree::try_new(evaluated_input).unwrap();
+    assert_eq!(
+        tree.to_string(),
+        shown(&["Input: evaluated samples source=0, contiguous",])
+    );
+
+    let interleaved = NativeType::Samples(Arc::new(SeriesSchema {
+        fields: fields(),
+        eval_grid: None,
+    }));
+    let raw_input = NativeNode {
+        expr: NativeExpr::Input(BoundInput {
+            output: interleaved.clone(),
+            source_index: 0,
+            ordering: SeriesOrdering::Interleaved,
+        }),
+        output: interleaved,
+    };
+    let tree = NativeTree::try_new(raw_input).unwrap();
+    assert_eq!(
+        tree.to_string(),
+        shown(&["Input: raw samples source=0, interleaved"])
+    );
+}
+
+/// A leaf kind renders what it holds, whether or not anything could run it: the line names the
+/// node it is and makes no claim about executability.
+#[test]
+fn a_scalar_and_an_instant_line_show_what_they_hold() {
+    let out = grid(0, 60_000, 4);
+    let scalar = NativeNode {
+        expr: NativeExpr::Scalar(BoundScalar { value: 2.0 }),
+        output: NativeType::Scalar(Arc::clone(&out)),
+    };
+    let tree = NativeTree::try_new(scalar).unwrap();
+    assert_eq!(tree.to_string(), shown(&["Scalar: 2"]));
+
+    let instant = NativeNode {
+        expr: NativeExpr::Instant {
+            input: Box::new(raw_input()),
+            op: BoundInstant {
+                lookback_ms: 300_000,
+                offset_ms: 60_000,
+                at_ms: None,
+                value: InstantValue::Sample,
+                output_grid: Arc::clone(&out),
+            },
+        },
+        output: evaluated(out),
+    };
+    let tree = NativeTree::try_new(instant).unwrap();
+    assert_eq!(
+        tree.to_string(),
+        shown(&[
+            "Instant: lookback 300000ms offset 60000 on grid 0/60000x4",
+            "  Input: raw samples source=0",
+        ])
+    );
+}
+
+/// An aggregate and a binary operation name the binding they were compiled with, which is what
+/// makes the line worth reading.
+#[test]
+fn an_aggregate_and_a_binary_name_their_binding() {
+    let out = grid(0, 60_000, 4);
+    let aggregate = NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(window_over(
+                raw_input(),
+                RangeFunction::Rate,
+                300_000,
+                0,
+                None,
+                Arc::clone(&out),
+            )),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group: Grouping::By(Arc::new(["job".into()])),
+                stage: AggregateStage::Complete,
+                field_kind: FieldKind::Float,
+            },
+        },
+        output: evaluated(Arc::clone(&out)),
+    };
+    let tree = NativeTree::try_new(aggregate).unwrap();
+    assert_eq!(
+        tree.to_string(),
+        shown(&[
+            "Aggregate: sum by [job] complete",
+            "  Window: rate [300000ms] offset 0 anchor - on grid 0/60000x4",
+            "    Input: raw samples source=0",
+        ])
+    );
+
+    // A scalar broadcast, which is the one binary shape whose matching rules are never consulted:
+    // the display still prints them, because the binding is what the compiler decided.
+    let binary = NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(NativeNode {
+                expr: NativeExpr::Scalar(BoundScalar { value: 2.0 }),
+                output: NativeType::Scalar(Arc::clone(&out)),
+            }),
+            right: Box::new(window_over(
+                raw_input(),
+                RangeFunction::Rate,
+                300_000,
+                0,
+                None,
+                Arc::clone(&out),
+            )),
+            matching: BinaryMatching {
+                op: BinaryOp::Add,
+                return_bool: false,
+                labels: MatchingLabels::Ignoring(Vec::new()),
+                cardinality: Cardinality::OneToOne,
+                fill: FillValues::default(),
+            },
+        },
+        output: evaluated(out),
+    };
+    let tree = NativeTree::try_new(binary.clone()).unwrap();
+    assert_eq!(
+        tree.to_string(),
+        shown(&[
+            "Binary: + ignoring [] one-to-one",
+            "  Scalar: 2",
+            "  Window: rate [300000ms] offset 0 anchor - on grid 0/60000x4",
+            "    Input: raw samples source=0",
+        ])
+    );
+
+    // Fill values change the result, so a set one is part of the binding shown.
+    let mut filled = binary;
+    let NativeExpr::Binary { matching, .. } = &mut filled.expr else {
+        unreachable!()
+    };
+    matching.fill.rhs = Some(0.5);
+    assert_eq!(
+        NativeTree::try_new(filled)
+            .unwrap()
+            .to_string()
+            .lines()
+            .next(),
+        Some("Binary: + ignoring [] one-to-one fill_right 0.5")
+    );
+}
+
+/// A set operation names its operator and its matching labels: the logical plan compares fused
+/// nodes by this rendering, so `and`, `or` and `unless`, and `on` and `ignoring`, must not read
+/// alike.
+#[test]
+fn a_set_operation_names_its_operator_and_labels() {
+    let out = grid(0, 60_000, 4);
+    let operand = || {
+        window_over(
+            raw_input(),
+            RangeFunction::Rate,
+            300_000,
+            0,
+            None,
+            Arc::clone(&out),
+        )
+    };
+    let root_line = |op: SetOp, labels: MatchingLabels| {
+        let tree = NativeTree::try_new(NativeNode {
+            expr: NativeExpr::Set {
+                left: Box::new(operand()),
+                right: Box::new(operand()),
+                op: BoundSetOp { op, labels },
+            },
+            output: evaluated(Arc::clone(&out)),
+        })
+        .unwrap();
+        tree.to_string().lines().next().unwrap().to_string()
+    };
+    assert_eq!(
+        root_line(SetOp::And, MatchingLabels::On(vec!["job".into()])),
+        "Set: and on [job]"
+    );
+    assert_eq!(
+        root_line(SetOp::Or, MatchingLabels::Ignoring(vec!["job".into()])),
+        "Set: or ignoring [job]"
+    );
+    assert_eq!(
+        root_line(SetOp::Unless, MatchingLabels::Ignoring(Vec::new())),
+        "Set: unless ignoring []"
+    );
+}
+
+/// A `without` grouping reads as `without [...]`, not as `by [...]`.
+///
+/// The two are different queries over the same label list: `by(job)` keeps `job` and drops the
+/// rest, `without(job)` drops `job` and keeps the rest. A rendering that spelled both `by` would
+/// show two different queries as one.
+#[test]
+fn a_without_grouping_does_not_read_as_by() {
+    let out = grid(0, 60_000, 4);
+    let aggregate = NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(window_over(
+                raw_input(),
+                RangeFunction::Rate,
+                300_000,
+                0,
+                None,
+                Arc::clone(&out),
+            )),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group: Grouping::Without(Arc::new(["job".into()])),
+                stage: AggregateStage::Complete,
+                field_kind: FieldKind::Float,
+            },
+        },
+        output: evaluated(Arc::clone(&out)),
+    };
+    let tree = NativeTree::try_new(aggregate).unwrap();
+    assert_eq!(
+        tree.to_string(),
+        shown(&[
+            "Aggregate: sum without [job] complete",
+            "  Window: rate [300000ms] offset 0 anchor - on grid 0/60000x4",
+            "    Input: raw samples source=0",
+        ])
+    );
+}
+
+/// A vector operation names its operator, constant and grouping.
+#[test]
+fn instant_at_and_timestamp_are_displayed() {
+    let out = grid(0, 60_000, 4);
+    let instant = NativeNode {
+        expr: NativeExpr::Instant {
+            input: Box::new(raw_input()),
+            op: BoundInstant {
+                lookback_ms: 300_000,
+                offset_ms: 0,
+                at_ms: Some(1_234),
+                value: InstantValue::Timestamp,
+                output_grid: Arc::clone(&out),
+            },
+        },
+        output: evaluated(out),
+    };
+    assert!(
+        NativeTree::try_new(instant)
+            .unwrap()
+            .to_string()
+            .contains("@ 1234ms timestamp")
+    );
+}
+
+#[test]
+fn a_vector_operation_names_its_binding() {
+    let out = grid(0, 60_000, 4);
+    let window = window_over(
+        raw_input(),
+        RangeFunction::Rate,
+        300_000,
+        0,
+        None,
+        Arc::clone(&out),
+    );
+    let lines = [
+        (
+            BoundVectorOp::TopK {
+                k: 3.0,
+                top: false,
+                group: Grouping::Without(Arc::new(["job".into()])),
+            },
+            "Vector: bottomk 3 without [job]",
+        ),
+        (
+            BoundVectorOp::LimitK {
+                k: 2.0,
+                group: Grouping::By(Arc::new([])),
+            },
+            "Vector: limitk 2 by []",
+        ),
+        (
+            BoundVectorOp::LimitRatio { ratio: -0.5 },
+            "Vector: limit_ratio -0.5",
+        ),
+        (
+            BoundVectorOp::Sort(SortOrder::ByLabelDesc(vec!["job".into(), "le".into()])),
+            "Vector: sort_by_label_desc [job, le]",
+        ),
+        (
+            BoundVectorOp::Absent {
+                labels: SeriesLabels::try_new(
+                    None,
+                    vec![Label {
+                        name: "job".into(),
+                        value: "x".into(),
+                    }],
+                )
+                .unwrap(),
+            },
+            r#"Vector: absent {job="x"}"#,
+        ),
+        (
+            BoundVectorOp::CountValues {
+                label: "value".into(),
+                group: Grouping::Without(Arc::new(["job".into()])),
+            },
+            r#"Vector: count_values "value" without [job]"#,
+        ),
+    ];
+    for (op, line) in lines {
+        let tree = NativeTree::try_new(NativeNode {
+            expr: NativeExpr::Vector {
+                input: Box::new(window.clone()),
+                op,
+            },
+            output: evaluated(Arc::clone(&out)),
+        })
+        .unwrap();
+        assert_eq!(tree.to_string().lines().next(), Some(line));
+    }
+}
+
+/// A window read with a range modifier names it and the lookback it reads around the window.
+#[test]
+fn a_modified_window_names_its_modifier() {
+    let out = grid(0, 60_000, 4);
+    let mut node = window_over(
+        raw_input(),
+        RangeFunction::Rate,
+        300_000,
+        0,
+        None,
+        Arc::clone(&out),
+    );
+    if let NativeExpr::Window { op, .. } = &mut node.expr {
+        op.window.modifier = Some(RangeModifier::Smoothed {
+            lookback_ms: 300_000,
+        });
+    }
+    let tree = NativeTree::try_new(node).unwrap();
+    assert_eq!(
+        tree.to_string().lines().next(),
+        Some(
+            "Window: rate [300000ms] smoothed lookback 300000ms offset 0 anchor - on grid \
+             0/60000x4"
+        )
+    );
+}
+
+/// An aggregate over a window over a scan, which is the shape whose three nodes each record
+/// something different.
+fn aggregate_over_window(out: Arc<EvalGrid>) -> NativeTree {
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(window_over(
+                raw_input(),
+                RangeFunction::Rate,
+                300_000,
+                0,
+                None,
+                Arc::clone(&out),
+            )),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group: Grouping::By(Arc::new(["job".into()])),
+                stage: AggregateStage::Complete,
+                field_kind: FieldKind::Histogram,
+            },
+        },
+        output: evaluated(out),
+    })
+    .unwrap()
+}
+
+/// A node's figures end its own line, and only its own: the walk asks for them by the path the
+/// runtime registered that node under, so one node never reports another's work.
+#[test]
+fn each_node_shows_only_the_figures_it_recorded() {
+    let tree = aggregate_over_window(grid(0, 60_000, 4));
+    let set = ExecutionPlanMetricsSet::new();
+
+    let aggregate = NodeMetrics::default();
+    aggregate.record_state(120, 0);
+    aggregate.register("root", &set, 0);
+    let window = NodeMetrics::default();
+    window.record_output(4, 7200);
+    window.register("root.input", &set, 0);
+    let input = NodeMetrics::default();
+    input.record_input(1, 1_486_080);
+    input.register("root.input.input", &set, 0);
+
+    let metrics = NodeMetricsSnapshot::read(&set);
+    assert_eq!(
+        tree.display_with(&metrics).to_string(),
+        shown(&[
+            "Aggregate: sum by [job] complete, metrics=[groups: 120]",
+            "  Window: rate [300000ms] offset 0 anchor - on grid 0/60000x4, \
+             metrics=[output_batches: 4, output_values: 7200]",
+            "    Input: raw samples source=0, metrics=[input_batches: 1, input_samples: 1486080]",
+        ])
+    );
+}
+
+/// A tree whose nodes recorded nothing - one that was never run, which is what `EXPLAIN` shows -
+/// is the same lines without figures. No flag says so: an empty snapshot is what an unexecuted
+/// registration leaves.
+#[test]
+fn a_tree_that_recorded_nothing_shows_no_figures() {
+    let tree = aggregate_over_window(grid(0, 60_000, 4));
+
+    assert_eq!(
+        tree.display_with(&NodeMetricsSnapshot::default())
+            .to_string(),
+        tree.to_string()
+    );
+    assert!(!tree.to_string().contains("metrics="));
+}
+
+/// A node's figures are read from the path the runtime registers, not from the name the bound tree
+/// gives the operand: `info` binds its operands as `base` and `info`, and the runtime registers them
+/// as the kernel's `left` and `right`.
+#[test]
+fn every_child_is_read_from_the_path_the_runtime_registers() {
+    let out = grid(0, 60_000, 4);
+    let scalar = NativeNode {
+        expr: NativeExpr::Scalar(BoundScalar { value: 2.0 }),
+        output: NativeType::Scalar(Arc::clone(&out)),
+    };
+    let parameterized = NativeNode {
+        expr: NativeExpr::ParameterizedMap {
+            input: Box::new(window_over(
+                raw_input(),
+                RangeFunction::Rate,
+                300_000,
+                0,
+                None,
+                Arc::clone(&out),
+            )),
+            op: ParameterizedOp::Round,
+            parameters: vec![scalar.clone(), scalar],
+        },
+        output: evaluated(Arc::clone(&out)),
+    };
+    let segments = |node: &NativeNode| {
+        child_segments(node)
+            .into_iter()
+            .map(|(_, segment)| segment.to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        segments(&parameterized),
+        ["input", "parameter0", "parameter1"]
+    );
+
+    let info = NativeNode {
+        expr: NativeExpr::Info {
+            base: Box::new(raw_input()),
+            info: Box::new(raw_input()),
+            selector: InfoSelector {
+                name_matchers: Vec::new(),
+                data_labels: Vec::new(),
+                keep_unmatched: false,
+            },
+        },
+        output: evaluated(out),
+    };
+    assert_eq!(segments(&info), ["left", "right"]);
+}

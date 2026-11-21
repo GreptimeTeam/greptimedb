@@ -29,6 +29,7 @@ use index::bloom_filter::reader::{
 use index::target::IndexTarget;
 use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
+use puffin::puffin_manager::file_key::PuffinFileKey;
 use puffin::puffin_manager::{PuffinManager, PuffinReader};
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
@@ -48,7 +49,7 @@ use crate::sst::file::RegionIndexId;
 use crate::sst::index::bloom_filter::INDEX_BLOB_TYPE;
 pub use crate::sst::index::bloom_filter::applier::builder::BloomFilterIndexApplierBuilder;
 use crate::sst::index::column::skipping_target_data_type;
-use crate::sst::index::puffin_manager::{BlobReader, PuffinManagerFactory};
+use crate::sst::index::puffin_manager::{BlobReader, PuffinManagerFactory, SstPuffinManager};
 use crate::sst::index::{TYPE_BLOOM_FILTER_INDEX, trigger_index_background_download};
 
 /// Metrics for tracking bloom filter index apply operations.
@@ -126,6 +127,10 @@ pub struct BloomFilterIndexApplier {
     /// Factory to create puffin manager.
     puffin_manager_factory: PuffinManagerFactory,
 
+    /// Managers keep backend identity resolution out of per-blob reads.
+    remote_puffin_manager: SstPuffinManager,
+    cached_puffin_manager: Option<SstPuffinManager>,
+
     /// Cache for puffin metadata.
     puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
 
@@ -152,6 +157,10 @@ impl BloomFilterIndexApplier {
         predicates: BTreeMap<IndexTarget, Vec<InListPredicate>>,
         expected_predicate_target_types: BTreeMap<IndexTarget, ConcreteDataType>,
     ) -> Self {
+        let remote_puffin_manager = puffin_manager_factory.build(
+            object_store.clone(),
+            RegionFilePathFactory::new(table_dir.clone(), path_type),
+        );
         let default_predicates = Arc::new(predicates);
         Self {
             table_dir,
@@ -159,6 +168,8 @@ impl BloomFilterIndexApplier {
             object_store,
             file_cache: None,
             puffin_manager_factory,
+            remote_puffin_manager,
+            cached_puffin_manager: None,
             puffin_metadata_cache: None,
             bloom_filter_index_cache: None,
             default_predicates,
@@ -167,6 +178,13 @@ impl BloomFilterIndexApplier {
     }
 
     pub fn with_file_cache(mut self, file_cache: Option<FileCacheRef>) -> Self {
+        self.cached_puffin_manager = file_cache.as_ref().map(|cache| {
+            self.puffin_manager_factory.build_cached(
+                &self.remote_puffin_manager,
+                cache.local_store(),
+                WriteCachePathProvider::new(cache.clone()),
+            )
+        });
         self.file_cache = file_cache;
         self
     }
@@ -234,7 +252,7 @@ impl BloomFilterIndexApplier {
             .collect::<Vec<_>>();
 
         for (target, predicates) in predicates {
-            let blob = match self
+            let (file_key, blob) = match self
                 .blob_reader(file_id, target, file_size_hint, metrics.as_deref_mut())
                 .await?
             {
@@ -249,8 +267,7 @@ impl BloomFilterIndexApplier {
                     m.blob_read_bytes += blob_size;
                 }
                 let reader = CachedBloomFilterIndexBlobReader::new(
-                    file_id.file_id(),
-                    file_id.version,
+                    file_key,
                     target.clone(),
                     Tag::Skipping,
                     blob_size,
@@ -299,7 +316,7 @@ impl BloomFilterIndexApplier {
         target: &IndexTarget,
         file_size_hint: Option<u64>,
         metrics: Option<&mut BloomFilterIndexApplyMetrics>,
-    ) -> Result<Option<BlobReader>> {
+    ) -> Result<Option<(PuffinFileKey<RegionIndexId>, BlobReader)>> {
         let reader = match self
             .cached_blob_reader(file_id, target, file_size_hint)
             .await
@@ -340,8 +357,10 @@ impl BloomFilterIndexApplier {
         file_id: RegionIndexId,
         target: &IndexTarget,
         file_size_hint: Option<u64>,
-    ) -> Result<Option<BlobReader>> {
-        let Some(file_cache) = &self.file_cache else {
+    ) -> Result<Option<(PuffinFileKey<RegionIndexId>, BlobReader)>> {
+        let (Some(file_cache), Some(puffin_manager)) =
+            (&self.file_cache, &self.cached_puffin_manager)
+        else {
             return Ok(None);
         };
 
@@ -354,10 +373,6 @@ impl BloomFilterIndexApplier {
             return Ok(None);
         };
 
-        let puffin_manager = self.puffin_manager_factory.build(
-            file_cache.local_store(),
-            WriteCachePathProvider::new(file_cache.clone()),
-        );
         let blob_name = Self::target_blob_name(target);
 
         let reader = puffin_manager
@@ -371,7 +386,7 @@ impl BloomFilterIndexApplier {
             .reader()
             .await
             .context(PuffinBuildReaderSnafu)?;
-        Ok(Some(reader))
+        Ok(Some((puffin_manager.file_key(&file_id), reader)))
     }
 
     // TODO(ruihang): use the same util with the code in creator
@@ -386,7 +401,7 @@ impl BloomFilterIndexApplier {
         file_id: RegionIndexId,
         target: &IndexTarget,
         file_size_hint: Option<u64>,
-    ) -> Result<BlobReader> {
+    ) -> Result<(PuffinFileKey<RegionIndexId>, BlobReader)> {
         let path_factory = RegionFilePathFactory::new(self.table_dir.clone(), self.path_type);
 
         // Trigger background download if file cache and file size are available
@@ -399,13 +414,13 @@ impl BloomFilterIndexApplier {
         );
 
         let puffin_manager = self
-            .puffin_manager_factory
-            .build(self.object_store.clone(), path_factory)
+            .remote_puffin_manager
+            .clone()
             .with_puffin_metadata_cache(self.puffin_metadata_cache.clone());
 
         let blob_name = Self::target_blob_name(target);
 
-        puffin_manager
+        let reader = puffin_manager
             .reader(&file_id)
             .await
             .context(PuffinBuildReaderSnafu)?
@@ -415,7 +430,8 @@ impl BloomFilterIndexApplier {
             .context(PuffinReadBlobSnafu)?
             .reader()
             .await
-            .context(PuffinBuildReaderSnafu)
+            .context(PuffinBuildReaderSnafu)?;
+        Ok((puffin_manager.file_key(&file_id), reader))
     }
 
     async fn apply_predicates<R: BloomFilterReader + Send + 'static>(

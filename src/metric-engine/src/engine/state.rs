@@ -25,6 +25,7 @@ use store_api::metadata::ColumnMetadata;
 use store_api::storage::RegionId;
 
 use crate::engine::options::PhysicalRegionOptions;
+use crate::engine::region_metadata::LogicalColumns;
 use crate::error::{PhysicalRegionNotFoundSnafu, Result};
 use crate::metrics::LOGICAL_REGION_COUNT;
 use crate::utils::to_data_region_id;
@@ -43,6 +44,15 @@ pub struct PhysicalRegionState {
     primary_key_encoding: PrimaryKeyEncoding,
     options: PhysicalRegionOptions,
     time_index_unit: TimeUnit,
+    /// Serializes adding columns to this physical region: the column existence
+    /// check, the column id allocation and the physical ALTER that installs the
+    /// columns. Column ids are derived from the current metadata, so two
+    /// concurrent add-column requests on logical regions sharing this physical
+    /// region could otherwise assign the same id to different columns.
+    ///
+    /// Callers clone the [`Arc`] out of the state and hold it across the
+    /// physical alter; see [`crate::data_region::DataRegion::add_columns`].
+    column_add_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl PhysicalRegionState {
@@ -67,7 +77,13 @@ impl PhysicalRegionState {
             primary_key_encoding,
             options,
             time_index_unit,
+            column_add_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
+    }
+
+    /// Returns the lock that serializes adding columns to this physical region.
+    pub fn column_add_lock(&self) -> &Arc<tokio::sync::Mutex<()>> {
+        &self.column_add_lock
     }
 
     /// Returns a reference to the logical region ids.
@@ -113,7 +129,7 @@ pub(crate) struct MetricEngineState {
     /// Cache for the column metadata of logical regions.
     /// The column order is the same with the order in the metadata, which is
     /// alphabetically ordered on column name.
-    logical_columns: HashMap<RegionId, Vec<ColumnMetadata>>,
+    logical_columns: HashMap<RegionId, LogicalColumns>,
 }
 
 impl MetricEngineState {
@@ -201,11 +217,7 @@ impl MetricEngineState {
     }
 
     /// Replace the logical columns of the logical region with given columns.
-    pub fn set_logical_columns(
-        &mut self,
-        logical_region_id: RegionId,
-        columns: Vec<ColumnMetadata>,
-    ) {
+    pub fn set_logical_columns(&mut self, logical_region_id: RegionId, columns: LogicalColumns) {
         self.logical_columns.insert(logical_region_id, columns);
     }
 
@@ -213,7 +225,7 @@ impl MetricEngineState {
         self.logical_regions.get(&logical_region_id).copied()
     }
 
-    pub fn logical_columns(&self) -> &HashMap<RegionId, Vec<ColumnMetadata>> {
+    pub fn logical_columns(&self) -> &HashMap<RegionId, LogicalColumns> {
         &self.logical_columns
     }
 
@@ -263,6 +275,7 @@ impl MetricEngineState {
 
         for logical_region in logical_regions {
             self.logical_regions.remove(logical_region);
+            self.logical_columns.remove(logical_region);
         }
         self.physical_regions.remove(&physical_region_id);
         Ok(())

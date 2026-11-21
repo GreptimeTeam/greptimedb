@@ -14,20 +14,23 @@
 
 use std::assert_matches;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
 use common_meta::DatanodeId;
 use common_meta::ddl::NoopRegionFailureDetectorControl;
+use common_meta::instruction::{CacheIdent, Instruction};
 use common_meta::key::table_route::TableRouteValue;
+use common_meta::key::test_utils::new_test_table_info;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::kv_backend::memory::MemoryKvBackend;
+use common_meta::kv_backend::test_util::TxnObservingKvBackend;
 use common_meta::peer::Peer;
-use common_meta::region_keeper::{MemoryRegionKeeper, MemoryRegionKeeperRef};
-use common_meta::rpc::router::RegionRoute;
+use common_meta::region_keeper::{MemoryRegionKeeper, MemoryRegionKeeperRef, OperatingRegionGuard};
+use common_meta::rpc::router::{LeaderState, Region, RegionRoute};
 use common_meta::sequence::SequenceBuilder;
 use common_meta::state_store::KvStateStore;
 use common_procedure::local::{LocalManager, ManagerConfig};
@@ -36,11 +39,12 @@ use common_procedure::{Context as ProcedureContext, ProcedureId, ProcedureManage
 use common_procedure_test::MockContextProvider;
 use common_telemetry::debug;
 use futures::future::BoxFuture;
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, TableId};
 use table::metadata::TableInfo;
 
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::error::{self, Error, Result};
+use crate::handler::HeartbeatMailbox;
 use crate::metasrv::MetasrvInfo;
 use crate::procedure::region_migration::close_downgraded_region::CloseDowngradedRegion;
 use crate::procedure::region_migration::downgrade_leader_region::DowngradeLeaderRegion;
@@ -55,7 +59,7 @@ use crate::procedure::region_migration::{
     Context, ContextFactory, DefaultContextFactory, PersistentContext,
     RegionMigrationTriggerReason, State, VolatileContext,
 };
-use crate::procedure::test_util::{MailboxContext, send_mock_reply};
+use crate::procedure::test_util::{MailboxContext, MockHeartbeatReceiver, send_mock_reply};
 use crate::service::mailbox::Channel;
 
 /// `TestingEnv` provides components during the tests.
@@ -151,6 +155,42 @@ impl TestingEnv {
     /// Returns the mutable [MailboxContext].
     pub fn mailbox_context(&mut self) -> &mut MailboxContext {
         &mut self.mailbox_ctx
+    }
+
+    /// Creates the table of a batch of two regions and returns their ids. The leader of the
+    /// first region is neither peer 1 nor peer 2; the second region is led by
+    /// `downgraded_leader` in the downgrading state.
+    pub(crate) async fn create_batch_with_moved_leader(
+        &self,
+        downgraded_leader: DatanodeId,
+    ) -> Vec<RegionId> {
+        let moved = RegionId::new(1024, 1);
+        let downgraded = RegionId::new(1024, 2);
+        let region_routes = vec![
+            RegionRoute {
+                region: Region::new_test(moved),
+                leader_peer: Some(Peer::empty(3)),
+                ..Default::default()
+            },
+            RegionRoute {
+                region: Region::new_test(downgraded),
+                leader_peer: Some(Peer::empty(downgraded_leader)),
+                leader_state: Some(LeaderState::Downgrading),
+                ..Default::default()
+            },
+        ];
+        self.create_physical_table_metadata(new_test_table_info(1024), region_routes)
+            .await;
+        vec![moved, downgraded]
+    }
+
+    /// Returns the receiver of the messages broadcast to a frontend.
+    pub(crate) async fn frontend_receiver(&mut self) -> MockHeartbeatReceiver {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        self.mailbox_ctx
+            .insert_heartbeat_response_receiver(Channel::Frontend(1), tx)
+            .await;
+        rx
     }
 
     /// Returns the [TableMetadataManagerRef]
@@ -584,6 +624,28 @@ fn test_merge_mailbox_messages() {
     }
 }
 
+/// Asserts that the next message of `rx` invalidates the table caches of `table_ids`.
+pub(crate) fn assert_table_cache_invalidated(
+    rx: &mut MockHeartbeatReceiver,
+    table_ids: &[TableId],
+) {
+    let msg = rx.try_recv().unwrap().unwrap().mailbox_message.unwrap();
+    let Instruction::InvalidateCaches(mut cache_idents) =
+        HeartbeatMailbox::json_instruction(&msg).unwrap()
+    else {
+        unreachable!()
+    };
+    cache_idents.sort_by_key(|ident| match ident {
+        CacheIdent::TableId(table_id) => *table_id,
+        _ => unreachable!(),
+    });
+    let expected = table_ids
+        .iter()
+        .map(|table_id| CacheIdent::TableId(*table_id))
+        .collect::<Vec<_>>();
+    assert_eq!(cache_idents, expected);
+}
+
 /// Returns a new [ProcedureContext].
 pub fn new_procedure_context() -> ProcedureContext {
     ProcedureContext {
@@ -591,4 +653,75 @@ pub fn new_procedure_context() -> ProcedureContext {
         provider: Arc::new(MockContextProvider::default()),
         event_context: None,
     }
+}
+
+/// A migration about to roll back: its region is led by the source peer in the downgrading state,
+/// and registered on the target peer as the migration's candidate.
+pub(crate) struct CandidateRollback {
+    /// Creates contexts on the table metadata whose transactions are observed.
+    pub(crate) context_factory: DefaultContextFactory,
+    /// The candidate registration of the region on the target peer.
+    pub(crate) guard: OperatingRegionGuard,
+    /// Whether the keeper held no registration before each transaction since the setup.
+    pub(crate) keeper_empty_at_txn: Arc<Mutex<Vec<bool>>>,
+}
+
+impl CandidateRollback {
+    /// Creates the table of `persistent_ctx` and the candidate registration of its region.
+    pub(crate) async fn new(env: &TestingEnv, persistent_ctx: &PersistentContext) -> Self {
+        let (table_metadata_manager, keeper_empty_at_txn) =
+            table_metadata_manager_observing_keeper(env.opening_region_keeper().clone());
+        let region_id = persistent_ctx.region_ids[0];
+        let region_routes = vec![RegionRoute {
+            region: Region::new_test(region_id),
+            leader_peer: Some(persistent_ctx.from_peer.clone()),
+            leader_state: Some(LeaderState::Downgrading),
+            ..Default::default()
+        }];
+        table_metadata_manager
+            .create_table_metadata(
+                new_test_table_info(region_id.table_id()),
+                TableRouteValue::physical(region_routes),
+                HashMap::default(),
+            )
+            .await
+            .unwrap();
+        keeper_empty_at_txn.lock().unwrap().clear();
+        let guard = env
+            .opening_region_keeper()
+            .register_candidate_region(persistent_ctx.to_peer.id, region_id)
+            .unwrap();
+        Self {
+            context_factory: env.context_factory_with_metadata(table_metadata_manager),
+            guard,
+            keeper_empty_at_txn,
+        }
+    }
+}
+
+/// Asserts that the table metadata was written at least once after the setup, and that the
+/// candidate registration was gone before every such write.
+pub(crate) fn assert_registration_dropped_before_route_write(
+    keeper_empty_at_txn: &Mutex<Vec<bool>>,
+) {
+    let keeper_empty_at_txn = keeper_empty_at_txn.lock().unwrap();
+    assert!(!keeper_empty_at_txn.is_empty());
+    assert!(keeper_empty_at_txn.iter().all(|empty| *empty));
+}
+
+/// Returns a table metadata manager that records, before each of its transactions, whether
+/// `keeper` holds no registration.
+fn table_metadata_manager_observing_keeper(
+    keeper: MemoryRegionKeeperRef,
+) -> (TableMetadataManagerRef, Arc<Mutex<Vec<bool>>>) {
+    let keeper_empty_at_txn = Arc::new(Mutex::new(Vec::new()));
+    let recorded = keeper_empty_at_txn.clone();
+    let kv_backend = Arc::new(TxnObservingKvBackend {
+        inner: Arc::new(MemoryKvBackend::new()),
+        before_txn: Box::new(move || recorded.lock().unwrap().push(keeper.is_empty())),
+    });
+    (
+        Arc::new(TableMetadataManager::new(kv_backend)),
+        keeper_empty_at_txn,
+    )
 }

@@ -21,6 +21,7 @@ use common_event_recorder::EventRecorderOptions;
 use common_memory_manager::OnExhaustedPolicy;
 use common_options::memory::MemoryOptions;
 use common_telemetry::logging::{LoggingOptions, SlowQueryOptions, TracingOptions};
+use common_time::timestamp::TimeUnit;
 use common_wal::config::DatanodeWalConfig;
 use datanode::config::{DatanodeOptions, ProcedureConfig, RegionEngineConfig, StorageConfig};
 use file_engine::config::EngineConfig as FileEngineConfig;
@@ -47,11 +48,20 @@ pub struct StandaloneOptions {
     /// Upper bound: when `false`, missing tables are never auto-created even if a
     /// request sets the `auto_create_table` hint to `true`. Default: `true`.
     pub auto_create_table: bool,
-    /// Maximum total memory for all concurrent write request bodies and messages (HTTP, gRPC, Flight).
+    /// Time index unit for physical metric tables created by auto table creation
+    /// (Prometheus remote write, OTLP metrics, and other metric-engine ingestion).
+    /// New logical tables created under such a physical table inherit its unit.
+    /// Options: "Second", "Millisecond" (default), "Microsecond", "Nanosecond".
+    pub auto_create_physical_table_timestamp_unit: TimeUnit,
+    /// Shared quota for write bodies/messages, retained decoder memory, and estimated
+    /// ordinary-table batch conversion memory. A batch must fit alongside its request's
+    /// existing reservations; only additional memory is acquired.
     /// Set to 0 to disable the limit. Default: "0" (unlimited)
     pub max_in_flight_write_bytes: ReadableSize,
     /// Policy when write bytes quota is exhausted.
     /// Options: "wait" (default, 10s), "wait(<duration>)", "fail"
+    /// Table-batch conversion never waits for additional memory. Under a wait policy,
+    /// temporary contention returns a retryable error; requests that cannot fit are rejected.
     pub write_bytes_exhausted_policy: OnExhaustedPolicy,
     pub http: HttpOptions,
     pub grpc: GrpcOptions,
@@ -107,6 +117,7 @@ impl Default for StandaloneOptions {
             default_timezone: None,
             default_column_prefix: None,
             auto_create_table: true,
+            auto_create_physical_table_timestamp_unit: TimeUnit::Millisecond,
             max_in_flight_write_bytes: ReadableSize(0),
             write_bytes_exhausted_policy: OnExhaustedPolicy::default(),
             http: HttpOptions::default(),
@@ -177,6 +188,8 @@ impl StandaloneOptions {
         FrontendOptions {
             default_timezone: cloned_opts.default_timezone,
             auto_create_table: cloned_opts.auto_create_table,
+            auto_create_physical_table_timestamp_unit: cloned_opts
+                .auto_create_physical_table_timestamp_unit,
             max_in_flight_write_bytes: cloned_opts.max_in_flight_write_bytes,
             write_bytes_exhausted_policy: cloned_opts.write_bytes_exhausted_policy,
             http: cloned_opts.http,
@@ -328,13 +341,17 @@ concurrent_query_limiter_timeout = "250ms""#,
     }
 
     #[test]
-    fn test_pipeline_host_access_config_forwarding() {
+    fn test_pipeline_config_forwarding() {
         let defaults: StandaloneOptions = toml::from_str("").unwrap();
         assert!(!defaults.pipeline.allow_vrl_host_access);
         assert!(!defaults.frontend_options().pipeline.allow_vrl_host_access);
+        assert!(!defaults.pipeline.ignore_errors);
+        assert!(!defaults.frontend_options().pipeline.ignore_errors);
         let options: StandaloneOptions =
-            toml::from_str("[pipeline]\nallow_vrl_host_access = true").unwrap();
+            toml::from_str("[pipeline]\nallow_vrl_host_access = true\nignore_errors = true")
+                .unwrap();
         assert!(options.frontend_options().pipeline.allow_vrl_host_access);
+        assert!(options.frontend_options().pipeline.ignore_errors);
         let serialized = toml::to_string(&options).unwrap();
         let restored: StandaloneOptions = toml::from_str(&serialized).unwrap();
         assert_eq!(options.pipeline, restored.pipeline);

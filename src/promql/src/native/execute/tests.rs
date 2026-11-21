@@ -1,0 +1,15780 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! What the runtime has to get right: each layer's grid, per-node accounting, rejection and
+//! release.
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Weak};
+
+use datafusion::error::DataFusionError;
+use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool, MemoryReservation};
+use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricValue};
+use datatypes::arrow::array::{Array, Float64Array, UInt32Array};
+use datatypes::arrow::buffer::{Buffer, ScalarBuffer};
+use datatypes::series::histogram::{
+    BucketSideView, CounterResetHint, HistogramBatch, HistogramBatchBuilder, HistogramView,
+};
+use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
+use datatypes::series::samples::{
+    DenseSamplesRef, FieldSpec, HistogramSamples, SampleRef, Samples, Series, SeriesFields,
+    SeriesSchema,
+};
+use datatypes::series::time::{EvalGrid, GridRange, GridSpan, GridSpec, TimeAxis};
+use datatypes::series::{Label, SeriesLabels, SeriesOrdering};
+
+fn is_resources_exhausted(error: &DataFusionError) -> bool {
+    match error {
+        DataFusionError::ResourcesExhausted(_) => true,
+        DataFusionError::Context(_, inner) => is_resources_exhausted(inner),
+        _ => false,
+    }
+}
+
+use super::{
+    BinaryRuntime, Emitted, InputId, InputSlot, InstantRuntime, NativeChunk, NativeExecutionState,
+    NativeExecutor, NodeState, PairKernel, Reader, RetainedInput, RuntimeNode, RuntimeOp,
+    absorb_rebuilds, buffered_fields, buffered_time, evaluated_bytes, grid_chunk_bytes,
+    grid_end_ms, grid_position, map_chunk, map_workspace_bytes, raw_bytes, vector_series_with_k,
+    vector_workspace_bytes,
+};
+use crate::evaluated::EvaluatedChunk;
+use crate::extension_plan::FieldKind;
+use crate::grid_series::{merge_same_labelset, series_bytes};
+use crate::histogram_eval::{HistogramFunction, NativeHistogramFunction};
+use crate::info::InfoSelector;
+use crate::instant_eval::{instant_candidate_span, select_instants};
+use crate::map::MathOp;
+use crate::map_label::LabelRewrite;
+use crate::map_time::DateFunction;
+use crate::native::metrics::{NodeMetric, NodeMetrics};
+use crate::native::plan::{
+    AggregateKind, AggregateStage, AggregateStateSchema, BoundAggregate, BoundInput, BoundInstant,
+    BoundMap, BoundScalar, BoundSetOp, BoundVectorOp, BoundWindow, Grouping, InstantValue, MapOp,
+    NativeExpr, NativeNode, NativeTree, NativeType, ParameterizedOp,
+};
+use crate::range_eval::{RangeEvaluator, RangeFunction, RangeWindow};
+use crate::select::SortOrder;
+use crate::vector_match::{
+    BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels, SetOp, reset_visited_pairs,
+    visited_pairs,
+};
+
+/// Watches the final release of a reservation without keeping its histogram payload alive.
+#[derive(Debug)]
+struct DropOrderPool {
+    inner: GreedyMemoryPool,
+    watch: std::sync::Mutex<Option<(String, Weak<HistogramBatch>)>>,
+    released: AtomicBool,
+    retained_on_release: AtomicBool,
+}
+
+impl std::fmt::Display for DropOrderPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "drop-order test pool")
+    }
+}
+
+impl MemoryPool for DropOrderPool {
+    fn name(&self) -> &str {
+        "drop-order test pool"
+    }
+
+    fn grow(&self, reservation: &MemoryReservation, additional: usize) {
+        self.inner.grow(reservation, additional);
+    }
+
+    fn try_grow(
+        &self,
+        reservation: &MemoryReservation,
+        additional: usize,
+    ) -> Result<(), DataFusionError> {
+        self.inner.try_grow(reservation, additional)
+    }
+
+    fn shrink(&self, reservation: &MemoryReservation, shrink: usize) {
+        if reservation.size() == 0 {
+            let watch = self.watch.lock().unwrap();
+            if let Some((name, payload)) = watch.as_ref()
+                && reservation.consumer().name() == name
+            {
+                self.released.store(true, Ordering::SeqCst);
+                self.retained_on_release
+                    .store(payload.upgrade().is_some(), Ordering::SeqCst);
+            }
+        }
+        self.inner.shrink(reservation, shrink);
+    }
+
+    fn reserved(&self) -> usize {
+        self.inner.reserved()
+    }
+}
+
+fn grid(start: i64, step: i64, len: u64) -> Arc<EvalGrid> {
+    Arc::new(EvalGrid::try_new(GridSpec::try_new(start, step, len).unwrap()).unwrap())
+}
+
+fn fields() -> Arc<[FieldSpec]> {
+    field_count(1)
+}
+
+/// `count` float fields named `v0`, `v1`, ...
+fn field_count(count: usize) -> Arc<[FieldSpec]> {
+    (0..count)
+        .map(|index| FieldSpec {
+            name: format!("v{index}").into(),
+        })
+        .collect()
+}
+
+fn raw_schema() -> Arc<SeriesSchema> {
+    raw_schema_of(fields())
+}
+
+fn raw_schema_of(fields: Arc<[FieldSpec]>) -> Arc<SeriesSchema> {
+    Arc::new(SeriesSchema {
+        fields,
+        eval_grid: None,
+    })
+}
+
+fn evaluated_schema(grid: Arc<EvalGrid>) -> Arc<SeriesSchema> {
+    Arc::new(SeriesSchema {
+        fields: fields(),
+        eval_grid: Some(grid),
+    })
+}
+
+fn evaluated(grid: Arc<EvalGrid>) -> NativeType {
+    NativeType::Samples(evaluated_schema(grid))
+}
+
+fn metric() -> SeriesLabels {
+    SeriesLabels::try_new(Some("requests".into()), Vec::new()).unwrap()
+}
+
+/// The raw source every supported tree starts from.
+fn input() -> NativeNode {
+    raw_input_with_ordering(SeriesOrdering::KeyThenTime)
+}
+
+/// The same raw source, declaring `ordering`.
+fn raw_input_with_ordering(ordering: SeriesOrdering) -> NativeNode {
+    raw_input_with_source_index_and_ordering(0, ordering)
+}
+
+fn raw_input_with_source_index_and_ordering(
+    source_index: usize,
+    ordering: SeriesOrdering,
+) -> NativeNode {
+    let output = NativeType::Samples(raw_schema());
+    NativeNode {
+        expr: NativeExpr::Input(BoundInput {
+            output: output.clone(),
+            source_index,
+            ordering,
+        }),
+        output,
+    }
+}
+
+/// The same source over `count` float fields, which one input chunk has to carry all of.
+fn raw_input_of(count: usize) -> NativeNode {
+    let output = NativeType::Samples(raw_schema_of(field_count(count)));
+    NativeNode {
+        expr: NativeExpr::Input(BoundInput {
+            output: output.clone(),
+            source_index: 0,
+            ordering: SeriesOrdering::KeyThenTime,
+        }),
+        output,
+    }
+}
+
+/// A source whose chunks are already evaluated, such as the inner result of a subquery.
+fn evaluated_input(grid: Arc<EvalGrid>) -> NativeNode {
+    evaluated_input_with_source_index(grid, 0)
+}
+
+fn evaluated_input_with_source_index(grid: Arc<EvalGrid>, source_index: usize) -> NativeNode {
+    evaluated_input_with_source_index_and_ordering(grid, source_index, SeriesOrdering::KeyThenTime)
+}
+
+/// A source of evaluated chunks that guarantees `ordering`.
+fn evaluated_input_with_ordering(grid: Arc<EvalGrid>, ordering: SeriesOrdering) -> NativeNode {
+    evaluated_input_with_source_index_and_ordering(grid, 0, ordering)
+}
+
+fn evaluated_input_with_source_index_and_ordering(
+    grid: Arc<EvalGrid>,
+    source_index: usize,
+    ordering: SeriesOrdering,
+) -> NativeNode {
+    let output = evaluated(grid);
+    NativeNode {
+        expr: NativeExpr::Input(BoundInput {
+            output: output.clone(),
+            source_index,
+            ordering,
+        }),
+        output,
+    }
+}
+
+fn window(inner: NativeNode, output_grid: Arc<EvalGrid>) -> NativeNode {
+    window_with(
+        inner,
+        RangeFunction::LastOverTime,
+        300_000,
+        None,
+        output_grid,
+    )
+}
+
+fn window_with(
+    inner: NativeNode,
+    function: RangeFunction,
+    range_ms: i64,
+    input_grid: Option<Arc<EvalGrid>>,
+    output_grid: Arc<EvalGrid>,
+) -> NativeNode {
+    NativeNode {
+        expr: NativeExpr::Window {
+            input: Box::new(inner),
+            op: BoundWindow {
+                function,
+                window: RangeWindow {
+                    range_ms,
+                    offset_ms: 0,
+                    anchor_ms: None,
+                    modifier: None,
+                },
+                input_grid,
+                output_grid: Arc::clone(&output_grid),
+            },
+        },
+        output: evaluated(output_grid),
+    }
+}
+
+/// A 1 ms `last_over_time` window over `count` float fields, whose output carries them all.
+///
+/// Every other window here is over `fields`; this one is what a test of per-field retention needs.
+fn window_over_fields(count: usize, output_grid: Arc<EvalGrid>) -> NativeNode {
+    let fields = field_count(count);
+    NativeNode {
+        expr: NativeExpr::Window {
+            input: Box::new(raw_input_of(count)),
+            op: BoundWindow {
+                function: RangeFunction::LastOverTime,
+                window: RangeWindow {
+                    range_ms: 1,
+                    offset_ms: 0,
+                    anchor_ms: None,
+                    modifier: None,
+                },
+                input_grid: None,
+                output_grid: Arc::clone(&output_grid),
+            },
+        },
+        output: NativeType::Samples(Arc::new(SeriesSchema {
+            fields,
+            eval_grid: Some(output_grid),
+        })),
+    }
+}
+
+/// A bare selector over `inner`: the last sample at or before each grid point, read within
+/// `lookback_ms` and at `offset_ms`.
+///
+/// The selection reports one value per input field, so its layout is the input's, just as the
+/// compiler builds it.
+fn instant(
+    inner: NativeNode,
+    lookback_ms: i64,
+    offset_ms: i64,
+    output_grid: Arc<EvalGrid>,
+) -> NativeNode {
+    let fields = inner
+        .output
+        .samples()
+        .expect("a selection reads samples")
+        .fields
+        .clone();
+    NativeNode {
+        expr: NativeExpr::Instant {
+            input: Box::new(inner),
+            op: BoundInstant {
+                lookback_ms,
+                offset_ms,
+                at_ms: None,
+                value: InstantValue::Sample,
+                output_grid: Arc::clone(&output_grid),
+            },
+        },
+        output: NativeType::Samples(Arc::new(SeriesSchema {
+            fields,
+            eval_grid: Some(output_grid),
+        })),
+    }
+}
+
+#[test]
+fn window_and_limitk_collect_only_unified_contributions() {
+    let grid = grid(0, 1_000, 2);
+
+    let build = |node: NativeNode| {
+        let tree = NativeTree::try_new(node).unwrap();
+        let mut inputs = Vec::new();
+        let mut binary_before = 0;
+        RuntimeNode::build(
+            tree.root(),
+            &pool(),
+            &mut inputs,
+            &mut binary_before,
+            "root".to_string(),
+            None,
+        )
+        .unwrap()
+    };
+
+    let raw_window = build(window_with(
+        evaluated_input(Arc::clone(&grid)),
+        RangeFunction::LastOverTime,
+        300_000,
+        Some(Arc::clone(&grid)),
+        Arc::clone(&grid),
+    ));
+    let RuntimeOp::Window {
+        merge: raw_merge, ..
+    } = raw_window.op
+    else {
+        panic!("expected window runtime node");
+    };
+    assert!(
+        raw_merge.is_none(),
+        "unknown input keeps the old no-merge behavior"
+    );
+
+    let fragmented_window = build(window_with(
+        map(evaluated_input(Arc::clone(&grid)), vec![MathOp::Abs]),
+        RangeFunction::LastOverTime,
+        300_000,
+        Some(Arc::clone(&grid)),
+        Arc::clone(&grid),
+    ));
+    let RuntimeOp::Window {
+        merge: fragmented_merge,
+        ..
+    } = fragmented_window.op
+    else {
+        panic!("expected window runtime node");
+    };
+    assert!(
+        fragmented_merge.is_some(),
+        "reported fragments must be collected"
+    );
+
+    let merged_window = build(window_with(
+        merge(evaluated_input(Arc::clone(&grid))),
+        RangeFunction::LastOverTime,
+        300_000,
+        Some(Arc::clone(&grid)),
+        Arc::clone(&grid),
+    ));
+    let RuntimeOp::Window {
+        merge: merged_input,
+        ..
+    } = merged_window.op
+    else {
+        panic!("expected window runtime node");
+    };
+    assert!(
+        merged_input.is_none(),
+        "already-unified contributions need no collection"
+    );
+
+    let raw_limitk = build(vector_op(
+        evaluated_input(Arc::clone(&grid)),
+        BoundVectorOp::LimitK {
+            k: 1.0,
+            group: Grouping::By(Arc::from([])),
+        },
+    ));
+    let RuntimeOp::Vector { vector, .. } = raw_limitk.op else {
+        panic!("expected vector runtime node");
+    };
+    assert!(
+        !vector.merge_input,
+        "input with unknown grouping is not merged here"
+    );
+
+    let limitk = || BoundVectorOp::LimitK {
+        k: 1.0,
+        group: Grouping::By(Arc::from([])),
+    };
+    let fragmented = map(evaluated_input(Arc::clone(&grid)), vec![MathOp::Abs]);
+    let fragmented_limitk = build(vector_op(fragmented, limitk()));
+    let RuntimeOp::Vector { vector, .. } = fragmented_limitk.op else {
+        panic!("expected vector runtime node");
+    };
+    assert!(
+        vector.merge_input,
+        "limitk must merge fragmented input series"
+    );
+
+    let unified = merge(map(evaluated_input(Arc::clone(&grid)), vec![MathOp::Abs]));
+    let unified_limitk = build(vector_op(unified, limitk()));
+    let RuntimeOp::Vector { vector, .. } = unified_limitk.op else {
+        panic!("expected vector runtime node");
+    };
+    assert!(
+        !vector.merge_input,
+        "limitk must not re-merge unified input"
+    );
+
+    // A name-keeping window over an already collected child emits one series per label set, so a
+    // `limitk` above the window has nothing to merge: it must not read the window's child as the
+    // answer for the window.
+    let windowed = window_with(
+        merge(evaluated_input(Arc::clone(&grid))),
+        RangeFunction::LastOverTime,
+        300_000,
+        Some(Arc::clone(&grid)),
+        Arc::clone(&grid),
+    );
+    let windowed_limitk = build(vector_op(windowed, limitk()));
+    let RuntimeOp::Vector { vector, .. } = windowed_limitk.op else {
+        panic!("expected vector runtime node");
+    };
+    assert!(
+        !vector.merge_input,
+        "limitk must not re-merge a window that already unifies its contributions"
+    );
+}
+
+#[test]
+fn timestamp_instant_rejects_negative_lookback() {
+    let output_grid = grid(500, 1_000, 1);
+    let mut root = instant(input(), -1, 0, Arc::clone(&output_grid));
+    let NativeExpr::Instant { op, .. } = &mut root.expr else {
+        unreachable!();
+    };
+    op.value = InstantValue::Timestamp;
+    op.at_ms = Some(500);
+    let tree = NativeTree::try_new(root).unwrap();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution
+        .push_raw(
+            InputId::new(0),
+            raw_chunk(&raw_schema(), &[500], &[1.0], true),
+        )
+        .unwrap();
+
+    let error = execution
+        .finish()
+        .expect_err("negative lookback was accepted");
+    assert!(
+        error.to_string().contains("lookback must be non-negative"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(pool.reserved(), 0);
+}
+
+fn merge(inner: NativeNode) -> NativeNode {
+    let output = inner.output.clone();
+    NativeNode {
+        expr: NativeExpr::Merge {
+            input: Box::new(inner),
+        },
+        output,
+    }
+}
+
+fn map(inner: NativeNode, ops: Vec<MathOp>) -> NativeNode {
+    map_ops(inner, ops.into_iter().map(MapOp::Math).collect())
+}
+
+fn map_ops(inner: NativeNode, ops: Vec<MapOp>) -> NativeNode {
+    let output = inner.output.grid().expect("a map needs a grid").clone();
+    NativeNode {
+        expr: NativeExpr::Map {
+            input: Box::new(inner),
+            op: BoundMap { ops: ops.into() },
+        },
+        output: evaluated(output),
+    }
+}
+
+fn scalar(value: f64, grid: Arc<EvalGrid>) -> NativeNode {
+    NativeNode {
+        expr: NativeExpr::Scalar(BoundScalar { value }),
+        output: NativeType::Scalar(grid),
+    }
+}
+
+fn raw_chunk(
+    schema: &SeriesSchema,
+    timestamps: &[i64],
+    values: &[f64],
+    is_last: bool,
+) -> RawSeriesChunk {
+    raw_chunk_of(schema, b"series-a", metric(), timestamps, values, is_last)
+}
+
+/// One raw chunk of the series named by `key` and `metric`.
+fn raw_chunk_of(
+    schema: &SeriesSchema,
+    key: &[u8],
+    metric: SeriesLabels,
+    timestamps: &[i64],
+    values: &[f64],
+    is_last: bool,
+) -> RawSeriesChunk {
+    RawSeriesChunk::try_new(
+        schema,
+        Buffer::from_slice_ref(key),
+        Some(metric),
+        RawTimestamps::try_new(ScalarBuffer::from(timestamps.to_vec())).unwrap(),
+        SeriesFields::one(Samples::from_float(Float64Array::from(values.to_vec()))),
+        is_last,
+    )
+    .unwrap()
+}
+
+/// One raw chunk of `series-a` whose every field carries `values`, so one input can be pushed to a
+/// schema of more than one field.
+fn raw_chunk_repeated(
+    schema: &SeriesSchema,
+    timestamps: &[i64],
+    values: &[f64],
+    is_last: bool,
+) -> RawSeriesChunk {
+    let fields = SeriesFields::try_from_vec(
+        (0..schema.fields.len())
+            .map(|_| Samples::from_float(Float64Array::from(values.to_vec())))
+            .collect(),
+    )
+    .unwrap();
+    RawSeriesChunk::try_new(
+        schema,
+        Buffer::from_slice_ref(b"series-a"),
+        Some(metric()),
+        RawTimestamps::try_new(ScalarBuffer::from(timestamps.to_vec())).unwrap(),
+        fields,
+        is_last,
+    )
+    .unwrap()
+}
+
+/// One raw chunk of `series-a` whose fields carry `columns`, one column per field.
+///
+/// A `None` is a position that field holds no sample at, which is what a partially filled field
+/// looks like at the source.
+fn raw_chunk_columns(
+    schema: &SeriesSchema,
+    timestamps: &[i64],
+    columns: Vec<Vec<Option<f64>>>,
+    is_last: bool,
+) -> RawSeriesChunk {
+    let fields = SeriesFields::try_from_vec(
+        columns
+            .into_iter()
+            .map(|values| Samples::from_float(Float64Array::from(values)))
+            .collect(),
+    )
+    .unwrap();
+    RawSeriesChunk::try_new(
+        schema,
+        Buffer::from_slice_ref(b"series-a"),
+        Some(metric()),
+        RawTimestamps::try_new(ScalarBuffer::from(timestamps.to_vec())).unwrap(),
+        fields,
+        is_last,
+    )
+    .unwrap()
+}
+
+/// Pushes one native histogram whose positive side is one span of `buckets` buckets of one count
+/// into `builder`, and returns the index it was filed under.
+fn push_histogram(builder: &mut HistogramBatchBuilder, buckets: i32) -> u32 {
+    let offsets = [0];
+    let lengths = [buckets];
+    let counts = vec![1.0; usize::try_from(buckets).unwrap()];
+    builder
+        .push(HistogramView {
+            schema: 0,
+            zero_threshold: 0.0,
+            zero_count: 0.0,
+            count: f64::from(buckets),
+            sum: f64::from(buckets),
+            reset_hint: CounterResetHint::Unknown,
+            start_timestamp: None,
+            custom_values: &[],
+            positive: BucketSideView {
+                span_offsets: &offsets,
+                span_lengths: &lengths,
+                buckets: &counts,
+            },
+            negative: BucketSideView {
+                span_offsets: &[],
+                span_lengths: &[],
+                buckets: &[],
+            },
+        })
+        .unwrap()
+}
+
+/// One raw chunk of `series-a` whose one field holds a `buckets`-wide native histogram at each of
+/// `timestamps`.
+fn raw_histogram_chunk(
+    schema: &SeriesSchema,
+    timestamps: &[i64],
+    buckets: i32,
+    is_last: bool,
+) -> RawSeriesChunk {
+    let mut builder = HistogramBatchBuilder::new();
+    let indices: UInt32Array = timestamps
+        .iter()
+        .map(|_| Some(push_histogram(&mut builder, buckets)))
+        .collect();
+    let samples = Samples::try_from_histogram(indices, builder.finish().unwrap()).unwrap();
+    RawSeriesChunk::try_new(
+        schema,
+        Buffer::from_slice_ref(b"series-a"),
+        Some(metric()),
+        RawTimestamps::try_new(ScalarBuffer::from(timestamps.to_vec())).unwrap(),
+        SeriesFields::one(samples),
+        is_last,
+    )
+    .unwrap()
+}
+
+/// One raw chunk of `series-a` whose one field holds a four-bucket native histogram at each of
+/// `timestamps`, each carrying `start_timestamp` as the payload it was read from reports it.
+fn raw_histogram_chunk_with_start(
+    schema: &SeriesSchema,
+    timestamps: &[i64],
+    start_timestamp: Option<i64>,
+    is_last: bool,
+) -> RawSeriesChunk {
+    let mut builder = HistogramBatchBuilder::new();
+    let offsets = [0];
+    let lengths = [4];
+    let counts = vec![1.0; 4];
+    let indices: UInt32Array = timestamps
+        .iter()
+        .map(|_| {
+            Some(
+                builder
+                    .push(HistogramView {
+                        schema: 0,
+                        zero_threshold: 0.0,
+                        zero_count: 0.0,
+                        count: 4.0,
+                        sum: 4.0,
+                        reset_hint: CounterResetHint::Unknown,
+                        start_timestamp,
+                        custom_values: &[],
+                        positive: BucketSideView {
+                            span_offsets: &offsets,
+                            span_lengths: &lengths,
+                            buckets: &counts,
+                        },
+                        negative: BucketSideView {
+                            span_offsets: &[],
+                            span_lengths: &[],
+                            buckets: &[],
+                        },
+                    })
+                    .unwrap(),
+            )
+        })
+        .collect();
+    let samples = Samples::try_from_histogram(indices, builder.finish().unwrap()).unwrap();
+    RawSeriesChunk::try_new(
+        schema,
+        Buffer::from_slice_ref(b"series-a"),
+        Some(metric()),
+        RawTimestamps::try_new(ScalarBuffer::from(timestamps.to_vec())).unwrap(),
+        SeriesFields::one(samples),
+        is_last,
+    )
+    .unwrap()
+}
+
+/// One raw chunk of `series-a` whose one field holds the histogram at `index` of `table`.
+///
+/// Two chunks built this way share one `Arc<HistogramBatch>`, which is what makes the allocation
+/// one table for accounting even though each chunk carries its own indices into it.
+fn raw_shared_histogram_chunk(
+    schema: &SeriesSchema,
+    table: &Arc<HistogramBatch>,
+    index: u32,
+    timestamp: i64,
+    is_last: bool,
+) -> RawSeriesChunk {
+    let samples =
+        Samples::try_from_histogram(UInt32Array::from(vec![Some(index)]), Arc::clone(table))
+            .unwrap();
+    RawSeriesChunk::try_new(
+        schema,
+        Buffer::from_slice_ref(b"series-a"),
+        Some(metric()),
+        RawTimestamps::try_new(ScalarBuffer::from(vec![timestamp])).unwrap(),
+        SeriesFields::one(samples),
+        is_last,
+    )
+    .unwrap()
+}
+
+/// A source leaf: the schema its chunks are checked against and the queue it is held for.
+///
+/// The leaf owns the only state a source has, which is why the figure below is read off the slot
+/// rather than off a node: a source reserves for what the caller queued at it and for nothing else.
+fn source_runtime(pool: &Arc<dyn MemoryPool>) -> InputSlot {
+    InputSlot {
+        source_index: 0,
+        kind: super::LeafKind::Raw,
+        open_source_series: false,
+        state: NodeState::new(
+            "native.input at root (source_index=0)",
+            Arc::new(NodeMetrics::default()),
+            pool,
+        ),
+    }
+}
+
+/// A binary node's state and the operation it runs: both operands bound to `schema`, and the
+/// reservation the node is held for.
+///
+/// The two are returned side by side because that is how a node keeps them: its state is shared by
+/// every node kind, and the operation is the payload that belongs to this one.
+fn binary_runtime(
+    pool: &Arc<dyn MemoryPool>,
+    schema: &Arc<SeriesSchema>,
+) -> (NodeState, BinaryRuntime) {
+    (
+        NodeState::new(
+            "native.binary at root",
+            Arc::new(NodeMetrics::default()),
+            pool,
+        ),
+        BinaryRuntime::new(
+            PairKernel::Binary(Arc::new(binary_matching(BinaryOp::Add))),
+            [Arc::clone(schema), Arc::clone(schema)],
+            0,
+            None,
+        ),
+    )
+}
+
+/// What a binary node holds once it retains `left` and `right`, and what assembling the retained
+/// chunks into the series the kernel matches adds on top.
+///
+/// Both are read from a runtime of its own, so a pool can be sized from them: the first is what the
+/// node reserves for the operands it retains and the second its own bound, and neither is a figure
+/// the pool reports.
+fn binary_charge(
+    schema: &Arc<SeriesSchema>,
+    left: &EvaluatedChunk,
+    right: &EvaluatedChunk,
+) -> (usize, usize) {
+    let (mut state, mut binary) = binary_runtime(&pool(), schema);
+    state
+        .retain_binary(&mut binary, 0, NativeChunk::Evaluated(left.clone()))
+        .unwrap();
+    state
+        .retain_binary(&mut binary, 1, NativeChunk::Evaluated(right.clone()))
+        .unwrap();
+    let retained = state.buffer.reservation.size();
+    let assembly = binary
+        .assembly_bytes()
+        .expect("the assembly bound does not overflow");
+    (retained, assembly)
+}
+
+/// One evaluated chunk of an input series: `values` at `start` and onwards on `schema`'s grid.
+fn evaluated_chunk(
+    schema: &SeriesSchema,
+    start: usize,
+    values: Vec<f64>,
+    is_last: bool,
+) -> EvaluatedChunk {
+    evaluated_chunk_of(
+        schema,
+        metric(),
+        start,
+        values.into_iter().map(Some).collect(),
+        is_last,
+    )
+}
+
+/// One evaluated chunk of the series `metric`, `values` at `start` and onwards on `schema`'s grid.
+///
+/// A `None` value is a position the series decided to hold no sample, which is what an inner
+/// evaluated result carries where it had nothing to report.
+fn evaluated_chunk_of(
+    schema: &SeriesSchema,
+    metric: SeriesLabels,
+    start: usize,
+    values: Vec<Option<f64>>,
+    is_last: bool,
+) -> EvaluatedChunk {
+    evaluated_array_chunk_of(schema, metric, start, Float64Array::from(values), is_last)
+}
+
+/// One evaluated chunk of the series `metric` whose one field holds `values`, addressed at `start`.
+///
+/// The array is passed in rather than built here so that two chunks can hold sibling slices of one
+/// Arrow allocation, which is what a source handing over the chunks of one batch does.
+fn evaluated_array_chunk_of(
+    schema: &SeriesSchema,
+    metric: SeriesLabels,
+    start: usize,
+    values: Float64Array,
+    is_last: bool,
+) -> EvaluatedChunk {
+    let samples = Samples::from_float(values);
+    let range =
+        GridRange::try_new(schema.eval_grid.clone().unwrap(), start, samples.len()).unwrap();
+    let series = Series {
+        metric,
+        time: TimeAxis::Grid(range),
+        fields: SeriesFields::try_from_vec(vec![samples]).unwrap(),
+    };
+    EvaluatedChunk::try_new(series, is_last).unwrap()
+}
+
+/// One evaluated chunk of the series `metric` whose one field holds `indices` into `table`,
+/// addressed at `start` on `schema`'s grid.
+///
+/// Two chunks built with one `table` are two slices of one allocation; two built with tables of the
+/// same shape hold two allocations of the same size.
+fn evaluated_histogram_chunk_of(
+    schema: &SeriesSchema,
+    metric: SeriesLabels,
+    start: usize,
+    indices: Vec<Option<u32>>,
+    table: &Arc<HistogramBatch>,
+    is_last: bool,
+) -> EvaluatedChunk {
+    let samples =
+        Samples::try_from_histogram(UInt32Array::from(indices), Arc::clone(table)).unwrap();
+    let range =
+        GridRange::try_new(schema.eval_grid.clone().unwrap(), start, samples.len()).unwrap();
+    let series = Series {
+        metric,
+        time: TimeAxis::Grid(range),
+        fields: SeriesFields::try_from_vec(vec![samples]).unwrap(),
+    };
+    EvaluatedChunk::try_new(series, is_last).unwrap()
+}
+
+/// One histogram table of `histograms` histograms of `buckets` buckets each.
+fn histogram_table(histograms: usize, buckets: i32) -> Arc<HistogramBatch> {
+    let mut builder = HistogramBatchBuilder::new();
+    for _ in 0..histograms {
+        push_histogram(&mut builder, buckets);
+    }
+    builder.finish().unwrap()
+}
+
+/// What `table` holds: the batch struct and the arrays its columns view.
+///
+/// Written out here rather than read from the runtime, so a test can size its expectations from the
+/// table it built instead of from the figure it is checking.
+fn histogram_table_bytes(table: &Arc<HistogramBatch>) -> usize {
+    std::mem::size_of::<HistogramBatch>() + table.as_arrow().get_array_memory_size()
+}
+
+/// The series `name{job="job"}`, so two series can share the label a map leaves behind.
+fn named_metric(name: &str, job: &str) -> SeriesLabels {
+    SeriesLabels::try_new(
+        Some(name.into()),
+        vec![Label {
+            name: "job".into(),
+            value: job.into(),
+        }],
+    )
+    .unwrap()
+}
+
+/// `requests{host="web-1"}` with `zone` either present and empty or absent.
+///
+/// The two are distinct series to a scan — an empty tag value is a present label, an absent one is
+/// not — and the same label set to everything that drops empty-valued labels, as Prometheus does.
+fn host_metric(zone: Option<&str>) -> SeriesLabels {
+    let mut tags = vec![Label {
+        name: "host".into(),
+        value: "web-1".into(),
+    }];
+    if let Some(zone) = zone {
+        tags.push(Label {
+            name: "zone".into(),
+            value: zone.into(),
+        });
+    }
+    SeriesLabels::try_new(Some("requests".into()), tags).unwrap()
+}
+
+fn pool() -> Arc<dyn MemoryPool> {
+    Arc::new(GreedyMemoryPool::new(1 << 20))
+}
+
+/// A pool with a fixed budget, so a reservation that grows with the input fails here.
+fn bounded_pool(bytes: usize) -> Arc<dyn MemoryPool> {
+    Arc::new(GreedyMemoryPool::new(bytes))
+}
+
+fn executor(tree: &NativeTree, pool: Arc<dyn MemoryPool>) -> NativeExecutor {
+    NativeExecutor::new(NativeExecutionState::try_new(tree, pool, None).unwrap())
+}
+
+/// Pulls until the tree has nothing settled, then closes it.
+fn run(executor: &mut NativeExecutor) -> Vec<EvaluatedChunk> {
+    let mut out = Vec::new();
+    while let Some(chunk) = executor.next_chunk().unwrap() {
+        out.push(chunk);
+    }
+    out.extend(executor.finish().unwrap());
+    out
+}
+
+/// A deep native tree executes after the real FusedSeries envelope is decoded.
+#[test]
+fn deep_native_tree_executes_after_fused_series_round_trip() {
+    // A representative deep codec/runtime test owns its worker stack; this is not an
+    // arbitrary-depth guarantee or a product-level stack setting.
+    std::thread::Builder::new()
+        .name("deep-native-codec".into())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            use crate::extension_plan::{FusedOutputFormat, FusedSeries, FusedSeriesBinding};
+            use datafusion::common::DFSchema;
+            use datafusion::logical_expr::{EmptyRelation, LogicalPlan};
+
+            let grid = grid(0, 60_000, 3);
+            let schema = evaluated_schema(Arc::clone(&grid));
+            let mut root = evaluated_input(Arc::clone(&grid));
+            for _ in 0..80 {
+                root = scalar_binary(
+                    root,
+                    scalar(1.0, Arc::clone(&grid)),
+                    binary_matching(BinaryOp::Add),
+                );
+            }
+            root = map(
+                root,
+                vec![MathOp::Clamp {
+                    min: 0.0,
+                    max: 1000.0,
+                }],
+            );
+            let tree = NativeTree::try_new(root).unwrap();
+            let output_schema = FusedSeries::series_frame_schema(&tree).unwrap();
+            let output_schema =
+                Arc::new(DFSchema::try_from(output_schema.as_ref().clone()).unwrap());
+            let node = FusedSeries::try_new_with_format(
+                Arc::from("deep"),
+                tree,
+                FusedSeriesBinding {
+                    grid: Arc::clone(&grid),
+                    time_index: "ts".to_string(),
+                    tags: Vec::new(),
+                    metric_name: None,
+                },
+                vec![LogicalPlan::EmptyRelation(EmptyRelation {
+                    produce_one_row: false,
+                    schema: Arc::new(DFSchema::empty()),
+                })],
+                output_schema,
+                FusedOutputFormat::SeriesFrame,
+            )
+            .unwrap();
+            let bytes = node.serialize().unwrap();
+            let decoded = FusedSeries::deserialize(&bytes).unwrap();
+            fn depth(node: &NativeNode) -> usize {
+                1 + match &node.expr {
+                    NativeExpr::Input(_) | NativeExpr::Scalar(_) => 0,
+                    NativeExpr::Map { input, .. } => depth(input),
+                    NativeExpr::Binary { left, right, .. } => depth(left).max(depth(right)),
+                    other => panic!("unexpected node: {other:?}"),
+                }
+            }
+            assert!(depth(decoded.tree().root()) > 64);
+            let pool = pool();
+            let mut execution = executor(decoded.tree(), Arc::clone(&pool));
+            execution
+                .push_evaluated(
+                    InputId::new(0),
+                    evaluated_chunk_of(
+                        &schema,
+                        named_metric("x", "a"),
+                        0,
+                        vec![Some(-1.0), None, Some(3.0)],
+                        true,
+                    ),
+                )
+                .unwrap();
+            let chunks = run(&mut execution);
+            assert_eq!(chunks.len(), 1);
+            assert_eq!(
+                sample_values(&chunks[0]),
+                vec![Some(79.0), None, Some(83.0)]
+            );
+            assert_eq!(chunks[0].series.time.grid().unwrap().spec(), grid.spec());
+            assert_eq!(chunks[0].series.metric.get("job"), Some("a"));
+            assert_eq!(chunks[0].series.metric.name(), None);
+            assert_eq!(pool.reserved(), 0);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+/// A scalar root answers its own value, once, on the grid it was bound to.
+///
+/// It reads nothing, so what it reports is not a series it was handed: one unlabelled chunk holding
+/// one value per grid point and closing on that same chunk. Nothing above it exists, so the value's
+/// field is the only field, and the chunk is addressed on the statement's grid rather than on one of
+/// its own.
+#[test]
+fn scalar_root_emits_one_unlabelled_grid_chunk() {
+    let grid = grid(10, 5, 3);
+    let tree = NativeTree::try_new(scalar(2.5, Arc::clone(&grid))).unwrap();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution.end_of_input().unwrap();
+    let chunk = execution.next_chunk().unwrap().unwrap();
+    assert_eq!(
+        chunk.series.metric,
+        SeriesLabels::try_new(None, Vec::new()).unwrap(),
+        "a scalar carries no metric name and no labels"
+    );
+    assert_eq!(chunk.series.fields.len(), 1, "one value per grid point");
+    assert_eq!(sample_values(&chunk), vec![Some(2.5); 3]);
+    assert_eq!(chunk.series.time.len(), 3);
+    assert_eq!(
+        chunk.series.time.timestamps().unwrap().as_ref(),
+        grid.timestamps().unwrap().as_ref(),
+        "the chunk's positions are the statement's grid"
+    );
+    assert!(chunk.is_last, "the one chunk closes the value it reports");
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "a scalar owes one chunk and no second one"
+    );
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// The scalar's chunk is reserved before it is allocated, and its own node reports it.
+///
+/// The pool is asked first, so a low budget refuses the chunk instead of allocating it: the failure
+/// leaves nothing held, and an execution stopped by it gives back everything it took. What the node
+/// reports is the one batch and the values it produced, and no input at all, because it reads none.
+#[test]
+fn scalar_root_reserves_before_allocating_and_counts_its_output() {
+    let grid = grid(0, 1, 4);
+    let tree = NativeTree::try_new(scalar(2.0, Arc::clone(&grid))).unwrap();
+    let zero_pool = bounded_pool(0);
+    let mut rejected = executor(&tree, Arc::clone(&zero_pool));
+    rejected.end_of_input().unwrap();
+    let error = rejected.next_chunk().unwrap_err();
+    assert!(error.to_string().contains("memory"), "{error}");
+    assert_eq!(rejected.state().reserved_bytes(), 0);
+    assert_eq!(zero_pool.reserved(), 0);
+    // A stopped execution holds nothing either, and says so rather than answering again.
+    assert!(rejected.next_chunk().is_err());
+
+    let pool = pool();
+    let metrics = ExecutionPlanMetricsSet::new();
+    let state = NativeExecutionState::try_new(&tree, Arc::clone(&pool), None).unwrap();
+    state.register_metrics(&metrics, 0);
+    let mut execution = NativeExecutor::new(state);
+    execution.end_of_input().unwrap();
+    let chunk = execution.next_chunk().unwrap().unwrap();
+    assert_eq!(sample_values(&chunk), vec![Some(2.0); 4]);
+    assert!(execution.next_chunk().unwrap().is_none());
+    assert_eq!(pool.reserved(), 0);
+    let peak = "native.p0.root.peak_reserved_bytes";
+    assert!(gauge(&metrics, peak) >= 4 * std::mem::size_of::<f64>());
+    assert_eq!(count(&metrics, "root", NodeMetric::OUTPUT_BATCHES), 1);
+    assert_eq!(count(&metrics, "root", NodeMetric::OUTPUT_VALUES), 4);
+    assert_eq!(
+        count(&metrics, "root", NodeMetric::EVALUATED_GRID_POINTS),
+        4
+    );
+    assert_eq!(count(&metrics, "root", NodeMetric::COMPLETED_SERIES), 1);
+    assert_eq!(count(&metrics, "root", NodeMetric::INPUT_BATCHES), 0);
+    assert_eq!(count(&metrics, "root", NodeMetric::INPUT_SAMPLES), 0);
+}
+
+/// A scalar can produce its value before the input ends.
+///
+/// Nothing arrives for it, so waiting would be waiting for a chunk no producer will send. Ending the
+/// input afterwards changes nothing: the chunk was handed over once and the tree owes no second one.
+#[test]
+fn scalar_root_settles_before_the_input_ends() {
+    let tree = NativeTree::try_new(scalar(3.0, grid(0, 1, 3))).unwrap();
+    let mut execution = executor(&tree, pool());
+    assert_eq!(
+        sample_values(&execution.next_chunk().unwrap().unwrap()),
+        vec![Some(3.0); 3]
+    );
+    assert!(execution.next_chunk().unwrap().is_none());
+    execution.end_of_input().unwrap();
+    assert!(execution.next_chunk().unwrap().is_none());
+    assert_eq!(execution.state().reserved_bytes(), 0);
+}
+
+/// Stopped executors do not retain the scalar grid after handing off or rejecting the value.
+#[test]
+fn scalar_root_releases_grid_after_success_and_memory_failure() {
+    let pool = pool();
+    let (mut execution, weak_grid) = {
+        let grid = grid(0, 1, 3);
+        let tree = NativeTree::try_new(scalar(3.0, Arc::clone(&grid))).unwrap();
+        let weak = Arc::downgrade(&grid);
+        (executor(&tree, Arc::clone(&pool)), weak)
+    };
+    let chunk = execution.next_chunk().unwrap().unwrap();
+    assert!(weak_grid.upgrade().is_some());
+    drop(chunk);
+    execution.end_of_input().unwrap();
+    assert!(execution.next_chunk().unwrap().is_none());
+    assert!(weak_grid.upgrade().is_none());
+
+    let bounded = bounded_pool(0);
+    let (mut rejected, weak_grid) = {
+        let grid = grid(0, 1, 3);
+        let tree = NativeTree::try_new(scalar(3.0, Arc::clone(&grid))).unwrap();
+        let weak = Arc::downgrade(&grid);
+        (executor(&tree, Arc::clone(&bounded)), weak)
+    };
+    rejected.end_of_input().unwrap();
+    assert!(rejected.next_chunk().is_err());
+    assert_eq!(bounded.reserved(), 0);
+    assert!(weak_grid.upgrade().is_none());
+}
+
+/// Non-finite values and signed zero retain their bits rather than becoming missing samples.
+#[test]
+fn scalar_root_preserves_nan_negative_zero_and_infinity() {
+    for value in [f64::NAN, -0.0, f64::INFINITY, f64::NEG_INFINITY] {
+        let tree = NativeTree::try_new(scalar(value, grid(0, 1, 1))).unwrap();
+        let mut execution = executor(&tree, pool());
+        execution.end_of_input().unwrap();
+        let chunk = execution.next_chunk().unwrap().unwrap();
+        let actual = sample_values(&chunk)[0].expect("the point holds the constant");
+        assert_eq!(
+            actual.to_bits(),
+            value.to_bits(),
+            "the constant {value} is reported bit for bit"
+        );
+    }
+}
+
+fn eval_time(date: Option<DateFunction>, grid: Arc<EvalGrid>) -> NativeNode {
+    NativeNode {
+        expr: NativeExpr::EvalTime { date },
+        output: NativeType::Scalar(grid),
+    }
+}
+
+fn vector_of(input: NativeNode) -> NativeNode {
+    let grid = input
+        .output
+        .grid()
+        .cloned()
+        .expect("vector() reads a scalar");
+    NativeNode {
+        expr: NativeExpr::VectorOf {
+            input: Box::new(input),
+        },
+        output: evaluated(grid),
+    }
+}
+
+/// A binary node with at least one scalar side, typed as the compiler types it.
+fn scalar_binary(left: NativeNode, right: NativeNode, matching: BinaryMatching) -> NativeNode {
+    let output = match (&left.output, &right.output) {
+        (NativeType::Samples(_), _) => left.output.clone(),
+        _ => right.output.clone(),
+    };
+    NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(left),
+            right: Box::new(right),
+            matching,
+        },
+        output,
+    }
+}
+
+/// `time()` reports the evaluation time in seconds, fractions included, and a date function without
+/// an argument reads that time truncated to whole seconds, as Prometheus `dateWrapper` does.
+#[test]
+fn eval_time_reports_seconds_and_dates_of_the_grid() {
+    let grid = grid(3_598_500, 1_000, 3);
+    let tree = NativeTree::try_new(eval_time(None, Arc::clone(&grid))).unwrap();
+    let mut execution = executor(&tree, pool());
+    let chunks = run(&mut execution);
+    assert_eq!(chunks.len(), 1);
+    assert!(chunks[0].series.metric.tags().is_empty());
+    assert_eq!(
+        sample_values(&chunks[0]),
+        vec![Some(3598.5), Some(3599.5), Some(3600.5)]
+    );
+
+    let tree = NativeTree::try_new(vector_of(eval_time(Some(DateFunction::Hour), grid))).unwrap();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    let chunks = run(&mut execution);
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(
+        sample_values(&chunks[0]),
+        vec![Some(0.0), Some(0.0), Some(1.0)]
+    );
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// `vector(c)` hands the constant on as one unlabelled series over the whole grid.
+#[test]
+fn vector_of_a_constant_is_one_unlabelled_series() {
+    let tree = NativeTree::try_new(vector_of(scalar(4.0, grid(0, 10, 3)))).unwrap();
+    let mut execution = executor(&tree, pool());
+    let chunks = run(&mut execution);
+    assert_eq!(chunks.len(), 1);
+    assert!(chunks[0].series.metric.name().is_none());
+    assert!(chunks[0].series.metric.tags().is_empty());
+    assert_eq!(sample_values(&chunks[0]), vec![Some(4.0); 3]);
+}
+
+/// A varying scalar is broadcast point by point, on the side it was written.
+#[test]
+fn a_varying_scalar_is_broadcast_on_its_side() {
+    let grid = grid(1_000, 1_000, 3);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let vector = || evaluated_input(Arc::clone(&grid));
+    let time = || eval_time(None, Arc::clone(&grid));
+    let gt_bool = BinaryMatching {
+        return_bool: true,
+        ..binary_matching(BinaryOp::Gt)
+    };
+    let cases = [
+        (
+            scalar_binary(vector(), time(), binary_matching(BinaryOp::Sub)),
+            vec![Some(9.0), Some(18.0), Some(27.0)],
+        ),
+        (
+            scalar_binary(time(), vector(), binary_matching(BinaryOp::Sub)),
+            vec![Some(-9.0), Some(-18.0), Some(-27.0)],
+        ),
+        (
+            scalar_binary(vector(), time(), gt_bool),
+            vec![Some(1.0), Some(1.0), Some(1.0)],
+        ),
+    ];
+    for (root, expected) in cases {
+        let tree = NativeTree::try_new(root).unwrap();
+        let pool = pool();
+        let mut execution = executor(&tree, Arc::clone(&pool));
+        let input = execution.state().input_ids(0).next().unwrap();
+        execution
+            .push_evaluated(
+                input,
+                evaluated_chunk_of(
+                    &schema,
+                    named_metric("x", "a"),
+                    0,
+                    vec![Some(10.0), Some(20.0), Some(30.0)],
+                    true,
+                ),
+            )
+            .unwrap();
+        let chunks = run(&mut execution);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].series.metric.name(), None, "the name is dropped");
+        assert_eq!(chunks[0].series.metric.get("job"), Some("a"));
+        assert_eq!(sample_values(&chunks[0]), expected);
+        assert_eq!(pool.reserved(), 0);
+    }
+}
+
+/// An operation between scalars where one varies is a scalar, computed point by point with each
+/// side where it was written.
+#[test]
+fn scalars_combine_point_by_point_when_one_varies() {
+    let grid = grid(10_000, 10_000, 2);
+    let time = || eval_time(None, Arc::clone(&grid));
+    let sixty = || scalar(60.0, Arc::clone(&grid));
+    let cases = [
+        (time(), sixty(), vec![Some(-50.0), Some(-40.0)]),
+        (sixty(), time(), vec![Some(50.0), Some(40.0)]),
+        (time(), time(), vec![Some(0.0), Some(0.0)]),
+    ];
+    for (left, right, expected) in cases {
+        let tree = NativeTree::try_new(scalar_binary(left, right, binary_matching(BinaryOp::Sub)))
+            .unwrap();
+        assert!(matches!(tree.root().output, NativeType::Scalar(_)));
+        let mut execution = executor(&tree, pool());
+        let chunks = run(&mut execution);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(sample_values(&chunks[0]), expected);
+    }
+}
+
+fn parameterized(
+    input: NativeNode,
+    op: ParameterizedOp,
+    parameters: Vec<NativeNode>,
+) -> NativeNode {
+    let output = input.output.clone();
+    NativeNode {
+        expr: NativeExpr::ParameterizedMap {
+            input: Box::new(input),
+            op,
+            parameters,
+        },
+        output,
+    }
+}
+
+/// Runs `root` over one vector series `x{job="a"}` and returns the one answer.
+fn run_parameterized(root: NativeNode, vector: Vec<Option<f64>>) -> EvaluatedChunk {
+    let schema = evaluated_schema(root.output.grid().cloned().unwrap());
+    let tree = NativeTree::try_new(root).unwrap();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    let input = execution.state().input_ids(0).next().unwrap();
+    execution
+        .push_evaluated(
+            input,
+            evaluated_chunk_of(&schema, named_metric("x", "a"), 0, vector, true),
+        )
+        .unwrap();
+    let mut chunks = run(&mut execution);
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(pool.reserved(), 0);
+    chunks.remove(0)
+}
+
+/// A constant parameter beside a varying one, as in `clamp(vector(1), 0, time())`, is reserved
+/// before its values are built: on a grid whose values could never be allocated, the pool refuses
+/// it instead of the allocation failing.
+#[test]
+fn a_constant_parameter_is_reserved_before_it_is_built() {
+    let grid = Arc::new(EvalGrid::try_deferred(GridSpec::try_new(0, 1, 1 << 60).unwrap()).unwrap());
+    let root = parameterized(
+        vector_of(scalar(1.0, Arc::clone(&grid))),
+        ParameterizedOp::Clamp,
+        vec![scalar(0.0, Arc::clone(&grid)), eval_time(None, grid)],
+    );
+    let tree = NativeTree::try_new(root).unwrap();
+    let pool = bounded_pool(1 << 20);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution.end_of_input().unwrap();
+    let error = execution.next_chunk().unwrap_err();
+    assert!(
+        matches!(error.find_root(), DataFusionError::ResourcesExhausted(_)),
+        "{error}"
+    );
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// A parameter is read at each point, as Prometheus reads it at each step: `round` rounds every
+/// point to its own nearest.
+#[test]
+fn a_map_reads_its_scalar_parameter_at_each_point() {
+    let grid = grid(1_000, 9_000, 2);
+    let root = parameterized(
+        evaluated_input(Arc::clone(&grid)),
+        ParameterizedOp::Round,
+        vec![eval_time(None, grid)],
+    );
+    let chunk = run_parameterized(root, vec![Some(12.4), Some(17.0)]);
+    assert_eq!(chunk.series.metric.name(), None, "the name is dropped");
+    assert_eq!(chunk.series.metric.get("job"), Some("a"));
+    assert_eq!(sample_values(&chunk), vec![Some(12.0), Some(20.0)]);
+}
+
+/// `clamp` with a maximum below its minimum at a point has no value there, which is Prometheus'
+/// empty vector for that step; a constant parameter beside a varying one is read as the constant.
+#[test]
+fn clamp_with_a_varying_bound_has_no_value_where_max_is_below_min() {
+    let grid = grid(0, 1_000, 3);
+    // `time() - 1` is -1, 0 and 1.
+    let max = scalar_binary(
+        eval_time(None, Arc::clone(&grid)),
+        scalar(1.0, Arc::clone(&grid)),
+        binary_matching(BinaryOp::Sub),
+    );
+    let root = parameterized(
+        evaluated_input(Arc::clone(&grid)),
+        ParameterizedOp::Clamp,
+        vec![scalar(0.0, grid), max],
+    );
+    let chunk = run_parameterized(root, vec![Some(7.0), Some(3.0), Some(5.0)]);
+    assert_eq!(
+        decided(std::slice::from_ref(&chunk)),
+        vec![(1, Some(0.0)), (2, Some(1.0))]
+    );
+}
+
+/// A closing chunk whose every point has `clamp`'s maximum below its minimum keeps no value, and is
+/// still handed over, empty, under the labels the map produces: a consumer tells "nothing more here"
+/// from "no more input" by that chunk alone.
+#[test]
+fn a_closing_chunk_that_keeps_no_value_is_handed_over_empty() {
+    let grid = grid(0, 1_000, 2);
+    let root = parameterized(
+        evaluated_input(Arc::clone(&grid)),
+        ParameterizedOp::Clamp,
+        vec![scalar(5.0, Arc::clone(&grid)), eval_time(None, grid)],
+    );
+    let chunk = run_parameterized(root, vec![Some(5.0), Some(6.0)]);
+    assert!(chunk.is_last);
+    assert_eq!(chunk.series.time.len(), 0);
+    assert_eq!(chunk.series.metric.name(), None, "the name is dropped");
+    assert_eq!(chunk.series.metric.get("job"), Some("a"));
+}
+
+/// `max_of(a, b)` and `min_of(a, b)` against Go's `math.Max` / `math.Min`, whose signed-zero, NaN
+/// and infinity rules differ from `f64::max` / `f64::min`; `max_min_cases.txt` holds Go's answers
+/// for each pair.
+///
+/// The cases run through the executor, as a compiled `max_of(a, b)` call does: the call's first
+/// operand is the map's scalar input and its second is the map's constant parameter.
+#[test]
+fn max_of_and_min_of_follow_go() {
+    let bits = |text: &str| f64::from_bits(u64::from_str_radix(text, 16).unwrap());
+    let same = |a: f64, b: f64| a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan());
+    let mut checked = 0;
+    for line in include_str!("../../map/max_min_cases.txt")
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+    {
+        let values: Vec<f64> = line.split_whitespace().map(bits).collect();
+        let (a, b) = (values[0], values[1]);
+        for (op, expected) in [
+            (ParameterizedOp::MaxOf, values[2]),
+            (ParameterizedOp::MinOf, values[3]),
+        ] {
+            let grid = grid(0, 1_000, 1);
+            let root = parameterized(
+                scalar_of(evaluated_input(Arc::clone(&grid))),
+                op,
+                vec![scalar(b, grid)],
+            );
+            let answer = sample_values(&run_parameterized(root, vec![Some(a)]));
+            assert_eq!(answer.len(), 1, "{op:?}({a}, {b})");
+            let answered = answer[0].expect("the one point holds a value");
+            assert!(
+                same(answered, expected),
+                "{op:?}({a}, {b}) answered {answered}"
+            );
+        }
+        checked += 1;
+    }
+    assert_eq!(checked, 64);
+}
+
+/// A constant input is materialized by the map, as a constant parameter is: `max_of(0, time())`
+/// reads the call's first operand off its binding and pairs it with the varying second one.
+#[test]
+fn a_constant_input_is_read_against_its_parameter() {
+    // `time()` reports 1 and 10 seconds on this grid.
+    let grid = grid(1_000, 9_000, 2);
+    let root = parameterized(
+        scalar(0.0, Arc::clone(&grid)),
+        ParameterizedOp::MaxOf,
+        vec![eval_time(None, grid)],
+    );
+    let tree = NativeTree::try_new(root).unwrap();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution.end_of_input().unwrap();
+    let chunk = execution.next_chunk().unwrap().unwrap();
+    assert_eq!(
+        chunk.series.metric,
+        SeriesLabels::try_new(None, Vec::new()).unwrap(),
+        "a scalar carries no metric name and no labels"
+    );
+    assert_eq!(sample_values(&chunk), vec![Some(1.0), Some(10.0)]);
+    assert!(chunk.is_last, "the one chunk closes the value it reports");
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "a scalar owes one chunk and no second one"
+    );
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// The scalar `min_of` answers is what `vector(...)` materializes, so the value a call computes
+/// reaches a vector consumer unchanged: `vector(min_of(time(), 1))` is `min(time(), 1)`.
+#[test]
+fn a_scalar_function_answers_the_vector_it_is_wrapped_in() {
+    let grid = grid(0, 1_000, 3);
+    let root = vector_of(parameterized(
+        eval_time(None, Arc::clone(&grid)),
+        ParameterizedOp::MinOf,
+        vec![scalar(1.0, grid)],
+    ));
+    let tree = NativeTree::try_new(root).unwrap();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution.end_of_input().unwrap();
+    let chunk = execution.next_chunk().unwrap().unwrap();
+    assert_eq!(chunk.series.fields.len(), 1);
+    assert_eq!(sample_values(&chunk), vec![Some(0.0), Some(1.0), Some(1.0)]);
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "the vector owes one chunk and no second one"
+    );
+    assert_eq!(pool.reserved(), 0);
+}
+
+fn scalar_of(input: NativeNode) -> NativeNode {
+    let grid = input
+        .output
+        .grid()
+        .expect("scalar() needs evaluated input")
+        .clone();
+    NativeNode {
+        expr: NativeExpr::ScalarOf {
+            input: Box::new(input),
+        },
+        output: NativeType::Scalar(grid),
+    }
+}
+
+fn sample_values(chunk: &EvaluatedChunk) -> Vec<Option<f64>> {
+    field_values(chunk, 0)
+}
+
+/// The values field `index` carries, one per row the chunk holds.
+fn field_values(chunk: &EvaluatedChunk, index: usize) -> Vec<Option<f64>> {
+    let field = chunk
+        .series
+        .fields
+        .get(index)
+        .unwrap_or_else(|| panic!("the chunk carries no field {index}"));
+    field
+        .iter()
+        .map(|sample| match sample {
+            SampleRef::Float(value) => Some(value),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The start timestamp of the histogram at every position of a chunk, in grid order.
+///
+/// It is read off the output's own histogram views rather than off a converted value, because the
+/// figure under test is the one a later reader sees.
+fn histogram_starts(chunk: &EvaluatedChunk) -> Vec<Option<i64>> {
+    let mut cursor = chunk.series.fields.as_slice()[0].cursor();
+    chunk
+        .series
+        .time
+        .positions()
+        .filter_map(
+            |(_, row)| match cursor.at(row).expect("the axis and the fields are aligned") {
+                SampleRef::Histogram(view) => Some(view.start_timestamp),
+                _ => None,
+            },
+        )
+        .collect()
+}
+
+fn series_start(chunk: &EvaluatedChunk) -> usize {
+    chunk
+        .series
+        .time
+        .first_position()
+        // An empty chunk carries no row, but where it sits is still what it addresses: a closing
+        // chunk that holds nothing is handed over exactly so the consumer learns it closed.
+        .or_else(|| chunk.series.time.as_grid_range().map(GridRange::start))
+        .expect("every chunk in these tests is addressed on a grid")
+}
+
+/// The absolute start and the values of every chunk, which is what addressing means here.
+fn addressed(chunks: &[EvaluatedChunk]) -> Vec<(usize, Vec<Option<f64>>)> {
+    chunks
+        .iter()
+        .map(|chunk| (series_start(chunk), sample_values(chunk)))
+        .collect()
+}
+
+/// Every decided position of a chunk stream with its value, in absolute grid order.
+///
+/// Two streams that decided the same positions hold the same result however they were split into
+/// chunks, which is what "the same series, delivered differently" means.
+///
+/// The positions come from the axis, not from the chunk's start plus a row number: a chunk whose
+/// rows form several runs carries them at absolute positions that are not adjacent, so adding the
+/// row to the start would name positions the chunk does not hold.
+fn decided(chunks: &[EvaluatedChunk]) -> Vec<(usize, Option<f64>)> {
+    chunks
+        .iter()
+        .flat_map(|chunk| {
+            let values = sample_values(chunk);
+            chunk
+                .series
+                .time
+                .positions()
+                .map(|(position, row)| {
+                    (
+                        position,
+                        *values.get(row).expect("one value per carried row"),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// The handles the nodes of `execution`'s tree record into, registered before it does any work.
+///
+/// A caller registers once per execution, so what the returned set holds follows what the nodes
+/// record from here on, and it keeps none of the execution's topology.
+fn metrics_of(execution: &NativeExecutor) -> ExecutionPlanMetricsSet {
+    let metrics = ExecutionPlanMetricsSet::new();
+    execution.state().register_metrics(&metrics, 0);
+    metrics
+}
+
+/// Every node of `execution`'s tree as a weak handle to the metrics it records into, root first.
+///
+/// What a node records into is its own, so a weak handle says whether the node still exists: the
+/// registered set holds the counters, not the nodes, and dropping the execution must drop both the
+/// topology and the handles it held.
+fn node_metrics(execution: &NativeExecutor) -> Vec<Weak<NodeMetrics>> {
+    fn walk(node: &RuntimeNode, out: &mut Vec<Weak<NodeMetrics>>) {
+        out.push(Arc::downgrade(&node.metrics));
+        match &node.op {
+            RuntimeOp::Input(_) | RuntimeOp::Scalar | RuntimeOp::EvalTime { .. } => {}
+            RuntimeOp::ScalarOf { input, .. } => walk(input, out),
+            RuntimeOp::Instant { input, .. }
+            | RuntimeOp::Window { input, .. }
+            | RuntimeOp::Merge { input, .. }
+            | RuntimeOp::Map { input, .. }
+            | RuntimeOp::Timestamp { input, .. }
+            | RuntimeOp::Aggregate { input, .. }
+            | RuntimeOp::Vector { input, .. }
+            | RuntimeOp::VectorOf { input, .. } => walk(input, out),
+            RuntimeOp::Binary { left, right, .. } | RuntimeOp::Broadcast { left, right, .. } => {
+                walk(left, out);
+                walk(right, out);
+            }
+            RuntimeOp::ParameterizedTopK {
+                input, parameter, ..
+            } => {
+                walk(input, out);
+                if let Some(parameter) = parameter {
+                    walk(parameter, out);
+                }
+            }
+            RuntimeOp::ParameterizedHistogram {
+                input, parameters, ..
+            } => {
+                walk(input, out);
+                for parameter in parameters.iter().flatten() {
+                    walk(parameter, out);
+                }
+            }
+            RuntimeOp::ParameterizedMap {
+                input, parameters, ..
+            } => {
+                walk(input, out);
+                for parameter in parameters {
+                    walk(parameter, out);
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&execution.state().live.as_ref().unwrap().root, &mut out);
+    out
+}
+
+/// The count `metric` of the node called `name`, read from the handles `set` holds.
+///
+/// The set was registered from the execution's own tree, so a read here sees what the nodes
+/// recorded even after the execution stopped or was dropped.
+fn count(set: &ExecutionPlanMetricsSet, name: &str, metric: &str) -> usize {
+    let full = format!("native.{name}.{metric}");
+    match set.clone_inner().sum_by_name(&full) {
+        Some(MetricValue::Count { count, .. }) => count.value(),
+        other => panic!("no count named {full}: {other:?}"),
+    }
+}
+
+/// The gauge called `name` — its full registered name — read from `set`.
+fn gauge(set: &ExecutionPlanMetricsSet, name: &str) -> usize {
+    match set.clone_inner().sum_by_name(name) {
+        Some(MetricValue::Gauge { gauge, .. }) => gauge.value(),
+        other => panic!("no gauge named {name}: {other:?}"),
+    }
+}
+
+/// Whether the root node of `execution` still holds the payload its kind keeps.
+///
+/// A window's evaluator, an instant node's buffered series and a binary node's retained operands all
+/// belong to the node that owns them, so what is read here is the root operator and nothing below
+/// it: the trees these tests build have one node of that kind, and it is the root. The state owns
+/// that tree, so the read is a borrow of it and the execution can be polled again afterwards.
+fn root_holds(execution: &NativeExecutor, holds: fn(&RuntimeOp) -> bool) -> bool {
+    execution
+        .state()
+        .live
+        .as_ref()
+        .is_some_and(|live| holds(&live.root.op))
+}
+
+/// The payload a window root holds: its range evaluator.
+fn holds_window(op: &RuntimeOp) -> bool {
+    matches!(
+        op,
+        RuntimeOp::Window {
+            window: Some(_),
+            ..
+        }
+    )
+}
+
+/// The payload an instant root holds: the chunks of the series it is gathering.
+fn holds_instant(op: &RuntimeOp) -> bool {
+    matches!(op, RuntimeOp::Instant { .. })
+}
+
+/// The payload a binary root holds: the operands it retained.
+fn holds_binary(op: &RuntimeOp) -> bool {
+    matches!(op, RuntimeOp::Binary { .. })
+}
+
+/// Whether the root is the leaf that reads the first routing slot, which is what a tree of one
+/// input is.
+fn holds_input(op: &RuntimeOp) -> bool {
+    matches!(op, RuntimeOp::Input(id) if id.index() == 0)
+}
+
+/// Both queued input and retained operation payload must die before their reservations return.
+#[test]
+fn terminal_teardown_drops_payloads_before_returning_reservations() {
+    for retained in [false, true] {
+        let watched = Arc::new(DropOrderPool {
+            inner: GreedyMemoryPool::new(1 << 20),
+            watch: std::sync::Mutex::new(None),
+            released: AtomicBool::new(false),
+            retained_on_release: AtomicBool::new(false),
+        });
+        let pool: Arc<dyn MemoryPool> = watched.clone();
+        let grid = grid(0, 1, 1);
+        let schema = evaluated_schema(Arc::clone(&grid));
+        let root = if retained {
+            binary_of(
+                evaluated_input(Arc::clone(&grid)),
+                evaluated_input(Arc::clone(&grid)),
+                binary_matching(BinaryOp::Add),
+            )
+        } else {
+            evaluated_input(Arc::clone(&grid))
+        };
+        let tree = NativeTree::try_new(root).unwrap();
+        let mut execution = executor(&tree, Arc::clone(&pool));
+        let metrics = metrics_of(&execution);
+        let table = histogram_table(1, 2);
+        let weak = Arc::downgrade(&table);
+        let chunk = evaluated_histogram_chunk_of(&schema, metric(), 0, vec![Some(0)], &table, true);
+        drop(table);
+        execution.push_evaluated(InputId::new(0), chunk).unwrap();
+        if retained {
+            assert!(execution.next_chunk().unwrap().is_none());
+        }
+        assert!(weak.upgrade().is_some());
+        assert!(pool.reserved() > 0);
+        let consumer = if retained {
+            "native.binary at root"
+        } else {
+            "native.input at root (source_index=0)"
+        };
+        *watched.watch.lock().unwrap() = Some((consumer.to_string(), weak.clone()));
+
+        // Invalid routing fails while the queue or operation payload is still held.
+        let invalid = if retained { 2 } else { 1 };
+        let error = execution
+            .push_evaluated(
+                InputId::new(invalid),
+                evaluated_chunk(&schema, 0, vec![1.0], true),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("no input"), "{error}");
+        assert!(watched.released.load(Ordering::SeqCst));
+        assert!(
+            !watched.retained_on_release.load(Ordering::SeqCst),
+            "{consumer}"
+        );
+        assert!(weak.upgrade().is_none());
+        assert!(execution.state().live.is_none());
+        assert_eq!(pool.reserved(), 0);
+        assert_eq!(gauge(&metrics, "native.root.current_reserved_bytes"), 0);
+        assert!(gauge(&metrics, "native.p0.root.peak_reserved_bytes") > 0);
+        assert!(
+            execution
+                .next_chunk()
+                .unwrap_err()
+                .to_string()
+                .contains("stopped after an earlier error")
+        );
+    }
+}
+
+/// A window finish failure is reported before its live execution and reservation are dropped.
+#[test]
+fn finishing_a_window_propagates_its_error_and_drops_the_live_tree() {
+    let tree = NativeTree::try_new(window(input(), grid(0, 60_000, 4))).unwrap();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    let metrics = metrics_of(&execution);
+    let nodes = node_metrics(&execution);
+    let schema = raw_schema();
+    execution
+        .push_raw(InputId::new(0), raw_chunk(&schema, &[0], &[1.0], false))
+        .unwrap();
+    drop(execution.next_chunk().unwrap());
+    assert!(pool.reserved() > 0);
+    // The source-level check normally catches truncation first; leave the evaluator open so the
+    // actual terminal finish pass exercises its own error and context propagation.
+    execution.state.live.as_mut().unwrap().inputs[0].open_source_series = false;
+    execution.end_of_input().unwrap();
+    let error = execution.next_chunk().unwrap_err();
+    assert!(
+        error.to_string().contains("native.window at root"),
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("ended before the last chunk"),
+        "{error}"
+    );
+    assert!(execution.state().live.is_none());
+    assert!(nodes.iter().all(|node| node.upgrade().is_none()));
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(gauge(&metrics, "native.root.current_reserved_bytes"), 0);
+    assert!(gauge(&metrics, "native.p0.root.peak_reserved_bytes") > 0);
+    assert!(
+        execution
+            .next_chunk()
+            .unwrap_err()
+            .to_string()
+            .contains("stopped after an earlier error")
+    );
+}
+
+/// The zero-input scalar operations retain their binding while live, not after completion.
+#[test]
+fn scalar_operations_drop_their_grid_and_topology_on_finish_or_failure() {
+    for vector in [false, true] {
+        for fails in [false, true] {
+            let grid = grid(0, 1, 2);
+            let weak = Arc::downgrade(&grid);
+            let time = eval_time(None, Arc::clone(&grid));
+            let tree = NativeTree::try_new(if vector { vector_of(time) } else { time }).unwrap();
+            let pool = if fails { bounded_pool(0) } else { pool() };
+            let mut execution = executor(&tree, Arc::clone(&pool));
+            let nodes = node_metrics(&execution);
+            drop(tree);
+            drop(grid);
+            execution.end_of_input().unwrap();
+            if fails {
+                assert!(execution.next_chunk().is_err());
+            } else {
+                drop(execution.next_chunk().unwrap().unwrap());
+                assert!(execution.next_chunk().unwrap().is_none());
+            }
+            assert!(weak.upgrade().is_none());
+            assert!(execution.state().live.is_none());
+            assert!(nodes.iter().all(|node| node.upgrade().is_none()));
+            assert_eq!(pool.reserved(), 0);
+            let error = execution.next_chunk().unwrap_err();
+            let expected = if fails {
+                "stopped after an earlier error"
+            } else {
+                "already finished"
+            };
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+    }
+}
+
+/// A window over raw input evaluates onto its own output grid, and its values are the evaluator's.
+///
+/// The grid is compared by allocation identity, so a window that evaluated on a copy of its
+/// output grid — the same timestamps, a different grid — fails here even though every value and
+/// every timestamp would still look right.
+#[test]
+fn a_window_over_raw_input_evaluates_onto_its_own_grid() {
+    let out_grid = grid(0, 60_000, 4);
+    let tree = NativeTree::try_new(window(input(), Arc::clone(&out_grid))).unwrap();
+    let schema = raw_schema();
+    let chunk = raw_chunk(
+        &schema,
+        &[0, 60_000, 120_000, 180_000, 240_000],
+        &[1.0, 2.0, 3.0, 4.0, 5.0],
+        true,
+    );
+
+    let mut execution = executor(&tree, pool());
+    execution.push_raw(InputId::new(0), chunk.clone()).unwrap();
+    let out = run(&mut execution);
+
+    // The same samples, evaluated by the evaluator this runtime wraps.
+    let mut evaluator = RangeEvaluator::try_new(
+        &schema,
+        Arc::clone(&out_grid),
+        RangeWindow {
+            range_ms: 300_000,
+            offset_ms: 0,
+            anchor_ms: None,
+            modifier: None,
+        },
+        RangeFunction::LastOverTime,
+    )
+    .unwrap();
+    let expected: Vec<(usize, Vec<Option<f64>>)> = evaluator
+        .push(&chunk)
+        .unwrap()
+        .iter()
+        .map(|produced| (series_start(produced), sample_values(produced)))
+        .collect();
+    evaluator.finish().unwrap();
+
+    assert_eq!(out.len(), 1, "one closed series, one chunk");
+    for chunk in &out {
+        assert!(
+            Arc::ptr_eq(chunk.series.time.grid().expect("a grid chunk"), &out_grid),
+            "the chunk is addressed on a grid that is not the window's output grid"
+        );
+        assert_eq!(
+            chunk.series.time.grid().expect("a grid chunk").spec(),
+            out_grid.spec()
+        );
+        assert!(chunk.is_last);
+    }
+    assert_eq!(
+        addressed(&out),
+        vec![(0, vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0)])]
+    );
+    assert_eq!(addressed(&out), expected);
+}
+
+/// Timestamp projection reserves its grid-sized workspace before allocating and releases it on failure.
+#[test]
+fn timestamp_projection_workspace_failure_releases_runtime() {
+    let schema = evaluated_schema(grid(0, 1, 10_000));
+    let input = NativeNode {
+        expr: NativeExpr::Input(BoundInput {
+            source_index: 0,
+            output: NativeType::Samples(Arc::clone(&schema)),
+            ordering: SeriesOrdering::Contiguous,
+        }),
+        output: NativeType::Samples(Arc::clone(&schema)),
+    };
+    let tree = NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Timestamp {
+            input: Box::new(input),
+        },
+        output: NativeType::Samples(schema),
+    })
+    .unwrap();
+    let pool = bounded_pool(4096);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk(&evaluated_schema(grid(0, 1, 10_000)), 0, vec![1.0], true),
+        )
+        .unwrap();
+    assert!(
+        execution
+            .next_chunk()
+            .is_err_and(|error| is_resources_exhausted(&error))
+    );
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(execution.state().reserved_bytes(), 0);
+}
+
+/// `Window -> Map -> Window` keeps the inner grid inside and the outer grid outside.
+///
+/// The inner window runs on a 60 s grid and the outer one on a 90 s grid offset by 30 s, so a
+/// layer that resampled onto its consumer's grid would change the addressing of every chunk and
+/// the values of the last one.
+#[test]
+fn a_window_map_window_chain_keeps_each_layer_on_its_own_grid() {
+    let inner_grid = grid(0, 60_000, 5);
+    let outer_grid = grid(30_000, 90_000, 3);
+    let inner = || {
+        window_with(
+            input(),
+            RangeFunction::LastOverTime,
+            120_000,
+            None,
+            Arc::clone(&inner_grid),
+        )
+    };
+    let mapped = || map(inner(), vec![MathOp::Abs]);
+    let chain = || {
+        window_with(
+            map(inner(), vec![MathOp::Abs]),
+            RangeFunction::LastOverTime,
+            240_000,
+            Some(Arc::clone(&inner_grid)),
+            Arc::clone(&outer_grid),
+        )
+    };
+    let schema = raw_schema();
+    let chunk = raw_chunk(
+        &schema,
+        &[0, 60_000, 120_000, 180_000, 240_000],
+        &[-1.0, -2.0, -3.0, -4.0, -5.0],
+        true,
+    );
+
+    // Down to the map, on its own: the map's chunks stay addressed on the inner window's grid.
+    let map_tree = NativeTree::try_new(mapped()).unwrap();
+    let mut map_execution = executor(&map_tree, pool());
+    map_execution
+        .push_raw(InputId::new(0), chunk.clone())
+        .unwrap();
+    let mapped_chunks = run(&mut map_execution);
+    assert_eq!(mapped_chunks.len(), 1);
+    for chunk in &mapped_chunks {
+        assert!(
+            Arc::ptr_eq(chunk.series.time.grid().expect("a grid chunk"), &inner_grid),
+            "the map handed over a chunk that is not addressed on the inner grid"
+        );
+    }
+    assert_eq!(mapped_chunks[0].series.time.len(), 5);
+    assert_eq!(
+        addressed(&mapped_chunks),
+        vec![(
+            0,
+            vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0), Some(5.0)]
+        )]
+    );
+
+    // The whole chain: only the outer window's grid leaves the tree.
+    let chain_tree = NativeTree::try_new(chain()).unwrap();
+    let mut chain_execution = executor(&chain_tree, pool());
+    chain_execution
+        .push_raw(InputId::new(0), chunk.clone())
+        .unwrap();
+    let out = run(&mut chain_execution);
+    assert_eq!(out.len(), 1);
+    for chunk in &out {
+        assert!(
+            Arc::ptr_eq(chunk.series.time.grid().expect("a grid chunk"), &outer_grid),
+            "the chain handed over a chunk that is not addressed on the outer grid"
+        );
+    }
+    assert_eq!(out[0].series.time.len(), 3);
+    assert_eq!(
+        addressed(&out),
+        vec![(0, vec![Some(1.0), Some(3.0), Some(4.0)])]
+    );
+
+    // The same chain driven by hand, one kernel at a time.
+    let mut inner_evaluator = RangeEvaluator::try_new(
+        &schema,
+        Arc::clone(&inner_grid),
+        RangeWindow {
+            range_ms: 120_000,
+            offset_ms: 0,
+            anchor_ms: None,
+            modifier: None,
+        },
+        RangeFunction::LastOverTime,
+    )
+    .unwrap();
+    let inner_series = inner_evaluator.push(&chunk).unwrap().unwrap();
+    inner_evaluator.finish().unwrap();
+    let map_schema = evaluated_schema(Arc::clone(&inner_grid));
+    let mapped_chunk = map_chunk(
+        &map_schema,
+        &inner_series,
+        &[MapOp::Math(MathOp::Abs)],
+        &mut |_| Ok(()),
+    )
+    .unwrap()
+    .expect("`abs` maps every position, so the chunk keeps its rows");
+    assert!(
+        Arc::ptr_eq(
+            mapped_chunk.series.time.grid().expect("a grid chunk"),
+            &inner_grid
+        ),
+        "the map kernel moved the inner grid"
+    );
+    let mut outer_evaluator = RangeEvaluator::try_new(
+        &map_schema,
+        Arc::clone(&outer_grid),
+        RangeWindow {
+            range_ms: 240_000,
+            offset_ms: 0,
+            anchor_ms: None,
+            modifier: None,
+        },
+        RangeFunction::LastOverTime,
+    )
+    .unwrap();
+    let outer_series = outer_evaluator
+        .push_series(&mapped_chunk.series, mapped_chunk.is_last)
+        .unwrap()
+        .unwrap();
+    outer_evaluator.finish().unwrap();
+    assert_eq!(
+        addressed(&out),
+        vec![(series_start(&outer_series), sample_values(&outer_series))]
+    );
+}
+
+/// A window over an evaluated input reports a decision before its input series has ended.
+///
+/// The inner series arrives in two pieces and the window is pulled after the first one, so the
+/// outer grid point whose window that piece settled has to come out then. A layer that collected
+/// the pieces into a whole series first could not produce anything here: its first answer would
+/// only exist once the piece carrying `is_last` had arrived, and the bytes of the whole series
+/// would be held until then.
+#[test]
+fn a_downstream_window_emits_before_its_input_series_ends() {
+    // 60 s inner grid, 120 s outer grid, so the inner series settles outer points as it arrives.
+    let inner_grid = grid(0, 60_000, 5);
+    let outer_grid = grid(0, 120_000, 3);
+    let tree = NativeTree::try_new(window_with(
+        evaluated_input(Arc::clone(&inner_grid)),
+        RangeFunction::LastOverTime,
+        240_000,
+        Some(Arc::clone(&inner_grid)),
+        Arc::clone(&outer_grid),
+    ))
+    .unwrap();
+    let schema = evaluated_schema(Arc::clone(&inner_grid));
+
+    // The first piece covers inner positions 0..3; the series is still open after it.
+    let head = evaluated_chunk(&schema, 0, vec![1.0, 2.0, 3.0], false);
+    let tail = evaluated_chunk(&schema, 3, vec![4.0, 5.0], true);
+
+    let mut execution = executor(&tree, pool());
+    let metrics = metrics_of(&execution);
+    execution.push_evaluated(InputId::new(0), head).unwrap();
+
+    let mut early = Vec::new();
+    while let Some(chunk) = execution.next_chunk().unwrap() {
+        early.push(chunk);
+    }
+    assert!(
+        !early.is_empty(),
+        "the outer window buffered its input: nothing came out before the series ended"
+    );
+    // The piece settled outer points 0 and 1: their windows end inside it, at the inner values
+    // 1.0 and 3.0.
+    assert_eq!(
+        decided(&early),
+        vec![(0, Some(1.0)), (1, Some(3.0))],
+        "the outer window did not report the points its input had already settled"
+    );
+    for chunk in &early {
+        assert!(
+            !chunk.is_last,
+            "the series cannot close before its last piece"
+        );
+    }
+    // The open outer series is still accounted for: the pieces handed over are what it holds.
+    assert_eq!(
+        count(&metrics, "root", NodeMetric::COMPLETED_SERIES),
+        0,
+        "a series closed before its last piece arrived"
+    );
+
+    // The closing piece: the rest of the outer grid, and the one chunk that closes the series.
+    execution.push_evaluated(InputId::new(0), tail).unwrap();
+    let mut out = early;
+    while let Some(chunk) = execution.next_chunk().unwrap() {
+        out.push(chunk);
+    }
+    out.extend(execution.finish().unwrap());
+    assert_eq!(
+        decided(&out),
+        vec![(0, Some(1.0)), (1, Some(3.0)), (2, Some(5.0)),]
+    );
+    assert_eq!(out.iter().filter(|chunk| chunk.is_last).count(), 1);
+    assert!(out.last().unwrap().is_last);
+    assert_eq!(
+        count(&metrics, "root", NodeMetric::COMPLETED_SERIES),
+        1,
+        "the outer series closed once per piece instead of once in total"
+    );
+
+    // The same chain with the whole series in one piece answers exactly the same.
+    let whole_tree = NativeTree::try_new(window_with(
+        evaluated_input(Arc::clone(&inner_grid)),
+        RangeFunction::LastOverTime,
+        240_000,
+        Some(Arc::clone(&inner_grid)),
+        Arc::clone(&outer_grid),
+    ))
+    .unwrap();
+    let mut whole = executor(&whole_tree, pool());
+    whole
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk(&schema, 0, vec![1.0, 2.0, 3.0, 4.0, 5.0], true),
+        )
+        .unwrap();
+    let whole = run(&mut whole);
+    assert_eq!(decided(&out), decided(&whole));
+    for chunk in &whole {
+        assert!(
+            Arc::ptr_eq(chunk.series.time.grid().expect("a grid chunk"), &outer_grid),
+            "the chain handed over a chunk that is not addressed on the outer grid"
+        );
+    }
+}
+
+/// Every binary shape the runtime does not execute is rejected, naming the kind and its position.
+///
+/// A scalar is not one of them any more: it is a value node, and a binary node over a constant is
+/// executed as a broadcast. The binary shapes that stay refused are the ones no kernel here takes;
+/// the aggregate kinds and stages this runtime does not execute are refused by
+/// `an_aggregate_kind_or_stage_the_runtime_does_not_compute_is_named`.
+#[test]
+fn an_unimplemented_node_is_reported_not_panicked() {
+    // One grid shared by the nodes that validate by allocation identity.
+    let statement = || grid(0, 120_000, 2);
+
+    // Two constants make a scalar, which is a legal node and a shape no binary here broadcasts
+    // over: there is no vector to pair either of them with.
+    let two_scalars_tree = {
+        let out = statement();
+        NativeNode {
+            expr: NativeExpr::Binary {
+                left: Box::new(scalar(1.0, Arc::clone(&out))),
+                right: Box::new(scalar(2.0, Arc::clone(&out))),
+                matching: binary_matching(BinaryOp::Add),
+            },
+            output: NativeType::Scalar(out),
+        }
+    };
+    // A constant carries no labels, so the matching modifiers of a vector–scalar operation have no
+    // meaning: the operation this tree names is not the one it would compute.
+    let matched_scalar_tree = {
+        let out = statement();
+        NativeNode {
+            expr: NativeExpr::Binary {
+                left: Box::new(window(input(), Arc::clone(&out))),
+                right: Box::new(scalar(1.0, Arc::clone(&out))),
+                matching: BinaryMatching {
+                    labels: MatchingLabels::On(vec!["job".into()]),
+                    ..binary_matching(BinaryOp::Mul)
+                },
+            },
+            output: NativeType::Samples(evaluated_schema(out)),
+        }
+    };
+
+    let cases = [
+        ("Binary", "two constants", two_scalars_tree),
+        ("Binary", "matching modifiers", matched_scalar_tree),
+    ];
+    for (kind, reason, root) in cases {
+        // Legality stays `validate`'s: the plan accepts these trees, the runtime does not run them.
+        let tree = NativeTree::try_new(root).expect("the bound tree is legal");
+        let error = match NativeExecutionState::try_new(&tree, pool(), None) {
+            Ok(_) => panic!("the runtime accepted a {kind} node"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, DataFusionError::NotImplemented(_)),
+            "{kind}: {error}"
+        );
+        let message = error.to_string();
+        assert!(message.contains(kind), "{kind}: {message}");
+        assert!(message.contains(reason), "{reason}: {message}");
+    }
+}
+
+/// Each node reports its own chunks, grid points and closed series, at its own position.
+///
+/// The two windows decide different traffic — the inner one four grid points of its own grid, the
+/// outer one two of its own — so a single total for the tree cannot produce both numbers. The inner
+/// window reads the source as it arrives and hands over one chunk per chunk it took in; the outer
+/// one collects those chunks, because the inner one keeps the metric name and its output can hold
+/// two source series under one label set, and reports the one merged series its input ended with.
+#[test]
+fn each_node_records_its_own_metrics() {
+    let inner_grid = grid(0, 60_000, 4);
+    let outer_grid = grid(0, 120_000, 2);
+    let root = window_with(
+        window_with(
+            input(),
+            RangeFunction::LastOverTime,
+            300_000,
+            None,
+            Arc::clone(&inner_grid),
+        ),
+        RangeFunction::LastOverTime,
+        300_000,
+        Some(inner_grid),
+        outer_grid,
+    );
+    let tree = NativeTree::try_new(root).unwrap();
+    let mut execution = executor(&tree, pool());
+    let metrics = metrics_of(&execution);
+    let schema = raw_schema();
+    execution
+        .push_raw(
+            InputId::new(0),
+            raw_chunk(&schema, &[0, 60_000], &[1.0, 2.0], false),
+        )
+        .unwrap();
+    execution
+        .push_raw(
+            InputId::new(0),
+            raw_chunk(&schema, &[120_000], &[3.0], false),
+        )
+        .unwrap();
+    execution
+        .push_raw(
+            InputId::new(0),
+            raw_chunk(&schema, &[180_000], &[4.0], true),
+        )
+        .unwrap();
+    let out = run(&mut execution);
+    // The outer window reports the two points of its grid once its input ended, in the one chunk of
+    // the series it merged from the inner window's pieces.
+    assert_eq!(addressed(&out), vec![(0, vec![Some(1.0), Some(3.0)])]);
+    assert!(out.last().unwrap().is_last);
+
+    // Three source chunks reach the inner window, which hands one chunk on per chunk it took in.
+    // The outer window takes those three pieces in and reports the one series they merge into.
+    assert_eq!(
+        count(&metrics, "root.input.input", NodeMetric::INPUT_BATCHES),
+        3
+    );
+    assert_eq!(
+        count(&metrics, "root.input.input", NodeMetric::OUTPUT_BATCHES),
+        3
+    );
+    assert_eq!(count(&metrics, "root.input", NodeMetric::INPUT_BATCHES), 3);
+    assert_eq!(count(&metrics, "root", NodeMetric::INPUT_BATCHES), 3);
+    assert_eq!(count(&metrics, "root.input", NodeMetric::OUTPUT_BATCHES), 3);
+    assert_eq!(count(&metrics, "root", NodeMetric::OUTPUT_BATCHES), 1);
+    // The grid points each window decided, which is its own output range: four on the inner grid
+    // and two on the outer one, which is the figure that tells the two nodes apart.
+    assert_eq!(
+        count(&metrics, "root.input", NodeMetric::EVALUATED_GRID_POINTS),
+        4
+    );
+    assert_eq!(
+        count(&metrics, "root", NodeMetric::EVALUATED_GRID_POINTS),
+        2
+    );
+    // The one series closes once, on the chunk carrying `is_last`.
+    assert_eq!(
+        count(&metrics, "root.input.input", NodeMetric::COMPLETED_SERIES),
+        1
+    );
+    assert_eq!(
+        count(&metrics, "root.input", NodeMetric::COMPLETED_SERIES),
+        1
+    );
+    assert_eq!(count(&metrics, "root", NodeMetric::COMPLETED_SERIES), 1);
+    // Per node, not one total for the tree.
+    assert_ne!(
+        count(&metrics, "root.input", NodeMetric::EVALUATED_GRID_POINTS),
+        count(&metrics, "root", NodeMetric::EVALUATED_GRID_POINTS)
+    );
+}
+
+/// A tree whose left operand is a broadcast registers every node it runs, the constant included.
+///
+/// The tree is `(2 + in0) + in1`: the root is a binary, its left operand a broadcast over the first
+/// input, its right operand the second. Each of the five nodes keeps its own handles, so one
+/// registration names one entry per node and per metric a node reports, and the branches carry what
+/// each node did with the input it was handed.
+#[test]
+fn a_binary_over_a_broadcast_registers_every_node_it_runs() {
+    let out_grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&out_grid));
+    let tree = NativeTree::try_new(binary_of(
+        broadcast_left(
+            2.0,
+            evaluated_input(Arc::clone(&out_grid)),
+            BinaryOp::Add,
+            false,
+        ),
+        evaluated_input(Arc::clone(&out_grid)),
+        binary_matching(BinaryOp::Add),
+    ))
+    .unwrap();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    let metrics = metrics_of(&execution);
+
+    // One direct pattern per level, on the nodes the constructor made; the borrow ends before the
+    // first push.
+    {
+        let RuntimeOp::Binary { left, right, .. } =
+            &execution.state().live.as_ref().unwrap().root.op
+        else {
+            panic!("the root is not the binary node the tree built");
+        };
+        let RuntimeOp::Broadcast {
+            left: constant,
+            right: vector,
+            ..
+        } = &left.op
+        else {
+            panic!("the left operand is not the broadcast the tree built");
+        };
+        assert!(
+            matches!(&constant.op, RuntimeOp::Scalar),
+            "the broadcast's left operand is not the constant the tree built"
+        );
+        assert!(
+            matches!(&vector.op, RuntimeOp::Input(id) if id.index() == 0),
+            "the broadcast's vector is not the first input"
+        );
+        assert!(
+            matches!(&right.op, RuntimeOp::Input(id) if id.index() == 1),
+            "the binary's right operand is not the second input"
+        );
+    }
+
+    // Input 0 is the vector under the broadcast, where `2 +` applies; input 1 is the right operand.
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk(&schema, 0, vec![1.0, 2.0], true),
+        )
+        .unwrap();
+    execution
+        .push_evaluated(
+            InputId::new(1),
+            evaluated_chunk(&schema, 0, vec![10.0, 20.0], true),
+        )
+        .unwrap();
+    // A matching binary answers nothing before its input ends.
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "the binary answered before its input ended"
+    );
+    let out = run(&mut execution);
+    assert_eq!(decided(&out), vec![(0, Some(13.0)), (1, Some(24.0))]);
+
+    // Each leaf closed the one series it was handed; the constant closed none.
+    assert_eq!(
+        count(&metrics, "root.left.right", NodeMetric::COMPLETED_SERIES),
+        1
+    );
+    assert_eq!(
+        count(&metrics, "root.right", NodeMetric::COMPLETED_SERIES),
+        1
+    );
+    for metric in [
+        NodeMetric::INPUT_BATCHES,
+        NodeMetric::OUTPUT_BATCHES,
+        NodeMetric::COMPLETED_SERIES,
+    ] {
+        assert_eq!(
+            count(&metrics, "root.left.left", metric),
+            0,
+            "the constant counted {metric}"
+        );
+    }
+    assert_eq!(count(&metrics, "root", NodeMetric::OUTPUT_BATCHES), 1);
+
+    // Five nodes of 11 names each, the peak under the partition it belongs to.
+    let mut expected: Vec<String> = Vec::new();
+    for node in [
+        "root",
+        "root.left",
+        "root.left.left",
+        "root.left.right",
+        "root.right",
+    ] {
+        for metric in NodeMetric::ALL {
+            expected.push(if *metric == NodeMetric::PEAK_RESERVED_BYTES {
+                format!("native.p0.{node}.{metric}")
+            } else {
+                format!("native.{node}.{metric}")
+            });
+        }
+    }
+    expected.sort();
+    let exported = |metrics: &ExecutionPlanMetricsSet| -> Vec<String> {
+        let mut names: Vec<String> = metrics
+            .clone_inner()
+            .iter()
+            .map(|metric| metric.value().name().to_string())
+            .collect();
+        names.sort();
+        names
+    };
+    assert_eq!(exported(&metrics), expected);
+    // Reading the registered handles again repeats no name, which a doubled entry in the sorted
+    // list would show: a read registers nothing.
+    assert_eq!(exported(&metrics), expected);
+
+    // The execution closed itself, so every node gave its bytes back.
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    for node in [
+        "root",
+        "root.left",
+        "root.left.left",
+        "root.left.right",
+        "root.right",
+    ] {
+        let current = format!("native.{node}.{}", NodeMetric::CURRENT_RESERVED_BYTES);
+        assert_eq!(gauge(&metrics, &current), 0, "{node} kept its bytes");
+    }
+}
+
+/// An error returns the reservation while the execution is still alive, and a drop returns it too.
+#[test]
+fn an_error_releases_the_reservation() {
+    let tree = NativeTree::try_new(window(input(), grid(0, 60_000, 4))).unwrap();
+    let pool = pool();
+    let schema = raw_schema();
+
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    let metrics = metrics_of(&execution);
+    assert_eq!(pool.reserved(), 0);
+    assert!(
+        root_holds(&execution, holds_window),
+        "a window that has not been released is what the drop below has to give back"
+    );
+    execution
+        .push_raw(
+            InputId::new(0),
+            raw_chunk(&schema, &[0, 60_000], &[1.0, 2.0], false),
+        )
+        .unwrap();
+    assert!(
+        pool.reserved() > 0,
+        "the queued chunk has to be reserved for"
+    );
+    // The chunk settles the first grid points, so it comes out; the series it belongs to has not
+    // ended, so the node still holds what it buffered for it.
+    let settled = execution.next_chunk().unwrap();
+    assert!(
+        settled.is_some_and(|chunk| !chunk.is_last),
+        "a chunk that does not close its series was reported as closing it"
+    );
+    let held = pool.reserved();
+    assert!(held > 0, "the open series has to be reserved for");
+
+    // A second chunk of the same series whose timestamps do not increase: the evaluator rejects it
+    // after the node already held input for it.
+    execution
+        .push_raw(
+            InputId::new(0),
+            raw_chunk(&schema, &[0, 60_000], &[3.0, 4.0], true),
+        )
+        .unwrap();
+    let error = execution.next_chunk().unwrap_err();
+    assert!(error.to_string().contains("not increasing"), "{error}");
+    assert!(
+        error.to_string().contains("native.window at root"),
+        "{error}"
+    );
+    // Everything went back to the pool while the execution is alive: waiting for the drop would
+    // keep the query's bytes in use for as long as the caller holds the executor.
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    // The numbers above only say the reservation was returned. The state the bytes were taken for
+    // has to be gone too, or the executor keeps the evaluator's sample buffers alive while the pool
+    // reports them as free: the window is dropped, not only its accounting.
+    assert!(
+        !root_holds(&execution, holds_window),
+        "the stopped execution still holds a window's samples while its reservation reads zero"
+    );
+    let current = format!("native.root.{}", NodeMetric::CURRENT_RESERVED_BYTES);
+    assert_eq!(gauge(&metrics, &current), 0);
+    let peak = format!("native.p0.root.{}", NodeMetric::PEAK_RESERVED_BYTES);
+    assert!(gauge(&metrics, &peak) >= held);
+    // A stopped execution is not resumed.
+    let again = execution.next_chunk().unwrap_err();
+    assert!(
+        again.to_string().contains("stopped after an earlier error"),
+        "{again}"
+    );
+
+    // Dropping an execution that never finished returns its bytes too.
+    let mut unfinished = executor(&tree, Arc::clone(&pool));
+    unfinished
+        .push_raw(InputId::new(0), raw_chunk(&schema, &[0], &[1.0], false))
+        .unwrap();
+    let _ = unfinished.next_chunk().unwrap();
+    assert!(
+        pool.reserved() > 0,
+        "the open series has to be reserved for"
+    );
+    drop(unfinished);
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// Runtime routing keeps a raw input's source index and feeds its actual leaf id.
+#[test]
+fn runtime_input_ids_route_raw_sources() {
+    let out_grid = grid(0, 60_000, 2);
+    let tree = NativeTree::try_new(window_with(
+        raw_input_with_source_index_and_ordering(7, SeriesOrdering::KeyThenTime),
+        RangeFunction::LastOverTime,
+        1,
+        None,
+        Arc::clone(&out_grid),
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool());
+    let id = execution.state().input_ids(7).next().unwrap();
+    execution
+        .push_raw(
+            id,
+            raw_chunk(&raw_schema(), &[0, 60_000], &[4.0, 5.0], true),
+        )
+        .unwrap();
+    assert_eq!(
+        addressed(&run(&mut execution)),
+        vec![(0, vec![Some(4.0), Some(5.0)])]
+    );
+}
+
+/// A fanout enqueue failure stops the whole execution and releases earlier recipients' reservations.
+#[test]
+fn a_fanout_enqueue_failure_releases_every_recipient() {
+    let out_grid = grid(0, 60_000, 1);
+    let tree = NativeTree::try_new(binary_of(
+        window_with(
+            raw_input_with_source_index_and_ordering(0, SeriesOrdering::KeyThenTime),
+            RangeFunction::LastOverTime,
+            1,
+            None,
+            Arc::clone(&out_grid),
+        ),
+        window_with(
+            raw_input_with_source_index_and_ordering(0, SeriesOrdering::KeyThenTime),
+            RangeFunction::LastOverTime,
+            1,
+            None,
+            out_grid,
+        ),
+        binary_matching(BinaryOp::Add),
+    ))
+    .unwrap();
+    let schema = raw_schema();
+    let chunk = raw_chunk(&schema, &[0], &[1.0], true);
+    let first_charge = raw_bytes(&chunk);
+    let pool = bounded_pool(first_charge);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    let ids: Vec<_> = execution.state().input_ids(0).collect();
+    let names = &execution.state().live.as_ref().unwrap().inputs;
+    assert_ne!(
+        names[0].state.buffer.reservation.consumer().name(),
+        names[1].state.buffer.reservation.consumer().name()
+    );
+    assert!(
+        names[0]
+            .state
+            .buffer
+            .reservation
+            .consumer()
+            .name()
+            .contains("root.left.input")
+    );
+    assert!(
+        names[1]
+            .state
+            .buffer
+            .reservation
+            .consumer()
+            .name()
+            .contains("root.right.input")
+    );
+    assert!(
+        names[0]
+            .state
+            .buffer
+            .reservation
+            .consumer()
+            .name()
+            .contains("source_index=0")
+    );
+    assert!(
+        names[1]
+            .state
+            .buffer
+            .reservation
+            .consumer()
+            .name()
+            .contains("source_index=0")
+    );
+    let first = ids[0];
+    let second = ids[1];
+    let error = execution
+        .push_raw(first, chunk.clone())
+        .and_then(|()| execution.push_raw(second, chunk))
+        .expect_err("second fanout recipient exceeded the shared pool");
+    match &error {
+        DataFusionError::Context(context, inner) => {
+            assert_eq!(context, "native.input at root.right.input (source_index=0)");
+            assert!(is_resources_exhausted(inner), "{inner}");
+        }
+        other => panic!("expected input context around resource exhaustion, got {other}"),
+    }
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
+    assert!(
+        execution
+            .next_chunk()
+            .unwrap_err()
+            .to_string()
+            .contains("stopped after an earlier error"),
+        "a failed fanout execution continued"
+    );
+    assert!(
+        execution
+            .push_raw(first, raw_chunk(&schema, &[1], &[2.0], true))
+            .is_err(),
+        "a failed fanout execution accepted another input"
+    );
+}
+
+/// A chunk the pool cannot admit fails the execution and gives back everything it already held.
+///
+/// The window holds the first chunk's samples, so the second one is refused against a reservation
+/// that is already standing: the failure has to hand that reservation back too, rather than leaving
+/// the pool full for as long as the caller keeps the stopped executor alive.
+#[test]
+fn a_pool_that_cannot_admit_a_chunk_releases_what_it_held() {
+    let tree = NativeTree::try_new(window(input(), grid(0, 60_000, 4))).unwrap();
+    let schema = raw_schema();
+    // Room for the first chunk and what the window keeps of it, not for the second one.
+    let pool = bounded_pool(16 << 10);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    let metrics = metrics_of(&execution);
+
+    execution
+        .push_raw(InputId::new(0), raw_chunk(&schema, &[0], &[1.0], false))
+        .unwrap();
+    drop(execution.next_chunk().unwrap());
+    let held = pool.reserved();
+    assert!(held > 0, "the open series has to be reserved for");
+
+    // A hundred thousand samples are hundreds of kilobytes whatever the pool already holds.
+    let timestamps: Vec<i64> = (0..100_000).collect();
+    let values = vec![1.0; 100_000];
+    let error = execution
+        .push_raw(
+            InputId::new(0),
+            raw_chunk(&schema, &timestamps, &values, true),
+        )
+        .expect_err("a chunk larger than the pool was admitted");
+    assert!(is_resources_exhausted(&error), "{error}");
+
+    // The chunk never entered the queue, and everything the execution held went back to the pool
+    // while the executor is still alive.
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
+    let current = format!("native.root.{}", NodeMetric::CURRENT_RESERVED_BYTES);
+    assert_eq!(gauge(&metrics, &current), 0);
+    let peak = format!("native.p0.root.{}", NodeMetric::PEAK_RESERVED_BYTES);
+    assert!(gauge(&metrics, &peak) >= held);
+    // A stopped execution is not resumed.
+    let again = execution.next_chunk().unwrap_err();
+    assert!(
+        again.to_string().contains("stopped after an earlier error"),
+        "{again}"
+    );
+}
+
+/// The malformed streams a streaming window refuses are refused by the collector too.
+///
+/// The window below the map collects the whole fragment stream and hands it to
+/// [`crate::grid_series::merge_same_labelset`], which sorts the rows by position and groups them by
+/// label set. That is what makes two closed series that share a label set one series, and it is also
+/// what would hide a stream that never was one series: runs that went backwards inside a series, and
+/// an identity that changed inside a series, both come out as a plausible merged series with a
+/// peaceful answer. A window that read the same stream as it arrived refuses it on the chunk that
+/// breaks it, and so does the collector, before the chunk is kept.
+///
+/// The stream below is a single series per case and the answer it would have produced is the one
+/// nothing asked for: `3` for the first (the merge would sort 1 and 2 onto positions 0 and 1), and
+/// two answers for the second.
+#[test]
+fn a_collector_refuses_the_malformed_streams_a_streaming_window_refuses() {
+    let inner_grid = grid(0, 60_000, 2);
+    let outer_grid = grid(60_000, 60_000, 1);
+    let schema = evaluated_schema(Arc::clone(&inner_grid));
+    let tree = || {
+        NativeTree::try_new(window_with(
+            map(evaluated_input(Arc::clone(&inner_grid)), vec![MathOp::Abs]),
+            RangeFunction::SumOverTime,
+            120_000,
+            Some(Arc::clone(&inner_grid)),
+            Arc::clone(&outer_grid),
+        ))
+        .unwrap()
+    };
+
+    let cases = [
+        (
+            "runs going backwards inside one series",
+            evaluated_chunk_of(&schema, named_metric("a", "x"), 1, vec![Some(1.0)], false),
+            evaluated_chunk_of(&schema, named_metric("a", "x"), 0, vec![Some(2.0)], true),
+            "not increasing",
+        ),
+        (
+            "an identity changing inside one series",
+            evaluated_chunk_of(&schema, named_metric("a", "x"), 0, vec![Some(1.0)], false),
+            evaluated_chunk_of(&schema, named_metric("b", "y"), 1, vec![Some(2.0)], true),
+            "changed identity",
+        ),
+    ];
+    for (what, first, second, phrase) in cases {
+        let pool = pool();
+        let mut execution = executor(&tree(), Arc::clone(&pool));
+        // The chunk that only opens the series is what a stream hands over first, and it is legal:
+        // the collector keeps it and reports nothing.
+        execution.push_evaluated(InputId::new(0), first).unwrap();
+        assert!(
+            execution.next_chunk().unwrap().is_none(),
+            "{what}: the collector reported a piece before its input ended"
+        );
+        execution.push_evaluated(InputId::new(0), second).unwrap();
+        let error = match execution.next_chunk() {
+            Ok(None) => panic!("{what} was collected as if it were one series"),
+            Ok(Some(chunk)) => panic!("{what} reached the evaluator as {:?}", decided(&[chunk])),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains(phrase),
+            "{what} was refused for another reason: {message}"
+        );
+        // The failure released everything the chain held while the executor is still alive.
+        assert_eq!(execution.state().reserved_bytes(), 0);
+        assert_eq!(pool.reserved(), 0);
+        assert!(
+            !root_holds(&execution, holds_window),
+            "{what}: the stopped execution still holds a window's samples"
+        );
+        // A stopped execution is not resumed.
+        let again = execution.next_chunk().unwrap_err();
+        assert!(
+            again.to_string().contains("stopped after an earlier error"),
+            "{again}"
+        );
+    }
+}
+
+/// The streams a streaming window accepts are accepted by the collector too.
+///
+/// One series arriving in chunks that move forward is what a scan hands over, and the chunk that
+/// closes a series may carry no row at all. Both are legal to a streaming window, so both are legal
+/// to the collector, which merges them into the one series they are and answers over it. The values
+/// are the ones the audit's counterexamples would have produced had they been legal: the two forward
+/// chunks hold 1 and 3 and sum to 4, and the close that carries no row leaves the 1 it follows.
+#[test]
+fn a_collector_accepts_forward_runs_and_a_close_without_a_row() {
+    let inner_grid = grid(0, 60_000, 2);
+    let outer_grid = grid(60_000, 60_000, 1);
+    let schema = evaluated_schema(Arc::clone(&inner_grid));
+    let tree = || {
+        NativeTree::try_new(window_with(
+            map(evaluated_input(Arc::clone(&inner_grid)), vec![MathOp::Abs]),
+            RangeFunction::SumOverTime,
+            120_000,
+            Some(Arc::clone(&inner_grid)),
+            Arc::clone(&outer_grid),
+        ))
+        .unwrap()
+    };
+
+    let cases = [
+        (
+            "two chunks moving forward",
+            vec![
+                evaluated_chunk_of(&schema, named_metric("a", "x"), 0, vec![Some(-1.0)], false),
+                evaluated_chunk_of(&schema, named_metric("a", "x"), 1, vec![Some(-3.0)], true),
+            ],
+            vec![(0, Some(4.0))],
+        ),
+        (
+            "a close that carries no row",
+            vec![
+                evaluated_chunk_of(&schema, named_metric("a", "x"), 0, vec![Some(-1.0)], false),
+                evaluated_chunk_of(&schema, named_metric("a", "x"), 2, Vec::new(), true),
+            ],
+            vec![(0, Some(1.0))],
+        ),
+    ];
+    for (what, chunks, expected) in cases {
+        let mut execution = executor(&tree(), pool());
+        for chunk in chunks {
+            execution.push_evaluated(InputId::new(0), chunk).unwrap();
+            assert!(
+                execution.next_chunk().unwrap().is_none(),
+                "{what}: the collector reported a piece before its input ended"
+            );
+        }
+        let out = execution
+            .finish()
+            .unwrap_or_else(|error| panic!("{what} was refused: {error}"));
+        assert_eq!(decided(&out), expected, "{what}");
+        assert_eq!(
+            out.iter().filter(|chunk| chunk.is_last).count(),
+            1,
+            "{what}: the one merged series closed more than once"
+        );
+    }
+}
+
+/// An input that ends inside a series is reported by a window that collects its input too.
+///
+/// The collector holds the fragments until the input ends and closes every series it merges with a
+/// synthetic `is_last`, so a series the caller never closed would look exactly like one that closed
+/// afterwards: the merge would answer it and the barrier would hide the truncation. Nothing is
+/// merged here, because the executor refuses the truncation before the flush runs. The check is the
+/// input node's own, which follows what it handed over, and it is the only one needed: every closing
+/// chunk the caller sent has already reached the collector, which wrote down the series it left open.
+///
+/// A root map reports the same truncation, and
+/// [`an_input_that_ends_mid_series_is_reported_without_a_window`] is that case on its own; this one
+/// is the barrier's, where the flush would have run before the report if the check came later.
+#[test]
+fn an_input_that_ends_inside_a_collected_series_is_reported() {
+    let inner_grid = grid(0, 60_000, 2);
+    let outer_grid = grid(60_000, 60_000, 1);
+    let tree = NativeTree::try_new(window_with(
+        map(evaluated_input(Arc::clone(&inner_grid)), vec![MathOp::Abs]),
+        RangeFunction::SumOverTime,
+        120_000,
+        Some(Arc::clone(&inner_grid)),
+        Arc::clone(&outer_grid),
+    ))
+    .unwrap();
+    let schema = evaluated_schema(Arc::clone(&inner_grid));
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    let metrics = metrics_of(&execution);
+
+    // One piece of a series that never says it ended: the collector keeps it and reports nothing.
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, named_metric("a", "x"), 0, vec![Some(-1.0)], false),
+        )
+        .unwrap();
+    assert!(
+        execution
+            .next_chunk()
+            .expect("the fragment is legal")
+            .is_none(),
+        "the collector reported a piece before its input ended"
+    );
+    assert!(
+        execution.state().reserved_bytes() > 0,
+        "the collected fragment is not charged for"
+    );
+
+    let error = execution
+        .finish()
+        .expect_err("an input that ended inside a collected series was accepted");
+    assert!(
+        error
+            .to_string()
+            .contains("ended before the last chunk of a series"),
+        "the truncation was reported as {error}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("native.input at root.input.input (source_index=0)"),
+        "{error}"
+    );
+    // Nothing was merged and nothing was answered, and everything went back while the executor is
+    // alive.
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
+    assert!(
+        !root_holds(&execution, holds_window),
+        "the stopped execution still holds a window's samples"
+    );
+    // The window's own gauge, which is the node that collected the fragment, reads zero.
+    let current = format!("native.root.{}", NodeMetric::CURRENT_RESERVED_BYTES);
+    assert_eq!(gauge(&metrics, &current), 0);
+    // A stopped execution is not resumed.
+    let again = execution.next_chunk().unwrap_err();
+    assert!(
+        again.to_string().contains("stopped after an earlier error"),
+        "{again}"
+    );
+}
+
+/// Two series that a map turns into one label set are merged before the window above reads them.
+///
+/// `a{job="x"}` and `b{job="x"}` arrive whole, so each says it is the last chunk of its own source
+/// series, and `abs` drops the name, so both become `{job="x"}`. The two hold their values at
+/// different positions, so they are one series with a hole each and the answer is the window over
+/// the merged series: `sum_over_time` sees 1 and 3 and answers 4, `count_over_time` answers 2. A
+/// window that read the two as two series would answer twice, once per source series, and close
+/// twice.
+///
+/// The window above the map is the node that merges: its input can hold two series under one label
+/// set, so it collects the whole input, merges each label set once with
+/// [`crate::grid_series::merge_same_labelset`], and only then evaluates. Nothing comes out of it
+/// while the pieces arrive, which is the price of merging; what comes out is one series.
+#[test]
+fn two_series_onto_one_label_set_after_a_map_are_merged_into_one_series() {
+    let inner_grid = grid(0, 60_000, 2);
+    let outer_grid = grid(60_000, 60_000, 1);
+    let schema = evaluated_schema(Arc::clone(&inner_grid));
+    // One map and two maps: the label set is rewritten at the first one either way, and the second
+    // only rewrites it again, so both shapes are one affected window over one rewritten set.
+    let shapes = |function: RangeFunction| {
+        [
+            (
+                "a map",
+                NativeTree::try_new(window_with(
+                    map(evaluated_input(Arc::clone(&inner_grid)), vec![MathOp::Abs]),
+                    function,
+                    120_000,
+                    Some(Arc::clone(&inner_grid)),
+                    Arc::clone(&outer_grid),
+                ))
+                .unwrap(),
+            ),
+            (
+                "two maps",
+                NativeTree::try_new(window_with(
+                    map(
+                        map(evaluated_input(Arc::clone(&inner_grid)), vec![MathOp::Abs]),
+                        vec![MathOp::Abs],
+                    ),
+                    function,
+                    120_000,
+                    Some(Arc::clone(&inner_grid)),
+                    Arc::clone(&outer_grid),
+                ))
+                .unwrap(),
+            ),
+        ]
+    };
+
+    for (function, expected) in [
+        // The two values at inner positions 0 and 1 both fall in the one window of the outer grid.
+        (RangeFunction::SumOverTime, 4.0),
+        (RangeFunction::CountOverTime, 2.0),
+    ] {
+        for (shape, tree) in shapes(function) {
+            let mut execution = executor(&tree, pool());
+            // Each source series is closed properly, and each holds its value where the other holds
+            // none, so the pair is one logical series and one answer.
+            execution
+                .push_evaluated(
+                    InputId::new(0),
+                    evaluated_chunk_of(
+                        &schema,
+                        named_metric("a", "x"),
+                        0,
+                        vec![Some(1.0), None],
+                        true,
+                    ),
+                )
+                .unwrap();
+            execution
+                .push_evaluated(
+                    InputId::new(0),
+                    evaluated_chunk_of(
+                        &schema,
+                        named_metric("b", "x"),
+                        0,
+                        vec![None, Some(3.0)],
+                        true,
+                    ),
+                )
+                .unwrap();
+            // Nothing settles while the pieces arrive: the merged series is what the window evaluates,
+            // and it does not exist before the input ends.
+            assert!(
+                execution.next_chunk().unwrap().is_none(),
+                "{shape} with {function:?} reported a piece it had not merged yet"
+            );
+            let out = execution.finish().expect("the merged series evaluates");
+            assert_eq!(
+                decided(&out),
+                vec![(0, Some(expected))],
+                "{shape} with {function:?} did not answer over the merged series"
+            );
+            assert_eq!(
+                out.iter().filter(|chunk| chunk.is_last).count(),
+                1,
+                "{shape} with {function:?} closed the one merged series more than once"
+            );
+        }
+    }
+}
+
+/// A dynamic `topk` hands on the label sets its input holds, so the window above it merges them as
+/// it does under a literal `topk`.
+///
+/// `topk` keeps whole input series and canonicalises nothing about their labels, so a `topk` over a
+/// map hands on what the map handed it: `a{job="x"}` and `b{job="x"}` become two pieces of one
+/// label set, and the two hold their values at different positions. The window above is the node
+/// that merges them, which it only does when the child says its output can hold two series of one
+/// label set. A window that streamed them instead answers once per piece, and the two answers
+/// overlap on the same label set at the same position, which is neither Prometheus' answer nor a
+/// result the node can hand out: merging first makes `sum_over_time` answer 4, once.
+#[test]
+fn two_series_onto_one_label_set_under_a_parameterized_topk_are_merged() {
+    let inner_grid = grid(0, 60_000, 2);
+    let outer_grid = grid(60_000, 60_000, 1);
+    let schema = evaluated_schema(Arc::clone(&inner_grid));
+    // A `k` of two at every point, so the dynamic path keeps what a literal `topk(2, ...)` keeps.
+    let parameter = scalar_binary(
+        scalar_binary(
+            eval_time(None, Arc::clone(&inner_grid)),
+            scalar(0.0, Arc::clone(&inner_grid)),
+            binary_matching(BinaryOp::Mul),
+        ),
+        scalar(2.0, Arc::clone(&inner_grid)),
+        binary_matching(BinaryOp::Add),
+    );
+    let tree = NativeTree::try_new(window_with(
+        NativeNode {
+            expr: NativeExpr::ParameterizedTopK {
+                input: Box::new(map(
+                    evaluated_input(Arc::clone(&inner_grid)),
+                    vec![MathOp::Abs],
+                )),
+                op: BoundVectorOp::TopK {
+                    k: 0.0,
+                    top: true,
+                    group: Grouping::By(Arc::from([])),
+                },
+                parameter: Box::new(parameter),
+            },
+            output: evaluated(Arc::clone(&inner_grid)),
+        },
+        RangeFunction::SumOverTime,
+        120_000,
+        Some(Arc::clone(&inner_grid)),
+        Arc::clone(&outer_grid),
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("a", "x"),
+                0,
+                vec![Some(1.0), None],
+                true,
+            ),
+        )
+        .unwrap();
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("b", "x"),
+                0,
+                vec![None, Some(3.0)],
+                true,
+            ),
+        )
+        .unwrap();
+    // Nothing settles while the pieces arrive: the merged series is what the window evaluates, and
+    // it does not exist before the input ends.
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "the window reported a piece it had not merged yet"
+    );
+    let out = execution.finish().expect("the merged series evaluates");
+    assert_eq!(
+        decided(&out),
+        vec![(0, Some(4.0))],
+        "the window did not answer over the merged label set"
+    );
+    assert_eq!(
+        out.iter().filter(|chunk| chunk.is_last).count(),
+        1,
+        "the one merged label set closed more than once"
+    );
+}
+
+/// Two closed series that hold a value at the same position are still refused under one label set.
+///
+/// The pair below maps into one label set and both hold a value at position 0 of the field, which
+/// no merge resolves and Prometheus rejects for two series whose label sets became equal. The
+/// refusal is the map's own, before the window above evaluates anything, and it names the position
+/// rather than a closed label set: a closed source series is not a closed label set.
+#[test]
+fn two_series_onto_one_label_set_after_a_map_are_rejected() {
+    let inner_grid = grid(0, 60_000, 2);
+    let outer_grid = grid(60_000, 60_000, 1);
+    let tree = || {
+        NativeTree::try_new(window_with(
+            map(evaluated_input(Arc::clone(&inner_grid)), vec![MathOp::Abs]),
+            RangeFunction::AvgOverTime,
+            120_000,
+            Some(Arc::clone(&inner_grid)),
+            Arc::clone(&outer_grid),
+        ))
+        .unwrap()
+    };
+    let schema = evaluated_schema(Arc::clone(&inner_grid));
+
+    let mut execution = executor(&tree(), pool());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("a", "x"),
+                0,
+                vec![Some(1.0), None],
+                true,
+            ),
+        )
+        .unwrap();
+    // The first series closed, and the window above collects it rather than reporting it.
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "the window above the map reported a piece before its input ended"
+    );
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("b", "x"),
+                0,
+                vec![Some(3.0), Some(4.0)],
+                true,
+            ),
+        )
+        .unwrap();
+    let error = match execution.next_chunk() {
+        Ok(None) => panic!("the second series was accepted at a position the first one holds"),
+        Ok(Some(chunk)) => panic!(
+            "two values at one position were handed on: {:?}",
+            decided(&[chunk])
+        ),
+        Err(error) => error,
+    };
+    let message = error.to_string();
+    assert!(
+        message.contains("job"),
+        "the rejection does not name the label set: {message}"
+    );
+    assert!(
+        message.contains("position 0"),
+        "the rejection does not name the shared position: {message}"
+    );
+}
+
+/// An empty tag and an absent one are two source series and one canonical label set.
+///
+/// `requests{host="web-1", zone=""}` and `requests{host="web-1"}` are distinct series to a scan: an
+/// empty tag value is a present label, an absent one is not. `last_over_time` keeps the metric name
+/// and every tag, so the inner window hands both on as two pieces, each closing its own source
+/// series, and the two pieces carry different metrics. The outer window is the node that merges
+/// them: a consumer compares label sets without the empty value, so the two are one series there.
+/// Merging first is what makes the outer `sum_over_time` answer 4 at the second point -- the two
+/// pieces hold 1 at the first point and 3 at the second -- where evaluating each piece on its own
+/// would answer 3.
+#[test]
+fn an_empty_tag_and_an_absent_one_are_one_label_set_to_the_window_above() {
+    let inner_grid = grid(0, 60_000, 2);
+    let outer_grid = grid(0, 60_000, 2);
+    let inner = || {
+        // A one-millisecond window on a 60 s grid, so every point reads only the sample at its own
+        // timestamp and each source series decides one point.
+        window_with(
+            input(),
+            RangeFunction::LastOverTime,
+            1,
+            None,
+            Arc::clone(&inner_grid),
+        )
+    };
+    let chain = || {
+        window_with(
+            inner(),
+            RangeFunction::SumOverTime,
+            120_000,
+            Some(Arc::clone(&inner_grid)),
+            Arc::clone(&outer_grid),
+        )
+    };
+    let schema = raw_schema();
+    let push_both = |execution: &mut NativeExecutor| {
+        execution
+            .push_raw(
+                InputId::new(0),
+                raw_chunk_of(
+                    &schema,
+                    b"series-a",
+                    host_metric(Some("")),
+                    &[0],
+                    &[1.0],
+                    true,
+                ),
+            )
+            .unwrap();
+        execution
+            .push_raw(
+                InputId::new(0),
+                raw_chunk_of(
+                    &schema,
+                    b"series-b",
+                    host_metric(None),
+                    &[60_000],
+                    &[3.0],
+                    true,
+                ),
+            )
+            .unwrap();
+    };
+
+    // The inner window alone hands both series on, and they are two series: the empty tag survives
+    // `last_over_time`, which keeps the name and every tag.
+    let inner_tree = NativeTree::try_new(inner()).unwrap();
+    let mut inner_execution = executor(&inner_tree, pool());
+    push_both(&mut inner_execution);
+    let pieces = run(&mut inner_execution);
+    assert_eq!(
+        pieces.len(),
+        2,
+        "the inner window did not hand both series on"
+    );
+    assert_ne!(
+        pieces[0].series.metric, pieces[1].series.metric,
+        "the two source series were not two series to `last_over_time`"
+    );
+
+    // The chain merges them before the outer window reads them.
+    let tree = NativeTree::try_new(chain()).unwrap();
+    let mut execution = executor(&tree, pool());
+    push_both(&mut execution);
+    let out = run(&mut execution);
+    assert_eq!(
+        decided(&out),
+        vec![(0, Some(1.0)), (1, Some(4.0))],
+        "the outer window did not answer over the merged label set"
+    );
+    assert_eq!(
+        out.iter().filter(|chunk| chunk.is_last).count(),
+        1,
+        "the merged label set closed more than once"
+    );
+}
+
+/// A window that collects its whole input gives every byte back when the execution closes.
+///
+/// The fragments it holds, the workspace it merges them with and the chunks it queued while
+/// flushing are all charged while they live, so the pool never admits memory the node still owns.
+/// The close releases all of them, and the figures read zero while the executor is still alive.
+#[test]
+fn a_window_that_merges_its_input_releases_what_it_collected() {
+    let inner_grid = grid(0, 60_000, 2);
+    let outer_grid = grid(60_000, 60_000, 1);
+    let tree = NativeTree::try_new(window_with(
+        map(evaluated_input(Arc::clone(&inner_grid)), vec![MathOp::Abs]),
+        RangeFunction::SumOverTime,
+        120_000,
+        Some(Arc::clone(&inner_grid)),
+        Arc::clone(&outer_grid),
+    ))
+    .unwrap();
+    let schema = evaluated_schema(Arc::clone(&inner_grid));
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    let metrics = metrics_of(&execution);
+    for (name, values) in [("a", vec![Some(1.0), None]), ("b", vec![None, Some(3.0)])] {
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(&schema, named_metric(name, "x"), 0, values, true),
+            )
+            .unwrap();
+    }
+    // Pulling takes both fragments out of the queue and into the window, which charges them.
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "the collecting window reported a piece"
+    );
+    let held = execution.state().reserved_bytes();
+    // The root is the window that collected the fragments, so its own reservation is what the peak
+    // below has to cover. The borrow ends before the close below.
+    let window_held = {
+        let RuntimeOp::Window { state, .. } = &execution.state().live.as_ref().unwrap().root.op
+        else {
+            panic!("the root is not the window the tree built");
+        };
+        state.buffer.reservation.size()
+    };
+    assert!(held > 0, "the collected input is not charged for");
+    assert_eq!(
+        held,
+        pool.reserved(),
+        "the state and the pool disagree on what the collected input holds"
+    );
+
+    let out = execution.finish().expect("the merged series evaluates");
+    assert_eq!(decided(&out), vec![(0, Some(4.0))]);
+    // The fragments, the workspace, the queue and the evaluator are all gone.
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
+    assert!(!root_holds(&execution, holds_window));
+    let current = format!("native.root.{}", NodeMetric::CURRENT_RESERVED_BYTES);
+    assert_eq!(gauge(&metrics, &current), 0);
+    let peak = format!("native.p0.root.{}", NodeMetric::PEAK_RESERVED_BYTES);
+    assert!(
+        gauge(&metrics, &peak) >= window_held,
+        "the peak does not cover the input the window collected"
+    );
+}
+
+/// Every answer a merge flush queues stays charged until its own pull hands it over.
+///
+/// The flush evaluates one series per label set at once, and only the pull of the first of them
+/// returns the fragments it collected: what is left in the queue after that pull is what the node
+/// still keeps, so the reservation is what those answers hold, the label sets the node handed out
+/// under and what the evaluator retains. Pulling the second one gives its share back in turn, and
+/// the pool is empty once the tree has answered everything it had.
+#[test]
+fn a_merge_flush_reserves_every_queued_output() {
+    let inner_grid = grid(0, 60_000, 2);
+    let outer_grid = grid(60_000, 60_000, 1);
+    let tree = NativeTree::try_new(window_with(
+        map(evaluated_input(Arc::clone(&inner_grid)), vec![MathOp::Abs]),
+        RangeFunction::LastOverTime,
+        120_000,
+        Some(Arc::clone(&inner_grid)),
+        Arc::clone(&outer_grid),
+    ))
+    .unwrap();
+    let schema = evaluated_schema(Arc::clone(&inner_grid));
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    for (name, values) in [("a", vec![Some(1.0), None]), ("b", vec![None, Some(3.0)])] {
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(&schema, named_metric("x", name), 0, values, true),
+            )
+            .unwrap();
+    }
+    execution.end_of_input().unwrap();
+    let first = execution
+        .next_chunk()
+        .unwrap()
+        .expect("the first merged output is delivered");
+    assert_eq!(
+        addressed(std::slice::from_ref(&first)),
+        vec![(0, vec![Some(1.0)])]
+    );
+    assert_eq!(first.series.metric.tags()[0].value.as_ref(), "a");
+    assert!(first.is_last, "a merged series is handed over closed");
+
+    // What the root holds once one of the two answers left: the answer still queued, the label sets
+    // the node handed out under, and the evaluator that evaluated them. The borrow ends before the
+    // next pull.
+    let (queued, queued_bytes, retained, emitted, held) = {
+        let RuntimeOp::Window { window, state, .. } =
+            &execution.state().live.as_ref().unwrap().root.op
+        else {
+            panic!("the root is not the window the tree built");
+        };
+        let queued_bytes = state.queued.iter().map(|(_, bytes)| *bytes).sum::<usize>();
+        (
+            state.queued.len(),
+            queued_bytes,
+            window.as_ref().map_or(0, RangeEvaluator::retained_bytes),
+            state.emitted_bytes(),
+            state.buffer.reservation.size(),
+        )
+    };
+    assert_eq!(queued, 1, "the second answer was queued but not kept");
+    assert!(
+        queued_bytes > 0,
+        "the answer left in the queue is charged nothing"
+    );
+    assert_eq!(
+        held,
+        queued_bytes + retained + emitted,
+        "the reservation after the first pull is not what the node still holds"
+    );
+    assert_eq!(pool.reserved(), execution.state().reserved_bytes());
+
+    let second = execution
+        .next_chunk()
+        .unwrap()
+        .expect("the second merged output is delivered");
+    assert_eq!(
+        addressed(std::slice::from_ref(&second)),
+        vec![(0, vec![Some(3.0)])]
+    );
+    assert_eq!(second.series.metric.tags()[0].value.as_ref(), "b");
+    assert!(second.is_last, "a merged series is handed over closed");
+    assert!(execution.next_chunk().unwrap().is_none());
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// Dropping the execution releases everything it held and every node it built, and the counters
+/// the caller registered still read what those nodes did.
+///
+/// The state owns its tree, so the drop takes the evaluator, the collected input, the queued answers,
+/// the reservation and the topology with it. What outlives the execution is what the caller
+/// registered before it started: the nodes' own counters and gauges, not the nodes, so a weak
+/// handle to any of them is dead while the peak the tree reached still stands.
+#[test]
+fn dropping_the_execution_releases_its_tree_and_keeps_the_registered_metrics() {
+    let inner_grid = grid(0, 60_000, 2);
+    let outer_grid = grid(60_000, 60_000, 1);
+    let tree = NativeTree::try_new(window_with(
+        map(evaluated_input(Arc::clone(&inner_grid)), vec![MathOp::Abs]),
+        RangeFunction::LastOverTime,
+        120_000,
+        Some(Arc::clone(&inner_grid)),
+        Arc::clone(&outer_grid),
+    ))
+    .unwrap();
+    let schema = evaluated_schema(Arc::clone(&inner_grid));
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    let metrics = metrics_of(&execution);
+    // Every node the tree built, watched by a handle that says whether it still exists.
+    let nodes = node_metrics(&execution);
+    assert_eq!(
+        nodes.len(),
+        3,
+        "the tree is a window over a map over an input"
+    );
+    for (name, values) in [("a", vec![Some(1.0), None]), ("b", vec![None, Some(3.0)])] {
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(&schema, named_metric("x", name), 0, values, true),
+            )
+            .unwrap();
+    }
+    // Pulling takes both fragments out of the input and into the window, which collects them.
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "the collecting window reported a piece"
+    );
+    // The root holds the evaluator and the collected input before the input ends.
+    {
+        let RuntimeOp::Window {
+            input,
+            window,
+            merge,
+            state,
+        } = &execution.state().live.as_ref().unwrap().root.op
+        else {
+            panic!("the root is not the window the tree built");
+        };
+        assert!(window.is_some(), "the root holds no evaluator to release");
+        assert!(merge.is_some(), "the root collected nothing to release");
+        assert!(state.queued.is_empty(), "a fragment was not collected");
+        let RuntimeOp::Map { input: leaf, .. } = &input.op else {
+            panic!("the window's input is not the map the tree built");
+        };
+        assert!(
+            matches!(&leaf.op, RuntimeOp::Input(id) if id.index() == 0),
+            "the window's leaf is not the input it was built over"
+        );
+    }
+    execution.end_of_input().unwrap();
+    let first = execution
+        .next_chunk()
+        .unwrap()
+        .expect("the first merged output is delivered");
+    assert_eq!(
+        addressed(std::slice::from_ref(&first)),
+        vec![(0, vec![Some(1.0)])]
+    );
+    // The flush took the collected input, so what is left to release is the evaluator and the
+    // answer the caller has not pulled yet.
+    {
+        let RuntimeOp::Window {
+            window,
+            merge,
+            state,
+            ..
+        } = &execution.state().live.as_ref().unwrap().root.op
+        else {
+            panic!("the root is not the window the tree built");
+        };
+        assert!(window.is_some(), "the evaluator left before the drop");
+        assert!(merge.is_none(), "the collected input outlived its flush");
+        assert_eq!(state.queued.len(), 1, "the second answer is not queued");
+        assert!(state.buffer.reservation.size() > 0);
+    }
+    assert!(pool.reserved() > 0, "the root reserved nothing to release");
+    assert!(
+        nodes.iter().all(|node| node.upgrade().is_some()),
+        "a node went before the execution it belongs to"
+    );
+
+    drop(execution);
+
+    // What the caller registered before the run is all that is left, and it reads the released
+    // nodes: the peak they reached stands, and nothing they held is charged any more.
+    let current = format!("native.root.{}", NodeMetric::CURRENT_RESERVED_BYTES);
+    let peak = format!("native.p0.root.{}", NodeMetric::PEAK_RESERVED_BYTES);
+    assert_eq!(gauge(&metrics, &current), 0);
+    assert!(
+        gauge(&metrics, &peak) > 0,
+        "the peak the node reached did not survive the release"
+    );
+    assert_eq!(count(&metrics, "root", NodeMetric::INPUT_BATCHES), 2);
+    assert_eq!(pool.reserved(), 0);
+    assert!(
+        nodes.iter().all(|node| node.upgrade().is_none()),
+        "the dropped execution kept the tree it was built from"
+    );
+}
+
+/// A pool that cannot admit what a collecting chain holds fails the execution and gives everything
+/// back.
+///
+/// The window collects its whole input, so the fragment it keeps costs more than the chunk it was
+/// made from: the pool below holds room for the chunk and no more, so one of the charges the chain
+/// makes fails. Whichever it is, the failure hands every reservation back while the executor is
+/// still alive, and the evaluators and the collected fragments go with it.
+#[test]
+fn a_pool_that_cannot_admit_a_collected_fragment_releases_what_it_held() {
+    let inner_grid = grid(0, 60_000, 2);
+    let outer_grid = grid(60_000, 60_000, 1);
+    let tree = NativeTree::try_new(window_with(
+        map(evaluated_input(Arc::clone(&inner_grid)), vec![MathOp::Abs]),
+        RangeFunction::SumOverTime,
+        120_000,
+        Some(Arc::clone(&inner_grid)),
+        Arc::clone(&outer_grid),
+    ))
+    .unwrap();
+    let schema = evaluated_schema(Arc::clone(&inner_grid));
+    let chunk = evaluated_chunk_of(
+        &schema,
+        named_metric("a", "x"),
+        0,
+        vec![Some(1.0), None],
+        true,
+    );
+    // Room for the chunk the source queue holds -- read where the pool admits anything, so the limit
+    // is what the queue charges and not a figure derived from the estimator -- and nothing for the
+    // label sets the map records or the fragment the window collects.
+    let queued = {
+        let mut probe = executor(&tree, pool());
+        probe
+            .push_evaluated(InputId::new(0), chunk.clone())
+            .expect("the probe queue admits the chunk");
+        probe.state().reserved_bytes()
+    };
+    assert!(queued > 0, "the queued chunk is not charged for");
+    let pool = bounded_pool(queued);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution
+        .push_evaluated(InputId::new(0), chunk)
+        .expect("the source queue holds the chunk");
+
+    let error = execution
+        .next_chunk()
+        .expect_err("the chain was admitted by a pool that cannot hold what it makes of the chunk");
+    assert!(is_resources_exhausted(&error), "{error}");
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
+    assert!(
+        !root_holds(&execution, holds_window),
+        "the stopped execution still holds a window's samples"
+    );
+}
+
+/// A merge whose workspace the pool cannot admit stops the execution and gives everything back.
+///
+/// The fragments are admitted one by one as they arrive, so their charge is not what fails here:
+/// what fails is the workspace the merge needs, taken in `finish` before the helper runs. The first
+/// run measures what the collected input holds where the pool admits it; the second is given that
+/// much, the map's transient charge for one chunk and a little over -- enough for every fragment,
+/// not for the workspace, which charges at least one `(position, member, row)` triple and one
+/// position per row. The failure releases the fragments, the evaluators and the queues while the
+/// executor is still alive.
+#[test]
+fn a_pool_that_cannot_admit_the_merge_workspace_releases_what_it_held() {
+    let inner_grid = grid(0, 60_000, 2);
+    let outer_grid = grid(60_000, 60_000, 1);
+    let tree = || {
+        NativeTree::try_new(window_with(
+            map(evaluated_input(Arc::clone(&inner_grid)), vec![MathOp::Abs]),
+            RangeFunction::SumOverTime,
+            120_000,
+            Some(Arc::clone(&inner_grid)),
+            Arc::clone(&outer_grid),
+        ))
+        .unwrap()
+    };
+    let schema = evaluated_schema(Arc::clone(&inner_grid));
+    // Two closed source series, each holding its value where the other holds none, so the fragments
+    // do merge and the merge is what needs the workspace.
+    let push_both = |execution: &mut NativeExecutor| {
+        for (name, values) in [("a", vec![Some(-1.0), None]), ("b", vec![None, Some(-3.0)])] {
+            execution
+                .push_evaluated(
+                    InputId::new(0),
+                    evaluated_chunk_of(&schema, named_metric(name, "x"), 0, values, true),
+                )
+                .unwrap();
+        }
+    };
+
+    // What the chain holds once its input is collected, measured where the pool admits it.
+    let mut reference = executor(&tree(), pool());
+    push_both(&mut reference);
+    assert!(
+        reference.next_chunk().unwrap().is_none(),
+        "the collecting window reported a piece"
+    );
+    let measured = reference.state().reserved_bytes();
+    assert!(measured > 0, "the collected input is not charged for");
+    drop(reference);
+
+    // Room for what the collected input holds and for the map to hold one chunk with the workspace
+    // its kernel writes in, which it gives back before the next chunk; not for the merge's
+    // workspace.
+    let one_chunk = evaluated_chunk_of(
+        &schema,
+        named_metric("a", "x"),
+        0,
+        vec![Some(-1.0), None],
+        true,
+    );
+    let mapping = evaluated_bytes(&one_chunk)
+        + map_workspace_bytes(&[MapOp::Math(MathOp::Abs)], &one_chunk.series).unwrap();
+    let pool = bounded_pool(measured + mapping + 64);
+    let mut execution = executor(&tree(), Arc::clone(&pool));
+    push_both(&mut execution);
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "the collecting window reported a piece"
+    );
+    let collected = execution.state().reserved_bytes();
+    assert_eq!(
+        collected, measured,
+        "the collected input was charged differently the second time, so the pool is not sized for it"
+    );
+    assert_eq!(collected, pool.reserved());
+
+    let error = execution
+        .finish()
+        .expect_err("the merge ran without its workspace admitted");
+    assert!(is_resources_exhausted(&error), "{error}");
+    // Everything the chain held went back while the executor is alive: the fragments, the
+    // evaluator and both queues.
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
+    assert!(
+        !root_holds(&execution, holds_window),
+        "the stopped execution still holds a window's samples"
+    );
+    // A stopped execution is not resumed.
+    let again = execution.next_chunk().unwrap_err();
+    assert!(
+        again.to_string().contains("stopped after an earlier error"),
+        "{again}"
+    );
+}
+
+/// A window that drops empty-valued labels cannot hand two series on under one label set either.
+///
+/// `{host="web-1", zone=""}` and `{host="web-1"}` are two series to the scan: an empty tag value is
+/// a present label, an absent one is not. `rate` drops the metric name and the empty-valued labels,
+/// so both become `{host="web-1"}` and each covers the same grid; answering would hand the whole
+/// grid out twice under the same labels and the same timestamps. No map is involved, so the
+/// rejection has to be the node's own — a check at the root would be too late, because the window
+/// above would already have evaluated the two as two series.
+///
+/// The two cover the same positions of the same field, which is the collision no merge resolves:
+/// the refusal names the position, not a closed label set, because closing a source series says
+/// nothing about the label set it shared with another one. `rate` needs two samples, so neither
+/// series decides position 0 -- it holds the single sample at its own timestamp -- and both decide
+/// positions 1 to 4. The first position both occupy is therefore 1.
+#[test]
+fn two_series_onto_one_label_set_after_a_window_are_rejected() {
+    let out_grid = grid(0, 60_000, 5);
+    let tree = NativeTree::try_new(window_with(
+        input(),
+        RangeFunction::Rate,
+        300_000,
+        None,
+        Arc::clone(&out_grid),
+    ))
+    .unwrap();
+    let schema = raw_schema();
+    let counter = [0, 60_000, 120_000, 180_000, 240_000];
+
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_raw(
+            InputId::new(0),
+            raw_chunk_of(
+                &schema,
+                b"series-a",
+                host_metric(Some("")),
+                &counter,
+                &[1.0, 2.0, 3.0, 4.0, 5.0],
+                true,
+            ),
+        )
+        .unwrap();
+    let first = execution
+        .next_chunk()
+        .unwrap()
+        .expect("the first series settles the grid");
+    // The decided positions of the first series, which are the ones the second one has to share.
+    assert_eq!(
+        first.series.time.runs().count(),
+        1,
+        "the first series decided more than one run"
+    );
+    assert_eq!(
+        first.series.time.first_position(),
+        Some(1),
+        "`rate` decided a position the single sample at 0 cannot settle"
+    );
+    assert!(first.is_last);
+
+    // The second series is a different one to the scan and the same one to `rate`.
+    execution
+        .push_raw(
+            InputId::new(0),
+            raw_chunk_of(
+                &schema,
+                b"series-b",
+                host_metric(None),
+                &counter,
+                &[6.0, 7.0, 8.0, 9.0, 10.0],
+                true,
+            ),
+        )
+        .unwrap();
+    let error = match execution.next_chunk() {
+        Ok(None) => panic!("the second series settled nothing at all"),
+        Ok(Some(chunk)) => panic!(
+            "a second series left the window under the first one's label set: {:?}",
+            decided(&[chunk])
+        ),
+        Err(error) => error,
+    };
+    let message = error.to_string();
+    assert!(message.contains("host"), "{message}");
+    assert!(message.contains("web-1"), "{message}");
+    assert!(
+        message.contains("position 1"),
+        "the rejection does not name the first position both series hold: {message}"
+    );
+
+    // Two series carrying different hosts stay distinct, which is what a rate over a label that
+    // survives the rewrite looks like.
+    let mut distinct = executor(&tree, pool());
+    distinct
+        .push_raw(
+            InputId::new(0),
+            raw_chunk_of(
+                &schema,
+                b"series-a",
+                host_metric(Some("")),
+                &counter,
+                &[1.0, 2.0, 3.0, 4.0, 5.0],
+                true,
+            ),
+        )
+        .unwrap();
+    distinct
+        .push_raw(
+            InputId::new(0),
+            raw_chunk_of(
+                &schema,
+                b"series-b",
+                SeriesLabels::try_new(
+                    Some("requests".into()),
+                    vec![Label {
+                        name: "host".into(),
+                        value: "web-2".into(),
+                    }],
+                )
+                .unwrap(),
+                &counter,
+                &[6.0, 7.0, 8.0, 9.0, 10.0],
+                true,
+            ),
+        )
+        .unwrap();
+    let out = run(&mut distinct);
+    assert_eq!(out.len(), 2, "two series over two hosts are two series");
+}
+
+/// A chunk that holds a value where the same field already holds one is rejected.
+///
+/// Neither piece closes its series, and neither needs to: the refusal is about the positions
+/// themselves. `v0` would carry two values at position 0 under one label set, which no merge can
+/// resolve, so the node refuses rather than picking one.
+#[test]
+fn two_series_holding_a_value_at_one_position_are_rejected() {
+    let map_grid = grid(0, 60_000, 2);
+    let tree = NativeTree::try_new(map(
+        evaluated_input(Arc::clone(&map_grid)),
+        vec![MathOp::Abs],
+    ))
+    .unwrap();
+    let schema = evaluated_schema(Arc::clone(&map_grid));
+
+    let mut execution = executor(&tree, pool());
+    for (name, values) in [
+        ("a", vec![Some(-1.0), Some(-2.0)]),
+        ("b", vec![Some(-3.0), Some(-4.0)]),
+    ] {
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(&schema, named_metric(name, "x"), 0, values, false),
+            )
+            .unwrap();
+    }
+    // The first piece is fine on its own: nothing has occupied any position yet.
+    let first = execution
+        .next_chunk()
+        .unwrap()
+        .expect("the first piece is handed on as it arrives");
+    assert_eq!(sample_values(&first), vec![Some(1.0), Some(2.0)]);
+    // The second one puts a second value of the same field at position 0.
+    let error = match execution.next_chunk() {
+        Ok(None) => panic!("the map produced no chunk at all"),
+        Ok(Some(chunk)) => panic!(
+            "a second series holding a value at the same position was handed on: {:?}",
+            decided(&[chunk])
+        ),
+        Err(error) => error,
+    };
+    let message = error.to_string();
+    assert!(message.contains("job"), "{message}");
+    assert!(message.contains("field 0"), "{message}");
+    assert!(message.contains("position 0"), "{message}");
+}
+
+/// Two closed series under one label set are two pieces of one logical series.
+///
+/// `a{job="x"}` and `b{job="x"}` are two series to the input and one label set to `abs`, which drops
+/// the name. Each holds a value where the other holds none, and each says it is the last chunk of
+/// its own source series — which is what `is_last` means here: the source series ended, not the
+/// label set. The map hands both pieces on, and merging the two pieces with
+/// [`crate::grid_series::merge_same_labelset`] gives the one series the data has, which is what a
+/// caller holding the root's pieces does.
+#[test]
+fn a_merge_across_two_closed_series_is_the_root_piece_stream() {
+    let map_grid = grid(0, 60_000, 2);
+    let tree = NativeTree::try_new(map(
+        evaluated_input(Arc::clone(&map_grid)),
+        vec![MathOp::Abs],
+    ))
+    .unwrap();
+    let schema = evaluated_schema(Arc::clone(&map_grid));
+
+    let mut execution = executor(&tree, pool());
+    // Each source series is closed properly: the pieces hold disjoint positions of field 0 and both
+    // end their series.
+    for (name, values) in [("a", vec![Some(-1.0), None]), ("b", vec![None, Some(-3.0)])] {
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(&schema, named_metric(name, "x"), 0, values, true),
+            )
+            .unwrap();
+    }
+    // Both pieces come out of the root, one per source series, and neither is refused.
+    let mut pieces = Vec::new();
+    loop {
+        match execution.next_chunk() {
+            Ok(Some(chunk)) => pieces.push(chunk),
+            Ok(None) => break,
+            Err(error) => panic!("a closed source series was refused: {error}"),
+        }
+    }
+    pieces.extend(
+        execution
+            .finish()
+            .expect("the map holds no collected input"),
+    );
+    assert_eq!(pieces.len(), 2, "the root did not hand over both pieces");
+    assert!(
+        pieces.iter().all(|piece| piece.is_last),
+        "a piece of a closed source series did not close it"
+    );
+
+    // The one series the two pieces are, merged the way a consumer of the root's pieces merges
+    // them: positions 0 and 1 of field 0, holding 1 and 3.
+    let merged = merge_same_labelset(
+        &evaluated_schema(Arc::clone(&map_grid)),
+        pieces.into_iter().map(|piece| piece.series).collect(),
+    )
+    .expect("the two pieces hold disjoint positions");
+    assert_eq!(
+        merged.len(),
+        1,
+        "the two pieces did not merge into one logical series"
+    );
+    assert_eq!(
+        merged[0].metric,
+        {
+            let mut mapped = named_metric("a", "x");
+            mapped.remove("__name__");
+            mapped
+        },
+        "the merged series does not carry the label set both pieces produced"
+    );
+    assert_eq!(
+        merged[0]
+            .fields
+            .get(0)
+            .expect("one field")
+            .iter()
+            .map(|sample| match sample {
+                SampleRef::Float(value) => Some(value),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![Some(1.0), Some(3.0)],
+        "the merged series does not hold both pieces' values at their positions"
+    );
+}
+
+#[test]
+fn merge_canonicalizes_complementary_series_and_flushes_only_at_eof() {
+    let grid = grid(0, 1, 2);
+    let tree = NativeTree::try_new(merge(evaluated_input(Arc::clone(&grid)))).unwrap();
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let label = named_metric("same", "x");
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, label.clone(), 0, vec![Some(1.0), None], true),
+        )
+        .unwrap();
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, label, 0, vec![None, Some(2.0)], true),
+        )
+        .unwrap();
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "merge exposed output before EOF"
+    );
+    execution.end_of_input().unwrap();
+    let output = execution.next_chunk().unwrap().unwrap();
+    assert!(output.is_last);
+    let values = output
+        .series
+        .fields
+        .get(0)
+        .unwrap()
+        .iter()
+        .map(|v| match v {
+            SampleRef::Float(x) => Some(x),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(values, vec![Some(1.0), Some(2.0)]);
+    assert!(execution.next_chunk().unwrap().is_none());
+}
+
+/// A parent reads a merge's answer only once the merge has flushed.
+///
+/// `Merge` is the only node that answers nothing until its input ends, so a parent that treats it
+/// as settled would compute over an empty vector. The tree here is the shape that exposes it: two
+/// merges over complementary pieces of one label set, combined by a binary operation. Each side
+/// answers 3 once merged, and the parent answers only at EOF.
+#[test]
+fn a_parent_of_a_merge_waits_for_the_flush() {
+    let grid = grid(0, 1, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(binary_of(
+        merge(evaluated_input_with_source_index(Arc::clone(&grid), 0)),
+        merge(evaluated_input_with_source_index(Arc::clone(&grid), 1)),
+        binary_matching(BinaryOp::Add),
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool());
+    let metric = named_metric("same", "x");
+    // Each side hands its label set over in two complementary pieces, so nothing can be answered
+    // until both arrive and the flush merges them.
+    for source in 0..2 {
+        execution
+            .push_evaluated(
+                InputId::new(source),
+                evaluated_chunk_of(
+                    &schema,
+                    metric.clone(),
+                    0,
+                    vec![Some(1.0), Some(1.0)],
+                    false,
+                ),
+            )
+            .unwrap();
+        execution
+            .push_evaluated(
+                InputId::new(source),
+                evaluated_chunk_of(&schema, metric.clone(), 2, vec![Some(1.0), Some(1.0)], true),
+            )
+            .unwrap();
+    }
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "a merge owes its answer until its input ends, so its parent owes its own"
+    );
+    execution.end_of_input().unwrap();
+    let chunk = execution
+        .next_chunk()
+        .unwrap()
+        .expect("the parent answers once both merges flushed");
+    // A binary operation drops `__name__`, as Prometheus does, so the answer carries the tag both
+    // merged sides shared and no metric name.
+    let mut expected_metric = metric.clone();
+    expected_metric.remove("__name__");
+    assert_eq!(chunk.series.metric, expected_metric);
+    let values = chunk
+        .series
+        .fields
+        .get(0)
+        .expect("one field")
+        .iter()
+        .map(|sample| match sample {
+            SampleRef::Float(value) => Some(value),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        values,
+        vec![Some(2.0), Some(2.0), Some(2.0), Some(2.0)],
+        "each merged side answers 1 at every position, so their sum is 2"
+    );
+    assert!(chunk.is_last);
+    assert!(execution.next_chunk().unwrap().is_none());
+}
+
+#[test]
+fn standalone_merge_keeps_queued_label_bytes_reserved_until_drain() {
+    const SERIES: usize = 64;
+    const LABEL_BYTES: usize = 4 * 1024;
+
+    let grid = grid(0, 1, 16);
+    let tree = NativeTree::try_new(merge(evaluated_input(Arc::clone(&grid)))).unwrap();
+    let schema = evaluated_schema(grid);
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    for index in 0..SERIES {
+        let metric = SeriesLabels::try_new(
+            Some("same".into()),
+            vec![Label {
+                name: "large".into(),
+                value: format!("{index:04}{}", "x".repeat(LABEL_BYTES - 4)).into(),
+            }],
+        )
+        .unwrap();
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(&schema, metric, 0, vec![Some(index as f64)], true),
+            )
+            .unwrap();
+    }
+    execution.end_of_input().unwrap();
+    let first = execution.next_chunk().unwrap().unwrap();
+    assert!(first.is_last);
+    assert!(
+        pool.reserved() >= (SERIES - 1) * LABEL_BYTES,
+        "remaining canonical outputs' labels are not fully reserved: {} bytes",
+        pool.reserved()
+    );
+    for _ in 1..SERIES {
+        assert!(execution.next_chunk().unwrap().is_some());
+    }
+    assert!(execution.next_chunk().unwrap().is_none());
+    assert_eq!(
+        pool.reserved(),
+        0,
+        "draining outputs must release reservations"
+    );
+}
+
+#[test]
+fn standalone_merge_accepts_empty_closing_chunk_and_canonical_empty_input() {
+    let grid = grid(0, 1, 2);
+    let tree = NativeTree::try_new(merge(evaluated_input(Arc::clone(&grid)))).unwrap();
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let label = named_metric("same", "x");
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, label.clone(), 0, vec![Some(1.0)], false),
+        )
+        .unwrap();
+    assert!(execution.next_chunk().unwrap().is_none());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, label, 2, Vec::new(), true),
+        )
+        .unwrap();
+    assert!(execution.next_chunk().unwrap().is_none());
+    execution.end_of_input().unwrap();
+    let output = execution.next_chunk().unwrap().unwrap();
+    assert_eq!(sample_values(&output), vec![Some(1.0)]);
+    assert!(output.is_last);
+    assert!(execution.next_chunk().unwrap().is_none());
+
+    let mut empty = executor(&tree, pool());
+    empty.end_of_input().unwrap();
+    assert!(empty.next_chunk().unwrap().is_none());
+}
+
+#[test]
+fn standalone_merge_rejects_malformed_grid_and_field_shapes() {
+    let merge_grid = grid(0, 1, 2);
+    let tree = NativeTree::try_new(merge(evaluated_input(Arc::clone(&merge_grid)))).unwrap();
+    let schema = evaluated_schema(Arc::clone(&merge_grid));
+
+    let mut wrong_grid = executor(&tree, pool());
+    wrong_grid
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &evaluated_schema(grid(1, 1, 2)),
+                named_metric("same", "x"),
+                0,
+                vec![Some(1.0)],
+                true,
+            ),
+        )
+        .unwrap();
+    assert_eq!(
+        wrong_grid.next_chunk().unwrap_err().to_string(),
+        "Execution error: merge input does not match its input schema"
+    );
+
+    let mut wrong_fields = executor(&tree, pool());
+    let series = Series {
+        metric: named_metric("same", "x"),
+        time: TimeAxis::Grid(GridRange::try_new(Arc::clone(&merge_grid), 0, 1).unwrap()),
+        fields: SeriesFields::try_from_vec(vec![
+            Samples::from_float(Float64Array::from(vec![Some(1.0)])),
+            Samples::from_float(Float64Array::from(vec![Some(2.0)])),
+        ])
+        .unwrap(),
+    };
+    wrong_fields
+        .push_evaluated(
+            InputId::new(0),
+            EvaluatedChunk::try_new(series, true).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        wrong_fields.next_chunk().unwrap_err().to_string(),
+        "Execution error: merge input does not match its input schema"
+    );
+
+    let mut open_at_eof = executor(&tree, pool());
+    open_at_eof
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("same", "x"),
+                0,
+                vec![Some(1.0)],
+                false,
+            ),
+        )
+        .unwrap();
+    assert!(open_at_eof.next_chunk().unwrap().is_none());
+    assert!(open_at_eof.finish().is_err());
+    assert_eq!(open_at_eof.state().reserved_bytes(), 0);
+}
+
+#[test]
+fn standalone_merge_feeds_a_downstream_window_only_after_complete_canonicalization() {
+    let input_grid = grid(0, 1, 2);
+    let output_grid = grid(1, 1, 1);
+    let tree = NativeTree::try_new(window_with(
+        merge(evaluated_input(Arc::clone(&input_grid))),
+        RangeFunction::SumOverTime,
+        2,
+        Some(Arc::clone(&input_grid)),
+        output_grid,
+    ))
+    .unwrap();
+    let schema = evaluated_schema(input_grid);
+    let mut execution = executor(&tree, pool());
+    for (name, values) in [("a", vec![Some(1.0), None]), ("a", vec![None, Some(2.0)])] {
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(&schema, named_metric(name, "x"), 0, values, true),
+            )
+            .unwrap();
+        assert!(execution.next_chunk().unwrap().is_none());
+    }
+    execution.end_of_input().unwrap();
+    let output = execution.next_chunk().unwrap().unwrap();
+    assert_eq!(sample_values(&output), vec![Some(3.0)]);
+    assert!(output.is_last);
+    assert!(execution.next_chunk().unwrap().is_none());
+}
+
+#[test]
+fn standalone_merge_rejects_non_increasing_continuations() {
+    let grid = grid(0, 1, 3);
+    let tree = NativeTree::try_new(merge(evaluated_input(Arc::clone(&grid)))).unwrap();
+    let schema = evaluated_schema(grid);
+    let mut execution = executor(&tree, pool());
+    let label = named_metric("same", "x");
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, label.clone(), 1, vec![Some(1.0)], false),
+        )
+        .unwrap();
+    assert!(execution.next_chunk().unwrap().is_none());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, label, 0, vec![Some(2.0)], true),
+        )
+        .unwrap();
+    let error = execution.next_chunk().unwrap_err();
+    assert!(error.to_string().contains("not increasing"), "{error}");
+}
+
+#[test]
+fn standalone_merge_collection_budget_failure_releases_input_and_stops() {
+    let grid = grid(0, 1, 2);
+    let tree = NativeTree::try_new(merge(evaluated_input(Arc::clone(&grid)))).unwrap();
+    let schema = evaluated_schema(grid);
+    let chunk = evaluated_chunk_of(
+        &schema,
+        named_metric("same", "x"),
+        0,
+        vec![Some(1.0), None],
+        true,
+    );
+    // The input queue is drained before collection grows the merge buffer. The budget is what the
+    // queue charges -- read where the pool admits anything -- so it admits that entry and leaves
+    // nothing for the fragment the collector retains.
+    let queued = {
+        let mut probe = executor(&tree, pool());
+        probe
+            .push_evaluated(InputId::new(0), chunk.clone())
+            .expect("the probe queue admits the chunk");
+        probe.state().reserved_bytes()
+    };
+    assert!(queued > 0, "the queued chunk is not charged for");
+    let pool = bounded_pool(queued);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution
+        .push_evaluated(InputId::new(0), chunk)
+        .expect("input queue admits the incoming fragment");
+    let error = execution
+        .next_chunk()
+        .expect_err("collection requires its own reservation while the input is queued");
+    assert!(
+        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        "{error}"
+    );
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
+    assert!(
+        execution
+            .next_chunk()
+            .unwrap_err()
+            .to_string()
+            .contains("stopped after an earlier error")
+    );
+}
+
+#[test]
+fn standalone_merge_flush_budget_failure_releases_fragments_and_stops() {
+    let grid = grid(0, 1, 2);
+    let tree = NativeTree::try_new(merge(evaluated_input(Arc::clone(&grid)))).unwrap();
+    let schema = evaluated_schema(grid);
+    let chunk = evaluated_chunk_of(
+        &schema,
+        named_metric("same", "x"),
+        0,
+        vec![Some(1.0), None],
+        true,
+    );
+    // What the collector holds once it has absorbed the queued fragment, read where the pool admits
+    // anything: a budget of exactly that admits the collection and leaves nothing for the flush's
+    // workspace.
+    let collected = {
+        let mut probe = executor(&tree, pool());
+        probe
+            .push_evaluated(InputId::new(0), chunk.clone())
+            .expect("the probe queue admits the chunk");
+        assert!(probe.next_chunk().unwrap().is_none());
+        probe.state().reserved_bytes()
+    };
+    assert!(collected > 0, "the collected fragment is not charged for");
+    let pool = bounded_pool(collected);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution
+        .push_evaluated(InputId::new(0), chunk)
+        .expect("source queue admits the input fragment");
+    assert!(execution.next_chunk().unwrap().is_none());
+    assert!(pool.reserved() > 0, "collected fragment was not reserved");
+    execution.end_of_input().unwrap();
+    let error = execution
+        .next_chunk()
+        .expect_err("the merge flush must not exceed the pool");
+    assert!(
+        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        "{error}"
+    );
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
+    let again = execution.next_chunk().unwrap_err();
+    assert!(
+        again.to_string().contains("stopped after an earlier error"),
+        "{again}"
+    );
+}
+
+#[test]
+fn standalone_merge_partial_drain_and_drop_release_queued_output() {
+    let grid = grid(0, 1, 2);
+    let tree = NativeTree::try_new(merge(evaluated_input(Arc::clone(&grid)))).unwrap();
+    let schema = evaluated_schema(grid);
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    for name in ["a", "b"] {
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(
+                    &schema,
+                    named_metric(name, "x"),
+                    0,
+                    vec![Some(1.0), None],
+                    true,
+                ),
+            )
+            .unwrap();
+    }
+    execution.end_of_input().unwrap();
+    let first = execution.next_chunk().unwrap().unwrap();
+    assert!(first.is_last);
+    assert!(
+        pool.reserved() > 0,
+        "the undrained canonical output was not charged"
+    );
+    drop(execution);
+    assert_eq!(pool.reserved(), 0);
+}
+
+#[test]
+fn merge_rejects_overlapping_occupancy() {
+    let grid = grid(0, 1, 2);
+    let tree = NativeTree::try_new(merge(evaluated_input(Arc::clone(&grid)))).unwrap();
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("same", "x"),
+                0,
+                vec![Some(f64::NAN), None],
+                true,
+            ),
+        )
+        .unwrap();
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("same", "x"),
+                0,
+                vec![Some(1.0), None],
+                true,
+            ),
+        )
+        .unwrap();
+    execution.end_of_input().unwrap();
+    assert!(
+        execution.next_chunk().is_err(),
+        "NaN occupancy overlap was accepted"
+    );
+}
+
+/// Two open chunks that share a label set are accepted where no position of a field collides.
+///
+/// `a{job="x"}` and `b{job="x"}` are two series to the input and one label set to `abs`, which
+/// drops the name. Neither piece says it is the last chunk of its series, so the second one arrives
+/// while the first is still open. The two occupy disjoint positions of field 0 — a value at 0 and a
+/// value at 3 — so the label-set check hands both on.
+///
+/// The ordering is contiguous because that is the only ordering this runtime executes: the stream
+/// below is not one a scan produces, since it never closes `a`, and what is checked here is the
+/// occupancy the check reads rather than a delivery order.
+///
+/// This is acceptance by that check, and it is not a merge: this layer passes every chunk through
+/// as it arrives and keeps no sample state that would combine two series. Merging two series under
+/// one label set is [`crate::grid_series::merge_same_labelset`]'s job, and nothing here performs
+/// it.
+#[test]
+fn two_open_series_that_share_a_label_set_are_accepted_when_no_position_collides() {
+    let map_grid = grid(0, 60_000, 4);
+    let tree = NativeTree::try_new(map(
+        evaluated_input_with_ordering(Arc::clone(&map_grid), SeriesOrdering::Contiguous),
+        vec![MathOp::Abs],
+    ))
+    .expect("a map-only tree is legal over a contiguous input");
+    let schema = evaluated_schema(Arc::clone(&map_grid));
+
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("a", "x"),
+                0,
+                vec![Some(-1.0), None],
+                false,
+            ),
+        )
+        .unwrap();
+    let first = execution
+        .next_chunk()
+        .unwrap()
+        .expect("the first open chunk is handed on as it arrives");
+    assert_eq!(sample_values(&first), vec![Some(1.0), None]);
+    assert_eq!(series_start(&first), 0);
+
+    // Positions 2 and 3 of field 0, holding a value at 3 only: no position of the field is
+    // occupied twice, so nothing the check looks at is claimed by both series.
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("b", "x"),
+                2,
+                vec![None, Some(-3.0)],
+                false,
+            ),
+        )
+        .unwrap();
+    let second = execution
+        .next_chunk()
+        .unwrap_or_else(|error| panic!("the second open chunk was refused: {error}"))
+        .expect("the second open chunk is handed on too");
+    assert_eq!(sample_values(&second), vec![None, Some(3.0)]);
+    assert_eq!(series_start(&second), 2);
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "the map handed on more than the two chunks it was given"
+    );
+}
+
+/// A `NaN` is a value and a missing sample is not, so only the `NaN` occupies its position.
+///
+/// `abs` drops the metric name, so the two series below are one label set to the map, which is where
+/// the two are read against each other. A position holding no sample is a position the series never
+/// claimed, and another series may fill it; a position holding a `NaN` is decided and holds a value,
+/// like any other, so a second value there is the collision no merge resolves.
+#[test]
+fn a_nan_occupies_its_position_where_a_missing_sample_does_not() {
+    let map_grid = grid(0, 60_000, 1);
+    let tree = || {
+        NativeTree::try_new(map(
+            evaluated_input_with_ordering(Arc::clone(&map_grid), SeriesOrdering::Contiguous),
+            vec![MathOp::Abs],
+        ))
+        .unwrap()
+    };
+    let schema = evaluated_schema(Arc::clone(&map_grid));
+
+    // The first series' sample at position 0, the second series' sample there, and whether the two
+    // can share the label set `abs` leaves them.
+    let cases = [
+        (vec![Some(f64::NAN)], vec![Some(1.0)], false),
+        (vec![Some(1.0)], vec![Some(f64::NAN)], false),
+        (vec![Some(f64::NAN)], vec![None], true),
+        (vec![Some(1.0)], vec![None], true),
+        (vec![None], vec![Some(f64::NAN)], true),
+    ];
+    // Both chunks are open and neither needs to close: what the check reads is which positions a
+    // chunk occupies, and that does not depend on `is_last`.
+    let drain = |execution: &mut NativeExecutor| -> Result<(), DataFusionError> {
+        while execution.next_chunk()?.is_some() {}
+        Ok(())
+    };
+    for (first, second, accepted) in cases {
+        let mut execution = executor(&tree(), pool());
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(&schema, named_metric("a", "x"), 0, first.clone(), false),
+            )
+            .unwrap();
+        drain(&mut execution).expect("the first open chunk is handed on");
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(&schema, named_metric("b", "x"), 0, second.clone(), false),
+            )
+            .unwrap();
+        let outcome = drain(&mut execution);
+        assert_eq!(
+            outcome.is_ok(),
+            accepted,
+            "{first:?} and {second:?} were {}: {:?}",
+            if accepted { "refused" } else { "handed on" },
+            outcome.err(),
+        );
+    }
+}
+
+/// One series arriving in pieces is not two series: the pieces are merged into the one series they
+/// are, and the window above reports it once.
+///
+/// The map is passed twice for one label set, so the window above collects both pieces and merges
+/// them with [`crate::grid_series::merge_same_labelset`] before it evaluates: the two pieces hold
+/// one position each, the window across them needs both, and answering per piece would close the
+/// first series in the evaluator before the second arrived.
+#[test]
+fn a_series_that_continues_where_it_ended_is_not_a_second_series() {
+    let inner_grid = grid(0, 60_000, 4);
+    let outer_grid = grid(180_000, 60_000, 1);
+    let tree = NativeTree::try_new(window_with(
+        map(evaluated_input(Arc::clone(&inner_grid)), vec![MathOp::Abs]),
+        RangeFunction::AvgOverTime,
+        360_000,
+        Some(Arc::clone(&inner_grid)),
+        Arc::clone(&outer_grid),
+    ))
+    .unwrap();
+    let schema = evaluated_schema(Arc::clone(&inner_grid));
+
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("a", "x"),
+                0,
+                vec![Some(-1.0), None],
+                false,
+            ),
+        )
+        .unwrap();
+    // Nothing comes out of the collecting window before its input ended, and the piece here does
+    // not end it.
+    while let Some(chunk) = execution.next_chunk().unwrap() {
+        assert!(
+            !chunk.is_last,
+            "the series cannot close before its last chunk"
+        );
+    }
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("a", "x"),
+                2,
+                vec![None, Some(-3.0)],
+                true,
+            ),
+        )
+        .unwrap();
+    let out = run(&mut execution);
+    assert_eq!(
+        decided(&out),
+        vec![(0, Some(2.0))],
+        "the two chunks of one series are one series to the window above the map"
+    );
+    assert!(out.last().unwrap().is_last);
+}
+
+/// A window reserves what it retains, not what it has consumed.
+///
+/// A long series is fed one sample per chunk to a pool with a fixed budget, pulling and dropping the
+/// result of every chunk and closing only on the last one. The same one-sample-per-chunk input
+/// leaves the evaluator's storage at the same size however many chunks it arrives in, so the peak
+/// reservation is the same whether the data is split into 64 chunks or into 1024, and it stays a
+/// small constant rather than the running total of what arrived. A figure charged per chunk
+/// consumed would grow with the chunk count and exhaust the budget the first chunks fit in.
+#[test]
+fn a_window_reserves_what_it_retains_not_what_it_consumed() {
+    // A 1 ms window on a 1 ms grid, so every chunk's sample is out of the window of the next one.
+    let tree = || {
+        NativeTree::try_new(window_with(
+            input(),
+            RangeFunction::LastOverTime,
+            1,
+            None,
+            grid(0, 1, 1024),
+        ))
+        .unwrap()
+    };
+    let schema = raw_schema();
+
+    let peak = |count: usize| {
+        let pool = bounded_pool(32 << 10);
+        let mut execution = executor(&tree(), Arc::clone(&pool));
+        let mut peak = 0;
+        for index in 0..count {
+            execution
+                .push_raw(
+                    InputId::new(0),
+                    raw_chunk(
+                        &schema,
+                        &[index as i64],
+                        &[index as f64],
+                        index + 1 == count,
+                    ),
+                )
+                .unwrap_or_else(|error| {
+                    panic!("chunk {index} of the {count}-chunk series did not fit: {error}")
+                });
+            // The output of every chunk is dropped: a consumer reading the series as it arrives
+            // never holds it, and neither may the node.
+            drop(execution.next_chunk().unwrap_or_else(|error| {
+                panic!("chunk {index} of the {count}-chunk series did not fit: {error}")
+            }));
+            let held = execution.state().reserved_bytes();
+            assert_eq!(
+                held,
+                pool.reserved(),
+                "chunk {index} of {count}: the state and the pool disagree on what is held"
+            );
+            assert!(
+                held <= (8 << 10),
+                "chunk {index} of {count} holds {held} bytes of a 1 ms window over one sample"
+            );
+            peak = peak.max(held);
+        }
+        peak
+    };
+    let short = peak(64);
+    let long = peak(1024);
+    assert_eq!(
+        short, long,
+        "the reservation grew with the number of chunks the same series arrived in"
+    );
+}
+
+/// A window's retention is per field, as the evaluator's storage is.
+///
+/// The same one-sample-per-chunk input goes to a window over one float field, over two and over
+/// three. Every field costs its own timestamps, values and row slot, so the reservation a window
+/// reaches grows with the width of the series; a figure counting one timestamp and one float per
+/// row, or one field per series, would not.
+#[test]
+fn a_window_retains_the_samples_of_every_field() {
+    // The most the window ever retained, over the same input and the same short window.
+    let peak = |width: usize| -> usize {
+        let tree = NativeTree::try_new(window_over_fields(width, grid(0, 1, 1024))).unwrap();
+        let schema = raw_schema_of(field_count(width));
+        let mut execution = executor(&tree, pool());
+        let (count, mut peak) = (8, 0);
+        for index in 0..count {
+            execution
+                .push_raw(
+                    InputId::new(0),
+                    raw_chunk_repeated(
+                        &schema,
+                        &[index as i64],
+                        &[index as f64],
+                        index + 1 == count,
+                    ),
+                )
+                .unwrap();
+            drop(execution.next_chunk().unwrap());
+            peak = peak.max(execution.state().reserved_bytes());
+        }
+        peak
+    };
+    let (one, two, three) = (peak(1), peak(2), peak(3));
+    assert!(
+        two > one,
+        "a window over two fields reserved {two} bytes, no more than the {one} bytes a window over \
+         one field reserves"
+    );
+    assert!(
+        three > two,
+        "a window over three fields reserved {three} bytes, no more than the {two} bytes a window \
+         over two fields reserves"
+    );
+}
+
+/// A chunk that produces nothing still leaves the table this node emitted into in its hands.
+///
+/// The first chunk decided both grid points and the window handed them out, so the table holds a
+/// label set and its runs. The second chunk decides nothing — every point was already decided — so
+/// the window yields no chunk, but it has given none of that history back: the reservation has to
+/// keep covering the table, not drop it.
+#[test]
+fn a_chunk_with_no_output_keeps_charging_the_emitted_table() {
+    let tree = NativeTree::try_new(window_with(
+        input(),
+        RangeFunction::LastOverTime,
+        1,
+        None,
+        grid(0, 60_000, 2),
+    ))
+    .unwrap();
+    let schema = raw_schema();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+
+    execution
+        .push_raw(
+            InputId::new(0),
+            raw_chunk(&schema, &[0, 60_000], &[1.0, 2.0], false),
+        )
+        .unwrap();
+    let first = execution
+        .next_chunk()
+        .unwrap()
+        .expect("the first chunk decided both points");
+    assert_eq!(sample_values(&first), vec![Some(1.0), Some(2.0)]);
+    drop(first);
+    let after_output = execution.state().reserved_bytes();
+    assert!(
+        after_output > 0,
+        "the window handed out a position, which it has to hold"
+    );
+    assert_eq!(after_output, pool.reserved());
+
+    // Both points are decided, so this chunk decides nothing and the window yields no chunk.
+    execution
+        .push_raw(
+            InputId::new(0),
+            raw_chunk(&schema, &[120_000], &[3.0], false),
+        )
+        .unwrap();
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "a chunk after every point was decided produced a chunk"
+    );
+    assert!(
+        execution.state().reserved_bytes() > 0,
+        "a chunk with no output released the bytes the emitted table still holds"
+    );
+    assert_eq!(execution.state().reserved_bytes(), pool.reserved());
+}
+
+/// A window cannot run over an interleaved input, and the runtime says so before reading a chunk.
+///
+/// The binding refuses a window whose own input declares the ordering, and the runtime refuses the
+/// ordering itself -- which is what catches a window over a map over the source, where the binding
+/// only sees the map. A tree with no window above the source is refused by the same check, since
+/// every node here reads one series at a time; [`an_interleaved_input_is_refused_without_a_window`]
+/// is that case on its own.
+#[test]
+fn a_window_over_an_interleaved_input_is_rejected() {
+    let inner_grid = grid(0, 60_000, 2);
+    let outer_grid = grid(0, 120_000, 1);
+    let tree = NativeTree::try_new(window_with(
+        evaluated_input_with_ordering(Arc::clone(&inner_grid), SeriesOrdering::Interleaved),
+        RangeFunction::LastOverTime,
+        120_000,
+        Some(Arc::clone(&inner_grid)),
+        Arc::clone(&outer_grid),
+    ));
+    // A window directly over an interleaved source is rejected when the tree is bound: the
+    // binding is where the ordering is known, and refusing there fails before a chunk is read.
+    let error = tree.expect_err("a window over an interleaved input must not bind");
+    // A rejected tree is a compiler defect rather than a query error, so the binding reports it as
+    // `Internal`; what this pins is that the refusal names the ordering it came from rather than
+    // the node kind, since the same check refuses every input that declares it.
+    assert!(matches!(error, DataFusionError::Internal(_)), "{error}");
+    let message = error.to_string();
+    assert!(message.contains("interleaved"), "{message}");
+
+    // A map between them is not caught by the binding, which only looks at a window's own input:
+    // the map passes chunks through in the order they arrive, so the window still reads an
+    // interleaved stream. That is what this runtime checks for itself.
+    let tree = NativeTree::try_new(window_with(
+        map(
+            evaluated_input_with_ordering(Arc::clone(&inner_grid), SeriesOrdering::Interleaved),
+            vec![MathOp::Abs],
+        ),
+        RangeFunction::LastOverTime,
+        120_000,
+        Some(Arc::clone(&inner_grid)),
+        Arc::clone(&outer_grid),
+    ))
+    .expect("the binding accepts a window over a map");
+    let error = match NativeExecutionState::try_new(&tree, pool(), None) {
+        Ok(_) => panic!("the runtime accepted an interleaved input under a window"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(error, DataFusionError::NotImplemented(_)),
+        "{error}"
+    );
+    let message = error.to_string();
+    assert!(message.contains("Interleaved"), "{message}");
+}
+
+/// An interleaved input is refused with no window above it to notice it.
+///
+/// A map over an input has no evaluator, so nothing in the tree reads one series to its `is_last`.
+/// The sequence the input node cannot tell from a whole one is `a{job="x"}` open, `b{job="y"}`
+/// closed, and the end of the input: the flag that reports a series left open would say the last
+/// chunk closed its series and `finish` would accept an input whose first series never closed. The
+/// runtime therefore refuses the ordering when the state is built, before a chunk is read, instead
+/// of reporting a truncation it cannot see.
+#[test]
+fn an_interleaved_input_is_refused_without_a_window() {
+    let map_grid = grid(0, 60_000, 2);
+    let tree = NativeTree::try_new(map(
+        evaluated_input_with_ordering(Arc::clone(&map_grid), SeriesOrdering::Interleaved),
+        vec![MathOp::Abs],
+    ))
+    .expect("the binding accepts a map over an interleaved input");
+    let error = match NativeExecutionState::try_new(&tree, pool(), None) {
+        Ok(_) => panic!("the runtime accepted an interleaved input with no window above it"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(error, DataFusionError::NotImplemented(_)),
+        "{error}"
+    );
+    let message = error.to_string();
+    assert!(message.contains("Interleaved"), "{message}");
+}
+
+/// A selection over an interleaved input is refused when the tree is bound, before it can run.
+///
+/// The binding is where the ordering is known, and the plan's `Instant` arm refuses an input that
+/// declares `Interleaved` for the reason the window arm does: a selection's consumer collects one
+/// series' chunks into one buffer, so it reads a series to its last chunk before the next. Nothing
+/// about an interleaved input is therefore left to the runtime along a selection, and the tree
+/// never reaches [`NativeExecutionState::try_new`]. The ordering check there stays for the shape
+/// the binding cannot see through: it only looks at a window's own input, so a window over a map
+/// over the source still reads an interleaved stream, which is
+/// [`a_window_over_an_interleaved_input_is_rejected`]. The shape with a map above the selection is
+/// [`an_interleaved_input_is_refused_under_a_map_over_a_selection`].
+#[test]
+fn an_interleaved_input_is_refused_under_a_selection() {
+    let out_grid = grid(0, 60_000, 2);
+    let error = NativeTree::try_new(instant(
+        raw_input_with_ordering(SeriesOrdering::Interleaved),
+        60_000,
+        0,
+        Arc::clone(&out_grid),
+    ))
+    .expect_err("a selection over an interleaved input must not bind");
+    // A rejected tree is a compiler defect rather than a query error, so the binding reports it as
+    // `Internal`; what this pins is that the refusal names the ordering it came from, since the
+    // same check refuses a window over the same input.
+    assert!(matches!(error, DataFusionError::Internal(_)), "{error}");
+    let message = error.to_string();
+    assert!(
+        message.contains("interleaved chunks cannot be fed to it"),
+        "{message}"
+    );
+}
+
+/// The same refusal with a map above the selection.
+///
+/// The tree here is `Input -> Instant -> Map`: the map sits above the selection, and the selection
+/// reads the interleaved input directly. A map between the input and the selection is not a tree
+/// this compiler can build at all -- a `Map` produces an evaluated vector while an instant
+/// selection requires raw samples, and the plan's `Instant` arm rejects evaluated values -- so what
+/// this test pins is the recursion: `validate` descends through the outer map to the selection
+/// below it, whose own arm then refuses the input it reads, and the tree is refused at the same
+/// point as [`an_interleaved_input_is_refused_under_a_selection`].
+#[test]
+fn an_interleaved_input_is_refused_under_a_map_over_a_selection() {
+    let out_grid = grid(0, 60_000, 2);
+    let error = NativeTree::try_new(map(
+        instant(
+            raw_input_with_ordering(SeriesOrdering::Interleaved),
+            60_000,
+            0,
+            Arc::clone(&out_grid),
+        ),
+        vec![MathOp::Abs],
+    ))
+    .expect_err("a map over a selection over an interleaved input must not bind");
+    assert!(matches!(error, DataFusionError::Internal(_)), "{error}");
+    let message = error.to_string();
+    assert!(
+        message.contains("interleaved chunks cannot be fed to it"),
+        "{message}"
+    );
+}
+
+/// A series that produced values under a label set, followed by one that produced none under the
+/// same label set, is not a collision: the second contributes no sample, so the answer is just the
+/// first one's values.
+///
+/// This is the other order of [`two_series_with_no_result_do_not_collide`]: a series that produced
+/// values under a label set, followed by one that produced none. The empty one occupies no
+/// position, so it records nothing and changes nothing, and the answer is the first one's values.
+///
+/// The first series closed, which closes the source series and not the label set: the empty series
+/// is a later one that also answers empty, and
+/// [`an_empty_closing_chunk_of_another_series_does_not_close_a_label_set`] is its mirror image.
+#[test]
+fn a_series_with_no_result_after_a_closed_one_is_passed_over() {
+    let map_grid = grid(0, 60_000, 1);
+    let tree = NativeTree::try_new(map(
+        evaluated_input(Arc::clone(&map_grid)),
+        vec![MathOp::Abs],
+    ))
+    .unwrap();
+    let schema = evaluated_schema(Arc::clone(&map_grid));
+    let mut execution = executor(&tree, pool());
+
+    // `abs` drops the name, so both series arrive under the same label set. The first holds a
+    // value; the second holds none at all and has to be passed over rather than refused.
+    for (name, values) in [("a", vec![Some(-7.0)]), ("b", vec![None])] {
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(&schema, named_metric(name, "x"), 0, values, true),
+            )
+            .unwrap();
+    }
+
+    let mut handed = Vec::new();
+    loop {
+        match execution.next_chunk() {
+            Ok(Some(chunk)) => handed.push(decided(&[chunk])),
+            Ok(None) => break,
+            Err(error) => panic!("an empty series after a closed one was refused: {error}"),
+        }
+    }
+    assert!(
+        handed
+            .iter()
+            .flatten()
+            .any(|(_, value)| *value == Some(7.0)),
+        "the first series' value is missing: {handed:?}"
+    );
+}
+
+/// An empty closing chunk of one series does not close a label set another series is still filling.
+///
+/// `abs` drops the metric name, so `a{job="x"}` and `b{job="x"}` are one label set to the map. `b`
+/// holds no row at all: its closing chunk closes a series that contributed nothing, so it must not
+/// close the set `a` opened, or `a`'s continuation would be refused for a label set that `a` itself
+/// never closed. Two series back to back are what contiguous input hands over, so this is a stream
+/// the runtime executes rather than an ordering it refuses.
+#[test]
+fn an_empty_closing_chunk_of_another_series_does_not_close_a_label_set() {
+    let map_grid = grid(0, 60_000, 2);
+    let tree = NativeTree::try_new(map(
+        evaluated_input(Arc::clone(&map_grid)),
+        vec![MathOp::Abs],
+    ))
+    .unwrap();
+    let schema = evaluated_schema(Arc::clone(&map_grid));
+    let mut execution = executor(&tree, pool());
+
+    // `a` opens the label set and has not closed it when `b` closes an empty series onto it, and the
+    // chunk that closes `a` itself comes last.
+    let chunks = [
+        evaluated_chunk_of(&schema, named_metric("a", "x"), 0, vec![Some(-1.0)], false),
+        evaluated_chunk_of(&schema, named_metric("b", "x"), 0, vec![], true),
+        evaluated_chunk_of(&schema, named_metric("a", "x"), 1, vec![Some(-2.0)], true),
+    ];
+    let steps = chunks.len();
+    let mut handed = Vec::new();
+    for (step, chunk) in chunks.into_iter().enumerate() {
+        execution.push_evaluated(InputId::new(0), chunk).unwrap();
+        while let Some(chunk) = execution
+            .next_chunk()
+            .unwrap_or_else(|error| panic!("step {step} was refused: {error}"))
+        {
+            handed.push(chunk);
+        }
+    }
+    assert_eq!(
+        handed.len(),
+        steps,
+        "the map did not consume all {steps} chunks it was given: {:?}",
+        decided(&handed)
+    );
+    let last = handed.last().expect("the map handed nothing on");
+    assert!(last.is_last, "the final output does not close its series");
+    // `abs` drops the metric name, so the label set the output closes is `{job="x"}`.
+    let mut mapped = named_metric("a", "x");
+    mapped.remove("__name__");
+    assert_eq!(
+        last.series.metric, mapped,
+        "the final output closes a label set other than the one `abs` leaves of `a{{job=\"x\"}}`"
+    );
+    assert_eq!(
+        (series_start(last), sample_values(last)),
+        (1, vec![Some(2.0)]),
+        "the value `a` held at position 1 did not survive"
+    );
+    assert!(
+        execution.finish().unwrap().is_empty(),
+        "the map still held a chunk when the input ended"
+    );
+}
+
+/// Two series that each produce no value at all are not a collision: both answer empty, and the
+/// node hands nothing on rather than refusing the second one.
+///
+/// `rate` over a five-minute window with one sample in it has no result, in the single-point and
+/// the batch kernel alike. Both series then arrive as a closing chunk of missing values under the
+/// same label set -- `rate` drops the name -- but neither holds a sample, so there is nothing to
+/// report twice and nothing to merge.
+#[test]
+fn two_series_with_no_result_do_not_collide() {
+    let out = grid(0, 60_000, 1);
+    let tree = NativeTree::try_new(window_with(
+        input(),
+        RangeFunction::Rate,
+        300_000,
+        None,
+        Arc::clone(&out),
+    ))
+    .unwrap();
+    let schema = raw_schema();
+    let mut execution = executor(&tree, pool());
+
+    // One sample each: rate over a 5m window with a single sample has no result.
+    for name in ["a", "b"] {
+        execution
+            .push_raw(
+                InputId::new(0),
+                raw_chunk_of(
+                    &schema,
+                    name.as_bytes(),
+                    SeriesLabels::try_new(Some(name.into()), vec![]).unwrap(),
+                    &[0],
+                    &[1.0],
+                    true,
+                ),
+            )
+            .unwrap();
+    }
+    let mut handed = Vec::new();
+    loop {
+        match execution.next_chunk() {
+            Ok(Some(chunk)) => handed.push(decided(&[chunk])),
+            Ok(None) => break,
+            Err(error) => panic!("two empty series were refused: {error}"),
+        }
+    }
+    assert!(
+        handed.iter().flatten().all(|(_, value)| value.is_none()),
+        "a series with no result handed a value on: {handed:?}"
+    );
+}
+
+/// A chunk of `metric` whose rows are the `spans` of `schema`'s grid, with `values` row by row.
+///
+/// This is what a producer that decided only some positions hands over: the rows are absolute grid
+/// positions and need not be adjacent, so a consumer that reads them as `start + row` names
+/// positions the chunk does not hold.
+fn sparse_chunk(
+    schema: &SeriesSchema,
+    metric: SeriesLabels,
+    spans: &[(usize, usize)],
+    values: Vec<f64>,
+    is_last: bool,
+) -> EvaluatedChunk {
+    let samples = Samples::from_float(Float64Array::from(values));
+    let time = TimeAxis::from_grid_spans(
+        Arc::clone(schema.eval_grid.as_ref().unwrap()),
+        spans
+            .iter()
+            .map(|&(start, len)| GridSpan::new(start, len))
+            .collect(),
+    )
+    .unwrap();
+    let series = Series {
+        metric,
+        time,
+        fields: SeriesFields::try_from_vec(vec![samples]).unwrap(),
+    };
+    EvaluatedChunk::try_new(series, is_last).unwrap()
+}
+
+#[test]
+fn a_sparse_chunk_is_read_at_the_positions_it_holds_through_window_map_window() {
+    // An inner series that decided positions 0, 1 and 5, 6 of an eight-point grid and left the
+    // positions between them empty: two runs, not six rows with holes.
+    let inner_grid = grid(0, 60_000, 8);
+    let middle_grid = grid(0, 60_000, 8);
+    let outer_grid = grid(0, 120_000, 4);
+    let tree = NativeTree::try_new(window_with(
+        map(
+            window_with(
+                evaluated_input(Arc::clone(&inner_grid)),
+                RangeFunction::LastOverTime,
+                // One step exactly, so the window is the identity: each point reads the sample at
+                // its own position and nothing else.
+                60_000,
+                Some(Arc::clone(&inner_grid)),
+                Arc::clone(&middle_grid),
+            ),
+            vec![MathOp::Abs],
+        ),
+        RangeFunction::LastOverTime,
+        240_000,
+        Some(Arc::clone(&middle_grid)),
+        Arc::clone(&outer_grid),
+    ))
+    .unwrap();
+    let schema = evaluated_schema(Arc::clone(&inner_grid));
+    let chunk = sparse_chunk(
+        &schema,
+        metric(),
+        &[(0, 2), (5, 2)],
+        vec![1.0, 2.0, 3.0, 4.0],
+        true,
+    );
+
+    let mut execution = executor(&tree, pool());
+    execution.push_evaluated(InputId::new(0), chunk).unwrap();
+    let out = run(&mut execution);
+
+    // The outer window's points: every one of them has a sample in its range, so every one holds
+    // the last value its window saw. 4.0 sits at 360 s, inside the window that ends there, which
+    // is why the sparse tail is not lost between the runs.
+    assert_eq!(
+        decided(&out),
+        vec![
+            (0, Some(1.0)),
+            (1, Some(2.0)),
+            (2, Some(2.0)),
+            (3, Some(4.0)),
+        ]
+    );
+    assert_eq!(out.iter().filter(|chunk| chunk.is_last).count(), 1);
+}
+
+#[test]
+fn a_sparse_chunk_occupies_only_the_positions_it_holds() {
+    let map_grid = grid(0, 60_000, 8);
+    let tree = NativeTree::try_new(map(
+        evaluated_input(Arc::clone(&map_grid)),
+        vec![MathOp::Abs],
+    ))
+    .unwrap();
+    let schema = evaluated_schema(Arc::clone(&map_grid));
+
+    let mut execution = executor(&tree, pool());
+    // Series a holds positions 0, 1 and 5, 6: two runs with a hole in the middle, not one run
+    // covering the hole.
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            sparse_chunk(
+                &schema,
+                named_metric("a", "x"),
+                &[(0, 2), (5, 2)],
+                vec![-1.0, -2.0, -3.0, -4.0],
+                false,
+            ),
+        )
+        .unwrap();
+    execution
+        .next_chunk()
+        .unwrap()
+        .expect("the first open chunk is handed on as it arrives");
+
+    // Position 2 sits in the hole, so series b occupies it and collides with nothing a holds.
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            sparse_chunk(&schema, named_metric("b", "x"), &[(2, 1)], vec![-5.0], true),
+        )
+        .unwrap();
+    execution
+        .next_chunk()
+        .unwrap_or_else(|error| panic!("the series in the hole was refused: {error}"))
+        .expect("the second series is handed on");
+}
+
+/// What an operation that empties every position hands on: nothing while the series is open, and
+/// one empty chunk when it closes.
+///
+/// The two are not interchangeable. A non-closing empty chunk is rejected by a downstream evaluator
+/// (an empty delivery inside a series decides nothing), and dropping the closing one would leave
+/// the consumer unable to tell "nothing more here" from "no more input", so the series would never
+/// close and `finish` would report an input that ended mid-series.
+#[test]
+fn an_emptying_operation_hands_on_nothing_until_it_closes_the_series() {
+    let inner_grid = grid(0, 60_000, 4);
+    let outer_grid = grid(0, 120_000, 2);
+    // `clamp` with `max < min` empties every field of every chunk it sees.
+    let emptying = vec![MathOp::Clamp { min: 1.0, max: 0.0 }];
+    let tree = NativeTree::try_new(window_with(
+        map(evaluated_input(Arc::clone(&inner_grid)), emptying.clone()),
+        RangeFunction::LastOverTime,
+        120_000,
+        Some(Arc::clone(&inner_grid)),
+        Arc::clone(&outer_grid),
+    ))
+    .unwrap();
+    let schema = evaluated_schema(Arc::clone(&inner_grid));
+
+    let mut execution = executor(&tree, pool());
+    // An open chunk that maps to nothing yields nothing at all: it is not handed to the window,
+    // which would refuse an empty delivery inside a series.
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk(&schema, 0, vec![5.0, 6.0], false),
+        )
+        .unwrap();
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "an emptying map handed on a chunk for a series still open"
+    );
+
+    // The closing chunk still closes: one empty chunk reaches the window and closes the series.
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk(&schema, 2, vec![7.0, 8.0], true),
+        )
+        .unwrap();
+    let mut out = Vec::new();
+    while let Some(chunk) = execution.next_chunk().unwrap() {
+        out.push(chunk);
+    }
+    out.extend(execution.finish().expect("the window closed its series"));
+
+    assert_eq!(
+        out.len(),
+        1,
+        "an emptying series handed on more than the one chunk that closes it"
+    );
+    assert!(
+        out.iter().all(|chunk| chunk.series.time.is_empty()),
+        "the outer window produced a value for a series that held none"
+    );
+    assert_eq!(
+        out.iter().filter(|chunk| chunk.is_last).count(),
+        1,
+        "the series closed a number of times other than once"
+    );
+    assert!(out.last().unwrap().is_last);
+}
+
+/// A tree with no window reports an input that ended mid-series as a truncated input.
+///
+/// A window's evaluator is what knows a series has not closed: it holds the series until the chunk
+/// carrying `is_last`, so closing the execution over what is left reports the input that never
+/// delivered it. A tree of an input alone, or of a map over one, has no evaluator at all, so
+/// without the input node saying so the series would reach the consumer open and never close. The
+/// input node is the only place that sees every chunk the caller queued, so the truncation is
+/// reported against it, for a tree of one node and for one with a map above it alike.
+#[test]
+fn an_input_that_ends_mid_series_is_reported_without_a_window() {
+    let map_grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&map_grid));
+    let shapes = [
+        // The input alone, and the same input under a map: neither has a window above it.
+        ("an input", evaluated_input(Arc::clone(&map_grid))),
+        (
+            "a map over an input",
+            map(evaluated_input(Arc::clone(&map_grid)), vec![MathOp::Abs]),
+        ),
+    ];
+    for (what, root) in shapes {
+        let tree = NativeTree::try_new(root).unwrap();
+        let mut execution = executor(&tree, pool());
+        // A chunk that does not close its series: the chunk carrying `is_last` never arrives.
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk(&schema, 0, vec![-1.0, -2.0], false),
+            )
+            .unwrap();
+        let handed = execution
+            .next_chunk()
+            .unwrap()
+            .expect("a chunk of a series still open is handed on as it arrives");
+        assert!(
+            !handed.is_last,
+            "{what} handed on a chunk that closed a series it never closed"
+        );
+        let error = execution
+            .finish()
+            .expect_err("an input that ended mid-series was accepted");
+        assert!(
+            error
+                .to_string()
+                .contains("ended before the last chunk of a series"),
+            "{what} reported {error} instead of a truncated input"
+        );
+    }
+}
+
+/// A window over native histograms reserves what it retains, payload included.
+///
+/// A chunk is estimated from the samples it holds rather than from one float per field and row, so a
+/// histogram field -- which holds no float at all -- reaches the figure as the table its indices point
+/// into. A window over such a series therefore reserves for the payload it keeps, and a one-sample
+/// histogram chunk is worth more than a one-sample float chunk of the same shape.
+#[test]
+fn a_window_over_histograms_reserves_what_it_retains() {
+    let out = grid(0, 10_000, 2);
+    let tree = NativeTree::try_new(window_with(
+        input(),
+        RangeFunction::LastOverTime,
+        20_000,
+        None,
+        Arc::clone(&out),
+    ))
+    .unwrap();
+    let schema = raw_schema();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+
+    for (timestamp, is_last) in [(0, false), (10_000, true)] {
+        execution
+            .push_raw(
+                InputId::new(0),
+                raw_histogram_chunk(&schema, &[timestamp], 2, is_last),
+            )
+            .unwrap();
+        while execution.next_chunk().unwrap().is_some() {}
+        assert_eq!(
+            execution.state().reserved_bytes(),
+            pool.reserved(),
+            "the state and the pool disagree on what the window holds"
+        );
+        assert!(
+            pool.reserved() > 0,
+            "a window over a histogram series reserves for nothing"
+        );
+    }
+
+    // The table the indices point into is what the field costs, so the same one-sample chunk is
+    // worth more as a histogram than as a float.
+    let histogram = raw_histogram_chunk(&schema, &[0], 2, true);
+    let float = raw_chunk(&schema, &[0], &[1.0], true);
+    assert!(
+        raw_bytes(&histogram) > raw_bytes(&float),
+        "a histogram chunk is estimated at {} bytes, no more than the {} bytes of a float chunk of \
+         the same shape",
+        raw_bytes(&histogram),
+        raw_bytes(&float),
+    );
+}
+
+/// A source reserves the estimate of every queued chunk, and gives each one back as it leaves.
+///
+/// The figure is symmetric: what a chunk added when it entered is what comes out when it leaves, so a
+/// queue that empties returns its reservation to the pool exactly. Two chunks of one series may share
+/// one immutable histogram table, and each of them is charged for it: the estimate is per chunk, which
+/// costs a bounded over-count of a shared table rather than a pass over the queue per operation.
+#[test]
+fn a_source_charges_its_queue_and_gives_it_back() {
+    let pool = pool();
+    let mut source = source_runtime(&pool);
+    let schema = raw_schema();
+    let mut builder = HistogramBatchBuilder::new();
+    let index = push_histogram(&mut builder, 2);
+    let table = builder.finish().unwrap();
+    let first = raw_shared_histogram_chunk(&schema, &table, index, 0, false);
+    let second = raw_shared_histogram_chunk(&schema, &table, index, 10_000, true);
+    let (first_bytes, second_bytes) = (raw_bytes(&first), raw_bytes(&second));
+
+    source.enqueue(NativeChunk::Raw(first)).unwrap();
+    assert_eq!(source.state.buffer.reservation.size(), first_bytes);
+    assert_eq!(pool.reserved(), first_bytes);
+
+    source.enqueue(NativeChunk::Raw(second)).unwrap();
+    assert_eq!(
+        source.state.buffer.reservation.size(),
+        first_bytes + second_bytes,
+        "the queue is not the sum of the estimates it holds"
+    );
+    assert_eq!(pool.reserved(), first_bytes + second_bytes);
+
+    let popped = source
+        .pop_source()
+        .unwrap()
+        .expect("the queue held two chunks");
+    assert!(!popped.is_last());
+    // One table, two queued chunks, two shares of its estimate: what leaves is what the chunk that
+    // left was charged, and the other chunk's share stays.
+    assert_eq!(
+        source.state.buffer.reservation.size(),
+        second_bytes,
+        "the chunk that left did not give its estimate back"
+    );
+    assert_eq!(pool.reserved(), second_bytes);
+
+    source
+        .pop_source()
+        .unwrap()
+        .expect("the queue held two chunks");
+    assert_eq!(source.state.buffer.reservation.size(), 0);
+    assert_eq!(
+        pool.reserved(),
+        0,
+        "the queue emptied, but the pool holds its bytes"
+    );
+    assert!(source.pop_source().unwrap().is_none());
+}
+
+/// Dropping a node drops its queue and returns the reservation once.
+///
+/// A node stopped with chunks still queued holds nothing afterwards: the queue goes, and the bytes it
+/// was reserved for go back to the pool rather than staying held for as long as the caller keeps the
+/// stopped executor alive.
+#[test]
+fn dropping_a_node_drops_its_queue() {
+    let pool = pool();
+    let mut source = source_runtime(&pool);
+    let schema = raw_schema();
+    let mut builder = HistogramBatchBuilder::new();
+    let index = push_histogram(&mut builder, 2);
+    let table = builder.finish().unwrap();
+    for timestamp in [0, 10_000] {
+        source
+            .enqueue(NativeChunk::Raw(raw_shared_histogram_chunk(
+                &schema, &table, index, timestamp, false,
+            )))
+            .unwrap();
+    }
+    assert!(pool.reserved() > 0);
+
+    let metrics = ExecutionPlanMetricsSet::new();
+    source.state.buffer.metrics.register("source", &metrics, 0);
+    drop(source);
+    assert_eq!(pool.reserved(), 0, "the reservation was not returned");
+    assert_eq!(gauge(&metrics, "native.source.current_reserved_bytes"), 0);
+    assert!(gauge(&metrics, "native.p0.source.peak_reserved_bytes") > 0);
+}
+
+/// A chunk whose axis and fields disagree is refused, not read past the end of a field.
+///
+/// [`Series`] keeps its fields public, so a chunk built by struct literal -- by a caller of this
+/// crate as much as by a mistake here -- can carry fewer samples than the axis places rows. The
+/// label-set ledger reads every row the axis names, so it is where such a chunk would be read out of
+/// bounds; it reports the misalignment against the node that was handed it instead.
+#[test]
+fn a_series_whose_axis_and_fields_disagree_is_rejected() {
+    let grid = grid(0, 60_000, 4);
+    // Two samples placed on a four-row axis: the third row the axis names has nothing to read.
+    let samples = Samples::from_float(Float64Array::from(vec![1.0, 2.0]));
+    let time = TimeAxis::Grid(GridRange::try_new(Arc::clone(&grid), 0, 4).unwrap());
+    let series = Series {
+        metric: named_metric("requests", "job"),
+        time,
+        fields: SeriesFields::try_from_vec(vec![samples]).unwrap(),
+    };
+    let chunk = EvaluatedChunk::try_new(series, false).expect("the axis is addressed on a grid");
+
+    let mut emitted = Emitted::default();
+    let error = emitted
+        .occupy(&chunk)
+        .expect_err("a field with fewer samples than the axis places rows was accepted");
+    let message = error.to_string();
+    assert!(
+        message.contains("misaligned")
+            && message.contains("4 rows")
+            && message.contains("2 samples"),
+        "the rejection does not name what the axis places against what the field holds: {message}"
+    );
+}
+
+/// A sparse series that only ever moves forward is appended to its history, not merged into it again
+/// chunk after chunk.
+///
+/// One legal series arrives as eight chunks of one position each, every position a hole apart from
+/// the last: no label set is reached twice, no position of a field is occupied twice, and this is
+/// what a scan produces as its positions advance. The stored runs still grow by one per chunk, so
+/// rebuilding the array after each chunk moves `K(K+1)/2` runs to hold `K` rows of real data, which
+/// is the cost this asserts away.
+///
+/// The chunks go through [`super::Emitted::occupy`], the helper the runtime records an output with,
+/// so what is checked is the history that helper keeps. Three shapes are pushed: chunks landing past
+/// every stored run, which have to be appended to; a chunk starting where the last stored run ends,
+/// which has to be joined to it rather than left beside it; and chunks landing before what is
+/// stored, which cannot be appended to and have to go through the full merge while still leaving the
+/// history sorted and disjoint.
+#[test]
+fn a_sparse_series_that_moves_forward_is_appended_to_its_history() {
+    let map_grid = grid(0, 60_000, 21);
+    let schema = evaluated_schema(Arc::clone(&map_grid));
+    let mut emitted = Emitted::default();
+
+    // One row at `position`, which is one run of one position: the same series every time, since a
+    // map dropping the name leaves them all one label set.
+    let push = |emitted: &mut Emitted, position: usize| {
+        let chunk = sparse_chunk(
+            &schema,
+            named_metric("a", "x"),
+            &[(position, 1)],
+            vec![-1.0],
+            false,
+        );
+        emitted
+            .occupy(&chunk)
+            .unwrap_or_else(|error| panic!("position {position} was refused: {error}"));
+    };
+    // The runs stored under the one label set, which is what `absorb` keeps in position order.
+    let stored = |emitted: &Emitted| -> Vec<(usize, usize)> {
+        emitted
+            .sets
+            .values()
+            .next()
+            .expect("the chunk was recorded under one label set")
+            .fields
+            .first()
+            .expect("the series has one field")
+            .iter()
+            .map(|run| (run.start, run.end))
+            .collect()
+    };
+    let ordered = |runs: &[(usize, usize)]| {
+        runs.iter().all(|(start, end)| start < end)
+            && runs.windows(2).all(|pair| pair[0].1 < pair[1].0)
+    };
+
+    // Eight chunks, one position each, a hole between them.
+    let positions = [4, 6, 8, 10, 12, 14, 16, 18];
+    let before = absorb_rebuilds();
+    for position in positions {
+        push(&mut emitted, position);
+    }
+    assert_eq!(
+        stored(&emitted),
+        vec![
+            (4, 5),
+            (6, 7),
+            (8, 9),
+            (10, 11),
+            (12, 13),
+            (14, 15),
+            (16, 17),
+            (18, 19),
+        ],
+        "a sparse series was not stored as the one run each of its chunks occupies"
+    );
+    assert_eq!(
+        absorb_rebuilds() - before,
+        0,
+        "the {} chunks of a series moving forward rebuilt its history instead of appending to it",
+        positions.len()
+    );
+
+    // A chunk that starts where the last stored run ends touches it, and the two are one run: the
+    // fast path appends, and the boundary is the part it has to join.
+    let before = absorb_rebuilds();
+    push(&mut emitted, 19);
+    assert_eq!(
+        stored(&emitted),
+        vec![
+            (4, 5),
+            (6, 7),
+            (8, 9),
+            (10, 11),
+            (12, 13),
+            (14, 15),
+            (16, 17),
+            (18, 20),
+        ],
+        "a chunk touching the last stored run was left beside it rather than joined to it"
+    );
+    assert_eq!(
+        absorb_rebuilds() - before,
+        0,
+        "a chunk touching the last stored run was merged rather than appended to it"
+    );
+
+    // A chunk landing in a hole before the last stored run cannot be appended to: it joins the runs
+    // on both sides of it, so it goes through the full merge, which has to join them all the same.
+    let before = absorb_rebuilds();
+    push(&mut emitted, 5);
+    assert_eq!(
+        stored(&emitted),
+        vec![
+            (4, 7),
+            (8, 9),
+            (10, 11),
+            (12, 13),
+            (14, 15),
+            (16, 17),
+            (18, 20),
+        ],
+        "a chunk in a hole did not join the runs on either side of it"
+    );
+    assert_eq!(
+        absorb_rebuilds() - before,
+        1,
+        "a chunk landing before the last stored run was appended rather than merged"
+    );
+
+    // A chunk before every stored run is the other shape the fast path cannot take.
+    let before = absorb_rebuilds();
+    push(&mut emitted, 1);
+    let runs = stored(&emitted);
+    assert_eq!(
+        runs,
+        vec![
+            (1, 2),
+            (4, 7),
+            (8, 9),
+            (10, 11),
+            (12, 13),
+            (14, 15),
+            (16, 17),
+            (18, 20),
+        ],
+        "a chunk before every stored run did not land in front of them"
+    );
+    assert_eq!(
+        absorb_rebuilds() - before,
+        1,
+        "a chunk landing before every stored run was appended rather than merged"
+    );
+    assert!(
+        ordered(&runs),
+        "the merged history is not sorted, disjoint and joined: {runs:?}"
+    );
+}
+
+/// A bare selector stamps the last sample at or before each grid point onto its own grid.
+///
+/// The chunk is addressed on the node's output grid, not on the source's timestamps; a grid point
+/// may select a row an earlier point already did (the point after the last sample repeats it); and
+/// the same samples delivered as one chunk and as three answer the same, because the selection reads
+/// a whole axis rather than a chunk.
+#[test]
+fn a_bare_selector_selects_instants_onto_its_own_grid() {
+    let out_grid = grid(0, 60_000, 4);
+    let tree = NativeTree::try_new(instant(input(), 120_000, 0, Arc::clone(&out_grid))).unwrap();
+    let schema = raw_schema();
+    let whole = raw_chunk(
+        &schema,
+        &[0, 30_000, 90_000, 120_000, 200_000],
+        &[1.0, 2.0, 3.0, 4.0, 5.0],
+        true,
+    );
+    // The same series as three chunks, so nothing about it is decided by a chunk boundary.
+    let split = [
+        raw_chunk(&schema, &[0, 30_000], &[1.0, 2.0], false),
+        raw_chunk(&schema, &[90_000], &[3.0], false),
+        raw_chunk(&schema, &[120_000, 200_000], &[4.0, 5.0], true),
+    ];
+
+    let mut once = executor(&tree, pool());
+    once.push_raw(InputId::new(0), whole).unwrap();
+    let out = run(&mut once);
+
+    let mut piecewise = executor(&tree, pool());
+    let mut in_pieces = Vec::new();
+    for chunk in split {
+        let closing = chunk.is_last;
+        piecewise.push_raw(InputId::new(0), chunk).unwrap();
+        // Until the series ends nothing is decided for it, so only the closing chunk reports.
+        let pulled = piecewise.next_chunk().unwrap();
+        assert_eq!(
+            pulled.is_some(),
+            closing,
+            "a series reported a chunk before its last one arrived"
+        );
+        in_pieces.extend(pulled);
+    }
+    in_pieces.extend(piecewise.finish().unwrap());
+
+    assert_eq!(out.len(), 1, "one series is one chunk, however it arrived");
+    let chunk = &out[0];
+    assert!(chunk.is_last, "the only chunk of a series closes it");
+    assert!(
+        Arc::ptr_eq(chunk.series.time.grid().expect("a grid chunk"), &out_grid),
+        "the chunk is addressed on a grid that is not the selection's output grid"
+    );
+    // 0 -> 0, 60s -> 30s, 120s -> 120s, 180s -> 120s: the row at 90s is never the last one before a
+    // grid point, and the point past the last sample repeats the row before it.
+    assert_eq!(
+        decided(&out),
+        vec![
+            (0, Some(1.0)),
+            (1, Some(2.0)),
+            (2, Some(4.0)),
+            (3, Some(4.0)),
+        ]
+    );
+    // A selection keeps the labels it read, the metric name included: unlike a range function it
+    // does not rewrite what the selector named.
+    assert_eq!(chunk.series.metric, metric());
+    assert_eq!(
+        decided(&in_pieces),
+        decided(&out),
+        "the same series split into chunks answered differently"
+    );
+}
+
+/// The lookback edge is exclusive: a sample exactly `lookback_ms` before a grid point is not
+/// selected, one millisecond later is.
+///
+/// This pins what the selection kernel does rather than what Prometheus' documentation suggests: a
+/// sample at the point itself is always selected, and the window is `(point - lookback, point]`.
+#[test]
+fn a_sample_at_the_lookback_edge_is_not_selected() {
+    // The statement's grid is the single point 1000ms, and the lookback is 200ms.
+    let out_grid = grid(1000, 100, 1);
+    let schema = raw_schema();
+    let selected = |timestamp: i64| {
+        let tree = NativeTree::try_new(instant(input(), 200, 0, Arc::clone(&out_grid))).unwrap();
+        let mut execution = executor(&tree, pool());
+        execution
+            .push_raw(
+                InputId::new(0),
+                raw_chunk(&schema, &[timestamp], &[1.0], true),
+            )
+            .unwrap();
+        run(&mut execution)
+    };
+
+    // 800 is exactly `1000 - 200`, so the edge itself selects nothing.
+    let edge = selected(800);
+    assert_eq!(edge.len(), 1, "the series still closes on one chunk");
+    assert!(edge[0].is_last);
+    assert!(
+        decided(&edge).is_empty(),
+        "a sample exactly at the lookback edge was selected: {:?}",
+        decided(&edge)
+    );
+    // One millisecond inside the window is selected; a sample after the grid point never is.
+    assert_eq!(decided(&selected(801)), vec![(0, Some(1.0))]);
+    assert!(decided(&selected(1001)).is_empty());
+}
+
+/// A positive offset reads earlier samples, and a negative one later samples.
+#[test]
+fn an_offset_reads_a_different_sample_at_each_grid_point() {
+    let out_grid = grid(0, 60_000, 2);
+    let schema = raw_schema();
+    let values = |offset_ms: i64| {
+        let tree = NativeTree::try_new(instant(input(), 600_000, offset_ms, Arc::clone(&out_grid)))
+            .unwrap();
+        let mut execution = executor(&tree, pool());
+        execution
+            .push_raw(
+                InputId::new(0),
+                raw_chunk(&schema, &[-60_000, 0, 60_000], &[1.0, 2.0, 3.0], true),
+            )
+            .unwrap();
+        decided(&run(&mut execution))
+    };
+
+    assert_eq!(
+        values(0),
+        vec![(0, Some(2.0)), (1, Some(3.0))],
+        "without an offset a point reads the sample at or before it"
+    );
+    assert_eq!(
+        values(60_000),
+        vec![(0, Some(1.0)), (1, Some(2.0))],
+        "a minute of offset did not read the samples a minute earlier"
+    );
+    // A negative offset reads samples the statement's own range does not reach: both points read
+    // the sample one minute after them.
+    assert_eq!(
+        values(-60_000),
+        vec![(0, Some(3.0)), (1, Some(3.0))],
+        "a negative offset did not read the samples a minute later"
+    );
+}
+
+/// A series that selects nothing still closes, exactly once, on a chunk that holds no row.
+#[test]
+fn a_series_with_no_selectable_sample_closes_once() {
+    // Every sample carries the stale marker, which suppresses the selection at every point.
+    let stale = f64::from_bits(common_query::prometheus::PROMETHEUS_STALE_NAN_BITS);
+    let out_grid = grid(0, 60_000, 3);
+    let tree = NativeTree::try_new(instant(input(), 300_000, 0, Arc::clone(&out_grid))).unwrap();
+    let mut execution = executor(&tree, pool());
+    let metrics = metrics_of(&execution);
+    let schema = raw_schema();
+    execution
+        .push_raw(
+            InputId::new(0),
+            raw_chunk(&schema, &[0, 60_000], &[stale, stale], true),
+        )
+        .unwrap();
+    let out = run(&mut execution);
+
+    assert_eq!(out.len(), 1, "the series has to close exactly once");
+    let chunk = &out[0];
+    assert!(chunk.is_last);
+    assert!(
+        chunk.series.time.is_empty(),
+        "the closing chunk of a series that selected nothing holds a row"
+    );
+    assert_eq!(
+        series_start(chunk),
+        0,
+        "the empty chunk is not addressed on the grid"
+    );
+    assert!(
+        Arc::ptr_eq(chunk.series.time.grid().expect("a grid chunk"), &out_grid),
+        "the empty chunk is addressed on a grid that is not the selection's output grid"
+    );
+    assert_eq!(
+        chunk.series.metric,
+        metric(),
+        "the series lost its identity"
+    );
+    assert_eq!(
+        count(&metrics, "root", NodeMetric::COMPLETED_SERIES),
+        1,
+        "the series did not close exactly once"
+    );
+}
+
+/// A row one field fills and another misses stays one row, with a null where the field misses it.
+#[test]
+fn a_selected_row_keeps_the_fields_that_miss_it_null() {
+    let out_grid = grid(0, 60_000, 2);
+    let tree =
+        NativeTree::try_new(instant(raw_input_of(2), 60_000, 0, Arc::clone(&out_grid))).unwrap();
+    let schema = raw_schema_of(field_count(2));
+    // Each field holds a value at one of the two rows and none at the other.
+    let chunk = raw_chunk_columns(
+        &schema,
+        &[0, 60_000],
+        vec![vec![Some(1.0), None], vec![None, Some(4.0)]],
+        true,
+    );
+    let mut execution = executor(&tree, pool());
+    execution.push_raw(InputId::new(0), chunk).unwrap();
+    let out = run(&mut execution);
+
+    assert_eq!(out.len(), 1);
+    let chunk = &out[0];
+    assert_eq!(
+        chunk.series.time.len(),
+        2,
+        "a row no field of which holds a value was written down"
+    );
+    assert_eq!(field_values(chunk, 0), vec![Some(1.0), None]);
+    assert_eq!(field_values(chunk, 1), vec![None, Some(4.0)]);
+    assert_eq!(
+        chunk
+            .series
+            .time
+            .positions()
+            .map(|(position, _)| position)
+            .collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+}
+
+/// A grid position nobody fills is not a row, and a hole does not close the series early.
+///
+/// The samples lie at the first and the last point of the grid with nothing in between, and the
+/// lookback is too short to carry either one across: two rows, two runs, and no row per position
+/// between them.
+#[test]
+fn a_position_no_field_fills_is_not_a_row() {
+    let out_grid = grid(0, 60_000, 5);
+    let tree = NativeTree::try_new(instant(input(), 1_000, 0, Arc::clone(&out_grid))).unwrap();
+    let schema = raw_schema();
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_raw(InputId::new(0), raw_chunk(&schema, &[0], &[1.0], false))
+        .unwrap();
+    // The hole between the two samples decides nothing, and it does not end the series.
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "a hole in the grid closed the series"
+    );
+    assert!(
+        execution.state().reserved_bytes() > 0,
+        "the open series is not reserved for"
+    );
+    execution
+        .push_raw(
+            InputId::new(0),
+            raw_chunk(&schema, &[240_000], &[5.0], true),
+        )
+        .unwrap();
+    let out = run(&mut execution);
+
+    assert_eq!(out.len(), 1);
+    let chunk = &out[0];
+    assert!(chunk.is_last);
+    assert_eq!(
+        chunk
+            .series
+            .time
+            .positions()
+            .map(|(position, _)| position)
+            .collect::<Vec<_>>(),
+        vec![0, 4],
+        "the positions nobody fills were written down as rows"
+    );
+    assert_eq!(decided(&out), vec![(0, Some(1.0)), (4, Some(5.0))]);
+    assert!(
+        chunk.range().is_none(),
+        "a chunk of two runs of positions was addressed as one range"
+    );
+}
+
+/// An instant selection selects: the histogram it picks keeps its start timestamp.
+///
+/// The sample is read, converted into the histogram type the builder writes back, and written out
+/// again, and that type used to have no start timestamp to write: a sample carrying
+/// `start_timestamp = Some(1500)` at 2000ms came out `None`. It matters downstream -- a reader
+/// detects a counter reset from a start timestamp that falls inside the range it reads -- and it is
+/// the difference between selecting a sample and computing a value.
+///
+/// One source sample is selected by three grid points here, which is the case a per-row conversion
+/// can get wrong twice: applied once and forgotten on the second use, or applied to a value that no
+/// longer carries the timestamp.
+#[test]
+fn a_selected_histogram_keeps_its_start_timestamp() {
+    let out_grid = grid(2000, 1, 3);
+    let tree = NativeTree::try_new(instant(input(), 60_000, 0, Arc::clone(&out_grid))).unwrap();
+    let schema = raw_schema();
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_raw(
+            InputId::new(0),
+            raw_histogram_chunk_with_start(&schema, &[2000], Some(1500), true),
+        )
+        .unwrap();
+    let out = run(&mut execution);
+
+    assert_eq!(out.len(), 1);
+    assert_eq!(
+        histogram_starts(&out[0]),
+        vec![Some(1500), Some(1500), Some(1500)],
+        "the selected sample lost the start timestamp it was read with"
+    );
+}
+
+/// Two series that differ only in an empty-valued label are two series, and both are answered.
+///
+/// The label set the runtime's occupancy table compares drops empty values, so a node that recorded
+/// what it handed out under one would refuse the second series. A selection keeps the labels it
+/// read, empty values included, so it keeps them apart and records nothing.
+#[test]
+fn two_series_differing_only_in_an_empty_label_are_both_answered() {
+    let out_grid = grid(0, 60_000, 1);
+    let tree = NativeTree::try_new(instant(input(), 300_000, 0, Arc::clone(&out_grid))).unwrap();
+    let schema = raw_schema();
+    let mut execution = executor(&tree, pool());
+    // `zone=""` against an absent `zone`: one label set to everything that drops empty values.
+    execution
+        .push_raw(
+            InputId::new(0),
+            raw_chunk_of(&schema, b"a", host_metric(Some("")), &[0], &[1.0], true),
+        )
+        .unwrap();
+    execution
+        .push_raw(
+            InputId::new(0),
+            raw_chunk_of(&schema, b"b", host_metric(None), &[0], &[2.0], true),
+        )
+        .unwrap();
+    let out = run(&mut execution);
+
+    assert_eq!(out.len(), 2, "one of the two series was not answered");
+    assert_eq!(out[0].series.metric, host_metric(Some("")));
+    assert_eq!(out[1].series.metric, host_metric(None));
+    assert_eq!(decided(&out[..1]), vec![(0, Some(1.0))]);
+    assert_eq!(decided(&out[1..]), vec![(0, Some(2.0))]);
+}
+
+/// What a selection reserves is the series it has buffered, measured chunk by chunk.
+///
+/// The node holds a whole series, so its reservation grows with the chunks that series arrived in
+/// and goes back when the series is answered. Each chunk is measured once, with the same estimate a
+/// queued chunk is charged with: an allocation two chunks share is counted once per chunk, which is
+/// the over-count a figure that keeps no state across chunks accepts.
+///
+/// What this checks is the buffer alone. The workspace the gather of that buffer allocates -- the
+/// axis, the selection's two arrays and the rows the builder keeps -- is reserved for while it is
+/// live and is not part of this figure, so this test cannot see it, however many bytes it is:
+/// [`an_instant_selection_reserves_the_workspace_it_gathers`] is the one that does.
+#[test]
+fn an_instant_selection_reserves_the_series_it_buffers() {
+    let out_grid = grid(0, 60_000, 4);
+    let tree = NativeTree::try_new(instant(input(), 300_000, 0, Arc::clone(&out_grid))).unwrap();
+    let schema = raw_schema();
+    let mut execution = executor(&tree, pool());
+    let mut previous = 0;
+    for timestamps in [vec![0, 60_000], vec![120_000], vec![180_000]] {
+        let values = vec![1.0; timestamps.len()];
+        let chunk = raw_chunk(&schema, &timestamps, &values, false);
+        let bytes = raw_bytes(&chunk);
+        execution.push_raw(InputId::new(0), chunk).unwrap();
+        assert!(
+            execution.next_chunk().unwrap().is_none(),
+            "a series was reported before its last chunk arrived"
+        );
+        let held = execution.state().reserved_bytes();
+        assert_eq!(
+            held,
+            previous + bytes,
+            "the buffered series is not what is reserved for: {held} bytes held after {previous} \
+             and a chunk of {bytes}"
+        );
+        previous = held;
+    }
+    execution
+        .push_raw(
+            InputId::new(0),
+            raw_chunk(&schema, &[240_000], &[2.0], true),
+        )
+        .unwrap();
+    let out = run(&mut execution);
+    assert_eq!(out.len(), 1);
+    assert_eq!(
+        execution.state().reserved_bytes(),
+        0,
+        "the series that was answered is still reserved for"
+    );
+}
+
+/// The workspace the gather allocates is reserved for before it exists.
+///
+/// A selection decides the points of the grid it can be selected at, so its workspace is
+/// proportional to those points rather than to the samples of the series: the axis it concatenates,
+/// the source row and evaluation timestamp it reports per point, and the rows the builder keeps.
+/// The lookback here reaches from the sample to the last point, so this series is decididable at
+/// every one of the million points -- the clipped count equals the grid's -- and the two selection
+/// arrays alone are 16 MB while the built rows are more, against a series the node holds of one
+/// sample of a few hundred bytes. [`a_selection_reserves_the_points_it_decides`] is the other side
+/// of the same figure: a series whose samples cover only the start of a long grid reserves for the
+/// few points it can decide and is admitted by a pool this one is refused by.
+///
+/// The pool here holds 8 KiB, which is enough for the buffered chunk and nothing near the
+/// workspace, so the gather is refused instead of being performed. Nothing else refuses a million
+/// points, so this is the reservation and not a point limit answering: without it the gather simply
+/// runs.
+#[test]
+fn an_instant_selection_reserves_the_workspace_it_gathers() {
+    let out_grid = grid(0, 1, 1_000_000);
+    let tree = NativeTree::try_new(instant(input(), 1_000_000, 0, out_grid)).unwrap();
+    let pool = bounded_pool(8 * 1024);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    let schema = raw_schema();
+    execution
+        .push_raw(InputId::new(0), raw_chunk(&schema, &[0], &[1.0], true))
+        .unwrap();
+
+    let error = execution.next_chunk().unwrap_err();
+    assert!(
+        is_resources_exhausted(&error),
+        "the gather's workspace was taken without asking the pool: {error}"
+    );
+    assert!(
+        !error.to_string().contains("exceed limit"),
+        "a point limit answered in the pool's place: {error}"
+    );
+    assert_eq!(
+        pool.reserved(),
+        0,
+        "the stopped execution still holds bytes"
+    );
+    assert_eq!(
+        execution.state().reserved_bytes(),
+        0,
+        "the workspace of the refused gather is still reserved for"
+    );
+    assert!(
+        !root_holds(&execution, holds_instant),
+        "the stopped execution still holds the buffered series"
+    );
+    // A refused gather stops the execution rather than leaving it to be resumed.
+    let again = execution.next_chunk().unwrap_err();
+    assert!(
+        again.to_string().contains("stopped after an earlier error"),
+        "{again}"
+    );
+}
+
+/// The estimator charges exactly the kernel's candidate span, which can contain points that the
+/// kernel does not select. Check independently listed candidate and selected timestamps as well as
+/// coverage: a shared mistake in the estimator and kernel must not make this test pass.
+#[test]
+fn instant_candidate_span_covers_native_selection_at_boundaries() {
+    struct Case {
+        name: &'static str,
+        times: &'static [i64],
+        grid: (i64, i64, u64),
+        lookback: i64,
+        offset: i64,
+        stale_first: bool,
+        candidates: &'static [i64],
+        selected: &'static [i64],
+    }
+    let cases = [
+        Case {
+            name: "aligned samples",
+            times: &[100, 110, 120, 130, 140, 150],
+            grid: (100, 10, 6),
+            lookback: 0,
+            offset: 0,
+            stale_first: false,
+            candidates: &[100, 110, 120, 130, 140, 150],
+            selected: &[100, 110, 120, 130, 140, 150],
+        },
+        Case {
+            name: "positive offset and exclusive lookback edge",
+            times: &[90, 100, 110],
+            grid: (100, 10, 6),
+            lookback: 10,
+            offset: 10,
+            stale_first: false,
+            candidates: &[100, 110, 120, 130],
+            selected: &[100, 110, 120],
+        },
+        Case {
+            name: "negative offset and outward grid alignment",
+            times: &[125, 135],
+            grid: (100, 10, 6),
+            lookback: 10,
+            offset: -10,
+            stale_first: false,
+            candidates: &[110, 120, 130, 140],
+            selected: &[120, 130],
+        },
+        Case {
+            name: "clipped at both query bounds",
+            times: &[80, 110, 180],
+            grid: (100, 10, 6),
+            lookback: 101,
+            offset: 0,
+            stale_first: false,
+            candidates: &[100, 110, 120, 130, 140, 150],
+            selected: &[100, 110, 120, 130, 140, 150],
+        },
+        Case {
+            name: "empty input",
+            times: &[],
+            grid: (100, 10, 6),
+            lookback: 10,
+            offset: 0,
+            stale_first: false,
+            candidates: &[],
+            selected: &[],
+        },
+        Case {
+            name: "sample too old",
+            times: &[0],
+            grid: (100, 10, 6),
+            lookback: 10,
+            offset: 0,
+            stale_first: false,
+            candidates: &[],
+            selected: &[],
+        },
+        Case {
+            name: "sample after range",
+            times: &[200],
+            grid: (100, 10, 6),
+            lookback: 10,
+            offset: 0,
+            stale_first: false,
+            candidates: &[],
+            selected: &[],
+        },
+        Case {
+            name: "exclusive edge at range start",
+            times: &[90],
+            grid: (100, 10, 6),
+            lookback: 10,
+            offset: 0,
+            stale_first: false,
+            candidates: &[],
+            selected: &[],
+        },
+        Case {
+            name: "inside lookback at range start",
+            times: &[91],
+            grid: (100, 10, 6),
+            lookback: 10,
+            offset: 0,
+            stale_first: false,
+            candidates: &[100],
+            selected: &[100],
+        },
+        Case {
+            name: "outward alignment with no selected points",
+            times: &[104],
+            grid: (100, 10, 6),
+            lookback: 3,
+            offset: 0,
+            stale_first: false,
+            candidates: &[100, 110],
+            selected: &[],
+        },
+        Case {
+            name: "zero lookback and gaps",
+            times: &[100, 115, 140],
+            grid: (100, 10, 6),
+            lookback: 0,
+            offset: 0,
+            stale_first: false,
+            candidates: &[100, 110, 120, 130, 140],
+            selected: &[100, 140],
+        },
+        Case {
+            name: "staleness suppresses candidates",
+            times: &[100, 120],
+            grid: (100, 10, 5),
+            lookback: 30,
+            offset: 0,
+            stale_first: true,
+            candidates: &[100, 110, 120, 130, 140],
+            selected: &[120, 130, 140],
+        },
+        Case {
+            name: "wide offset reaches grid",
+            times: &[i64::MAX],
+            grid: (-11, 10, 3),
+            lookback: 0,
+            offset: i64::MIN,
+            stale_first: false,
+            candidates: &[-1],
+            selected: &[-1],
+        },
+        Case {
+            name: "shifted times below i64 range",
+            times: &[i64::MIN],
+            grid: (i64::MIN, 1, 3),
+            lookback: i64::MAX,
+            offset: i64::MIN,
+            stale_first: false,
+            candidates: &[],
+            selected: &[],
+        },
+    ];
+
+    let schema = raw_schema();
+    for case in cases {
+        let out_grid = grid(case.grid.0, case.grid.1, case.grid.2);
+        let selection = BoundInstant {
+            lookback_ms: case.lookback,
+            offset_ms: case.offset,
+            at_ms: None,
+            value: InstantValue::Sample,
+            output_grid: Arc::clone(&out_grid),
+        };
+        let mut runtime = InstantRuntime::try_new(&schema, &selection).unwrap();
+        let values: Vec<_> = case
+            .times
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                if index == 0 && case.stale_first {
+                    f64::from_bits(common_query::prometheus::PROMETHEUS_STALE_NAN_BITS)
+                } else {
+                    1.0
+                }
+            })
+            .collect();
+        let chunk = |times: &[i64], values: &[f64], is_last| {
+            if !times.is_empty() {
+                return raw_chunk(&schema, times, values, is_last);
+            }
+            // Empty chunks cannot be constructed through try_new, but may occur on this internal
+            // boundary; exercise admission's endpoint search and the kernel's empty-axis path.
+            RawSeriesChunk {
+                primary_key: Buffer::from_slice_ref(b"series-a"),
+                metric: Some(metric()),
+                time: RawTimestamps::try_new(ScalarBuffer::from(Vec::<i64>::new())).unwrap(),
+                fields: SeriesFields::one(Samples::from_float(Float64Array::new_null(0))),
+                is_last,
+            }
+        };
+        let split = case.times.len() / 2;
+        runtime.chunks.push(chunk(&[], &[], false));
+        runtime
+            .chunks
+            .push(chunk(&case.times[..split], &values[..split], false));
+        runtime.chunks.push(chunk(&[], &[], false));
+        let closing = chunk(&case.times[split..], &values[split..], true);
+        let estimate = runtime.selected_points(&closing);
+
+        let mut all_chunks = runtime.chunks.clone();
+        all_chunks.push(closing);
+        let time = buffered_time(&all_chunks).unwrap();
+        let fields = buffered_fields(&all_chunks, schema.fields.len()).unwrap();
+        let spec = out_grid.spec();
+        let range = spec.start_ms..=grid_end_ms(spec);
+        let endpoints = time
+            .as_buffer()
+            .first()
+            .copied()
+            .zip(time.as_buffer().last().copied());
+        let span = instant_candidate_span(
+            endpoints,
+            range.clone(),
+            spec.step_ms,
+            case.lookback,
+            case.offset,
+        );
+        let candidates: Vec<_> = (span.start..=span.end)
+            .step_by(spec.step_ms as usize)
+            .map(|timestamp| i64::try_from(timestamp).unwrap())
+            .collect();
+        assert_eq!(candidates, case.candidates, "{}", case.name);
+        assert_eq!(span.count, case.candidates.len() as i128, "{}", case.name);
+        assert_eq!(estimate, case.candidates.len(), "{}", case.name);
+
+        let (rows, selected) = select_instants(
+            &time,
+            &fields,
+            range,
+            spec.step_ms,
+            case.lookback,
+            case.offset,
+        )
+        .unwrap();
+        assert_eq!(rows.len(), selected.len(), "{}", case.name);
+        assert_eq!(selected, case.selected, "{}", case.name);
+        assert!(
+            selected.iter().all(|point| candidates.contains(point)),
+            "{}",
+            case.name
+        );
+        assert!(selected.len() <= estimate, "{}", case.name);
+    }
+}
+
+/// A selection reserves the points it can decide, not the points the grid plans.
+///
+/// The review's shape: a seven-day grid at a one-minute step is 10,081 points, and one sample at
+/// the start of the series read with a five-minute lookback is decided at five of them. The
+/// grid-scaled terms of `InstantRuntime::gather_bytes` at the planned grid -- the selection's two
+/// arrays and the doubled builder columns -- are about 504 KB, which the 64 KiB pool here is far
+/// below; the handful of points really decided need a few hundred bytes, so this gather has to be
+/// admitted. What it hands out is the rows `select_instants` reports for the same series, bounded
+/// by the candidate count the reservation agrees with.
+///
+/// The second half is the other direction: the same grid, the same pool, and a series that spans
+/// the grid with a lookback long enough to cover it, so all 10,081 points can be decided. The
+/// figure then exceeds the pool and the gather is refused, which is what keeps this from being a
+/// reservation of nothing.
+#[test]
+fn a_selection_reserves_the_points_it_decides() {
+    let out_grid = grid(0, 60_000, 10_081);
+    let schema = raw_schema();
+    let budget = 64 << 10;
+    // The two grid-scaled terms of `gather_bytes` at the planned grid: 10,081 points x 16 bytes for
+    // the selection's arrays, and 10,081 points x (8 + 8 + 1) x 2 for the doubled builder columns.
+    let full_grid = 10_081 * (8 + 8) + 10_081 * (8 + 8 + 1) * 2;
+    assert!(
+        full_grid > budget,
+        "the pool is not below what the full grid would be reserved: {full_grid} bytes"
+    );
+
+    // One sample at the start, read within five minutes: the kernel reports 0s..240s, and the
+    // candidate bound it sizes its arrays with is 0s..300s.
+    let tree = NativeTree::try_new(instant(input(), 300_000, 0, Arc::clone(&out_grid))).unwrap();
+    let chunk = raw_chunk(&schema, &[0], &[1.0], true);
+    let (_, timestamps) = select_instants(
+        &chunk.time,
+        &chunk.fields,
+        out_grid.spec().start_ms..=grid_end_ms(out_grid.spec()),
+        out_grid.spec().step_ms,
+        300_000,
+        0,
+    )
+    .unwrap();
+    assert_eq!(
+        timestamps.len(),
+        5,
+        "the clipping kernel decides another count"
+    );
+    let mut execution = executor(&tree, bounded_pool(budget));
+    execution.push_raw(InputId::new(0), chunk).unwrap();
+    let out = run(&mut execution);
+    assert_eq!(out.len(), 1);
+    let expected: Vec<(usize, Option<f64>)> = timestamps
+        .iter()
+        .map(|timestamp| {
+            (
+                usize::try_from((timestamp - out_grid.spec().start_ms) / out_grid.spec().step_ms)
+                    .unwrap(),
+                Some(1.0),
+            )
+        })
+        .collect();
+    assert_eq!(
+        decided(&out),
+        expected,
+        "the gather handed out another set of points than the clipping decides"
+    );
+
+    // The same series spans the grid with a lookback that covers it, so every point can be decided
+    // and the workspace no longer fits the same pool.
+    let tree =
+        NativeTree::try_new(instant(input(), 604_800_001, 0, Arc::clone(&out_grid))).unwrap();
+    let pool = bounded_pool(budget);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution
+        .push_raw(
+            InputId::new(0),
+            raw_chunk(&schema, &[0, 604_800_000], &[1.0, 2.0], true),
+        )
+        .unwrap();
+    let error = execution.next_chunk().unwrap_err();
+    assert!(
+        is_resources_exhausted(&error),
+        "a series covering the grid was gathered without asking the pool: {error}"
+    );
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(execution.state().reserved_bytes(), 0);
+}
+
+/// A grid longer than any point limit is charged for, and the pool is what refuses it.
+///
+/// `gather_bytes` used to return zero for a grid this long, so that a point limit inside the
+/// kernel stayed the error reported and the workspace of a long gather was never reserved. The
+/// estimate now applies to every gather, so the pool is asked before the kernel is and its refusal
+/// is the one the caller sees — a bound in bytes, on the path that decides the points, rather than
+/// a count that says nothing about what they cost.
+#[test]
+fn an_oversized_selection_is_refused_by_the_pool() {
+    // One million and two points over two samples: longer than the short circuit used to allow,
+    // so the estimate has to cover it rather than return zero.
+    let out_grid = grid(0, 1, 1_000_002);
+    let tree = NativeTree::try_new(instant(input(), 1_000_000, 0, out_grid)).unwrap();
+    let pool = bounded_pool(8 * 1024);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    let schema = raw_schema();
+    execution
+        .push_raw(
+            InputId::new(0),
+            raw_chunk(&schema, &[0, 1_000_001], &[1.0, 2.0], true),
+        )
+        .unwrap();
+
+    let error = execution.next_chunk().unwrap_err();
+    assert!(
+        is_resources_exhausted(&error),
+        "the gather's workspace was taken without asking the pool: {error}"
+    );
+    assert!(
+        !error.to_string().contains("exceed limit"),
+        "a point limit answered in the pool's place: {error}"
+    );
+    // Nothing is dropped silently: the execution stops and gives its reservation back.
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert!(!root_holds(&execution, holds_instant));
+    let again = execution.next_chunk().unwrap_err();
+    assert!(
+        again.to_string().contains("stopped after an earlier error"),
+        "{again}"
+    );
+}
+
+/// An input that ends inside a series is an error, not an empty answer.
+///
+/// The selection holds the series and gathers it only on the chunk that closes it, so nothing is
+/// answered for it. The node that notices is the input: the chunk it handed over did not say
+/// `is_last`, and the tree's close reports that before any collected input is merged.
+#[test]
+fn an_input_that_ends_inside_a_series_is_reported() {
+    let tree = NativeTree::try_new(instant(input(), 300_000, 0, grid(0, 60_000, 2))).unwrap();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    let schema = raw_schema();
+    execution
+        .push_raw(InputId::new(0), raw_chunk(&schema, &[0], &[1.0], false))
+        .unwrap();
+    assert!(execution.next_chunk().unwrap().is_none());
+
+    let error = execution.finish().unwrap_err();
+    assert!(
+        error.to_string().contains("ended before the last chunk"),
+        "{error}"
+    );
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert!(
+        !root_holds(&execution, holds_instant),
+        "the stopped execution still holds the buffered series"
+    );
+}
+
+/// A selection combines one series into one axis, so a chunk of another series is refused.
+///
+/// The buffered chunks are read as one axis, so a chunk of a second series has nowhere to go: it
+/// would be selected as though its samples were the open series'.
+#[test]
+fn a_chunk_of_another_series_is_refused() {
+    let tree = NativeTree::try_new(instant(input(), 300_000, 0, grid(0, 60_000, 2))).unwrap();
+    let schema = raw_schema();
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_raw(InputId::new(0), raw_chunk(&schema, &[0], &[1.0], false))
+        .unwrap();
+    assert!(execution.next_chunk().unwrap().is_none());
+    // The second chunk carries another series' key.
+    execution
+        .push_raw(
+            InputId::new(0),
+            raw_chunk_of(&schema, b"series-b", metric(), &[60_000], &[2.0], true),
+        )
+        .unwrap();
+
+    let error = execution.next_chunk().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("a chunk of another series arrived"),
+        "{error}"
+    );
+    assert_eq!(
+        execution.state().reserved_bytes(),
+        0,
+        "the refused series is still reserved for"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Vector–vector binary operations, driven through `NativeExecutor`.
+// ---------------------------------------------------------------------------
+
+/// The matching most tests here start from: no label list, one-to-one, no `bool`.
+fn binary_matching(op: BinaryOp) -> BinaryMatching {
+    BinaryMatching {
+        op,
+        return_bool: false,
+        labels: MatchingLabels::Ignoring(Vec::new()),
+        cardinality: Cardinality::OneToOne,
+        fill: FillValues::default(),
+    }
+}
+
+/// A binary node over `left` and `right`, bound the way the compiler binds it: the left side's
+/// fields paired by position, on the grid both operands are evaluated on.
+fn binary_of(left: NativeNode, right: NativeNode, matching: BinaryMatching) -> NativeNode {
+    let left_schema = left.output.samples().expect("binary reads samples").clone();
+    let right_schema = right
+        .output
+        .samples()
+        .expect("binary reads samples")
+        .clone();
+    let fields = field_count(left_schema.fields.len().min(right_schema.fields.len()));
+    NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(left),
+            right: Box::new(right),
+            matching,
+        },
+        output: NativeType::Samples(Arc::new(SeriesSchema {
+            fields,
+            eval_grid: Some(
+                left_schema
+                    .eval_grid
+                    .clone()
+                    .expect("binary reads evaluated samples"),
+            ),
+        })),
+    }
+}
+
+#[test]
+fn binary_runtime_indices_are_assigned_in_preorder() {
+    let grid = grid(0, 60_000, 2);
+    let inner = binary_of(
+        evaluated_input(Arc::clone(&grid)),
+        evaluated_input(Arc::clone(&grid)),
+        binary_matching(BinaryOp::Add),
+    );
+    let root = binary_of(
+        inner,
+        evaluated_input(Arc::clone(&grid)),
+        binary_matching(BinaryOp::Mul),
+    );
+    let tree = NativeTree::try_new(root).unwrap();
+    let execution = NativeExecutionState::try_new(&tree, pool(), None).unwrap();
+
+    let RuntimeOp::Binary {
+        left,
+        binary: root_binary,
+        ..
+    } = &execution.live.as_ref().unwrap().root.op
+    else {
+        panic!("the root is not a binary runtime");
+    };
+    let RuntimeOp::Binary {
+        binary: inner_binary,
+        ..
+    } = &left.op
+    else {
+        panic!("the left child is not a binary runtime");
+    };
+
+    assert_eq!(root_binary.node_index, 0);
+    assert_eq!(inner_binary.node_index, 1);
+}
+
+#[test]
+fn dynamic_nodes_propagate_binary_indices_and_duplicate_evidence() {
+    let grid = grid(0, 60_000, 2);
+    let binary = || {
+        binary_of(
+            evaluated_input(Arc::clone(&grid)),
+            evaluated_input(Arc::clone(&grid)),
+            binary_matching(BinaryOp::Add),
+        )
+    };
+    let input = binary();
+    let topk = NativeNode {
+        output: input.output.clone(),
+        expr: NativeExpr::ParameterizedTopK {
+            input: Box::new(input),
+            op: BoundVectorOp::TopK {
+                k: 0.0,
+                top: true,
+                group: Grouping::By(Arc::from([])),
+            },
+            parameter: Box::new(scalar_of(binary())),
+        },
+    };
+    let input = binary();
+    let histogram = NativeNode {
+        output: input.output.clone(),
+        expr: NativeExpr::ParameterizedHistogram {
+            input: Box::new(input),
+            op: BoundVectorOp::Histogram(HistogramFunction::Fraction {
+                lower: 0.0,
+                upper: 0.0,
+            }),
+            parameters: vec![scalar_of(binary()), scalar_of(binary())],
+        },
+    };
+    let tree =
+        NativeTree::try_new(binary_of(topk, histogram, binary_matching(BinaryOp::Add))).unwrap();
+    let pool = pool();
+    let evidence = Arc::new(crate::vector_match::DuplicateEvidence::new(&pool, 2));
+    let execution =
+        NativeExecutionState::try_new(&tree, pool, Some(Arc::clone(&evidence))).unwrap();
+
+    let RuntimeOp::Binary {
+        left,
+        right,
+        binary: root,
+        ..
+    } = &execution.live.as_ref().unwrap().root.op
+    else {
+        panic!("expected root binary");
+    };
+    let RuntimeOp::ParameterizedTopK {
+        input: topk_input,
+        parameter: topk_parameter,
+        ..
+    } = &left.op
+    else {
+        panic!("expected topk");
+    };
+    let RuntimeOp::ParameterizedHistogram {
+        input: histogram_input,
+        parameters: histogram_parameters,
+        ..
+    } = &right.op
+    else {
+        panic!("expected histogram");
+    };
+    let binary_at = |node: &RuntimeNode| {
+        let RuntimeOp::Binary { binary, .. } = &node.op else {
+            panic!("expected vector binary");
+        };
+        assert!(Arc::ptr_eq(binary.evidence.as_ref().unwrap(), &evidence));
+        binary.node_index
+    };
+    let scalar_binary_at = |node: &RuntimeNode| {
+        let RuntimeOp::ScalarOf { input, .. } = &node.op else {
+            panic!("expected scalar() parameter");
+        };
+        binary_at(input)
+    };
+    assert!(Arc::ptr_eq(root.evidence.as_ref().unwrap(), &evidence));
+    assert_eq!(root.node_index, 0);
+    assert_eq!(binary_at(topk_input), 1);
+    assert_eq!(scalar_binary_at(topk_parameter.as_ref().unwrap()), 2);
+    assert_eq!(binary_at(histogram_input), 3);
+    assert_eq!(
+        scalar_binary_at(histogram_parameters[0].as_ref().unwrap()),
+        4
+    );
+    assert_eq!(
+        scalar_binary_at(histogram_parameters[1].as_ref().unwrap()),
+        5
+    );
+}
+
+/// A source of evaluated chunks over `count` float fields.
+fn evaluated_input_of(count: usize, grid: Arc<EvalGrid>) -> NativeNode {
+    let output = NativeType::Samples(Arc::new(SeriesSchema {
+        fields: field_count(count),
+        eval_grid: Some(grid),
+    }));
+    NativeNode {
+        expr: NativeExpr::Input(BoundInput {
+            output: output.clone(),
+            source_index: 0,
+            ordering: SeriesOrdering::KeyThenTime,
+        }),
+        output,
+    }
+}
+
+/// One evaluated chunk of `metric` whose fields carry `columns`, one column per field.
+fn evaluated_columns(
+    schema: &SeriesSchema,
+    metric: SeriesLabels,
+    start: usize,
+    columns: Vec<Vec<Option<f64>>>,
+    is_last: bool,
+) -> EvaluatedChunk {
+    let rows = columns.first().map_or(0, Vec::len);
+    evaluated_on(schema, metric, start, rows, columns, is_last)
+}
+
+/// One evaluated chunk of `metric` addressed on `rows` positions from `start`, carrying `columns`.
+///
+/// The axis and the columns are given independently so that a chunk whose two disagree can be built:
+/// [`Series`] keeps its fields public, so nothing between a caller and a kernel refuses such a chunk
+/// on its way in.
+fn evaluated_on(
+    schema: &SeriesSchema,
+    metric: SeriesLabels,
+    start: usize,
+    rows: usize,
+    columns: Vec<Vec<Option<f64>>>,
+    is_last: bool,
+) -> EvaluatedChunk {
+    let fields = SeriesFields::try_from_vec(
+        columns
+            .into_iter()
+            .map(|values| Samples::from_float(Float64Array::from(values)))
+            .collect(),
+    )
+    .unwrap();
+    let range = GridRange::try_new(schema.eval_grid.clone().unwrap(), start, rows).unwrap();
+    EvaluatedChunk::try_new(
+        Series {
+            metric,
+            time: TimeAxis::Grid(range),
+            fields,
+        },
+        is_last,
+    )
+    .unwrap()
+}
+
+/// One evaluated chunk of `metric` whose one field holds a `buckets`-wide histogram at each of
+/// `len` positions from `start`.
+fn evaluated_histograms(
+    schema: &SeriesSchema,
+    metric: SeriesLabels,
+    start: usize,
+    buckets: i32,
+    len: usize,
+    is_last: bool,
+) -> EvaluatedChunk {
+    let mut builder = HistogramBatchBuilder::new();
+    let indices: UInt32Array = (0..len)
+        .map(|_| Some(push_histogram(&mut builder, buckets)))
+        .collect();
+    let samples = Samples::try_from_histogram(indices, builder.finish().unwrap()).unwrap();
+    let range = GridRange::try_new(schema.eval_grid.clone().unwrap(), start, len).unwrap();
+    EvaluatedChunk::try_new(
+        Series {
+            metric,
+            time: TimeAxis::Grid(range),
+            fields: SeriesFields::one(samples),
+        },
+        is_last,
+    )
+    .unwrap()
+}
+
+/// The `count` of the histogram at every carried row of a chunk.
+fn histogram_counts(chunk: &EvaluatedChunk) -> Vec<f64> {
+    let mut cursor = chunk.series.fields.as_slice()[0].cursor();
+    chunk
+        .series
+        .time
+        .positions()
+        .filter_map(
+            |(_, row)| match cursor.at(row).expect("the axis and the fields align") {
+                SampleRef::Histogram(view) => Some(view.count),
+                _ => None,
+            },
+        )
+        .collect()
+}
+
+/// A source bound in label mode: `name{job="api",pod="a"}` and the other series here.
+fn pod_metric(name: &str, job: &str, pod: &str) -> SeriesLabels {
+    SeriesLabels::try_new(
+        Some(name.into()),
+        vec![
+            Label {
+                name: "job".into(),
+                value: job.into(),
+            },
+            Label {
+                name: "pod".into(),
+                value: pod.into(),
+            },
+        ],
+    )
+    .unwrap()
+}
+
+/// The one side of a `group_left` match: `one{job=...,instance=...}`.
+fn one_metric(job: &str, instance: &str) -> SeriesLabels {
+    SeriesLabels::try_new(
+        Some("one".into()),
+        vec![
+            Label {
+                name: "job".into(),
+                value: job.into(),
+            },
+            Label {
+                name: "instance".into(),
+                value: instance.into(),
+            },
+        ],
+    )
+    .unwrap()
+}
+
+/// A tree of two evaluated sources over `points` points under a binary node, with the two paths a
+/// caller queues at.
+fn binary_tree(op: BinaryOp, points: u64) -> (NativeTree, Arc<EvalGrid>, InputId, InputId) {
+    let grid = grid(0, 60_000, points);
+    let root = binary_of(
+        evaluated_input_of(1, Arc::clone(&grid)),
+        evaluated_input_of(1, Arc::clone(&grid)),
+        binary_matching(op),
+    );
+    (
+        NativeTree::try_new(root).unwrap(),
+        grid,
+        InputId::new(0),
+        InputId::new(1),
+    )
+}
+
+/// Runtime source indexes map to all matching leaf slots, including below unary and scalar nodes.
+#[test]
+fn runtime_input_ids_route_repeated_and_distinct_source_indexes() {
+    let out_grid = grid(0, 60_000, 2);
+    let tree = NativeTree::try_new(binary_of(
+        binary_of(
+            map(
+                evaluated_input_with_source_index(Arc::clone(&out_grid), 0),
+                vec![MathOp::Abs],
+            ),
+            evaluated_input_with_source_index(Arc::clone(&out_grid), 7),
+            binary_matching(BinaryOp::Add),
+        ),
+        broadcast_right(
+            evaluated_input_with_source_index(Arc::clone(&out_grid), 0),
+            3.0,
+            BinaryOp::Add,
+            false,
+        ),
+        binary_matching(BinaryOp::Add),
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool());
+    let ids_0: Vec<_> = execution.state().input_ids(0).collect();
+    let ids_7: Vec<_> = execution.state().input_ids(7).collect();
+    assert_eq!(ids_0.len(), 2);
+    assert_eq!(ids_7.len(), 1);
+    assert_ne!(ids_0[0], ids_0[1]);
+    assert_ne!(ids_0[0], ids_7[0]);
+    assert_ne!(ids_0[1], ids_7[0]);
+    assert!(execution.state().input_ids(99).next().is_none());
+
+    let schema = evaluated_schema(Arc::clone(&out_grid));
+    for (id, value) in [(ids_0[0], 1.0), (ids_7[0], 2.0), (ids_0[1], 3.0)] {
+        execution
+            .push_evaluated(id, evaluated_chunk(&schema, 0, vec![value; 2], true))
+            .unwrap();
+    }
+    assert_eq!(
+        addressed(&run(&mut execution)),
+        vec![(0, vec![Some(9.0); 2])]
+    );
+}
+
+/// Two evaluated sources under a binary node add the series they match, point by point.
+#[test]
+fn a_binary_of_two_inputs_adds_the_matched_series() {
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 4);
+    let schema = evaluated_schema(grid);
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_evaluated(
+            left,
+            evaluated_chunk(&schema, 0, vec![1.0, 2.0, 3.0, 4.0], true),
+        )
+        .unwrap();
+    execution
+        .push_evaluated(
+            right,
+            evaluated_chunk(&schema, 0, vec![10.0, 20.0, 30.0, 40.0], true),
+        )
+        .unwrap();
+    assert_eq!(
+        addressed(&run(&mut execution)),
+        vec![(0, vec![Some(11.0), Some(22.0), Some(33.0), Some(44.0)])]
+    );
+}
+
+/// Neither the order the sides arrive in nor the chunk boundaries of one side change the result.
+///
+/// A binary node matches whole series, so the two deliveries below are the same vector: one splits
+/// the right side over two chunks, the other queues the right side first. `is_last` is the only
+/// thing that ends a series, so a chunk boundary carries no meaning of its own.
+#[test]
+fn a_binary_result_does_not_depend_on_arrival_order_or_chunk_boundaries() {
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Sub, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let mut split = executor(&tree, pool());
+    split
+        .push_evaluated(
+            left,
+            evaluated_chunk(&schema, 0, vec![1.0, 2.0, 3.0, 4.0], true),
+        )
+        .unwrap();
+    split
+        .push_evaluated(right, evaluated_chunk(&schema, 0, vec![10.0, 20.0], false))
+        .unwrap();
+    split
+        .push_evaluated(right, evaluated_chunk(&schema, 2, vec![30.0, 40.0], true))
+        .unwrap();
+    let split = decided(&run(&mut split));
+
+    let mut reversed = executor(&tree, pool());
+    reversed
+        .push_evaluated(right, evaluated_chunk(&schema, 0, vec![10.0, 20.0], false))
+        .unwrap();
+    reversed
+        .push_evaluated(
+            left,
+            evaluated_chunk(&schema, 0, vec![1.0, 2.0, 3.0, 4.0], true),
+        )
+        .unwrap();
+    reversed
+        .push_evaluated(right, evaluated_chunk(&schema, 2, vec![30.0, 40.0], true))
+        .unwrap();
+    let reversed = decided(&run(&mut reversed));
+
+    let expected = vec![
+        (0, Some(-9.0)),
+        (1, Some(-18.0)),
+        (2, Some(-27.0)),
+        (3, Some(-36.0)),
+    ];
+    assert_eq!(split, expected);
+    assert_eq!(reversed, expected);
+}
+
+/// Two series that arrive in separate chunks and hold a value at the same point are refused.
+///
+/// Each chunk is a series of its own, closed by its own `is_last`, and the two claim one label set:
+/// Prometheus reports the duplicate at the first point both are present at, which no chunk boundary
+/// can resolve. Two such series whose positions do not meet are accepted instead, as
+/// `a_sparse_binary_keeps_the_shared_positions` shows.
+#[test]
+fn a_cross_chunk_duplicate_on_one_side_is_refused() {
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 4);
+    let schema = evaluated_schema(grid);
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution
+        .push_evaluated(left, evaluated_chunk(&schema, 0, vec![1.0, 2.0], true))
+        .unwrap();
+    // The same label set twice on the right, each delivered in the chunk that closes it, and both
+    // holding values at positions 0 and 1.
+    execution
+        .push_evaluated(right, evaluated_chunk(&schema, 0, vec![10.0, 20.0], true))
+        .unwrap();
+    execution
+        .push_evaluated(right, evaluated_chunk(&schema, 0, vec![30.0, 40.0], true))
+        .unwrap();
+
+    let error = execution.finish().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("found duplicate series for the match group"),
+        "{error}"
+    );
+    assert_eq!(pool.reserved(), 0, "the refused operands are still held");
+    assert_eq!(execution.state().reserved_bytes(), 0);
+}
+
+/// An operand that closes without a row contributes nothing, and pairing it is not an error.
+#[test]
+fn an_empty_side_yields_no_series() {
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 2);
+    let schema = evaluated_schema(grid);
+    let mut execution = executor(&tree, pool());
+    // A closing chunk with no row: the series ends before its first point.
+    execution
+        .push_evaluated(
+            left,
+            evaluated_chunk_of(&schema, metric(), 0, Vec::new(), true),
+        )
+        .unwrap();
+    execution
+        .push_evaluated(right, evaluated_chunk(&schema, 0, vec![1.0, 2.0], true))
+        .unwrap();
+    assert!(run(&mut execution).is_empty());
+}
+
+/// An empty closing chunk after rows is not the series going backwards.
+#[test]
+fn an_empty_closing_chunk_does_not_rewind_a_series() {
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 2);
+    let schema = evaluated_schema(grid);
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_evaluated(left, evaluated_chunk(&schema, 0, vec![1.0], false))
+        .unwrap();
+    // The chunk that closes the series holds no row, so where it addresses says nothing.
+    execution
+        .push_evaluated(
+            left,
+            evaluated_chunk_of(&schema, metric(), 0, Vec::new(), true),
+        )
+        .unwrap();
+    execution
+        .push_evaluated(right, evaluated_chunk(&schema, 0, vec![10.0, 20.0], true))
+        .unwrap();
+    assert_eq!(decided(&run(&mut execution)), vec![(0, Some(11.0))]);
+}
+
+/// Two sparse operands meet at the positions both carry.
+#[test]
+fn a_sparse_binary_keeps_the_shared_positions() {
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 4);
+    let schema = evaluated_schema(grid);
+    let mut execution = executor(&tree, pool());
+    // The left side decides positions 0 and 2 only, in two chunks.
+    execution
+        .push_evaluated(left, evaluated_chunk(&schema, 0, vec![1.0], false))
+        .unwrap();
+    execution
+        .push_evaluated(left, evaluated_chunk(&schema, 2, vec![3.0], true))
+        .unwrap();
+    execution
+        .push_evaluated(
+            right,
+            evaluated_chunk(&schema, 0, vec![10.0, 20.0, 30.0, 40.0], true),
+        )
+        .unwrap();
+    assert_eq!(
+        decided(&run(&mut execution)),
+        vec![(0, Some(11.0)), (2, Some(33.0))]
+    );
+}
+
+/// Fields are paired by position, and a field that misses a position keeps it null.
+#[test]
+fn a_binary_pairs_the_fields_of_each_operand() {
+    let grid = grid(0, 60_000, 2);
+    let root = binary_of(
+        evaluated_input_of(2, Arc::clone(&grid)),
+        evaluated_input_of(2, Arc::clone(&grid)),
+        binary_matching(BinaryOp::Add),
+    );
+    let tree = NativeTree::try_new(root).unwrap();
+    let schema = Arc::new(SeriesSchema {
+        fields: field_count(2),
+        eval_grid: Some(grid),
+    });
+    let mut execution = executor(&tree, pool());
+    let metrics = metrics_of(&execution);
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_columns(
+                &schema,
+                metric(),
+                0,
+                vec![vec![Some(1.0), None], vec![Some(5.0), Some(6.0)]],
+                true,
+            ),
+        )
+        .unwrap();
+    execution
+        .push_evaluated(
+            InputId::new(1),
+            evaluated_columns(
+                &schema,
+                metric(),
+                0,
+                vec![vec![Some(10.0), Some(20.0)], vec![Some(7.0), Some(8.0)]],
+                true,
+            ),
+        )
+        .unwrap();
+    let out = run(&mut execution);
+    assert_eq!(out.len(), 1);
+    // Position 1 holds no left value of field 0, so that field keeps it null while field 1 has one.
+    assert_eq!(field_values(&out[0], 0), vec![Some(11.0), None]);
+    assert_eq!(field_values(&out[0], 1), vec![Some(12.0), Some(14.0)]);
+    // The result decided two positions and holds three values: the two positions are what the node
+    // evaluated, and a value is what a field sample holds, which is one fewer for the null.
+    assert_eq!(
+        count(&metrics, "root", NodeMetric::EVALUATED_GRID_POINTS),
+        2
+    );
+    assert_eq!(count(&metrics, "root", NodeMetric::OUTPUT_VALUES), 3);
+}
+
+/// A comparison without `bool` filters the points it does not hold at; with `bool` it reports both.
+#[test]
+fn a_comparison_filters_and_a_bool_comparison_reports_both_outcomes() {
+    let grid = grid(0, 60_000, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    for (return_bool, expected) in [
+        (false, vec![(2, Some(3.0)), (3, Some(4.0))]),
+        (
+            true,
+            vec![
+                (0, Some(0.0)),
+                (1, Some(0.0)),
+                (2, Some(1.0)),
+                (3, Some(1.0)),
+            ],
+        ),
+    ] {
+        let matching = BinaryMatching {
+            op: BinaryOp::Gt,
+            return_bool,
+            labels: MatchingLabels::Ignoring(Vec::new()),
+            cardinality: Cardinality::OneToOne,
+            fill: FillValues::default(),
+        };
+        let root = binary_of(
+            evaluated_input_of(1, Arc::clone(&grid)),
+            evaluated_input_of(1, Arc::clone(&grid)),
+            matching,
+        );
+        let tree = NativeTree::try_new(root).unwrap();
+        let mut execution = executor(&tree, pool());
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk(&schema, 0, vec![1.0, 2.0, 3.0, 4.0], true),
+            )
+            .unwrap();
+        execution
+            .push_evaluated(
+                InputId::new(1),
+                evaluated_chunk(&schema, 0, vec![2.0, 2.0, 2.0, 2.0], true),
+            )
+            .unwrap();
+        assert_eq!(
+            decided(&run(&mut execution)),
+            expected,
+            "bool={return_bool}"
+        );
+    }
+}
+
+/// `group_left(instance)` keeps every many-side series and copies the label from its match.
+#[test]
+fn a_group_modifier_copies_the_one_side_label() {
+    let grid = grid(0, 60_000, 2);
+    let matching = BinaryMatching {
+        op: BinaryOp::Add,
+        return_bool: false,
+        labels: MatchingLabels::On(vec![Arc::from("job")]),
+        cardinality: Cardinality::ManyToOne(vec![Arc::from("instance")]),
+        fill: FillValues::default(),
+    };
+    let root = binary_of(
+        evaluated_input_of(1, Arc::clone(&grid)),
+        evaluated_input_of(1, Arc::clone(&grid)),
+        matching,
+    );
+    let tree = NativeTree::try_new(root).unwrap();
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let (left, right) = (InputId::new(0), InputId::new(1));
+    let mut execution = executor(&tree, pool());
+    for (metric, values) in [
+        (pod_metric("a", "api", "p1"), vec![Some(1.0), Some(2.0)]),
+        (pod_metric("b", "db", "p2"), vec![Some(3.0), Some(4.0)]),
+    ] {
+        execution
+            .push_evaluated(left, evaluated_chunk_of(&schema, metric, 0, values, true))
+            .unwrap();
+    }
+    for (metric, values) in [
+        (one_metric("api", "i1"), vec![Some(10.0), Some(20.0)]),
+        (one_metric("db", "i2"), vec![Some(100.0), Some(200.0)]),
+    ] {
+        execution
+            .push_evaluated(right, evaluated_chunk_of(&schema, metric, 0, values, true))
+            .unwrap();
+    }
+
+    // The result is compared as label sets, so the two series are sorted by the labels they carry:
+    // the value lists of `f64` have no total order, and none is needed here.
+    let mut results: Vec<_> = run(&mut execution)
+        .iter()
+        .map(|chunk| {
+            let mut tags: Vec<(String, String)> = chunk
+                .series
+                .metric
+                .tags()
+                .iter()
+                .map(|tag| (tag.name.to_string(), tag.value.to_string()))
+                .collect();
+            tags.sort();
+            (tags, sample_values(chunk))
+        })
+        .collect();
+    results.sort_by(|left, right| left.0.cmp(&right.0));
+    assert_eq!(
+        results,
+        vec![
+            (
+                vec![
+                    ("instance".to_string(), "i1".to_string()),
+                    ("job".to_string(), "api".to_string()),
+                    ("pod".to_string(), "p1".to_string()),
+                ],
+                vec![Some(11.0), Some(22.0)],
+            ),
+            (
+                vec![
+                    ("instance".to_string(), "i2".to_string()),
+                    ("job".to_string(), "db".to_string()),
+                    ("pod".to_string(), "p2".to_string()),
+                ],
+                vec![Some(103.0), Some(204.0)],
+            ),
+        ]
+    );
+}
+
+/// Two native histograms are added bucket by bucket.
+#[test]
+fn a_binary_adds_the_native_histograms_of_both_sides() {
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 2);
+    let schema = evaluated_schema(grid);
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_evaluated(left, evaluated_histograms(&schema, metric(), 0, 4, 2, true))
+        .unwrap();
+    execution
+        .push_evaluated(
+            right,
+            evaluated_histograms(&schema, metric(), 0, 4, 2, true),
+        )
+        .unwrap();
+    let out = run(&mut execution);
+    assert_eq!(out.len(), 1);
+    // Each side holds four buckets of one count at each point, so the sum counts eight.
+    assert_eq!(histogram_counts(&out[0]), vec![8.0, 8.0]);
+}
+
+/// The native vector matcher annotates only unsupported, present histogram pairs.
+#[test]
+fn binary_histogram_drop_info_respects_presence_and_duplicates() {
+    use common_query::promql_annotations::PromqlAnnotationCollector;
+
+    let infos = |collector: &PromqlAnnotationCollector| {
+        let mut warnings = Vec::new();
+        let mut infos = Vec::new();
+        collector.append_to(&mut warnings, &mut infos);
+        assert!(warnings.is_empty());
+        infos
+    };
+    for (op, histogram_left, histogram_right, symbol) in [
+        (BinaryOp::Add, true, false, "+"),
+        (BinaryOp::Add, false, true, "+"),
+        (BinaryOp::Mul, true, true, "*"),
+    ] {
+        let (tree, grid, left, right) = binary_tree(op, 2);
+        let schema = evaluated_schema(grid);
+        let collector = PromqlAnnotationCollector::default();
+        let pool = pool();
+        let mut state = NativeExecutionState::try_new(&tree, Arc::clone(&pool), None).unwrap();
+        state.set_annotations(Some(collector.clone()));
+        let mut execution = NativeExecutor::new(state);
+        let chunk = |histogram, name| {
+            if histogram {
+                evaluated_histograms(&schema, named_metric(name, "a"), 0, 4, 2, true)
+            } else {
+                evaluated_chunk_of(
+                    &schema,
+                    named_metric(name, "a"),
+                    0,
+                    vec![Some(2.0), Some(2.0)],
+                    true,
+                )
+            }
+        };
+        execution
+            .push_evaluated(left, chunk(histogram_left, "left"))
+            .unwrap();
+        execution
+            .push_evaluated(right, chunk(histogram_right, "right"))
+            .unwrap();
+        assert!(run(&mut execution).is_empty());
+        assert_eq!(
+            infos(&collector),
+            vec![format!(
+                "{symbol}: dropped native histogram samples because this binary operation is not supported for native histograms"
+            )]
+        );
+        assert_eq!(pool.reserved(), 0);
+    }
+
+    // No label match, or a missing sample at every shared point, cannot produce a drop Info.
+    for unmatched in [false, true] {
+        let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 2);
+        let schema = evaluated_schema(grid);
+        let collector = PromqlAnnotationCollector::default();
+        let mut state = NativeExecutionState::try_new(&tree, pool(), None).unwrap();
+        state.set_annotations(Some(collector.clone()));
+        let mut execution = NativeExecutor::new(state);
+        execution
+            .push_evaluated(
+                left,
+                evaluated_histograms(&schema, named_metric("hist", "a"), 0, 4, 2, true),
+            )
+            .unwrap();
+        let values = if unmatched {
+            vec![Some(2.0); 2]
+        } else {
+            vec![None; 2]
+        };
+        let job = if unmatched { "b" } else { "a" };
+        execution
+            .push_evaluated(
+                right,
+                evaluated_chunk_of(&schema, named_metric("float", job), 0, values, true),
+            )
+            .unwrap();
+        assert!(run(&mut execution).is_empty());
+        assert!(infos(&collector).is_empty());
+    }
+
+    // Even when the operation would drop the pair, duplicate one-side series retain their error.
+    let grid = grid(0, 60_000, 1);
+    let mut matching = binary_matching(BinaryOp::Add);
+    matching.labels = MatchingLabels::On(vec![Arc::from("job")]);
+    let tree = NativeTree::try_new(binary_of(
+        evaluated_input_with_source_index(Arc::clone(&grid), 0),
+        evaluated_input_with_source_index(Arc::clone(&grid), 1),
+        matching,
+    ))
+    .unwrap();
+    let left = InputId::new(0);
+    let right = InputId::new(1);
+    let schema = evaluated_schema(grid);
+    let collector = PromqlAnnotationCollector::default();
+    let pool = pool();
+    let mut state = NativeExecutionState::try_new(&tree, Arc::clone(&pool), None).unwrap();
+    state.set_annotations(Some(collector));
+    let mut execution = NativeExecutor::new(state);
+    execution
+        .push_evaluated(
+            left,
+            evaluated_histograms(&schema, pod_metric("hist", "a", "h"), 0, 4, 1, true),
+        )
+        .unwrap();
+    for pod in ["one", "two"] {
+        execution
+            .push_evaluated(
+                right,
+                evaluated_chunk_of(
+                    &schema,
+                    pod_metric("float", "a", pod),
+                    0,
+                    vec![Some(2.0)],
+                    true,
+                ),
+            )
+            .unwrap();
+    }
+    let error = execution.finish().unwrap_err().to_string();
+    assert!(
+        error.contains("duplicate series for the match group"),
+        "{error}"
+    );
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// A filled pair is a pair the operation is run on, so the native executor annotates the
+/// unsupported histogram pairing a fill value made.
+///
+/// `hist{job="a"}` has no `job="b"` counterpart, so `hist + on(job) fill_right(0) float` answers
+/// every point of it with `histogram + 0`, the pairing Prometheus runs `doBinOp` on after it fills
+/// a step. The Info it records is the wording the legacy planner states the same rule with, and a
+/// pair the fill never forms at all carries nothing.
+#[test]
+fn binary_histogram_fill_reports_the_dropped_info() {
+    use common_query::promql_annotations::PromqlAnnotationCollector;
+
+    let dropped = |symbol: &str| {
+        vec![format!(
+            "{symbol}: dropped native histogram samples because this binary operation is not supported for native histograms"
+        )]
+    };
+    // `fill_right` answers a missing right-hand sample, so the histogram is the left operand and
+    // every point of it is the pair `histogram + 0`; `fill_left` answers a missing left-hand one,
+    // so the histogram is the right operand and the pair is `0 + histogram`.
+    for (fill, histogram_left) in [
+        (
+            FillValues {
+                lhs: None,
+                rhs: Some(0.0),
+            },
+            true,
+        ),
+        (
+            FillValues {
+                lhs: Some(0.0),
+                rhs: None,
+            },
+            false,
+        ),
+    ] {
+        let grid = grid(0, 60_000, 2);
+        let mut matching = binary_matching(BinaryOp::Add);
+        matching.labels = MatchingLabels::On(vec![Arc::from("job")]);
+        matching.fill = fill;
+        let tree = NativeTree::try_new(binary_of(
+            evaluated_input_with_source_index(Arc::clone(&grid), 0),
+            evaluated_input_with_source_index(Arc::clone(&grid), 1),
+            matching,
+        ))
+        .unwrap();
+        let schema = evaluated_schema(grid);
+        // The two sides carry different `job` labels, so nothing matches and the fill value is what
+        // every point of the histogram series pairs with.
+        let histogram = || evaluated_histograms(&schema, named_metric("hist", "a"), 0, 4, 2, true);
+        let float = || {
+            evaluated_chunk_of(
+                &schema,
+                named_metric("float", "b"),
+                0,
+                vec![Some(2.0), Some(2.0)],
+                true,
+            )
+        };
+        let (left, right) = if histogram_left {
+            (histogram(), float())
+        } else {
+            (float(), histogram())
+        };
+        let collector = PromqlAnnotationCollector::default();
+        let pool = pool();
+        let mut state = NativeExecutionState::try_new(&tree, Arc::clone(&pool), None).unwrap();
+        state.set_annotations(Some(collector.clone()));
+        let mut execution = NativeExecutor::new(state);
+        execution.push_evaluated(InputId::new(0), left).unwrap();
+        execution.push_evaluated(InputId::new(1), right).unwrap();
+        let chunks = run(&mut execution);
+        assert!(
+            chunks.is_empty(),
+            "a dropped fill pair filed a row: {:?}",
+            chunks
+                .iter()
+                .map(|chunk| chunk.series.metric.clone())
+                .collect::<Vec<_>>()
+        );
+        let mut warnings = Vec::new();
+        let mut infos = Vec::new();
+        collector.append_to(&mut warnings, &mut infos);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(infos, dropped("+"), "{fill:?}");
+        assert_eq!(pool.reserved(), 0);
+    }
+
+    // Without a fill modifier the two sides never pair, and a pair that was never formed produces
+    // no sample to drop.
+    let grid = grid(0, 60_000, 2);
+    let mut matching = binary_matching(BinaryOp::Add);
+    matching.labels = MatchingLabels::On(vec![Arc::from("job")]);
+    let tree = NativeTree::try_new(binary_of(
+        evaluated_input_with_source_index(Arc::clone(&grid), 0),
+        evaluated_input_with_source_index(Arc::clone(&grid), 1),
+        matching,
+    ))
+    .unwrap();
+    let schema = evaluated_schema(grid);
+    let collector = PromqlAnnotationCollector::default();
+    let pool = pool();
+    let mut state = NativeExecutionState::try_new(&tree, Arc::clone(&pool), None).unwrap();
+    state.set_annotations(Some(collector.clone()));
+    let mut execution = NativeExecutor::new(state);
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_histograms(&schema, named_metric("hist", "a"), 0, 4, 2, true),
+        )
+        .unwrap();
+    execution
+        .push_evaluated(
+            InputId::new(1),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("float", "b"),
+                0,
+                vec![Some(2.0), Some(2.0)],
+                true,
+            ),
+        )
+        .unwrap();
+    assert!(run(&mut execution).is_empty());
+    let mut warnings = Vec::new();
+    let mut infos = Vec::new();
+    collector.append_to(&mut warnings, &mut infos);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert!(infos.is_empty(), "{infos:?}");
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// Matched histogram arithmetic: the payload it answers with, and the pairs its diagnostics drop.
+#[test]
+fn binary_histogram_add_sub_payload_and_diagnostics() {
+    use common_query::native_histogram::CUSTOM_BUCKETS_SCHEMA;
+    use common_query::promql_annotations::PromqlAnnotationCollector;
+
+    // A single positive bucket makes its post-reconciliation count unambiguous, including when
+    // all custom bounds differ and both source buckets fold into the result's +Inf bucket.
+    let hist = |custom: bool, bounds: &[f64], hint, count, sum| {
+        let offsets = [0];
+        let lengths = [1];
+        let buckets = [count];
+        let mut builder = HistogramBatchBuilder::new();
+        let index = builder
+            .push(HistogramView {
+                schema: if custom { CUSTOM_BUCKETS_SCHEMA } else { 0 },
+                zero_threshold: 0.0,
+                sum,
+                count,
+                zero_count: 0.0,
+                reset_hint: hint,
+                start_timestamp: None,
+                custom_values: bounds,
+                positive: BucketSideView {
+                    span_offsets: &offsets,
+                    span_lengths: &lengths,
+                    buckets: &buckets,
+                },
+                negative: BucketSideView {
+                    span_offsets: &[],
+                    span_lengths: &[],
+                    buckets: &[],
+                },
+            })
+            .unwrap();
+        (builder.finish().unwrap(), index)
+    };
+    for op in [BinaryOp::Add, BinaryOp::Sub] {
+        let name = if op == BinaryOp::Add {
+            "prom_native_histogram_add"
+        } else {
+            "prom_native_histogram_sub"
+        };
+        let factor = if op == BinaryOp::Add { 1.0 } else { -1.0 };
+        // Same exponential buckets: agreeing hints answer, and a contradiction in either
+        // orientation drops the pair with the warning, as Prometheus skips a pair whose operation
+        // reports one.
+        for hints in [
+            (
+                CounterResetHint::NotCounterReset,
+                CounterResetHint::NotCounterReset,
+            ),
+            (
+                CounterResetHint::CounterReset,
+                CounterResetHint::NotCounterReset,
+            ),
+            (
+                CounterResetHint::NotCounterReset,
+                CounterResetHint::CounterReset,
+            ),
+        ] {
+            let collision = hints.0 != hints.1;
+            let left_hist = hist(false, &[], hints.0, 5.0, 10.0);
+            let right_hist = hist(false, &[], hints.1, 2.0, 4.0);
+            let (tree, grid, left, right) = binary_tree(op, 1);
+            let schema = evaluated_schema(grid);
+            let collector = PromqlAnnotationCollector::default();
+            let pool = pool();
+            let mut state = NativeExecutionState::try_new(&tree, Arc::clone(&pool), None).unwrap();
+            state.set_annotations(Some(collector.clone()));
+            let mut execution = NativeExecutor::new(state);
+            for (input, (table, index)) in [(left, left_hist), (right, right_hist)] {
+                execution
+                    .push_evaluated(
+                        input,
+                        evaluated_histogram_chunk_of(
+                            &schema,
+                            named_metric("hist", "a"),
+                            0,
+                            vec![Some(index)],
+                            &table,
+                            true,
+                        ),
+                    )
+                    .unwrap();
+            }
+            let chunks = run(&mut execution);
+            let mut warnings = Vec::new();
+            let mut infos = Vec::new();
+            collector.append_to(&mut warnings, &mut infos);
+            if collision {
+                assert!(chunks.is_empty());
+                assert_eq!(
+                    warnings,
+                    vec![format!(
+                        "{name}: native histogram counter reset hints contradict"
+                    )]
+                );
+            } else {
+                assert_eq!(chunks.len(), 1);
+                let mut cursor = chunks[0].series.fields.as_slice()[0].cursor();
+                let SampleRef::Histogram(h) = cursor.at(0).unwrap() else {
+                    panic!("expected histogram")
+                };
+                assert_eq!(
+                    (h.count, h.sum, h.zero_count),
+                    (5.0 + factor * 2.0, 10.0 + factor * 4.0, 0.0)
+                );
+                assert_eq!(h.positive.buckets, &[5.0 + factor * 2.0]);
+                assert_eq!(
+                    h.reset_hint,
+                    if op == BinaryOp::Add {
+                        CounterResetHint::NotCounterReset
+                    } else {
+                        CounterResetHint::Gauge
+                    }
+                );
+                assert_eq!(chunks[0].series.metric.get("job"), Some("a"));
+                assert_eq!(chunks[0].series.metric.name(), None);
+                assert!(warnings.is_empty(), "{warnings:?}");
+            }
+            assert!(infos.is_empty());
+            assert_eq!(pool.reserved(), 0);
+        }
+
+        // Differing custom bounds reconcile; exercise partially overlapping and disjoint bounds.
+        // Contradictory reset hints drop the pair before its reconciliation is reported.
+        for (left_bounds, right_bounds) in
+            [(&[1.0, 2.0][..], &[2.0, 3.0][..]), (&[1.0][..], &[2.0][..])]
+        {
+            for collision in [false, true] {
+                let hints = if collision {
+                    (
+                        CounterResetHint::CounterReset,
+                        CounterResetHint::NotCounterReset,
+                    )
+                } else {
+                    (CounterResetHint::Unknown, CounterResetHint::Unknown)
+                };
+                let left_hist = hist(true, left_bounds, hints.0, 5.0, 10.0);
+                let right_hist = hist(true, right_bounds, hints.1, 2.0, 4.0);
+                let (tree, grid, left, right) = binary_tree(op, 1);
+                let schema = evaluated_schema(grid);
+                let collector = PromqlAnnotationCollector::default();
+                let pool = pool();
+                let mut state =
+                    NativeExecutionState::try_new(&tree, Arc::clone(&pool), None).unwrap();
+                state.set_annotations(Some(collector.clone()));
+                let mut execution = NativeExecutor::new(state);
+                for (input, (table, index)) in [(left, left_hist), (right, right_hist)] {
+                    execution
+                        .push_evaluated(
+                            input,
+                            evaluated_histogram_chunk_of(
+                                &schema,
+                                named_metric("hist", "a"),
+                                0,
+                                vec![Some(index)],
+                                &table,
+                                true,
+                            ),
+                        )
+                        .unwrap();
+                }
+                let chunks = run(&mut execution);
+                let mut warnings = Vec::new();
+                let mut infos = Vec::new();
+                collector.append_to(&mut warnings, &mut infos);
+                if collision {
+                    assert!(chunks.is_empty());
+                    assert_eq!(
+                        warnings,
+                        vec![format!(
+                            "{name}: native histogram counter reset hints contradict"
+                        )]
+                    );
+                    assert!(infos.is_empty(), "{infos:?}");
+                    assert_eq!(pool.reserved(), 0);
+                    continue;
+                }
+                assert_eq!(chunks.len(), 1);
+                let mut cursor = chunks[0].series.fields.as_slice()[0].cursor();
+                let SampleRef::Histogram(h) = cursor.at(0).unwrap() else {
+                    panic!("expected histogram")
+                };
+                assert_eq!((h.count, h.sum), (5.0 + factor * 2.0, 10.0 + factor * 4.0));
+                assert_eq!(h.positive.buckets, &[5.0 + factor * 2.0]);
+                assert_eq!(
+                    h.custom_values,
+                    if left_bounds.len() == 1 {
+                        &[][..]
+                    } else {
+                        &[2.0][..]
+                    }
+                );
+                assert_eq!(
+                    h.reset_hint,
+                    if op == BinaryOp::Add {
+                        CounterResetHint::Unknown
+                    } else {
+                        CounterResetHint::Gauge
+                    }
+                );
+                assert!(warnings.is_empty(), "{warnings:?}");
+                assert_eq!(
+                    infos,
+                    vec![format!(
+                        "{name}: reconciled native histograms with different custom buckets"
+                    )]
+                );
+                assert_eq!(pool.reserved(), 0);
+            }
+        }
+
+        // A conflicting pair is not a sample pair at an absent point or when labels do not match.
+        for unmatched in [false, true] {
+            let left_hist = hist(true, &[1.0], CounterResetHint::CounterReset, 5.0, 10.0);
+            let right_hist = hist(false, &[], CounterResetHint::NotCounterReset, 2.0, 4.0);
+            let (tree, grid, left, right) = binary_tree(op, 1);
+            let schema = evaluated_schema(grid);
+            let collector = PromqlAnnotationCollector::default();
+            let pool = pool();
+            let mut state = NativeExecutionState::try_new(&tree, Arc::clone(&pool), None).unwrap();
+            state.set_annotations(Some(collector.clone()));
+            let mut execution = NativeExecutor::new(state);
+            execution
+                .push_evaluated(
+                    left,
+                    evaluated_histogram_chunk_of(
+                        &schema,
+                        named_metric("left", "a"),
+                        0,
+                        vec![Some(left_hist.1)],
+                        &left_hist.0,
+                        true,
+                    ),
+                )
+                .unwrap();
+            let right_index = if unmatched { Some(right_hist.1) } else { None };
+            let right_job = if unmatched { "b" } else { "a" };
+            execution
+                .push_evaluated(
+                    right,
+                    evaluated_histogram_chunk_of(
+                        &schema,
+                        named_metric("right", right_job),
+                        0,
+                        vec![right_index],
+                        &right_hist.0,
+                        true,
+                    ),
+                )
+                .unwrap();
+            assert!(run(&mut execution).is_empty());
+            let mut warnings = Vec::new();
+            let mut infos = Vec::new();
+            collector.append_to(&mut warnings, &mut infos);
+            assert!(warnings.is_empty());
+            assert!(infos.is_empty());
+            assert_eq!(pool.reserved(), 0);
+        }
+
+        // Incompatible custom/exponential pairs are dropped, in either direction. Prometheus
+        // reports the layouts before it reaches the reset hints, so a pair that fails both carries
+        // the schema warning alone.
+        for reverse in [false, true] {
+            for collision in [false, true] {
+                let hints = if collision {
+                    (
+                        CounterResetHint::CounterReset,
+                        CounterResetHint::NotCounterReset,
+                    )
+                } else {
+                    (CounterResetHint::Unknown, CounterResetHint::Unknown)
+                };
+                let left_hist = hist(
+                    reverse,
+                    if reverse { &[1.0] } else { &[] },
+                    hints.0,
+                    5.0,
+                    10.0,
+                );
+                let right_hist = hist(
+                    !reverse,
+                    if reverse { &[] } else { &[1.0] },
+                    hints.1,
+                    2.0,
+                    4.0,
+                );
+                let (tree, grid, left, right) = binary_tree(op, 1);
+                let schema = evaluated_schema(grid);
+                let collector = PromqlAnnotationCollector::default();
+                let pool = pool();
+                let mut state =
+                    NativeExecutionState::try_new(&tree, Arc::clone(&pool), None).unwrap();
+                state.set_annotations(Some(collector.clone()));
+                let mut execution = NativeExecutor::new(state);
+                for (input, (table, index)) in [(left, left_hist), (right, right_hist)] {
+                    execution
+                        .push_evaluated(
+                            input,
+                            evaluated_histogram_chunk_of(
+                                &schema,
+                                named_metric("hist", "a"),
+                                0,
+                                vec![Some(index)],
+                                &table,
+                                true,
+                            ),
+                        )
+                        .unwrap();
+                }
+                assert!(run(&mut execution).is_empty());
+                let mut warnings = Vec::new();
+                let mut infos = Vec::new();
+                collector.append_to(&mut warnings, &mut infos);
+                // The hint collision changes nothing here: the layouts already decided the pair,
+                // and that one warning is all Prometheus reports for it.
+                assert_eq!(
+                    warnings,
+                    vec![format!(
+                        "{name}: dropped native histogram sample with incompatible schemas"
+                    )],
+                    "collision {collision}"
+                );
+                assert!(infos.is_empty());
+                assert_eq!(pool.reserved(), 0);
+            }
+        }
+    }
+}
+
+/// Supported histogram scaling keeps the values, labels and grid in both operand orders.
+#[test]
+fn binary_histogram_scaling_preserves_payload_and_labels() {
+    for (op, histogram_left, expected) in [
+        (BinaryOp::Mul, true, 8.0),
+        (BinaryOp::Mul, false, 8.0),
+        (BinaryOp::Div, true, 2.0),
+    ] {
+        let (tree, grid, left, right) = binary_tree(op, 2);
+        let schema = evaluated_schema(Arc::clone(&grid));
+        let pool = pool();
+        let mut execution = executor(&tree, Arc::clone(&pool));
+        let histogram = evaluated_histograms(&schema, named_metric("hist", "a"), 0, 4, 2, true);
+        let float = evaluated_chunk_of(
+            &schema,
+            named_metric("float", "a"),
+            0,
+            vec![Some(2.0); 2],
+            true,
+        );
+        let (lhs, rhs) = if histogram_left {
+            (histogram, float)
+        } else {
+            (float, histogram)
+        };
+        execution.push_evaluated(left, lhs).unwrap();
+        execution.push_evaluated(right, rhs).unwrap();
+        let chunks = run(&mut execution);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(histogram_counts(&chunks[0]), vec![expected; 2]);
+        let mut cursor = chunks[0].series.fields.as_slice()[0].cursor();
+        for row in 0..2 {
+            let SampleRef::Histogram(histogram) = cursor.at(row).unwrap() else {
+                panic!("scaled sample is not a histogram");
+            };
+            assert_eq!(histogram.sum, expected);
+            let bucket = if op == BinaryOp::Mul { 2.0 } else { 0.5 };
+            assert_eq!(histogram.positive.buckets, &[bucket; 4]);
+        }
+        assert_eq!(
+            chunks[0].series.time.timestamps().unwrap().as_ref(),
+            &grid.timestamps().unwrap()[..]
+        );
+        assert_eq!(chunks[0].series.metric.get("job"), Some("a"));
+        assert_eq!(chunks[0].series.metric.name(), None);
+        assert_eq!(chunks[0].series.time.grid().unwrap().spec(), grid.spec());
+        assert_eq!(pool.reserved(), 0);
+    }
+}
+
+/// Nothing is decided before the input ends; `finish` is what hands the result over.
+#[test]
+fn a_binary_yields_nothing_until_the_input_finishes() {
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 2);
+    let schema = evaluated_schema(grid);
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_evaluated(left, evaluated_chunk(&schema, 0, vec![1.0, 2.0], true))
+        .unwrap();
+    execution
+        .push_evaluated(right, evaluated_chunk(&schema, 0, vec![10.0, 20.0], true))
+        .unwrap();
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "a binary node answered before its input ended"
+    );
+    assert_eq!(
+        addressed(&execution.finish().unwrap()),
+        vec![(0, vec![Some(11.0), Some(22.0)])]
+    );
+}
+
+/// A truncated operand is refused before the kernel is handed anything.
+///
+/// The right side also carries a duplicate series, which the kernel would report: the truncation is
+/// what comes back, so the kernel never ran over half a vector.
+#[test]
+fn a_truncated_operand_is_refused_before_the_kernel_runs() {
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 4);
+    let schema = evaluated_schema(grid);
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    // The left side holds a duplicate the kernel would report if it were reached.
+    execution
+        .push_evaluated(left, evaluated_chunk(&schema, 0, vec![1.0, 2.0], true))
+        .unwrap();
+    execution
+        .push_evaluated(left, evaluated_chunk(&schema, 0, vec![3.0, 4.0], true))
+        .unwrap();
+    // The right side never hands over the chunk that closes its series.
+    execution
+        .push_evaluated(right, evaluated_chunk(&schema, 0, vec![10.0], false))
+        .unwrap();
+
+    let error = execution.finish().unwrap_err();
+    assert!(
+        error.to_string().contains("ended before the last chunk"),
+        "{error}"
+    );
+    assert_eq!(pool.reserved(), 0);
+    assert!(!root_holds(&execution, holds_binary));
+}
+
+/// A workspace the pool cannot hold is refused, and what the node retained is given back with it.
+#[test]
+fn an_oversized_binary_workspace_is_refused_by_the_pool() {
+    let points = 100_000;
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, points);
+    let schema = evaluated_schema(grid);
+    // Enough for the two one-row operands, far less than the presence arrays the kernel builds.
+    let pool = bounded_pool(60_000);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution
+        .push_evaluated(left, evaluated_chunk(&schema, 0, vec![1.0], true))
+        .unwrap();
+    execution
+        .push_evaluated(right, evaluated_chunk(&schema, 0, vec![10.0], true))
+        .unwrap();
+    let error = execution.finish().unwrap_err();
+    assert!(
+        is_resources_exhausted(&error),
+        "a point limit answered in the pool's place: {error}"
+    );
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert!(!root_holds(&execution, holds_binary));
+}
+
+/// A pool that cannot hold both operands refuses the second one, and the first is given back.
+///
+/// Both chunks sit in their input's queue until the input ends, so the reservation covers them at
+/// once: the second one is what the pool refuses, and stopping the execution returns what the first
+/// one held.
+#[test]
+fn an_oversized_binary_operand_is_refused_by_the_pool() {
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 100_000);
+    let schema = evaluated_schema(grid);
+    let pool = bounded_pool(60_000);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution
+        .push_evaluated(left, evaluated_chunk(&schema, 0, vec![1.0], true))
+        .unwrap();
+    let values: Vec<f64> = (0..50_000).map(f64::from).collect();
+    let error = execution
+        .push_evaluated(right, evaluated_chunk(&schema, 0, values, true))
+        .unwrap_err();
+    assert!(
+        is_resources_exhausted(&error),
+        "an operand limit answered in the pool's place: {error}"
+    );
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(execution.state().reserved_bytes(), 0);
+}
+
+/// A binary operand reserves each chunk it retains before it retains it, and holds what those
+/// chunks hold between them.
+///
+/// The figure of a retained chunk is what its rows occupy rather than the allocation they are slices
+/// of, so a series delivered in sibling slices of one batch is charged the batch's data once instead
+/// of once per chunk: the two halves of a 40 000-row batch cost the 320 000 bytes of its samples and
+/// not twice that. A chunk is also reserved for exactly what retaining it charges, so a reservation
+/// made before the fact does not leave the operand holding more, or less, than the pool gave it.
+#[test]
+fn a_binary_operand_reserves_what_it_retains() {
+    let grid = grid(0, 60_000, 40_000);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let batch = Float64Array::from((0..40_000).map(f64::from).collect::<Vec<_>>());
+    let first = evaluated_array_chunk_of(&schema, metric(), 0, batch.slice(0, 20_000), false);
+    let second =
+        evaluated_array_chunk_of(&schema, metric(), 20_000, batch.slice(20_000, 20_000), true);
+
+    // The two chunks are the halves of one 40 000-row float batch, so what the operand holds
+    // between them is that batch's data: 320 000 bytes of samples, however the rows are cut up. A
+    // figure that charged the whole allocation per chunk would hold 640 000 for the same rows.
+    let rows = 40_000 * std::mem::size_of::<f64>();
+    let descriptors = 4 * 1024;
+    let pool = bounded_pool(rows + descriptors);
+    let (mut state, mut binary) = binary_runtime(&pool, &schema);
+    state
+        .retain_binary(&mut binary, 0, NativeChunk::Evaluated(first))
+        .unwrap();
+    state
+        .retain_binary(&mut binary, 0, NativeChunk::Evaluated(second))
+        .unwrap();
+    assert!(
+        state.buffer.reservation.size() >= rows,
+        "the operand reserves {} bytes, less than the {rows} of samples the two chunks hold",
+        state.buffer.reservation.size()
+    );
+    assert!(
+        state.buffer.reservation.size() <= rows + descriptors,
+        "the operand reserves {} bytes for {rows} bytes of samples: a chunk is charged the \
+         allocation it is a slice of rather than the rows it adds",
+        state.buffer.reservation.size()
+    );
+    assert_eq!(
+        pool.reserved(),
+        state.buffer.reservation.size(),
+        "the operand reserves less from the pool than it holds"
+    );
+
+    // The figure a caller reserves for before retaining a chunk is the figure the operand grows by:
+    // one reserved for and then retained leaves the operand exactly where the reservation put it.
+    let own = evaluated_chunk(&schema, 0, vec![1.0, 2.0], true);
+    let (mut own_state, mut own_binary) = binary_runtime(&pool, &schema);
+    let pending = own_binary.pending(0, &own).unwrap();
+    let before = own_state.buffer.reservation.size();
+    own_state
+        .retain_binary(&mut own_binary, 0, NativeChunk::Evaluated(own))
+        .unwrap();
+    assert_eq!(
+        own_state.buffer.reservation.size() - before,
+        pending,
+        "retaining a chunk charges the operand something other than the figure reserved for it"
+    );
+
+    // Assembling the two chunks keeps the allocation they are slices of: the series the kernel reads
+    // is made of their descriptors, and no sample is copied into it.
+    let assembled = binary.assemble().unwrap();
+    assert_eq!(
+        assembled[0].len(),
+        1,
+        "two chunks of one series are one series"
+    );
+    let field = &assembled[0][0].fields.as_slice()[0];
+    assert_eq!(
+        field.segments().len(),
+        2,
+        "the assembled field is not the chunks it is built from"
+    );
+    for segment in field.segments() {
+        let Some(DenseSamplesRef::Float(values)) = segment.dense() else {
+            panic!("a float chunk assembles into float segments");
+        };
+        assert_eq!(
+            values.values().inner().data_ptr(),
+            batch.values().inner().data_ptr(),
+            "the assembly copied samples instead of sharing the allocation they are slices of"
+        );
+    }
+}
+
+/// Two chunks that are first to reference a histogram table each are billed a table each.
+///
+/// A histogram field's samples are a column of indices into a table, and the table is the bulk of
+/// what such a chunk costs: the indices are four bytes a row where the table is thousands of bytes
+/// of buckets. Two chunks of the same shape hold two tables, so each costs the other, and each
+/// costs at least the table it holds -- a figure that charged the column of indices alone would
+/// leave both tables outside everything the node reserves.
+#[test]
+fn a_binary_operand_bills_each_histogram_table_it_retains() {
+    const BUCKETS: i32 = 4_000;
+    let grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let table = histogram_table(2, BUCKETS);
+    let other = histogram_table(2, BUCKETS);
+    let bytes = histogram_table_bytes(&table);
+    assert_eq!(
+        bytes,
+        histogram_table_bytes(&other),
+        "the two tables are not the same shape, so the two chunks are not comparable"
+    );
+    assert!(
+        bytes > 32 * 1024,
+        "a table of {bytes} bytes is no bigger than the descriptors of a one-row chunk, so nothing \
+         here would tell a billed table from an unbilled one"
+    );
+    let first = evaluated_histogram_chunk_of(&schema, metric(), 0, vec![Some(0)], &table, true);
+    let second = evaluated_histogram_chunk_of(&schema, metric(), 1, vec![Some(1)], &other, true);
+
+    let pool = pool();
+    let (mut state, mut binary) = binary_runtime(&pool, &schema);
+    let before = state.buffer.reservation.size();
+    state
+        .retain_binary(&mut binary, 0, NativeChunk::Evaluated(first))
+        .unwrap();
+    let first_cost = state.buffer.reservation.size() - before;
+    let before = state.buffer.reservation.size();
+    state
+        .retain_binary(&mut binary, 0, NativeChunk::Evaluated(second))
+        .unwrap();
+    let second_cost = state.buffer.reservation.size() - before;
+
+    assert_eq!(
+        first_cost, second_cost,
+        "two chunks of one shape and one table each cost different figures: {first_cost} and \
+         {second_cost}"
+    );
+    for (name, cost) in [("first", first_cost), ("second", second_cost)] {
+        assert!(
+            cost >= bytes,
+            "the {name} chunk costs {cost} bytes, less than the {bytes} its histogram table holds"
+        );
+        assert!(
+            cost < 2 * bytes,
+            "the {name} chunk costs {cost} bytes, more than the {bytes} of its table and the rest \
+             of a one-row chunk"
+        );
+    }
+    assert_eq!(
+        state.buffer.reservation.size(),
+        first_cost + second_cost,
+        "the operand does not reserve what the two chunks it retains cost"
+    );
+    assert_eq!(pool.reserved(), state.buffer.reservation.size());
+}
+
+/// Two chunks that index one histogram table are billed that table once.
+///
+/// A table is one allocation however many chunks of a series index into it, so the second chunk is
+/// charged the descriptor, the index and the end it records, and not the table again. The two
+/// chunks here are the same shape, so what separates their figures is the table: the pair costs one
+/// table plus both chunks' own descriptors, not one table per chunk and not no table at all.
+#[test]
+fn a_binary_operand_bills_a_shared_histogram_table_once() {
+    const BUCKETS: i32 = 4_000;
+    let grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let table = histogram_table(2, BUCKETS);
+    let bytes = histogram_table_bytes(&table);
+    assert!(
+        bytes > 32 * 1024,
+        "a table of {bytes} bytes is no bigger than the descriptors of a one-row chunk, so nothing \
+         here would tell a shared table from a second one"
+    );
+    let first = evaluated_histogram_chunk_of(&schema, metric(), 0, vec![Some(0)], &table, true);
+    let second = evaluated_histogram_chunk_of(&schema, metric(), 1, vec![Some(1)], &table, true);
+
+    let pool = pool();
+    let (mut state, mut binary) = binary_runtime(&pool, &schema);
+    let before = state.buffer.reservation.size();
+    state
+        .retain_binary(&mut binary, 0, NativeChunk::Evaluated(first))
+        .unwrap();
+    let first_cost = state.buffer.reservation.size() - before;
+    let before = state.buffer.reservation.size();
+    state
+        .retain_binary(&mut binary, 0, NativeChunk::Evaluated(second))
+        .unwrap();
+    let second_cost = state.buffer.reservation.size() - before;
+
+    assert!(
+        first_cost >= bytes,
+        "the chunk that first references the table costs {first_cost} bytes, less than the {bytes} \
+         the table holds"
+    );
+    // The two chunks are the same shape, so the second one is charged its own descriptors and not
+    // the table: it costs a small fraction of what the table holds, where a second table would cost
+    // the table again.
+    assert!(
+        second_cost * 8 < bytes,
+        "the second slice of one table costs {second_cost} bytes, comparable to the {bytes} the \
+         table itself holds"
+    );
+    // What the pair costs past the second chunk is the table the first one billed, and no more than
+    // the few bytes that remembering it takes.
+    let difference = first_cost.saturating_sub(second_cost);
+    assert!(
+        difference >= bytes,
+        "the pair costs {difference} bytes more than its second chunk, less than the {bytes} of the \
+         one table between them"
+    );
+    assert!(
+        difference <= bytes + 64,
+        "the pair costs {difference} bytes more than its second chunk, past the {bytes} of the one \
+         table between them: the table is billed twice"
+    );
+    assert!(
+        state.buffer.reservation.size() < bytes + 2 * second_cost + 64,
+        "the operand charges the one table of its two chunks twice: {} bytes for {} bytes of table",
+        state.buffer.reservation.size(),
+        bytes
+    );
+    assert_eq!(pool.reserved(), state.buffer.reservation.size());
+}
+
+/// A pool with room for one histogram table admits one chunk of a table, refuses a second chunk
+/// holding another table, and admits a second slice of the table it already holds.
+///
+/// This is the figure the reservation is made for: a chunk that is the first to reference a table
+/// costs that table, so two of them do not fit in room for one, while a chunk that indexes a table
+/// the operand already holds costs its own slice and does. The room beside the first chunk is half a
+/// table -- far more than the descriptors of a second chunk and far less than a second table -- and
+/// the refused chunk leaves the operand where it was.
+#[test]
+fn a_pool_that_holds_one_histogram_table_refuses_a_second() {
+    const BUCKETS: i32 = 4_000;
+    let grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let table = histogram_table(2, BUCKETS);
+    let other = histogram_table(2, BUCKETS);
+    let bytes = histogram_table_bytes(&table);
+    assert!(
+        bytes > 32 * 1024,
+        "a table of {bytes} bytes is no bigger than the descriptors of a one-row chunk, so the room \
+         beside one table would hold a second"
+    );
+    let first = evaluated_histogram_chunk_of(&schema, metric(), 0, vec![Some(0)], &table, true);
+    let second_own =
+        evaluated_histogram_chunk_of(&schema, metric(), 0, vec![Some(0)], &other, true);
+    let second_shared =
+        evaluated_histogram_chunk_of(&schema, metric(), 1, vec![Some(1)], &table, true);
+
+    // What the operand holds once it retains one chunk of a table, measured where the pool admits
+    // anything; the pool below is sized from it and half a table.
+    let (mut probe_state, mut probe_binary) = binary_runtime(&pool(), &schema);
+    probe_state
+        .retain_binary(&mut probe_binary, 0, NativeChunk::Evaluated(first.clone()))
+        .unwrap();
+    let one_chunk = probe_state.buffer.reservation.size();
+    let budget = one_chunk + bytes / 2;
+
+    // A second chunk holding a table of its own does not fit: the pool refuses it and the operand
+    // keeps what it had.
+    let (mut refused_state, mut refused_binary) = binary_runtime(&bounded_pool(budget), &schema);
+    refused_state
+        .retain_binary(
+            &mut refused_binary,
+            0,
+            NativeChunk::Evaluated(first.clone()),
+        )
+        .unwrap();
+    let error = refused_state
+        .retain_binary(&mut refused_binary, 0, NativeChunk::Evaluated(second_own))
+        .unwrap_err();
+    assert!(
+        is_resources_exhausted(&error),
+        "a second chunk holding a table of its own was admitted beside the first: {error}"
+    );
+    assert_eq!(
+        refused_state.buffer.reservation.size(),
+        one_chunk,
+        "the refused chunk moved what the operand reserves"
+    );
+
+    // The second slice of the one table the operand holds does fit.
+    let (mut shared_state, mut shared_binary) = binary_runtime(&bounded_pool(budget), &schema);
+    shared_state
+        .retain_binary(&mut shared_binary, 0, NativeChunk::Evaluated(first))
+        .unwrap();
+    shared_state
+        .retain_binary(&mut shared_binary, 0, NativeChunk::Evaluated(second_shared))
+        .unwrap();
+    assert!(
+        shared_state.buffer.reservation.size() > one_chunk,
+        "the second slice of the table was admitted without being charged its own descriptors"
+    );
+    assert!(
+        shared_state.buffer.reservation.size() <= budget,
+        "the operand reserves past the pool it was admitted in"
+    );
+}
+
+/// The executor's binary node holds no more than the operands it retains: the peak of its own
+/// reservation is the data the retained chunks hold between them -- the thirty-two thousand bytes of
+/// one 4 000-row float batch, whichever way the batch is sliced -- and not a second copy of it.
+///
+/// The source queue holds one chunk while the node retains the other, so what is read here is the
+/// binary node's own figure rather than the pool's: the overlap of the two nodes is a charge of the
+/// input and says nothing about what the operand costs.
+#[test]
+fn a_binary_beneath_the_executor_reserves_what_it_retains() {
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 4_000);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let batch = Float64Array::from(vec![1.0; 4_000]);
+    let first = evaluated_array_chunk_of(&schema, metric(), 0, batch.slice(0, 2_000), false);
+    let second =
+        evaluated_array_chunk_of(&schema, metric(), 2_000, batch.slice(2_000, 2_000), true);
+    // Both chunks are halves of one 4 000-row float batch, so what the node holds once it retains
+    // them is that batch's data: 32 000 bytes of samples. A figure that charged the allocation per
+    // chunk would hold the same rows twice.
+    let retained = 4_000 * std::mem::size_of::<f64>();
+    let descriptors = 4 * 1024;
+
+    let mut execution = executor(&tree, bounded_pool(1 << 22));
+    let metrics = metrics_of(&execution);
+    execution.push_evaluated(left, first).unwrap();
+    execution.push_evaluated(left, second).unwrap();
+    // Nothing is queued on the right, so the pull retains both chunks of the left operand and
+    // nothing else: the kernel has not run and the node holds what it retains.
+    assert!(execution.next_chunk().unwrap().is_none());
+    let peak = format!("native.p0.root.{}", NodeMetric::PEAK_RESERVED_BYTES);
+    let peak_bytes = gauge(&metrics, &peak);
+    assert!(
+        peak_bytes >= retained,
+        "the binary node reserved {peak_bytes} bytes, less than the {retained} bytes of samples \
+         the two retained chunks hold"
+    );
+    assert!(
+        peak_bytes <= retained + descriptors,
+        "the binary node reserved {peak_bytes} bytes for {retained} bytes of samples: it charged \
+         the shared allocation once per chunk"
+    );
+
+    // The right operand matches the label set, so the operation answers every point of the grid.
+    execution
+        .push_evaluated(right, evaluated_chunk(&schema, 0, vec![2.0; 4_000], true))
+        .unwrap();
+    assert_eq!(
+        addressed(&run(&mut execution)),
+        vec![(0, vec![Some(3.0); 4_000])]
+    );
+}
+
+/// A query rooted at a binary node streams its answer after the input ends, one chunk per pull.
+///
+/// The kernel needs both whole vectors before it answers anything, so nothing is settled until the
+/// caller ends the input. From there the answer is not handed over as one collected value: each pull
+/// takes the next chunk out of the node that holds it and gives back what that chunk was charged,
+/// and the pull that finds nothing left is where the execution closes. A caller that stops pulling
+/// early therefore still holds nothing it did not ask for, and the pool is empty when the last
+/// `None` arrives.
+#[test]
+fn an_ended_input_streams_the_binary_answer_one_chunk_at_a_time() {
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let pool = bounded_pool(1 << 22);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution
+        .push_evaluated(left, evaluated_chunk(&schema, 0, vec![1.0; 4], true))
+        .unwrap();
+    execution
+        .push_evaluated(right, evaluated_chunk(&schema, 0, vec![2.0; 4], true))
+        .unwrap();
+    // The operands are whole now, but the kernel has not run: the caller has not ended the input.
+    assert!(execution.next_chunk().unwrap().is_none());
+
+    execution
+        .end_of_input()
+        .expect("a closed input with two whole operands ends cleanly");
+    // Ending the input runs the kernel and leaves its answer in the node that computed it, charged
+    // there until it is pulled; it does not collect the answer into a value of its own.
+    let mut chunks = Vec::new();
+    while let Some(chunk) = execution.next_chunk().unwrap() {
+        chunks.push(chunk);
+    }
+    assert_eq!(addressed(&chunks), vec![(0, vec![Some(3.0); 4])]);
+    // The last pull closed the execution and returned everything it reserved.
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
+    // A finished execution is not pulled again.
+    let again = execution.next_chunk().unwrap_err();
+    assert!(again.to_string().contains("already finished"), "{again}");
+}
+
+/// `finish` still answers the whole result in one value for a caller that wants it that way.
+#[test]
+fn finish_collects_what_the_streaming_contract_would_have_pulled() {
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let pool = bounded_pool(1 << 22);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution
+        .push_evaluated(left, evaluated_chunk(&schema, 0, vec![1.0; 4], true))
+        .unwrap();
+    execution
+        .push_evaluated(right, evaluated_chunk(&schema, 0, vec![2.0; 4], true))
+        .unwrap();
+    let chunks = execution.finish().expect("the whole answer is collected");
+    assert_eq!(addressed(&chunks), vec![(0, vec![Some(3.0); 4])]);
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// A binary node reads an operand a collecting window below it produces only after that window
+/// flushes.
+///
+/// `Add(LastOverTime(Abs(a)), b)` puts a collecting window under a binary node: the window is above
+/// a map, so it collects its whole input and answers at the end of it, while the binary node needs
+/// both operands whole before it decides a point. Ending the input therefore has to finish the
+/// subtree below each operand before the binary node computes -- flushing the window first and
+/// letting the pull that follows carry its answer up. A binary node that computed on the empty
+/// left operand would mark itself computed and answer nothing, and the value the window produced
+/// afterwards would never be read.
+#[test]
+fn a_binary_reads_an_operand_a_collecting_window_flushes() {
+    let grid = grid(0, 60_000, 1);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    // The left operand is a window over a map: the map rewrites the label set, so the window
+    // collects its input and answers at the end of it. The right operand is a plain source.
+    let root = binary_of(
+        window_with(
+            map(evaluated_input(Arc::clone(&grid)), vec![MathOp::Abs]),
+            RangeFunction::LastOverTime,
+            60_000,
+            Some(Arc::clone(&grid)),
+            Arc::clone(&grid),
+        ),
+        evaluated_input(Arc::clone(&grid)),
+        binary_matching(BinaryOp::Add),
+    );
+    let tree = NativeTree::try_new(root).expect("the shape is legal");
+    let mut execution = executor(&tree, pool());
+    // One point on each side, in one window: the left is -1, which `abs` makes 1, and the right is
+    // 10, so the sum is 11.
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, metric(), 0, vec![Some(-1.0)], true),
+        )
+        .unwrap();
+    execution
+        .push_evaluated(
+            InputId::new(1),
+            evaluated_chunk_of(&schema, metric(), 0, vec![Some(10.0)], true),
+        )
+        .unwrap();
+
+    assert_eq!(
+        decided(&run(&mut execution)),
+        vec![(0, Some(11.0))],
+        "the binary node computed before the window below it answered"
+    );
+}
+
+/// A series that arrives in ten thousand one-point chunks is one candidate for the kernel, not ten
+/// thousand.
+///
+/// The kernel matches whole series, so the chunks of a logical series are assembled into the series
+/// it reads before it runs: the pairing is over candidates, and a chunk that was a candidate of its
+/// own would pair every chunk of one side with every chunk of the other. The same series delivered
+/// whole must answer the same result, so the count of pairs the kernel actually visited is what
+/// separates the two deliveries rather than their outcome.
+#[test]
+fn a_series_of_many_chunks_is_one_candidate_for_the_kernel() {
+    let points = 10_000usize;
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, points as u64);
+    let schema = evaluated_schema(grid);
+    let batch = Float64Array::from((0..points).map(|point| point as f64).collect::<Vec<_>>());
+    // One point per chunk, and only the last of them closes the series: the boundaries of the
+    // delivery say nothing about the series it carries.
+    let per_point: Vec<EvaluatedChunk> = (0..points)
+        .map(|position| {
+            evaluated_array_chunk_of(
+                &schema,
+                metric(),
+                position,
+                batch.slice(position, 1),
+                position + 1 == points,
+            )
+        })
+        .collect();
+
+    reset_visited_pairs();
+    let mut split = executor(&tree, bounded_pool(1 << 26));
+    for (position, chunk) in per_point.iter().enumerate() {
+        split.push_evaluated(left, chunk.clone()).unwrap();
+        split.push_evaluated(right, chunk.clone()).unwrap();
+        assert!(
+            split.next_chunk().unwrap().is_none(),
+            "the binary node answered at position {position} before its input ended"
+        );
+    }
+    let split = split.finish().unwrap();
+    assert_eq!(
+        visited_pairs(),
+        1,
+        "the chunks of one series were paired instead of the one series they make up"
+    );
+    assert_eq!(split.len(), 1, "one matched label set answers one chunk");
+
+    reset_visited_pairs();
+    let mut whole = executor(&tree, bounded_pool(1 << 26));
+    let chunk = evaluated_array_chunk_of(&schema, metric(), 0, batch.clone(), true);
+    whole.push_evaluated(left, chunk.clone()).unwrap();
+    whole.push_evaluated(right, chunk).unwrap();
+    assert!(whole.next_chunk().unwrap().is_none());
+    let whole = whole.finish().unwrap();
+    assert_eq!(
+        visited_pairs(),
+        1,
+        "a series delivered whole is one candidate as well"
+    );
+    assert_eq!(whole.len(), 1, "one matched label set answers one chunk");
+
+    assert_eq!(
+        decided(&split),
+        decided(&whole),
+        "the delivery of a series changed the result"
+    );
+    let expected: Vec<(usize, Option<f64>)> = (0..points)
+        .map(|position| (position, Some(2.0 * position as f64)))
+        .collect();
+    assert_eq!(decided(&split), expected);
+}
+
+/// The assembly of the operands into the series the kernel matches is reserved before it allocates.
+///
+/// Assembling one series per closed series is metadata on top of the chunks the node retains -- the
+/// descriptors the chunks' fields are collected into and the runs the axis is built from -- and the
+/// pool is asked for that figure before it exists. A pool a byte short of it refuses the assembly,
+/// and nothing of it is left charged: the node holds what it retained while the runtime is still
+/// alive.
+#[test]
+fn an_assembly_the_pool_cannot_hold_is_refused_before_it_allocates() {
+    let grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let left = evaluated_chunk(&schema, 0, vec![1.0, 2.0], true);
+    let right = evaluated_chunk(&schema, 0, vec![10.0, 20.0], true);
+    let (retained, assembly) = binary_charge(&schema, &left, &right);
+    assert!(
+        assembly > 0,
+        "assembling the operands into series is not charged for"
+    );
+
+    // One byte short of the assembly: the assembly is refused rather than run over the budget.
+    let pool = bounded_pool(retained + assembly - 1);
+    let (mut state, mut binary) = binary_runtime(&pool, &schema);
+    state
+        .retain_binary(&mut binary, 0, NativeChunk::Evaluated(left.clone()))
+        .unwrap();
+    state
+        .retain_binary(&mut binary, 1, NativeChunk::Evaluated(right.clone()))
+        .unwrap();
+    assert_eq!(state.buffer.reservation.size(), retained);
+    let error = state.compute_binary(&mut binary).unwrap_err();
+    assert!(
+        is_resources_exhausted(&error),
+        "the assembly was not reserved before it allocated: {error}"
+    );
+    // The assembly never ran, so its charge is gone: what the node holds is what it retained, and
+    // the pool holds no more than that while the runtime is still alive.
+    assert_eq!(state.buffer.reservation.size(), retained);
+    assert_eq!(pool.reserved(), retained);
+    assert_eq!(
+        binary.retained_bytes(),
+        retained,
+        "the refused assembly changed what the operand retains"
+    );
+
+    // The figure covers the assembly itself: with exactly that much more, the series are built and
+    // hold the rows the chunks carried.
+    let pool = bounded_pool(retained + assembly);
+    let (mut state, mut binary) = binary_runtime(&pool, &schema);
+    state
+        .retain_binary(&mut binary, 0, NativeChunk::Evaluated(left))
+        .unwrap();
+    state
+        .retain_binary(&mut binary, 1, NativeChunk::Evaluated(right))
+        .unwrap();
+    let assembled = binary.assemble().unwrap();
+    assert_eq!(assembled[0].len(), 1, "one closed series is one series");
+    assert_eq!(assembled[1].len(), 1, "one closed series is one series");
+    let built = EvaluatedChunk::try_new(assembled[0][0].clone(), true).unwrap();
+    assert_eq!(sample_values(&built), vec![Some(1.0), Some(2.0)]);
+}
+
+/// An assembly the executor's pool cannot hold stops it and leaves it holding nothing.
+///
+/// The pool is one byte short of what the node retains plus what assembling the retained chunks
+/// allocates, so both operands are retained and the assembly is what the pool refuses. What a caller
+/// sees afterwards is a stopped execution that holds nothing: the operand chunks are dropped and the
+/// reservation is back at zero while the executor is still alive.
+#[test]
+fn an_assembly_the_executors_pool_cannot_hold_stops_it() {
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 2);
+    let schema = evaluated_schema(grid);
+    let (left_chunk, right_chunk) = (
+        evaluated_chunk(&schema, 0, vec![1.0, 2.0], true),
+        evaluated_chunk(&schema, 0, vec![10.0, 20.0], true),
+    );
+    let (retained, assembly) = binary_charge(&schema, &left_chunk, &right_chunk);
+    let pool = bounded_pool(retained + assembly - 1);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    let metrics = metrics_of(&execution);
+    execution.push_evaluated(left, left_chunk).unwrap();
+    execution.push_evaluated(right, right_chunk).unwrap();
+    // Both operands are retained before anything is assembled, and nothing is answered: the refusal
+    // below is the assembly's and not a chunk's.
+    assert!(execution.next_chunk().unwrap().is_none());
+    assert_eq!(
+        pool.reserved(),
+        retained,
+        "the operands are not what the pool holds"
+    );
+    assert_eq!(
+        gauge(
+            &metrics,
+            &format!("native.p0.root.{}", NodeMetric::PEAK_RESERVED_BYTES)
+        ),
+        retained,
+        "the binary node reserved past what it retains"
+    );
+
+    let error = execution.finish().unwrap_err();
+    assert!(
+        is_resources_exhausted(&error),
+        "the assembly was not reserved before it allocated: {error}"
+    );
+    assert_eq!(
+        pool.reserved(),
+        0,
+        "the stopped execution kept a reservation"
+    );
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert!(
+        !root_holds(&execution, holds_binary),
+        "the stopped execution kept the operands it retained"
+    );
+    let stopped = execution.next_chunk().unwrap_err();
+    assert!(
+        stopped
+            .to_string()
+            .contains("stopped after an earlier error"),
+        "a stopped execution answered again: {stopped}"
+    );
+}
+
+/// The assembly bound covers the vector a field's descriptors are flattened into, on the shape that
+/// grows it the most.
+///
+/// One chunk's field can itself hold 1024 segments. Beside a second chunk's one, [`Samples::try_from_chunks`]
+/// copies all 1025 descriptors into a vector that doubled to 2048 slots, and then into the
+/// `Arc<[Samples]>` it returns, so 3073 slots are live at once: two slots per segment -- 2052 here --
+/// would reserve less than the assembly allocates. The segments are dense slices of one histogram
+/// table, which the assembled field keeps sharing rather than copying.
+#[test]
+fn an_assembly_bound_covers_the_capacity_its_flatten_grows_to() {
+    let (segments, chunks) = (1025usize, 2usize);
+    let grid = grid(0, 60_000, segments as u64);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    // One table every segment indexes into, so the assembly has one allocation to share.
+    let mut builder = HistogramBatchBuilder::new();
+    for _ in 0..segments {
+        push_histogram(&mut builder, 4);
+    }
+    let table = builder.finish().unwrap();
+    let one = |index: usize| {
+        let index = u32::try_from(index).unwrap();
+        Samples::try_from_histogram(UInt32Array::from(vec![Some(index)]), Arc::clone(&table))
+            .unwrap()
+    };
+    // The first chunk's field is itself chunked -- 1024 one-sample segments -- and the second holds
+    // one, so the two chunks of the one logical series hold 1025 segments in all.
+    let nested = Samples::try_from_chunks((0..1024).map(one).collect::<Vec<_>>()).unwrap();
+    assert_eq!(
+        nested.segments().len(),
+        1024,
+        "the first field is not nested"
+    );
+    let chunk_of = |start: usize, len: usize, samples: Samples, is_last: bool| {
+        EvaluatedChunk::try_new(
+            Series {
+                metric: metric(),
+                time: TimeAxis::Grid(GridRange::try_new(Arc::clone(&grid), start, len).unwrap()),
+                fields: SeriesFields::one(samples),
+            },
+            is_last,
+        )
+        .unwrap()
+    };
+    let first = chunk_of(0, 1024, nested, false);
+    let second = chunk_of(1024, 1, one(1024), true);
+
+    // What the flatten the assembly runs holds at its peak, measured with the operations it makes:
+    // a chunked field contributes its segments and a dense one contributes itself.
+    let mut flat: Vec<Samples> = Vec::new();
+    for chunk in [&first, &second] {
+        let field = &chunk.series.fields.as_slice()[0];
+        if field.segments().len() > 1 {
+            flat.extend(field.segments().iter().cloned());
+        } else {
+            flat.push(field.clone());
+        }
+    }
+    // The `Arc<[Samples]>` holds one slot per descriptor while the vector they were copied out of is
+    // still alive, so the peak is that vector's capacity plus the descriptors it held.
+    let peak = flat.capacity() + flat.len();
+    assert_eq!(
+        flat.len(),
+        segments,
+        "the flatten did not meet every segment"
+    );
+    assert!(
+        flat.capacity() > flat.len(),
+        "the flatten grew to no more than its descriptors, so this shape proves nothing"
+    );
+    // The bound the assembly is reserved for: one descriptor per chunk per field, three per segment,
+    // and the four slots a first push allocates.
+    let allowed = chunks + 3 * segments + 4;
+    assert!(
+        peak <= allowed,
+        "the flatten of {segments} segments in {chunks} chunks holds {peak} slots at its peak, past \
+         the {allowed} the assembly bound allows"
+    );
+
+    let pool = pool();
+    let (mut state, mut binary) = binary_runtime(&pool, &schema);
+    for chunk in [first, second.clone()] {
+        state
+            .retain_binary(&mut binary, 0, NativeChunk::Evaluated(chunk))
+            .unwrap();
+    }
+    state
+        .retain_binary(&mut binary, 1, NativeChunk::Evaluated(second))
+        .unwrap();
+    let assembly = binary.assembly_bytes().unwrap();
+    assert!(
+        peak * std::mem::size_of::<Samples>() <= assembly,
+        "the {assembly} bytes reserved for the assembly do not cover the {peak} slots its flatten \
+         holds"
+    );
+
+    // The assembled series keeps the segments and the one table they index into.
+    let assembled = binary.assemble().unwrap();
+    assert_eq!(assembled[0].len(), 1, "one closed series is one series");
+    assert_eq!(assembled[0][0].time.len(), segments);
+    let field = &assembled[0][0].fields.as_slice()[0];
+    assert_eq!(field.segments().len(), segments);
+    for segment in field.segments() {
+        let Some(DenseSamplesRef::Histogram(histograms)) = segment.dense() else {
+            panic!("a histogram chunk assembles into histogram segments");
+        };
+        assert!(
+            Arc::ptr_eq(histograms.batch(), &table),
+            "the assembly copied the histogram table instead of sharing it"
+        );
+    }
+    let built = EvaluatedChunk::try_new(assembled[0][0].clone(), true).unwrap();
+    assert_eq!(histogram_counts(&built), vec![4.0; segments]);
+}
+
+/// A mixed operand delivered in two chunks over a sparse axis assembles into one series that keeps
+/// its holes, both its fields and the allocations they are slices of.
+///
+/// Field 0 holds native histograms and field 1 floats, both chunks index one table, and the
+/// positions they decide are 0, 2 and 3 of a four-point grid. The assembly keeps one descriptor per
+/// segment instead of copying a sample, so the assembled series reads the same table and the same
+/// float buffers the chunks read, and the position neither chunk decided stays a hole. The kernel
+/// then answers that series as one candidate, which is what the result below is computed from.
+#[test]
+fn a_mixed_nested_operand_assembles_into_one_series_with_its_holes() {
+    let grid = grid(0, 60_000, 4);
+    let schema = Arc::new(SeriesSchema {
+        fields: field_count(2),
+        eval_grid: Some(Arc::clone(&grid)),
+    });
+    // One table both chunks index into.
+    let mut builder = HistogramBatchBuilder::new();
+    for _ in 0..2 {
+        push_histogram(&mut builder, 4);
+    }
+    let table = builder.finish().unwrap();
+    let chunk_of = |spans: &[(usize, usize)],
+                    indices: Vec<Option<u32>>,
+                    floats: Vec<Option<f64>>,
+                    is_last: bool| {
+        let histograms =
+            Samples::try_from_histogram(UInt32Array::from(indices), Arc::clone(&table)).unwrap();
+        let time = TimeAxis::from_grid_spans(
+            Arc::clone(&grid),
+            spans
+                .iter()
+                .map(|&(start, len)| GridSpan::new(start, len))
+                .collect(),
+        )
+        .unwrap();
+        EvaluatedChunk::try_new(
+            Series {
+                metric: metric(),
+                time,
+                fields: SeriesFields::try_from_vec(vec![
+                    histograms,
+                    Samples::from_float(Float64Array::from(floats)),
+                ])
+                .unwrap(),
+            },
+            is_last,
+        )
+        .unwrap()
+    };
+    let (left_a, left_b) = (
+        chunk_of(
+            &[(0, 1), (2, 1)],
+            vec![Some(0), Some(0)],
+            vec![Some(1.0), None],
+            false,
+        ),
+        chunk_of(&[(3, 1)], vec![Some(1)], vec![Some(4.0)], true),
+    );
+    let (right_a, right_b) = (
+        chunk_of(
+            &[(0, 1), (2, 1)],
+            vec![Some(1), Some(1)],
+            vec![Some(10.0), Some(30.0)],
+            false,
+        ),
+        chunk_of(&[(3, 1)], vec![Some(0)], vec![Some(40.0)], true),
+    );
+
+    // The two chunks are collected into the one series the kernel matches.
+    let pool = pool();
+    let (mut state, mut binary) = binary_runtime(&pool, &schema);
+    for chunk in [&left_a, &left_b] {
+        state
+            .retain_binary(&mut binary, 0, NativeChunk::Evaluated(chunk.clone()))
+            .unwrap();
+    }
+    let assembled = binary.assemble().unwrap();
+    assert_eq!(
+        assembled[0].len(),
+        1,
+        "two chunks of one series are not one series"
+    );
+    let series = &assembled[0][0];
+    assert_eq!(series.time.len(), 3);
+    assert_eq!(series.time.first_position(), Some(0));
+    assert_eq!(series.time.last_position(), Some(3));
+    assert_eq!(
+        series.time.runs().count(),
+        3,
+        "the assembly filled the hole neither chunk decided"
+    );
+    let histograms = &series.fields.as_slice()[0];
+    assert_eq!(
+        histograms.segments().len(),
+        2,
+        "the chunks' histograms were not collected"
+    );
+    for segment in histograms.segments() {
+        let Some(DenseSamplesRef::Histogram(samples)) = segment.dense() else {
+            panic!("a histogram chunk assembles into histogram segments");
+        };
+        assert!(
+            Arc::ptr_eq(samples.batch(), &table),
+            "the assembly copied a histogram table instead of sharing it"
+        );
+    }
+    let floats = &series.fields.as_slice()[1];
+    assert_eq!(
+        floats.segments().len(),
+        2,
+        "the chunks' floats were not collected"
+    );
+    for (segment, chunk) in floats.segments().iter().zip([&left_a, &left_b]) {
+        let (Some(DenseSamplesRef::Float(values)), Some(DenseSamplesRef::Float(source))) =
+            (segment.dense(), chunk.series.fields.as_slice()[1].dense())
+        else {
+            panic!("a float chunk assembles into float segments");
+        };
+        assert_eq!(
+            values.values().inner().data_ptr(),
+            source.values().inner().data_ptr(),
+            "the assembly copied floats instead of sharing the buffer they are slices of"
+        );
+    }
+
+    // The kernel reads the assembled series, over the two fields and the positions it holds.
+    let root = binary_of(
+        evaluated_input_of(2, Arc::clone(&grid)),
+        evaluated_input_of(2, Arc::clone(&grid)),
+        binary_matching(BinaryOp::Add),
+    );
+    let tree = NativeTree::try_new(root).unwrap();
+    let (left, right) = (InputId::new(0), InputId::new(1));
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    for chunk in [left_a, left_b] {
+        execution.push_evaluated(left, chunk).unwrap();
+    }
+    for chunk in [right_a, right_b] {
+        execution.push_evaluated(right, chunk).unwrap();
+    }
+    let out = run(&mut execution);
+    assert_eq!(out.len(), 1, "one matched label set answers one chunk");
+    assert_eq!(
+        field_values(&out[0], 1),
+        vec![Some(11.0), None, Some(44.0)],
+        "the floats of the two chunks are not added at the positions they hold"
+    );
+    assert_eq!(
+        histogram_counts(&out[0]),
+        vec![8.0, 8.0, 8.0],
+        "the histograms of the two chunks are not added at the positions they hold"
+    );
+}
+
+/// A kernel error and dropping the execution both give back everything the node reserved.
+#[test]
+fn a_kernel_error_and_a_drop_release_the_binary_reservation() {
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 2);
+    let schema = evaluated_schema(grid);
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution
+        .push_evaluated(left, evaluated_chunk(&schema, 0, vec![1.0, 2.0], true))
+        .unwrap();
+    // The same label set twice on the right, both holding a value at position 0.
+    execution
+        .push_evaluated(right, evaluated_chunk(&schema, 0, vec![1.0], true))
+        .unwrap();
+    execution
+        .push_evaluated(right, evaluated_chunk(&schema, 0, vec![2.0], true))
+        .unwrap();
+    let error = execution.finish().unwrap_err();
+    assert!(error.to_string().contains("duplicate series"), "{error}");
+    assert_eq!(pool.reserved(), 0, "the kernel error kept its reservation");
+    assert_eq!(execution.state().reserved_bytes(), 0);
+
+    // A dropped execution returns its reservation without being told to.
+    let mut dropped = executor(&tree, Arc::clone(&pool));
+    dropped
+        .push_evaluated(left, evaluated_chunk(&schema, 0, vec![1.0], true))
+        .unwrap();
+    assert!(pool.reserved() > 0, "the operand reserved nothing");
+    drop(dropped);
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// A queued chunk has to name an input the tree has.
+#[test]
+fn a_queued_chunk_names_an_input_the_tree_has() {
+    let (tree, grid, evaluated, _right) = binary_tree(BinaryOp::Add, 2);
+    let schema = evaluated_schema(grid);
+    let chunk = evaluated_chunk(&schema, 0, vec![1.0, 2.0], true);
+
+    // Two leaves are indexed zero and one, so an id past the last one names nothing: the count is
+    // what says so, rather than an assignment to whichever leaf the count happened to reach.
+    let mut missing = executor(&tree, pool());
+    let error = missing.push_evaluated(InputId::new(2), chunk).unwrap_err();
+    assert!(
+        error.to_string().contains("has 2 inputs, and no input 2"),
+        "{error}"
+    );
+
+    // An input bound to evaluated samples refuses raw ones, naming the input it was queued at.
+    let mut fresh = executor(&tree, pool());
+    let error = fresh
+        .push_raw(evaluated, raw_chunk(&raw_schema(), &[0], &[1.0], true))
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("is bound to an evaluated series"),
+        "{error}"
+    );
+}
+
+/// A map above a binary, and a window above a binary, pull its result through their own loops.
+#[test]
+fn a_binary_beneath_a_map_and_a_window_is_pulled_recursively() {
+    // A map over the binary result: the subtraction is mapped to its magnitude.
+    let inner_grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&inner_grid));
+    // The raw sources are the only leaves, one per operand: counted left to right, the left
+    // subtree's is input 0 and the right subtree's input 1, whatever sits above them.
+    let (left, right) = (InputId::new(0), InputId::new(1));
+    let root = binary_of(
+        evaluated_input_of(1, Arc::clone(&inner_grid)),
+        evaluated_input_of(1, Arc::clone(&inner_grid)),
+        binary_matching(BinaryOp::Sub),
+    );
+    let mapped = NativeTree::try_new(map(root, vec![MathOp::Abs])).unwrap();
+    let mut execution = executor(&mapped, pool());
+    execution
+        .push_evaluated(left, evaluated_chunk(&schema, 0, vec![1.0, 2.0], true))
+        .unwrap();
+    execution
+        .push_evaluated(right, evaluated_chunk(&schema, 0, vec![4.0, 5.0], true))
+        .unwrap();
+    assert_eq!(
+        decided(&run(&mut execution)),
+        vec![(0, Some(3.0)), (1, Some(3.0))]
+    );
+
+    // A window over the binary result, evaluated on its own outer grid.
+    let outer = grid(0, 60_000, 2);
+    let root = binary_of(
+        evaluated_input_of(1, Arc::clone(&inner_grid)),
+        evaluated_input_of(1, Arc::clone(&inner_grid)),
+        binary_matching(BinaryOp::Add),
+    );
+    let windowed = NativeTree::try_new(window_with(
+        root,
+        RangeFunction::LastOverTime,
+        120_000,
+        Some(Arc::clone(&inner_grid)),
+        Arc::clone(&outer),
+    ))
+    .unwrap();
+    let mut execution = executor(&windowed, pool());
+    execution
+        .push_evaluated(left, evaluated_chunk(&schema, 0, vec![1.0, 2.0], true))
+        .unwrap();
+    execution
+        .push_evaluated(right, evaluated_chunk(&schema, 0, vec![10.0, 20.0], true))
+        .unwrap();
+    // The outer window decides each point from the binary result, on its own grid.
+    assert_eq!(
+        decided(&run(&mut execution)),
+        vec![(0, Some(11.0)), (1, Some(22.0))]
+    );
+}
+
+/// A binary over two windows reads what each window decided, and over two selections what each
+/// selection picked.
+#[test]
+fn a_binary_over_two_windows_and_selections_is_executed() {
+    let inner = grid(0, 60_000, 2);
+    let schema = raw_schema();
+
+    let root = binary_of(
+        window_with(
+            input(),
+            RangeFunction::LastOverTime,
+            60_000,
+            None,
+            Arc::clone(&inner),
+        ),
+        window_with(
+            input(),
+            RangeFunction::LastOverTime,
+            60_000,
+            None,
+            Arc::clone(&inner),
+        ),
+        binary_matching(BinaryOp::Add),
+    );
+    let tree = NativeTree::try_new(root).unwrap();
+    let mut execution = executor(&tree, pool());
+    for (input, key, values) in [
+        (InputId::new(0), b"series-a".as_slice(), [1.0, 2.0]),
+        (InputId::new(1), b"series-b".as_slice(), [10.0, 20.0]),
+    ] {
+        execution
+            .push_raw(
+                input,
+                raw_chunk_of(&schema, key, metric(), &[0, 60_000], &values, true),
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        decided(&run(&mut execution)),
+        vec![(0, Some(11.0)), (1, Some(22.0))]
+    );
+
+    // The same two grid points, selected from raw samples on each side.
+    let root = binary_of(
+        instant(input(), 300_000, 0, Arc::clone(&inner)),
+        instant(input(), 300_000, 0, Arc::clone(&inner)),
+        binary_matching(BinaryOp::Add),
+    );
+    let tree = NativeTree::try_new(root).unwrap();
+    let mut execution = executor(&tree, pool());
+    for (input, key, value) in [
+        (InputId::new(0), b"series-a".as_slice(), 1.0),
+        (InputId::new(1), b"series-b".as_slice(), 10.0),
+    ] {
+        execution
+            .push_raw(
+                input,
+                raw_chunk_of(&schema, key, metric(), &[0], &[value], true),
+            )
+            .unwrap();
+    }
+    // The one sample of each side is the last at or before both grid points.
+    assert_eq!(
+        decided(&run(&mut execution)),
+        vec![(0, Some(11.0)), (1, Some(11.0))]
+    );
+}
+
+/// The chain Prometheus evaluates as `abs(instant - last_over_time)`, with the raw samples of each
+/// side and the literal rows it decides.
+///
+/// The left side is a selection reading back 1001 ms and the right side a 1000 ms window, on a grid
+/// of 1000 ms steps: the two report different samples of the two raw series, which is what the
+/// subtraction then pairs.
+#[test]
+fn a_binary_of_a_selection_and_a_window_matches_prometheus() {
+    let out = grid(0, 1_000, 4);
+    let left = instant(input(), 1_001, 0, Arc::clone(&out));
+    let right = window_with(
+        input(),
+        RangeFunction::LastOverTime,
+        1_000,
+        None,
+        Arc::clone(&out),
+    );
+    let tree = NativeTree::try_new(map(
+        binary_of(left, right, binary_matching(BinaryOp::Sub)),
+        vec![MathOp::Abs],
+    ))
+    .unwrap();
+    let schema = raw_schema();
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_raw(
+            InputId::new(0),
+            raw_chunk_of(
+                &schema,
+                b"left_raw",
+                named_metric("left_raw", "x"),
+                &[0, 500, 2_000],
+                &[-2.0, -4.0, -8.0],
+                true,
+            ),
+        )
+        .unwrap();
+    execution
+        .push_raw(
+            InputId::new(1),
+            raw_chunk_of(
+                &schema,
+                b"right_raw",
+                named_metric("right_raw", "x"),
+                &[0, 1_000, 2_000, 3_000],
+                &[1.0, 3.0, 2.0, 4.0],
+                true,
+            ),
+        )
+        .unwrap();
+    assert_eq!(
+        decided(&run(&mut execution)),
+        vec![
+            (0, Some(3.0)),
+            (1, Some(7.0)),
+            (2, Some(10.0)),
+            (3, Some(12.0)),
+        ]
+    );
+}
+
+/// An operand chunk whose series changes before it ends is refused, naming the side and the node.
+///
+/// A binary node matches whole series, so the pairs of a series that is still open cannot be
+/// computed from a chunk of another one: the two are reported instead of being paired as though the
+/// second were a continuation of the first.
+#[test]
+fn a_chunk_of_another_series_on_one_operand_is_refused() {
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 4);
+    let schema = evaluated_schema(grid);
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution
+        .push_evaluated(
+            right,
+            evaluated_chunk_of(&schema, named_metric("api", "x"), 0, vec![Some(1.0)], false),
+        )
+        .unwrap();
+    // The chunk that arrived while `api` is open names another series.
+    execution
+        .push_evaluated(left, evaluated_chunk(&schema, 0, vec![1.0], true))
+        .unwrap();
+    assert!(execution.next_chunk().unwrap().is_none());
+
+    execution
+        .push_evaluated(
+            right,
+            evaluated_chunk_of(&schema, named_metric("db", "x"), 1, vec![Some(2.0)], true),
+        )
+        .unwrap();
+    let error = execution.next_chunk().unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("the binary node")
+            && message.contains("its right operand")
+            && message.contains("before"),
+        "{message}"
+    );
+    // The execution stopped rather than handing on the pairs it had, and it holds nothing.
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert!(!root_holds(&execution, holds_binary));
+    let again = execution.next_chunk().unwrap_err();
+    assert!(
+        again.to_string().contains("stopped after an earlier error"),
+        "{again}"
+    );
+    // No partial answer surfaced through `finish` either.
+    assert!(execution.finish().is_err());
+}
+
+/// An operand chunk that starts behind the end of the open series is refused, values or not.
+///
+/// The overlap is read off the axes, not off the samples they carry: a chunk whose every sample is
+/// missing still occupies the positions its axis places, so a second chunk that reaches back into
+/// them is a rewind rather than a continuation.
+#[test]
+fn an_operand_chunk_that_rewinds_is_refused_with_or_without_values() {
+    let (tree, grid, left, _right) = binary_tree(BinaryOp::Add, 4);
+    let schema = evaluated_schema(grid);
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    // Two positions that hold no value at all, and a series that did not close on them.
+    execution
+        .push_evaluated(
+            left,
+            evaluated_chunk_of(&schema, metric(), 0, vec![None, None], false),
+        )
+        .unwrap();
+    assert!(execution.next_chunk().unwrap().is_none());
+    // Position 1 is one of the two the series already placed.
+    execution
+        .push_evaluated(left, evaluated_chunk(&schema, 1, vec![1.0], true))
+        .unwrap();
+
+    let error = execution.next_chunk().unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("do not continue each other")
+            && message.contains("the binary node")
+            && message.contains("by its left operand")
+            && message.contains("after the series already reached 2"),
+        "{message}"
+    );
+    assert_eq!(pool.reserved(), 0);
+    assert!(!root_holds(&execution, holds_binary));
+}
+
+/// A chunk that does not match the layout its operand is bound to is refused before the kernel.
+///
+/// Each case is a chunk a caller can build: [`Series`] keeps its fields public, so an axis and the
+/// fields beside it can disagree, and a chunk can be addressed on a grid no operand was bound to.
+#[test]
+fn a_chunk_that_does_not_match_its_operand_is_refused_before_the_kernel() {
+    let (tree, out_grid, left, _right) = binary_tree(BinaryOp::Add, 4);
+    let pool = pool();
+    // What each operand of `binary_tree` is bound to: one float field on the tree's own grid.
+    let schema = evaluated_schema(Arc::clone(&out_grid));
+    let two_fields = Arc::new(SeriesSchema {
+        fields: field_count(2),
+        eval_grid: Some(Arc::clone(&out_grid)),
+    });
+    let elsewhere = grid(1, 60_000, 4);
+
+    let cases: Vec<(&str, EvaluatedChunk)> = vec![
+        (
+            // An axis on another grid: one step from the one the operand is bound to.
+            "the other grid",
+            evaluated_on(
+                &evaluated_schema(Arc::clone(&elsewhere)),
+                metric(),
+                0,
+                2,
+                vec![vec![Some(1.0), Some(2.0)]],
+                true,
+            ),
+        ),
+        (
+            // Two fields where the operand is bound to one.
+            "the field count",
+            evaluated_on(
+                &two_fields,
+                metric(),
+                0,
+                2,
+                vec![vec![Some(1.0), Some(2.0)], vec![Some(3.0), Some(4.0)]],
+                true,
+            ),
+        ),
+        (
+            // Two rows of axis, one sample of the one field.
+            "the field length",
+            evaluated_on(&schema, metric(), 0, 2, vec![vec![Some(1.0)]], true),
+        ),
+    ];
+    for (case, chunk) in cases {
+        let mut execution = executor(&tree, Arc::clone(&pool));
+        execution.push_evaluated(left, chunk).unwrap();
+        let error = execution.next_chunk().unwrap_err();
+        assert!(
+            error.to_string().contains("rejected its left operand"),
+            "{case}: {error}"
+        );
+        assert_eq!(
+            pool.reserved(),
+            0,
+            "{case}: the refused chunk is still held"
+        );
+        assert_eq!(execution.state().reserved_bytes(), 0, "{case}");
+        assert!(!root_holds(&execution, holds_binary), "{case}");
+    }
+}
+
+/// A series cannot be built with no field at all, which is what keeps a zero-field check honest.
+///
+/// The validator's field-count check is not skipped by an empty field list because an empty one
+/// cannot exist: [`SeriesFields`] refuses it, so every chunk any caller can build carries at least
+/// one field. The boundary is the constructor's, and it is recorded here rather than loosened there.
+#[test]
+fn a_series_cannot_carry_no_fields() {
+    let error =
+        SeriesFields::try_from_vec(Vec::new()).expect_err("a series with no field was accepted");
+    assert!(error.to_string().contains("must not be empty"), "{error}");
+    // The one-field and many-field shapes a chunk can have are not empty either.
+    let one = SeriesFields::one(Samples::from_float(Float64Array::from(vec![1.0])));
+    assert!(!one.is_empty());
+    assert_eq!(one.len(), 1);
+}
+
+/// A binary node with no chunk at all on either side answers nothing, and holds nothing.
+///
+/// The input ending without a chunk is a stream that held no series, not a tree that never ran: the
+/// kernel is asked about two empty vectors and reports none, so the answer is the empty one.
+#[test]
+fn an_absent_operand_yields_no_series() {
+    let (tree, grid, _left, right) = binary_tree(BinaryOp::Add, 2);
+    let schema = evaluated_schema(grid);
+    let pool = pool();
+
+    // Neither side queued a chunk.
+    let mut empty = executor(&tree, Arc::clone(&pool));
+    assert!(empty.finish().unwrap().is_empty());
+    assert_eq!(pool.reserved(), 0);
+    assert!(!root_holds(&empty, holds_binary));
+
+    // Only the right side ran, and it closed: nothing matches a series that is not there.
+    let mut one_side = executor(&tree, Arc::clone(&pool));
+    one_side
+        .push_evaluated(right, evaluated_chunk(&schema, 0, vec![1.0, 2.0], true))
+        .unwrap();
+    assert!(one_side.finish().unwrap().is_empty());
+    assert_eq!(pool.reserved(), 0);
+    assert!(!root_holds(&one_side, holds_binary));
+}
+
+/// A binary node counts the series it closes on its output, and does not count an operand chunk
+/// that already closed its input series.
+#[test]
+fn a_binary_counts_each_closed_result_once() {
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 2);
+    let schema = evaluated_schema(grid);
+    let mut execution = executor(&tree, pool());
+    let metrics = metrics_of(&execution);
+    execution
+        .push_evaluated(left, evaluated_chunk(&schema, 0, vec![1.0, 2.0], true))
+        .unwrap();
+    execution
+        .push_evaluated(right, evaluated_chunk(&schema, 0, vec![10.0, 20.0], true))
+        .unwrap();
+    let out = run(&mut execution);
+    assert_eq!(out.len(), 1);
+    assert!(out[0].is_last, "a result series is handed over closed");
+    // One matched result closed, not one per operand chunk and not one per handover of the result.
+    assert_eq!(count(&metrics, "root", NodeMetric::COMPLETED_SERIES), 1);
+    assert_eq!(count(&metrics, "root", NodeMetric::INPUT_BATCHES), 2);
+    assert_eq!(count(&metrics, "root", NodeMetric::OUTPUT_BATCHES), 1);
+}
+
+/// A legitimate empty result over a wide operand finishes in a 4 MiB pool and holds nothing after.
+///
+/// A match group of one member collects no points in the duplicate scan, so charging a point per
+/// row of an operand reserves memory the kernel never allocates.
+#[test]
+fn an_empty_result_of_a_wide_operand_fits_its_pool() {
+    let points = 10_000;
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, points as u64);
+    let schema = evaluated_schema(grid);
+    let pool = bounded_pool(4 << 20);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    let series = |job: &str| pod_metric("requests", job, "p");
+    execution
+        .push_evaluated(
+            left,
+            evaluated_chunk_of(&schema, series("left"), 0, vec![Some(1.0); points], true),
+        )
+        .unwrap();
+    assert!(execution.next_chunk().unwrap().is_none());
+    for index in 0..32 {
+        execution
+            .push_evaluated(
+                right,
+                evaluated_chunk_of(
+                    &schema,
+                    series(&format!("r{index:02}")),
+                    0,
+                    vec![Some(2.0); points],
+                    true,
+                ),
+            )
+            .unwrap();
+        assert!(execution.next_chunk().unwrap().is_none());
+    }
+
+    let finished = execution.finish();
+    assert!(
+        finished.is_ok(),
+        "an empty result over {points} points does not fit a 4 MiB pool: {:?}",
+        finished.as_ref().err()
+    );
+    assert!(
+        finished.unwrap().is_empty(),
+        "nothing matches, so nothing is answered"
+    );
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(execution.state().reserved_bytes(), 0);
+}
+
+/// A legitimate wide query finishes in a 32 MiB pool, keeping every field's sum and nothing else.
+///
+/// A thousand points pair all sixty-four fields of both operands, so the workspace is the rows
+/// filed and the tables beside them, not a figure far past either.
+#[test]
+fn a_dense_wide_result_fits_a_32_mib_pool() {
+    let (points, width) = (1_000usize, 64usize);
+    let grid = grid(0, 60_000, points as u64);
+    let (left_node, right_node) = (
+        evaluated_input_of(width, Arc::clone(&grid)),
+        evaluated_input_of(width, Arc::clone(&grid)),
+    );
+    let schema = left_node
+        .output
+        .samples()
+        .expect("a source of evaluated samples")
+        .clone();
+    let root = binary_of(left_node, right_node, binary_matching(BinaryOp::Add));
+    let tree = NativeTree::try_new(root).unwrap();
+    let pool = bounded_pool(32 << 20);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    let columns = |value: f64| -> Vec<Vec<Option<f64>>> {
+        (0..width).map(|_| vec![Some(value); points]).collect()
+    };
+    let (left, right) = (InputId::new(0), InputId::new(1));
+    execution
+        .push_evaluated(
+            left,
+            evaluated_columns(&schema, metric(), 0, columns(1.0), true),
+        )
+        .unwrap();
+    execution
+        .push_evaluated(
+            right,
+            evaluated_columns(&schema, metric(), 0, columns(2.0), true),
+        )
+        .unwrap();
+    assert!(execution.next_chunk().unwrap().is_none());
+
+    let finished = execution.finish();
+    assert!(
+        finished.is_ok(),
+        "{width} fields over {points} points do not fit a 32 MiB pool: {:?}",
+        finished.as_ref().err()
+    );
+    let out = finished.unwrap();
+    assert_eq!(out.len(), 1, "one matched label set answers one chunk");
+    let chunk = &out[0];
+    assert!(chunk.is_last, "a result series is handed over closed");
+    assert_eq!(chunk.series.time.len(), points);
+    assert_eq!(series_start(chunk), 0);
+    assert_eq!(chunk.series.fields.len(), width);
+    for field in 0..width {
+        assert_eq!(
+            field_values(chunk, field),
+            vec![Some(3.0); points],
+            "field {field}"
+        );
+    }
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(execution.state().reserved_bytes(), 0);
+}
+
+/// An all-missing match group of two right series finishes in a 4 MiB pool and answers nothing.
+///
+/// No member carries a sample, so the duplicate scan needs no point buffer.
+#[test]
+fn an_all_missing_match_group_fits_its_pool() {
+    let points = 100_000;
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, points as u64);
+    let schema = evaluated_schema(grid);
+    let pool = bounded_pool(4 << 20);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution
+        .push_evaluated(
+            left,
+            evaluated_chunk_of(&schema, metric(), 0, vec![Some(1.0); points], true),
+        )
+        .unwrap();
+    assert!(execution.next_chunk().unwrap().is_none());
+    // Both right chunks close the one label set, so its match group has two members.
+    for _ in 0..2 {
+        execution
+            .push_evaluated(
+                right,
+                evaluated_chunk_of(&schema, metric(), 0, vec![None; points], true),
+            )
+            .unwrap();
+        assert!(execution.next_chunk().unwrap().is_none());
+    }
+
+    let finished = execution.finish();
+    assert!(
+        finished.is_ok(),
+        "an all-missing match group over {points} points does not fit a 4 MiB pool: {:?}",
+        finished.as_ref().err()
+    );
+    assert!(
+        finished.unwrap().is_empty(),
+        "no point holds a value on both sides, so nothing is answered"
+    );
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(execution.state().reserved_bytes(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Set operations, driven through `NativeExecutor`.
+// ---------------------------------------------------------------------------
+
+/// A set node over `left` and `right`, bound the way the compiler binds one: the left side's fields
+/// on the grid both operands share.
+fn set_of(left: NativeNode, right: NativeNode, op: SetOp, labels: MatchingLabels) -> NativeNode {
+    let output = left.output.clone();
+    NativeNode {
+        expr: NativeExpr::Set {
+            left: Box::new(left),
+            right: Box::new(right),
+            op: BoundSetOp { op, labels },
+        },
+        output,
+    }
+}
+
+/// Every series a chunk stream holds, by its rendered label set with the metric name first.
+fn decided_by_label_set(chunks: &[EvaluatedChunk]) -> Vec<(String, Decided)> {
+    let mut series: Vec<(String, Decided)> = chunks
+        .iter()
+        .map(|chunk| {
+            let metric = &chunk.series.metric;
+            let labels = metric
+                .name()
+                .into_iter()
+                .map(|name| format!("__name__={name}"))
+                .chain(
+                    metric
+                        .tags()
+                        .iter()
+                        .map(|tag| format!("{}={}", tag.name, tag.value)),
+                )
+                .collect::<Vec<_>>()
+                .join(",");
+            (labels, decided(std::slice::from_ref(chunk)))
+        })
+        .collect();
+    series.sort_by(|a, b| a.0.cmp(&b.0));
+    series
+}
+
+/// Each operator matches per grid point, by the labels it was bound with, and hands samples on with
+/// the labels of the side they came from.
+///
+/// `l{job="a"}` holds every point and `l{job="b"}` only the last two; `r{job="a"}` holds the middle
+/// two and `r{job="b"}` every point. The pods differ on every pair, so the default matching pairs
+/// nothing, while `on(job)` and `ignoring(pod)` pair by job alone.
+#[test]
+fn set_operators_match_by_their_labels_at_each_point() {
+    let grid = grid(0, 60_000, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let left = [
+        (pod_metric("l", "a", "x"), 0, vec![1.0, 2.0, 3.0, 4.0]),
+        (pod_metric("l", "b", "y"), 2, vec![7.0, 8.0]),
+    ];
+    let right = [
+        (pod_metric("r", "a", "z"), 1, vec![10.0, 20.0]),
+        (pod_metric("r", "b", "w"), 0, vec![30.0, 40.0, 50.0, 60.0]),
+    ];
+    let on_job = || MatchingLabels::On(vec!["job".into()]);
+    let la = "__name__=l,job=a,pod=x".to_string();
+    let lb = "__name__=l,job=b,pod=y".to_string();
+    let rb = "__name__=r,job=b,pod=w".to_string();
+    for (op, labels, expected) in [
+        (
+            SetOp::And,
+            on_job(),
+            vec![
+                (la.clone(), vec![(1, Some(2.0)), (2, Some(3.0))]),
+                (lb.clone(), vec![(2, Some(7.0)), (3, Some(8.0))]),
+            ],
+        ),
+        (SetOp::And, MatchingLabels::Ignoring(Vec::new()), vec![]),
+        (
+            SetOp::Unless,
+            MatchingLabels::Ignoring(vec!["pod".into()]),
+            vec![(la.clone(), vec![(0, Some(1.0)), (3, Some(4.0))])],
+        ),
+        // `r{job="a"}` finds the left side's job at each of its points and is dropped; `r{job="b"}`
+        // fills the two points where the left side has no `job="b"`, under its own labels.
+        (
+            SetOp::Or,
+            on_job(),
+            vec![
+                (
+                    la.clone(),
+                    vec![
+                        (0, Some(1.0)),
+                        (1, Some(2.0)),
+                        (2, Some(3.0)),
+                        (3, Some(4.0)),
+                    ],
+                ),
+                (lb.clone(), vec![(2, Some(7.0)), (3, Some(8.0))]),
+                (rb.clone(), vec![(0, Some(30.0)), (1, Some(40.0))]),
+            ],
+        ),
+    ] {
+        let tree = NativeTree::try_new(set_of(
+            evaluated_input_with_source_index(Arc::clone(&grid), 0),
+            evaluated_input_with_source_index(Arc::clone(&grid), 1),
+            op,
+            labels.clone(),
+        ))
+        .unwrap();
+        let mut execution = executor(&tree, pool());
+        for (source, side) in [(0, &left), (1, &right)] {
+            let id = execution.state().input_ids(source).next().unwrap();
+            for (metric, start, values) in side.iter() {
+                execution
+                    .push_evaluated(
+                        id,
+                        evaluated_chunk_of(
+                            &schema,
+                            metric.clone(),
+                            *start,
+                            values.iter().copied().map(Some).collect(),
+                            true,
+                        ),
+                    )
+                    .unwrap();
+            }
+        }
+        assert_eq!(
+            decided_by_label_set(&run(&mut execution)),
+            expected,
+            "{op:?} {labels:?}"
+        );
+        assert_eq!(execution.state().reserved_bytes(), 0, "{op:?} {labels:?}");
+    }
+}
+
+/// The rows a set operation keeps are reserved from the pool like a binary operation's workspace:
+/// a pool that holds both operands, their assembly and the kept output, but not the rows the kernel
+/// files and merges on the way, refuses the operation and gets back what the node held.
+#[test]
+fn an_oversized_set_workspace_is_refused_by_the_pool() {
+    let points = 10_000;
+    let grid = grid(0, 60_000, points);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let operand = || evaluated_chunk(&schema, 0, vec![1.0; points as usize], true);
+    let (retained, assembly) = binary_charge(&schema, &operand(), &operand());
+    // Room for a copy of the one-field output on top of what the node holds before the kernel runs,
+    // which is far less than the rows `and` files for every point and the merge reads them into.
+    let pool = bounded_pool(retained + assembly + 2 * points as usize * 9);
+    let tree = NativeTree::try_new(set_of(
+        evaluated_input_with_source_index(Arc::clone(&grid), 0),
+        evaluated_input_with_source_index(Arc::clone(&grid), 1),
+        SetOp::And,
+        MatchingLabels::Ignoring(Vec::new()),
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    for source in [0, 1] {
+        let id = execution.state().input_ids(source).next().unwrap();
+        execution.push_evaluated(id, operand()).unwrap();
+    }
+    let error = execution.finish().unwrap_err();
+    assert!(
+        matches!(error.find_root(), DataFusionError::ResourcesExhausted(_)),
+        "the set workspace was not refused by the pool: {error}"
+    );
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert!(!root_holds(&execution, holds_binary));
+}
+
+/// The results a set node queues are held with their labels until each is handed on: a result's
+/// label set is owned by the queued chunk, so a queue of long-labelled one-point results is mostly
+/// labels, and the reservation drops to zero once the queue is drained or the execution dropped.
+#[test]
+fn queued_set_results_hold_their_labels_until_handed_on() {
+    const SERIES: usize = 64;
+    const LABEL: usize = 4_096;
+    let grid = grid(0, 60_000, 1);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(set_of(
+        evaluated_input_with_source_index(Arc::clone(&grid), 0),
+        evaluated_input_with_source_index(Arc::clone(&grid), 1),
+        SetOp::And,
+        MatchingLabels::On(Vec::new()),
+    ))
+    .unwrap();
+    let start = |pool: &Arc<dyn MemoryPool>| {
+        let mut execution = executor(&tree, Arc::clone(pool));
+        match &execution.state().live.as_ref().unwrap().root.op {
+            RuntimeOp::Binary { state, .. } => assert_eq!(
+                state.buffer.reservation.consumer().name(),
+                "native.set at root"
+            ),
+            _ => panic!("expected set binary runtime"),
+        }
+        let (left, right) = (
+            execution.state().input_ids(0).next().unwrap(),
+            execution.state().input_ids(1).next().unwrap(),
+        );
+        for index in 0..SERIES {
+            let metric = pod_metric("l", &format!("{index:0>LABEL$}"), "x");
+            execution
+                .push_evaluated(
+                    left,
+                    evaluated_chunk_of(&schema, metric, 0, vec![Some(1.0)], true),
+                )
+                .unwrap();
+        }
+        execution
+            .push_evaluated(
+                right,
+                evaluated_chunk_of(&schema, pod_metric("r", "a", "y"), 0, vec![Some(2.0)], true),
+            )
+            .unwrap();
+        execution.end_of_input().unwrap();
+        // The first pull runs the kernel and hands one result on; the rest stay queued.
+        assert!(execution.next_chunk().unwrap().is_some());
+        execution
+    };
+
+    let drained = pool();
+    let mut execution = start(&drained);
+    assert!(
+        drained.reserved() >= (SERIES - 1) * LABEL,
+        "{} bytes held for {} queued results of {LABEL}-byte labels",
+        drained.reserved(),
+        SERIES - 1
+    );
+    let mut handed_on = 1;
+    while execution.next_chunk().unwrap().is_some() {
+        handed_on += 1;
+    }
+    assert_eq!(handed_on, SERIES);
+    assert_eq!(drained.reserved(), 0);
+
+    let dropped = pool();
+    drop(start(&dropped));
+    assert_eq!(dropped.reserved(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// `info`, driven through `NativeExecutor`.
+// ---------------------------------------------------------------------------
+
+/// `name` with `labels`.
+fn labelled(name: &str, labels: &[(&str, &str)]) -> SeriesLabels {
+    SeriesLabels::try_new(
+        Some(name.into()),
+        labels
+            .iter()
+            .map(|(name, value)| Label {
+                name: (*name).into(),
+                value: (*value).into(),
+            })
+            .collect(),
+    )
+    .unwrap()
+}
+
+/// `info` over evaluated base chunks at source 0 and the raw info series at source 1, selected the
+/// way the compiler selects them: within `lookback_ms`, reporting each selected sample's time.
+fn info_tree(grid: &Arc<EvalGrid>, lookback_ms: i64, selector: InfoSelector) -> NativeTree {
+    let base = evaluated_input_with_source_index(Arc::clone(grid), 0);
+    let mut info = instant(
+        raw_input_with_source_index_and_ordering(1, SeriesOrdering::KeyThenTime),
+        lookback_ms,
+        0,
+        Arc::clone(grid),
+    );
+    let NativeExpr::Instant { op, .. } = &mut info.expr else {
+        unreachable!("`instant` builds an instant selection");
+    };
+    op.value = InstantValue::InfoTimestamp;
+    let output = base.output.clone();
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Info {
+            base: Box::new(base),
+            info: Box::new(info),
+            selector,
+        },
+        output,
+    })
+    .unwrap()
+}
+
+/// A base series takes the data labels of the newest info series sharing its identifying labels at
+/// each point, which the runtime can only tell from the sample times its info side reports, and a
+/// base series no info series matches is dropped when the selector's data matcher needs a value.
+///
+/// `version="v1"` is sampled at 0s and 10s and `version="v2"` at 15s and 30s, read within 15s: the
+/// point at 20s sees both and keeps `v2`, the newer one.
+#[test]
+fn info_labels_each_point_from_the_newest_info_series() {
+    let grid = grid(0, 10_000, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = info_tree(
+        &grid,
+        15_000,
+        InfoSelector {
+            name_matchers: Vec::new(),
+            data_labels: vec!["version".into()],
+            keep_unmatched: false,
+        },
+    );
+    let mut execution = executor(&tree, pool());
+    let base = execution.state().input_ids(0).next().unwrap();
+    let info = execution.state().input_ids(1).next().unwrap();
+    for (instance, values) in [("a", [1.0, 2.0, 3.0, 4.0]), ("b", [5.0, 6.0, 7.0, 8.0])] {
+        execution
+            .push_evaluated(
+                base,
+                evaluated_chunk_of(
+                    &schema,
+                    labelled("up", &[("instance", instance), ("job", "j")]),
+                    0,
+                    values.into_iter().map(Some).collect(),
+                    true,
+                ),
+            )
+            .unwrap();
+    }
+    for (key, version, timestamps) in [
+        (b"info-v1", "v1", [0, 10_000]),
+        (b"info-v2", "v2", [15_000, 30_000]),
+    ] {
+        execution
+            .push_raw(
+                info,
+                raw_chunk_of(
+                    &raw_schema(),
+                    key,
+                    labelled(
+                        "target_info",
+                        &[("instance", "a"), ("job", "j"), ("version", version)],
+                    ),
+                    &timestamps,
+                    &[1.0, 1.0],
+                    true,
+                ),
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        decided_by_label_set(&run(&mut execution)),
+        vec![
+            (
+                "__name__=up,instance=a,job=j,version=v1".to_string(),
+                vec![(0, Some(1.0)), (1, Some(2.0))]
+            ),
+            (
+                "__name__=up,instance=a,job=j,version=v2".to_string(),
+                vec![(2, Some(3.0)), (3, Some(4.0))]
+            ),
+        ]
+    );
+    assert_eq!(execution.state().reserved_bytes(), 0);
+}
+
+/// The rows `info` keeps for every base point are reserved from the pool before the kernel files
+/// them: a pool that holds the operands but not those rows refuses the operation and gets back what
+/// the node held.
+#[test]
+fn an_oversized_info_workspace_is_refused_by_the_pool() {
+    let points = 10_000;
+    let grid = grid(0, 60_000, points);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = info_tree(
+        &grid,
+        60_000,
+        InfoSelector {
+            name_matchers: Vec::new(),
+            data_labels: Vec::new(),
+            keep_unmatched: true,
+        },
+    );
+    // About two operand copies of the base, far less than a row per point.
+    let pool = bounded_pool(points as usize * 20);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    let base = execution.state().input_ids(0).next().unwrap();
+    let info = execution.state().input_ids(1).next().unwrap();
+    execution
+        .push_evaluated(
+            base,
+            evaluated_chunk_of(
+                &schema,
+                labelled("up", &[("job", "j")]),
+                0,
+                vec![Some(1.0); points as usize],
+                true,
+            ),
+        )
+        .unwrap();
+    execution
+        .push_raw(
+            info,
+            raw_chunk_of(
+                &raw_schema(),
+                b"info",
+                labelled("target_info", &[("job", "j"), ("version", "v1")]),
+                &[0],
+                &[1.0],
+                true,
+            ),
+        )
+        .unwrap();
+    let error = execution.finish().unwrap_err();
+    assert!(
+        matches!(error.find_root(), DataFusionError::ResourcesExhausted(_)),
+        "the info workspace was not refused by the pool: {error}"
+    );
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert!(!root_holds(&execution, holds_binary));
+}
+
+// ---------------------------------------------------------------------------
+// Scalar broadcasts, driven through `NativeExecutor`.
+// ---------------------------------------------------------------------------
+
+/// A binary node over `left` and `right` where one side is a constant, bound the way the compiler
+/// binds a broadcast: the output is the vector side's fields on the statement's grid.
+fn broadcast_of(left: NativeNode, right: NativeNode, matching: BinaryMatching) -> NativeNode {
+    let vector = left
+        .output
+        .samples()
+        .or_else(|| right.output.samples())
+        .expect("a broadcast reads one evaluated vector")
+        .clone();
+    NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(left),
+            right: Box::new(right),
+            matching,
+        },
+        output: NativeType::Samples(Arc::new(SeriesSchema {
+            fields: vector.fields.clone(),
+            eval_grid: vector.eval_grid.clone(),
+        })),
+    }
+}
+
+/// `vector <op> constant`, on the grid the vector is evaluated on.
+fn broadcast_right(
+    vector: NativeNode,
+    constant: f64,
+    op: BinaryOp,
+    return_bool: bool,
+) -> NativeNode {
+    let grid = vector
+        .output
+        .grid()
+        .expect("a broadcast reads a grid")
+        .clone();
+    let matching = BinaryMatching {
+        return_bool,
+        ..binary_matching(op)
+    };
+    broadcast_of(vector, scalar(constant, grid), matching)
+}
+
+/// `constant <op> vector`, on the grid the vector is evaluated on.
+fn broadcast_left(
+    constant: f64,
+    vector: NativeNode,
+    op: BinaryOp,
+    return_bool: bool,
+) -> NativeNode {
+    let grid = vector
+        .output
+        .grid()
+        .expect("a broadcast reads a grid")
+        .clone();
+    let matching = BinaryMatching {
+        return_bool,
+        ..binary_matching(op)
+    };
+    broadcast_of(scalar(constant, grid), vector, matching)
+}
+
+/// The metric name a chunk carries, or `None` when the operation dropped it.
+fn name_of(chunk: &EvaluatedChunk) -> Option<&str> {
+    chunk.series.metric.name()
+}
+
+/// The [`Emitted`] tables a tree built from `node` keeps, as `(broadcast, window it reads)`.
+///
+/// The second answer is `false` when the broadcast's vector side is not a window, which is what
+/// tells a table its own node keeps from one the node below it already keeps.
+fn emitted_tables(node: NativeNode) -> (bool, bool) {
+    let tree = NativeTree::try_new(node).unwrap();
+    let mut inputs = Vec::new();
+    let mut binary_before = 0;
+    let root = RuntimeNode::build(
+        tree.root(),
+        &pool(),
+        &mut inputs,
+        &mut binary_before,
+        "root".to_string(),
+        None,
+    )
+    .unwrap();
+    let RuntimeOp::Broadcast {
+        left, right, state, ..
+    } = root.op
+    else {
+        panic!("the tree did not build a broadcast at its root");
+    };
+    let vector = if matches!(left.op, RuntimeOp::Window { .. }) {
+        left
+    } else {
+        right
+    };
+    let window = match vector.op {
+        RuntimeOp::Window { state, .. } => state.emitted.is_some(),
+        _ => false,
+    };
+    (state.emitted.is_some(), window)
+}
+
+/// A constant on the right multiplies every value of the vector and drops the metric name.
+///
+/// The chunk arrives as it is pushed, before the input ends: a broadcast answers a chunk from that
+/// chunk alone, so nothing waits for the vector to be complete.
+#[test]
+fn a_constant_on_the_right_multiplies_every_value() {
+    let grid = grid(0, 60_000, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(broadcast_right(
+        evaluated_input(Arc::clone(&grid)),
+        100.0,
+        BinaryOp::Mul,
+        false,
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk(&schema, 0, vec![1.0, 2.0, 3.0, 4.0], true),
+        )
+        .unwrap();
+    let streamed = execution
+        .next_chunk()
+        .unwrap()
+        .expect("a broadcast answers the chunk it read without waiting for the end of the input");
+    assert!(streamed.is_last, "the closing the chunk carried is kept");
+    assert_eq!(
+        sample_values(&streamed),
+        vec![Some(100.0), Some(200.0), Some(300.0), Some(400.0)]
+    );
+    assert!(
+        name_of(&streamed).is_none(),
+        "arithmetic drops the metric name, and the chunk still carries it"
+    );
+
+    let out = run(&mut execution);
+    assert!(
+        out.is_empty(),
+        "the chunk was already handed over, so the end of the input owes nothing"
+    );
+    assert_eq!(execution.state().reserved_bytes(), 0);
+}
+
+/// A `Complete` aggregate over `inner`, carrying `inner`'s fields and evaluated on its grid.
+///
+/// A `Complete` aggregate neither adds nor drops a field and lands on its input's grid, so the node's
+/// own output is the layout its input produces.
+fn aggregate(inner: NativeNode, op: BoundAggregate) -> NativeNode {
+    let fields = inner
+        .output
+        .samples()
+        .expect("an aggregate reads samples")
+        .fields
+        .clone();
+    let grid = inner
+        .output
+        .grid()
+        .expect("a complete aggregate reads an evaluated vector")
+        .clone();
+    let output = NativeType::Samples(Arc::new(SeriesSchema {
+        fields,
+        eval_grid: Some(grid),
+    }));
+    NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(inner),
+            op,
+        },
+        output,
+    }
+}
+
+/// A `Complete` `sum` grouped as `group`.
+fn sum_grouping(group: Grouping) -> BoundAggregate {
+    BoundAggregate {
+        kind: AggregateKind::Sum,
+        group,
+        stage: AggregateStage::Complete,
+        field_kind: FieldKind::Float,
+    }
+}
+
+/// A `Partial` `sum` over `inner`, ungrouped, exporting state for a later merge.
+///
+/// A partial aggregate folds only this execution's contributions and keeps what it folded until its
+/// input ends, so a duplicate it read would end up in one group rather than being answered as two.
+fn partial_sum(inner: NativeNode) -> NativeNode {
+    let samples = inner
+        .output
+        .samples()
+        .expect("a partial aggregate reads an evaluated vector");
+    let grid = inner
+        .output
+        .grid()
+        .expect("a partial aggregate reads an evaluated vector")
+        .clone();
+    let (kind, components) =
+        crate::native::plan::aggregate_state_binding(AggregateKind::Sum, FieldKind::Float)
+            .expect("sum keeps a mergeable state");
+    let state = Arc::new(AggregateStateSchema {
+        group: Grouping::By(Arc::new([])),
+        kind,
+        components: components.into(),
+        accumulators: samples.fields.clone(),
+        grid,
+    });
+    NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(inner),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group: Grouping::By(Arc::new([])),
+                stage: AggregateStage::Partial,
+                field_kind: FieldKind::Float,
+            },
+        },
+        output: NativeType::AggregateState(state),
+    }
+}
+
+/// `name{job=...,instance=...}`, the two labels these tests group by.
+fn job_instance_metric(name: &str, job: &str, instance: &str) -> SeriesLabels {
+    SeriesLabels::try_new(
+        Some(name.into()),
+        vec![
+            Label {
+                name: "job".into(),
+                value: job.into(),
+            },
+            Label {
+                name: "instance".into(),
+                value: instance.into(),
+            },
+        ],
+    )
+    .unwrap()
+}
+
+/// What one aggregate result reports: its name, its tags and the value at each point it decided.
+type GroupResult = (
+    Option<String>,
+    Vec<(String, String)>,
+    Vec<(usize, Option<f64>)>,
+);
+
+/// The groups a run produced, each with the absolute positions it decided, sorted by identity.
+///
+/// Sorting is the test's, not the runtime's: a group's place in the answer is the order its first
+/// input appeared, which the tests that check it assert on the stream rather than here.
+fn groups_of(chunks: &[EvaluatedChunk]) -> Vec<GroupResult> {
+    let mut results: Vec<GroupResult> = chunks
+        .iter()
+        .map(|chunk| {
+            let mut tags: Vec<(String, String)> = chunk
+                .series
+                .metric
+                .tags()
+                .iter()
+                .map(|tag| (tag.name.to_string(), tag.value.to_string()))
+                .collect();
+            tags.sort();
+            (
+                chunk.series.metric.name().map(str::to_string),
+                tags,
+                decided(std::slice::from_ref(chunk)),
+            )
+        })
+        .collect();
+    results.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+    results
+}
+
+/// One group's answer under the name and tags `tags` give it, ordered by label name.
+fn grouped(tags: &[(&str, &str)], points: Vec<(usize, Option<f64>)>) -> GroupResult {
+    let mut tags: Vec<(String, String)> = tags
+        .iter()
+        .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+        .collect();
+    tags.sort();
+    (None, tags, points)
+}
+
+/// One group's answer when every label of its input was dropped.
+fn unlabelled(points: Vec<(usize, Option<f64>)>) -> GroupResult {
+    grouped(&[], points)
+}
+
+/// `sum` with no grouping drops every label, name and tags alike, and adds the members per point.
+#[test]
+fn an_aggregate_drops_every_label_and_adds_its_group_per_point() {
+    let grid = grid(0, 60_000, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(aggregate(
+        evaluated_input(Arc::clone(&grid)),
+        sum_grouping(Grouping::By(Arc::new([]))),
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool());
+    let metrics = metrics_of(&execution);
+    for (metric, values) in [
+        (
+            job_instance_metric("requests", "api", "a"),
+            vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0)],
+        ),
+        (
+            job_instance_metric("requests", "db", "b"),
+            vec![Some(10.0), Some(20.0), Some(30.0), Some(40.0)],
+        ),
+    ] {
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(&schema, metric, 0, values, true),
+            )
+            .unwrap();
+    }
+
+    let output = execution.finish().unwrap();
+    assert_eq!(
+        groups_of(&output),
+        vec![unlabelled(vec![
+            (0, Some(11.0)),
+            (1, Some(22.0)),
+            (2, Some(33.0)),
+            (3, Some(44.0)),
+        ])],
+        "the two series were not folded into one unlabelled group"
+    );
+    // One group is one series, so it closes exactly once and its chunk says so.
+    assert!(output.len() == 1 && output[0].is_last);
+    assert_eq!(count(&metrics, "root", NodeMetric::COMPLETED_SERIES), 1);
+    assert_eq!(execution.state().reserved_bytes(), 0);
+}
+
+/// The side a constant is on decides which operand the vector's value is.
+///
+/// Division is not commutative, so `x / 100` and `100 / x` answering different values is what says
+/// the operand direction survived the broadcast.
+#[test]
+fn a_broadcast_keeps_the_operand_direction() {
+    let grid = grid(0, 60_000, 3);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let values = || vec![100.0, 200.0, 400.0];
+    let run_one = |root: NativeNode| -> Vec<Option<f64>> {
+        let tree = NativeTree::try_new(root).unwrap();
+        let mut execution = executor(&tree, pool());
+        execution
+            .push_evaluated(InputId::new(0), evaluated_chunk(&schema, 0, values(), true))
+            .unwrap();
+        let out = run(&mut execution);
+        assert_eq!(out.len(), 1, "one chunk in, one chunk out");
+        sample_values(&out[0])
+    };
+    assert_eq!(
+        run_one(broadcast_right(
+            evaluated_input(Arc::clone(&grid)),
+            100.0,
+            BinaryOp::Div,
+            false,
+        )),
+        vec![Some(1.0), Some(2.0), Some(4.0)],
+        "x / 100 divides the vector's value"
+    );
+    assert_eq!(
+        run_one(broadcast_left(
+            100.0,
+            evaluated_input(Arc::clone(&grid)),
+            BinaryOp::Div,
+            false,
+        )),
+        vec![Some(1.0), Some(0.5), Some(0.25)],
+        "100 / x divides the constant by the vector's value"
+    );
+    assert_eq!(
+        run_one(broadcast_right(
+            evaluated_input(Arc::clone(&grid)),
+            100.0,
+            BinaryOp::Sub,
+            false,
+        )),
+        vec![Some(0.0), Some(100.0), Some(300.0)],
+        "x - 100 subtracts from the vector's value"
+    );
+    assert_eq!(
+        run_one(broadcast_left(
+            100.0,
+            evaluated_input(Arc::clone(&grid)),
+            BinaryOp::Sub,
+            false,
+        )),
+        vec![Some(0.0), Some(-100.0), Some(-300.0)],
+        "100 - x subtracts the vector's value"
+    );
+}
+
+/// A `bool` comparison reports `1`/`0` at every position and drops the metric name.
+#[test]
+fn a_bool_comparison_reports_one_and_zero() {
+    let grid = grid(0, 60_000, 3);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(broadcast_right(
+        evaluated_input(Arc::clone(&grid)),
+        0.0,
+        BinaryOp::Gt,
+        true,
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk(&schema, 0, vec![1.0, -1.0, 0.0], true),
+        )
+        .unwrap();
+    let out = run(&mut execution);
+    assert_eq!(
+        addressed(&out),
+        vec![(0, vec![Some(1.0), Some(0.0), Some(0.0)])],
+        "`x > bool 0` answers 1 or 0 at every position it read"
+    );
+    assert!(
+        name_of(&out[0]).is_none(),
+        "a bool comparison drops the metric name"
+    );
+}
+
+/// A filtering comparison keeps only the positions that passed, and keeps the label set it read.
+#[test]
+fn a_filtering_comparison_keeps_the_positions_that_passed() {
+    let grid = grid(0, 60_000, 3);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(broadcast_right(
+        evaluated_input(Arc::clone(&grid)),
+        0.0,
+        BinaryOp::Gt,
+        false,
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk(&schema, 0, vec![1.0, -1.0, 0.0], true),
+        )
+        .unwrap();
+    let out = run(&mut execution);
+    assert_eq!(
+        decided(&out),
+        vec![(0, Some(1.0))],
+        "only the position that passed is handed over"
+    );
+    assert_eq!(
+        name_of(&out[0]),
+        Some("requests"),
+        "a filter keeps the label set it read"
+    );
+}
+
+/// `-1 * x` is the negation shape: a constant on the left, multiplying every value.
+#[test]
+fn a_constant_of_minus_one_on_the_left_negates_the_vector() {
+    let grid = grid(0, 60_000, 3);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(broadcast_left(
+        -1.0,
+        evaluated_input(Arc::clone(&grid)),
+        BinaryOp::Mul,
+        false,
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk(&schema, 0, vec![1.0, -2.0, 5.0], true),
+        )
+        .unwrap();
+    let out = run(&mut execution);
+    assert_eq!(
+        addressed(&out),
+        vec![(0, vec![Some(-1.0), Some(2.0), Some(-5.0)])],
+        "-1 * x negates every value of the vector"
+    );
+}
+
+/// A position the vector held no value at stays missing, and a position it skipped stays skipped.
+///
+/// The chunk that is not last is answered as it arrives: a broadcast transforms a chunk and hands
+/// it up, so `is_last` is the only thing that says where a series ends.
+#[test]
+fn a_broadcast_preserves_missing_values_and_skipped_positions() {
+    let grid = grid(0, 60_000, 6);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(broadcast_right(
+        evaluated_input(Arc::clone(&grid)),
+        2.0,
+        BinaryOp::Mul,
+        false,
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool());
+
+    // Position 0 holds a value and position 1 holds none: the axis covers both, so the difference
+    // is the field's validity rather than the axis's rows.
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, metric(), 0, vec![Some(3.0), None], false),
+        )
+        .unwrap();
+    let first = execution
+        .next_chunk()
+        .unwrap()
+        .expect("a broadcast answers a chunk that does not close its series");
+    assert!(!first.is_last, "the chunk that did not close is not closed");
+    assert_eq!(
+        decided(&[first]),
+        vec![(0, Some(6.0)), (1, None)],
+        "the positions are unchanged and the missing one stayed missing"
+    );
+
+    // The last chunk sits at position 5: positions 2 to 4 are skipped, not empty values.
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, metric(), 5, vec![Some(4.0)], true),
+        )
+        .unwrap();
+    let second = execution
+        .next_chunk()
+        .unwrap()
+        .expect("the closing chunk is answered as it arrives");
+    assert!(second.is_last);
+    assert_eq!(decided(&[second]), vec![(5, Some(8.0))]);
+    assert!(
+        execution.finish().unwrap().is_empty(),
+        "both chunks were handed over as they arrived, so the end of the input owes nothing"
+    );
+    assert_eq!(execution.state().reserved_bytes(), 0);
+}
+
+/// An empty non-closing filter result does not end a broadcast before a later chunk passes.
+#[test]
+fn a_filter_empty_nonclosing_chunk_does_not_end_the_broadcast() {
+    let grid = grid(0, 60_000, 5);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(broadcast_right(
+        evaluated_input(Arc::clone(&grid)),
+        0.0,
+        BinaryOp::Gt,
+        false,
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool());
+
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk(&schema, 0, vec![-1.0, -2.0], false),
+        )
+        .unwrap();
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "a non-closing chunk with no passing positions emits no output but does not end the series"
+    );
+
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk(&schema, 2, vec![3.0, -4.0, 5.0], true),
+        )
+        .unwrap();
+    let passing = execution
+        .next_chunk()
+        .unwrap()
+        .expect("the broadcast remains live and hands over a later passing chunk");
+    assert!(
+        passing.is_last,
+        "only the later input chunk closes the series"
+    );
+    assert_eq!(
+        decided(std::slice::from_ref(&passing)),
+        vec![(2, Some(3.0)), (4, Some(5.0))]
+    );
+    assert_eq!(
+        name_of(&passing),
+        Some("requests"),
+        "the filtering comparison preserves the input labels"
+    );
+    assert!(
+        execution.finish().unwrap().is_empty(),
+        "the sole closing chunk was handed over exactly once"
+    );
+}
+
+/// A histogram function maps only the positions native histograms hold, dropping the float one
+/// between them, and drops the name.
+#[test]
+fn a_histogram_function_maps_the_histogram_positions() {
+    let grid = grid(0, 60_000, 3);
+    let mut builder = HistogramBatchBuilder::new();
+    let first = push_histogram(&mut builder, 2);
+    let second = push_histogram(&mut builder, 5);
+    let table = builder.finish().unwrap();
+    let histogram = |index| {
+        Samples::try_from_histogram(UInt32Array::from(vec![index]), Arc::clone(&table)).unwrap()
+    };
+    let field = Samples::try_from_chunks(vec![
+        histogram(first),
+        Samples::from_float(Float64Array::from(vec![7.0])),
+        histogram(second),
+    ])
+    .unwrap();
+    let series = Series {
+        metric: named_metric("a", "x"),
+        time: TimeAxis::Grid(GridRange::try_new(Arc::clone(&grid), 0, 3).unwrap()),
+        fields: SeriesFields::try_from_vec(vec![field]).unwrap(),
+    };
+    let tree = NativeTree::try_new(map_ops(
+        evaluated_input(Arc::clone(&grid)),
+        vec![MapOp::Histogram(NativeHistogramFunction::Count)],
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            EvaluatedChunk::try_new(series, true).unwrap(),
+        )
+        .unwrap();
+    let chunks = run(&mut execution);
+    let [chunk] = chunks.as_slice() else {
+        panic!("expected one chunk, got {}", chunks.len());
+    };
+    assert_eq!(chunk.series.metric.name(), None);
+    assert_eq!(chunk.series.metric.get("job"), Some("x"));
+    let positions = chunk
+        .series
+        .time
+        .positions()
+        .map(|(position, _)| position)
+        .collect::<Vec<_>>();
+    assert_eq!(positions, vec![0, 2]);
+    assert_eq!(sample_values(chunk), vec![Some(2.0), Some(5.0)]);
+}
+
+/// A histogram function over a closing float chunk empties it, and the closing chunk is named as
+/// Prometheus' `simpleHistogramFunc` names its output: without `__name__` but with `__type__`,
+/// which math functions drop.
+#[test]
+fn a_histogram_function_names_an_emptied_closing_chunk_like_its_kernel() {
+    let grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let metric = SeriesLabels::try_new(
+        Some("a".into()),
+        vec![Label {
+            name: "__type__".into(),
+            value: "histogram".into(),
+        }],
+    )
+    .unwrap();
+    let tree = NativeTree::try_new(map_ops(
+        evaluated_input(Arc::clone(&grid)),
+        vec![MapOp::Histogram(NativeHistogramFunction::Sum)],
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, metric, 0, vec![Some(1.0), Some(2.0)], true),
+        )
+        .unwrap();
+    let chunks = run(&mut execution);
+    let [closing] = chunks.as_slice() else {
+        panic!("expected one closing chunk, got {}", chunks.len());
+    };
+    assert!(closing.is_last);
+    assert_eq!(closing.series.time.len(), 0);
+    assert_eq!(closing.series.metric.name(), None);
+    assert_eq!(closing.series.metric.get("__type__"), Some("histogram"));
+}
+
+/// A filter that passes nothing on the chunk that closes a series still closes it.
+/// The chunk it hands over holds no row and carries the label set the operation produces, which is
+/// the only way the consumer downstream learns that the series ended rather than that no input has
+/// arrived yet.
+#[test]
+fn a_filter_that_passes_nothing_still_closes_the_series() {
+    let grid = grid(0, 60_000, 3);
+    let schema = evaluated_schema(Arc::clone(&grid));
+
+    // A filtering comparison keeps the label set it read, so the closing chunk carries it.
+    let tree = NativeTree::try_new(broadcast_right(
+        evaluated_input(Arc::clone(&grid)),
+        0.0,
+        BinaryOp::Gt,
+        false,
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk(&schema, 0, vec![-1.0, -2.0], false),
+        )
+        .unwrap();
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "a chunk that passed nothing and closed nothing has nothing to hand over"
+    );
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk(&schema, 2, vec![-3.0], true),
+        )
+        .unwrap();
+    let out = run(&mut execution);
+    assert_eq!(
+        out.len(),
+        1,
+        "the closing chunk is handed over even though it holds no value"
+    );
+    assert!(out[0].is_last, "the empty chunk closes the series");
+    assert_eq!(
+        out[0].series.time.len(),
+        0,
+        "a filter that passed nothing hands over no row"
+    );
+    assert_eq!(
+        name_of(&out[0]),
+        Some("requests"),
+        "a filter keeps the labels it read, so the closing chunk carries them"
+    );
+    assert_eq!(
+        series_start(&out[0]),
+        3,
+        "the empty chunk closes at the end"
+    );
+
+    // A `bool` comparison drops the name, so its empty closing chunk carries the dropped one.
+    let bool_tree = NativeTree::try_new(broadcast_right(
+        evaluated_input(Arc::clone(&grid)),
+        0.0,
+        BinaryOp::Gt,
+        true,
+    ))
+    .unwrap();
+    let mut execution = executor(&bool_tree, pool());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, metric(), 0, vec![None; 3], true),
+        )
+        .unwrap();
+    let out = run(&mut execution);
+    assert_eq!(
+        out.len(),
+        1,
+        "the closing chunk of an all-missing input arrives"
+    );
+    assert!(out[0].is_last);
+    assert_eq!(out[0].series.time.len(), 0);
+    assert!(
+        name_of(&out[0]).is_none(),
+        "a bool comparison drops the metric name, and the empty closing chunk carries that"
+    );
+    assert_eq!(execution.state().reserved_bytes(), 0);
+}
+
+/// A broadcast holds the chunk it is working on and nothing more, however long the vector is.
+///
+/// The same series arrives in one chunk and in many: what the node reserves has to be the chunk in
+/// hand and the label sets it handed out, not the vector it read, or a broadcast over a long series
+/// would cost the whole series.
+#[test]
+fn a_broadcast_does_not_retain_the_vector_it_reads() {
+    // The most the node ever reserved, over the same series delivered in `count` chunks.
+    let peak =
+        |count: usize| -> usize {
+            let grid = grid(0, 60_000, count as u64);
+            let schema = evaluated_schema(Arc::clone(&grid));
+            let tree = NativeTree::try_new(broadcast_right(
+                evaluated_input(Arc::clone(&grid)),
+                2.0,
+                BinaryOp::Mul,
+                false,
+            ))
+            .unwrap();
+            let pool = bounded_pool(32 << 10);
+            let mut execution = executor(&tree, Arc::clone(&pool));
+            let mut peak = 0;
+            for index in 0..count {
+                execution
+                    .push_evaluated(
+                        InputId::new(0),
+                        evaluated_chunk(&schema, index, vec![index as f64], index + 1 == count),
+                    )
+                    .unwrap_or_else(|error| {
+                        panic!("chunk {index} of {count} did not fit: {error}");
+                    });
+                // The consumer drops every chunk: a reader that streams the vector never holds it, and
+                // neither may the node.
+                drop(execution.next_chunk().unwrap_or_else(|error| {
+                    panic!("chunk {index} of {count} did not fit: {error}")
+                }));
+                let held = execution.state().reserved_bytes();
+                assert_eq!(
+                    held,
+                    pool.reserved(),
+                    "chunk {index} of {count}: the state and the pool disagree on what is held"
+                );
+                assert!(
+                    held <= (8 << 10),
+                    "chunk {index} of {count} holds {held} bytes of one float and one label set"
+                );
+                peak = peak.max(held);
+            }
+            // The series ends, and the node holds nothing afterwards.
+            drop(run(&mut execution));
+            assert_eq!(execution.state().reserved_bytes(), 0);
+            assert_eq!(pool.reserved(), 0);
+            peak
+        };
+    assert_eq!(
+        peak(64),
+        peak(1024),
+        "the reservation grew with the number of chunks the same vector arrived in"
+    );
+}
+
+/// A window above a broadcast that drops the metric name merges what that broadcast collapses.
+///
+/// The multiplication rewrites the label set, so two input series with different names and one set
+/// of tags become one label set under it. A window above therefore has to collect its input and
+/// merge the pieces before it evaluates: reporting each piece on its own answers two series where
+/// Prometheus answers one, and the second piece's positions are exactly the ones the first left
+/// empty. `holds_shared` is what tells the window to collect, so a window that streams here is the
+/// regression this test exists for.
+#[test]
+fn a_window_above_a_broadcast_merges_the_series_it_collapses() {
+    let grid = grid(0, 60_000, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(window_with(
+        broadcast_right(
+            evaluated_input(Arc::clone(&grid)),
+            2.0,
+            BinaryOp::Mul,
+            false,
+        ),
+        RangeFunction::LastOverTime,
+        60_000,
+        Some(Arc::clone(&grid)),
+        Arc::clone(&grid),
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool());
+    let metrics = metrics_of(&execution);
+    // Two series that only differ by name, each holding the half of the grid the other leaves empty.
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("requests", "x"),
+                0,
+                vec![Some(1.0), Some(2.0)],
+                true,
+            ),
+        )
+        .unwrap();
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("requests_total", "x"),
+                2,
+                vec![Some(3.0), Some(4.0)],
+                true,
+            ),
+        )
+        .unwrap();
+
+    let out = run(&mut execution);
+    assert_eq!(
+        decided(&out),
+        vec![
+            (0, Some(2.0)),
+            (1, Some(4.0)),
+            (2, Some(6.0)),
+            (3, Some(8.0))
+        ],
+        "the window did not merge the two pieces the broadcast collapsed onto one label set"
+    );
+    assert_eq!(
+        out.iter().filter(|chunk| chunk.is_last).count(),
+        1,
+        "the merged series closed more or less than once"
+    );
+    // The node counts the source series it collected, not the merged one: two fragments arrived
+    // with `is_last`, so two source series ended. What proves the merge happened is the single
+    // closing chunk above -- a window that streamed would have closed each piece on its own.
+    assert_eq!(
+        count(&metrics, "root", NodeMetric::COMPLETED_SERIES),
+        2,
+        "the window did not see both source series end"
+    );
+    assert_eq!(execution.state().reserved_bytes(), 0);
+}
+
+/// Every supported `Complete` kind reaches its matching float kernel through the native runtime.
+#[test]
+fn complete_aggregate_kinds_fold_two_values() {
+    let cases = [
+        (AggregateKind::Sum, 4.0),
+        (AggregateKind::Count, 2.0),
+        (AggregateKind::Avg, 2.0),
+        (AggregateKind::Min, 1.0),
+        (AggregateKind::Max, 3.0),
+        (AggregateKind::Group, 1.0),
+        (AggregateKind::Stddev, 1.0),
+        (AggregateKind::Stdvar, 1.0),
+    ];
+
+    for (kind, expected) in cases {
+        let grid = grid(0, 60_000, 1);
+        let schema = evaluated_schema(Arc::clone(&grid));
+        let tree = NativeTree::try_new(aggregate(
+            evaluated_input(Arc::clone(&grid)),
+            BoundAggregate {
+                kind,
+                group: Grouping::By(Arc::new([])),
+                stage: AggregateStage::Complete,
+                field_kind: FieldKind::Float,
+            },
+        ))
+        .unwrap();
+        let mut execution = executor(&tree, pool());
+        for value in [1.0, 3.0] {
+            execution
+                .push_evaluated(
+                    InputId::new(0),
+                    evaluated_chunk_of(&schema, metric(), 0, vec![Some(value)], true),
+                )
+                .unwrap();
+        }
+
+        let output = execution.finish().unwrap();
+        assert_eq!(
+            groups_of(&output),
+            vec![unlabelled(vec![(0, Some(expected))])],
+            "{kind:?} did not compute its native complete result"
+        );
+    }
+}
+
+/// The same series, delivered in two chunks, fold to what the whole series folds to.
+#[test]
+fn an_aggregate_folds_a_series_split_across_chunks_like_a_whole_one() {
+    let bound = grid(0, 60_000, 4);
+    let schema = evaluated_schema(Arc::clone(&bound));
+    // A fresh tree per execution: the node's state is the execution's, not the tree's.
+    let tree = || {
+        NativeTree::try_new(aggregate(
+            evaluated_input(grid(0, 60_000, 4)),
+            sum_grouping(Grouping::By(Arc::new(["job".into()]))),
+        ))
+        .unwrap()
+    };
+    let (first, second) = (
+        job_instance_metric("requests", "api", "a"),
+        job_instance_metric("requests", "api", "b"),
+    );
+
+    // One chunk per series.
+    let mut whole = executor(&tree(), pool());
+    for (metric, values) in [
+        (
+            first.clone(),
+            vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0)],
+        ),
+        (
+            second.clone(),
+            vec![Some(10.0), Some(20.0), Some(30.0), Some(40.0)],
+        ),
+    ] {
+        whole
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(&schema, metric, 0, values, true),
+            )
+            .unwrap();
+    }
+    let whole = whole.finish().unwrap();
+
+    // The first series split in two, the second whole: the group is the same group, folded from
+    // positions the chunks name absolutely.
+    let mut split = executor(&tree(), pool());
+    split
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, first.clone(), 0, vec![Some(1.0), Some(2.0)], false),
+        )
+        .unwrap();
+    assert!(
+        split.next_chunk().unwrap().is_none(),
+        "a chunk that does not close its series answered for the group"
+    );
+    split
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, first, 2, vec![Some(3.0), Some(4.0)], true),
+        )
+        .unwrap();
+
+    split
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                second,
+                0,
+                vec![Some(10.0), Some(20.0), Some(30.0), Some(40.0)],
+                true,
+            ),
+        )
+        .unwrap();
+
+    let split = split.finish().unwrap();
+    assert_eq!(groups_of(&split), groups_of(&whole));
+    assert_eq!(
+        groups_of(&split),
+        vec![grouped(
+            &[("job", "api")],
+            vec![
+                (0, Some(11.0)),
+                (1, Some(22.0)),
+                (2, Some(33.0)),
+                (3, Some(44.0)),
+            ],
+        )],
+        "the split series was folded as two groups or at the wrong positions"
+    );
+}
+
+/// A point no member of a group has a value at is not a point of the group's result.
+///
+/// Sparse input is what says the fold indexes its states by absolute position: a chunk holding
+/// positions 0 and 1 and another holding 1 and 2 leave position 3 to nothing, and the hole between
+/// the rows is never filled with a value.
+#[test]
+fn an_aggregate_reports_only_the_points_a_group_holds_a_value_at() {
+    let grid = grid(0, 60_000, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(aggregate(
+        evaluated_input(Arc::clone(&grid)),
+        sum_grouping(Grouping::By(Arc::new([]))),
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool());
+    // Positions 0 and 1 of the first series, 1 and 2 of the second, and nothing at 3.
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            sparse_chunk(
+                &schema,
+                job_instance_metric("requests", "api", "a"),
+                &[(0, 2)],
+                vec![1.0, 2.0],
+                true,
+            ),
+        )
+        .unwrap();
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            sparse_chunk(
+                &schema,
+                job_instance_metric("requests", "db", "b"),
+                &[(1, 2)],
+                vec![20.0, 300.0],
+                true,
+            ),
+        )
+        .unwrap();
+
+    let output = execution.finish().unwrap();
+    assert_eq!(
+        groups_of(&output),
+        vec![
+            // Position 1 is the only one both members hold, and it is their sum.
+            unlabelled(vec![(0, Some(1.0)), (1, Some(22.0)), (2, Some(300.0))]),
+        ],
+        "the group was answered at a point no member holds, or summed the wrong members"
+    );
+}
+
+/// An aggregate handed no series produces nothing at all: no group, so no empty series either.
+#[test]
+fn an_aggregate_over_no_series_produces_nothing() {
+    let grid = grid(0, 60_000, 4);
+    let tree = NativeTree::try_new(aggregate(
+        evaluated_input(Arc::clone(&grid)),
+        sum_grouping(Grouping::By(Arc::new(["job".into()]))),
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool());
+    let output = execution.finish().unwrap();
+    assert!(
+        output.is_empty(),
+        "an aggregate with no input answered {} series",
+        output.len()
+    );
+    assert_eq!(execution.state().reserved_bytes(), 0);
+}
+
+/// A broadcast hands one chunk over for every chunk it reads, and closes the series once.
+///
+/// The metrics are what says the chunk-per-chunk behaviour held: one input batch per chunk read, one
+/// output batch per chunk handed over, and one closed series for the series that ended.
+#[test]
+fn a_broadcast_reports_one_chunk_in_for_each_chunk_out() {
+    let grid = grid(0, 60_000, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(broadcast_right(
+        evaluated_input(Arc::clone(&grid)),
+        2.0,
+        BinaryOp::Mul,
+        false,
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool());
+    let metrics = metrics_of(&execution);
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk(&schema, 0, vec![1.0, 2.0], false),
+        )
+        .unwrap();
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk(&schema, 2, vec![3.0, 4.0], true),
+        )
+        .unwrap();
+    let out = run(&mut execution);
+    assert_eq!(
+        addressed(&out),
+        vec![
+            (0, vec![Some(2.0), Some(4.0)]),
+            (2, vec![Some(6.0), Some(8.0)])
+        ],
+        "each chunk is answered as it arrived, at the positions it held"
+    );
+    assert_eq!(
+        count(&metrics, "root", NodeMetric::INPUT_BATCHES),
+        2,
+        "the node read two chunks"
+    );
+    assert_eq!(
+        count(&metrics, "root", NodeMetric::OUTPUT_BATCHES),
+        2,
+        "the node handed two chunks over"
+    );
+    assert_eq!(
+        count(&metrics, "root", NodeMetric::COMPLETED_SERIES),
+        1,
+        "the series closed once, on the chunk that said so"
+    );
+    // The scalar side is a node of the tree and reads nothing: it has no input at all.
+    assert_eq!(
+        count(&metrics, "root.right", NodeMetric::INPUT_BATCHES),
+        0,
+        "the constant was pulled as a stream"
+    );
+}
+
+/// A broadcast forwards the settled pieces of a streaming window and its eventual close.
+#[test]
+fn a_broadcast_over_a_streaming_window_hands_over_the_points_it_settles() {
+    let inner_grid = grid(0, 60_000, 5);
+    let outer_grid = grid(0, 120_000, 3);
+    let inner_schema = evaluated_schema(Arc::clone(&inner_grid));
+    let tree = NativeTree::try_new(broadcast_right(
+        window_with(
+            evaluated_input(Arc::clone(&inner_grid)),
+            RangeFunction::LastOverTime,
+            240_000,
+            Some(Arc::clone(&inner_grid)),
+            outer_grid,
+        ),
+        100.0,
+        BinaryOp::Mul,
+        false,
+    ))
+    .unwrap();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    let metrics = metrics_of(&execution);
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk(&inner_schema, 0, vec![1.0, 2.0, 3.0], false),
+        )
+        .unwrap();
+
+    let mut out = Vec::new();
+    while let Some(chunk) = execution.next_chunk().unwrap() {
+        out.push(chunk);
+    }
+    assert_eq!(decided(&out), vec![(0, Some(100.0)), (1, Some(300.0))]);
+    assert!(out.iter().all(|chunk| !chunk.is_last));
+    assert_eq!(count(&metrics, "root", NodeMetric::COMPLETED_SERIES), 0);
+
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk(&inner_schema, 3, vec![4.0, 5.0], true),
+        )
+        .unwrap();
+    while let Some(chunk) = execution.next_chunk().unwrap() {
+        out.push(chunk);
+    }
+    out.extend(execution.finish().unwrap());
+    assert_eq!(
+        decided(&out),
+        vec![(0, Some(100.0)), (1, Some(300.0)), (2, Some(500.0))]
+    );
+    assert_eq!(out.iter().filter(|chunk| chunk.is_last).count(), 1);
+    assert!(out.last().unwrap().is_last);
+    assert!(out.iter().all(|chunk| name_of(chunk).is_none()));
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// A broadcast waits for a collecting window to flush before answering its series.
+#[test]
+fn a_broadcast_above_a_collecting_window_waits_for_its_flush() {
+    let grid = grid(0, 60_000, 1);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(broadcast_right(
+        window_with(
+            map(evaluated_input(Arc::clone(&grid)), vec![MathOp::Abs]),
+            RangeFunction::LastOverTime,
+            60_000,
+            Some(Arc::clone(&grid)),
+            Arc::clone(&grid),
+        ),
+        10.0,
+        BinaryOp::Mul,
+        false,
+    ))
+    .unwrap();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, metric(), 0, vec![Some(-1.0)], true),
+        )
+        .unwrap();
+
+    assert!(execution.next_chunk().unwrap().is_none());
+    let out = run(&mut execution);
+    assert_eq!(decided(&out), vec![(0, Some(10.0))]);
+    assert_eq!(out.iter().filter(|chunk| chunk.is_last).count(), 1);
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// A broadcast rejects distinct input names that become one output label set at occupied points.
+#[test]
+fn a_broadcast_refuses_two_series_that_share_a_label_set_and_releases_the_reservation() {
+    let grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(broadcast_right(
+        evaluated_input(Arc::clone(&grid)),
+        100.0,
+        BinaryOp::Mul,
+        false,
+    ))
+    .unwrap();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    let first_metric =
+        SeriesLabels::try_new(Some("requests".to_string().into()), Vec::new()).unwrap();
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, first_metric, 0, vec![Some(1.0), Some(2.0)], true),
+        )
+        .unwrap();
+    let first = execution
+        .next_chunk()
+        .unwrap()
+        .expect("first series output");
+    assert_eq!(
+        decided(std::slice::from_ref(&first)),
+        vec![(0, Some(100.0)), (1, Some(200.0))]
+    );
+
+    let second_metric =
+        SeriesLabels::try_new(Some("requests_total".to_string().into()), Vec::new()).unwrap();
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, second_metric, 0, vec![Some(3.0), Some(4.0)], true),
+        )
+        .unwrap();
+    let error = execution
+        .next_chunk()
+        .expect_err("the output label set and occupied positions conflict");
+    let message = error.to_string();
+    // The refusal names the defect the way Prometheus does: one label set holding two series. The
+    // scalar broadcast produced no label set of its own, so the rendering is empty and the two
+    // series are told apart only by what they produced.
+    assert!(
+        message.contains("vector cannot contain metrics with the same labelset")
+            && message.contains("two series hold a value of field 0"),
+        "expected the collision the node produces, got: {message:?}"
+    );
+    assert_eq!(
+        pool.reserved(),
+        0,
+        "error retained a pool reservation: {message}"
+    );
+    assert_eq!(
+        execution.state().reserved_bytes(),
+        0,
+        "error retained execution bytes: {message}"
+    );
+}
+
+/// A literal arithmetic broadcast hands out the label set its vector side already checked, so it
+/// keeps no [`Emitted`] table of its own — and the window below it keeps its own.
+///
+/// A table is what refuses a second series collapsing onto one label set, and the window is where a
+/// dropped name makes that collapse happen. A second copy above it would record every label set the
+/// window hands out to decide what the window has already decided.
+#[test]
+fn a_literal_arithmetic_over_a_name_dropping_window_keeps_no_emitted_table() {
+    let grid = grid(0, 60_000, 2);
+    let streaming = || {
+        window_with(
+            evaluated_input(Arc::clone(&grid)),
+            RangeFunction::Increase,
+            120_000,
+            Some(Arc::clone(&grid)),
+            Arc::clone(&grid),
+        )
+    };
+    let collecting = || {
+        window_with(
+            map(evaluated_input(Arc::clone(&grid)), vec![MathOp::Abs]),
+            RangeFunction::Increase,
+            120_000,
+            Some(Arc::clone(&grid)),
+            Arc::clone(&grid),
+        )
+    };
+    // `increase` drops the metric name, so both shapes stand on a window whose table already covers
+    // the identities this node would hand out -- and the operation is neither `rate` nor a
+    // multiplication, which is not what decides it.
+    assert_eq!(
+        emitted_tables(broadcast_right(streaming(), 2.0, BinaryOp::Add, false)),
+        (false, true),
+        "a streaming window repeats its table under a constant add"
+    );
+    assert_eq!(
+        emitted_tables(broadcast_left(2.0, streaming(), BinaryOp::Add, false)),
+        (false, true),
+        "a constant on the left is the same one-to-one map"
+    );
+    assert_eq!(
+        emitted_tables(broadcast_right(collecting(), 2.0, BinaryOp::Mul, false)),
+        (false, true),
+        "a collecting window repeats its table too"
+    );
+    // A window that keeps the metric name hands out identities the operation has not seen: the
+    // multiplication drops the name, so two names of one tag set become one label set above it.
+    assert_eq!(
+        emitted_tables(broadcast_right(
+            window_with(
+                evaluated_input(Arc::clone(&grid)),
+                RangeFunction::LastOverTime,
+                120_000,
+                Some(Arc::clone(&grid)),
+                Arc::clone(&grid),
+            ),
+            2.0,
+            BinaryOp::Mul,
+            false,
+        )),
+        (true, true),
+        "a name-preserving window leaves the collision to the node above it"
+    );
+    // The vector side is the source itself, so nothing below this node dropped a name and this node
+    // is the only one that can refuse: `a_broadcast_refuses_two_series_that_share_a_label_set_and_
+    // releases_the_reservation` is the refusal that rests on the table it keeps.
+    assert_eq!(
+        emitted_tables(broadcast_right(
+            evaluated_input(Arc::clone(&grid)),
+            2.0,
+            BinaryOp::Mul,
+            false,
+        )),
+        (true, false),
+        "a source under the broadcast leaves it the only node that can refuse"
+    );
+}
+
+/// What a literal arithmetic broadcast hands on under a name-dropping window keeps its positions:
+/// series that differ only by name hold different ones, so nothing collides, each hands over its own
+/// close, and the constant reaches every value that is there.
+///
+/// `sum_over_time` over a 1 ms window answers each position its input holds a sample at, so the two
+/// series occupy disjoint positions and the missing samples in between stay missing. The window
+/// drops the name, so both answer under one label set: what lets them through is occupancy, which
+/// the broadcast neither widens nor narrows.
+#[test]
+fn a_literal_arithmetic_over_a_name_dropping_window_keeps_the_positions_it_reads() {
+    let grid = grid(0, 60_000, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let window = || {
+        window_with(
+            evaluated_input(Arc::clone(&grid)),
+            RangeFunction::SumOverTime,
+            1,
+            Some(Arc::clone(&grid)),
+            Arc::clone(&grid),
+        )
+    };
+    let trees = [
+        NativeTree::try_new(broadcast_right(window(), 2.0, BinaryOp::Add, false)).unwrap(),
+        NativeTree::try_new(broadcast_left(2.0, window(), BinaryOp::Add, false)).unwrap(),
+    ];
+    for tree in &trees {
+        let pool = pool();
+        let mut execution = executor(tree, Arc::clone(&pool));
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(
+                    &schema,
+                    named_metric("requests", "x"),
+                    0,
+                    vec![Some(1.0), None, Some(3.0)],
+                    true,
+                ),
+            )
+            .unwrap();
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(
+                    &schema,
+                    named_metric("requests_total", "x"),
+                    1,
+                    vec![Some(2.0), None, Some(5.0)],
+                    true,
+                ),
+            )
+            .unwrap();
+        let out = run(&mut execution);
+        let mut points = decided(&out);
+        points.sort_by_key(|(position, _)| *position);
+        assert_eq!(
+            points,
+            vec![
+                (0, Some(3.0)),
+                (1, Some(4.0)),
+                (2, Some(5.0)),
+                (3, Some(7.0))
+            ],
+            "the positions the two series hold apart were not each mapped by the constant"
+        );
+        assert!(out.iter().all(|chunk| name_of(chunk).is_none()));
+        assert_eq!(
+            out.iter().filter(|chunk| chunk.is_last).count(),
+            2,
+            "each source series closes once, and the broadcast keeps its close"
+        );
+        assert_eq!(execution.state().reserved_bytes(), 0);
+        assert_eq!(pool.reserved(), 0);
+    }
+}
+
+/// A collecting window that drops the metric name hands its flush to the literal arithmetic above
+/// it, which keeps no table of its own and so passes every position of that flush on.
+///
+/// The window collects because its input reports fragments, merges the two series that share a tag
+/// set once their name is gone, and answers only when the input ends: what reaches the broadcast is
+/// that flush, its closes included. The second tag set the flush answers holds no value, so the
+/// chunk that closes it carries no row -- the one a consumer tells "nothing more here" by.
+#[test]
+fn a_literal_arithmetic_over_a_collecting_window_hands_on_its_flush() {
+    let grid = grid(0, 60_000, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(broadcast_right(
+        window_with(
+            map(evaluated_input(Arc::clone(&grid)), vec![MathOp::Abs]),
+            RangeFunction::SumOverTime,
+            1,
+            Some(Arc::clone(&grid)),
+            Arc::clone(&grid),
+        ),
+        2.0,
+        BinaryOp::Add,
+        false,
+    ))
+    .unwrap();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    // Two series differing only by name hold the halves of the grid the other leaves empty, and a
+    // third tag set holds no value at all.
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("requests", "x"),
+                0,
+                vec![Some(1.0), Some(2.0)],
+                true,
+            ),
+        )
+        .unwrap();
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("requests_total", "x"),
+                2,
+                vec![Some(4.0), Some(5.0)],
+                true,
+            ),
+        )
+        .unwrap();
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, named_metric("requests", "y"), 0, vec![None], true),
+        )
+        .unwrap();
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "the collector answered before its input ended"
+    );
+
+    let out = run(&mut execution);
+    let mut points = decided(&out);
+    points.sort_by_key(|(position, _)| *position);
+    assert_eq!(
+        points,
+        vec![
+            (0, Some(3.0)),
+            (1, Some(4.0)),
+            (2, Some(6.0)),
+            (3, Some(7.0))
+        ],
+        "the positions the flush merged were not each mapped by the constant"
+    );
+    assert!(out.iter().all(|chunk| name_of(chunk).is_none()));
+    assert!(
+        out.iter()
+            .any(|chunk| chunk.is_last && chunk.series.time.is_empty()),
+        "the tag set the flush answered empty did not close on a chunk carrying no row"
+    );
+    assert_eq!(
+        out.iter().filter(|chunk| chunk.is_last).count(),
+        2,
+        "each series the flush answered closes once"
+    );
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// The window below a literal arithmetic broadcast refuses two series that collapse onto one label
+/// set, and it does so before the aggregate above can fold them into one group.
+///
+/// The broadcast keeps no table for this shape, so the refusal is the window's -- which is also what
+/// keeps it upstream: a duplicate the partial aggregate read would land in one group and answer a
+/// wrong value instead of refusing, and the reservations would be held until the fold answered.
+#[test]
+fn a_window_under_a_literal_arithmetic_refuses_the_collision_it_collapses() {
+    let out_grid = grid(0, 60_000, 5);
+    let tree = NativeTree::try_new(partial_sum(broadcast_right(
+        window_with(
+            input(),
+            RangeFunction::Rate,
+            300_000,
+            None,
+            Arc::clone(&out_grid),
+        ),
+        2.0,
+        BinaryOp::Mul,
+        false,
+    )))
+    .unwrap();
+    let schema = raw_schema();
+    let counter = [0, 60_000, 120_000, 180_000, 240_000];
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    let metrics = metrics_of(&execution);
+    execution
+        .push_raw(
+            InputId::new(0),
+            raw_chunk_of(
+                &schema,
+                b"series-a",
+                host_metric(Some("")),
+                &counter,
+                &[1.0, 2.0, 3.0, 4.0, 5.0],
+                true,
+            ),
+        )
+        .unwrap();
+    assert!(
+        execution.next_state().unwrap().is_none(),
+        "the partial aggregate answered before its input ended"
+    );
+    // The second series is a different one to the scan and the same one to `rate`: the window is
+    // where the two meet, and the broadcast above it has no table to notice it.
+    execution
+        .push_raw(
+            InputId::new(0),
+            raw_chunk_of(
+                &schema,
+                b"series-b",
+                host_metric(None),
+                &counter,
+                &[6.0, 7.0, 8.0, 9.0, 10.0],
+                true,
+            ),
+        )
+        .unwrap();
+    let error = match execution.next_state() {
+        Ok(None) => panic!("the second series settled nothing at all"),
+        Ok(Some(_)) => panic!("a second series left the window under the first one's label set"),
+        Err(error) => error,
+    };
+    let message = error.to_string();
+    assert!(
+        message.contains("vector cannot contain metrics with the same labelset")
+            && message.contains("two series hold a value of field 0"),
+        "expected the window's refusal, got: {message:?}"
+    );
+    // The node the refusal comes from is the one named: the window under the broadcast's left
+    // operand, not the broadcast that hands its answer on.
+    assert!(
+        message.contains("native.window at root.input.left"),
+        "the refusal does not name the window that made it: {message:?}"
+    );
+    assert_eq!(
+        count(&metrics, "root", NodeMetric::OUTPUT_BATCHES),
+        0,
+        "the aggregate answered a group from a stream the window refused"
+    );
+    assert_eq!(
+        execution.state().reserved_bytes(),
+        0,
+        "error retained execution bytes: {message}"
+    );
+    assert_eq!(
+        pool.reserved(),
+        0,
+        "error retained a pool reservation: {message}"
+    );
+}
+
+/// A window that keeps the metric name leaves the collision to the broadcast, which still keeps the
+/// table that refuses it.
+///
+/// `last_over_time` reports the name it read, so the two series stay distinct under it; the
+/// multiplication drops the name, and the two then hold one label set at the same positions. Nothing
+/// below this node has checked that identity, so this node is where it is refused.
+#[test]
+fn a_name_preserving_window_leaves_the_collision_to_the_broadcast() {
+    let grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(broadcast_right(
+        window_with(
+            evaluated_input(Arc::clone(&grid)),
+            RangeFunction::LastOverTime,
+            60_000,
+            Some(Arc::clone(&grid)),
+            Arc::clone(&grid),
+        ),
+        2.0,
+        BinaryOp::Mul,
+        false,
+    ))
+    .unwrap();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("requests", "x"),
+                0,
+                vec![Some(1.0), Some(2.0)],
+                true,
+            ),
+        )
+        .unwrap();
+    let first = execution
+        .next_chunk()
+        .unwrap()
+        .expect("the first series answers under its own name dropped");
+    assert_eq!(
+        decided(std::slice::from_ref(&first)),
+        vec![(0, Some(2.0)), (1, Some(4.0))]
+    );
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("requests_total", "x"),
+                0,
+                vec![Some(3.0), Some(4.0)],
+                true,
+            ),
+        )
+        .unwrap();
+    let error = execution
+        .next_chunk()
+        .expect_err("the two names become one label set at the positions both hold");
+    let message = error.to_string();
+    assert!(
+        message.contains("vector cannot contain metrics with the same labelset")
+            && message.contains("two series hold a value of field 0"),
+        "expected the collision the broadcast produces, got: {message:?}"
+    );
+    assert_eq!(
+        pool.reserved(),
+        0,
+        "error retained a pool reservation: {message}"
+    );
+    assert_eq!(
+        execution.state().reserved_bytes(),
+        0,
+        "error retained execution bytes: {message}"
+    );
+}
+
+/// Literal arithmetic over a name-dropping window keeps only the positions it was handed:
+/// multiplication scales histograms, while unsupported arithmetic drops their samples without
+/// dropping floats or the series close. The window already checks the identities and positions.
+#[test]
+fn a_histogram_window_under_literal_arithmetic_never_expands_occupancy() {
+    let grid = grid(0, 60_000, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let window = || {
+        window_with(
+            evaluated_input(Arc::clone(&grid)),
+            RangeFunction::SumOverTime,
+            1,
+            Some(Arc::clone(&grid)),
+            Arc::clone(&grid),
+        )
+    };
+    let mut metric = named_metric("requests", "x");
+    metric.set("__type__", "histogram".into()).unwrap();
+    metric.set("__unit__", "seconds".into()).unwrap();
+    let mut expected_metric = named_metric("requests", "x");
+    expected_metric.remove("__name__");
+    let mixed = Samples::try_from_mixed(
+        Float64Array::from(vec![Some(3.0), None, None, Some(5.0)]),
+        HistogramSamples::try_new(
+            UInt32Array::from(vec![None, Some(0), None, None]),
+            histogram_table(1, 4),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mixed = EvaluatedChunk::try_new(
+        Series {
+            metric: metric.clone(),
+            time: TimeAxis::Grid(GridRange::try_new(Arc::clone(&grid), 0, 4).unwrap()),
+            fields: SeriesFields::one(mixed),
+        },
+        true,
+    )
+    .unwrap();
+    let histograms = evaluated_histogram_chunk_of(
+        &schema,
+        metric,
+        0,
+        vec![Some(0), None, Some(0), None],
+        &histogram_table(1, 4),
+        true,
+    );
+
+    for (op, literal_left, input, expected, dropped) in [
+        (
+            BinaryOp::Mul,
+            false,
+            mixed.clone(),
+            vec![(0, Some(6.0)), (1, None), (3, Some(10.0))],
+            false,
+        ),
+        (
+            BinaryOp::Mul,
+            true,
+            mixed.clone(),
+            vec![(0, Some(6.0)), (1, None), (3, Some(10.0))],
+            false,
+        ),
+        (
+            BinaryOp::Add,
+            false,
+            mixed,
+            vec![(0, Some(5.0)), (1, None), (3, Some(7.0))],
+            true,
+        ),
+        (
+            BinaryOp::Add,
+            false,
+            histograms,
+            vec![(0, None), (2, None)],
+            true,
+        ),
+    ] {
+        let root = if literal_left {
+            broadcast_left(2.0, window(), op, false)
+        } else {
+            broadcast_right(window(), 2.0, op, false)
+        };
+        assert_eq!(emitted_tables(root.clone()), (false, true));
+        let tree = NativeTree::try_new(root).unwrap();
+        let pool = pool();
+        let collector = common_query::promql_annotations::PromqlAnnotationCollector::default();
+        let mut state = NativeExecutionState::try_new(&tree, Arc::clone(&pool), None).unwrap();
+        state.set_annotations(Some(collector.clone()));
+        let mut execution = NativeExecutor::new(state);
+        execution.push_evaluated(InputId::new(0), input).unwrap();
+        let out = run(&mut execution);
+
+        assert_eq!(decided(&out), expected);
+        assert_eq!(out.iter().filter(|chunk| chunk.is_last).count(), 1);
+        for chunk in &out {
+            assert_eq!(chunk.series.metric, expected_metric);
+        }
+        let counts = out.iter().flat_map(histogram_counts).collect::<Vec<_>>();
+        assert_eq!(counts, if dropped { vec![] } else { vec![8.0] });
+        let mut warnings = Vec::new();
+        let mut infos = Vec::new();
+        collector.append_to(&mut warnings, &mut infos);
+        assert_eq!(
+            infos
+                .iter()
+                .any(|info| info.contains("dropped native histogram samples")),
+            dropped,
+            "unexpected histogram drop annotation: {infos:?}"
+        );
+        assert_eq!(execution.state().reserved_bytes(), 0);
+        assert_eq!(pool.reserved(), 0);
+    }
+}
+
+/// A series that ended is one member of a group, not the group: nothing is answered until the input
+/// ends.
+///
+/// The observable state between the two is what this pins: the fold has read the closing chunk of
+/// the first series and answered nothing, and `computed` still says so.
+#[test]
+fn an_aggregate_answers_nothing_until_its_whole_input_ends() {
+    let grid = grid(0, 60_000, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(aggregate(
+        evaluated_input(Arc::clone(&grid)),
+        sum_grouping(Grouping::By(Arc::new([]))),
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool());
+    // The root is the aggregate the tree built, and the fold is its own payload: what is read
+    // below is a copy of the flag, not a borrow held across the pulls.
+    let computed = |execution: &NativeExecutor| {
+        let RuntimeOp::Aggregate { aggregate, .. } =
+            &execution.state().live.as_ref().unwrap().root.op
+        else {
+            panic!("the root is not the aggregate the tree built");
+        };
+        aggregate.computed
+    };
+
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                job_instance_metric("requests", "api", "a"),
+                0,
+                vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0)],
+                true,
+            ),
+        )
+        .unwrap();
+    assert!(execution.next_chunk().unwrap().is_none());
+    assert!(!computed(&execution), "the fold finished on one series");
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "the closing chunk of one series answered for its group"
+    );
+    // The second series closed too, and the input still has not ended.
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                job_instance_metric("requests", "db", "b"),
+                0,
+                vec![Some(10.0), Some(20.0), Some(30.0), Some(40.0)],
+                true,
+            ),
+        )
+        .unwrap();
+    assert!(
+        !computed(&execution),
+        "the fold finished before the input ended"
+    );
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "every series closed, and the group was answered before the input ended"
+    );
+
+    execution.end_of_input().unwrap();
+    assert!(
+        !computed(&execution),
+        "ending the input finished the fold before anything pulled for it"
+    );
+    let mut output = Vec::new();
+    while let Some(chunk) = execution.next_chunk().unwrap() {
+        output.push(chunk);
+    }
+    assert_eq!(
+        groups_of(&output),
+        vec![unlabelled(vec![
+            (0, Some(11.0)),
+            (1, Some(22.0)),
+            (2, Some(33.0)),
+            (3, Some(44.0)),
+        ])],
+        "the group was not answered once the input ended"
+    );
+}
+
+/// A chunk of another layout is refused, naming the aggregate and its position, and the execution
+/// stops with nothing reserved.
+///
+/// The fold indexes its states by absolute position and by field, so a chunk of another field count
+/// would be folded into states that mean something else. It is refused rather than folded, and what
+/// the refusal leaves behind is a stopped execution whose reservation went back to the pool.
+#[test]
+fn an_aggregate_refuses_a_chunk_of_another_layout_and_returns_its_reservation() {
+    let grid = grid(0, 60_000, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(aggregate(
+        evaluated_input(Arc::clone(&grid)),
+        sum_grouping(Grouping::By(Arc::new([]))),
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                metric(),
+                0,
+                vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0)],
+                true,
+            ),
+        )
+        .unwrap();
+    // Two fields where the tree bound one: the source node accepts it, the fold refuses it.
+    let wider = Arc::new(SeriesSchema {
+        fields: field_count(2),
+        eval_grid: Some(Arc::clone(&grid)),
+    });
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_columns(
+                &wider,
+                metric(),
+                0,
+                vec![vec![Some(1.0); 4], vec![Some(2.0); 4]],
+                true,
+            ),
+        )
+        .unwrap();
+
+    let error = execution
+        .next_chunk()
+        .expect_err("a chunk of another field count was folded");
+    // The refusal names the node it came from and keeps the sentence that says what disagreed, so a
+    // client reads the cause and not just the node.
+    let message = error.to_string();
+    assert!(
+        message.contains("native.aggregate at root: "),
+        "the refusal is not aggregate-contextualized: {message}"
+    );
+    assert!(
+        message.contains("the `Sum` aggregate"),
+        "the refusal does not name the aggregate: {message}"
+    );
+    assert!(
+        message.contains("field count"),
+        "the refusal does not say what disagreed: {message}"
+    );
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    // A stopped execution is not resumed: the fold must not be asked to continue after this.
+    assert!(execution.next_chunk().is_err());
+}
+
+/// A pool rejection while the first aggregate block is admitted releases the source and fold.
+#[test]
+fn aggregate_budget_rejects_first_block_and_releases_everything() {
+    let grid = grid(0, 1, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(aggregate(
+        evaluated_input(Arc::clone(&grid)),
+        sum_grouping(Grouping::By(Arc::new([]))),
+    ))
+    .unwrap();
+    let pool = bounded_pool(2_000);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, metric(), 0, vec![Some(2.0)], true),
+        )
+        .unwrap();
+    assert!(execution.next_chunk().is_err());
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(execution.state().reserved_bytes(), 0);
+}
+
+/// The aggregate runtime charges its output queue, releases each output as it is pulled, and keeps
+/// queue backing until the runtime itself is released.
+#[test]
+fn aggregate_runtime_queue_keeps_only_backing_after_pops_until_release() {
+    let grid = grid(0, 1, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(aggregate(
+        evaluated_input(Arc::clone(&grid)),
+        sum_grouping(Grouping::By(Arc::new(["job".into()]))),
+    ))
+    .unwrap();
+    let pool = bounded_pool(1 << 20);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    for (job, value) in [("api", 1.0), ("db", 2.0)] {
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(
+                    &schema,
+                    job_instance_metric("requests", job, "a"),
+                    0,
+                    vec![Some(value)],
+                    true,
+                ),
+            )
+            .unwrap();
+    }
+    execution.end_of_input().unwrap();
+    let first = execution.next_chunk().unwrap().expect("first group output");
+    assert_eq!(first.series.time.positions().count(), 1);
+    let entry = std::mem::size_of::<(NativeChunk, usize)>();
+    // What the root's queue holds, what the first chunk in it was queued with, the node's
+    // reservation and the backing the queue grew to. The borrow ends inside the call, so the pull
+    // below is taken with nothing held.
+    let queue = |execution: &NativeExecutor| -> (usize, usize, usize, usize) {
+        let RuntimeOp::Aggregate { state, .. } = &execution.state().live.as_ref().unwrap().root.op
+        else {
+            panic!("the root is not the aggregate the tree built");
+        };
+        (
+            state.queued.len(),
+            state.queued.front().map_or(0, |(_, bytes)| *bytes),
+            state.buffer.reservation.size(),
+            state.queued.capacity(),
+        )
+    };
+    let (queued, remaining, held, capacity) = queue(&execution);
+    assert_eq!(queued, 1);
+    assert_eq!(held, capacity * entry + remaining);
+    assert!(remaining > 0, "the queued answer was not charged for");
+
+    let second = execution
+        .next_chunk()
+        .unwrap()
+        .expect("second group output");
+    assert_eq!(second.series.time.positions().count(), 1);
+    let (queued, _, held, capacity) = queue(&execution);
+    assert_eq!(queued, 0);
+    let backing = capacity * entry;
+    assert!(backing > 0);
+    assert_eq!(held, backing);
+    assert!(execution.next_chunk().unwrap().is_none());
+    // The terminal pull is the close: the queue's backing and the reservation go back with it, and
+    // the root reads released rather than only uncharged.
+    assert!(
+        execution.state().live.is_none(),
+        "the closed root was retained"
+    );
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// An aggregate whose sparse output has a few points on a large grid can finish in a small pool.
+#[test]
+fn aggregate_sparse_output_budget_uses_rows_not_grid_length() {
+    let grid = grid(0, 1, 100_000);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(aggregate(
+        evaluated_input(Arc::clone(&grid)),
+        sum_grouping(Grouping::By(Arc::new([]))),
+    ))
+    .unwrap();
+    let pool = bounded_pool(64 * 1024);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, metric(), 10, vec![Some(2.0)], true),
+        )
+        .unwrap();
+    let output = execution.finish().unwrap();
+    assert_eq!(groups_of(&output), vec![unlabelled(vec![(10, Some(2.0))])]);
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// `quantile` answers what the kernel answers, because the node keeps the input the kernel reads.
+///
+/// The node is not a second implementation of the quantile: it retains its members and hands them to
+/// [`crate::aggregate::aggregate_quantile`] with a constant parameter over the rows they hold, so the
+/// assertion is against that kernel over the same series. Positions, values and the group each row
+/// belongs to must agree row for row. The input is uneven on purpose - a group's members hold
+/// different points, and one point's values come only from one member - which is what a per-point
+/// fold would answer and this must not.
+#[test]
+fn quantile_answers_what_the_kernel_answers() {
+    let grid = grid(0, 60_000, 6);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let members = [
+        (
+            job_instance_metric("requests", "api", "a"),
+            vec![Some(1.0), None, Some(3.0), Some(4.0), None, Some(6.0)],
+        ),
+        (
+            job_instance_metric("requests", "api", "b"),
+            vec![None, Some(2.0), Some(5.0), None, Some(2.0), None],
+        ),
+        (
+            job_instance_metric("requests", "db", "c"),
+            vec![Some(10.0), Some(20.0), None, None, Some(50.0), Some(60.0)],
+        ),
+    ];
+    let chunks: Vec<EvaluatedChunk> = members
+        .iter()
+        .map(|(metric, values)| {
+            evaluated_chunk_of(&schema, metric.clone(), 0, values.clone(), true)
+        })
+        .collect();
+    for grouping in [
+        Grouping::By(Arc::new([])),
+        Grouping::By(Arc::new(["job".into()])),
+    ] {
+        let tree = NativeTree::try_new(aggregate(
+            evaluated_input(Arc::clone(&grid)),
+            BoundAggregate {
+                kind: AggregateKind::Quantile { quantile: 0.9 },
+                group: grouping.clone(),
+                stage: AggregateStage::Complete,
+                field_kind: FieldKind::Float,
+            },
+        ))
+        .unwrap();
+        let pool = bounded_pool(1 << 20);
+        let mut execution = executor(&tree, Arc::clone(&pool));
+        for chunk in &chunks {
+            execution
+                .push_evaluated(InputId::new(0), chunk.clone())
+                .unwrap();
+        }
+        let output = execution.finish().unwrap();
+        assert!(
+            !output.is_empty(),
+            "{grouping:?}: the quantile answered nothing"
+        );
+
+        // The kernel over the same members, with the parameter this node builds: the φ as an
+        // unlabelled single-field scalar over every point the input's rows sit at.
+        let series: Vec<Series> = chunks.iter().map(|chunk| chunk.series.clone()).collect();
+        let parameter_schema = SeriesSchema {
+            fields: Arc::from([FieldSpec {
+                name: "scalar".into(),
+            }]),
+            eval_grid: Some(Arc::clone(&grid)),
+        };
+        let parameter = crate::map::constant_series(
+            &parameter_schema,
+            GridRange::try_new(Arc::clone(&grid), 0, 6).unwrap(),
+            0.9,
+        )
+        .unwrap();
+        let names: Vec<&str> = match &grouping {
+            Grouping::By(labels) | Grouping::Without(labels) => {
+                labels.iter().map(|label| label.as_ref()).collect()
+            }
+        };
+        let kernel_grouping = match &grouping {
+            Grouping::By(_) => crate::aggregate::Grouping::By(&names),
+            Grouping::Without(_) => crate::aggregate::Grouping::Without(&names),
+        };
+        let expected =
+            crate::aggregate::aggregate_quantile(&schema, &series, &parameter, kernel_grouping)
+                .unwrap();
+        drop(names);
+        let expected: Vec<EvaluatedChunk> = expected
+            .into_iter()
+            .map(|series| EvaluatedChunk::try_new(series, true).unwrap())
+            .collect();
+        assert_eq!(groups_of(&expected), groups_of(&output), "{grouping:?}");
+        assert_eq!(pool.reserved(), 0, "{grouping:?}");
+    }
+}
+
+/// A `quantile`'s parameter is as wide as the points the input holds, not the span they sit in.
+///
+/// The two points are 99_999 positions apart on a 100_000-point grid, so a parameter over the window
+/// between them carries a value for every position in it -- 800 KB at this width -- and no admission
+/// ever sized it. That pool is 64 KiB, which the dense span could not be admitted into and which this
+/// fold answers in: the parameter is built over the input's own positions, so the gaps cost a span
+/// and not a row. What the fold took is released again when it answers.
+#[test]
+fn quantile_parameter_costs_the_points_held_not_the_span_between_them() {
+    let grid = grid(0, 1, 100_000);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(aggregate(
+        evaluated_input(Arc::clone(&grid)),
+        BoundAggregate {
+            kind: AggregateKind::Quantile { quantile: 0.5 },
+            group: Grouping::By(Arc::new([])),
+            stage: AggregateStage::Complete,
+            field_kind: FieldKind::Float,
+        },
+    ))
+    .unwrap();
+    let pool = bounded_pool(64 * 1024);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            sparse_chunk(
+                &schema,
+                metric(),
+                &[(0, 1), (99_999, 1)],
+                vec![1.0, 3.0],
+                true,
+            ),
+        )
+        .unwrap();
+    let output = execution.finish().unwrap();
+    assert_eq!(
+        groups_of(&output),
+        vec![unlabelled(vec![(0, Some(1.0)), (99_999, Some(3.0))])]
+    );
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// A `quantile` whose input holds no sample at all answers nothing, rather than failing on the
+/// parameter it has no point to write the φ at.
+///
+/// The node hands the empty input to [`crate::aggregate::aggregate_quantile`] with the φ as an
+/// unlabelled single-field scalar, and that scalar is built over exactly the points the retained
+/// members sit at. An input with no member sits at none of them, so the builder it is written
+/// through finishes with no series at all -- and there is no point the kernel could ask for a φ it
+/// has no value at. The statement is still a legal one whose answer is the empty vector:
+/// `quantile(0.5, m)` over a range `m` holds no sample in is exactly this case, and Prometheus
+/// answers it with no series rather than with an error. The parameter is therefore an empty scalar
+/// over the grid instead -- the same thing said in the form the kernel reads -- which is what keeps
+/// "no sample in range" an answer of no samples rather than a failure to build a parameter.
+#[test]
+fn a_quantile_over_no_input_answers_nothing() {
+    let grid = grid(0, 60_000, 4);
+    let tree = NativeTree::try_new(aggregate(
+        evaluated_input(Arc::clone(&grid)),
+        BoundAggregate {
+            kind: AggregateKind::Quantile { quantile: 0.5 },
+            group: Grouping::By(Arc::new([])),
+            stage: AggregateStage::Complete,
+            field_kind: FieldKind::Float,
+        },
+    ))
+    .unwrap();
+    let pool = bounded_pool(1 << 20);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    // Nothing is pushed: the selection under this aggregate held no sample in the range it was
+    // asked for, so its leaf hands over no chunk at all and the fold keeps no member.
+    let output = run(&mut execution);
+    assert!(
+        output.is_empty(),
+        "a quantile over no input answered {:?}",
+        groups_of(&output)
+    );
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// A `quantile` bills the buffer its chunks are slices of once, not once per chunk.
+///
+/// One 2000-sample Arrow allocation is handed over as 2000 one-row chunks, which is what a source
+/// handing over the rows of one batch does: every chunk is a slice of the same 16 KB buffer, so the
+/// series holds 16 KB of values and one descriptor per chunk. Charging each chunk for the allocation
+/// its slice points into -- `series_bytes`, which reads the capacity of the buffer a slice keeps
+/// alive -- bills 2000 x ~16.3 KB ≈ 32 MB, and the 4 MiB pool below refuses this input at about the
+/// 260th chunk (4 MiB / 16.3 KB), while `min` over the same chunks answers, because a point-wise fold
+/// holds one chunk at a time and never the input. Retained the way this node bills its input --
+/// `chunk_bytes_beside_samples` per chunk, plus the allocations the chunks' samples are slices of,
+/// each billed once by the first chunk that references one (`unbilled_sample_buffers`) -- the input
+/// costs its rows, its descriptors and one charge for the buffer they slice: under a megabyte, so
+/// the fold answers and leaves the pool empty.
+#[test]
+fn a_quantile_bills_a_shared_buffer_once() {
+    const ROWS: usize = 2_000;
+    const POOL: usize = 4 * 1024 * 1024;
+    let grid = grid(0, 1, ROWS as u64);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let batch = Float64Array::from((0..ROWS).map(|row| row as f64).collect::<Vec<f64>>());
+    let chunks: Vec<EvaluatedChunk> = (0..ROWS)
+        .map(|row| {
+            evaluated_array_chunk_of(&schema, metric(), row, batch.slice(row, 1), row + 1 == ROWS)
+        })
+        .collect();
+    // What a one-row chunk is charged by the figure this test is about: the buffer it is a slice of,
+    // not the eight bytes of the row it holds. The whole input is that buffer twice over -- once
+    // spent on the values and once billed per chunk -- which is what the pool would refuse.
+    let per_chunk = series_bytes(&chunks[0].series);
+    assert!(
+        per_chunk >= ROWS * std::mem::size_of::<f64>(),
+        "a one-row chunk is charged {per_chunk} bytes, less than the {} the buffer it is a slice of \
+         holds, so this test is not reproducing the per-chunk billing it is about",
+        ROWS * std::mem::size_of::<f64>()
+    );
+    let per_chunk_total = per_chunk.saturating_mul(ROWS);
+    assert!(
+        per_chunk_total > 7 * POOL,
+        "billing each chunk for its buffer costs {per_chunk_total} bytes, which a {POOL}-byte pool \
+         would admit, so this input does not reproduce the double billing"
+    );
+
+    let run = |kind: AggregateKind, pool: Arc<dyn MemoryPool>| {
+        let tree = NativeTree::try_new(aggregate(
+            evaluated_input(Arc::clone(&grid)),
+            BoundAggregate {
+                kind,
+                group: Grouping::By(Arc::new([])),
+                stage: AggregateStage::Complete,
+                field_kind: FieldKind::Float,
+            },
+        ))
+        .unwrap();
+        let mut execution = executor(&tree, Arc::clone(&pool));
+        for chunk in &chunks {
+            execution
+                .push_evaluated(InputId::new(0), chunk.clone())
+                .unwrap();
+            // A source queue holds the chunk the caller just pushed, so a pull per push keeps what
+            // the pool holds to what the nodes retain rather than to the whole input stream. An
+            // aggregate answers once, when its input ends, so nothing has settled here yet.
+            assert!(
+                execution.next_chunk().unwrap().is_none(),
+                "{kind:?} answered early"
+            );
+        }
+        let output = execution.finish().unwrap();
+        assert_eq!(
+            pool.reserved(),
+            0,
+            "{kind:?} left the pool holding input it was finished with"
+        );
+        output
+    };
+    let minimum = run(AggregateKind::Min, bounded_pool(POOL));
+    let quantile = run(
+        AggregateKind::Quantile { quantile: 0.5 },
+        bounded_pool(POOL),
+    );
+    // Every point of this input holds exactly one value, so the φ-quantile of a point is that value
+    // and the two aggregates answer the same series.
+    assert_eq!(groups_of(&quantile), groups_of(&minimum));
+}
+
+/// A `quantile` bills the allocation its chunks' slices point into, once, and not the rows it holds of
+/// it.
+///
+/// A one-row chunk of a 100 000-row batch keeps that batch's whole 800 KB buffer resident, so that is
+/// what retaining it costs: its row is eight bytes, and a figure that stopped at the rows would leave
+/// the buffer the chunk pins to nothing -- a chunk holding a small slice of a large batch under-billed
+/// by everything the batch holds. One allocation is also one however many chunks slice it, so a second
+/// one-row chunk of the same batch is charged its descriptors and not the buffer again: billing every
+/// chunk for the buffer it slices would refuse an input whose buffer fits the pool.
+#[test]
+fn a_quantile_bills_the_allocation_its_slices_point_into_once() {
+    const ROWS: usize = 100_000;
+    // What the batch's values occupy, and so what one chunk of it keeps alive however few rows it
+    // holds of it.
+    let residency = ROWS * std::mem::size_of::<f64>();
+    let grid = grid(0, 1, ROWS as u64);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let batch = Float64Array::from((0..ROWS).map(|row| row as f64).collect::<Vec<f64>>());
+    let tree = NativeTree::try_new(aggregate(
+        evaluated_input(Arc::clone(&grid)),
+        BoundAggregate {
+            kind: AggregateKind::Quantile { quantile: 0.5 },
+            group: Grouping::By(Arc::new([])),
+            stage: AggregateStage::Complete,
+            field_kind: FieldKind::Float,
+        },
+    ))
+    .unwrap();
+    let pool = bounded_pool(16 * residency);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+
+    // The first row of the batch, which is a slice of the whole buffer.
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_array_chunk_of(&schema, metric(), 0, batch.slice(0, 1), false),
+        )
+        .unwrap();
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "the quantile answered before its input ended"
+    );
+    let one = execution.state().reserved_bytes();
+    assert!(
+        one >= residency,
+        "a retained chunk holding one row of a {residency}-byte buffer is charged {one} bytes, less \
+         than the buffer it keeps alive"
+    );
+
+    // A second row of the same buffer: the same allocation, sliced again.
+    let second = evaluated_array_chunk_of(&schema, metric(), 1, batch.slice(1, 1), true);
+    execution
+        .push_evaluated(InputId::new(0), second.clone())
+        .unwrap();
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "the quantile answered before its input ended"
+    );
+    let both = execution.state().reserved_bytes();
+    assert!(
+        both < residency + residency / 2,
+        "two chunks slicing one {residency}-byte buffer are charged {both} bytes, so the buffer is \
+         counted once per chunk rather than once"
+    );
+    // What the second chunk cost is its own descriptors and the slot it takes in the vector: the
+    // allocation it slices is already billed, and its `Series` is that slot rather than a second
+    // figure beside it. The delta is exact, because the settle reads back the capacity the vector
+    // really holds, so a chunk billed twice -- or a buffer billed again -- shows up here.
+    let second_cost = both.saturating_sub(one);
+    let expected = super::chunk_bytes_beside_samples(&second.series)
+        .saturating_add(std::mem::size_of::<Series>());
+    assert!(
+        second_cost <= expected,
+        "the second chunk of one allocation cost {second_cost} bytes, more than the {expected} its \
+         own descriptors and one slot hold"
+    );
+
+    // Both rows are one member of the one group, so each point answers from its own row.
+    let output = execution.finish().unwrap();
+    assert_eq!(
+        groups_of(&output),
+        vec![unlabelled(vec![(0, Some(0.0)), (1, Some(1.0))])]
+    );
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// A `quantile` skips a histogram sample and says so, exactly as `min` does.
+///
+/// The φ-quantile orders the values of its group and a native histogram is not one it can order, so
+/// Prometheus answers the quantile of the float samples and skips the histogram ones -- which for a
+/// group of nothing but histograms is no answer at all. `min` reads a histogram the same way and
+/// records the same info while doing it; the two are one branch in the legacy planner, and this pins
+/// that the native fold agrees with them rather than answering from samples it dropped.
+#[test]
+fn a_quantile_skips_histogram_samples_and_reports_it_like_min() {
+    let grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    for (kind, expected_info) in [
+        (
+            AggregateKind::Quantile { quantile: 0.5 },
+            "quantile: ignored native histogram samples",
+        ),
+        (AggregateKind::Min, "min: ignored native histogram samples"),
+    ] {
+        let tree = NativeTree::try_new(aggregate(
+            evaluated_input(Arc::clone(&grid)),
+            BoundAggregate {
+                kind,
+                group: Grouping::By(Arc::new([])),
+                stage: AggregateStage::Complete,
+                field_kind: FieldKind::Float,
+            },
+        ))
+        .unwrap();
+        let collector = common_query::promql_annotations::PromqlAnnotationCollector::default();
+        let mut state = NativeExecutionState::try_new(&tree, pool(), None).unwrap();
+        state.set_annotations(Some(collector.clone()));
+        let mut execution = NativeExecutor::new(state);
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_histogram_chunk_of(
+                    &schema,
+                    metric(),
+                    0,
+                    vec![Some(0), None],
+                    &histogram_table(1, 2),
+                    true,
+                ),
+            )
+            .unwrap();
+        let output = run(&mut execution);
+        assert!(
+            output.is_empty(),
+            "{kind:?} answered a group it had no value for: {:?}",
+            groups_of(&output)
+        );
+        let mut warnings = Vec::new();
+        let mut infos = Vec::new();
+        collector.append_to(&mut warnings, &mut infos);
+        assert!(warnings.is_empty(), "{kind:?}: {warnings:?}");
+        assert_eq!(infos, vec![expected_info.to_string()], "{kind:?}");
+    }
+}
+
+/// An aggregate retains its fold before finish and release returns its reservation.
+#[test]
+fn aggregate_fold_state_is_released_after_input() {
+    let grid = grid(0, 1, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(aggregate(
+        evaluated_input(Arc::clone(&grid)),
+        sum_grouping(Grouping::By(Arc::new([]))),
+    ))
+    .unwrap();
+    let pool = bounded_pool(1 << 20);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, metric(), 0, vec![Some(2.0)], true),
+        )
+        .unwrap();
+    assert!(execution.next_chunk().unwrap().is_none());
+    // The root is the aggregate the tree built: its fold holds one group and has not run. The
+    // borrow ends before the close below takes the state again.
+    {
+        let RuntimeOp::Aggregate { aggregate, .. } =
+            &execution.state().live.as_ref().unwrap().root.op
+        else {
+            panic!("the root is not the aggregate the tree built");
+        };
+        assert_eq!(aggregate.groups(), 1);
+        assert!(!aggregate.computed);
+    }
+    assert!(pool.reserved() > 0);
+    execution.finish().unwrap();
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// A `quantile` carries no state, so a tree cannot even bind it as anything but `Complete`.
+///
+/// `quantile` is answered from its group's whole sample set, so a stage that saw part of a group
+/// would answer the quantile of a subset of it, and the quantile of two partial groups is not a
+/// function of their quantiles. There is no state layout to export or merge, which is what the tree's
+/// own validation refuses while it is built: a `Partial` or `Final` node has nowhere to put its
+/// state. That refusal is the only one there is -- the runtime starts from a validated tree and so
+/// starts the `Complete` stage alone, without a second check of its own.
+#[test]
+fn a_quantile_stage_the_runtime_does_not_compute_is_named() {
+    let grid = || grid(0, 60_000, 4);
+    let schema = || evaluated_schema(grid());
+    // The state layout a `Sum` exports is enough to build the stage's tree: what this test asks is
+    // which stages the runtime starts, and a `quantile` state is refused before it is read.
+    let (state_kind, components) =
+        crate::native::plan::aggregate_state_binding(AggregateKind::Sum, FieldKind::Float).unwrap();
+    let state_schema = || {
+        Arc::new(AggregateStateSchema {
+            group: Grouping::By(Arc::new([])),
+            kind: state_kind,
+            components: components.clone().into(),
+            accumulators: schema().fields.clone(),
+            grid: grid(),
+        })
+    };
+    let state_input = || NativeNode {
+        expr: NativeExpr::Input(BoundInput {
+            output: NativeType::AggregateState(state_schema()),
+            source_index: 0,
+            ordering: SeriesOrdering::Contiguous,
+        }),
+        output: NativeType::AggregateState(state_schema()),
+    };
+    let quantile_node = |stage| {
+        let (input, output) = match stage {
+            AggregateStage::Complete => (evaluated_input(grid()), evaluated(grid())),
+            AggregateStage::Partial => (
+                evaluated_input(grid()),
+                NativeType::AggregateState(state_schema()),
+            ),
+            AggregateStage::Final => (state_input(), evaluated(grid())),
+        };
+        aggregate_with_output(
+            input,
+            BoundAggregate {
+                kind: AggregateKind::Quantile { quantile: 0.5 },
+                group: Grouping::By(Arc::new([])),
+                stage,
+                field_kind: FieldKind::Float,
+            },
+            output,
+        )
+    };
+    for stage in [AggregateStage::Partial, AggregateStage::Final] {
+        let error = match NativeTree::try_new(quantile_node(stage)) {
+            Ok(_) => panic!("the tree accepted a {stage:?} Quantile aggregate"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, DataFusionError::NotImplemented(_)),
+            "{stage:?}: {error}"
+        );
+        let message = error.to_string();
+        assert!(message.contains("Quantile"), "{stage:?}: {message}");
+        assert!(
+            message.contains("aggregate state is not defined"),
+            "{stage:?}: {message}"
+        );
+    }
+    // The `Complete` stage of the same kind is what this runtime does compute.
+    let complete = NativeTree::try_new(quantile_node(AggregateStage::Complete))
+        .expect("a complete quantile is a legal tree");
+    assert!(
+        NativeExecutionState::try_new(&complete, pool(), None).is_ok(),
+        "the runtime rejected a Complete quantile"
+    );
+
+    let out = grid();
+    let group = Grouping::By(Arc::new(["job".into()]));
+    let state = Arc::new(AggregateStateSchema {
+        group: group.clone(),
+        kind: datatypes::series::aggregate_state::AggregateStateKind::Sum,
+        components: Arc::from([
+            datatypes::series::aggregate_state::StateComponent::Value,
+            datatypes::series::aggregate_state::StateComponent::Compensation,
+        ]),
+        accumulators: fields(),
+        grid: Arc::clone(&out),
+    });
+    let partial_tree = NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(evaluated_input(Arc::clone(&out))),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group,
+                stage: AggregateStage::Partial,
+                field_kind: FieldKind::Float,
+            },
+        },
+        output: NativeType::AggregateState(state),
+    })
+    .unwrap();
+    assert!(
+        NativeExecutionState::try_new(&partial_tree, pool(), None).is_ok(),
+        "the runtime rejected a Partial aggregate"
+    );
+}
+
+/// An aggregate above a window that collects and merges its input waits for that merge.
+///
+/// The multiplication drops the metric name, so the two input series land on one label set and the
+/// `last_over_time` above them has to collect and merge before it evaluates. The aggregate above the
+/// window must wait for that merge: its guard is `inputs_finished && settled(child)`, and with only
+/// the first half it finalizes on the pull that follows the caller's last chunk, before the window
+/// has answered.
+#[test]
+fn an_aggregate_above_a_collecting_window_waits_for_the_merge() {
+    let grid = grid(0, 60_000, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = || {
+        NativeTree::try_new(aggregate(
+            window_with(
+                broadcast_right(
+                    evaluated_input(Arc::clone(&grid)),
+                    2.0,
+                    BinaryOp::Mul,
+                    false,
+                ),
+                RangeFunction::LastOverTime,
+                60_000,
+                Some(Arc::clone(&grid)),
+                Arc::clone(&grid),
+            ),
+            sum_grouping(Grouping::By(Arc::new([]))),
+        ))
+        .unwrap()
+    };
+
+    let mut execution = executor(&tree(), pool());
+    // Two series that only differ by name, each holding half of the grid the other leaves empty:
+    // after the name is dropped they are one series only once merged.
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("requests", "x"),
+                0,
+                vec![Some(1.0), Some(2.0)],
+                true,
+            ),
+        )
+        .unwrap();
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "the aggregate answered before the window above it had merged"
+    );
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("requests_total", "x"),
+                2,
+                vec![Some(3.0), Some(4.0)],
+                true,
+            ),
+        )
+        .unwrap();
+
+    let out = run(&mut execution);
+    assert_eq!(
+        decided(&out),
+        vec![
+            (0, Some(2.0)),
+            (1, Some(4.0)),
+            (2, Some(6.0)),
+            (3, Some(8.0)),
+        ],
+        "the aggregate did not fold the merged window result"
+    );
+    assert_eq!(execution.state().reserved_bytes(), 0);
+}
+
+fn vector_op(inner: NativeNode, op: BoundVectorOp) -> NativeNode {
+    let output = inner.output.clone();
+    NativeNode {
+        expr: NativeExpr::Vector {
+            input: Box::new(inner),
+            op,
+        },
+        output,
+    }
+}
+
+#[test]
+fn count_values_runtime_rejects_grouping_by_another_value_field() {
+    let grid = grid(0, 60_000, 1);
+    let input = instant(raw_input_of(2), 60_000, 0, Arc::clone(&grid));
+    let tree = NativeTree::try_new(vector_op(
+        input,
+        BoundVectorOp::CountValues {
+            label: "sample".into(),
+            group: Grouping::By(Arc::from([Arc::<str>::from("v1")])),
+        },
+    ))
+    .unwrap();
+    let error = NativeExecutionState::try_new(&tree, pool(), None)
+        .err()
+        .expect("grouping by another value field is unsupported");
+    assert!(
+        matches!(error, DataFusionError::NotImplemented(_)),
+        "{error}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("aggregate by value field requires a per-point label/schema adapter"),
+        "{error}"
+    );
+}
+
+#[test]
+fn count_values_runtime_accepts_grouping_by_its_target_label() {
+    let grid = grid(0, 60_000, 1);
+    let tree = NativeTree::try_new(vector_op(
+        instant(input(), 60_000, 0, Arc::clone(&grid)),
+        BoundVectorOp::CountValues {
+            label: "v0".into(),
+            group: Grouping::By(Arc::from([Arc::<str>::from("v0")])),
+        },
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_raw(
+            InputId::new(0),
+            raw_chunk(&raw_schema(), &[0], &[3.0], true),
+        )
+        .unwrap();
+    let chunks = run(&mut execution);
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0].series.metric.get("v0"), Some("3"));
+    assert_eq!(decided(&chunks), vec![(0, Some(1.0))]);
+}
+
+#[test]
+fn topk_runtime_rejects_grouping_by_a_value_field() {
+    let grid = grid(0, 60_000, 1);
+    let input = instant(input(), 60_000, 0, Arc::clone(&grid));
+    let tree = NativeTree::try_new(vector_op(
+        input,
+        BoundVectorOp::TopK {
+            k: 1.0,
+            top: true,
+            group: Grouping::By(Arc::from([Arc::<str>::from("v0")])),
+        },
+    ))
+    .unwrap();
+    let error = NativeExecutionState::try_new(&tree, pool(), None)
+        .err()
+        .expect("grouping by a value field is unsupported");
+    assert!(
+        matches!(error, DataFusionError::NotImplemented(_)),
+        "{error}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("aggregate by value field requires a per-point label/schema adapter"),
+        "{error}"
+    );
+}
+
+#[test]
+fn topk_runtime_accepts_grouping_by_a_label() {
+    let grid = grid(0, 60_000, 1);
+    let input = instant(input(), 60_000, 0, Arc::clone(&grid));
+    let tree = NativeTree::try_new(vector_op(
+        input,
+        BoundVectorOp::TopK {
+            k: 1.0,
+            top: true,
+            group: Grouping::By(Arc::from([Arc::<str>::from("host")])),
+        },
+    ))
+    .unwrap();
+    NativeExecutionState::try_new(&tree, pool(), None).expect("a label grouping stays supported");
+}
+
+/// The positions a series decided, with their values.
+type Decided = Vec<(usize, Option<f64>)>;
+
+/// The values a chunk stream decided, by the `job` label of the series that holds them.
+fn decided_by_job(chunks: &[EvaluatedChunk]) -> Vec<(String, Decided)> {
+    chunks
+        .iter()
+        .map(|chunk| {
+            (
+                chunk
+                    .series
+                    .metric
+                    .get("job")
+                    .unwrap_or_default()
+                    .to_string(),
+                decided(std::slice::from_ref(chunk)),
+            )
+        })
+        .collect()
+}
+
+/// `topk` ranks the whole vector at each point, so a series that arrives in several chunks is one
+/// candidate, and the reservation is given back once the kept series are handed over.
+#[test]
+fn topk_ranks_whole_series_at_each_point() {
+    let grid = grid(0, 60_000, 3);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(vector_op(
+        evaluated_input(Arc::clone(&grid)),
+        BoundVectorOp::TopK {
+            k: 1.0,
+            top: true,
+            group: Grouping::By(Arc::from([])),
+        },
+    ))
+    .unwrap();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    for chunk in [
+        evaluated_chunk_of(
+            &schema,
+            named_metric("m", "a"),
+            0,
+            vec![Some(1.0), Some(5.0)],
+            false,
+        ),
+        evaluated_chunk_of(&schema, named_metric("m", "a"), 2, vec![Some(7.0)], true),
+        evaluated_chunk_of(
+            &schema,
+            named_metric("m", "b"),
+            0,
+            vec![Some(3.0), Some(4.0), Some(6.0)],
+            true,
+        ),
+    ] {
+        execution.push_evaluated(InputId::new(0), chunk).unwrap();
+    }
+    let chunks = run(&mut execution);
+    assert_eq!(
+        decided_by_job(&chunks),
+        vec![
+            ("a".to_string(), vec![(1, Some(5.0)), (2, Some(7.0))]),
+            ("b".to_string(), vec![(0, Some(3.0))]),
+        ]
+    );
+    assert!(chunks.iter().all(|chunk| chunk.is_last));
+    assert_eq!(chunks[0].series.metric.name(), Some("m"));
+    assert_eq!(pool.reserved(), 0);
+}
+
+#[test]
+fn parameterized_topk_varies_by_grid_point_and_handles_invalid_k() {
+    let grid = grid(1_000, 2_000, 3);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let input = evaluated_input(Arc::clone(&grid));
+    let output = input.output.clone();
+    let root = NativeNode {
+        expr: NativeExpr::ParameterizedTopK {
+            input: Box::new(input),
+            op: BoundVectorOp::TopK {
+                k: 0.0,
+                top: true,
+                group: Grouping::By(Arc::from([])),
+            },
+            parameter: {
+                let t = eval_time(None, Arc::clone(&grid));
+                let t_squared = scalar_binary(t.clone(), t.clone(), binary_matching(BinaryOp::Mul));
+                let quadratic = scalar_binary(
+                    t_squared,
+                    scalar(-0.625, Arc::clone(&grid)),
+                    binary_matching(BinaryOp::Mul),
+                );
+                let linear = scalar_binary(
+                    t,
+                    scalar(3.5, Arc::clone(&grid)),
+                    binary_matching(BinaryOp::Mul),
+                );
+                Box::new(scalar_binary(
+                    scalar_binary(quadratic, linear, binary_matching(BinaryOp::Add)),
+                    scalar(-1.875, Arc::clone(&grid)),
+                    binary_matching(BinaryOp::Add),
+                ))
+            },
+        },
+        output,
+    };
+    let tree = NativeTree::try_new(root).unwrap();
+    let mut execution = executor(&tree, pool());
+    for (index, value) in (1..=5).enumerate() {
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(
+                    &schema,
+                    named_metric("m", &format!("{index}")),
+                    0,
+                    vec![Some(value as f64), Some(value as f64), Some(value as f64)],
+                    true,
+                ),
+            )
+            .unwrap();
+    }
+    let chunks = run(&mut execution);
+    assert_eq!(
+        chunks
+            .iter()
+            .filter(|c| c.series.time.row_of(0).is_some())
+            .count(),
+        1
+    );
+    assert_eq!(
+        chunks
+            .iter()
+            .filter(|c| c.series.time.row_of(1).is_some())
+            .count(),
+        3
+    );
+    let mut counts = [0usize; 3];
+    for chunk in &chunks {
+        for (point, _) in chunk.series.time.positions() {
+            counts[point] += 1;
+        }
+    }
+    assert_eq!(counts, [1, 3, 0]);
+}
+
+/// A point the parameter series holds no sample at selects nothing there, as Prometheus' empty
+/// parameter does at that step, and does not abort the points that do hold one; a parameter that is
+/// present and NaN is still an error.
+///
+/// `values` is what the topk arm reads a parameter series into: `None` is a position the series
+/// decided nothing at, `Some(k)` a value it decided.
+#[test]
+fn a_topk_parameter_with_a_gap_selects_nothing_at_that_point() {
+    let grid = grid(0, 1_000, 3);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    // `m{job="a"}` holds 1, 2 and 3, `m{job="b"}` holds 4, 5 and 6, so `topk(1, ...)` keeps `b`.
+    let series: Vec<Series> = ["a", "b"]
+        .iter()
+        .enumerate()
+        .map(|(index, job)| {
+            let values = [1.0, 2.0, 3.0]
+                .into_iter()
+                .map(|value| Some(value + 3.0 * index as f64))
+                .collect::<Vec<Option<f64>>>();
+            evaluated_chunk_of(&schema, named_metric("m", job), 0, values, true).series
+        })
+        .collect();
+    let op = BoundVectorOp::TopK {
+        k: 0.0,
+        top: true,
+        group: Grouping::By(Arc::from([])),
+    };
+    // The parameter has a sample at points 0 and 2 and a gap at point 1, where both series hold one.
+    let kept = vector_series_with_k(
+        &op,
+        &schema,
+        &series,
+        Some(&[Some(1.0), None, Some(1.0)]),
+        None,
+    )
+    .expect("an absent parameter selects nothing rather than failing the query");
+    assert_eq!(kept.len(), 1, "both points keep the same series");
+    assert_eq!(kept[0].metric.get("job"), Some("b"));
+    let mut points: Vec<usize> = kept[0].time.positions().map(|(point, _)| point).collect();
+    points.sort_unstable();
+    assert_eq!(points, vec![0, 2], "the gap at point 1 was not a gap");
+
+    // A parameter sample that is present and NaN is still refused, as a NaN k always is.
+    let error = vector_series_with_k(
+        &op,
+        &schema,
+        &series,
+        Some(&[Some(1.0), Some(f64::NAN), Some(1.0)]),
+        None,
+    )
+    .expect_err("a present NaN parameter was accepted");
+    assert!(error.to_string().contains("NaN"), "{error}");
+}
+
+/// A parameterized `topk` reads its per-point parameter whole before it reads any input, so the
+/// values it reads it into are held beside the input for as long as the node lives: a pool that
+/// admits the parameter series but not the values refuses the query rather than running it over the
+/// budget.
+#[test]
+fn parameterized_topk_reserves_the_values_of_its_parameter() {
+    // `eval_time` hands over one value per grid point: eight bytes a point in the series the node is
+    // handed, sixteen in the values it reads them into.
+    const POINTS: usize = 1 << 18;
+    let grid = grid(0, 1_000, POINTS as u64);
+    let input = evaluated_input(Arc::clone(&grid));
+    let root = NativeNode {
+        expr: NativeExpr::ParameterizedTopK {
+            input: Box::new(input.clone()),
+            op: BoundVectorOp::TopK {
+                k: 0.0,
+                top: true,
+                group: Grouping::By(Arc::from([])),
+            },
+            parameter: Box::new(eval_time(None, Arc::clone(&grid))),
+        },
+        output: input.output,
+    };
+    let tree = NativeTree::try_new(root).unwrap();
+    // Room for the parameter series and not for the values read off it, and then room for both.
+    for (budget, fits) in [(12 * POINTS, false), (32 * POINTS, true)] {
+        let pool = bounded_pool(budget);
+        let mut execution = executor(&tree, Arc::clone(&pool));
+        execution.end_of_input().unwrap();
+        let result = execution.next_chunk();
+        if fits {
+            assert!(
+                result.unwrap().is_none(),
+                "the parameter values were refused a pool that holds them"
+            );
+        } else {
+            let error = result.unwrap_err();
+            assert!(
+                matches!(error.find_root(), DataFusionError::ResourcesExhausted(_)),
+                "the parameter values were not reserved before they were read: {error}"
+            );
+        }
+        assert_eq!(pool.reserved(), 0);
+    }
+}
+
+/// A consumed dynamic parameter drops charged scalar/broadcast state before the input is finished.
+#[test]
+fn dynamic_parameters_drop_broadcast_subtrees_before_input_finishes() {
+    for histogram in [false, true] {
+        let grid = grid(1_000, 1_000, 2);
+        let input = evaluated_input(Arc::clone(&grid));
+        // Both sides are varying scalars: the broadcast retains one scalar series and emitted
+        // label history after producing the parameter.
+        let parameter = scalar_binary(
+            eval_time(None, Arc::clone(&grid)),
+            eval_time(None, Arc::clone(&grid)),
+            binary_matching(BinaryOp::Add),
+        );
+        let root = NativeNode {
+            output: input.output.clone(),
+            expr: if histogram {
+                NativeExpr::ParameterizedHistogram {
+                    input: Box::new(input),
+                    op: BoundVectorOp::Histogram(HistogramFunction::Quantile(0.0)),
+                    parameters: vec![parameter],
+                }
+            } else {
+                NativeExpr::ParameterizedTopK {
+                    input: Box::new(input),
+                    op: BoundVectorOp::TopK {
+                        k: 0.0,
+                        top: true,
+                        group: Grouping::By(Arc::from([])),
+                    },
+                    parameter: Box::new(parameter),
+                }
+            },
+        };
+        let tree = NativeTree::try_new(root).unwrap();
+        let pool = pool();
+        let mut execution = executor(&tree, Arc::clone(&pool));
+        let metrics = metrics_of(&execution);
+        let parameter_name = if histogram {
+            "root.parameter0"
+        } else {
+            "root.parameter"
+        };
+        assert!(execution.next_chunk().unwrap().is_none());
+        let root = &execution.state().live.as_ref().unwrap().root;
+        match &root.op {
+            RuntimeOp::ParameterizedTopK {
+                parameter,
+                vector,
+                state,
+                ..
+            } => {
+                assert!(parameter.is_none());
+                assert_eq!(
+                    vector.parameter.as_deref(),
+                    Some([Some(2.0), Some(4.0)].as_slice())
+                );
+                assert_eq!(
+                    state.buffer.reservation.size(),
+                    2 * std::mem::size_of::<Option<f64>>()
+                );
+            }
+            RuntimeOp::ParameterizedHistogram {
+                parameters,
+                values,
+                state,
+                ..
+            } => {
+                assert!(parameters[0].is_none());
+                assert_eq!(
+                    values[0].as_deref(),
+                    Some([Some(2.0), Some(4.0)].as_slice())
+                );
+                assert_eq!(
+                    state.buffer.reservation.size(),
+                    2 * std::mem::size_of::<Option<f64>>()
+                );
+            }
+            _ => panic!("expected dynamic operator"),
+        }
+        assert_eq!(execution.state().reserved_bytes(), pool.reserved());
+        assert_eq!(pool.reserved(), 2 * std::mem::size_of::<Option<f64>>());
+        assert_eq!(
+            gauge(
+                &metrics,
+                &format!("native.{parameter_name}.current_reserved_bytes")
+            ),
+            0
+        );
+        assert!(
+            gauge(
+                &metrics,
+                &format!("native.p0.{parameter_name}.peak_reserved_bytes")
+            ) > 0
+        );
+        assert_eq!(
+            count(&metrics, parameter_name, NodeMetric::OUTPUT_BATCHES),
+            1
+        );
+        assert!(execution.finish().unwrap().is_empty());
+        assert_eq!(pool.reserved(), 0);
+    }
+}
+
+/// `scalar()` releases its own retained input after producing, but a map below it still holds
+/// charged emitted-label history. Consuming the parameter must drop that subtree as well.
+#[test]
+fn dynamic_parameters_drop_scalar_of_map_history_before_terminal_close() {
+    for histogram in [false, true] {
+        let grid = grid(0, 1_000, 2);
+        let schema = evaluated_schema(Arc::clone(&grid));
+        let input = evaluated_input(Arc::clone(&grid));
+        let parameter = scalar_of(map(
+            evaluated_input_with_source_index(Arc::clone(&grid), 1),
+            vec![MathOp::Abs],
+        ));
+        let root = NativeNode {
+            output: input.output.clone(),
+            expr: if histogram {
+                NativeExpr::ParameterizedHistogram {
+                    input: Box::new(input),
+                    op: BoundVectorOp::Histogram(HistogramFunction::Quantile(0.0)),
+                    parameters: vec![parameter],
+                }
+            } else {
+                NativeExpr::ParameterizedTopK {
+                    input: Box::new(input),
+                    op: BoundVectorOp::TopK {
+                        k: 0.0,
+                        top: true,
+                        group: Grouping::By(Arc::from([])),
+                    },
+                    parameter: Box::new(parameter),
+                }
+            },
+        };
+        let tree = NativeTree::try_new(root).unwrap();
+        let pool = pool();
+        let mut execution = executor(&tree, Arc::clone(&pool));
+        let metrics = metrics_of(&execution);
+        let parameter_name = if histogram {
+            "root.parameter0"
+        } else {
+            "root.parameter"
+        };
+        let map_name = format!("{parameter_name}.input");
+        execution
+            .push_evaluated(
+                InputId::new(1),
+                evaluated_chunk(&schema, 0, vec![1.0, 1.0], true),
+            )
+            .unwrap();
+        assert!(execution.next_chunk().unwrap().is_none());
+        let map_current = format!("native.{map_name}.current_reserved_bytes");
+        assert!(
+            gauge(&metrics, &map_current) > 0,
+            "map did not retain emitted history"
+        );
+        // Drive exactly the finishing stage that produces the scalar, before the executor closes.
+        assert!(execution.live_mut().unwrap().pull(true).unwrap().is_none());
+        assert_eq!(gauge(&metrics, &map_current), 0);
+        assert!(
+            gauge(
+                &metrics,
+                &format!("native.p0.{map_name}.peak_reserved_bytes")
+            ) > 0
+        );
+        assert_eq!(count(&metrics, &map_name, NodeMetric::OUTPUT_BATCHES), 1);
+        let root = &execution.state().live.as_ref().unwrap().root;
+        match &root.op {
+            RuntimeOp::ParameterizedTopK { parameter, .. } => assert!(parameter.is_none()),
+            RuntimeOp::ParameterizedHistogram { parameters, .. } => {
+                assert!(parameters[0].is_none())
+            }
+            _ => panic!("expected dynamic operator"),
+        }
+        assert_eq!(execution.state().reserved_bytes(), pool.reserved());
+        execution.live_mut().unwrap().root.finish_windows().unwrap();
+        drop(execution);
+        assert_eq!(pool.reserved(), 0);
+    }
+}
+
+/// A settled parameter with an open window must report the window's finish error before dropping it.
+#[test]
+fn dynamic_parameters_finish_windows_before_dropping_the_subtree() {
+    for histogram in [false, true] {
+        let grid = grid(0, 1_000, 2);
+        let input = evaluated_input(Arc::clone(&grid));
+        let parameter_window = window(raw_input_of(1), Arc::clone(&grid));
+        let parameter = scalar_of(parameter_window);
+        let root = NativeNode {
+            output: input.output.clone(),
+            expr: if histogram {
+                NativeExpr::ParameterizedHistogram {
+                    input: Box::new(input),
+                    op: BoundVectorOp::Histogram(HistogramFunction::Quantile(0.0)),
+                    parameters: vec![parameter],
+                }
+            } else {
+                NativeExpr::ParameterizedTopK {
+                    input: Box::new(input),
+                    op: BoundVectorOp::TopK {
+                        k: 0.0,
+                        top: true,
+                        group: Grouping::By(Arc::from([])),
+                    },
+                    parameter: Box::new(parameter),
+                }
+            },
+        };
+        let tree = NativeTree::try_new(root).unwrap();
+        let pool = pool();
+        let mut execution = executor(&tree, Arc::clone(&pool));
+        let live = execution.state.live.as_mut().unwrap();
+        let parameter = match &mut live.root.op {
+            RuntimeOp::ParameterizedTopK { parameter, .. } => parameter.as_deref_mut().unwrap(),
+            RuntimeOp::ParameterizedHistogram { parameters, .. } => parameters[0].as_mut().unwrap(),
+            _ => panic!("expected dynamic operator"),
+        };
+        let RuntimeOp::ScalarOf {
+            input,
+            produced,
+            state,
+            ..
+        } = &mut parameter.op
+        else {
+            panic!("expected scalar() parameter");
+        };
+        let RuntimeOp::Window { window, .. } = &mut input.op else {
+            panic!("expected parameter window");
+        };
+        // Force a queued scalar and an open evaluator, an otherwise unreachable invariant break,
+        // so the real finish failure cannot be bypassed by ordinary EOF checks.
+        let chunk = raw_chunk(&raw_schema(), &[0], &[1.0], false);
+        drop(window.as_mut().unwrap().push(&chunk).unwrap());
+        let bytes = grid_chunk_bytes(&grid).unwrap();
+        state.buffer.grow(bytes).unwrap();
+        state.queued.push_back((
+            NativeChunk::Evaluated(super::scalar_chunk(Arc::clone(&grid), 1.0).unwrap()),
+            bytes,
+        ));
+        *produced = true;
+        execution.inputs_finished = true;
+        let error = execution.next_chunk().unwrap_err();
+        assert!(
+            error.to_string().contains("ended before the last chunk"),
+            "{error}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("native.window at root.parameter"),
+            "{error}"
+        );
+        assert!(execution.state().live.is_none());
+        assert_eq!(pool.reserved(), 0);
+    }
+}
+
+/// A parameterized `topk` released before it computes gives back everything it holds: the input it
+/// retained, and with it the samples and the label allocations those chunks keep alive.
+///
+/// The node's payload is the whole vector runtime, not the parameter values alone: a release that
+/// cleared only those would hand the pool its bytes back while the retained chunks -- and the
+/// executor a caller keeps alive -- still hold what it released.
+#[test]
+fn a_parameterized_topk_released_before_it_computes_drops_its_retained_input() {
+    let grid = grid(0, 1_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let input = evaluated_input(Arc::clone(&grid));
+    let root = NativeNode {
+        expr: NativeExpr::ParameterizedTopK {
+            input: Box::new(input.clone()),
+            op: BoundVectorOp::TopK {
+                k: 0.0,
+                top: true,
+                group: Grouping::By(Arc::from([])),
+            },
+            parameter: Box::new(eval_time(None, Arc::clone(&grid))),
+        },
+        output: input.output,
+    };
+    let tree = NativeTree::try_new(root).unwrap();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    // The label value is the only thing a test can follow into the retained chunk: it is one
+    // allocation, shared with the series the node holds and freed with it.
+    let job: Arc<str> = Arc::from("a");
+    let metric = SeriesLabels::try_new(
+        Some("m".into()),
+        vec![Label {
+            name: "job".into(),
+            value: Arc::clone(&job),
+        }],
+    )
+    .unwrap();
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, metric, 0, vec![Some(1.0), Some(2.0)], true),
+        )
+        .unwrap();
+    // A pull that finds the input unfinished installs the parameter and retains the chunk without
+    // computing: the kernel only reads a whole input.
+    assert!(execution.next_chunk().unwrap().is_none());
+    assert_eq!(
+        Arc::strong_count(&job),
+        2,
+        "the node did not retain the chunk it was handed"
+    );
+    assert!(
+        pool.reserved() > 0,
+        "the retained chunk was not charged for"
+    );
+    drop(execution);
+    assert_eq!(pool.reserved(), 0, "the reservation was not returned");
+    assert_eq!(
+        Arc::strong_count(&job),
+        1,
+        "the retained chunk outlived the release"
+    );
+}
+
+/// A parameterized histogram function reads each parameter whole before it reads its input, so the
+/// values it reads them into are held beside the input for as long as the node lives: a pool that
+/// admits the parameter series but not the values refuses the query rather than running it over the
+/// budget.
+#[test]
+fn parameterized_histogram_reserves_the_values_of_its_parameters() {
+    // As above: eight bytes a point in the series, sixteen in the values read off it.
+    const POINTS: usize = 1 << 18;
+    let grid = grid(0, 1_000, POINTS as u64);
+    let root = NativeNode {
+        expr: NativeExpr::ParameterizedHistogram {
+            input: Box::new(evaluated_input(Arc::clone(&grid))),
+            op: BoundVectorOp::Histogram(HistogramFunction::Quantile(0.0)),
+            parameters: vec![eval_time(None, Arc::clone(&grid))],
+        },
+        output: evaluated(Arc::clone(&grid)),
+    };
+    let tree = NativeTree::try_new(root).unwrap();
+    for (budget, fits) in [(12 * POINTS, false), (32 * POINTS, true)] {
+        let pool = bounded_pool(budget);
+        let mut execution = executor(&tree, Arc::clone(&pool));
+        execution.end_of_input().unwrap();
+        let result = execution.next_chunk();
+        if fits {
+            assert!(
+                result.unwrap().is_none(),
+                "the parameter values were refused a pool that holds them"
+            );
+        } else {
+            let error = result.unwrap_err();
+            assert!(
+                matches!(error.find_root(), DataFusionError::ResourcesExhausted(_)),
+                "the parameter values were not reserved before they were read: {error}"
+            );
+        }
+        assert_eq!(pool.reserved(), 0);
+    }
+}
+
+/// A parameterized histogram decides every result on the pull that finds its input ended, and hands
+/// them over from its own queue one result a pull: each pull after the first settles on what the
+/// node still holds, the results still queued beside the values it reads its parameters into.
+///
+/// Settling over the state as the kernel left it would drop the queued results' bytes: the handover
+/// that follows would take them from a reservation that no longer holds them, and the query would
+/// fail on results it had already computed.
+#[test]
+fn parameterized_histogram_hands_over_its_results_from_its_own_queue() {
+    let grid = grid(0, 1_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let root = NativeNode {
+        expr: NativeExpr::ParameterizedHistogram {
+            input: Box::new(evaluated_input(Arc::clone(&grid))),
+            op: BoundVectorOp::Histogram(HistogramFunction::Quantile(0.0)),
+            parameters: vec![scalar(0.5, Arc::clone(&grid))],
+        },
+        output: evaluated(Arc::clone(&grid)),
+    };
+    let tree = NativeTree::try_new(root).unwrap();
+    // Two label sets of buckets over two points, so the kernel decides two series and the queue
+    // holds a result the pull after the first has to hand over. The pool is sized for the run as it
+    // is accounted for: 16 KiB, which covers the chunks, their assembly and the kernel's workspace,
+    // is not enough -- what the node holds at its peak is a little over 20 KB.
+    let pool = bounded_pool(64 << 10);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    for host in ["a", "b"] {
+        for (le, counts) in [
+            ("1", vec![Some(1.0), Some(1.0)]),
+            ("2", vec![Some(9.0), Some(9.0)]),
+            ("+Inf", vec![Some(10.0), Some(10.0)]),
+        ] {
+            let metric = SeriesLabels::try_new(
+                Some("m".into()),
+                vec![
+                    Label {
+                        name: "host".into(),
+                        value: host.into(),
+                    },
+                    Label {
+                        name: "le".into(),
+                        value: le.into(),
+                    },
+                ],
+            )
+            .unwrap();
+            execution
+                .push_evaluated(
+                    InputId::new(0),
+                    evaluated_chunk_of(&schema, metric, 0, counts, true),
+                )
+                .unwrap();
+        }
+    }
+    execution.end_of_input().unwrap();
+    let mut chunks = Vec::new();
+    while let Some(chunk) = execution.next_chunk().unwrap() {
+        // The parameter is one `Option<f64>` per grid point and it stays charged on every pull,
+        // over whatever the queue still holds: a pull that dropped it gave back what it reads.
+        assert!(
+            execution.state.reserved_bytes() >= 2 * std::mem::size_of::<Option<f64>>(),
+            "a pull gave the parameter values back while the node still reads them"
+        );
+        chunks.push(chunk);
+    }
+    assert_eq!(
+        decided_by_label_set(&chunks),
+        vec![
+            ("host=a".to_string(), vec![(0, Some(1.5)), (1, Some(1.5))]),
+            ("host=b".to_string(), vec![(0, Some(1.5)), (1, Some(1.5))]),
+        ]
+    );
+    // The terminal pull dropped the queue and parameter values with the live tree.
+    assert_eq!(pool.reserved(), 0);
+}
+
+#[test]
+fn parameterized_histogram_rejects_duplicate_labelsets() {
+    let grid = grid(0, 1_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let input = evaluated_input(Arc::clone(&grid));
+    let root = NativeNode {
+        expr: NativeExpr::ParameterizedHistogram {
+            input: Box::new(input),
+            op: BoundVectorOp::Histogram(HistogramFunction::Quantile(0.5)),
+            parameters: vec![scalar(0.5, Arc::clone(&grid))],
+        },
+        output: evaluated(Arc::clone(&grid)),
+    };
+    let tree = NativeTree::try_new(root).unwrap();
+    let mut execution = executor(&tree, pool());
+    for host in [None, Some("")] {
+        let mut labels = vec![Label {
+            name: "le".into(),
+            value: "2".into(),
+        }];
+        if let Some(host) = host {
+            labels.push(Label {
+                name: "host".into(),
+                value: host.into(),
+            });
+        }
+        let metric = SeriesLabels::try_new(Some("m".into()), labels).unwrap();
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(&schema, metric, 0, vec![Some(1.0), Some(2.0)], true),
+            )
+            .unwrap();
+    }
+    execution.end_of_input().unwrap();
+    let error = execution.next_chunk().unwrap_err();
+    assert!(error.to_string().contains("same labelset"), "{error}");
+}
+
+#[test]
+fn parameterized_histogram_quantile_uses_each_grid_point_parameter() {
+    let grid = grid(0, 1_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let input = evaluated_input(Arc::clone(&grid));
+    let root = NativeNode {
+        expr: NativeExpr::ParameterizedHistogram {
+            input: Box::new(input),
+            op: BoundVectorOp::Histogram(HistogramFunction::Quantile(0.0)),
+            parameters: vec![scalar_binary(
+                scalar_binary(
+                    eval_time(None, Arc::clone(&grid)),
+                    scalar(0.4, Arc::clone(&grid)),
+                    binary_matching(BinaryOp::Mul),
+                ),
+                scalar(0.5, Arc::clone(&grid)),
+                binary_matching(BinaryOp::Add),
+            )],
+        },
+        output: evaluated(Arc::clone(&grid)),
+    };
+    let tree = NativeTree::try_new(root).unwrap();
+    let mut execution = executor(&tree, pool());
+    for (le, counts) in [
+        ("1", vec![Some(1.0), Some(1.0)]),
+        ("2", vec![Some(9.0), Some(9.0)]),
+        ("+Inf", vec![Some(10.0), Some(10.0)]),
+    ] {
+        let metric = SeriesLabels::try_new(
+            Some("m".into()),
+            vec![Label {
+                name: "le".into(),
+                value: le.into(),
+            }],
+        )
+        .unwrap();
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(&schema, metric, 0, counts, true),
+            )
+            .unwrap();
+    }
+    let chunks = run(&mut execution);
+    // The buckets are `le=1 → 1`, `le=2 → 9` and `+Inf → 10`, so the population is 10 and each
+    // answer is a value, not the phi that produced it:
+    //   phi = 0.5: rank 5 lies above the `le=1` bucket and interpolates inside `(1, 2]`:
+    //     1 + (5 - 1) / (9 - 1) * (2 - 1) = 1.5
+    //   phi = 0.9: rank 9 is the top of the `le=2` bucket: 1 + (9 - 1) / 8 = 2.0
+    assert_eq!(decided(&chunks), vec![(0, Some(1.5)), (1, Some(2.0))]);
+}
+
+/// A literal argument of a parameterized histogram call is materialized from its bound value: a
+/// constant node produces no chunk, so a consumer that pulls it finds nothing to read.
+///
+/// `histogram_fraction(0, <dynamic>, m)` is the statement that reported `histogram parameter
+/// produced no scalar` before the constant was read off its binding. The same statement with the
+/// literal `0` written as an expression that evaluates to zero answers the same rows, so this
+/// compares the two rather than a hand-computed fraction: the literal is honoured, not skipped.
+#[test]
+fn parameterized_histogram_reads_its_literal_parameter_without_a_chunk() {
+    let grid = grid(0, 1_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let fraction = |lower: NativeNode| NativeNode {
+        expr: NativeExpr::ParameterizedHistogram {
+            input: Box::new(evaluated_input(Arc::clone(&grid))),
+            op: BoundVectorOp::Histogram(HistogramFunction::Fraction {
+                lower: 0.0,
+                upper: 0.0,
+            }),
+            parameters: vec![
+                lower,
+                scalar_binary(
+                    eval_time(None, Arc::clone(&grid)),
+                    scalar(1.0 / 150.0, Arc::clone(&grid)),
+                    binary_matching(BinaryOp::Mul),
+                ),
+            ],
+        },
+        output: evaluated(Arc::clone(&grid)),
+    };
+    // Zero written as data rather than as a literal, so it hands a chunk over.
+    let zero_from_time = scalar_binary(
+        eval_time(None, Arc::clone(&grid)),
+        scalar(0.0, Arc::clone(&grid)),
+        binary_matching(BinaryOp::Mul),
+    );
+    let run_fraction = |root: NativeNode| {
+        let tree = NativeTree::try_new(root).unwrap();
+        let mut execution = executor(&tree, pool());
+        for (le, counts) in [
+            ("1", vec![Some(1.0), Some(1.0)]),
+            ("2", vec![Some(3.0), Some(3.0)]),
+            ("+Inf", vec![Some(4.0), Some(4.0)]),
+        ] {
+            let metric = SeriesLabels::try_new(
+                Some("m".into()),
+                vec![Label {
+                    name: "le".into(),
+                    value: le.into(),
+                }],
+            )
+            .unwrap();
+            execution
+                .push_evaluated(
+                    InputId::new(0),
+                    evaluated_chunk_of(&schema, metric, 0, counts, true),
+                )
+                .unwrap();
+        }
+        decided(&run(&mut execution))
+    };
+    let literal = run_fraction(fraction(scalar(0.0, Arc::clone(&grid))));
+    let dynamic = run_fraction(fraction(zero_from_time));
+    assert_eq!(literal.len(), 2, "one row per grid point: {literal:?}");
+    assert_eq!(
+        literal, dynamic,
+        "a literal parameter reads as its binding does"
+    );
+}
+
+/// The same buckets with a constant `phi` answer the same value at every point, so the two values
+/// the parameterized run above reports are the parameter read per point rather than once.
+#[test]
+fn constant_histogram_quantile_answers_every_point_with_its_one_phi() {
+    let grid = grid(0, 1_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(vector_op(
+        evaluated_input(Arc::clone(&grid)),
+        BoundVectorOp::Histogram(HistogramFunction::Quantile(0.5)),
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool());
+    for (le, counts) in [
+        ("1", vec![Some(1.0), Some(1.0)]),
+        ("2", vec![Some(9.0), Some(9.0)]),
+        ("+Inf", vec![Some(10.0), Some(10.0)]),
+    ] {
+        let metric = SeriesLabels::try_new(
+            Some("m".into()),
+            vec![Label {
+                name: "le".into(),
+                value: le.into(),
+            }],
+        )
+        .unwrap();
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(&schema, metric, 0, counts, true),
+            )
+            .unwrap();
+    }
+    let chunks = run(&mut execution);
+    assert_eq!(decided(&chunks), vec![(0, Some(1.5)), (1, Some(1.5))]);
+}
+
+#[test]
+fn parameterized_topk_rejects_nan_and_overflow_parameters() {
+    for (grid, parameter) in [
+        {
+            let grid = grid(0, 1_000, 1);
+            let time = eval_time(None, Arc::clone(&grid));
+            let zero = scalar_binary(time.clone(), time, binary_matching(BinaryOp::Sub));
+            let nan = scalar_binary(zero.clone(), zero, binary_matching(BinaryOp::Div));
+            (grid, nan)
+        },
+        {
+            let grid = grid(1_000, 1_000, 1);
+            let huge = scalar_binary(
+                eval_time(None, Arc::clone(&grid)),
+                scalar(1e30, Arc::clone(&grid)),
+                binary_matching(BinaryOp::Mul),
+            );
+            (grid, huge)
+        },
+    ] {
+        let schema = evaluated_schema(Arc::clone(&grid));
+        let input = evaluated_input(Arc::clone(&grid));
+        let root = NativeNode {
+            expr: NativeExpr::ParameterizedTopK {
+                input: Box::new(input.clone()),
+                op: BoundVectorOp::TopK {
+                    k: 0.0,
+                    top: true,
+                    group: Grouping::By(Arc::from([])),
+                },
+                parameter: Box::new(parameter),
+            },
+            output: input.output,
+        };
+        let tree = NativeTree::try_new(root).unwrap();
+        let mut execution = executor(&tree, pool());
+        for index in 0..5 {
+            execution
+                .push_evaluated(
+                    InputId::new(0),
+                    evaluated_chunk_of(
+                        &schema,
+                        named_metric("m", &index.to_string()),
+                        0,
+                        vec![Some(index as f64)],
+                        true,
+                    ),
+                )
+                .unwrap();
+        }
+        execution.end_of_input().unwrap();
+        let error = execution.next_chunk().unwrap_err();
+        assert!(
+            error.to_string().contains("NaN") || error.to_string().contains("overflows int64"),
+            "{error}"
+        );
+    }
+}
+
+/// The full parameter grid is validated before selecting any point, including a negative k whose
+/// underflow would otherwise be hidden by a later valid value.
+#[test]
+fn parameterized_topk_validates_parameters_even_when_input_is_empty() {
+    for (grid, parameter, error) in [
+        {
+            let grid = grid(0, 1_000, 1);
+            let time = eval_time(None, Arc::clone(&grid));
+            let zero = scalar_binary(time.clone(), time, binary_matching(BinaryOp::Sub));
+            let nan = scalar_binary(zero.clone(), zero, binary_matching(BinaryOp::Div));
+            (grid, nan, true)
+        },
+        {
+            let grid = grid(0, 1_000, 1);
+            let huge = scalar_binary(
+                eval_time(None, Arc::clone(&grid)),
+                scalar(1e30, Arc::clone(&grid)),
+                binary_matching(BinaryOp::Add),
+            );
+            (grid, huge, true)
+        },
+        {
+            let grid = grid(0, 1_000, 1);
+            let zero = scalar_binary(
+                eval_time(None, Arc::clone(&grid)),
+                eval_time(None, Arc::clone(&grid)),
+                binary_matching(BinaryOp::Sub),
+            );
+            (grid, zero, false)
+        },
+    ] {
+        let input = evaluated_input(Arc::clone(&grid));
+        let root = NativeNode {
+            expr: NativeExpr::ParameterizedTopK {
+                input: Box::new(input.clone()),
+                op: BoundVectorOp::TopK {
+                    k: 0.0,
+                    top: true,
+                    group: Grouping::By(Arc::from([])),
+                },
+                parameter: Box::new(parameter),
+            },
+            output: input.output,
+        };
+        let tree = NativeTree::try_new(root).unwrap();
+        let mut execution = executor(&tree, pool());
+        execution.end_of_input().unwrap();
+        let result = execution.next_chunk();
+        if error {
+            let err = result.unwrap_err();
+            assert!(
+                err.to_string().contains("NaN") || err.to_string().contains("overflows int64"),
+                "{err}"
+            );
+        } else {
+            assert!(result.unwrap().is_none());
+        }
+    }
+}
+
+#[test]
+fn parameterized_topk_rejects_underflow_across_grid() {
+    let grid = grid(1_000, 1_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let input = evaluated_input(Arc::clone(&grid));
+    let parameter = scalar_binary(
+        scalar_binary(
+            scalar_binary(
+                eval_time(None, Arc::clone(&grid)),
+                scalar(1e19, Arc::clone(&grid)),
+                binary_matching(BinaryOp::Mul),
+            ),
+            scalar(-2e19, Arc::clone(&grid)),
+            binary_matching(BinaryOp::Add),
+        ),
+        scalar(2.0, Arc::clone(&grid)),
+        binary_matching(BinaryOp::Add),
+    );
+    let root = NativeNode {
+        expr: NativeExpr::ParameterizedTopK {
+            input: Box::new(input.clone()),
+            op: BoundVectorOp::TopK {
+                k: 0.0,
+                top: true,
+                group: Grouping::By(Arc::from([])),
+            },
+            parameter: Box::new(parameter),
+        },
+        output: input.output,
+    };
+    let tree = NativeTree::try_new(root).unwrap();
+    let mut execution = executor(&tree, pool());
+    let metric = named_metric("x", "a");
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, metric, 0, vec![Some(2.0), Some(2.0)], true),
+        )
+        .unwrap();
+    let error = execution.next_chunk().unwrap_err();
+    assert!(error.to_string().contains("underflows int64"), "{error}");
+}
+
+#[test]
+fn scalar_of_reads_one_series_value_at_each_point() {
+    let grid = grid(0, 1_000, 3);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(scalar_of(evaluated_input(Arc::clone(&grid)))).unwrap();
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("a", "a"),
+                0,
+                vec![Some(1.0), Some(2.0), Some(3.0)],
+                true,
+            ),
+        )
+        .unwrap();
+    assert_eq!(
+        decided(&run(&mut execution)),
+        vec![(0, Some(1.0)), (1, Some(2.0)), (2, Some(3.0))]
+    );
+}
+
+#[test]
+fn scalar_of_ignores_histogram_when_one_float_is_present() {
+    let grid = grid(0, 1_000, 1);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(scalar_of(evaluated_input(Arc::clone(&grid)))).unwrap();
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("float", "float"),
+                0,
+                vec![Some(7.0)],
+                true,
+            ),
+        )
+        .unwrap();
+    let mut builder = HistogramBatchBuilder::new();
+    let index = push_histogram(&mut builder, 2);
+    let table = Arc::new(builder.finish().unwrap());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_histogram_chunk_of(
+                &schema,
+                named_metric("histogram", "histogram"),
+                0,
+                vec![Some(index)],
+                &table,
+                true,
+            ),
+        )
+        .unwrap();
+    assert_eq!(decided(&run(&mut execution)), vec![(0, Some(7.0))]);
+}
+
+#[test]
+fn scalar_of_answers_nan_for_a_histogram_alone() {
+    let grid = grid(0, 1_000, 1);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(scalar_of(evaluated_input(Arc::clone(&grid)))).unwrap();
+    let mut execution = executor(&tree, pool());
+    let mut builder = HistogramBatchBuilder::new();
+    let index = push_histogram(&mut builder, 2);
+    let table = Arc::new(builder.finish().unwrap());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_histogram_chunk_of(
+                &schema,
+                named_metric("histogram", "histogram"),
+                0,
+                vec![Some(index)],
+                &table,
+                true,
+            ),
+        )
+        .unwrap();
+    // A histogram sample holds no float value, so the point answers NaN rather than an error: the
+    // kernel ignores it, as Prometheus' `funcScalar` does.
+    let values = decided(&run(&mut execution));
+    assert_eq!(
+        values.len(),
+        1,
+        "one answer for the one grid point: {values:?}"
+    );
+    assert_eq!(values[0].0, 0);
+    assert!(
+        values[0].1.is_some_and(f64::is_nan),
+        "a histogram alone is no element of the vector: {values:?}"
+    );
+}
+
+#[test]
+fn scalar_of_reads_one_value_per_point_from_the_whole_vector() {
+    let grid = grid(0, 1_000, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let input = evaluated_input(Arc::clone(&grid));
+    let tree = NativeTree::try_new(scalar_of(input)).unwrap();
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("a", "a"),
+                0,
+                vec![Some(1.0), Some(2.0), None, Some(4.0)],
+                true,
+            ),
+        )
+        .unwrap();
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("b", "b"),
+                0,
+                vec![None, Some(3.0), None, None],
+                true,
+            ),
+        )
+        .unwrap();
+    let chunks = run(&mut execution);
+    let values = decided(&chunks);
+    assert_eq!(values[0], (0, Some(1.0)));
+    assert_eq!(values[3], (3, Some(4.0)));
+    assert!(values[1].1.is_some_and(f64::is_nan));
+    assert!(values[2].1.is_some_and(f64::is_nan));
+}
+
+#[test]
+fn scalar_of_reads_the_only_present_series_at_each_point() {
+    let grid = grid(0, 1_000, 3);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(scalar_of(evaluated_input(Arc::clone(&grid)))).unwrap();
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("a", "a"),
+                0,
+                vec![Some(1.0), None, None],
+                true,
+            ),
+        )
+        .unwrap();
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("b", "b"),
+                0,
+                vec![None, Some(2.0), None],
+                true,
+            ),
+        )
+        .unwrap();
+    let values = decided(&run(&mut execution));
+    assert_eq!(values[0], (0, Some(1.0)));
+    assert_eq!(values[1], (1, Some(2.0)));
+    assert!(values[2].1.is_some_and(f64::is_nan));
+}
+
+#[test]
+fn scalar_of_evaluates_above_a_window() {
+    let grid = grid(0, 1_000, 2);
+    let input = instant(input(), 5_000, 0, Arc::clone(&grid));
+    let window = window_with(
+        input,
+        RangeFunction::SumOverTime,
+        2_000,
+        Some(Arc::clone(&grid)),
+        Arc::clone(&grid),
+    );
+    let tree = NativeTree::try_new(scalar_of(window)).unwrap();
+    let schema = raw_schema();
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_raw(
+            InputId::new(0),
+            raw_chunk(&schema, &[-1_000, 0, 1_000], &[1.0, 2.0, 3.0], true),
+        )
+        .unwrap();
+    assert_eq!(
+        decided(&run(&mut execution)),
+        vec![(0, Some(2.0)), (1, Some(5.0))]
+    );
+}
+
+/// What `scalar()` holds once it has retained `chunk`, and what assembling it, the chunk it answers
+/// with and the counts it decides the answer by add on top.
+fn scalar_of_charge(
+    schema: &Arc<SeriesSchema>,
+    chunk: &EvaluatedChunk,
+) -> (usize, usize, usize, usize) {
+    let mut state = NodeState::new(
+        "native.scalar at root",
+        Arc::new(NodeMetrics::default()),
+        &pool(),
+    );
+    let mut retained = RetainedInput::default();
+    state.buffer.grow(retained.pending(chunk)).unwrap();
+    retained.retain(chunk.clone(), Reader::Vector).unwrap();
+    state.buffer.resize(retained.held).unwrap();
+    let held = state.buffer.reservation.size();
+    let grid = schema.eval_grid.clone().unwrap();
+    let assembly = retained.assembly_bytes(schema).unwrap();
+    let answer = grid_chunk_bytes(&grid).unwrap();
+    let counts = grid.spec().len as usize;
+    (held, assembly, answer, counts)
+}
+
+/// `scalar()` reads the assembled input while the counts it decides the answer by are live, so both
+/// are held beside the assembly: a pool that admits the assembly and the answer but not the counts
+/// refuses the query instead of letting it run over the budget.
+#[test]
+fn scalar_of_reserves_its_counts_while_it_reads_the_assembly() {
+    let points = 10_000usize;
+    let grid = grid(0, 60_000, points as u64);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let chunk = evaluated_chunk(&schema, 0, vec![1.0; points], true);
+    let (retained, assembly, answer, counts) = scalar_of_charge(&schema, &chunk);
+    let tree = NativeTree::try_new(scalar_of(evaluated_input(Arc::clone(&grid)))).unwrap();
+    for (budget, fits) in [
+        // One byte short of the assembly and the answer without the counts: refused only if the
+        // counts are reserved beside them.
+        (retained + assembly + answer + counts - 1, false),
+        // Room for the answer and the counts, but not for the assembly still read beside them:
+        // refused only if the assembly is held while it is consumed.
+        (retained + answer + counts + 1, false),
+        // Exactly what the node holds once it has retained its input, assembled it and built the
+        // answer and the counts.
+        (retained + assembly + answer + counts, true),
+    ] {
+        let pool = bounded_pool(budget);
+        let mut execution = executor(&tree, Arc::clone(&pool));
+        let input = execution.state().input_ids(0).next().unwrap();
+        execution.push_evaluated(input, chunk.clone()).unwrap();
+        let result = execution.finish();
+        if fits {
+            let chunks = result.expect("the assembly, the answer and the counts fit the pool");
+            assert_eq!(chunks.len(), 1, "one unlabelled answer");
+            assert_eq!(chunks[0].series.time.len(), points);
+            assert_eq!(sample_values(&chunks[0]), vec![Some(1.0); points]);
+        } else {
+            let error = result.unwrap_err();
+            assert!(
+                matches!(error.find_root(), DataFusionError::ResourcesExhausted(_)),
+                "the counts were not reserved while the assembly was read: {error}"
+            );
+        }
+        assert_eq!(pool.reserved(), 0);
+    }
+}
+
+/// `scalar()` reports what it holds while it retains its input, not that memory twice.
+///
+/// The retention path sets the node's reservation to what it retains, so the figure it reports is a
+/// reading of that one reservation: adding the retained bytes to it again would report more than the
+/// pool granted, and a caller watching the pool would read a node holding more than it holds.
+#[test]
+fn scalar_of_reports_what_it_holds_while_its_input_is_retained() {
+    let grid = grid(0, 1_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(scalar_of(evaluated_input(Arc::clone(&grid)))).unwrap();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("m", "a"),
+                0,
+                vec![Some(1.0), Some(2.0)],
+                false,
+            ),
+        )
+        .unwrap();
+    // The input is unfinished, so the pull retains the chunk, answers nothing and holds it from
+    // here on.
+    assert!(execution.next_chunk().unwrap().is_none());
+    let held = execution.state().reserved_bytes();
+    assert!(held > 0, "the retained chunk was not charged for");
+    assert_eq!(
+        held,
+        pool.reserved(),
+        "the reported reservation is not what the node holds"
+    );
+    drop(execution);
+    assert_eq!(pool.reserved(), 0, "the reservation was not returned");
+}
+
+/// `limitk` takes series in the order its input hands them over, not in label order, and the two
+/// series a map folds into `{job="z"}` are one series placed where it first arrived: it is kept at
+/// both points although `{job="y"}` sorts first and arrived before the piece that fills point 0.
+#[test]
+fn limitk_takes_series_in_input_order() {
+    let grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(vector_op(
+        map(evaluated_input(Arc::clone(&grid)), vec![MathOp::Abs]),
+        BoundVectorOp::LimitK {
+            k: 1.0,
+            group: Grouping::By(Arc::from([])),
+        },
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool());
+    for chunk in [
+        evaluated_chunk_of(&schema, named_metric("a", "z"), 1, vec![Some(1.0)], true),
+        evaluated_chunk_of(
+            &schema,
+            named_metric("b", "y"),
+            0,
+            vec![Some(2.0), Some(2.0)],
+            true,
+        ),
+        evaluated_chunk_of(&schema, named_metric("c", "z"), 0, vec![Some(3.0)], true),
+    ] {
+        execution.push_evaluated(InputId::new(0), chunk).unwrap();
+    }
+    let chunks = run(&mut execution);
+    assert_eq!(
+        decided_by_job(&chunks),
+        vec![("z".to_string(), vec![(0, Some(3.0)), (1, Some(1.0))])]
+    );
+}
+
+/// A binary node above a vector node reads what `topk` kept, once the vector node has read its
+/// whole input: `topk` keeps `{job="b"}` at point 0 and `{job="a"}` at point 1, so only point 1
+/// matches the right side's `{job="a"}`.
+#[test]
+fn a_binary_node_reads_what_a_vector_node_kept() {
+    let grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(binary_of(
+        vector_op(
+            evaluated_input(Arc::clone(&grid)),
+            BoundVectorOp::TopK {
+                k: 1.0,
+                top: true,
+                group: Grouping::By(Arc::from([])),
+            },
+        ),
+        evaluated_input(Arc::clone(&grid)),
+        binary_matching(BinaryOp::Add),
+    ))
+    .unwrap();
+    let (left, right) = (InputId::new(0), InputId::new(1));
+    let mut execution = executor(&tree, pool());
+    for (input, chunk) in [
+        (
+            left,
+            evaluated_chunk_of(
+                &schema,
+                named_metric("m", "a"),
+                0,
+                vec![Some(1.0), Some(5.0)],
+                true,
+            ),
+        ),
+        (
+            right,
+            evaluated_chunk_of(
+                &schema,
+                named_metric("m", "a"),
+                0,
+                vec![Some(10.0), Some(10.0)],
+                true,
+            ),
+        ),
+        (
+            left,
+            evaluated_chunk_of(
+                &schema,
+                named_metric("m", "b"),
+                0,
+                vec![Some(3.0), Some(4.0)],
+                true,
+            ),
+        ),
+    ] {
+        execution.push_evaluated(input, chunk).unwrap();
+    }
+    assert_eq!(decided(&run(&mut execution)), vec![(1, Some(15.0))]);
+}
+
+/// `absent` answers where its input holds nothing, under the labels it was bound to, and answers
+/// at every point when no series arrives at all.
+#[test]
+fn absent_answers_where_the_input_holds_nothing() {
+    let grid = grid(0, 60_000, 3);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    // What `absent_labels` derives from `up{job="x"}`: the name is not one of them.
+    let labels = SeriesLabels::try_new(
+        None,
+        vec![Label {
+            name: "job".into(),
+            value: "x".into(),
+        }],
+    )
+    .unwrap();
+    let tree = NativeTree::try_new(vector_op(
+        evaluated_input(Arc::clone(&grid)),
+        BoundVectorOp::Absent {
+            labels: labels.clone(),
+        },
+    ))
+    .unwrap();
+
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, named_metric("up", "y"), 1, vec![Some(0.0)], true),
+        )
+        .unwrap();
+    let chunks = run(&mut execution);
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0].series.metric, labels);
+    assert_eq!(decided(&chunks), vec![(0, Some(1.0)), (2, Some(1.0))]);
+
+    let mut execution = executor(&tree, pool());
+    assert_eq!(
+        decided(&run(&mut execution)),
+        vec![(0, Some(1.0)), (1, Some(1.0)), (2, Some(1.0))]
+    );
+}
+
+/// A sort orders the series of an instant result, and the node hands them over in that order.
+#[test]
+fn sort_desc_hands_over_series_in_value_order() {
+    let grid = grid(0, 60_000, 1);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(vector_op(
+        evaluated_input(Arc::clone(&grid)),
+        BoundVectorOp::Sort(SortOrder::Desc),
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool());
+    for (job, value) in [("b", 1.0), ("a", 3.0), ("c", 2.0)] {
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(&schema, named_metric("m", job), 0, vec![Some(value)], true),
+            )
+            .unwrap();
+    }
+    let jobs: Vec<String> = run(&mut execution)
+        .iter()
+        .map(|chunk| chunk.series.metric.get("job").unwrap().to_string())
+        .collect();
+    assert_eq!(jobs, ["a", "c", "b"]);
+}
+
+/// A sort hands back the assembled input, whose field is one slice per input chunk of one shared
+/// buffer: it is queued at what the slices hold, as the input was retained, not at the buffer once
+/// per chunk, which here would be ten times the input and more than the pool.
+#[test]
+fn a_sorted_series_is_queued_at_what_its_slices_hold() {
+    let points = 1_000;
+    let grid = grid(0, 60_000, points);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(vector_op(
+        evaluated_input(Arc::clone(&grid)),
+        BoundVectorOp::Sort(SortOrder::ByLabel(vec!["job".into()])),
+    ))
+    .unwrap();
+    let pool = bounded_pool(48 * 1024);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    let values = Float64Array::from((0..points).map(|v| v as f64).collect::<Vec<_>>());
+    for start in (0..points as usize).step_by(100) {
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_array_chunk_of(
+                    &schema,
+                    named_metric("m", "a"),
+                    start,
+                    values.slice(start, 100),
+                    start + 100 == points as usize,
+                ),
+            )
+            .unwrap();
+        // The vector node retains each chunk as it arrives, at what its slice holds.
+        assert!(execution.next_chunk().unwrap().is_none());
+    }
+    let chunks = run(&mut execution);
+    assert_eq!(decided(&chunks).len(), points as usize);
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// Two sorted results share one histogram table, so the table stays charged until the second one
+/// leaves, not only until the first one does.
+#[test]
+fn a_table_shared_by_queued_results_stays_charged_until_the_last_leaves() {
+    let grid = grid(0, 60_000, 1);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(vector_op(
+        evaluated_input(Arc::clone(&grid)),
+        BoundVectorOp::Sort(SortOrder::ByLabel(vec!["job".into()])),
+    ))
+    .unwrap();
+    let table = histogram_table(2, 64);
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    for (job, index) in [("a", 0), ("b", 1)] {
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_histogram_chunk_of(
+                    &schema,
+                    named_metric("m", job),
+                    0,
+                    vec![Some(index)],
+                    &table,
+                    true,
+                ),
+            )
+            .unwrap();
+    }
+    execution.end_of_input().unwrap();
+    let first = execution.next_chunk().unwrap().expect("two sorted results");
+    assert_eq!(first.series.metric.get("job"), Some("a"));
+    drop(first);
+    assert!(pool.reserved() >= histogram_table_bytes(&table));
+    let second = execution.next_chunk().unwrap().expect("two sorted results");
+    assert_eq!(second.series.metric.get("job"), Some("b"));
+    assert!(execution.next_chunk().unwrap().is_none());
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// `limitk` takes the order a sort below it decided: `sort_desc` puts `{job="z"}` first, so it is
+/// the one `limitk(1, ...)` keeps, although `{job="a"}` sorts first by label.
+#[test]
+fn limitk_keeps_the_order_a_sort_below_it_decided() {
+    let grid = grid(0, 60_000, 1);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(vector_op(
+        vector_op(
+            evaluated_input(Arc::clone(&grid)),
+            BoundVectorOp::Sort(SortOrder::Desc),
+        ),
+        BoundVectorOp::LimitK {
+            k: 1.0,
+            group: Grouping::By(Arc::from([])),
+        },
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool());
+    for (job, value) in [("a", 1.0), ("z", 2.0)] {
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(&schema, named_metric("v", job), 0, vec![Some(value)], true),
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        decided_by_job(&run(&mut execution)),
+        vec![("z".to_string(), vec![(0, Some(2.0))])]
+    );
+}
+
+/// `histogram_quantile` reads a classic histogram from the bucket series that share its labels,
+/// however they arrived, and answers under those labels without `le` and the name.
+#[test]
+fn histogram_quantile_reads_the_buckets_of_the_whole_vector() {
+    let grid = grid(0, 60_000, 1);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(vector_op(
+        evaluated_input(Arc::clone(&grid)),
+        BoundVectorOp::Histogram(HistogramFunction::Quantile(0.5)),
+    ))
+    .unwrap();
+    let bucket = |le: &str| {
+        SeriesLabels::try_new(
+            Some("m".into()),
+            vec![
+                Label {
+                    name: "job".into(),
+                    value: "a".into(),
+                },
+                Label {
+                    name: "le".into(),
+                    value: le.into(),
+                },
+            ],
+        )
+        .unwrap()
+    };
+    let mut execution = executor(&tree, pool());
+    for (le, count) in [("+Inf", 2.0), ("1", 1.0)] {
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(&schema, bucket(le), 0, vec![Some(count)], true),
+            )
+            .unwrap();
+    }
+    let chunks = run(&mut execution);
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0].series.metric.name(), None);
+    assert_eq!(chunks[0].series.metric.get("le"), None);
+    assert_eq!(chunks[0].series.metric.get("job"), Some("a"));
+    assert_eq!(decided(&chunks), vec![(0, Some(1.0))]);
+}
+
+/// An empty tag and an absent one are one label set, so the two native histogram series below are
+/// one series to `histogram_quantile`, answered at both of their points rather than one of them
+/// dropped.
+#[test]
+fn histogram_quantile_reads_the_pieces_of_one_label_set_as_one_series() {
+    let grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(vector_op(
+        evaluated_input(Arc::clone(&grid)),
+        BoundVectorOp::Histogram(HistogramFunction::Quantile(0.5)),
+    ))
+    .unwrap();
+    let metric = |tags: &[(&str, &str)]| {
+        SeriesLabels::try_new(
+            Some("m".into()),
+            tags.iter()
+                .map(|(name, value)| Label {
+                    name: (*name).into(),
+                    value: (*value).into(),
+                })
+                .collect(),
+        )
+        .unwrap()
+    };
+    let table = histogram_table(2, 4);
+    let mut execution = executor(&tree, pool());
+    for (start, tags, index) in [
+        (0, vec![("job", "a"), ("zone", "")], 0),
+        (1, vec![("job", "a")], 1),
+    ] {
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_histogram_chunk_of(
+                    &schema,
+                    metric(&tags),
+                    start,
+                    vec![Some(index)],
+                    &table,
+                    true,
+                ),
+            )
+            .unwrap();
+    }
+    let chunks = run(&mut execution);
+    let positions: Vec<usize> = decided(&chunks)
+        .into_iter()
+        .filter_map(|(position, value)| value.map(|_| position))
+        .collect();
+    assert_eq!(positions, [0, 1]);
+}
+
+/// `count_values` counts the samples that share a value across the whole vector at a point, under
+/// a label set per value; `a` arrives in two chunks and counts at both points.
+#[test]
+fn count_values_counts_the_samples_sharing_a_value() {
+    let grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(vector_op(
+        evaluated_input(Arc::clone(&grid)),
+        BoundVectorOp::CountValues {
+            label: "v".into(),
+            group: Grouping::By(Arc::from([])),
+        },
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool());
+    for (job, start, value, is_last) in [
+        ("a", 0, 1.0, false),
+        ("a", 1, 1.0, true),
+        ("b", 0, 2.0, true),
+        ("c", 0, 1.0, true),
+    ] {
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(
+                    &schema,
+                    named_metric("m", job),
+                    start,
+                    vec![Some(value)],
+                    is_last,
+                ),
+            )
+            .unwrap();
+    }
+    let mut counts: Vec<(String, Decided)> = run(&mut execution)
+        .iter()
+        .map(|chunk| {
+            (
+                chunk.series.metric.get("v").unwrap().to_string(),
+                decided(std::slice::from_ref(chunk)),
+            )
+        })
+        .collect();
+    counts.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        counts,
+        [
+            ("1".to_string(), vec![(0, Some(2.0)), (1, Some(1.0))]),
+            ("2".to_string(), vec![(0, Some(1.0))]),
+        ]
+    );
+}
+
+/// Every field's distinct values make `count_values` groups of their own, so its estimate grows
+/// with the field count, not only with the rows: a row of four fields reserves at least four
+/// times what a row of one field does.
+#[test]
+fn count_values_reserves_a_group_per_field_sample() {
+    let grid = grid(0, 60_000, 1);
+    let op = BoundVectorOp::CountValues {
+        label: "v".into(),
+        group: Grouping::By(Arc::from([])),
+    };
+    let estimate = |fields: usize| {
+        let schema = SeriesSchema {
+            fields: field_count(fields),
+            eval_grid: Some(Arc::clone(&grid)),
+        };
+        let samples = (0..fields)
+            .map(|field| Samples::from_float(Float64Array::from(vec![field as f64])))
+            .collect();
+        let series = Series::try_new(
+            &schema,
+            named_metric("m", "a"),
+            TimeAxis::Grid(GridRange::try_new(Arc::clone(&grid), 0, 1).unwrap()),
+            SeriesFields::try_from_vec(samples).unwrap(),
+        )
+        .unwrap();
+        vector_workspace_bytes(&op, &schema, &[series])
+    };
+    assert!(estimate(4) >= 4 * estimate(1));
+}
+
+/// `label_replace` runs in a map: each series is relabelled as it passes, and two series it gives
+/// one label set collide where both hold a value, as Prometheus' same-labelset check refuses.
+#[test]
+fn a_label_rewrite_relabels_series_and_refuses_a_shared_point() {
+    let grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let rewrite = LabelRewrite::replace("job", "all", "job", ".*").unwrap();
+    let tree = NativeTree::try_new(map_ops(
+        evaluated_input(Arc::clone(&grid)),
+        vec![MapOp::Label(Arc::new(rewrite))],
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("a", "x"),
+                0,
+                vec![Some(1.0), Some(2.0)],
+                true,
+            ),
+        )
+        .unwrap();
+    let first = execution
+        .next_chunk()
+        .unwrap()
+        .expect("the relabelled series");
+    assert_eq!(first.series.metric, named_metric("a", "all"));
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, named_metric("a", "y"), 1, vec![Some(3.0)], true),
+        )
+        .unwrap();
+    let error = execution.next_chunk().unwrap_err().to_string();
+    assert!(
+        error.contains("vector cannot contain metrics with the same labelset")
+            && error.contains("two series hold a value of field 0 at position 1"),
+        "{error}"
+    );
+}
+
+/// A chunk that math empties still closes its series, under the labels the whole chain would have
+/// given it: the label changes after the emptying step apply, and math drops the name.
+#[test]
+fn an_emptied_closing_chunk_carries_the_labels_of_the_whole_chain() {
+    let grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let replace = LabelRewrite::replace("job", "y", "job", "x").unwrap();
+    let join = LabelRewrite::join("both", "-", &["__name__", "job"]).unwrap();
+    let tree = NativeTree::try_new(map_ops(
+        evaluated_input(Arc::clone(&grid)),
+        vec![
+            MapOp::Label(Arc::new(replace)),
+            MapOp::Math(MathOp::Clamp { min: 2.0, max: 1.0 }),
+            MapOp::Label(Arc::new(join)),
+        ],
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("a", "x"),
+                0,
+                vec![Some(1.0), Some(2.0)],
+                true,
+            ),
+        )
+        .unwrap();
+    let chunks = run(&mut execution);
+    let [closing] = chunks.as_slice() else {
+        panic!("expected one closing chunk, got {}", chunks.len());
+    };
+    assert!(closing.is_last);
+    assert_eq!(closing.series.time.len(), 0);
+    // The name is gone before `label_join` reads it, and `job` was rewritten before the clamp.
+    assert_eq!(closing.series.metric.name(), None);
+    assert_eq!(closing.series.metric.get("both"), Some("-y"));
+}
+
+/// A label change reads no value, so a map of label changes alone hands histogram samples and
+/// holes over as they came, where a math function would drop them.
+#[test]
+fn a_label_only_map_keeps_histogram_samples() {
+    let grid = grid(0, 60_000, 3);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let table = histogram_table(2, 3);
+    let chunk = evaluated_histogram_chunk_of(
+        &schema,
+        named_metric("a", "x"),
+        0,
+        vec![Some(0), None, Some(1)],
+        &table,
+        true,
+    );
+    let rewrite = LabelRewrite::replace("job", "y", "job", "x").unwrap();
+    let mapped = map_chunk(
+        &schema,
+        &chunk,
+        &[MapOp::Label(Arc::new(rewrite))],
+        &mut |_| Ok(()),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(mapped.series.metric.get("job"), Some("y"));
+    assert_eq!(mapped.series.time.len(), 3);
+    let samples = mapped.series.fields.as_slice()[0]
+        .iter()
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        samples.as_slice(),
+        [
+            SampleRef::Histogram(_),
+            SampleRef::Missing,
+            SampleRef::Histogram(_)
+        ]
+    ));
+}
+
+/// `label_join` over one source listed a thousand times writes a label a thousand times the
+/// input's, so the map admits that before it builds the label: the bound covers the label it
+/// writes, and a pool that cannot hold it refuses the chunk and gets every byte back.
+#[test]
+fn a_label_change_admits_the_label_it_writes_before_building_it() {
+    let grid = grid(0, 60_000, 1);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let job = "j".repeat(1024);
+    let sources = vec!["job"; 1024];
+    let join = Arc::new(LabelRewrite::join("dst", "", &sources).unwrap());
+    let chunk = evaluated_chunk_of(&schema, named_metric("m", &job), 0, vec![Some(1.0)], true);
+
+    let mut admitted = 0;
+    map_chunk(
+        &schema,
+        &chunk,
+        &[MapOp::Label(Arc::clone(&join))],
+        &mut |bytes| {
+            admitted += bytes;
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert!(admitted >= 1024 * 1024, "{admitted}");
+    // Each capture reference of a `label_replace` template can repeat the whole source value.
+    let replace = LabelRewrite::replace("dst", &"$1".repeat(8), "job", "(.*)").unwrap();
+    let mut metric = named_metric("m", &job);
+    let bound = replace.written_bytes(&metric);
+    replace.apply(&mut metric).unwrap();
+    assert!(bound >= metric.get("dst").unwrap().len() + "dst".len());
+
+    let pool = bounded_pool(256 * 1024);
+    let tree = NativeTree::try_new(map_ops(
+        evaluated_input(Arc::clone(&grid)),
+        vec![MapOp::Label(join)],
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution.push_evaluated(InputId::new(0), chunk).unwrap();
+    let error = execution.next_chunk().unwrap_err();
+    assert!(error.to_string().contains("Resources exhausted"), "{error}");
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// An ended execution drops its tree, input schema and grid, while registered counters survive.
+/// Both ways an execution ends are covered: the answer is drained, and a rejected push stops it
+/// first.
+#[test]
+fn an_ended_execution_keeps_no_input_schema_or_grid() {
+    for fails in [false, true] {
+        let out_grid = grid(0, 60_000, 4);
+        let tree = NativeTree::try_new(evaluated_input(Arc::clone(&out_grid))).unwrap();
+        let schema = Arc::clone(
+            tree.root()
+                .output
+                .samples()
+                .expect("an input node produces samples"),
+        );
+        // Both chunks are built while the schema is at hand: the one the input answers, and one the
+        // failing case pushes at an input the tree does not have.
+        let queued = evaluated_chunk(&schema, 0, vec![1.0; 4], true);
+        let refused = evaluated_chunk(&schema, 0, vec![2.0; 4], true);
+        let (schema_weak, grid_weak) = (Arc::downgrade(&schema), Arc::downgrade(&out_grid));
+
+        let pool = pool();
+        let mut execution = executor(&tree, Arc::clone(&pool));
+        let metrics = metrics_of(&execution);
+        drop(tree);
+        drop(schema);
+        drop(out_grid);
+        assert!(
+            root_holds(&execution, holds_input),
+            "the root is not the input leaf the tree built"
+        );
+
+        execution.push_evaluated(InputId::new(0), queued).unwrap();
+        assert!(pool.reserved() > 0, "the queued chunk was not charged for");
+        if fails {
+            let error = execution
+                .push_evaluated(InputId::new(1), refused)
+                .expect_err("a chunk at an input the tree does not have was queued");
+            assert!(
+                matches!(error, DataFusionError::Execution(_)),
+                "the refusal is not an execution error: {error}"
+            );
+            assert!(
+                error.to_string().contains("no input 1"),
+                "the refusal does not name the input it was queued at: {error}"
+            );
+            // The push stopped the execution, so neither the chunk queued before it nor anything
+            // the leaf held is answered or kept.
+            assert_eq!(execution.state().reserved_bytes(), 0);
+            assert_eq!(pool.reserved(), 0);
+        } else {
+            let answered = execution.finish().expect("the queued chunk is answered");
+            assert_eq!(answered.len(), 1);
+            assert_eq!(answered[0].series.metric, metric());
+            assert_eq!(addressed(&answered), vec![(0, vec![Some(1.0); 4])]);
+            // The answer holds the grid, so it goes before the checks below: what is asked about
+            // there is what the execution kept, not what the caller's own chunk holds.
+            drop(answered);
+            drop(refused);
+        }
+
+        // The chunks still queued on the execution must not retain either input allocation.
+        assert!(
+            schema_weak.upgrade().is_none(),
+            "queued chunks retained the schema they were built with"
+        );
+        assert!(
+            grid_weak.upgrade().is_none(),
+            "queued chunks retained the grid they are addressed on"
+        );
+        // What the caller registered before the run sees is what the nodes recorded.
+        assert!(
+            schema_weak.upgrade().is_none(),
+            "the ended execution kept the schema its input was bound to"
+        );
+        assert!(
+            grid_weak.upgrade().is_none(),
+            "the ended execution kept the grid its input was addressed on"
+        );
+        assert_eq!(execution.state().reserved_bytes(), 0);
+        assert_eq!(pool.reserved(), 0);
+        assert!(
+            execution.state().live.is_none(),
+            "the ended execution kept its input slots"
+        );
+        let current = format!("native.root.{}", NodeMetric::CURRENT_RESERVED_BYTES);
+        assert_eq!(
+            gauge(&metrics, &current),
+            0,
+            "the ended execution still charges its leaf"
+        );
+        let peak = format!("native.p0.root.{}", NodeMetric::PEAK_RESERVED_BYTES);
+        assert!(
+            gauge(&metrics, &peak) > 0,
+            "the peak the leaf reached did not survive the end of the execution"
+        );
+        assert!(
+            !root_holds(&execution, holds_input),
+            "the ended execution kept its root"
+        );
+    }
+}
+
+/// A chunk pushed after the input ended is refused, and the answer already queued stays pullable.
+///
+/// The ending stages run as the caller pulls, so a chunk arriving behind them would reach a leaf
+/// whose consumer has already decided what to answer. It is refused rather than queued, and the
+/// refusal is not a stop: what the execution holds is the answer the caller has not pulled yet.
+#[test]
+fn a_chunk_pushed_after_the_input_ended_is_refused() {
+    let (tree, grid, _, _) = binary_tree(BinaryOp::Add, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let pool = bounded_pool(1 << 22);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    let left = execution.state().input_ids(0).next().unwrap();
+    let right = execution.state().input_ids(0).nth(1).unwrap();
+    // Two matched series on each side, so the answer is two chunks and pulling one leaves one
+    // queued: `{job="a"}` adds two to one, `{job="b"}` adds three to two.
+    for (side, metric, value) in [
+        (left, named_metric("m", "a"), 1.0),
+        (left, named_metric("m", "b"), 2.0),
+        (right, named_metric("m", "a"), 2.0),
+        (right, named_metric("m", "b"), 3.0),
+    ] {
+        execution
+            .push_evaluated(
+                side,
+                evaluated_chunk_of(&schema, metric, 0, vec![Some(value); 4], true),
+            )
+            .unwrap();
+    }
+    execution.end_of_input().expect("both operands closed");
+    let first = execution
+        .next_chunk()
+        .unwrap()
+        .expect("the first answer is settled");
+    let first_job = first
+        .series
+        .metric
+        .get("job")
+        .expect("the answer keeps the labels it matched")
+        .to_string();
+    assert!(
+        first_job == "a" || first_job == "b",
+        "the answer names a job the operands do not hold: {first_job}"
+    );
+    // Whichever of the two the kernel matched first, it carries its whole grid: `{job="a"}` adds
+    // two to one, `{job="b"}` adds three to two.
+    let first_value = if first_job == "a" { 3.0 } else { 5.0 };
+    assert_eq!(
+        addressed(std::slice::from_ref(&first)),
+        vec![(0, vec![Some(first_value); 4])],
+        "the first answer does not hold the values its labels decide"
+    );
+    // One answer is still queued, and it is charged to the node holding it.
+    let held = execution.state().reserved_bytes();
+    assert!(
+        held > 0,
+        "the answer the caller has not pulled is not charged for"
+    );
+    assert_eq!(pool.reserved(), held);
+
+    let rejection = execution
+        .push_evaluated(
+            left,
+            evaluated_chunk_of(
+                &schema,
+                named_metric("m", "late"),
+                0,
+                vec![Some(9.0); 4],
+                true,
+            ),
+        )
+        .expect_err("a chunk pushed after the input ended was queued");
+    assert!(
+        matches!(rejection, DataFusionError::Execution(_)),
+        "the refusal is not an execution error: {rejection}"
+    );
+    assert!(
+        rejection.to_string().contains("already ended its input"),
+        "the refusal does not say the input ended: {rejection}"
+    );
+    // The refused chunk was not queued, and nothing else changed: the answer still waits.
+    assert_eq!(
+        execution.state().reserved_bytes(),
+        held,
+        "the refused chunk changed what the execution holds"
+    );
+    assert_eq!(pool.reserved(), held);
+
+    // The refusal did not stop the execution: the rest of the answer is still pullable.
+    let mut pulled = vec![first];
+    while let Some(chunk) = execution.next_chunk().unwrap() {
+        pulled.push(chunk);
+    }
+    let mut answers = decided_by_job(&pulled);
+    answers.sort_by(|left, right| left.0.cmp(&right.0));
+    assert_eq!(
+        answers,
+        [
+            (
+                "a".to_string(),
+                vec![
+                    (0, Some(3.0)),
+                    (1, Some(3.0)),
+                    (2, Some(3.0)),
+                    (3, Some(3.0))
+                ]
+            ),
+            (
+                "b".to_string(),
+                vec![
+                    (0, Some(5.0)),
+                    (1, Some(5.0)),
+                    (2, Some(5.0)),
+                    (3, Some(5.0))
+                ]
+            ),
+        ]
+    );
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// A point-wise node reserves the series its kernel builds before the kernel runs.
+///
+/// Every case reads one dense series over a grid of `1 << 20` points, or -- for the window -- one
+/// raw sample whose window reaches every point, so the kernel writes a row per point. The first
+/// budget admits what the node is handed (the vector, the varying scalar, the grid's timestamps)
+/// and not the series it writes, which only the reservation taken before the kernel can refuse:
+/// nothing after it rejects a dense result of one run. The second admits both.
+#[test]
+fn point_wise_nodes_reserve_the_series_their_kernel_builds() {
+    const MIB: usize = 1 << 20;
+    let grid = grid(1_000, 1_000, 1 << 20);
+    let one = || vector_of(scalar(1.0, Arc::clone(&grid)));
+    let time = || eval_time(None, Arc::clone(&grid));
+    let timestamp = NativeNode {
+        output: one().output,
+        expr: NativeExpr::Timestamp {
+            input: Box::new(one()),
+        },
+    };
+    let window = window_with(
+        input(),
+        RangeFunction::LastOverTime,
+        1 << 31,
+        None,
+        Arc::clone(&grid),
+    );
+    let cases = [
+        ("map", map(one(), vec![MathOp::Abs]), 9 * MIB),
+        (
+            "constant broadcast",
+            broadcast_right(one(), 1.0, BinaryOp::Add, false),
+            9 * MIB,
+        ),
+        ("timestamp", timestamp, 17 * MIB),
+        ("window", window, MIB),
+        (
+            "parameterized map",
+            parameterized(one(), ParameterizedOp::Round, vec![time()]),
+            17 * MIB,
+        ),
+        (
+            "dynamic broadcast",
+            scalar_binary(one(), time(), binary_matching(BinaryOp::Add)),
+            17 * MIB,
+        ),
+    ];
+    for (node, root, inputs) in cases {
+        let tree = NativeTree::try_new(root).unwrap();
+        for (budget, fits) in [(inputs, false), (128 * MIB, true)] {
+            let pool = bounded_pool(budget);
+            let mut execution = executor(&tree, Arc::clone(&pool));
+            let source = execution.state().input_ids(0).next();
+            if let Some(input) = source {
+                execution
+                    .push_raw(input, raw_chunk(&raw_schema(), &[1_000], &[1.0], true))
+                    .unwrap();
+            }
+            match execution.finish() {
+                Ok(chunks) => {
+                    assert!(fits, "{node}: the kernel ran without its series reserved");
+                    let rows: usize = chunks.iter().map(|chunk| chunk.series.time.len()).sum();
+                    assert_eq!(rows, 1 << 20, "{node}");
+                }
+                Err(error) => {
+                    assert!(!fits, "{node}: {error}");
+                    assert!(
+                        matches!(error.find_root(), DataFusionError::ResourcesExhausted(_)),
+                        "{node}: {error}"
+                    );
+                }
+            }
+            assert_eq!(pool.reserved(), 0, "{node}");
+        }
+    }
+}
+
+fn aggregate_with_output(input: NativeNode, op: BoundAggregate, output: NativeType) -> NativeNode {
+    NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(input),
+            op,
+        },
+        output,
+    }
+}
+
+/// A state chunk the producer hands over stays charged until the consumer drops it.
+///
+/// The producer queues a chunk against its own reservation and gives that reservation back when the
+/// chunk leaves the queue. A consumer that keeps the batch - the state exporter packs rows from it
+/// across polls - must then be the one holding those bytes, or the pool admits memory nobody
+/// accounts for. The charge therefore moves with the chunk, and dropping the chunk returns exactly
+/// that figure.
+#[test]
+fn a_handed_over_state_chunk_keeps_its_charge_until_it_is_dropped() {
+    let grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let (state_kind, components) =
+        crate::native::plan::aggregate_state_binding(AggregateKind::Sum, FieldKind::Float)
+            .expect("sum keeps a mergeable state");
+    let state_schema = Arc::new(AggregateStateSchema {
+        group: Grouping::By(Arc::new([])),
+        kind: state_kind,
+        components: components.into(),
+        accumulators: schema.fields.clone(),
+        grid: Arc::clone(&grid),
+    });
+    let tree = NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(evaluated_input(Arc::clone(&grid))),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group: Grouping::By(Arc::new([])),
+                stage: AggregateStage::Partial,
+                field_kind: FieldKind::Float,
+            },
+        },
+        output: NativeType::AggregateState(Arc::clone(&state_schema)),
+    })
+    .unwrap();
+
+    let memory_pool = bounded_pool(1 << 20);
+    let mut exec = executor(&tree, Arc::clone(&memory_pool));
+    exec.push_evaluated(
+        InputId::new(0),
+        evaluated_chunk(&schema, 0, vec![1.0, 2.0], true),
+    )
+    .unwrap();
+    exec.end_of_input().unwrap();
+
+    let chunk = exec
+        .next_state()
+        .unwrap()
+        .expect("a partial sum exports one state chunk");
+    let crate::native::state::StateChunk::Series {
+        reservation,
+        state_schema: exported,
+        ..
+    } = &chunk
+    else {
+        panic!("a partial producer exports series state, not a decoded row");
+    };
+    assert_eq!(
+        state_kind, exported.kind,
+        "the exported state keeps its kind"
+    );
+    assert_eq!(
+        state_schema.components.as_ref(),
+        exported.components.as_ref(),
+        "the exported state keeps its components"
+    );
+    let carried = reservation
+        .as_ref()
+        .expect("the handed-over chunk carries the charge the queue released")
+        .size();
+    assert!(carried > 0, "a state chunk is worth more than no bytes");
+    assert_eq!(
+        crate::native::state::state_bytes(&chunk),
+        carried,
+        "the chunk carries exactly what the same chunk is worth, so nothing is left behind"
+    );
+    assert!(
+        memory_pool.reserved() >= carried,
+        "the pool still holds the handed-over bytes: reserved {}, carried {carried}",
+        memory_pool.reserved()
+    );
+
+    let held = memory_pool.reserved();
+    drop(chunk);
+    assert_eq!(
+        held - carried,
+        memory_pool.reserved(),
+        "dropping the chunk returns exactly the bytes it carried"
+    );
+    drop(exec);
+    assert_eq!(0, memory_pool.reserved(), "the execution released its own");
+}
+
+#[test]
+fn partial_final_matches_complete_over_concatenated_input() {
+    for kind in [
+        AggregateKind::Sum,
+        AggregateKind::Count,
+        AggregateKind::Group,
+    ] {
+        let grid = grid(0, 60_000, 2);
+        let schema = evaluated_schema(Arc::clone(&grid));
+        let (state_kind, components) =
+            crate::native::plan::aggregate_state_binding(kind, FieldKind::Float).unwrap();
+        let state_schema = Arc::new(AggregateStateSchema {
+            group: Grouping::By(Arc::new([])),
+            kind: state_kind,
+            components: components.into(),
+            accumulators: schema.fields.clone(),
+            grid: Arc::clone(&grid),
+        });
+        let aggregate_tree = |stage| {
+            let output = if stage == AggregateStage::Partial {
+                NativeType::AggregateState(Arc::clone(&state_schema))
+            } else {
+                evaluated(Arc::clone(&grid))
+            };
+            let input = if stage == AggregateStage::Final {
+                NativeNode {
+                    expr: NativeExpr::Input(BoundInput {
+                        output: NativeType::AggregateState(Arc::clone(&state_schema)),
+                        source_index: 0,
+                        ordering: SeriesOrdering::Contiguous,
+                    }),
+                    output: NativeType::AggregateState(Arc::clone(&state_schema)),
+                }
+            } else {
+                evaluated_input(Arc::clone(&grid))
+            };
+            NativeTree::try_new(aggregate_with_output(
+                input,
+                BoundAggregate {
+                    kind,
+                    group: Grouping::By(Arc::new([])),
+                    stage,
+                    field_kind: FieldKind::Float,
+                },
+                output,
+            ))
+            .unwrap()
+        };
+        let mut partial_states = Vec::new();
+        let mut backing_probe = None;
+        for vals in [vec![1.0, 2.0], vec![3.0, 4.0]] {
+            let tree = aggregate_tree(AggregateStage::Partial);
+            let mut exec = executor(&tree, pool());
+            exec.push_evaluated(InputId::new(0), evaluated_chunk(&schema, 0, vals, true))
+                .unwrap();
+            exec.end_of_input().unwrap();
+            let mut series = Vec::new();
+            while let Some(chunk) = exec.next_state().unwrap() {
+                let crate::native::state::StateChunk::Series {
+                    series: chunk_series,
+                    ..
+                } = chunk
+                else {
+                    panic!("Partial executor returned row state");
+                };
+                series.extend(chunk_series.into_iter().map(|series| (series, true)));
+            }
+            let source = Box::pin(futures::stream::iter(series.into_iter().map(Ok)));
+            let frame_state_schema = Arc::new(
+                datatypes::series::aggregate_state::AggregateStateSchema::try_new(
+                    state_kind,
+                    state_schema.components.to_vec(),
+                )
+                .unwrap(),
+            );
+            let frames = common_query::series_frame::pack_aggregate_state(
+                source,
+                frame_state_schema.clone(),
+                Arc::clone(&schema),
+            )
+            .unwrap();
+            let decoded = common_query::series_frame::unpack_aggregate_state(
+                frames,
+                Some(frame_state_schema),
+                Some(Arc::clone(&schema)),
+            )
+            .unwrap();
+            use futures::StreamExt;
+            for row in futures::executor::block_on(decoded.collect::<Vec<_>>()) {
+                let row = row.unwrap();
+                let row =
+                    crate::native::state::state_row_from_frame_row(row, &state_schema).unwrap();
+                if kind == AggregateKind::Sum && backing_probe.is_none() {
+                    let mut row = row.clone();
+                    let field = row.fields.field(0).unwrap();
+                    let value_len = field
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<Float64Array>()
+                        .unwrap()
+                        .len();
+                    let retained_len = 4096;
+                    let values = Float64Array::from(vec![7.0; retained_len]);
+                    let compensations = Float64Array::from(vec![0.0; retained_len]);
+                    let value_slice = values.slice(0, value_len);
+                    let compensation_slice = compensations.slice(0, value_len);
+                    let item_fields = field.fields().clone();
+                    let sliced = datatypes::arrow::array::StructArray::try_new(
+                        item_fields,
+                        vec![Arc::new(value_slice), Arc::new(compensation_slice)],
+                        None,
+                    )
+                    .unwrap();
+                    let list_field = Arc::new(datatypes::arrow::datatypes::Field::new(
+                        "item",
+                        sliced.data_type().clone(),
+                        false,
+                    ));
+                    let list = datatypes::arrow::array::ListArray::new(
+                        list_field.clone(),
+                        datatypes::arrow::buffer::OffsetBuffer::new(
+                            vec![0_i32, value_len as i32].into(),
+                        ),
+                        Arc::new(sliced),
+                        None,
+                    );
+                    let fields = datatypes::arrow::array::StructArray::try_new(
+                        vec![Arc::new(datatypes::arrow::datatypes::Field::new(
+                            "v0",
+                            list.data_type().clone(),
+                            false,
+                        ))]
+                        .into(),
+                        vec![Arc::new(list)],
+                        None,
+                    )
+                    .unwrap();
+                    row.fields =
+                        datatypes::series::aggregate_state::StateFieldsBatch::try_from_arrow(
+                            fields,
+                            &datatypes::series::aggregate_state::AggregateStateSchema::try_new(
+                                state_kind,
+                                state_schema.components.to_vec(),
+                            )
+                            .unwrap(),
+                        )
+                        .unwrap();
+                    assert_eq!(row.fields.field(0).unwrap().len(), value_len);
+                    assert!(values.values().inner().capacity() > value_len * 100);
+                    assert!(compensations.values().inner().capacity() > value_len * 100);
+                    let retained_value = row
+                        .fields
+                        .field(0)
+                        .unwrap()
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<Float64Array>()
+                        .unwrap();
+                    assert_eq!(
+                        retained_value.values().inner().as_ptr(),
+                        values.values().inner().as_ptr()
+                    );
+                    backing_probe = Some(crate::native::state::StateChunk::Row(row));
+                }
+                partial_states.push(crate::native::state::StateChunk::Row(row));
+            }
+        }
+        let tree_final = aggregate_tree(AggregateStage::Final);
+        if let Some(state) = backing_probe {
+            let crate::native::state::StateChunk::Row(row) = &state else {
+                unreachable!("decoded final input is a row");
+            };
+            let item = row.fields.field(0).unwrap();
+            let visible_len = item.len();
+            let value = item
+                .column(0)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            let compensation = item
+                .column(1)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            // Each slice shares a primitive backing vector allocated at `retained_len` above.
+            let backing_bytes = 2 * 4096 * std::mem::size_of::<f64>();
+            assert_eq!(
+                visible_len, 2,
+                "the state row remains the fixture's two points"
+            );
+            assert!(value.values().inner().capacity() > visible_len * 100);
+            assert!(compensation.values().inner().capacity() > visible_len * 100);
+
+            // The charge is the row's own extent, not the 4096-element buffers it borrows: a
+            // Final row is a one-row slice of the frame's list values, and charging the parent per
+            // row is what multiplied a chained router's figure.
+            let own = crate::native::state::state_row_bytes(row);
+            assert!(
+                own < backing_bytes,
+                "a row must not be charged the backing it borrows: own {own}, backing {backing_bytes}"
+            );
+            assert!(
+                own >= 2 * visible_len * std::mem::size_of::<f64>(),
+                "the charge still covers the values the row carries: {own}"
+            );
+            let mut constrained = executor(&tree_final, bounded_pool(own - 1));
+            let error = constrained
+                .push_state(
+                    InputId::new(0),
+                    crate::native::state::StateChunk::Row(row.clone()),
+                )
+                .expect_err("admission must account for the row it queues");
+            assert!(is_resources_exhausted(&error), "{error}");
+            assert_eq!(constrained.state().reserved_bytes(), 0);
+
+            let sufficient_pool = bounded_pool(own + 64 * 1024);
+            let mut sufficient = executor(&tree_final, Arc::clone(&sufficient_pool));
+            sufficient
+                .push_state(InputId::new(0), state)
+                .expect("the budget covers the row and its bookkeeping");
+            assert!(sufficient.state().reserved_bytes() >= own);
+            assert!(sufficient_pool.reserved() >= own);
+            drop(sufficient);
+            assert_eq!(sufficient_pool.reserved(), 0);
+        }
+        let mut final_exec = executor(&tree_final, pool());
+        let mut first_row_cost = None;
+        for state in partial_states {
+            // The cost the input queue charges is `state_bytes`, so that is what the assertion
+            // pins: a row reported as zero bytes would be held unaccounted while it waits.
+            if first_row_cost.is_none() {
+                first_row_cost = Some(crate::native::state::state_bytes(&state));
+            }
+            final_exec.push_state(InputId::new(0), state).unwrap();
+        }
+        assert!(
+            first_row_cost.unwrap() >= 2 * std::mem::size_of::<f64>(),
+            "a queued state row must include retained Arrow component buffers"
+        );
+        assert!(
+            final_exec.state().reserved_bytes() > 0,
+            "the executor must reserve what its input queue holds"
+        );
+        final_exec.end_of_input().unwrap();
+        let mut merged = Vec::new();
+        while let Some(chunk) = final_exec.next_chunk().unwrap() {
+            merged.push(chunk);
+        }
+        assert_eq!(final_exec.state().reserved_bytes(), 0);
+        let mut complete = executor(&aggregate_tree(AggregateStage::Complete), pool());
+        for vals in [vec![1.0, 2.0], vec![3.0, 4.0]] {
+            complete
+                .push_evaluated(InputId::new(0), evaluated_chunk(&schema, 0, vals, true))
+                .unwrap();
+        }
+        complete.end_of_input().unwrap();
+        let mut serial = Vec::new();
+        while let Some(chunk) = complete.next_chunk().unwrap() {
+            serial.push(chunk);
+        }
+        let (merged, serial) = (groups_of(&merged), groups_of(&serial));
+        assert_eq!(
+            merged
+                .iter()
+                .map(|g| (&g.0, &g.1, g.2.iter().map(|p| p.0).collect::<Vec<_>>()))
+                .collect::<Vec<_>>(),
+            serial
+                .iter()
+                .map(|g| (&g.0, &g.1, g.2.iter().map(|p| p.0).collect::<Vec<_>>()))
+                .collect::<Vec<_>>()
+        );
+        // The 1e-10 tolerance follows `partials_merge_to_the_serial_result` in
+        // `aggregate/tests.rs`; reassociation may change finite sum rounding, so use both
+        // absolute and relative bounds (with a unit floor for values near zero).
+        for (actual, expected) in merged
+            .iter()
+            .flat_map(|g| &g.2)
+            .zip(serial.iter().flat_map(|g| &g.2))
+        {
+            if kind != AggregateKind::Sum {
+                assert_eq!(actual.1, expected.1);
+            } else {
+                let (a, e) = (actual.1.unwrap(), expected.1.unwrap());
+                assert!((a - e).abs() <= 1e-10 * e.abs().max(1.0));
+            }
+        }
+    }
+}
+
+#[test]
+fn exporting_a_partial_charges_the_fold_and_the_groups_it_builds() {
+    use crate::aggregate::{AggregateOp, FloatAggregator};
+
+    let grid = grid(0, 1, 16);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let series = datatypes::series::samples::Series::try_new(
+        &schema,
+        metric(),
+        TimeAxis::Grid(GridRange::try_new(Arc::clone(&grid), 0, 16).unwrap()),
+        SeriesFields::one(Samples::from_float(Float64Array::from(vec![Some(1.0); 16]))),
+    )
+    .unwrap();
+    let mut aggregator = FloatAggregator::try_new(
+        &schema,
+        AggregateOp::Sum,
+        crate::aggregate::Grouping::By(&[]),
+    )
+    .unwrap();
+    aggregator.update(&series).unwrap();
+    let fold_bytes = aggregator.state_bytes();
+
+    let mut charges = Vec::new();
+    let partial = aggregator
+        .finish_partial_budgeted(|bytes| {
+            charges.push(bytes);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        1,
+        charges.len(),
+        "the export is admitted once, before it runs"
+    );
+
+    // The groups it built, measured as the chunk that carries them is measured.
+    let (kind, components) =
+        crate::native::plan::aggregate_state_binding(AggregateKind::Sum, FieldKind::Float).unwrap();
+    let chunk_bytes =
+        crate::native::state::state_bytes(&crate::native::state::StateChunk::Series {
+            series: partial.groups,
+            state_schema: Arc::new(AggregateStateSchema {
+                group: Grouping::By(Arc::new([])),
+                kind,
+                components: components.into(),
+                accumulators: schema.fields.clone(),
+                grid,
+            }),
+            reservation: None,
+        });
+    assert!(fold_bytes > 0, "the fold holds its blocks");
+    assert!(chunk_bytes > 0, "the export builds groups");
+    // The admitted figure covers what the export still reads *and* what it produced, because both
+    // are live while it runs. Charging only the output would leave the fold's blocks unaccounted.
+    assert!(
+        charges[0] >= fold_bytes.saturating_add(chunk_bytes).saturating_sub(2048),
+        "the admitted figure covers the fold ({fold_bytes}) and the exported groups ({chunk_bytes}): {}",
+        charges[0]
+    );
+}
+
+#[test]
+fn grid_position_reads_the_lattice_and_reports_what_is_off_it() {
+    let grid = EvalGrid::try_new(GridSpec::try_new(1_000, 30_000, 3).unwrap()).unwrap();
+    // Points of the lattice answer their own index, whether the position is the first, the last,
+    // or between them.
+    assert_eq!(0, grid_position(&grid, 1_000).unwrap());
+    assert_eq!(1, grid_position(&grid, 31_000).unwrap());
+    assert_eq!(2, grid_position(&grid, 61_000).unwrap());
+    // A timestamp off the lattice, one before the grid, and one past its end are disagreements
+    // between the selection and its binding, so each is reported rather than rounded into a point.
+    for off in [1_001, 8_999, 0, 91_000, 91_001] {
+        assert!(
+            grid_position(&grid, off).is_err(),
+            "{off} is not a point of the grid"
+        );
+    }
+}
+
+#[test]
+fn grid_position_still_answers_a_lattice_whose_offset_does_not_fit_in_an_i64() {
+    // The points are `i64::MIN`, `-1` and `i64::MAX - 1`: the last one is in range, but it sits
+    // `2 * i64::MAX` past the start, so only the `i128` path can place it. Answering an error here
+    // would make the fast path narrower than the code it replaces.
+    let grid = EvalGrid::try_new(GridSpec::try_new(i64::MIN, i64::MAX, 3).unwrap()).unwrap();
+    assert_eq!(0, grid_position(&grid, i64::MIN).unwrap());
+    // The offset is `i64::MAX`, the widest the fast path accepts.
+    assert_eq!(1, grid_position(&grid, -1).unwrap());
+    assert_eq!(2, grid_position(&grid, i64::MAX - 1).unwrap());
+
+    // The third point of this grid is `0`, and its offset is `i64::MAX + 1`, one past what the
+    // fast path accepts.
+    let grid = EvalGrid::try_new(GridSpec::try_new(i64::MIN, 1_i64 << 62, 3).unwrap()).unwrap();
+    assert_eq!(2, grid_position(&grid, 0).unwrap());
+}
+
+#[test]
+fn grid_position_reports_a_timestamp_whose_offset_overflows_and_misses_the_lattice() {
+    // The difference does not fit in an `i64`, so the `i128` path answers. Wrapped, it would be
+    // negative, which is not a position either: the answer is the lattice's own rejection, not a
+    // panic and not some row read through a wrapped offset.
+    let grid = EvalGrid::try_new(GridSpec::try_new(i64::MIN + 5, 1, 10).unwrap()).unwrap();
+    assert_eq!(0, grid_position(&grid, i64::MIN + 5).unwrap());
+    let error = grid_position(&grid, i64::MAX).unwrap_err().to_string();
+    assert!(error.contains("is not a point of"), "{error}");
+}

@@ -27,12 +27,12 @@ use strum::AsRefStr;
 use crate::error::{
     CreateMySqlPoolSnafu, MySqlExecutionSnafu, MySqlTransactionSnafu, Result, UnexpectedSnafu,
 };
-use crate::kv_backend::KvBackendRef;
+use crate::kv_backend::ClosableKvBackendRef;
 use crate::kv_backend::rds::{
-    Executor, ExecutorFactory, ExecutorImpl, KvQueryExecutor, RDS_STORE_OP_BATCH_DELETE,
-    RDS_STORE_OP_BATCH_GET, RDS_STORE_OP_BATCH_PUT, RDS_STORE_OP_RANGE_DELETE,
-    RDS_STORE_OP_RANGE_QUERY, RDS_STORE_TXN_RETRY_COUNT, RdsStore, Transaction,
-    ensure_rustls_crypto_provider_installed,
+    Executor, ExecutorFactory, ExecutorImpl, KvQueryExecutor, RDS_BATCH_SIZE,
+    RDS_STORE_OP_BATCH_DELETE, RDS_STORE_OP_BATCH_GET, RDS_STORE_OP_BATCH_PUT,
+    RDS_STORE_OP_RANGE_DELETE, RDS_STORE_OP_RANGE_QUERY, RDS_STORE_TXN_RETRY_COUNT, RdsStore,
+    Transaction, ensure_rustls_crypto_provider_installed,
 };
 use crate::rpc::KeyValue;
 use crate::rpc::store::{
@@ -41,6 +41,10 @@ use crate::rpc::store::{
 };
 
 const MYSQL_STORE_NAME: &str = "mysql_store";
+
+// MySQL prepared statements accept at most 65,535 parameters.
+const MAX_BATCH_KEYS: usize = u16::MAX as usize;
+const MAX_BATCH_PUT_KVS: usize = MAX_BATCH_KEYS / 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ValueBlobType {
@@ -288,18 +292,22 @@ impl Executor for MySqlClient {
     }
 
     async fn txn_executor<'a>(&'a mut self) -> Result<Self::Transaction<'a>> {
-        // sqlx has no isolation level support for now, so we have to set it manually.
-        // TODO(CookiePie): Waiting for https://github.com/launchbadge/sqlx/pull/3614 and remove this.
-        sqlx::query("SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE")
-            .execute(&**self)
-            .await
-            .context(MySqlExecutionSnafu {
-                sql: "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE",
-            })?;
+        // MySQL requires SET TRANSACTION separately from BEGIN. Execute both on
+        // the connection acquired by begin_with so the isolation level applies.
         let txn = self
-            .begin()
+            .begin_with("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; BEGIN")
             .await
-            .context(MySqlExecutionSnafu { sql: "begin" })?;
+            .context(MySqlTransactionSnafu { operation: "begin" })?;
+        Ok(MySqlTxnClient(txn))
+    }
+
+    async fn read_only_txn_executor<'a>(&'a mut self) -> Result<Self::Transaction<'a>> {
+        let txn = self
+            .begin_with("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY; BEGIN")
+            .await
+            .context(MySqlTransactionSnafu {
+                operation: "begin read-only",
+            })?;
         Ok(MySqlTxnClient(txn))
     }
 }
@@ -348,6 +356,10 @@ pub struct MySqlExecutorFactory {
 
 #[async_trait::async_trait]
 impl ExecutorFactory<MySqlClient> for MySqlExecutorFactory {
+    async fn close(&self) {
+        self.pool.close().await;
+    }
+
     async fn default_executor(&self) -> Result<MySqlClient> {
         Ok(self.pool.clone())
     }
@@ -404,49 +416,19 @@ impl KvQueryExecutor<MySqlClient> for MySqlStore {
         query_executor: &mut ExecutorImpl<'_, MySqlClient>,
         req: BatchPutRequest,
     ) -> Result<BatchPutResponse> {
-        let mut in_params = Vec::with_capacity(req.kvs.len() * 3);
-        let mut values_params = Vec::with_capacity(req.kvs.len() * 2);
-
-        for kv in &req.kvs {
-            let processed_key = &kv.key;
-            in_params.push(processed_key);
-
-            let processed_value = &kv.value;
-            values_params.push(processed_key);
-            values_params.push(processed_value);
-        }
-        let in_params = in_params.iter().map(|x| x as _).collect::<Vec<_>>();
-        let values_params = values_params.iter().map(|x| x as _).collect::<Vec<_>>();
-        let (select, update) = self
-            .sql_template_set
-            .generate_batch_upsert_query(req.kvs.len());
-
-        // Fast path: if we don't need previous kvs, we can just upsert the keys.
-        if !req.prev_kv {
-            crate::record_rds_sql_execute_elapsed!(
-                query_executor.execute(&update, &values_params).await,
-                MYSQL_STORE_NAME,
-                RDS_STORE_OP_BATCH_PUT,
-                ""
-            )?;
+        let kvs = &req.kvs;
+        if kvs.is_empty() {
             return Ok(BatchPutResponse::default());
         }
-        // Should use transaction to ensure atomicity.
-        if let ExecutorImpl::Default(query_executor) = query_executor {
-            let txn = query_executor.txn_executor().await?;
-            let mut txn = ExecutorImpl::Txn(txn);
-            let res = self.batch_put_with_query_executor(&mut txn, req).await;
+        if (req.prev_kv || kvs.len() > (*RDS_BATCH_SIZE).min(MAX_BATCH_PUT_KVS))
+            && let ExecutorImpl::Default(executor) = query_executor
+        {
+            let mut txn = ExecutorImpl::Txn(executor.txn_executor().await?);
+            let response = self.put_chunks(&mut txn, kvs, req.prev_kv).await?;
             txn.commit().await?;
-            return res;
+            return Ok(response);
         }
-        let prev_kvs = crate::record_rds_sql_execute_elapsed!(
-            query_executor.query(&select, &in_params).await,
-            MYSQL_STORE_NAME,
-            RDS_STORE_OP_BATCH_PUT,
-            ""
-        )?;
-        query_executor.execute(&update, &values_params).await?;
-        Ok(BatchPutResponse { prev_kvs })
+        self.put_chunks(query_executor, kvs, req.prev_kv).await
     }
 
     async fn batch_get_with_query_executor(
@@ -454,20 +436,20 @@ impl KvQueryExecutor<MySqlClient> for MySqlStore {
         query_executor: &mut ExecutorImpl<'_, MySqlClient>,
         req: BatchGetRequest,
     ) -> Result<BatchGetResponse> {
-        if req.keys.is_empty() {
-            return Ok(BatchGetResponse { kvs: vec![] });
+        let mut keys = req.keys;
+        keys.sort_unstable();
+        keys.dedup();
+        let chunk_size = *RDS_BATCH_SIZE;
+        if keys.len() > chunk_size
+            && let ExecutorImpl::Default(client) = query_executor
+        {
+            // Share one snapshot without serializable read conflicts or row locks.
+            let mut transaction = ExecutorImpl::Txn(client.read_only_txn_executor().await?);
+            let response = self.get_chunks(&mut transaction, &keys, chunk_size).await?;
+            transaction.commit().await?;
+            return Ok(response);
         }
-        let query = self
-            .sql_template_set
-            .generate_batch_get_query(req.keys.len());
-        let params = req.keys.iter().map(|x| x as _).collect::<Vec<_>>();
-        let kvs = crate::record_rds_sql_execute_elapsed!(
-            query_executor.query(&query, &params).await,
-            MYSQL_STORE_NAME,
-            RDS_STORE_OP_BATCH_GET,
-            ""
-        )?;
-        Ok(BatchGetResponse { kvs })
+        self.get_chunks(query_executor, &keys, chunk_size).await
     }
 
     async fn delete_range_with_query_executor(
@@ -516,55 +498,113 @@ impl KvQueryExecutor<MySqlClient> for MySqlStore {
         query_executor: &mut ExecutorImpl<'_, MySqlClient>,
         req: BatchDeleteRequest,
     ) -> Result<BatchDeleteResponse> {
-        if req.keys.is_empty() {
+        let keys = req.keys;
+        if keys.is_empty() {
             return Ok(BatchDeleteResponse::default());
         }
-        let query = self
-            .sql_template_set
-            .generate_batch_delete_query(req.keys.len());
-        let params = req.keys.iter().map(|x| x as _).collect::<Vec<_>>();
-        // Fast path: if we don't need previous kvs, we can just delete the keys.
-        if !req.prev_kv {
-            crate::record_rds_sql_execute_elapsed!(
-                query_executor.execute(&query, &params).await,
-                MYSQL_STORE_NAME,
-                RDS_STORE_OP_BATCH_DELETE,
-                ""
-            )?;
-            return Ok(BatchDeleteResponse::default());
-        }
-        // Should use transaction to ensure atomicity.
-        if let ExecutorImpl::Default(query_executor) = query_executor {
-            let txn = query_executor.txn_executor().await?;
-            let mut txn = ExecutorImpl::Txn(txn);
-            let res = self.batch_delete_with_query_executor(&mut txn, req).await;
+        if (req.prev_kv || keys.len() > *RDS_BATCH_SIZE)
+            && let ExecutorImpl::Default(executor) = query_executor
+        {
+            let mut txn = ExecutorImpl::Txn(executor.txn_executor().await?);
+            let response = self.delete_chunks(&mut txn, &keys, req.prev_kv).await?;
             txn.commit().await?;
-            return res;
+            return Ok(response);
         }
-        // Should get previous kvs first
-        let batch_get_req = BatchGetRequest {
-            keys: req.keys.clone(),
-        };
-        let prev_kvs = self
-            .batch_get_with_query_executor(query_executor, batch_get_req)
-            .await?
-            .kvs;
-        // Pure `DELETE` has no return value, so we need to use `execute` instead of `query`.
-        crate::record_rds_sql_execute_elapsed!(
-            query_executor.execute(&query, &params).await,
-            MYSQL_STORE_NAME,
-            RDS_STORE_OP_BATCH_DELETE,
-            ""
-        )?;
-        if req.prev_kv {
-            Ok(BatchDeleteResponse { prev_kvs })
-        } else {
-            Ok(BatchDeleteResponse::default())
-        }
+        self.delete_chunks(query_executor, &keys, req.prev_kv).await
     }
 }
 
 impl MySqlStore {
+    async fn get_chunks(
+        &self,
+        query_executor: &mut ExecutorImpl<'_, MySqlClient>,
+        keys: &[Vec<u8>],
+        chunk_size: usize,
+    ) -> Result<BatchGetResponse> {
+        let mut kvs = Vec::new();
+        let mut params = Vec::with_capacity(keys.len().min(chunk_size));
+        for keys in keys.chunks(chunk_size) {
+            let query = self.sql_template_set.generate_batch_get_query(keys.len());
+            params.clear();
+            params.extend(keys);
+            kvs.extend(crate::record_rds_sql_execute_elapsed!(
+                query_executor.query(&query, &params).await,
+                MYSQL_STORE_NAME,
+                RDS_STORE_OP_BATCH_GET,
+                ""
+            )?);
+        }
+        Ok(BatchGetResponse { kvs })
+    }
+
+    async fn put_chunks(
+        &self,
+        executor: &mut ExecutorImpl<'_, MySqlClient>,
+        kvs: &[KeyValue],
+        prev_kv: bool,
+    ) -> Result<BatchPutResponse> {
+        let mut prev_kvs = Vec::new();
+        let chunk_size = (*RDS_BATCH_SIZE).min(MAX_BATCH_PUT_KVS);
+        let mut params = Vec::with_capacity(kvs.len().min(chunk_size) * 2);
+        for chunk in kvs.chunks(chunk_size) {
+            let (select, update) = self
+                .sql_template_set
+                .generate_batch_upsert_query(chunk.len());
+            if prev_kv {
+                params.clear();
+                params.extend(chunk.iter().map(|kv| &kv.key));
+                prev_kvs.extend(crate::record_rds_sql_execute_elapsed!(
+                    executor.query(&select, &params).await,
+                    MYSQL_STORE_NAME,
+                    RDS_STORE_OP_BATCH_PUT,
+                    ""
+                )?);
+            }
+            params.clear();
+            params.extend(chunk.iter().flat_map(|kv| [&kv.key, &kv.value]));
+            crate::record_rds_sql_execute_elapsed!(
+                executor.execute(&update, &params).await,
+                MYSQL_STORE_NAME,
+                RDS_STORE_OP_BATCH_PUT,
+                ""
+            )?;
+        }
+        Ok(BatchPutResponse { prev_kvs })
+    }
+
+    async fn delete_chunks(
+        &self,
+        executor: &mut ExecutorImpl<'_, MySqlClient>,
+        keys: &[Vec<u8>],
+        prev_kv: bool,
+    ) -> Result<BatchDeleteResponse> {
+        let mut prev_kvs = Vec::new();
+        let mut params = Vec::with_capacity(keys.len().min(*RDS_BATCH_SIZE));
+        for chunk in keys.chunks(*RDS_BATCH_SIZE) {
+            params.clear();
+            params.extend(chunk);
+            if prev_kv {
+                let select = self.sql_template_set.generate_batch_get_query(chunk.len());
+                prev_kvs.extend(crate::record_rds_sql_execute_elapsed!(
+                    executor.query(&select, &params).await,
+                    MYSQL_STORE_NAME,
+                    RDS_STORE_OP_BATCH_DELETE,
+                    ""
+                )?);
+            }
+            let delete = self
+                .sql_template_set
+                .generate_batch_delete_query(chunk.len());
+            crate::record_rds_sql_execute_elapsed!(
+                executor.execute(&delete, &params).await,
+                MYSQL_STORE_NAME,
+                RDS_STORE_OP_BATCH_DELETE,
+                ""
+            )?;
+        }
+        Ok(BatchDeleteResponse { prev_kvs })
+    }
+
     /// Reads the current table definition for best-effort schema upgrades.
     async fn fetch_create_table_sql(
         pool: &Pool<MySql>,
@@ -631,8 +671,12 @@ impl MySqlStore {
         Ok(())
     }
 
-    /// Create [MySqlStore] impl of [KvBackendRef] from url.
-    pub async fn with_url(url: &str, table_name: &str, max_txn_ops: usize) -> Result<KvBackendRef> {
+    /// Create [MySqlStore] impl of [ClosableKvBackendRef] from url.
+    pub async fn with_url(
+        url: &str,
+        table_name: &str,
+        max_txn_ops: usize,
+    ) -> Result<ClosableKvBackendRef> {
         ensure_rustls_crypto_provider_installed()?;
         let pool = MySqlPool::connect(url)
             .await
@@ -640,12 +684,12 @@ impl MySqlStore {
         Self::with_mysql_pool(pool, table_name, max_txn_ops).await
     }
 
-    /// Create [MySqlStore] impl of [KvBackendRef] from [sqlx::Pool<MySql>].
+    /// Create [MySqlStore] impl of [ClosableKvBackendRef] from [sqlx::Pool<MySql>].
     pub async fn with_mysql_pool(
         pool: Pool<MySql>,
         table_name: &str,
         max_txn_ops: usize,
-    ) -> Result<KvBackendRef> {
+    ) -> Result<ClosableKvBackendRef> {
         // This step ensures the mysql metadata backend is ready to use.
         // We check if greptime_metakv table exists, and we will create a new table
         // if it does not exist.
@@ -678,8 +722,10 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+    use crate::kv_backend::KvBackend;
     use crate::kv_backend::test::{
-        prepare_kv_with_prefix, test_kv_batch_delete_with_prefix, test_kv_batch_get_with_prefix,
+        prepare_kv_with_prefix, test_kv_batch_delete_with_prefix,
+        test_kv_batch_get_concurrent_updates, test_kv_batch_get_with_prefix,
         test_kv_compare_and_put_with_prefix, test_kv_delete_range_with_prefix,
         test_kv_put_with_prefix, test_kv_range_2_with_prefix, test_kv_range_with_prefix,
         test_simple_kv_range, test_txn_compare_equal, test_txn_compare_greater,
@@ -689,6 +735,61 @@ mod tests {
     use crate::maybe_skip_mysql_integration_test;
     use crate::rpc::store::{PutRequest, RangeRequest};
     use crate::test_util::test_certs_dir;
+
+    #[tokio::test]
+    async fn test_close_backend() {
+        let pool =
+            sqlx::mysql::MySqlPoolOptions::new().connect_lazy_with(MySqlConnectOptions::new());
+        let backend: ClosableKvBackendRef = Arc::new(MySqlStore {
+            max_txn_ops: 128,
+            txn_retry_count: RDS_STORE_TXN_RETRY_COUNT,
+            executor_factory: MySqlExecutorFactory {
+                pool: Arc::new(pool.clone()),
+            },
+            sql_template_set: MySqlTemplateFactory::new("close_test").build(),
+            _phantom: PhantomData,
+        });
+        let shared_backend = backend.clone();
+        assert!(!pool.is_closed());
+        backend.close().await.unwrap();
+        assert!(pool.is_closed());
+        shared_backend.close().await.unwrap();
+        assert!(matches!(pool.acquire().await, Err(sqlx::Error::PoolClosed)));
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            shared_backend.put(crate::rpc::store::PutRequest {
+                key: b"key".to_vec(),
+                value: b"value".to_vec(),
+                prev_kv: false,
+            }),
+        )
+        .await
+        .expect("closed backend must reject writes promptly");
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_close_backend_waits_for_checked_out_connection() {
+        maybe_skip_mysql_integration_test!();
+        let pool = mysql_pool().await.unwrap();
+        let table = new_test_table_name("close_held");
+        let backend = MySqlStore::with_mysql_pool(pool.clone(), &table, 128)
+            .await
+            .unwrap();
+        let connection = pool.acquire().await.unwrap();
+        let close = backend.close();
+        tokio::pin!(close);
+
+        assert!(futures::poll!(close.as_mut()).is_pending());
+        assert!(pool.is_closed());
+        assert!(matches!(pool.acquire().await, Err(sqlx::Error::PoolClosed)));
+        drop(connection);
+        tokio::time::timeout(std::time::Duration::from_secs(5), close)
+            .await
+            .expect("close must finish after the connection is returned")
+            .unwrap();
+        backend.close().await.unwrap();
+    }
 
     fn new_test_table_name(prefix: &str) -> String {
         let uuid = Uuid::new_v4().simple().to_string();
@@ -750,6 +851,472 @@ mod tests {
             },
             _phantom: PhantomData,
         })
+    }
+
+    #[tokio::test]
+    async fn test_mysql_batch_parameter_boundaries() {
+        maybe_skip_mysql_integration_test!();
+        let table = new_test_table_name("batch_parameter_boundaries");
+        let store = build_mysql_kv_backend(&table).await.unwrap();
+        let client = store.executor_factory.default_executor().await.unwrap();
+        let mut executor = ExecutorImpl::Default(client.clone());
+        for size in [
+            0,
+            MAX_BATCH_PUT_KVS - 1,
+            MAX_BATCH_PUT_KVS,
+            MAX_BATCH_PUT_KVS + 1,
+            MAX_BATCH_KEYS - 1,
+            MAX_BATCH_KEYS,
+            MAX_BATCH_KEYS + 1,
+        ] {
+            let kvs: Vec<_> = (0..size)
+                .map(|index| KeyValue {
+                    key: format!("key-{index:06}").into_bytes(),
+                    value: b"original".to_vec(),
+                })
+                .collect();
+            let keys: Vec<_> = kvs.iter().map(|kv| kv.key.clone()).collect();
+            let response = store
+                .batch_put_with_query_executor(
+                    &mut executor,
+                    BatchPutRequest {
+                        kvs: kvs.clone(),
+                        prev_kv: false,
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(response.prev_kvs.is_empty());
+            let mut fetched = store
+                .batch_get_with_query_executor(
+                    &mut executor,
+                    BatchGetRequest { keys: keys.clone() },
+                )
+                .await
+                .unwrap()
+                .kvs;
+            fetched.sort_unstable_by(|a, b| a.key.cmp(&b.key));
+            assert_eq!(fetched, kvs);
+            let updated = kvs
+                .iter()
+                .map(|kv| KeyValue {
+                    key: kv.key.clone(),
+                    value: b"updated".to_vec(),
+                })
+                .collect::<Vec<_>>();
+            let mut previous = store
+                .batch_put_with_query_executor(
+                    &mut executor,
+                    BatchPutRequest {
+                        kvs: updated.clone(),
+                        prev_kv: true,
+                    },
+                )
+                .await
+                .unwrap()
+                .prev_kvs;
+            previous.sort_unstable_by(|a, b| a.key.cmp(&b.key));
+            assert_eq!(previous, kvs);
+            let mut deleted = store
+                .batch_delete_with_query_executor(
+                    &mut executor,
+                    BatchDeleteRequest {
+                        keys: keys.clone(),
+                        prev_kv: true,
+                    },
+                )
+                .await
+                .unwrap()
+                .prev_kvs;
+            deleted.sort_unstable_by(|a, b| a.key.cmp(&b.key));
+            assert_eq!(deleted, updated);
+            assert!(
+                store
+                    .batch_get_with_query_executor(&mut executor, BatchGetRequest { keys })
+                    .await
+                    .unwrap()
+                    .kvs
+                    .is_empty()
+            );
+        }
+        drop_table(&store.executor_factory.pool, &table).await;
+    }
+
+    #[tokio::test]
+    async fn test_mysql_batch_get_concurrent_updates() {
+        maybe_skip_mysql_integration_test!();
+        let table = new_test_table_name("batch_get_consistent");
+        let backend = build_mysql_kv_backend(&table).await.unwrap();
+        test_kv_batch_get_concurrent_updates(&backend, *RDS_BATCH_SIZE + 1).await;
+        drop_table(&backend.executor_factory.pool, &table).await;
+    }
+
+    #[tokio::test]
+    async fn test_mysql_transaction_isolation_preserves_session_defaults() {
+        maybe_skip_mysql_integration_test!();
+        ensure_rustls_crypto_provider_installed().unwrap();
+        // A single connection forces every subsequent borrower to reuse it.
+        let pool = sqlx::mysql::MySqlPoolOptions::new()
+            .max_connections(1)
+            .after_connect(|connection, _| {
+                Box::pin(async move {
+                    sqlx::query("SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED")
+                        .execute(connection)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect(&std::env::var("GT_MYSQL_ENDPOINTS").unwrap())
+            .await
+            .unwrap();
+        let table = new_test_table_name("transaction_scope");
+        let backend = build_mysql_kv_backend(&table).await.unwrap();
+        let mut writer = backend.executor_factory.pool.acquire().await.unwrap();
+        sqlx::query("SET SESSION innodb_lock_wait_timeout = 1")
+            .execute(&mut *writer)
+            .await
+            .unwrap();
+        let reset = format!(
+            "INSERT INTO `{table}` (k,v) VALUES ('a','old') ON DUPLICATE KEY UPDATE v='old'"
+        );
+        let update = format!("UPDATE `{table}` SET v='new' WHERE k='a'");
+        let select = backend.sql_template_set.generate_batch_get_query(1);
+        let key = b"a".to_vec();
+        let mut client = Arc::new(pool);
+        for read_only in [false, true] {
+            for finish in ["commit", "rollback", "drop"] {
+                sqlx::query(AssertSqlSafe(reset.as_str()))
+                    .execute(&mut *writer)
+                    .await
+                    .unwrap();
+                let mut txn = if read_only {
+                    client.read_only_txn_executor().await.unwrap()
+                } else {
+                    client.txn_executor().await.unwrap()
+                };
+                assert_eq!(txn.query(&select, &[&key]).await.unwrap()[0].value, b"old");
+                let write = sqlx::query(AssertSqlSafe(update.as_str()))
+                    .execute(&mut *writer)
+                    .await;
+                if read_only {
+                    // RR permits the writer to commit, but retains the first snapshot.
+                    write.unwrap();
+                    assert_eq!(txn.query(&select, &[&key]).await.unwrap()[0].value, b"old");
+                    let error = sqlx::query(AssertSqlSafe(update.as_str()))
+                        .execute(&mut *txn.0)
+                        .await
+                        .unwrap_err();
+                    assert_eq!(
+                        error.as_database_error().unwrap().code().as_deref(),
+                        Some("25006")
+                    );
+                } else {
+                    // SERIALIZABLE plain reads hold locks; a session-default RC
+                    // transaction would let this update succeed.
+                    let error = write.unwrap_err();
+                    assert_eq!(
+                        error
+                            .as_database_error()
+                            .unwrap()
+                            .downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
+                            .number(),
+                        1205
+                    );
+                }
+                match finish {
+                    "commit" => txn.0.commit().await.unwrap(),
+                    "rollback" => txn.0.rollback().await.unwrap(),
+                    "drop" => drop(txn),
+                    _ => unreachable!(),
+                }
+                let mut borrowed = client.acquire().await.unwrap();
+                let row = sqlx::query(
+                    "SHOW SESSION VARIABLES WHERE Variable_name IN ('transaction_isolation', 'tx_isolation')",
+                ).fetch_one(&mut *borrowed).await.unwrap();
+                assert_eq!(row.get::<String, _>(1), "READ-COMMITTED");
+                drop(borrowed);
+
+                // Verify the next ordinary transaction inherits RC and read/write
+                // access, rather than either override used above.
+                let mut next = client.begin().await.unwrap();
+                sqlx::query(AssertSqlSafe(reset.as_str()))
+                    .execute(&mut *writer)
+                    .await
+                    .unwrap();
+                let first = sqlx::query(AssertSqlSafe(select.as_str()))
+                    .bind(&key)
+                    .fetch_one(&mut *next)
+                    .await
+                    .unwrap();
+                assert_eq!(first.get::<Vec<u8>, _>(1), b"old");
+                sqlx::query(AssertSqlSafe(update.as_str()))
+                    .execute(&mut *writer)
+                    .await
+                    .unwrap();
+                let second = sqlx::query(AssertSqlSafe(select.as_str()))
+                    .bind(&key)
+                    .fetch_one(&mut *next)
+                    .await
+                    .unwrap();
+                assert_eq!(second.get::<Vec<u8>, _>(1), b"new");
+                sqlx::query(AssertSqlSafe(reset.as_str()))
+                    .execute(&mut *next)
+                    .await
+                    .unwrap();
+                next.rollback().await.unwrap();
+            }
+        }
+        drop(writer);
+        drop_table(&backend.executor_factory.pool, &table).await;
+        client.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_mysql_batch_get_does_not_wait_for_uncommitted_write() {
+        maybe_skip_mysql_integration_test!();
+        let table = new_test_table_name("snapshot_locked_writer");
+        let mut backend = build_mysql_kv_backend(&table).await.unwrap();
+        // Force the reader to time out quickly if it accidentally uses locking reads.
+        let reader_pool = sqlx::mysql::MySqlPoolOptions::new()
+            .after_connect(|connection, _| {
+                Box::pin(async move {
+                    sqlx::query("SET SESSION innodb_lock_wait_timeout = 1")
+                        .execute(connection)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect(&std::env::var("GT_MYSQL_ENDPOINTS").unwrap())
+            .await
+            .unwrap();
+        let writer_pool = backend.executor_factory.pool.clone();
+        backend.executor_factory.pool = Arc::new(reader_pool);
+        let kvs = vec![
+            KeyValue {
+                key: b"a".to_vec(),
+                value: b"old".to_vec(),
+            },
+            KeyValue {
+                key: b"z".to_vec(),
+                value: b"old".to_vec(),
+            },
+        ];
+        backend
+            .batch_put(BatchPutRequest {
+                kvs: kvs.clone(),
+                prev_kv: false,
+            })
+            .await
+            .unwrap();
+        let mut writer = writer_pool.begin().await.unwrap();
+        let update = format!("UPDATE `{table}` SET v='new' WHERE k='z'");
+        sqlx::query(AssertSqlSafe(update.as_str()))
+            .execute(&mut *writer)
+            .await
+            .unwrap();
+        let mut keys = vec![b"a".to_vec()];
+        keys.extend((0..*RDS_BATCH_SIZE - 1).map(|i| format!("m{i:06}").into_bytes()));
+        keys.push(b"z".to_vec());
+        let mut actual = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            backend.batch_get(BatchGetRequest { keys }),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .kvs;
+        actual.sort_unstable_by(|a, b| a.key.cmp(&b.key));
+        assert_eq!(actual, kvs);
+        writer.rollback().await.unwrap();
+        drop_table(&writer_pool, &table).await;
+    }
+
+    #[tokio::test]
+    async fn test_mysql_batch_get_deduplicates_keys_before_chunking() {
+        maybe_skip_mysql_integration_test!();
+        let table = new_test_table_name("get_duplicate_keys");
+        let store = build_mysql_kv_backend(&table).await.unwrap();
+        let client = store.executor_factory.default_executor().await.unwrap();
+        let mut executor = ExecutorImpl::Default(client.clone());
+        let kvs = vec![KeyValue {
+            key: b"key".to_vec(),
+            value: b"value".to_vec(),
+        }];
+        store
+            .batch_put_with_query_executor(
+                &mut executor,
+                BatchPutRequest {
+                    kvs: kvs.clone(),
+                    prev_kv: false,
+                },
+            )
+            .await
+            .unwrap();
+        for count in [1, *RDS_BATCH_SIZE, *RDS_BATCH_SIZE + 1] {
+            let response = store
+                .batch_get_with_query_executor(
+                    &mut executor,
+                    BatchGetRequest {
+                        keys: vec![b"key".to_vec(); count],
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.kvs, kvs);
+        }
+        drop_table(&store.executor_factory.pool, &table).await;
+    }
+
+    #[tokio::test]
+    async fn test_mysql_chunks_reuse_existing_transaction() {
+        maybe_skip_mysql_integration_test!();
+        let table = new_test_table_name("existing_chunk_transaction");
+        let store = build_mysql_kv_backend(&table).await.unwrap();
+        let mut client = store.executor_factory.default_executor().await.unwrap();
+        let kvs: Vec<_> = (0..=*RDS_BATCH_SIZE)
+            .map(|index| KeyValue {
+                key: format!("key-{index:06}").into_bytes(),
+                value: b"value".to_vec(),
+            })
+            .collect();
+        let keys = kvs.iter().map(|kv| kv.key.clone()).collect::<Vec<_>>();
+        {
+            let mut txn = ExecutorImpl::Txn(client.txn_executor().await.unwrap());
+            store
+                .batch_put_with_query_executor(
+                    &mut txn,
+                    BatchPutRequest {
+                        kvs,
+                        prev_kv: false,
+                    },
+                )
+                .await
+                .unwrap();
+            let inside = store
+                .batch_get_with_query_executor(&mut txn, BatchGetRequest { keys: keys.clone() })
+                .await
+                .unwrap();
+            assert_eq!(inside.kvs.len(), keys.len());
+            // The caller owns this transaction and deliberately does not commit it.
+        }
+        let mut executor = ExecutorImpl::Default(client.clone());
+        let outside = store
+            .batch_get_with_query_executor(&mut executor, BatchGetRequest { keys })
+            .await
+            .unwrap();
+        assert!(outside.kvs.is_empty());
+        drop_table(&store.executor_factory.pool, &table).await;
+    }
+
+    #[tokio::test]
+    async fn test_mysql_later_put_chunk_failure_rolls_back() {
+        maybe_skip_mysql_integration_test!();
+        let table = new_test_table_name("put_chunk_rollback");
+        let store = build_mysql_kv_backend(&table).await.unwrap();
+        let trigger_name = new_test_table_name("put_failure");
+        let trigger = format!(
+            "CREATE TRIGGER `{trigger_name}` BEFORE INSERT ON `{table}` \
+            FOR EACH ROW BEGIN IF NEW.v = X'6661696c' THEN \
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'injected put failure'; END IF; END"
+        );
+        sqlx::raw_sql(AssertSqlSafe(trigger.as_str()))
+            .execute(store.executor_factory.pool.as_ref())
+            .await
+            .unwrap();
+        let client = store.executor_factory.default_executor().await.unwrap();
+        let mut executor = ExecutorImpl::Default(client.clone());
+        for prev_kv in [false, true] {
+            let mut kvs: Vec<_> = (0..(*RDS_BATCH_SIZE).min(MAX_BATCH_PUT_KVS))
+                .map(|index| KeyValue {
+                    key: format!("key-{index:06}").into_bytes(),
+                    value: b"ok".to_vec(),
+                })
+                .collect();
+            kvs.push(KeyValue {
+                key: b"last".to_vec(),
+                value: b"fail".to_vec(),
+            });
+            assert!(
+                store
+                    .batch_put_with_query_executor(&mut executor, BatchPutRequest { kvs, prev_kv })
+                    .await
+                    .is_err()
+            );
+            let remaining = store
+                .range_with_query_executor(
+                    &mut executor,
+                    RangeRequest::new().with_range(vec![0], vec![0]),
+                )
+                .await
+                .unwrap();
+            assert!(
+                remaining.kvs.is_empty(),
+                "successful earlier chunks must roll back"
+            );
+        }
+        drop_table(&store.executor_factory.pool, &table).await;
+    }
+
+    #[tokio::test]
+    async fn test_mysql_later_delete_chunk_failure_rolls_back() {
+        maybe_skip_mysql_integration_test!();
+        let table = new_test_table_name("delete_chunk_rollback");
+        let store = build_mysql_kv_backend(&table).await.unwrap();
+        let client = store.executor_factory.default_executor().await.unwrap();
+        let mut executor = ExecutorImpl::Default(client.clone());
+        let kvs: Vec<_> = (0..=*RDS_BATCH_SIZE)
+            .map(|index| KeyValue {
+                key: format!("key-{index:06}").into_bytes(),
+                value: b"original".to_vec(),
+            })
+            .collect();
+        let keys = kvs.iter().map(|kv| kv.key.clone()).collect::<Vec<_>>();
+        store
+            .batch_put_with_query_executor(
+                &mut executor,
+                BatchPutRequest {
+                    kvs: kvs.clone(),
+                    prev_kv: false,
+                },
+            )
+            .await
+            .unwrap();
+        let last_key = String::from_utf8(keys.last().unwrap().clone()).unwrap();
+        let trigger_name = new_test_table_name("delete_failure");
+        let trigger = format!(
+            "CREATE TRIGGER `{trigger_name}` BEFORE DELETE ON `{table}` \
+            FOR EACH ROW BEGIN IF OLD.k = '{last_key}' THEN \
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'injected delete failure'; END IF; END"
+        );
+        sqlx::raw_sql(AssertSqlSafe(trigger.as_str()))
+            .execute(store.executor_factory.pool.as_ref())
+            .await
+            .unwrap();
+        for prev_kv in [false, true] {
+            assert!(
+                store
+                    .batch_delete_with_query_executor(
+                        &mut executor,
+                        BatchDeleteRequest {
+                            keys: keys.clone(),
+                            prev_kv
+                        }
+                    )
+                    .await
+                    .is_err()
+            );
+            let mut remaining = store
+                .batch_get_with_query_executor(
+                    &mut executor,
+                    BatchGetRequest { keys: keys.clone() },
+                )
+                .await
+                .unwrap()
+                .kvs;
+            remaining.sort_unstable_by(|a, b| a.key.cmp(&b.key));
+            assert_eq!(remaining, kvs, "successful earlier chunks must roll back");
+        }
+        drop_table(&store.executor_factory.pool, &table).await;
     }
 
     #[test]

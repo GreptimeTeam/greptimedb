@@ -13,6 +13,8 @@
 // limitations under the License.
 
 mod build_index_table;
+mod cancel_region_compaction;
+mod discard_pending_tails;
 mod discard_unflushed_data;
 mod flush_compact_region;
 mod flush_compact_table;
@@ -35,6 +37,8 @@ use reconcile_database::ReconcileDatabaseFunction;
 use reconcile_table::ReconcileTableFunction;
 
 use crate::admin::build_index_table::{BuildIndexFunction, BuildSeriesIndexFunction};
+use crate::admin::cancel_region_compaction::CancelRegionCompactionFunction;
+use crate::admin::discard_pending_tails::DiscardPendingTailsFunction;
 use crate::admin::discard_unflushed_data::DiscardUnflushedDataFunction;
 use crate::flush_flow::FlushFlowFunction;
 use crate::function_registry::FunctionRegistry;
@@ -48,6 +52,7 @@ impl AdminFunction {
         registry.register(MigrateRegionFunction::factory());
         registry.register(FlushRegionFunction::factory());
         registry.register(CompactRegionFunction::factory());
+        registry.register(CancelRegionCompactionFunction::factory());
         registry.register(FlushTableFunction::factory());
         registry.register(CompactTableFunction::factory());
         registry.register(GcRegionsFunction::factory());
@@ -63,6 +68,7 @@ impl AdminFunction {
     /// Register functions that must only be resolved by an ADMIN statement.
     pub fn register_admin_only(registry: &FunctionRegistry) {
         registry.register(DiscardUnflushedDataFunction::factory());
+        registry.register(DiscardPendingTailsFunction::factory());
         #[cfg(feature = "enterprise")]
         registry.register(PurgeTableFunction::factory());
     }

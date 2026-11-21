@@ -306,8 +306,9 @@ async fn flush_batch_physical_tracked(
     )?;
 
     // 4. Concatenate all modified batches (all share the same physical schema)
-    let combined_batch = batch_convert::concat_modified_batches(&modified_batches)?;
-    // 5. Split by physical partition rule and send to regions
+    let combined_batch = batch_convert::concat_modified_batches(&modified_batches, table_batches)?;
+    // 5. Use the physical rule with FromPayload context: the combined batch carries
+    // each row's logical table id, rather than one identity for the whole batch.
     let physical_table_id = physical_table_info.table_id();
     let row_count = table_batches
         .iter()

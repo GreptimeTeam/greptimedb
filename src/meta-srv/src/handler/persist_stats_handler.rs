@@ -298,13 +298,14 @@ mod tests {
                 file_removed_cnt: 0,
             },
             written_bytes,
-            flushed_parquet_bytes: 0,
+            ingested_parquet_bytes: 0,
             query_cpu_time: 0,
             query_scanned_bytes: 0,
             data_topic_latest_entry_id: 200,
             metadata_topic_latest_entry_id: 200,
             min_timestamp: None,
             max_timestamp: None,
+            has_pending_tails: false,
         }
     }
 

@@ -368,7 +368,7 @@ fn build_gcs_connection(
 fn build_azblob_connection(storage: &ObjectStoreConfig) -> (String, Vec<Option<String>>) {
     let account_name = expose_optional_secret(&storage.azblob.azblob_account_name);
     let account_key = expose_optional_secret(&storage.azblob.azblob_account_key);
-    let sas_token = storage.azblob.azblob_sas_token.clone();
+    let sas_token = expose_optional_secret(&storage.azblob.azblob_sas_token);
 
     let mut options = Vec::new();
     if let Some(account_name) = &account_name {
@@ -390,7 +390,7 @@ fn build_azblob_connection(storage: &ObjectStoreConfig) -> (String, Vec<Option<S
         ));
     }
 
-    let secrets = vec![account_name, account_key, sas_token];
+    let secrets = vec![sas_token, account_name, account_key];
     let connection = if options.is_empty() {
         String::new()
     } else {
@@ -405,16 +405,18 @@ fn expose_optional_secret(secret: &Option<SecretString>) -> Option<String> {
 
 fn mask_secrets(sql: &str, secrets: &[Option<String>]) -> String {
     let mut masked = sql.to_string();
+    let mut secrets: Vec<_> = secrets
+        .iter()
+        .flatten()
+        .filter(|secret| !secret.is_empty())
+        .collect();
+    secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
     for secret in secrets {
-        if let Some(secret) = secret
-            && !secret.is_empty()
-        {
-            let escaped = escape_sql_literal(secret);
-            if escaped != *secret {
-                masked = masked.replace(&escaped, "[REDACTED]");
-            }
-            masked = masked.replace(secret, "[REDACTED]");
+        let escaped = escape_sql_literal(secret);
+        if escaped != *secret {
+            masked = masked.replace(&escaped, "[REDACTED]");
         }
+        masked = masked.replace(secret, "[REDACTED]");
     }
     masked
 }
@@ -518,9 +520,9 @@ mod tests {
     fn test_build_azblob_connection_redacts_sas_token() {
         let storage = ObjectStoreConfig {
             azblob: PrefixedAzblobConnection {
-                azblob_account_name: Some(SecretString::from("account".to_string())),
-                azblob_account_key: Some(SecretString::from("key".to_string())),
-                azblob_sas_token: Some("sig=secret-token".to_string()),
+                azblob_account_name: Some(SecretString::from("sig".to_string())),
+                azblob_account_key: Some(SecretString::from("prefix_sig_CANARY_KEY".to_string())),
+                azblob_sas_token: Some("sv=2024-11-04&sig=CANARY_SIGNATURE".to_string().into()),
                 ..Default::default()
             },
             ..Default::default()
@@ -529,16 +531,18 @@ mod tests {
         let (connection, secrets) = build_azblob_connection(&storage);
         let masked = mask_secrets(&connection, &secrets);
 
-        assert!(connection.contains("SAS_TOKEN='sig=secret-token'"));
+        assert!(connection.contains("SAS_TOKEN='sv=2024-11-04&sig=CANARY_SIGNATURE'"));
         assert!(masked.contains("SAS_TOKEN='[REDACTED]'"));
-        assert!(!masked.contains("sig=secret-token"));
+        assert!(!masked.contains("CANARY_SIGNATURE"));
+        assert!(masked.contains("ACCOUNT_KEY='[REDACTED]'"));
+        assert!(!masked.contains("CANARY_KEY"));
     }
 
     #[test]
     fn test_mask_secrets_redacts_sql_escaped_literals() {
         let sql =
             "COPY DATABASE \"greptime\".\"public\" TO 's3://bucket' CONNECTION (SECRET='ab''cd');";
-        let masked = mask_secrets(sql, &[Some("ab'cd".to_string())]);
+        let masked = mask_secrets(sql, &[Some("ab".to_string()), Some("ab'cd".to_string())]);
 
         assert!(!masked.contains("ab'cd"));
         assert!(!masked.contains("ab''cd"));

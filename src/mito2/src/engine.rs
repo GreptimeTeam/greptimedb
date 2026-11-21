@@ -57,11 +57,13 @@ mod merge_mode_test;
 #[cfg(test)]
 mod object_store_wal_recovery_test;
 #[cfg(test)]
-mod object_store_wal_test;
+pub(crate) mod object_store_wal_test;
 #[cfg(test)]
 mod open_test;
 #[cfg(test)]
 mod parallel_test;
+#[cfg(test)]
+pub(crate) mod pending_tail_test;
 #[cfg(test)]
 mod projection_test;
 #[cfg(test)]
@@ -78,11 +80,17 @@ mod sequence_test;
 #[cfg(test)]
 mod set_role_state_test;
 #[cfg(test)]
+mod shared_file_test;
+#[cfg(test)]
 mod skip_wal_test;
 #[cfg(test)]
 mod staging_test;
 #[cfg(test)]
 mod sync_test;
+#[cfg(feature = "enterprise")]
+pub mod table_compaction;
+#[cfg(test)]
+mod tail_replay_test;
 #[cfg(test)]
 mod truncate_test;
 
@@ -99,8 +107,8 @@ mod puffin_index;
 
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 use api::region::RegionResponse;
 use async_trait::async_trait;
@@ -124,8 +132,8 @@ use snafu::{OptionExt, ResultExt, ensure};
 use store_api::ManifestVersion;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::compaction_task::{self, CompactionTaskEntry};
-use store_api::logstore::LogStore;
 use store_api::logstore::provider::{KafkaProvider, Provider};
+use store_api::logstore::{LogStore, ObjectStoreWalIoPermit};
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
 use store_api::metric_engine_consts::{
     MANIFEST_INFO_EXTENSION_KEY, TABLE_COLUMN_METADATA_EXTENSION_KEY,
@@ -150,14 +158,14 @@ use crate::compaction::CompactionState;
 use crate::config::{MitoConfig, ScanMemoryMode};
 use crate::engine::puffin_index::{IndexEntryContext, collect_index_entries_from_puffin};
 use crate::error::{
-    IncrementalQueryStaleSnafu, InvalidRequestSnafu, JoinSnafu, MitoManifestInfoSnafu, RecvSnafu,
-    RegionNotFoundSnafu, Result, SequenceRangeUnsupportedSnafu, SerdeJsonSnafu,
-    SerializeColumnMetadataSnafu, SnapshotFenceStaleSnafu,
+    EngineStoppedSnafu, IncrementalQueryStaleSnafu, InvalidRequestSnafu, JoinSnafu,
+    MitoManifestInfoSnafu, RecvSnafu, RegionNotFoundSnafu, Result, SequenceRangeUnsupportedSnafu,
+    SerdeJsonSnafu, SerializeColumnMetadataSnafu, SnapshotFenceStaleSnafu,
 };
 #[cfg(feature = "enterprise")]
 use crate::extension::BoxedExtensionRangeProviderFactory;
 use crate::gc::GcLimiterRef;
-use crate::manifest::action::RegionEdit;
+use crate::manifest::action::{RegionEdit, WalRecoveryEdit};
 use crate::memtable::MemtableStats;
 use crate::metrics::{
     HANDLE_REQUEST_ELAPSED, SCAN_MEMORY_EXHAUSTED_TOTAL, SCAN_MEMORY_USAGE_BYTES,
@@ -165,9 +173,9 @@ use crate::metrics::{
 };
 use crate::read::scan_region::{ScanRegion, Scanner, exact_sequence_range};
 use crate::read::stream::ScanBatchStream;
-use crate::region::MitoRegionRef;
 use crate::region::opener::PartitionExprFetcherRef;
 use crate::region::options::parse_wal_options;
+use crate::region::{MitoRegionRef, RegionRoleState};
 use crate::request::{RegionEditRequest, WorkerRequest};
 use crate::sst::file::{FileMeta, RegionFileId, RegionIndexId};
 use crate::sst::file_ref::FileReferenceManagerRef;
@@ -266,9 +274,10 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
             .build();
 
         let inner = EngineInner {
+            series_cache_namespace: store_api::storage::FileId::random(),
             workers,
             config,
-            wal_raw_entry_reader,
+            wal_raw_entry_reader: RwLock::new(Some(wal_raw_entry_reader)),
             scan_memory_tracker,
             region_hook,
             #[cfg(feature = "enterprise")]
@@ -338,15 +347,48 @@ impl MitoEngine {
         self.inner.workers.node_lease().enable();
     }
 
+    /// Returns the node-lease permission used to fence object-store WAL I/O.
+    pub fn object_store_wal_io_permit(&self) -> Arc<dyn ObjectStoreWalIoPermit> {
+        self.inner.workers.node_lease_permit()
+    }
+
     /// Renews the lease of this node from a heartbeat response that carries region leases.
     pub fn renew_node_lease(&self, deadline: Instant) {
         self.inner.workers.node_lease().renew(deadline);
+    }
+
+    /// Records a lease of a heartbeat sent at `sent_at` as the latest one the region received, if
+    /// it is the latest. The region may also be a region of a group that received the lease as a
+    /// whole, such as the data region of a metric engine region. Only records it: the region's role
+    /// does not change. Does nothing if the region is not open.
+    pub fn record_granted_lease(
+        &self,
+        region_id: RegionId,
+        sent_at: Instant,
+        candidate_lease_id: Option<u64>,
+    ) {
+        self.inner
+            .workers
+            .granted_leases()
+            .record(region_id, sent_at, candidate_lease_id, || {
+                self.inner.find_region(region_id).is_ok()
+            });
     }
 
     /// Freezes the clock of the lease checks at `at`.
     #[cfg(any(test, feature = "test"))]
     pub fn freeze_lease_clock(&self, at: Instant) {
         self.inner.workers.node_lease().freeze_clock(at);
+    }
+
+    /// Returns the candidate lease id of the latest lease granted to the region.
+    #[cfg(any(test, feature = "test"))]
+    pub fn granted_candidate_lease_id(&self, region_id: RegionId) -> Option<u64> {
+        self.inner
+            .workers
+            .granted_leases()
+            .get(region_id)
+            .and_then(|lease| lease.candidate_lease_id)
     }
 
     pub fn object_store_manager(&self) -> &ObjectStoreManagerRef {
@@ -489,7 +531,7 @@ impl MitoEngine {
     }
 
     /// Edit region's metadata by [RegionEdit] directly. Use with care.
-    /// Now we only allow adding files or removing files from region (the [RegionEdit] struct can only contain a non-empty "files_to_add" or "files_to_remove" field).
+    /// Allows adding or removing data files and series indexes from the region.
     /// Other region editing intention will result in an "invalid request" error.
     /// Also note that if a region is to be edited directly, we MUST not write data to it thereafter.
     pub async fn edit_region(&self, region_id: RegionId, edit: RegionEdit) -> Result<()> {
@@ -584,6 +626,7 @@ impl MitoEngine {
             .context(RegionNotFoundSnafu { region_id })?;
 
         let version = region.version();
+        version.ensure_no_pending_tails()?;
         let memtable_stats = version
             .memtables
             .list_memtables()
@@ -826,7 +869,10 @@ impl MitoEngine {
 ///
 /// Only adding or removing files to region is considered valid now.
 fn is_valid_region_edit(edit: &RegionEdit) -> bool {
-    (!edit.files_to_add.is_empty() || !edit.files_to_remove.is_empty())
+    (!edit.files_to_add.is_empty()
+        || !edit.files_to_remove.is_empty()
+        || !edit.series_indexes_to_add.is_empty()
+        || !edit.series_indexes_to_remove.is_empty())
         && matches!(
             edit,
             RegionEdit {
@@ -839,16 +885,21 @@ fn is_valid_region_edit(edit: &RegionEdit) -> bool {
                 ..
             }
         )
+        && edit.wal_recovery == WalRecoveryEdit::default()
 }
 
 /// Inner struct of [MitoEngine].
 struct EngineInner {
     /// Region workers group.
     workers: WorkerGroup,
+    /// Identifies this engine's series store across region closes/reopens. A new
+    /// engine may use a different store even with the same region/generation IDs.
+    series_cache_namespace: store_api::storage::FileId,
     /// Config of the engine.
     config: Arc<MitoConfig>,
-    /// The Wal raw entry reader.
-    wal_raw_entry_reader: Arc<dyn RawEntryReader>,
+    /// The Wal raw entry reader. `None` once the engine is stopped, so that it no longer holds
+    /// the log store and the owner of the log store can close it.
+    wal_raw_entry_reader: RwLock<Option<Arc<dyn RawEntryReader>>>,
     /// Memory tracker for table scans.
     scan_memory_tracker: QueryMemoryTracker,
     /// The region hook (if any) registered via plugins; exposed for the GC worker
@@ -901,7 +952,19 @@ impl EngineInner {
 
     /// Stop the inner engine.
     async fn stop(&self) -> Result<()> {
-        self.workers.stop().await
+        self.workers.stop().await?;
+        // Release the log store once the workers no longer use it.
+        let _ = self.wal_raw_entry_reader.write().unwrap().take();
+        Ok(())
+    }
+
+    /// Returns the Wal raw entry reader, or an error once the engine is stopped.
+    fn wal_raw_entry_reader(&self) -> Result<Arc<dyn RawEntryReader>> {
+        self.wal_raw_entry_reader
+            .read()
+            .unwrap()
+            .clone()
+            .context(EngineStoppedSnafu)
     }
 
     fn find_region(&self, region_id: RegionId) -> Result<MitoRegionRef> {
@@ -932,7 +995,7 @@ impl EngineInner {
         let provider = Provider::kafka_provider(topic);
         let (distributor, entry_receivers) = build_wal_entry_distributor_and_receivers(
             provider.clone(),
-            self.wal_raw_entry_reader.clone(),
+            self.wal_raw_entry_reader()?,
             &region_ids,
             DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE,
         );
@@ -1028,7 +1091,7 @@ impl EngineInner {
             .collect::<Vec<_>>();
         let (distributor, entry_receivers) = build_wal_entry_distributor_and_receivers(
             provider.clone(),
-            self.wal_raw_entry_reader.clone(),
+            self.wal_raw_entry_reader()?,
             &region_ids,
             DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE,
         );
@@ -1164,12 +1227,29 @@ impl EngineInner {
         // in the query's older SST snapshot.
         let series_index = region.series_index_store.as_ref().map(|store| {
             crate::series_index::SeriesIndexReadContext {
+                cache_namespace: self.series_cache_namespace,
+                format: if region
+                    .series_index_version_control
+                    .formats
+                    .read()
+                    .unwrap()
+                    .index
+                    .as_ref()
+                    .is_some_and(|format| {
+                        format.format()
+                            == crate::series_index::artifact::ArtifactFormat::ColumnarSeries
+                    }) {
+                    crate::config::SeriesIndexFormat::Columnar
+                } else {
+                    crate::config::SeriesIndexFormat::Legacy
+                },
                 store: store.clone(),
                 version: region.series_index_version(),
             }
         });
         let version_data = region.version_control.current();
         let version = version_data.version;
+        version.ensure_no_pending_tails()?;
 
         if request.snapshot_on_scan && request.memtable_max_sequence.is_none() {
             request.memtable_max_sequence = Some(version_data.committed_sequence);
@@ -1298,11 +1378,59 @@ impl EngineInner {
         scan_region
     }
 
-    /// Converts the [`RegionRole`].
+    /// Converts the [`RegionRole`]. Unlike lease and catchup promotions, a conversion to Leader
+    /// does not check whether the region waits for a reload.
     fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<()> {
         let region = self.find_region(region_id)?;
-        region.set_role(role);
+        let was_leader = region.region_role() == RegionRole::Leader;
+        let was_writable = region.is_writable();
+        let previous = region.set_role(role);
+        if role == RegionRole::Leader && !was_leader {
+            // No lease comes for a direct promotion, so it counts as one. A leader is not promoted.
+            region.manifest_ctx.record_leader_lease(Instant::now());
+        }
+        self.notify_if_can_no_longer_replay(&region, previous);
+        self.notify_if_became_writable(&region, was_writable);
         Ok(())
+    }
+
+    /// Asks the worker to cancel the tail replay of `region` if a role change left it unable to
+    /// replay. `previous` is the state the change replaced; a later state could come from a
+    /// concurrent promotion. A change to Leader only replaces states that cannot replay. A replay
+    /// may wait on I/O that never notices the role change.
+    fn notify_if_can_no_longer_replay(
+        &self,
+        region: &MitoRegionRef,
+        previous: Option<RegionRoleState>,
+    ) {
+        if previous.is_some_and(RegionRoleState::can_replay_tails) {
+            self.workers.notify_cannot_replay(region);
+        }
+    }
+
+    /// Logs the end of the wait of `region` for its Leader lease, which lasted `waited`, and
+    /// tells its worker to start what the wait deferred. Does nothing if the lease ended no wait
+    /// or the region waits again, so a wait ends with one notification.
+    fn notify_if_leader_lease_wait_ended(&self, region: &MitoRegionRef, waited: Option<Duration>) {
+        let Some(waited) = waited else {
+            return;
+        };
+        if region.manifest_ctx.awaits_leader_lease() {
+            return;
+        }
+        info!(
+            "Region {} received its Leader lease {:?} after a catchup made it writable",
+            region.region_id, waited
+        );
+        self.workers.notify_leader_lease_wait_ended(region);
+    }
+
+    /// Asks the worker to replay the pending tails of `region` if a role change made it
+    /// writable. The worker may already have started an ALTER or an edit of the region.
+    fn notify_if_became_writable(&self, region: &MitoRegionRef, was_writable: bool) {
+        if !was_writable && region.can_replay_tails() {
+            self.workers.notify_writable(region);
+        }
     }
 
     /// Sets read-only for a region and ensures no more writes in the region after it returns.
@@ -1643,18 +1771,34 @@ impl RegionEngine for MitoEngine {
         role: RegionRole,
         sent_at: Instant,
         deadline: Instant,
+        candidate_lease_id: Option<u64>,
     ) -> Result<bool, BoxedError> {
+        // Before the role, so a lease the region ignores still counts.
+        self.record_granted_lease(region_id, sent_at, candidate_lease_id);
         let region = self.inner.find_region(region_id).map_err(BoxedError::new)?;
         // Before the role, and even if the role leaves the region's state unchanged.
         if role.writable() {
             region.manifest_ctx.leader_deadline.extend(deadline);
         }
         if role == RegionRole::Leader {
-            return Ok(region
+            let was_writable = region.is_writable();
+            let promotion = region
                 .manifest_ctx
-                .promote_unless_downgrade_started_after(sent_at, region_id));
+                .promote_unless_downgrade_started_after(sent_at, region_id);
+            self.inner.notify_if_became_writable(&region, was_writable);
+            self.inner
+                .notify_if_leader_lease_wait_ended(&region, promotion.ended_wait);
+            return Ok(promotion.promoted);
         }
-        region.set_role(role);
+        // The metasrv grants it to the leader of a region whose route is in staging, and it ends
+        // the wait for a Leader lease too.
+        if role == RegionRole::StagingLeader && region.manifest_ctx.awaits_leader_lease() {
+            let ended_wait = region.manifest_ctx.record_leader_lease(sent_at);
+            self.inner
+                .notify_if_leader_lease_wait_ended(&region, ended_wait);
+        }
+        let previous = region.set_role(role);
+        self.inner.notify_if_can_no_longer_replay(&region, previous);
         Ok(true)
     }
 
@@ -1797,6 +1941,7 @@ impl MitoEngine {
             .build();
         Ok(MitoEngine {
             inner: Arc::new(EngineInner {
+                series_cache_namespace: store_api::storage::FileId::random(),
                 workers: WorkerGroup::start_for_test(
                     data_home,
                     config.clone(),
@@ -1811,7 +1956,7 @@ impl MitoEngine {
                 )
                 .await?,
                 config,
-                wal_raw_entry_reader,
+                wal_raw_entry_reader: RwLock::new(Some(wal_raw_entry_reader)),
                 scan_memory_tracker,
                 region_hook: None,
                 #[cfg(feature = "enterprise")]
@@ -1878,6 +2023,22 @@ mod tests {
 
     #[test]
     fn test_is_valid_region_edit() {
+        for edit in [
+            RegionEdit {
+                series_indexes_to_add: vec![FileMeta::default()],
+                ..Default::default()
+            },
+            RegionEdit {
+                series_indexes_to_remove: vec![FileMeta::default().file_id()],
+                ..Default::default()
+            },
+        ] {
+            assert!(is_valid_region_edit(&edit));
+            assert!(!is_valid_region_edit(&RegionEdit {
+                flushed_entry_id: Some(1),
+                ..edit
+            }));
+        }
         // Valid: has only "files_to_add"
         let edit = RegionEdit {
             files_to_add: vec![FileMeta::default()],
@@ -1887,6 +2048,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            ..Default::default()
         };
         assert!(is_valid_region_edit(&edit));
 
@@ -1899,6 +2061,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            ..Default::default()
         };
         assert!(!is_valid_region_edit(&edit));
 
@@ -1911,6 +2074,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            ..Default::default()
         };
         assert!(is_valid_region_edit(&edit));
 
@@ -1923,6 +2087,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            ..Default::default()
         };
         assert!(is_valid_region_edit(&edit));
 
@@ -1935,6 +2100,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            ..Default::default()
         };
         assert!(!is_valid_region_edit(&edit));
         let edit = RegionEdit {
@@ -1945,6 +2111,7 @@ mod tests {
             flushed_entry_id: Some(1),
             flushed_sequence: None,
             committed_sequence: None,
+            ..Default::default()
         };
         assert!(!is_valid_region_edit(&edit));
         let edit = RegionEdit {
@@ -1955,6 +2122,22 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: Some(1),
             committed_sequence: None,
+            ..Default::default()
+        };
+        assert!(!is_valid_region_edit(&edit));
+        let edit = RegionEdit {
+            files_to_add: vec![FileMeta::default()],
+            files_to_remove: vec![],
+            timestamp_ms: None,
+            compaction_time_window: None,
+            flushed_entry_id: None,
+            flushed_sequence: None,
+            committed_sequence: None,
+            wal_recovery: WalRecoveryEdit {
+                pending_tails: Some(vec![]),
+                handoff_floor: None,
+            },
+            ..Default::default()
         };
         assert!(!is_valid_region_edit(&edit));
     }

@@ -53,9 +53,11 @@
 
 use pgwire::error::PgWireResult;
 
+use crate::postgres::copy_in::arrow::ArrowOptions;
 use crate::postgres::copy_in::csv::CsvCodec;
 use crate::postgres::copy_in::influxdb::InfluxdbOptions;
 use crate::postgres::copy_in::otlp::OtlpOptions;
+use crate::postgres::copy_in::prom_write::PromWriteOptions;
 
 /// A resolved COPY FROM STDIN format with its validated options.
 #[derive(Debug, Clone)]
@@ -63,17 +65,26 @@ pub(super) enum CopyFormat {
     /// Table-bound CSV: records are parsed incrementally against the
     /// targeted table's columns and inserted in batches.
     Csv(CsvCodec),
+    /// Table-bound Arrow IPC stream, completed batch-by-batch through Flight's
+    /// bulk ingestion handler. Advertises binary wire format code 1.
+    Arrow(ArrowOptions),
     /// Table-less influxdb line protocol: the whole payload is one
     /// bounded request body, completed through the line-protocol
     /// pipeline the HTTP write endpoints use (one COPY statement is one
     /// ingestion request; streaming ingest is not supported).
     Influxdb(InfluxdbOptions),
-    /// Table-less, **binary** OTLP: one `ExportMetricsServiceRequest`,
+    /// **Binary** OTLP (optionally table-targeted for logs/traces):
+    /// one `ExportMetricsServiceRequest`,
     /// `ExportTraceServiceRequest` or `ExportLogsServiceRequest`
     /// protobuf message, buffered whole and completed through the
     /// matching OTLP pipeline the OTLP/HTTP endpoints use. Advertises
     /// wire format code 1.
     Otlp(OtlpOptions),
+    /// Table-less, **binary** Prometheus Remote Write: one request body
+    /// (v1 or v2, compressed protobuf), buffered whole and completed
+    /// through the same ingestion core the `/v1/prometheus/write`
+    /// endpoint runs. Advertises wire format code 1.
+    PromWrite(PromWriteOptions),
 }
 
 /// A parsed, insertable row: one gRPC value per targeted column, in COPY

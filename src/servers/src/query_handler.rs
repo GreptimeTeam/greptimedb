@@ -41,7 +41,9 @@ use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use operator::insert::PreparedMetricInserts;
 use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
-use pipeline::{GreptimePipelineParams, Pipeline, PipelineInfo, PipelineVersion, PipelineWay};
+use pipeline::{
+    GreptimePipelineParams, Pipeline, PipelineInfo, PipelineOptions, PipelineVersion, PipelineWay,
+};
 use serde_json::Value;
 use session::context::{QueryContext, QueryContextRef};
 use table::metadata::TableInfoRef;
@@ -285,6 +287,9 @@ pub trait PipelineHandler {
         query_ctx: &QueryContext,
     ) -> std::result::Result<Option<Arc<table::Table>>, catalog::error::Error>;
 
+    /// Returns the server's pipeline options.
+    fn pipeline_options(&self) -> &PipelineOptions;
+
     //// Build a pipeline from a string.
     fn build_pipeline(&self, pipeline: &str) -> Result<Pipeline>;
 
@@ -372,6 +377,35 @@ pub trait CopyInHandler: Send + Sync {
         table: &str,
         query_ctx: QueryContextRef,
     ) -> Result<Option<TableInfoRef>>;
+
+    /// Validates that a COPY target's resolved catalog/schema is within
+    /// the session's allowed scope, before any data is transferred.
+    /// Enforces the `disallow_cross_catalog_query` restriction for
+    /// targets that leave the session's catalog — the same restriction
+    /// SQL INSERT and `copy_in_table` enforce. A no-op when the
+    /// restriction is disabled.
+    async fn copy_in_validate_scope(
+        &self,
+        catalog: &str,
+        schema: &str,
+        query_ctx: QueryContextRef,
+    ) -> Result<()>;
+
+    /// Ingests Arrow batches through the same bulk path as Flight DoPut.
+    /// The COPY transport owns framing and memory admission; implementations
+    /// retain stream-level authorization and schema reconciliation.
+    fn copy_in_arrow(
+        &self,
+        _stream: crate::grpc::flight::PutRecordBatchRequestStream,
+        _query_ctx: QueryContextRef,
+    ) -> Result<
+        futures::stream::BoxStream<'static, Result<common_grpc::flight::do_put::DoPutResponse>>,
+    > {
+        crate::error::NotSupportedSnafu {
+            feat: "Arrow COPY ingestion",
+        }
+        .fail()
+    }
 
     /// Inserts a parsed batch produced by a COPY stream. Returns the
     /// number of affected rows.

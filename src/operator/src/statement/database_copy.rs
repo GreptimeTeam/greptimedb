@@ -16,9 +16,7 @@
 
 use std::collections::HashMap;
 
-use common_datasource::object_store::FILE_SCHEMA;
-#[cfg(windows)]
-use common_datasource::object_store::{FS_SCHEMA, parse_url};
+use common_datasource::object_store::{FILE_SCHEMA, FS_SCHEMA, parse_url};
 use common_stat::get_total_cpu_cores;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -143,6 +141,51 @@ impl DatabaseExportFile {
     }
 }
 
+/// Resolves every output before any writer starts. Packed exports use generated
+/// object names instead of table names on disk.
+pub(crate) fn prepare_database_export_files(
+    directory: &str,
+    names: impl IntoIterator<Item = String>,
+    suffix: &str,
+    packed: bool,
+) -> Result<Vec<DatabaseExportFile>> {
+    let (scheme, _, _) = parse_url(directory).context(error::BuildBackendSnafu)?;
+    let local = scheme.eq_ignore_ascii_case(FS_SCHEMA) || scheme.eq_ignore_ascii_case(FILE_SCHEMA);
+    let mut filenames = HashMap::new();
+    let mut outputs = Vec::new();
+    for name in names {
+        let output = DatabaseExportFile::new(directory, &name, suffix)?;
+        if cfg!(windows) && local && !packed {
+            common_datasource::object_store::validate_windows_file_name(&output.path).map_err(
+                |reason| {
+                    error::InvalidDatabaseExportSnafu {
+                        reason: format!("table {name}: {reason}"),
+                    }
+                    .build()
+                },
+            )?;
+        }
+        // Use platform defaults for per-table files. This does not model
+        // filesystem-specific Unicode equivalences such as APFS normalization.
+        let key = if local && !packed && cfg!(any(windows, target_os = "macos")) {
+            output.path.to_lowercase()
+        } else {
+            output.path.clone()
+        };
+        if let Some(previous) = filenames.insert(key, name.clone()) {
+            return error::InvalidDatabaseExportSnafu {
+                reason: format!(
+                    "duplicate output name: {name} conflicts with {previous} ({})",
+                    output.path
+                ),
+            }
+            .fail();
+        }
+        outputs.push(output);
+    }
+    Ok(outputs)
+}
+
 /// Resolve a listed writer key back to its table name and COPY input location.
 pub(crate) fn database_import_source(directory: &str, path: &str) -> Result<(String, String)> {
     let mut filename = path.rsplit('/').next().unwrap_or(path).to_string();
@@ -223,6 +266,56 @@ impl StatementExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn database_export_file_names_are_distinct() {
+        for directory in ["backup/", "file:///copy/backup/"] {
+            for names in [["Events", "events"], ["Éa", "éa"]] {
+                for packed in [false, true] {
+                    let result = prepare_database_export_files(
+                        directory,
+                        names.map(String::from),
+                        ".parquet",
+                        packed,
+                    );
+                    if !packed && cfg!(any(windows, target_os = "macos")) {
+                        assert!(matches!(result,
+                            Err(error::Error::InvalidDatabaseExport { reason })
+                            if names.iter().all(|name| reason.contains(name))));
+                    } else {
+                        assert_eq!(result.unwrap().len(), 2);
+                    }
+                }
+            }
+        }
+        let overlong_name = "z".repeat(252);
+        for name in [
+            "job:rate5m",
+            "a:b",
+            ":leading",
+            "con",
+            "nul.part",
+            &overlong_name,
+        ] {
+            let local = prepare_database_export_files("backup/", [name.into()], ".parquet", false);
+            assert_eq!(local.is_err(), cfg!(windows), "{name}");
+            prepare_database_export_files("backup/", [name.into()], ".parquet", true).unwrap();
+        }
+        let remote = prepare_database_export_files(
+            "s3://bucket/backup/",
+            [
+                "Events".into(),
+                "events".into(),
+                "job:rate5m".into(),
+                "con".into(),
+                overlong_name,
+            ],
+            ".parquet",
+            false,
+        )
+        .unwrap();
+        assert_eq!(remote.len(), 5);
+    }
 
     #[test]
     fn directory_url_components_cannot_capture_output_names() {

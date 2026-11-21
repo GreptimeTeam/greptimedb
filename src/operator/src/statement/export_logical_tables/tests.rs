@@ -310,6 +310,57 @@ async fn narrow_batches_share_row_groups() {
 }
 
 #[tokio::test]
+async fn packed_destination_reuses_backend_with_local_access_disabled() {
+    use common_datasource::packed_snapshot::{PACK_INDEX_FILE, PackIndex};
+    use common_datasource::packed_writer::PackedWriter;
+
+    let directory = common_test_util::temp_dir::create_temp_dir("packed_metric_destination");
+    let location = url::Url::from_directory_path(directory.path()).unwrap();
+    let store = object_store::secure_fs::SecureFsRoot::open(directory.path())
+        .unwrap()
+        .build_operator();
+    let connection = HashMap::new();
+    let access = LocalFileAccess::Disabled;
+    let result = LogicalExportDestination::new(location.as_str(), &connection, &access, None).await;
+    assert!(matches!(
+        result,
+        Err(error::Error::BuildBackend {
+            source: common_datasource::error::Error::LocalFileAccessDisabled { .. },
+            ..
+        })
+    ));
+
+    let packed = PackedWriter::new(store.clone()).unwrap();
+    let destination = LogicalExportDestination::new(
+        location.as_str(),
+        &connection,
+        &access,
+        Some(packed.clone()),
+    )
+    .await
+    .unwrap();
+    let token = CancellationToken::new();
+    let summary = export_stream_managed(
+        &unit(),
+        stream(vec![batch(vec![Some(1025)], vec![Some("a")])]),
+        destination,
+        export_limits(),
+        &token,
+        ExportWriteBudget::new(1),
+    )
+    .await
+    .unwrap();
+    assert_eq!(summary.rows, 1);
+    assert_eq!(summary.files, 3);
+    packed.lock().await.finish(&token).await.unwrap();
+    let index: PackIndex =
+        serde_json::from_slice(&store.read(PACK_INDEX_FILE).await.unwrap().to_bytes()).unwrap();
+    index
+        .validate_membership(["cpu.v1", "empty", "requests"])
+        .unwrap();
+}
+
+#[tokio::test]
 async fn routes_across_batches_and_writes_empty_files() {
     let unit = unit();
     let store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
@@ -324,11 +375,10 @@ async fn routes_across_batches_and_writes_empty_files() {
     let result = export_stream_managed(
         &unit,
         stream(batches),
-        &store,
+        LogicalExportDestination::Object(store.clone()),
         export_limits(),
         &CancellationToken::new(),
         budget.clone(),
-        None,
     )
     .await
     .unwrap();
@@ -619,11 +669,13 @@ async fn supported_metric_types_parquet_roundtrip() {
                 let summary = export_stream_managed(
                     &unit,
                     stream(vec![input.clone()]),
-                    &store,
+                    match &writer {
+                        Some(writer) => LogicalExportDestination::Packed(writer.clone()),
+                        None => LogicalExportDestination::Object(store.clone()),
+                    },
                     export_limits(),
                     &CancellationToken::new(),
                     ExportWriteBudget::new(1),
-                    writer.clone(),
                 )
                 .await
                 .unwrap();
@@ -803,11 +855,13 @@ async fn cancellation_drains_storage_and_preserves_committed_files() {
         let export = export_stream_managed(
             &unit,
             stream(vec![input]),
-            &store,
+            match &packed {
+                Some(packed) => LogicalExportDestination::Packed(packed.clone()),
+                None => LogicalExportDestination::Object(store.clone()),
+            },
             limits,
             &cancellation,
             budget.clone(),
-            packed.clone(),
         );
         tokio::pin!(export);
         tokio::select! {
@@ -1128,20 +1182,18 @@ async fn groups_and_ordinary_files_share_writer_admission_and_drain() {
                     export_stream_managed(
                         &a,
                         rows(),
-                        &store,
+                        LogicalExportDestination::Object(store.clone()),
                         export_limits(),
                         &token,
                         budget.clone(),
-                        None,
                     ),
                     export_stream_managed(
                         &b,
                         rows(),
-                        &store,
+                        LogicalExportDestination::Object(store.clone()),
                         export_limits(),
                         &token,
                         budget.clone(),
-                        None,
                     ),
                     ordinary,
                 )
@@ -1237,7 +1289,13 @@ async fn completed_table_workers_are_reaped_during_admission() {
         for id in 0..64 {
             file.output.path = format!("empty-{id}.parquet");
             writers
-                .open(id, file, &store, export_limits(), &token)
+                .open(
+                    id,
+                    file,
+                    &LogicalExportDestination::Object(store.clone()),
+                    export_limits(),
+                    &token,
+                )
                 .await
                 .unwrap();
             assert!(writers.pending_tasks() <= parallelism + 1);

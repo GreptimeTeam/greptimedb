@@ -14,10 +14,12 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::env;
+use std::future::Future;
 use std::net::TcpListener;
-use std::ops::RangeInclusive;
-use std::sync::Arc;
+use std::ops::{Deref, DerefMut, RangeInclusive};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -57,6 +59,7 @@ use frontend::frontend::{Frontend, FrontendOptions};
 use frontend::instance::Instance as FeInstance;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
+use frontend::service_config::BatcherOptions;
 use futures::TryStreamExt;
 use hyper_util::rt::TokioIo;
 use meta_client::client::MetaClientBuilder;
@@ -87,20 +90,60 @@ use crate::test_util::{
     create_tmp_dir_and_datanode_opts,
 };
 
-/// Flight `DoGet` requests another node sent to a datanode over its network address (see
-/// [`GreptimeDbClusterBuilder::with_real_datanode_grpc_addr`]).
-///
-/// The frontend and datanodes inside the test process use in-process clients, so counted requests
-/// come from remote nodes querying regions owned by this datanode.
+/// Flight `DoGet` requests sent to a datanode over its network address (see
+/// [`GreptimeDbClusterBuilder::with_real_datanode_grpc_addr`]). In-process duplex requests are not
+/// counted. Request totals are per datanode; active and peak counts are shared by all datanode
+/// listeners in the cluster. By default, the frontend uses duplex, but it can opt into TCP with
+/// [`GreptimeDbClusterBuilder::with_frontend_real_datanode_grpc`].
 #[derive(Debug, Default)]
 pub struct DatanodeRpcStats {
     do_get_requests: AtomicUsize,
+    active: Arc<Mutex<ActiveDoGet>>,
+}
+
+#[derive(Debug, Default)]
+struct ActiveDoGet {
+    current: usize,
+    peak: usize,
 }
 
 impl DatanodeRpcStats {
-    /// The number of Flight `DoGet` requests another node sent to the datanode.
+    /// The total number of Flight `DoGet` requests received over TCP.
     pub fn requests(&self) -> usize {
         self.do_get_requests.load(Ordering::Relaxed)
+    }
+
+    /// The cluster-wide number of TCP `DoGet` calls with a pending response or live response body.
+    pub fn active(&self) -> usize {
+        self.active.lock().unwrap().current
+    }
+
+    /// The cluster-wide peak number of concurrently active TCP `DoGet` calls since the last reset.
+    pub fn peak_active(&self) -> usize {
+        self.active.lock().unwrap().peak
+    }
+
+    /// Reset the peak to the number of currently active calls.
+    pub fn reset_peak_active(&self) {
+        let mut active = self.active.lock().unwrap();
+        active.peak = active.current;
+    }
+
+    fn start(self: &Arc<Self>) -> DoGetGuard {
+        self.do_get_requests.fetch_add(1, Ordering::Relaxed);
+        let mut active = self.active.lock().unwrap();
+        active.current += 1;
+        active.peak = active.peak.max(active.current);
+        DoGetGuard(self.clone())
+    }
+}
+
+/// Keeps a `DoGet` active until its response body is dropped, including cancellation and errors.
+struct DoGetGuard(Arc<DatanodeRpcStats>);
+
+impl Drop for DoGetGuard {
+    fn drop(&mut self) {
+        self.0.active.lock().unwrap().current -= 1;
     }
 }
 
@@ -112,9 +155,12 @@ pub struct GreptimeDbCluster {
     /// The stats of the network address of every datanode, empty unless the cluster serves the
     /// datanodes at their own addresses.
     pub datanode_rpc_stats: HashMap<DatanodeId, Arc<DatanodeRpcStats>>,
+    network_do_get: Arc<Mutex<ActiveDoGet>>,
     pub kv_backend: KvBackendRef,
     pub metasrv: Arc<Metasrv>,
     pub frontend: Arc<Frontend>,
+    metasrv_connection: MockInfo,
+    datanode_clients: Arc<NodeClients>,
 }
 
 impl GreptimeDbCluster {
@@ -127,6 +173,22 @@ impl GreptimeDbCluster {
     /// [`GreptimeDbClusterBuilder::with_real_datanode_grpc_addr`]).
     pub fn datanode_rpc_stats(&self, datanode_id: DatanodeId) -> Option<&Arc<DatanodeRpcStats>> {
         self.datanode_rpc_stats.get(&datanode_id)
+    }
+
+    /// Number of active TCP `DoGet` calls across all datanodes in this cluster.
+    pub fn network_do_get_active(&self) -> usize {
+        self.network_do_get.lock().unwrap().current
+    }
+
+    /// Peak active TCP `DoGet` calls across all datanodes since the last reset.
+    pub fn network_do_get_peak_active(&self) -> usize {
+        self.network_do_get.lock().unwrap().peak
+    }
+
+    /// Reset the cluster-wide peak to the number of currently active calls.
+    pub fn reset_network_do_get_peak(&self) {
+        let mut active = self.network_do_get.lock().unwrap();
+        active.peak = active.current;
     }
 
     /// List all SST files from all datanodes.
@@ -202,12 +264,16 @@ pub struct GreptimeDbClusterBuilder {
     datanode_gc_config: GcConfig,
     metasrv_gc_config: GcSchedulerOptions,
     frontend_auto_create_table: bool,
+    table_batcher: BatcherOptions,
     shared_home_dir: Option<Arc<TempDir>>,
     meta_selector: Option<SelectorRef>,
     plugins: Plugins,
+    datanode_plugins: Arc<dyn Fn(DatanodeId) -> Plugins + Send + Sync>,
     local_file_access: LocalFileAccess,
     event_recorder_options: EventRecorderOptions,
     real_datanode_grpc_addr: bool,
+    frontend_real_datanode_grpc: bool,
+    query_options: query::options::QueryOptions,
 }
 
 impl GreptimeDbClusterBuilder {
@@ -240,12 +306,16 @@ impl GreptimeDbClusterBuilder {
             datanode_gc_config: GcConfig::default(),
             metasrv_gc_config: GcSchedulerOptions::default(),
             frontend_auto_create_table: true,
+            table_batcher: BatcherOptions::default(),
             shared_home_dir: None,
             meta_selector: None,
             plugins: Plugins::default(),
+            datanode_plugins: Arc::new(|_| Plugins::default()),
             local_file_access: LocalFileAccess::default(),
             event_recorder_options: EventRecorderOptions::default(),
             real_datanode_grpc_addr: false,
+            frontend_real_datanode_grpc: false,
+            query_options: query::options::QueryOptions::default(),
         }
     }
 
@@ -306,6 +376,13 @@ impl GreptimeDbClusterBuilder {
         self
     }
 
+    /// Configures ordinary-table batching for the frontend.
+    #[must_use]
+    pub fn with_table_batcher(mut self, options: BatcherOptions) -> Self {
+        self.table_batcher = options;
+        self
+    }
+
     #[must_use]
     pub fn with_shared_home_dir(mut self, shared_home_dir: Arc<TempDir>) -> Self {
         self.shared_home_dir = Some(shared_home_dir);
@@ -346,6 +423,21 @@ impl GreptimeDbClusterBuilder {
         self
     }
 
+    /// Routes frontend-to-datanode RPCs through real TCP clients instead of duplex clients.
+    /// This only has an effect when `with_real_datanode_grpc_addr(true)` is also set.
+    #[must_use]
+    pub fn with_frontend_real_datanode_grpc(mut self, enabled: bool) -> Self {
+        self.frontend_real_datanode_grpc = enabled;
+        self
+    }
+
+    /// Overrides query options for this test cluster's frontend.
+    #[must_use]
+    pub fn with_query_options(mut self, options: query::options::QueryOptions) -> Self {
+        self.query_options = options;
+        self
+    }
+
     pub async fn build_with(
         &self,
         datanode_options: Vec<DatanodeOptions>,
@@ -355,7 +447,7 @@ impl GreptimeDbClusterBuilder {
         let datanodes = datanode_options.len();
 
         let channel_config = ChannelConfig::new().timeout(Some(Duration::from_secs(20)));
-        let datanode_clients = Arc::new(NodeClients::new(channel_config));
+        let datanode_clients = Arc::new(NodeClients::new(channel_config.clone()));
 
         let opt = MetasrvOptions {
             procedure: ProcedureConfig {
@@ -393,10 +485,19 @@ impl GreptimeDbClusterBuilder {
             .build_datanodes_with_options(&metasrv, &datanode_options)
             .await;
 
+        let network_do_get = Arc::new(Mutex::new(ActiveDoGet::default()));
         let datanode_rpc_stats = if self.real_datanode_grpc_addr {
             datanode_options
                 .iter()
-                .map(|opts| (opts.node_id.unwrap(), Arc::new(DatanodeRpcStats::default())))
+                .map(|opts| {
+                    (
+                        opts.node_id.unwrap(),
+                        Arc::new(DatanodeRpcStats {
+                            active: network_do_get.clone(),
+                            ..Default::default()
+                        }),
+                    )
+                })
                 .collect::<HashMap<_, _>>()
         } else {
             HashMap::new()
@@ -413,12 +514,15 @@ impl GreptimeDbClusterBuilder {
         self.wait_datanodes_alive(metasrv.metasrv.meta_peer_client(), datanodes)
             .await;
 
+        // Metasrv keeps its duplex clients; the frontend gets an empty cache so its misses
+        // construct TCP clients using the addresses registered by the datanodes.
+        let frontend_clients = if self.real_datanode_grpc_addr && self.frontend_real_datanode_grpc {
+            Arc::new(NodeClients::new(channel_config))
+        } else {
+            datanode_clients.clone()
+        };
         let mut frontend = self
-            .build_frontend(
-                metasrv.clone(),
-                datanode_clients.clone(),
-                start_frontend_servers,
-            )
+            .build_frontend(metasrv.clone(), frontend_clients, start_frontend_servers)
             .await;
 
         frontend.start().await.unwrap();
@@ -428,10 +532,49 @@ impl GreptimeDbClusterBuilder {
             guards,
             datanode_instances,
             datanode_rpc_stats,
+            network_do_get,
             kv_backend: self.kv_backend.clone(),
-            metasrv: metasrv.metasrv,
+            metasrv: metasrv.metasrv.clone(),
+            metasrv_connection: metasrv,
+            datanode_clients,
             frontend: Arc::new(frontend),
         }
+    }
+
+    /// Creates a fresh plugin registry for each datanode start, including restarts.
+    /// Datanode construction adds internal plugins, so registries cannot be shared.
+    #[must_use]
+    pub fn with_datanode_plugins(
+        mut self,
+        plugins: impl Fn(DatanodeId) -> Plugins + Send + Sync + 'static,
+    ) -> Self {
+        self.datanode_plugins = Arc::new(plugins);
+        self
+    }
+
+    /// Restarts one in-process datanode and reconnects the shared client pool.
+    /// Real TCP listeners are not restartable by this harness.
+    pub async fn restart_datanode(&self, cluster: &mut GreptimeDbCluster, node_id: DatanodeId) {
+        assert!(!self.real_datanode_grpc_addr);
+        let mut old = cluster.datanode_instances.remove(&node_id).unwrap();
+        old.shutdown().await.unwrap();
+        drop(old);
+        let options = cluster
+            .datanode_options
+            .iter()
+            .find(|options| options.node_id == Some(node_id))
+            .unwrap()
+            .clone();
+        let instance = self
+            .create_datanode(options.clone(), cluster.metasrv_connection.clone())
+            .await;
+        let (addr, client) =
+            create_datanode_client(&instance, &options.grpc.server_addr, None).await;
+        cluster
+            .datanode_clients
+            .insert_client(Peer::new(node_id, addr), client)
+            .await;
+        cluster.datanode_instances.insert(node_id, instance);
     }
 
     pub async fn build(&self, start_frontend_servers: bool) -> GreptimeDbCluster {
@@ -570,7 +713,8 @@ impl GreptimeDbClusterBuilder {
         let layered_cache_registry =
             Arc::new(build_datanode_layered_cache_registry(meta_backend.clone()));
 
-        let mut builder = DatanodeBuilder::new(opts.clone(), Plugins::default(), meta_backend);
+        let plugins = (self.datanode_plugins)(opts.node_id.unwrap());
+        let mut builder = DatanodeBuilder::new(opts.clone(), plugins, meta_backend);
         builder
             .with_cache_registry(layered_cache_registry.clone())
             .with_meta_client(meta_client);
@@ -665,8 +809,10 @@ impl GreptimeDbClusterBuilder {
         let mut fe_opts = FrontendOptions {
             auto_create_table: self.frontend_auto_create_table,
             event_recorder: self.event_recorder_options.clone(),
+            query: self.query_options.clone(),
             ..Default::default()
         };
+        fe_opts.pending_rows_batcher.table = self.table_batcher.clone();
 
         // Choose a random unused port between [14000, 24000] for local test to avoid conflicts.
         let port_range = 14000..=24000;
@@ -783,14 +929,12 @@ fn serve_datanode_region_server<I, IO>(
 
 /// Serves the region server of `datanode` and returns the address and the client of the address.
 ///
-/// The returned client is always an in-process client: the frontend and the datanodes of the test
-/// process reach the region server through a duplex stream, no matter which address they use. This
-/// keeps the in-process traffic out of `rpc_stats`.
+/// The returned client is always an in-process duplex client, keeping its traffic out of
+/// `rpc_stats`. The frontend can instead use separate TCP clients when opted in.
 ///
 /// [`test_util::PEER_PLACEHOLDER_ADDR`] is not a real address, so it cannot be served over the
 /// network at all. Any other address is a real one: the region server is additionally served on
-/// its local TCP port (`rpc_stats` counts the requests of the remote nodes that reach it, e.g. the
-/// region query that a datanode sends for the regions of another datanode).
+/// its local TCP port, and `rpc_stats` counts requests reaching that port.
 async fn create_datanode_client(
     datanode: &Datanode,
     addr: &str,
@@ -843,24 +987,61 @@ struct CountRequests<S> {
 
 impl<S, ReqBody> Service<http::Request<ReqBody>> for CountRequests<S>
 where
-    S: Service<http::Request<ReqBody>>,
+    S: Service<http::Request<ReqBody>, Response = http::Response<tonic::body::Body>>,
+    S::Future: Send + 'static,
+    S::Error: Send + 'static,
 {
-    type Response = S::Response;
+    type Response = http::Response<tonic::body::Body>;
     type Error = S::Error;
-    type Future = S::Future;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         self.inner.poll_ready(cx)
     }
 
     fn call(&mut self, request: http::Request<ReqBody>) -> Self::Future {
-        if request.uri().path() == "/arrow.flight.protocol.FlightService/DoGet"
-            && let Some(rpc_stats) = &self.rpc_stats
-        {
-            rpc_stats.do_get_requests.fetch_add(1, Ordering::Relaxed);
-        }
+        let guard = if request.uri().path() == "/arrow.flight.protocol.FlightService/DoGet" {
+            self.rpc_stats.as_ref().map(DatanodeRpcStats::start)
+        } else {
+            None
+        };
+        let future = self.inner.call(request);
 
-        self.inner.call(request)
+        Box::pin(async move {
+            let response = future.await?;
+            Ok(response.map(|body| match guard {
+                Some(guard) => {
+                    // The pinned body delegates HTTP frames (including gRPC trailers) while the
+                    // pointer owns the guard until the body is dropped.
+                    tonic::body::Body::new(Pin::new(GuardedBody {
+                        body: Box::new(body),
+                        _guard: guard,
+                    }))
+                }
+                None => body,
+            }))
+        })
+    }
+}
+
+// Dereferencing to the inner body lets tonic wrap it while keeping the guard alive until the
+// streaming body is completed and dropped, or the caller cancels the response.
+struct GuardedBody {
+    body: Box<tonic::body::Body>,
+    _guard: DoGetGuard,
+}
+
+impl Deref for GuardedBody {
+    type Target = tonic::body::Body;
+
+    fn deref(&self) -> &Self::Target {
+        &self.body
+    }
+}
+
+impl DerefMut for GuardedBody {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.body
     }
 }
 
@@ -904,6 +1085,230 @@ mod tests {
     use meta_srv::metasrv::builder::DdlManagerConfigureContext;
 
     use super::*;
+
+    #[tokio::test]
+    async fn test_do_get_stats_follow_response_body_lifetime() {
+        let stats = Arc::new(DatanodeRpcStats::default());
+        let mut service = CountRequests {
+            inner: service_fn(|_: http::Request<()>| async {
+                let stream = futures::stream::once(async {
+                    Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"data"))
+                });
+                let body = tonic::body::Body::new(axum::body::Body::from_stream(stream));
+                Ok::<_, std::convert::Infallible>(http::Response::new(body))
+            }),
+            rpc_stats: Some(stats.clone()),
+        };
+        let request = || {
+            http::Request::builder()
+                .uri("/arrow.flight.protocol.FlightService/DoGet")
+                .body(())
+                .unwrap()
+        };
+
+        let first = service.call(request()).await.unwrap();
+        let other_stats = Arc::new(DatanodeRpcStats {
+            active: stats.active.clone(),
+            ..Default::default()
+        });
+        service.rpc_stats = Some(other_stats.clone());
+        let second = service.call(request()).await.unwrap();
+        assert_eq!(
+            (
+                stats.requests(),
+                other_stats.requests(),
+                stats.active(),
+                stats.peak_active()
+            ),
+            (1, 1, 2, 2)
+        );
+        assert_eq!((other_stats.active(), other_stats.peak_active()), (2, 2));
+        stats.reset_peak_active();
+        assert_eq!(stats.peak_active(), 2);
+
+        // Completing one body and dropping another both release their guards.
+        let body = axum::body::Body::new(first.into_body());
+        assert_eq!(
+            axum::body::to_bytes(body, usize::MAX).await.unwrap(),
+            "data"
+        );
+        assert_eq!(stats.active(), 1);
+        stats.reset_peak_active();
+        assert_eq!(stats.peak_active(), 1);
+        drop(second);
+        assert_eq!(stats.active(), 0);
+        stats.reset_peak_active();
+        assert_eq!(stats.peak_active(), 0);
+
+        let other = http::Request::builder().uri("/other").body(()).unwrap();
+        let other = service.call(other).await.unwrap();
+        assert_eq!(
+            (stats.requests(), other_stats.requests(), stats.active()),
+            (1, 1, 0)
+        );
+        drop(other);
+    }
+
+    #[tokio::test]
+    async fn test_do_get_stats_release_on_future_cancel_or_error() {
+        let stats = Arc::new(DatanodeRpcStats::default());
+        let request = || {
+            http::Request::builder()
+                .uri("/arrow.flight.protocol.FlightService/DoGet")
+                .body(())
+                .unwrap()
+        };
+        let mut pending = CountRequests {
+            inner: service_fn(|_: http::Request<()>| {
+                std::future::pending::<
+                    Result<http::Response<tonic::body::Body>, std::convert::Infallible>,
+                >()
+            }),
+            rpc_stats: Some(stats.clone()),
+        };
+        let future = pending.call(request());
+        assert_eq!(stats.active(), 1);
+        drop(future);
+        assert_eq!(stats.active(), 0);
+
+        let mut failing = CountRequests {
+            inner: service_fn(|_: http::Request<()>| async {
+                Err::<http::Response<tonic::body::Body>, _>(std::io::Error::other("failed"))
+            }),
+            rpc_stats: Some(stats.clone()),
+        };
+        assert!(failing.call(request()).await.is_err());
+        assert_eq!(
+            (stats.requests(), stats.active(), stats.peak_active()),
+            (2, 0, 1)
+        );
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_object_store_cluster_entry_and_restart() {
+        use crate::test_util::{execute_sql, execute_sql_and_expect, get_test_store_config};
+        use client::OutputData;
+        use common_wal::config::object_store::{
+            EnableObjectStoreWal, FIXED_DIRECTORY_GENERATION, ObjectStoreWalConfig,
+        };
+
+        let home = Arc::new(create_temp_dir("object-store-cluster-entry"));
+        let (storage, _guard) = get_test_store_config(&StorageType::File);
+        let config = ObjectStoreWalConfig {
+            prefix: "cluster/wal".into(),
+            ..Default::default()
+        };
+        let plugins = Plugins::new();
+        plugins.insert(EnableObjectStoreWal);
+        let builder = GreptimeDbClusterBuilder::new("object-store-cluster-entry")
+            .await
+            .with_datanodes(2)
+            .with_store_config(storage)
+            .with_shared_home_dir(home.clone())
+            .with_metasrv_wal_config(MetasrvWalConfig::ObjectStore(config.clone()))
+            .with_datanode_wal_config(DatanodeWalConfig::ObjectStore(config.clone()))
+            .with_plugins(plugins)
+            .with_datanode_plugins(|_| {
+                let plugins = Plugins::new();
+                plugins.insert(EnableObjectStoreWal);
+                plugins
+            });
+        let mut cluster = builder.build(false).await;
+        execute_sql(cluster.fe_instance(), "CREATE TABLE oswal_entry (i INT PRIMARY KEY, ts TIMESTAMP TIME INDEX) PARTITION ON COLUMNS (i) (i < 10, i >= 10)").await;
+        assert!(matches!(
+            execute_sql(
+                cluster.fe_instance(),
+                "INSERT INTO oswal_entry VALUES (1, 0), (11, 0)"
+            )
+            .await
+            .data,
+            OutputData::AffectedRows(2)
+        ));
+        let expected = r#"+----+---------------------+
+| i  | ts                  |
++----+---------------------+
+| 1  | 1970-01-01T00:00:00 |
+| 11 | 1970-01-01T00:00:00 |
++----+---------------------+"#;
+        execute_sql_and_expect(
+            cluster.fe_instance(),
+            "SELECT * FROM oswal_entry ORDER BY i",
+            expected,
+        )
+        .await;
+        let table = cluster
+            .fe_instance()
+            .catalog_manager()
+            .table("greptime", "public", "oswal_entry", None)
+            .await
+            .unwrap()
+            .unwrap();
+        let table_id = table.table_info().table_id();
+        let stores =
+            DatanodeBuilder::build_object_store_manager(&cluster.datanode_options[0].storage, 1)
+                .await
+                .unwrap();
+        for node_id in [1, 2] {
+            let key = common_meta::key::datanode_table::DatanodeTableKey::new(node_id, table_id);
+            let metadata = cluster
+                .metasrv
+                .table_metadata_manager()
+                .datanode_table_manager()
+                .get(&key)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!metadata.regions.is_empty());
+            assert!(metadata.region_info.region_wal_options.values().all(|options| {
+                matches!(options, common_wal::options::WalOptions::ObjectStore(options) if options.prefix == config.prefix)
+            }));
+            let prefix = format!(
+                "{}/objects/",
+                config.node_prefix(node_id, FIXED_DIRECTORY_GENERATION)
+            );
+            assert!(
+                !stores
+                    .default_object_store()
+                    .list(&prefix)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            builder.restart_datanode(&mut cluster, node_id).await;
+            execute_sql_and_expect(
+                cluster.fe_instance(),
+                "SELECT * FROM oswal_entry ORDER BY i",
+                expected,
+            )
+            .await;
+        }
+        assert!(matches!(
+            execute_sql(
+                cluster.fe_instance(),
+                "INSERT INTO oswal_entry VALUES (2, 0), (12, 0)"
+            )
+            .await
+            .data,
+            OutputData::AffectedRows(2)
+        ));
+        execute_sql_and_expect(
+            cluster.fe_instance(),
+            "SELECT * FROM oswal_entry ORDER BY i",
+            r#"+----+---------------------+
+| i  | ts                  |
++----+---------------------+
+| 1  | 1970-01-01T00:00:00 |
+| 2  | 1970-01-01T00:00:00 |
+| 11 | 1970-01-01T00:00:00 |
+| 12 | 1970-01-01T00:00:00 |
++----+---------------------+"#,
+        )
+        .await;
+        for node in cluster.datanode_instances.values_mut() {
+            node.shutdown().await.unwrap();
+        }
+    }
 
     const HEALTH_REFRESH_INTERVAL: Duration = Duration::from_millis(10);
     const HEALTH_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);

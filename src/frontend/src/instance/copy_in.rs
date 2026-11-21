@@ -14,7 +14,10 @@
 
 use api::v1::RowInsertRequests;
 use async_trait::async_trait;
-use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
+use auth::{
+    PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionTableTarget,
+    PermissionTableTargets,
+};
 use common_error::ext::BoxedError;
 use common_query::Output;
 use query::query_engine::options::{QueryOptions, validate_catalog_and_schema};
@@ -26,8 +29,36 @@ use table::metadata::TableInfoRef;
 
 use crate::instance::Instance;
 
+impl Instance {
+    /// Whether cross-catalog access is disabled for this instance —
+    /// mirrors SQL INSERT's catalog restriction (see `check_permission`).
+    fn cross_catalog_restricted(&self) -> bool {
+        self.plugins
+            .get::<QueryOptions>()
+            .map(|opts| opts.disallow_cross_catalog_query)
+            .unwrap_or_default()
+    }
+}
+
 #[async_trait]
 impl CopyInHandler for Instance {
+    async fn copy_in_validate_scope(
+        &self,
+        catalog: &str,
+        schema: &str,
+        query_ctx: QueryContextRef,
+    ) -> Result<()> {
+        // Runs against the ORIGINAL session context — callers switch the
+        // context to the target scope afterwards, so nothing downstream
+        // would catch it.
+        if self.cross_catalog_restricted() {
+            validate_catalog_and_schema(catalog, schema, &query_ctx)
+                .map_err(BoxedError::new)
+                .context(ExecuteQuerySnafu)?;
+        }
+        Ok(())
+    }
+
     async fn copy_in_table(
         &self,
         catalog: &str,
@@ -41,12 +72,7 @@ impl CopyInHandler for Instance {
         // query context — `begin_copy_in` switches the context to the
         // target catalog afterwards, so nothing downstream would catch
         // it.
-        let disallow_cross_catalog_query = self
-            .plugins
-            .get::<QueryOptions>()
-            .map(|opts| opts.disallow_cross_catalog_query)
-            .unwrap_or_default();
-        if disallow_cross_catalog_query {
+        if self.cross_catalog_restricted() {
             validate_catalog_and_schema(catalog, schema, &query_ctx)
                 .map_err(BoxedError::new)
                 .context(ExecuteQuerySnafu)?;
@@ -67,11 +93,42 @@ impl CopyInHandler for Instance {
             )
             .context(AuthSnafu)?;
 
-        self.catalog_manager()
+        let table_info = self
+            .catalog_manager()
             .table(catalog, schema, table, None)
             .await
             .map(|table| table.map(|table| table.table_info()))
-            .map_err(servers::error::Error::from)
+            .map_err(servers::error::Error::from)?;
+        let target = PermissionTableTarget::new(catalog, schema, table).with_physical_metric_table(
+            table_info
+                .as_ref()
+                .is_some_and(|info| info.is_physical_table()),
+        );
+        self.check_table_permission(
+            &query_ctx,
+            PermissionReq::BulkInsert {
+                catalog,
+                schema,
+                table,
+            },
+            PermissionTableTargets::resolved(vec![target]),
+        )
+        .context(AuthSnafu)?;
+        Ok(table_info)
+    }
+
+    fn copy_in_arrow(
+        &self,
+        stream: servers::grpc::flight::PutRecordBatchRequestStream,
+        query_ctx: QueryContextRef,
+    ) -> Result<
+        futures::stream::BoxStream<'static, Result<common_grpc::flight::do_put::DoPutResponse>>,
+    > {
+        Ok(
+            servers::query_handler::grpc::GrpcQueryHandler::handle_put_record_batch_stream(
+                self, stream, query_ctx,
+            ),
+        )
     }
 
     async fn copy_in_insert(

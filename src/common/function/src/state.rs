@@ -199,6 +199,15 @@ impl FunctionState {
                 Ok(ROWS)
             }
 
+            async fn cancel_region_compaction(
+                &self,
+                _region_id: RegionId,
+                _task_id: String,
+                _ctx: QueryContextRef,
+            ) -> Result<AffectedRows> {
+                Ok(ROWS)
+            }
+
             async fn discard_unflushed_data(
                 &self,
                 _region_id: RegionId,
@@ -213,6 +222,25 @@ impl FunctionState {
                 _ctx: QueryContextRef,
             ) -> Result<AffectedRows> {
                 Ok(ROWS)
+            }
+
+            /// Returns the node id; the table form adds ROWS, so tests can tell the forms apart.
+            async fn discard_pending_tails(
+                &self,
+                _region_id: RegionId,
+                node_id: u64,
+                _ctx: QueryContextRef,
+            ) -> Result<AffectedRows> {
+                Ok(node_id as AffectedRows)
+            }
+
+            async fn discard_pending_tails_by_table(
+                &self,
+                _table_name: TableName,
+                node_id: u64,
+                _ctx: QueryContextRef,
+            ) -> Result<AffectedRows> {
+                Ok(ROWS + node_id as AffectedRows)
             }
         }
 

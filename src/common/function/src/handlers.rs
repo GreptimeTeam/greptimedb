@@ -70,6 +70,14 @@ pub trait TableMutationHandler: Send + Sync {
         ctx: QueryContextRef,
     ) -> Result<AffectedRows>;
 
+    /// Cancels one identified compaction task on a table region.
+    async fn cancel_region_compaction(
+        &self,
+        region_id: RegionId,
+        task_id: String,
+        ctx: QueryContextRef,
+    ) -> Result<AffectedRows>;
+
     /// Discard all unflushed data from a table region.
     async fn discard_unflushed_data(
         &self,
@@ -81,6 +89,23 @@ pub trait TableMutationHandler: Send + Sync {
     async fn discard_unflushed_data_by_table(
         &self,
         table_name: TableName,
+        ctx: QueryContextRef,
+    ) -> Result<AffectedRows>;
+
+    /// Discards the pending WAL tails that datanode `node_id` wrote from a table region.
+    async fn discard_pending_tails(
+        &self,
+        region_id: RegionId,
+        node_id: u64,
+        ctx: QueryContextRef,
+    ) -> Result<AffectedRows>;
+
+    /// Discards the pending WAL tails that datanode `node_id` wrote from all regions of a
+    /// table.
+    async fn discard_pending_tails_by_table(
+        &self,
+        table_name: TableName,
+        node_id: u64,
         ctx: QueryContextRef,
     ) -> Result<AffectedRows>;
 }

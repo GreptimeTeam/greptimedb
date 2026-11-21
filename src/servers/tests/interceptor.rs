@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::borrow::Cow;
+use std::sync::Arc;
 
 use api::v1::greptime_request::Request;
 use api::v1::{InsertRequest, InsertRequests};
@@ -21,9 +22,13 @@ use common_query::Output;
 use datafusion_expr::LogicalPlan;
 use query::parser::PromQuery;
 use servers::error::{self, InternalSnafu, NotSupportedSnafu, Result};
-use servers::interceptor::{GrpcQueryInterceptor, PromQueryInterceptor, SqlQueryInterceptor};
+use servers::exemplar::query::Query as ExemplarQuery;
+use servers::interceptor::{
+    GrpcQueryInterceptor, PromQueryInterceptor, PromQueryInterceptorRef, SqlQueryInterceptor,
+};
 use session::context::{QueryContext, QueryContextRef};
 use snafu::ensure;
+use table::table_reference::TableReference;
 
 pub struct NoopInterceptor;
 
@@ -109,6 +114,49 @@ impl PromQueryInterceptor for NoopInterceptor {
             OutputData::AffectedRows(1) => Ok(Output::new_with_affected_rows(2)),
             _ => Ok(output),
         }
+    }
+
+    fn pre_execute_exemplars(
+        &self,
+        query: &ExemplarQuery,
+        _table: TableReference<'_>,
+        _query_ctx: QueryContextRef,
+    ) -> Result<()> {
+        match query.expression.as_str() {
+            "up" => InternalSnafu { err_msg: "test" }.fail(),
+            _ => Ok(()),
+        }
+    }
+}
+
+#[test]
+fn test_exemplar_interceptor_wrappers() {
+    let interceptor: Option<PromQueryInterceptorRef<error::Error>> =
+        Some(Arc::new(NoopInterceptor));
+    let table = TableReference::bare("greptime_metrics_exemplars");
+    for expression in ["up", "down"] {
+        let query = ExemplarQuery::parse(expression.into(), "0", "1", "public").unwrap();
+        assert_eq!(
+            interceptor
+                .pre_execute_exemplars(&query, table, QueryContext::arc())
+                .is_err(),
+            expression == "up",
+        );
+        assert_eq!(
+            interceptor
+                .as_ref()
+                .pre_execute_exemplars(&query, table, QueryContext::arc())
+                .is_err(),
+            expression == "up",
+        );
+        let absent: Option<PromQueryInterceptorRef<error::Error>> = None;
+        absent
+            .pre_execute_exemplars(&query, table, QueryContext::arc())
+            .unwrap();
+        absent
+            .as_ref()
+            .pre_execute_exemplars(&query, table, QueryContext::arc())
+            .unwrap();
     }
 }
 

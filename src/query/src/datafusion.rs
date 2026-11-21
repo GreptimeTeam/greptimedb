@@ -30,7 +30,9 @@ use common_error::ext::BoxedError;
 use common_function::function::FunctionContext;
 use common_function::function_factory::ScalarFunctionFactory;
 use common_query::{Output, OutputData, OutputMeta};
-use common_recordbatch::adapter::{RecordBatchStreamAdapter, RegionQueryStatCounters};
+use common_recordbatch::adapter::{
+    RecordBatchStreamAdapter, RegionQueryStatCounters, SERIES_SCAN_EXEC_NAME,
+};
 use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::tracing;
 use datafusion::catalog::TableFunction;
@@ -50,7 +52,7 @@ use snafu::{OptionExt, ResultExt, ensure};
 use sqlparser::ast::AnalyzeFormat;
 use table::TableRef;
 use table::requests::{DeleteRequest, InsertRequest};
-use table::table::scan::{REGION_SCAN_EXEC_NAME, RegionScanExec};
+use table::table::scan::{REGION_SCAN_EXEC_NAME, RegionScanExec, SeriesScanExec};
 use tracing::Span;
 
 use crate::analyze::DistAnalyzeExec;
@@ -71,6 +73,7 @@ use crate::options::ScheduledTimeExtension;
 use crate::physical_wrapper::PhysicalPlanWrapperRef;
 use crate::planner::{DfLogicalPlanner, LogicalPlanner};
 use crate::query_engine::{DescribeResult, QueryEngineContext, QueryEngineState};
+use crate::region_query::RegionReadLimiter;
 use crate::{QueryEngine, metrics};
 
 /// Query parallelism hint key.
@@ -85,10 +88,16 @@ fn query_load_region_id(plan: &Arc<dyn ExecutionPlan>) -> Option<u64> {
     let mut stack = vec![plan.clone()];
 
     while let Some(plan) = stack.pop() {
-        if plan.name() == REGION_SCAN_EXEC_NAME
-            && let Some(scan) = plan.downcast_ref::<RegionScanExec>()
-            && let Some(scan_region_id) = scan.query_load_region_id()
-        {
+        let scan_region_id = if plan.name() == REGION_SCAN_EXEC_NAME {
+            plan.downcast_ref::<RegionScanExec>()
+                .and_then(RegionScanExec::query_load_region_id)
+        } else if plan.name() == SERIES_SCAN_EXEC_NAME {
+            plan.downcast_ref::<SeriesScanExec>()
+                .and_then(SeriesScanExec::query_load_region_id)
+        } else {
+            None
+        };
+        if let Some(scan_region_id) = scan_region_id {
             match region_id {
                 Some(region_id) if region_id != scan_region_id => return None,
                 Some(_) => {}
@@ -106,7 +115,7 @@ fn query_load_region_id(plan: &Arc<dyn ExecutionPlan>) -> Option<u64> {
 // Unlike the Prometheus read-load reporting in `MergeScanExec`, the heartbeat
 // counters must be updated before metrics leave the datanode process. The
 // `RecordBatchStreamAdapter` that resolves `RecordBatchMetrics` does not know
-// the owning `MitoRegion`, so we extract the counters from `RegionScanExec` and
+// the owning `MitoRegion`, so we extract the counters from the scan execs and
 // pass them to the adapter. If a plan contains scans from different regions,
 // return `None` to avoid charging the whole plan metrics to one region.
 fn query_stat_counters(plan: &Arc<dyn ExecutionPlan>) -> Option<RegionQueryStatCounters> {
@@ -114,10 +123,16 @@ fn query_stat_counters(plan: &Arc<dyn ExecutionPlan>) -> Option<RegionQueryStatC
     let mut stack = vec![plan.clone()];
 
     while let Some(plan) = stack.pop() {
-        if plan.name() == REGION_SCAN_EXEC_NAME
-            && let Some(scan) = plan.downcast_ref::<RegionScanExec>()
-            && let Some(scan_counters) = scan.query_stat_counters()
-        {
+        let scan_counters = if plan.name() == REGION_SCAN_EXEC_NAME {
+            plan.downcast_ref::<RegionScanExec>()
+                .and_then(RegionScanExec::query_stat_counters)
+        } else if plan.name() == SERIES_SCAN_EXEC_NAME {
+            plan.downcast_ref::<SeriesScanExec>()
+                .and_then(SeriesScanExec::query_stat_counters)
+        } else {
+            None
+        };
+        if let Some(scan_counters) = scan_counters {
             match &counters {
                 Some(counters)
                     if !Arc::ptr_eq(&counters.query_cpu_time, &scan_counters.query_cpu_time)
@@ -172,6 +187,18 @@ impl DatafusionQueryEngine {
         } else {
             physical_plan
         };
+
+        // A region read is a remote body that streams until drained, so a query reading several
+        // sources would otherwise run one body per source and partition. Bound the reads of the
+        // plan shape that can hold the budget: the native raw PromQL topology, whose only
+        // multi-input node polls every input at once. A plan with any other multi-input node (a
+        // join, or the union a discovered selector builds) keeps its per-scan bounds only rather
+        // than take a query-wide budget its topology has not been checked against.
+        if crate::promql::planner::native::native_raw_plan_bounds_region_reads(&physical_plan) {
+            let target_partitions = ctx.state().config().target_partitions();
+            ctx.config_mut()
+                .set_extension(Arc::new(RegionReadLimiter::new(target_partitions)));
+        }
 
         let stream = self.execute_stream(&ctx, &physical_plan)?;
 
@@ -578,6 +605,21 @@ impl QueryEngine for DatafusionQueryEngine {
                 state: self.engine_state().function_state(),
             });
 
+        // The PromQL planner registers the query's annotation collector in the session state it
+        // planned with. Execution builds its task context from a fresh state, so the same
+        // collector is looked up again by query id here; without it a native kernel's warnings
+        // and infos would be recorded into an object nobody reads.
+        if let Some(collector) = query_ctx
+            .remote_query_id()
+            .map(common_query::promql_annotations::promql_annotation_collector)
+        {
+            state
+                .config_mut()
+                .options_mut()
+                .extensions
+                .insert(collector);
+        }
+
         // Carry scheduled Flow time through ConfigOptions.extensions so that
         // the distributed plan analyzer can read it during expression
         // simplification (preventing wall-clock constant-folding of `now()`).
@@ -727,7 +769,7 @@ mod tests {
     };
     use datafusion::physical_plan::display::{DisplayAs, DisplayFormatType};
     use datafusion::physical_plan::expressions::PhysicalSortExpr;
-    use datafusion::physical_plan::joins::{HashJoinExec, JoinOn, PartitionMode};
+    use datafusion::physical_plan::joins::{CrossJoinExec, HashJoinExec, JoinOn, PartitionMode};
     use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
     use datafusion::physical_plan::{ExecutionPlan, PhysicalExpr};
     use datafusion::prelude::{col, lit};
@@ -739,7 +781,8 @@ mod tests {
     use session::context::{QueryContext, QueryContextBuilder};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
     use store_api::region_engine::{
-        PartitionRange, PrepareRequest, QueryScanContext, RegionScanner, ScannerProperties,
+        PartitionRange, PrepareRequest, QueryScanContext, RawLabelSource, RegionScanner,
+        ScannerProperties,
     };
     use store_api::storage::{RegionId, ScanRequest};
     use table::metadata::{TableInfoBuilder, TableMetaBuilder};
@@ -813,6 +856,17 @@ mod tests {
             true
         }
 
+        fn raw_series_schema(
+            &self,
+            _label_source: &RawLabelSource,
+        ) -> std::result::Result<Option<Arc<datatypes::series::samples::SeriesSchema>>, BoxedError>
+        {
+            Ok(Some(Arc::new(datatypes::series::samples::SeriesSchema {
+                fields: Arc::from([datatypes::series::samples::FieldSpec { name: "ts".into() }]),
+                eval_grid: None,
+            })))
+        }
+
         fn add_dyn_filter_to_predicate(
             &mut self,
             filter_exprs: Vec<Arc<dyn PhysicalExpr>>,
@@ -854,6 +908,13 @@ mod tests {
         query_load_region_id: Option<RegionId>,
         query_stat_counters: Option<RegionQueryStatCounters>,
     ) -> Arc<dyn ExecutionPlan> {
+        build_region_scan_exec(query_load_region_id, query_stat_counters)
+    }
+
+    fn build_region_scan_exec(
+        query_load_region_id: Option<RegionId>,
+        query_stat_counters: Option<RegionQueryStatCounters>,
+    ) -> Arc<RegionScanExec> {
         let schema = Arc::new(datatypes::schema::Schema::new(vec![ColumnSchema::new(
             "ts",
             ConcreteDataType::timestamp_millisecond_datatype(),
@@ -890,11 +951,55 @@ mod tests {
         Arc::new(RegionScanExec::new(Box::new(scanner), ScanRequest::default(), None).unwrap())
     }
 
+    fn build_series_scan(
+        query_load_region_id: Option<RegionId>,
+        query_stat_counters: Option<RegionQueryStatCounters>,
+    ) -> Arc<dyn ExecutionPlan> {
+        build_region_scan_exec(query_load_region_id, query_stat_counters)
+            .try_to_series_scan(RawLabelSource::Explicit)
+            .unwrap()
+            .expect("RecordingScanner supports a native series scan")
+    }
+
+    fn build_mixed_scan_plan(
+        left: Arc<dyn ExecutionPlan>,
+        right: Arc<dyn ExecutionPlan>,
+    ) -> Arc<dyn ExecutionPlan> {
+        Arc::new(CrossJoinExec::new(left, right))
+    }
+
     fn query_stat_counters_for_test() -> RegionQueryStatCounters {
         RegionQueryStatCounters {
             query_cpu_time: Arc::new(AtomicU64::new(0)),
             query_scanned_bytes: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    #[test]
+    fn query_load_region_id_reads_native_series_scan() {
+        let region_id = RegionId::new(1024, 42);
+        let scan = build_series_scan(Some(region_id), None);
+
+        assert_eq!(super::query_load_region_id(&scan), Some(region_id.as_u64()));
+    }
+
+    #[test]
+    fn query_load_region_id_accepts_mixed_scans_for_same_region() {
+        let region_id = RegionId::new(1024, 42);
+        let left = build_query_load_region_scan(Some(region_id));
+        let right = build_series_scan(Some(region_id), None);
+        let plan = build_mixed_scan_plan(left, right);
+
+        assert_eq!(super::query_load_region_id(&plan), Some(region_id.as_u64()));
+    }
+
+    #[test]
+    fn query_load_region_id_rejects_mixed_region_scans() {
+        let left = build_query_load_region_scan(Some(RegionId::new(1024, 42)));
+        let right = build_series_scan(Some(RegionId::new(1024, 43)), None);
+        let plan = build_mixed_scan_plan(left, right);
+
+        assert!(super::query_load_region_id(&plan).is_none());
     }
 
     #[test]
@@ -925,6 +1030,49 @@ mod tests {
             super::query_load_region_id(&plan),
             Some(query_load_region_id.as_u64())
         );
+    }
+
+    #[test]
+    fn query_stat_counters_reads_native_series_scan() {
+        let counters = query_stat_counters_for_test();
+        let scan = build_series_scan(None, Some(counters.clone()));
+
+        let actual = super::query_stat_counters(&scan).unwrap();
+        assert!(Arc::ptr_eq(
+            &actual.query_cpu_time,
+            &counters.query_cpu_time
+        ));
+        assert!(Arc::ptr_eq(
+            &actual.query_scanned_bytes,
+            &counters.query_scanned_bytes
+        ));
+    }
+
+    #[test]
+    fn query_stat_counters_returns_shared_counter_for_mixed_scan_plan() {
+        let counters = query_stat_counters_for_test();
+        let left = build_query_stat_counter_region_scan(counters.clone());
+        let right = build_series_scan(None, Some(counters.clone()));
+        let plan = build_mixed_scan_plan(left, right);
+
+        let actual = super::query_stat_counters(&plan).unwrap();
+        assert!(Arc::ptr_eq(
+            &actual.query_cpu_time,
+            &counters.query_cpu_time
+        ));
+        assert!(Arc::ptr_eq(
+            &actual.query_scanned_bytes,
+            &counters.query_scanned_bytes
+        ));
+    }
+
+    #[test]
+    fn query_stat_counters_rejects_mixed_counter_plan_with_series_scan() {
+        let left = build_query_stat_counter_region_scan(query_stat_counters_for_test());
+        let right = build_series_scan(None, Some(query_stat_counters_for_test()));
+        let plan = build_mixed_scan_plan(left, right);
+
+        assert!(super::query_stat_counters(&plan).is_none());
     }
 
     #[test]
@@ -1394,6 +1542,15 @@ mod tests {
             unimplemented!("unexpected compact_region")
         }
 
+        async fn cancel_region_compaction(
+            &self,
+            _region_id: store_api::storage::RegionId,
+            _task_id: String,
+            _ctx: session::context::QueryContextRef,
+        ) -> common_query::error::Result<common_base::AffectedRows> {
+            unimplemented!("unexpected cancel_region_compaction")
+        }
+
         async fn discard_unflushed_data(
             &self,
             _region_id: store_api::storage::RegionId,
@@ -1408,6 +1565,24 @@ mod tests {
             _ctx: session::context::QueryContextRef,
         ) -> common_query::error::Result<common_base::AffectedRows> {
             unimplemented!("unexpected discard_unflushed_data_by_table")
+        }
+
+        async fn discard_pending_tails(
+            &self,
+            _region_id: store_api::storage::RegionId,
+            _node_id: u64,
+            _ctx: session::context::QueryContextRef,
+        ) -> common_query::error::Result<common_base::AffectedRows> {
+            unimplemented!("unexpected discard_pending_tails")
+        }
+
+        async fn discard_pending_tails_by_table(
+            &self,
+            _table_name: table::table_name::TableName,
+            _node_id: u64,
+            _ctx: session::context::QueryContextRef,
+        ) -> common_query::error::Result<common_base::AffectedRows> {
+            unimplemented!("unexpected discard_pending_tails_by_table")
         }
     }
 

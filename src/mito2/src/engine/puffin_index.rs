@@ -24,6 +24,7 @@ use index::fulltext_index::Config as FulltextConfig;
 use index::inverted_index::format::reader::{InvertedIndexBlobReader, InvertedIndexReader};
 use index::target::IndexTarget;
 use puffin::blob_metadata::BlobMetadata;
+use puffin::puffin_manager::file_key::PuffinFileKey;
 use puffin::puffin_manager::{PuffinManager, PuffinReader};
 use serde_json::{Map, Value, json};
 use store_api::sst_entry::{
@@ -75,6 +76,7 @@ pub(crate) async fn collect_index_entries_from_puffin(
 ) -> Vec<PuffinIndexMetaEntry> {
     let mut entries = Vec::new();
 
+    let file_key = manager.file_key(&region_index_id);
     let reader = match manager.reader(&region_index_id).await {
         Ok(reader) => reader,
         Err(err) => {
@@ -106,7 +108,7 @@ pub(crate) async fn collect_index_entries_from_puffin(
             Some(BlobIndexTypeTargetKey::BloomFilter(target_key)) => {
                 let bloom_meta = try_read_bloom_meta(
                     &reader,
-                    region_index_id,
+                    &file_key,
                     blob.blob_type.as_str(),
                     target_key,
                     bloom_filter_cache.as_ref(),
@@ -132,7 +134,7 @@ pub(crate) async fn collect_index_entries_from_puffin(
             Some(BlobIndexTypeTargetKey::FulltextBloom(target_key, bloom_version)) => {
                 let bloom_meta = try_read_bloom_meta(
                     &reader,
-                    region_index_id,
+                    &file_key,
                     blob.blob_type.as_str(),
                     target_key,
                     bloom_filter_cache.as_ref(),
@@ -174,7 +176,7 @@ pub(crate) async fn collect_index_entries_from_puffin(
             Some(BlobIndexTypeTargetKey::Inverted) => {
                 let mut inverted_entries = collect_inverted_entries(
                     &reader,
-                    region_index_id,
+                    &file_key,
                     inverted_index_cache.as_ref(),
                     &context,
                 )
@@ -190,13 +192,11 @@ pub(crate) async fn collect_index_entries_from_puffin(
 
 async fn collect_inverted_entries(
     reader: &SstPuffinReader,
-    region_index_id: RegionIndexId,
+    file_key: &PuffinFileKey<RegionIndexId>,
     cache: Option<&InvertedIndexCacheRef>,
     context: &IndexEntryContext<'_>,
 ) -> Vec<PuffinIndexMetaEntry> {
     // Read the inverted index blob and surface its per-column metadata entries.
-    let file_id = region_index_id.file_id();
-
     let guard = match reader.blob(INVERTED_BLOB_TYPE).await {
         Ok(guard) => guard,
         Err(err) => {
@@ -230,8 +230,7 @@ async fn collect_inverted_entries(
         .map(|meta| meta.content_length);
     let metas = if let (Some(cache), Some(blob_size)) = (cache, blob_size) {
         let reader = CachedInvertedIndexBlobReader::new(
-            file_id,
-            region_index_id.version,
+            file_key.clone(),
             blob_size,
             InvertedIndexBlobReader::new(blob_reader),
             cache.clone(),
@@ -292,7 +291,7 @@ fn build_inverted_entries(
 
 async fn try_read_bloom_meta(
     reader: &SstPuffinReader,
-    region_index_id: RegionIndexId,
+    file_key: &PuffinFileKey<RegionIndexId>,
     blob_type: &str,
     target_key: &str,
     cache: Option<&BloomFilterIndexCacheRef>,
@@ -314,8 +313,7 @@ async fn try_read_bloom_meta(
                 let result = match (cache, column_id, blob_size) {
                     (Some(cache), Some(column_id), Some(blob_size)) => {
                         CachedBloomFilterIndexBlobReader::new(
-                            region_index_id.file_id(),
-                            region_index_id.version,
+                            file_key.clone(),
                             IndexTarget::ColumnId(column_id),
                             tag,
                             blob_size,

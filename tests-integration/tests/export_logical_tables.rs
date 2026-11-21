@@ -507,11 +507,15 @@ async fn database_export_rejects_invalid_members_before_output() {
             QueryContext::arc(),
         )
         .await;
-    assert!(matches!(result,
-        Err(frontend::error::Error::TableOperation {
-            source: operator::error::Error::InvalidDatabaseExport { reason }, ..
-        }) if reason == "duplicate output name: foo"));
-    assert!(!case_path.exists());
+    if cfg!(any(windows, target_os = "macos")) {
+        assert!(matches!(result,
+            Err(frontend::error::Error::TableOperation {
+                source: operator::error::Error::InvalidDatabaseExport { reason }, ..
+            }) if reason == "duplicate output name: foo conflicts with Foo (foo.parquet)"));
+        assert!(!case_path.exists());
+    } else {
+        assert_eq!(result.unwrap().output_files.len(), 2);
+    }
     case_req.location = "s3://export-bucket/data/".into();
     case_req.connection.extend([
         ("region".into(), "us-east-1".into()),
@@ -610,13 +614,94 @@ async fn database_export_rejects_invalid_members_before_output() {
         .await;
     assert!(matches!(result,
         Err(operator::error::Error::InvalidDatabaseExport { reason })
-            if reason == format!("duplicate output name: {duplicate_name}")));
+            if reason == format!("duplicate output name: {duplicate_name} conflicts with {duplicate_name} ({duplicate_name}.parquet)")));
     assert_eq!(
         std::fs::read_dir(destination.path().join("data"))
             .unwrap()
             .count(),
         0
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[cfg(any(windows, target_os = "macos"))]
+async fn database_export_rejects_unsafe_local_names_before_output() {
+    use common_error::ext::ErrorExt;
+    use servers::query_handler::sql::SqlQueryHandler;
+
+    let standalone = GreptimeDbStandaloneBuilder::new("unsafe_export_names")
+        .build()
+        .await;
+    let instance = standalone.fe_instance();
+    let destination = tempfile::tempdir_in(common_test_util::find_workspace_path(".")).unwrap();
+    let overlong_name = "z".repeat(252);
+    let mut cases = vec![vec!["Events", "events"]];
+    if cfg!(windows) {
+        cases.extend(
+            [
+                "job:rate5m",
+                "job:http:rate5m",
+                "a:b",
+                ":leading",
+                "con",
+                "nul.part",
+                "com0",
+                "lpt9",
+            ]
+            .map(|name| vec![name]),
+        );
+        cases.push(vec![&overlong_name]);
+    }
+    for (index, names) in cases.into_iter().enumerate() {
+        let schema = format!("unsafe_names_{index}");
+        sql(instance, &format!("CREATE DATABASE {schema}")).await;
+        for name in std::iter::once("aaa_valid").chain(names.iter().copied()) {
+            sql(
+                instance,
+                &format!("CREATE TABLE {schema}.\"{name}\" (ts TIMESTAMP TIME INDEX)"),
+            )
+            .await;
+            sql(
+                instance,
+                &format!("INSERT INTO {schema}.\"{name}\" VALUES (1)"),
+            )
+            .await;
+        }
+        for (format, experimental) in [
+            ("parquet", false),
+            ("csv", false),
+            ("json", false),
+            ("parquet", true),
+        ] {
+            for existing in [false, true] {
+                let path = destination
+                    .path()
+                    .join(format!("{index}-{format}-{experimental}-{existing}"));
+                let sentinel = path.join(format!("aaa_valid.{format}"));
+                if existing {
+                    std::fs::create_dir(&path).unwrap();
+                    std::fs::write(&sentinel, "preserved").unwrap();
+                }
+                let uri = url::Url::from_directory_path(&path).unwrap();
+                let statement = format!(
+                    "COPY DATABASE {schema} TO '{uri}' WITH (FORMAT='{format}', experimental_metric_export='{experimental}')"
+                );
+                let mut results = instance.do_query(&statement, QueryContext::arc()).await;
+                assert_eq!(results.len(), 1);
+                let error = results.remove(0).unwrap_err().output_msg();
+                assert!(error.contains("Invalid database export"), "{error}");
+                for name in &names {
+                    assert!(error.contains(name), "{error}");
+                }
+                if existing {
+                    assert_eq!(std::fs::read_to_string(&sentinel).unwrap(), "preserved");
+                    assert_eq!(std::fs::read_dir(&path).unwrap().count(), 1);
+                } else {
+                    assert!(!path.exists());
+                }
+            }
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -628,8 +713,12 @@ async fn database_export_preserves_valid_table_names() {
     let destination = tempfile::tempdir_in(common_test_util::find_workspace_path(".")).unwrap();
     sql(instance, "CREATE TABLE names_physical (ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING PRIMARY KEY) ENGINE=metric WITH (physical_metric_table='')").await;
     let mut names = vec!["ordinary#b".to_string(), "metric#b".to_string()];
+    names.push("z".repeat(247));
     if !cfg!(windows) {
         names.extend(["ordinary:b".to_string(), "metric:b".to_string()]);
+    }
+    if !cfg!(any(windows, target_os = "macos")) {
+        names.extend(["Events", "events"].map(String::from));
     }
     for name in &names {
         let engine = if name.starts_with("metric") {
@@ -1416,6 +1505,233 @@ async fn export_http(instance: Arc<Instance>) -> (String, tokio::task::JoinHandl
     (addr, task)
 }
 
+struct FailCopyExport {
+    concurrent_jobs: bool,
+}
+
+impl servers::interceptor::SqlQueryInterceptor for FailCopyExport {
+    type Error = frontend::error::Error;
+
+    fn pre_execute(
+        &self,
+        statement: Option<&sql::statements::statement::Statement>,
+        _plan: Option<&datafusion_expr::LogicalPlan>,
+        _ctx: session::context::QueryContextRef,
+    ) -> Result<(), Self::Error> {
+        use sql::statements::copy::{Copy, CopyDatabase};
+        use sql::statements::statement::Statement;
+        let copy_export = matches!(
+            statement,
+            Some(Statement::Copy(Copy::CopyDatabase(CopyDatabase::To(_))))
+        );
+        let other_job = matches!(
+            statement,
+            Some(Statement::ShowCreateTable(_))
+                | Some(Statement::Copy(Copy::CopyDatabase(CopyDatabase::From(_))))
+        );
+        if copy_export || (self.concurrent_jobs && other_job) {
+            return Err(operator::error::InvalidDatabaseExportSnafu {
+                reason: "injected COPY export failure",
+            }
+            .build()
+            .into());
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn data_cli_propagates_copy_failures() {
+    use servers::interceptor::SqlQueryInterceptorRef;
+    let plugins = common_base::Plugins::new();
+    plugins.insert::<SqlQueryInterceptorRef<frontend::error::Error>>(Arc::new(FailCopyExport {
+        concurrent_jobs: false,
+    }));
+    let standalone = GreptimeDbStandaloneBuilder::new("cli_copy_failures")
+        .with_plugin(plugins)
+        .build()
+        .await;
+    let instance = standalone.fe_instance();
+    for name in ["Events", "events", "aaa_valid"] {
+        sql(
+            instance,
+            &format!("CREATE TABLE \"{name}\" (ts TIMESTAMP TIME INDEX)"),
+        )
+        .await;
+        sql(instance, &format!("INSERT INTO \"{name}\" VALUES (1)")).await;
+    }
+    let (addr, server) = export_http(instance.clone()).await;
+    let destination = tempfile::tempdir_in(common_test_util::find_workspace_path(".")).unwrap();
+    let legacy = destination.path().join("legacy");
+    let error = run_data_cli(&[
+        "export",
+        "--addr",
+        &addr,
+        "--database",
+        "greptime-public",
+        "--target",
+        "data",
+        "--output-dir",
+        legacy.to_str().unwrap(),
+        "--no-proxy",
+    ])
+    .await
+    .unwrap_err();
+    assert!(
+        format!("{error:?}").contains("SQL request failed"),
+        "{error:?}"
+    );
+    let directory = legacy.join("greptime/public");
+    assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+
+    let uri = url::Url::from_directory_path(destination.path().join("v2")).unwrap();
+    let error = run_data_cli(&[
+        "export-v2",
+        "create",
+        "--addr",
+        &addr,
+        "--schemas",
+        "public",
+        "--to",
+        uri.as_str(),
+        "--no-proxy",
+        "--progress",
+        "never",
+    ])
+    .await
+    .unwrap_err();
+    assert!(
+        format!("{error:?}").contains("SQL request failed"),
+        "{error:?}"
+    );
+
+    std::fs::write(directory.join("aaa_valid.parquet"), "invalid parquet").unwrap();
+    std::fs::write(
+        directory.join("copy_from.sql"),
+        "COPY DATABASE public FROM '<PATH/TO/FILES>' WITH (FORMAT='parquet');",
+    )
+    .unwrap();
+    let error = run_data_cli(&[
+        "import",
+        "--addr",
+        &addr,
+        "--database",
+        "greptime-public",
+        "--target",
+        "data",
+        "--input-dir",
+        legacy.to_str().unwrap(),
+        "--no-proxy",
+    ])
+    .await
+    .unwrap_err();
+    assert!(
+        format!("{error:?}").contains("SQL request failed"),
+        "{error:?}"
+    );
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn data_cli_logs_failed_concurrent_schema_jobs() {
+    use common_telemetry::tracing::instrument::WithSubscriber;
+    use servers::interceptor::SqlQueryInterceptorRef;
+
+    let plugins = common_base::Plugins::new();
+    plugins.insert::<SqlQueryInterceptorRef<frontend::error::Error>>(Arc::new(FailCopyExport {
+        concurrent_jobs: true,
+    }));
+    let standalone = GreptimeDbStandaloneBuilder::new("cli_failed_schema_jobs")
+        .with_plugin(plugins)
+        .build()
+        .await;
+    let instance = standalone.fe_instance();
+    let schemas = ["public", "other_schema"];
+    sql(instance, "CREATE DATABASE other_schema").await;
+    for schema in schemas {
+        sql(
+            instance,
+            &format!("CREATE TABLE {schema}.t (ts TIMESTAMP TIME INDEX)"),
+        )
+        .await;
+    }
+    let (addr, server) = export_http(instance.clone()).await;
+    let destination = tempfile::tempdir_in(common_test_util::find_workspace_path(".")).unwrap();
+    for (command, target, path_arg, message) in [
+        (
+            "export",
+            "schema",
+            "--output-dir",
+            "Failed to export database schema",
+        ),
+        (
+            "export",
+            "data",
+            "--output-dir",
+            "Failed to export database data",
+        ),
+        (
+            "import",
+            "data",
+            "--input-dir",
+            "Failed to import copy_from.sql for database",
+        ),
+    ] {
+        let path = destination.path().join(format!("{command}-{target}"));
+        if command == "import" {
+            for schema in schemas {
+                let directory = path.join("greptime").join(schema);
+                std::fs::create_dir_all(&directory).unwrap();
+                std::fs::write(
+                    directory.join("copy_from.sql"),
+                    format!(
+                        "COPY DATABASE {schema} FROM '<PATH/TO/FILES>' WITH (FORMAT='parquet');"
+                    ),
+                )
+                .unwrap();
+            }
+        }
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let subscriber = common_telemetry::tracing_subscriber::fmt()
+            .with_max_level(common_telemetry::tracing::Level::ERROR)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(log.reopen().unwrap())
+            .finish();
+        let result = run_data_cli(&[
+            command,
+            "--addr",
+            &addr,
+            "--database",
+            "greptime-*",
+            "--db-parallelism",
+            "2",
+            "--target",
+            target,
+            path_arg,
+            path.to_str().unwrap(),
+            "--no-proxy",
+        ])
+        .with_subscriber(subscriber)
+        .await;
+        let error = result.unwrap_err();
+        assert!(
+            format!("{error:?}").contains("SQL request failed"),
+            "{error:?}"
+        );
+        let logs = std::fs::read_to_string(log.path()).unwrap();
+        for schema in schemas {
+            let expected = format!("{message} greptime.{schema}");
+            assert_eq!(
+                logs.lines().filter(|line| line.contains(&expected)).count(),
+                1,
+                "{command} {target}: {error:?}\n{logs}"
+            );
+        }
+    }
+    server.abort();
+}
+
 #[derive(Default)]
 struct ImportRequests {
     batches: std::sync::atomic::AtomicUsize,
@@ -1609,6 +1925,27 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool, older: bool) {
     )
     .await;
     sql(instance, "INSERT INTO audit VALUES ('a',1,1),('z',NULL,3)").await;
+    if packed {
+        let overlong_name = "z".repeat(252);
+        for (name, engine) in [
+            (overlong_name.as_str(), ""),
+            ("Events", ""),
+            ("events", ""),
+            ("ordinary:record", ""),
+            (
+                "metric:record",
+                "ENGINE=metric WITH (on_physical_table='v2_a')",
+            ),
+        ] {
+            sql(instance, &format!("CREATE TABLE \"{name}\" (host STRING PRIMARY KEY, val DOUBLE, ts TIMESTAMP TIME INDEX) {engine}")).await;
+            sql(
+                instance,
+                &format!("INSERT INTO \"{name}\" VALUES ('a',1,1),('z',2,3)"),
+            )
+            .await;
+            names.push(name.into());
+        }
+    }
     sql(instance, "CREATE VIEW dashboard AS SELECT * FROM audit").await;
     let special_name = "audit.dashboard";
     let quoted_special = special_name.replace('"', "\"\"");

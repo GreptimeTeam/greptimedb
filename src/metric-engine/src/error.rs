@@ -185,6 +185,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Mito discard pending tails operation fails"))]
+    MitoDiscardPendingTailsOperation {
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Mito sync operation fails"))]
     MitoSyncOperation {
         source: BoxedError,
@@ -249,6 +256,18 @@ pub enum Error {
 
     #[snafu(display("Column {} not found in logical region {}", name, region_id))]
     ColumnNotFound {
+        name: String,
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Column {} is missing from physical region {} after adding columns",
+        name,
+        region_id
+    ))]
+    MissingPhysicalColumn {
         name: String,
         region_id: RegionId,
         #[snafu(implicit)]
@@ -451,6 +470,10 @@ impl ErrorExt for Error {
 
             ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
 
+            // The physical region was read twice around the alter and lost a column in
+            // between, so the failure is an inconsistent server state, not a bad request.
+            MissingPhysicalColumn { .. } => StatusCode::Unexpected,
+
             CreateMitoRegion { source, .. }
             | OpenMitoRegion { source, .. }
             | CleanUpMitoRegion { source, .. }
@@ -459,6 +482,7 @@ impl ErrorExt for Error {
             | MitoWriteOperation { source, .. }
             | MitoFlushOperation { source, .. }
             | MitoTruncateOperation { source, .. }
+            | MitoDiscardPendingTailsOperation { source, .. }
             | MitoSyncOperation { source, .. }
             | MitoEnterStagingOperation { source, .. }
             | BatchOpenMitoRegion { source, .. }
@@ -499,6 +523,7 @@ impl ErrorExt for Error {
             | MitoWriteOperation { source, .. }
             | MitoFlushOperation { source, .. }
             | MitoTruncateOperation { source, .. }
+            | MitoDiscardPendingTailsOperation { source, .. }
             | MitoSyncOperation { source, .. }
             | MitoEnterStagingOperation { source, .. }
             | MitoCopyRegionFromOperation { source, .. }

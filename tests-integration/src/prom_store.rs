@@ -46,6 +46,315 @@ mod tests {
     use crate::tests;
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn test_table_batch_combined_memory_limit() {
+        use std::time::Duration;
+
+        use api::greptime_proto::io::prometheus::write::v2;
+        use frontend::service_config::BatcherOptions;
+        use servers::batcher::BatchingProtocol;
+        use servers::prom_remote_write::validation::PromValidationMode;
+
+        let label = "x".repeat(64 * 1024);
+        let v1 = WriteRequest {
+            timeseries: vec![TimeSeries {
+                labels: vec![
+                    Label {
+                        name: "__name__".into(),
+                        value: "quota_probe".into(),
+                    },
+                    Label {
+                        name: "job".into(),
+                        value: label.clone(),
+                    },
+                ],
+                samples: vec![Sample {
+                    value: 1.0,
+                    timestamp: 1,
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let v2 = v2::Request {
+            symbols: vec![
+                "".into(),
+                "__name__".into(),
+                "quota_probe".into(),
+                "job".into(),
+                "x".repeat(32 * 1024),
+            ],
+            timeseries: vec![v2::TimeSeries {
+                labels_refs: vec![1, 2, 3, 4],
+                samples: vec![v2::Sample {
+                    value: 1.0,
+                    timestamp: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        };
+        for limit in [320 * 1024, 768 * 1024, 0] {
+            let standalone = GreptimeDbStandaloneBuilder::new(&format!("combined_memory_{limit}"))
+                .with_write_memory_limit(limit)
+                .with_table_batcher(BatcherOptions {
+                    protocols: vec![BatchingProtocol::Prom, BatchingProtocol::Influxdb],
+                    pending_rows_flush_interval: Duration::from_millis(10),
+                    ..Default::default()
+                })
+                .build()
+                .await;
+            let instance = standalone.fe_instance();
+            let memory = instance.server_memory_limiter();
+            let build_server = |protocols| {
+                HttpServerBuilder::new(HttpOptions::default())
+                    .with_memory_limiter(memory.clone())
+                    .with_batching_protocols(protocols)
+                    .with_influxdb_handler(instance.clone())
+                    .with_prom_handler(
+                        instance.clone(),
+                        None,
+                        false,
+                        PromValidationMode::Strict,
+                        None,
+                    )
+                    .build()
+            };
+            let server = build_server(vec![BatchingProtocol::Prom, BatchingProtocol::Influxdb]);
+            let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+            let v2_body = prom_store::snappy_compress(&v2.encode_to_vec()).unwrap();
+            // The v2 decoder itself fits; the rejection below must happen during Arrow admission.
+            let unbatched = build_server(vec![]);
+            let unbatched = TestClient::new(unbatched.build(unbatched.make_app()).unwrap()).await;
+            let response = unbatched
+                .post("/v1/prometheus/write")
+                .header(
+                    "content-type",
+                    "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+                )
+                .header("content-encoding", "snappy")
+                .body(v2_body.clone())
+                .send()
+                .await;
+            assert!(response.status().is_success(), "{}", response.text().await);
+            assert_eq!(memory.used_bytes(), 0);
+
+            for (path, content_type, encoding, body, fits_alone) in [
+                // The longer label still fits in Arrow when only the compressed body is retained.
+                (
+                    "/v1/prometheus/write",
+                    "application/x-protobuf",
+                    "snappy",
+                    prom_store::snappy_compress(&v1.encode_to_vec()).unwrap(),
+                    true,
+                ),
+                (
+                    "/v1/influxdb/write",
+                    "text/plain",
+                    "identity",
+                    format!("quota_probe,job={label} greptime_value=1 1000000").into_bytes(),
+                    false,
+                ),
+                (
+                    "/v1/prometheus/write",
+                    "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+                    "snappy",
+                    v2_body,
+                    false,
+                ),
+            ] {
+                let response = client
+                    .post(path)
+                    .header("content-type", content_type)
+                    .header("content-encoding", encoding)
+                    .body(body)
+                    .send()
+                    .await;
+                if limit == 320 * 1024 && !fits_alone {
+                    assert_eq!(response.status(), 429, "{}", response.text().await);
+                } else {
+                    assert!(response.status().is_success(), "{}", response.text().await);
+                }
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while memory.used_bytes() != 0 {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_exemplar_wide_schema_conversion_memory_limit() {
+        use std::time::Duration;
+
+        use api::prom_store::remote::Exemplar;
+        use frontend::service_config::BatcherOptions;
+        use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
+        use otel_arrow_rust::proto::opentelemetry::metrics::v1 as otlp;
+        use servers::batcher::BatchingProtocol;
+        use servers::prom_remote_write::validation::PromValidationMode;
+
+        let v1 = WriteRequest {
+            timeseries: vec![TimeSeries {
+                labels: vec![
+                    Label {
+                        name: "__name__".into(),
+                        value: "probe_metric".into(),
+                    },
+                    Label {
+                        name: "job".into(),
+                        value: "api".into(),
+                    },
+                ],
+                samples: vec![Sample {
+                    value: 1.0,
+                    timestamp: 60_000,
+                }],
+                exemplars: vec![
+                    Exemplar {
+                        labels: vec![Label {
+                            name: "trace_id".into(),
+                            value: "abc".into()
+                        }],
+                        value: 0.5,
+                        timestamp: 60_000,
+                    };
+                    1000
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let otlp = ExportMetricsServiceRequest {
+            resource_metrics: vec![otlp::ResourceMetrics {
+                scope_metrics: vec![otlp::ScopeMetrics {
+                    metrics: vec![otlp::Metric {
+                        name: "probe_metric".into(),
+                        data: Some(otlp::metric::Data::Gauge(otlp::Gauge {
+                            data_points: vec![otlp::NumberDataPoint {
+                                time_unix_nano: 62_000_000_000,
+                                value: Some(otlp::number_data_point::Value::AsDouble(1.0)),
+                                exemplars: vec![
+                                    otlp::Exemplar {
+                                        time_unix_nano: 62_000_000_000,
+                                        value: Some(otlp::exemplar::Value::AsDouble(0.5)),
+                                        trace_id: vec![0xab; 16],
+                                        ..Default::default()
+                                    };
+                                    1000
+                                ],
+                                ..Default::default()
+                            }],
+                        })),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        };
+        for (limit, remote_write) in [
+            (4 * 1024 * 1024, false),
+            (64 * 1024 * 1024, false),
+            // Metric-engine Remote Write bypasses ordinary-table Arrow batching.
+            (4 * 1024 * 1024, true),
+        ] {
+            let standalone =
+                GreptimeDbStandaloneBuilder::new(&format!("exemplar_wide_{limit}_{remote_write}"))
+                    .with_write_memory_limit(limit)
+                    .with_table_batcher(BatcherOptions {
+                        protocols: vec![BatchingProtocol::Prom, BatchingProtocol::Otlp],
+                        pending_rows_flush_interval: Duration::from_millis(10),
+                        ..Default::default()
+                    })
+                    .build()
+                    .await;
+            let instance = standalone.fe_instance();
+            let names = (0..2048).map(|i| format!("tag_{i}")).collect::<Vec<_>>();
+            for sql in [
+                "CREATE TABLE probe_physical (greptime_timestamp TIMESTAMP(3) TIME INDEX, greptime_value DOUBLE) ENGINE=metric WITH ('physical_metric_table'='')".to_string(),
+                "CREATE TABLE probe_metric (greptime_timestamp TIMESTAMP(3) TIME INDEX, greptime_value DOUBLE, job STRING, PRIMARY KEY(job)) ENGINE=metric WITH ('on_physical_table'='probe_physical')".to_string(),
+                format!("CREATE TABLE greptime_metrics_exemplars (__table_id INT UNSIGNED NOT NULL, __tsid BIGINT UNSIGNED NOT NULL, greptime_metric STRING, greptime_timestamp TIMESTAMP(9) TIME INDEX, greptime_value DOUBLE, greptime_exemplar_labels JSON2, job STRING, {}, PRIMARY KEY (__table_id, __tsid, greptime_metric, job, {})) ENGINE=mito WITH ('append_mode'='true', 'primary_key_encoding'='sparse')",
+                    names.iter().map(|n| format!("{n} STRING")).collect::<Vec<_>>().join(","), names.join(",")),
+            ] {
+                instance.do_query(&sql, QueryContext::arc()).await.remove(0).unwrap();
+            }
+            let memory = instance.server_memory_limiter();
+            assert_eq!(memory.limit_bytes(), limit);
+            let server = HttpServerBuilder::new(HttpOptions::default())
+                .with_memory_limiter(memory.clone())
+                .with_batching_protocols(vec![BatchingProtocol::Prom, BatchingProtocol::Otlp])
+                .with_otlp_handler(instance.clone(), true)
+                .with_prom_handler(
+                    instance.clone(),
+                    None,
+                    true,
+                    PromValidationMode::Strict,
+                    None,
+                )
+                .build();
+            let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+            let (path, encoding, body) = if remote_write {
+                (
+                    "/v1/prometheus/write",
+                    "snappy",
+                    prom_store::snappy_compress(&v1.encode_to_vec()).unwrap(),
+                )
+            } else {
+                ("/v1/otlp/v1/metrics", "identity", otlp.encode_to_vec())
+            };
+            let response = client
+                .post(path)
+                .header("content-type", "application/x-protobuf")
+                .header("content-encoding", encoding)
+                .body(body)
+                .send()
+                .await;
+            let success = remote_write || limit > 4 * 1024 * 1024;
+            assert_eq!(
+                response.status().is_success(),
+                success,
+                "{path}, quota={limit}: {}",
+                response.text().await
+            );
+            if !success {
+                assert_eq!(response.status(), 429);
+            }
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while memory.used_bytes() != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let output = instance
+                .do_query(
+                    "SELECT COUNT(*) FROM greptime_metrics_exemplars",
+                    QueryContext::arc(),
+                )
+                .await
+                .remove(0)
+                .unwrap();
+            let OutputData::Stream(stream) = output.data else {
+                unreachable!()
+            };
+            let batches = common_recordbatch::RecordBatches::try_collect(stream)
+                .await
+                .unwrap()
+                .take();
+            assert_eq!(
+                batches[0]
+                    .column(0)
+                    .as_primitive::<datatypes::arrow::datatypes::Int64Type>()
+                    .value(0),
+                if success { 1000 } else { 0 }
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_standalone_prom_store_remote_rw_default_physical_table() {
         common_telemetry::init_default_ut_logging();
         let standalone = GreptimeDbStandaloneBuilder::new(
@@ -167,6 +476,202 @@ mod tests {
             2_000_000_000,
         )
         .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_standalone_prom_remote_write_auto_create_microsecond_physical_table() {
+        common_telemetry::init_default_ut_logging();
+        let standalone = GreptimeDbStandaloneBuilder::new("test_prom_rw_auto_create_us_physical")
+            .with_auto_create_physical_table_timestamp_unit(
+                common_time::timestamp::TimeUnit::Microsecond,
+            )
+            .build()
+            .await;
+        let instance = standalone.fe_instance();
+
+        let db = "prometheus_auto_create_us";
+        let ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, db));
+        assert!(
+            SqlQueryHandler::do_query(
+                instance.as_ref(),
+                &format!("CREATE DATABASE IF NOT EXISTS {db}"),
+                ctx.clone(),
+            )
+            .await
+            .first()
+            .unwrap()
+            .is_ok()
+        );
+
+        // No manual table creation: both the physical table and the logical
+        // table `metric1` must be auto-created by the write, with a
+        // microsecond time index inherited from the physical table.
+        let write_request = WriteRequest {
+            timeseries: vec![prom_store::mock_timeseries()[0].clone()],
+            ..Default::default()
+        };
+        let (row_inserts, _) = to_grpc_row_insert_requests(&write_request).unwrap();
+        instance
+            .write(row_inserts, ctx.clone(), true)
+            .await
+            .unwrap();
+
+        for table in ["greptime_physical_table", "metric1"] {
+            let mut output = instance
+                .do_query(
+                    &format!("SELECT greptime_timestamp FROM {table}"),
+                    ctx.clone(),
+                )
+                .await;
+            let OutputData::Stream(stream) = output.remove(0).unwrap().data else {
+                unreachable!()
+            };
+            let batches = common_recordbatch::RecordBatches::try_collect(stream)
+                .await
+                .unwrap()
+                .take();
+            assert_eq!(batches[0].num_rows(), 2, "unexpected rows in {table}");
+            let ts_column = batches[0].column(0);
+            assert_eq!(
+                ts_column.data_type(),
+                &DataType::Timestamp(TimeUnit::Microsecond, None),
+                "unexpected time index type in {table}"
+            );
+            let timestamps = ts_column
+                .as_primitive::<TimestampMicrosecondType>()
+                .values();
+            assert_eq!(timestamps.to_vec(), vec![1_000_000, 2_000_000]);
+        }
+
+        // Remote read narrows microsecond timestamps back to milliseconds.
+        let read_request = ReadRequest {
+            queries: vec![Query {
+                start_timestamp_ms: 1000,
+                end_timestamp_ms: 2000,
+                matchers: vec![LabelMatcher {
+                    name: prom_store::METRIC_NAME_LABEL.to_string(),
+                    value: "metric1".to_string(),
+                    r#type: 0,
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let resp = instance.read(read_request, ctx.clone()).await.unwrap();
+        let body = prom_store::snappy_decompress(&resp.body).unwrap();
+        let read_response = ReadResponse::decode(&body[..]).unwrap();
+        let samples = &read_response.results[0].timeseries[0].samples;
+        assert_eq!(
+            samples.clone(),
+            vec![
+                Sample {
+                    value: 1.0,
+                    timestamp: 1000
+                },
+                Sample {
+                    value: 2.0,
+                    timestamp: 2000
+                }
+            ]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_standalone_prom_batcher_auto_create_microsecond_physical_table() {
+        use servers::batcher::logical_table::PendingRowsSchemaAlterer;
+
+        common_telemetry::init_default_ut_logging();
+        let standalone = GreptimeDbStandaloneBuilder::new("test_prom_batcher_auto_create_us")
+            .with_auto_create_physical_table_timestamp_unit(
+                common_time::timestamp::TimeUnit::Microsecond,
+            )
+            .build()
+            .await;
+        let instance = standalone.fe_instance();
+
+        // Drives the batcher's schema-alterer path: a missing physical table is
+        // auto-created with the configured microsecond unit, and new logical
+        // tables aligned to it.
+        let db = "prometheus_batcher_auto_create_us";
+        let ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, db));
+        assert!(
+            SqlQueryHandler::do_query(
+                instance.as_ref(),
+                &format!("CREATE DATABASE IF NOT EXISTS {db}"),
+                ctx.clone(),
+            )
+            .await
+            .first()
+            .unwrap()
+            .is_ok()
+        );
+        // The batcher aligns request schemas to the physical table's unit
+        // before invoking the schema alterer, so the schema below arrives in
+        // the configured microsecond unit. A missing physical table must be
+        // auto-created with the same unit.
+        let request_schema = vec![
+            api::v1::ColumnSchema {
+                column_name: "greptime_timestamp".to_string(),
+                datatype: ColumnDataType::TimestampMicrosecond as i32,
+                semantic_type: SemanticType::Timestamp as i32,
+                datatype_extension: None,
+                options: None,
+            },
+            api::v1::ColumnSchema {
+                column_name: "greptime_value".to_string(),
+                datatype: ColumnDataType::Float64 as i32,
+                semantic_type: SemanticType::Field as i32,
+                datatype_extension: None,
+                options: None,
+            },
+            api::v1::ColumnSchema {
+                column_name: "job".to_string(),
+                datatype: ColumnDataType::String as i32,
+                semantic_type: SemanticType::Tag as i32,
+                datatype_extension: None,
+                options: None,
+            },
+        ];
+        instance
+            .create_tables_if_missing_batch(
+                DEFAULT_CATALOG_NAME,
+                db,
+                &[("metric1", request_schema.as_slice())],
+                true,
+                ctx.clone(),
+            )
+            .await
+            .unwrap();
+
+        for table in ["greptime_physical_table", "metric1"] {
+            let mut output = instance
+                .do_query(
+                    &format!(
+                        "SELECT greptime_data_type FROM information_schema.columns \
+                         WHERE table_schema='{db}' AND table_name='{table}' \
+                         AND column_name='greptime_timestamp'"
+                    ),
+                    ctx.clone(),
+                )
+                .await;
+            let OutputData::Stream(stream) = output.remove(0).unwrap().data else {
+                unreachable!()
+            };
+            let batches = common_recordbatch::RecordBatches::try_collect(stream)
+                .await
+                .unwrap()
+                .take();
+            assert_eq!(
+                batches[0].num_rows(),
+                1,
+                "missing time index column in {table}"
+            );
+            let data_type = batches[0].column(0).as_string::<i32>().value(0);
+            assert_eq!(
+                data_type, "TimestampMicrosecond",
+                "unexpected time index type in {table}"
+            );
+        }
     }
 
     /// Regression test for <https://github.com/GreptimeTeam/greptimedb/issues/9231>:
@@ -892,12 +1397,27 @@ mod tests {
                 let mut empty = query.clone();
                 empty.start_timestamp_ms = 5000;
                 empty.end_timestamp_ms = 6000;
+                let mut hinted = query.clone();
+                hinted.end_timestamp_ms = 3000;
+                hinted.hints = Some(api::prom_store::remote::ReadHints {
+                    start_ms: 2000,
+                    end_ms: 5000,
+                    ..Default::default()
+                });
+                let mut disjoint = query.clone();
+                disjoint.hints = Some(api::prom_store::remote::ReadHints {
+                    start_ms: 5000,
+                    end_ms: 6000,
+                    ..Default::default()
+                });
                 let request = ReadRequest {
                     queries: vec![
                         remote_query("metric1"),
                         query,
                         remote_query("missing_metric"),
                         empty,
+                        hinted,
+                        disjoint,
                     ],
                     accepted_response_types,
                 };
@@ -911,7 +1431,7 @@ mod tests {
                 assert_eq!(response.headers()["content-encoding"], "snappy");
                 let body = prom_store::snappy_decompress(&response.bytes().await).unwrap();
                 let response = ReadResponse::decode(body.as_slice()).unwrap();
-                assert_eq!(response.results.len(), 4);
+                assert_eq!(response.results.len(), 6);
                 assert!(!response.results[0].timeseries[0].samples.is_empty());
                 assert!(response.results[2].timeseries.is_empty());
                 assert!(response.results[3].timeseries.is_empty());
@@ -947,6 +1467,10 @@ mod tests {
                     Some(api::prom_store::remote::histogram::Count::CountFloat(6.0))
                 );
                 assert_eq!(series.histograms[3].sum.to_bits(), 0x7ff0_0000_0000_0002);
+                let hinted_series = &response.results[4].timeseries[0];
+                assert_eq!(hinted_series.labels, series.labels);
+                assert_eq!(hinted_series.histograms, series.histograms[1..3]);
+                assert!(response.results[5].timeseries.is_empty());
             }
         }
         let response = client

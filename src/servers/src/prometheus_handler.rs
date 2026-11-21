@@ -128,6 +128,17 @@ pub fn resolve_schema_from_matchers(matchers: &[Matcher]) -> Result<Option<Strin
 
 #[async_trait]
 pub trait PrometheusHandler {
+    async fn query_exemplars(
+        &self,
+        _query: crate::exemplar::query::Query,
+        _ctx: QueryContextRef,
+    ) -> Result<Vec<crate::exemplar::query::Series>> {
+        crate::error::NotSupportedSnafu {
+            feat: "query_exemplars",
+        }
+        .fail()
+    }
+
     async fn do_query(&self, query: &PromQuery, query_ctx: QueryContextRef) -> Result<Output>;
 
     /// Executes a query whose statement has already been parsed.

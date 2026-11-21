@@ -149,12 +149,14 @@ impl SchedulerEnv {
                 metadata,
                 0,
                 RegionManifestOptions {
+                    file_metadata_interner: Default::default(),
                     manifest_dir: "".to_string(),
                     object_store: self.access_layer.object_store().clone(),
                     compress_type: CompressionType::Uncompressed,
                     checkpoint_distance: 10,
                     remove_file_options: Default::default(),
                     manifest_cache: None,
+                    conditional_publication: false,
                 },
                 FormatType::PrimaryKey,
                 false,
@@ -164,6 +166,7 @@ impl SchedulerEnv {
             .unwrap(),
             RegionRoleState::Leader(RegionLeaderState::Writable),
             None,
+            Default::default(),
         ))
     }
 

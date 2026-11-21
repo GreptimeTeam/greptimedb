@@ -25,6 +25,7 @@ use common_options::datanode::{ClientOptions, DatanodeClientOptions};
 use common_runtime::global::RuntimeOptions;
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, DEFAULT_OTLP_HTTP_ENDPOINT, LoggingOptions};
 use common_test_util::temp_dir::create_named_temp_file;
+use common_time::timestamp::TimeUnit;
 use common_wal::config::DatanodeWalConfig;
 use common_wal::config::raft_engine::RaftEngineConfig;
 use datanode::config::{DatanodeOptions, RegionEngineConfig, StorageConfig};
@@ -249,6 +250,7 @@ fn test_load_frontend_example_config() {
             default_timezone: Some("UTC".to_string()),
             default_column_prefix: Some("greptime".to_string()),
             auto_create_table: true,
+            auto_create_physical_table_timestamp_unit: TimeUnit::Millisecond,
             meta_client: Some(MetaClientOptions {
                 metasrv_addrs: vec!["127.0.0.1:3002".to_string()],
                 timeout: Duration::from_secs(3),
@@ -430,6 +432,7 @@ fn test_load_standalone_example_config() {
             default_timezone: Some("UTC".to_string()),
             default_column_prefix: Some("greptime".to_string()),
             auto_create_table: true,
+            auto_create_physical_table_timestamp_unit: TimeUnit::Millisecond,
             wal: DatanodeWalConfig::RaftEngine(RaftEngineConfig {
                 dir: Some(format!("{}/{}", DEFAULT_DATA_HOME, WAL_DIR)),
                 sync_period: Some(Duration::from_secs(5)),
@@ -588,7 +591,12 @@ where
 ///
 /// `variants` lists tagged sections, e.g. `("wal", "provider", ["kafka"])`,
 /// whose options only deserialize under a specific tag value.
-fn check_example_defaults<T>(name: &str, variants: &[(&str, &str, &[&str])]) -> Vec<String>
+/// `enterprise_options` lists fields unavailable in OSS builds of this component.
+fn check_example_defaults<T>(
+    name: &str,
+    variants: &[(&str, &str, &[&str])],
+    enterprise_options: &[&str],
+) -> Vec<String>
 where
     T: Configurable + serde::Serialize,
 {
@@ -622,6 +630,7 @@ where
         "storage.access_key_secret",
         "storage.account_name",
         "storage.account_key",
+        "storage.sas_token",
         "storage.credential_path",
         "storage.credential",
         "region_engine.mito.inverted_index.intermediate_path",
@@ -631,7 +640,8 @@ where
     let mut full_leaves = Vec::new();
     leaf_values(&full, "", &mut full_leaves);
     for (path, _) in full_leaves {
-        if SKIP_SERIALIZING.contains(&path.as_str())
+        if (!cfg!(feature = "enterprise") && enterprise_options.contains(&path.as_str()))
+            || SKIP_SERIALIZING.contains(&path.as_str())
             || (path == "tracing.tokio_console_addr" && !cfg!(feature = "tokio-console"))
         {
             continue;
@@ -664,7 +674,9 @@ where
     let mut documented_leaves = Vec::new();
     leaf_values(&documented, "", &mut documented_leaves);
     for (path, documented_value) in documented_leaves {
-        if SKIP_SERIALIZING.contains(&path.as_str()) {
+        if (!cfg!(feature = "enterprise") && enterprise_options.contains(&path.as_str()))
+            || SKIP_SERIALIZING.contains(&path.as_str())
+        {
             continue;
         }
         if let Some((_, resolved)) = resolved_at_runtime.iter().find(|(p, _)| *p == path) {
@@ -713,22 +725,37 @@ fn test_example_configs_document_actual_defaults() {
     const STORAGE: (&str, &str, &[&str]) =
         ("storage", "type", &["S3", "Oss", "Azblob", "Gcs", "Hdfs"]);
 
-    let mut errors =
-        check_example_defaults::<StandaloneOptions>("standalone.example.toml", &[WAL, STORAGE]);
+    let mut errors = check_example_defaults::<StandaloneOptions>(
+        "standalone.example.toml",
+        &[WAL, STORAGE],
+        &[],
+    );
     errors.extend(check_example_defaults::<FrontendOptions>(
         "frontend.example.toml",
+        &[],
         &[],
     ));
     errors.extend(check_example_defaults::<DatanodeOptions>(
         "datanode.example.toml",
         &[WAL, STORAGE],
+        &[],
     ));
     errors.extend(check_example_defaults::<MetasrvOptions>(
         "metasrv.example.toml",
-        &[("wal", "provider", &["kafka"])],
+        &[(
+            "wal",
+            "provider",
+            &[
+                "kafka",
+                #[cfg(feature = "enterprise")]
+                "experimental_object_store",
+            ],
+        )],
+        &["wal.prefix"],
     ));
     errors.extend(check_example_defaults::<FlownodeOptions>(
         "flownode.example.toml",
+        &[],
         &[],
     ));
     assert!(errors.is_empty(), "{}", errors.join("\n"));

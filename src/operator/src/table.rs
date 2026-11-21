@@ -134,6 +134,19 @@ impl TableMutationHandler for TableMutationOperator {
             .context(query_error::TableMutationSnafu)
     }
 
+    async fn cancel_region_compaction(
+        &self,
+        region_id: RegionId,
+        task_id: String,
+        ctx: QueryContextRef,
+    ) -> QueryResult<AffectedRows> {
+        self.requester
+            .handle_cancel_region_compaction(region_id, task_id, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(query_error::TableMutationSnafu)
+    }
+
     async fn discard_unflushed_data(
         &self,
         region_id: RegionId,
@@ -153,6 +166,32 @@ impl TableMutationHandler for TableMutationOperator {
     ) -> QueryResult<AffectedRows> {
         self.requester
             .handle_discard_unflushed_data_by_table(table_name, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(query_error::TableMutationSnafu)
+    }
+
+    async fn discard_pending_tails(
+        &self,
+        region_id: RegionId,
+        node_id: u64,
+        ctx: QueryContextRef,
+    ) -> QueryResult<AffectedRows> {
+        self.requester
+            .handle_discard_pending_tails(region_id, node_id, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(query_error::TableMutationSnafu)
+    }
+
+    async fn discard_pending_tails_by_table(
+        &self,
+        table_name: TableName,
+        node_id: u64,
+        ctx: QueryContextRef,
+    ) -> QueryResult<AffectedRows> {
+        self.requester
+            .handle_discard_pending_tails_by_table(table_name, node_id, ctx)
             .await
             .map_err(BoxedError::new)
             .context(query_error::TableMutationSnafu)

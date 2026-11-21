@@ -137,14 +137,17 @@ mod tests {
         };
         let (range_started_tx, range_started_rx) = oneshot::channel();
         let range_release = Arc::new(Notify::new());
+        let backend = Arc::new(BlockingRangeKvBackend {
+            range_started: Mutex::new(None),
+            range_release: range_release.clone(),
+        });
         let cache = Arc::new(new_table_flownode_set_cache(
             "test".to_string(),
             CacheBuilder::new(2).build(),
-            Arc::new(BlockingRangeKvBackend {
-                range_started: Mutex::new(Some(range_started_tx)),
-                range_release: range_release.clone(),
-            }),
+            backend.clone(),
         ));
+        cache.get(cached_table_id).await.unwrap();
+        *backend.range_started.lock().unwrap() = Some(range_started_tx);
         cache
             .invalidate(&[CacheIdent::CreateFlow(CreateFlow {
                 flow_id: 1,

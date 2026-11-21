@@ -80,8 +80,8 @@ fn merge_region_statistic(
             metadata_manifest_version: metadata_stat.manifest.data_manifest_version(),
         },
         written_bytes: metadata_stat.written_bytes + data_stat.written_bytes,
-        flushed_parquet_bytes: metadata_stat.flushed_parquet_bytes
-            + data_stat.flushed_parquet_bytes,
+        ingested_parquet_bytes: metadata_stat.ingested_parquet_bytes
+            + data_stat.ingested_parquet_bytes,
         query_cpu_time: data_stat.query_cpu_time,
         query_scanned_bytes: data_stat.query_scanned_bytes,
         data_topic_latest_entry_id: data_stat.data_topic_latest_entry_id,
@@ -90,6 +90,9 @@ fn merge_region_statistic(
         // pin every metric region's minimum to the epoch.
         min_timestamp: data_stat.min_timestamp,
         max_timestamp: data_stat.max_timestamp,
+        // A repartition flushes the metadata region too, and that flush refuses pending
+        // tails, so the metadata region's tails count as well.
+        has_pending_tails: metadata_stat.has_pending_tails || data_stat.has_pending_tails,
     }
 }
 
@@ -153,19 +156,37 @@ mod tests {
     }
 
     #[test]
-    fn merge_region_statistic_sums_flushed_parquet_bytes() {
+    fn merge_region_statistic_sums_ingested_parquet_bytes() {
         let metadata_stat = RegionStatistic {
-            flushed_parquet_bytes: 123,
+            ingested_parquet_bytes: 123,
             ..Default::default()
         };
         let data_stat = RegionStatistic {
-            flushed_parquet_bytes: 456,
+            ingested_parquet_bytes: 456,
             ..Default::default()
         };
         assert_eq!(
-            merge_region_statistic(&metadata_stat, &data_stat).flushed_parquet_bytes,
+            merge_region_statistic(&metadata_stat, &data_stat).ingested_parquet_bytes,
             579
         );
+    }
+
+    #[test]
+    fn merge_region_statistic_has_pending_tails_of_either_region() {
+        for (metadata, data) in [(false, false), (true, false), (false, true), (true, true)] {
+            let metadata_stat = RegionStatistic {
+                has_pending_tails: metadata,
+                ..Default::default()
+            };
+            let data_stat = RegionStatistic {
+                has_pending_tails: data,
+                ..Default::default()
+            };
+            assert_eq!(
+                merge_region_statistic(&metadata_stat, &data_stat).has_pending_tails,
+                metadata || data
+            );
+        }
     }
 
     #[test]

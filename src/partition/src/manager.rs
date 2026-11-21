@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use api::v1::Rows;
@@ -22,6 +22,9 @@ use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{self, RegionRoute};
 use snafu::{OptionExt, ResultExt};
+use store_api::metric_engine_consts::{
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME,
+};
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::{TableId, TableInfo};
 
@@ -29,6 +32,7 @@ use crate::cache::{CachedPartitionInfo, PartitionInfoCacheRef, PhysicalPartition
 use crate::error::{FindLeaderSnafu, Result};
 use crate::expr::PartitionExpr;
 use crate::multi_dim::MultiDimPartitionRule;
+use crate::partition::PartitionEvalContext;
 use crate::splitter::RowSplitter;
 use crate::{PartitionRuleRef, error};
 
@@ -137,6 +141,19 @@ impl PartitionRuleManager {
         Ok(table_region_routes)
     }
 
+    /// Loads cached routing metadata for callers that only inspect region IDs or partitions.
+    /// Peer-address consumers use `batch_find_region_routes` to refresh node addresses.
+    pub async fn batch_cached_physical_table_routes(
+        &self,
+        table_ids: &[TableId],
+    ) -> Result<HashMap<TableId, Arc<PhysicalTableRouteValue>>> {
+        TableRouteManager::resolve_physical_table_routes(table_ids, |ids| async move {
+            self.table_route_cache.get_many(&ids).await
+        })
+        .await
+        .context(error::TableRouteManagerSnafu)
+    }
+
     /// Returns the physical partition info with version.
     pub async fn find_physical_partition_info(
         &self,
@@ -174,14 +191,14 @@ impl PartitionRuleManager {
         &self,
         table_ids: &[TableId],
     ) -> Result<HashMap<TableId, Vec<PartitionInfo>>> {
-        let batch_region_routes = self.batch_find_region_routes(table_ids).await?;
+        let routes = self.batch_cached_physical_table_routes(table_ids).await?;
 
         let mut results = HashMap::with_capacity(table_ids.len());
 
-        for (table_id, region_routes) in batch_region_routes {
+        for (table_id, route) in routes {
             results.insert(
                 table_id,
-                create_partitions_from_region_routes(table_id, &region_routes)?,
+                create_partitions_from_region_routes(table_id, &route.region_routes)?,
             );
         }
 
@@ -192,12 +209,6 @@ impl PartitionRuleManager {
         &self,
         table_info: &TableInfo,
     ) -> Result<(PartitionRuleRef, HashMap<RegionNumber, Option<u64>>)> {
-        let partition_columns = table_info
-            .meta
-            .partition_column_names()
-            .cloned()
-            .collect::<Vec<_>>();
-
         let partition_info = self
             .find_physical_partition_info(table_info.table_id())
             .await?;
@@ -225,12 +236,12 @@ impl PartitionRuleManager {
                 .filter(|partition| partition.partition_expr.is_none())
                 .map(|partition| partition.id.region_number()),
         );
-        let partition_rule = Arc::new(MultiDimPartitionRule::try_new(
-            partition_columns,
-            regions,
-            exprs,
-            false,
-        )?) as _;
+        let (partition_columns, eval_context) =
+            Self::resolve_partition_columns_and_context(table_info, &exprs)?;
+        let partition_rule = Arc::new(
+            MultiDimPartitionRule::try_new(partition_columns, regions, exprs, false)?
+                .with_eval_context(eval_context),
+        ) as _;
         Ok((partition_rule, partition_versions))
     }
 
@@ -275,6 +286,50 @@ impl PartitionRuleManager {
             .collect::<HashMap<_, _>>();
 
         Ok(result)
+    }
+
+    /// Resolves all expression inputs, including identity supplied outside the payload.
+    fn resolve_partition_columns_and_context(
+        table_info: &TableInfo,
+        exprs: &[PartitionExpr],
+    ) -> Result<(Vec<String>, PartitionEvalContext)> {
+        if table_info.meta.engine != METRIC_ENGINE_NAME
+            || !table_info
+                .meta
+                .options
+                .extra_options
+                .contains_key(LOGICAL_TABLE_METADATA_KEY)
+        {
+            let columns = table_info.meta.partition_column_names().cloned().collect();
+            return Ok((columns, PartitionEvalContext::FromPayload));
+        }
+
+        // Catalog maps only physical partition columns present in the logical schema.
+        // The routing context can additionally supply __table_id.
+        let mut columns = HashSet::new();
+        for expr in exprs {
+            expr.collect_column_names(&mut columns);
+        }
+        let mut columns: Vec<_> = columns.into_iter().collect();
+        // Keep rule snapshots deterministic despite collecting names in a HashSet.
+        columns.sort_unstable();
+        for column in &columns {
+            if column != DATA_SCHEMA_TABLE_ID_COLUMN_NAME
+                && table_info
+                    .meta
+                    .schema
+                    .column_schema_by_name(column)
+                    .is_none()
+            {
+                return error::UndefinedColumnSnafu { column }.fail();
+            }
+        }
+        Ok((
+            columns,
+            PartitionEvalContext::WithTableId {
+                table_id: table_info.table_id(),
+            },
+        ))
     }
 }
 

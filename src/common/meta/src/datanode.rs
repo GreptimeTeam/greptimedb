@@ -102,11 +102,13 @@ pub struct RegionStat {
     pub region_manifest: RegionManifestInfo,
     /// The total bytes written of the region since region opened.
     pub written_bytes: u64,
-    /// Total Parquet bytes committed by flushes since the region opened.
+    /// Total ingested Parquet bytes since the region opened.
+    /// Currently counts only committed flush output.
     ///
     /// Excludes index files, compaction and imported SSTs. Resets on region reopen.
-    #[serde(default)]
-    pub flushed_parquet_bytes: u64,
+    /// Accepts the legacy `flushed_parquet_bytes` key; upgrade metasrv before datanodes.
+    #[serde(default, alias = "flushed_parquet_bytes")]
+    pub ingested_parquet_bytes: u64,
     /// The total query CPU time of the region since region opened.
     ///
     /// Unit: nanoseconds.
@@ -128,6 +130,10 @@ pub struct RegionStat {
     /// The latest timestamp of the region's current data, if it holds any.
     #[serde(default)]
     pub max_timestamp: Option<Timestamp>,
+    /// Whether the region still has WAL ranges to recover. Omitted from the serialized form
+    /// when false.
+    #[serde(default, skip_serializing_if = "store_api::is_false")]
+    pub has_pending_tails: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -338,13 +344,14 @@ impl From<&api::v1::meta::RegionStat> for RegionStat {
             index_size: region_stat.index_size,
             region_manifest: region_stat.manifest.into(),
             written_bytes: region_stat.written_bytes,
-            flushed_parquet_bytes: region_stat.flushed_parquet_bytes,
+            ingested_parquet_bytes: region_stat.ingested_parquet_bytes,
             query_cpu_time: region_stat.query_cpu_time,
             query_scanned_bytes: region_stat.query_scanned_bytes,
             data_topic_latest_entry_id: region_stat.data_topic_latest_entry_id,
             metadata_topic_latest_entry_id: region_stat.metadata_topic_latest_entry_id,
             min_timestamp: region_stat.min_timestamp,
             max_timestamp: region_stat.max_timestamp,
+            has_pending_tails: region_stat.has_pending_tails,
         }
     }
 }
@@ -603,27 +610,28 @@ mod tests {
                     file_removed_cnt: 0,
                 },
                 written_bytes: 0,
-                flushed_parquet_bytes: 4096,
+                ingested_parquet_bytes: 4096,
                 query_cpu_time: 10,
                 query_scanned_bytes: 20,
                 data_topic_latest_entry_id: 0,
                 metadata_topic_latest_entry_id: 0,
                 min_timestamp: None,
                 max_timestamp: None,
+                has_pending_tails: false,
             }],
             ..Default::default()
         };
         let stat_val = DatanodeStatValue { stats: vec![stat] };
         let mut value = serde_json::to_value(stat_val).unwrap();
         let region_stat = value[0]["region_stats"][0].as_object_mut().unwrap();
-        region_stat.remove("flushed_parquet_bytes");
+        region_stat.remove("ingested_parquet_bytes");
         region_stat.remove("query_cpu_time");
         region_stat.remove("query_scanned_bytes");
 
         let stat_val: DatanodeStatValue = serde_json::from_value(value).unwrap();
         let region_stat = &stat_val.stats[0].region_stats[0];
 
-        assert_eq!(region_stat.flushed_parquet_bytes, 0);
+        assert_eq!(region_stat.ingested_parquet_bytes, 0);
         assert_eq!(region_stat.query_cpu_time, 0);
         assert_eq!(region_stat.query_scanned_bytes, 0);
     }
@@ -713,10 +721,10 @@ mod tests {
     }
 
     #[test]
-    fn test_flushed_parquet_bytes_from_heartbeat() {
+    fn test_ingested_parquet_bytes_from_heartbeat() {
         for bytes in [0, 4096, u64::MAX] {
             let statistic = RegionStatistic {
-                flushed_parquet_bytes: bytes,
+                ingested_parquet_bytes: bytes,
                 ..Default::default()
             };
             let mut region = api::v1::meta::RegionStat::default();
@@ -735,12 +743,35 @@ mod tests {
             };
             let stat = Stat::try_from(&request).unwrap();
             let stat = &stat.region_stats[0];
-            assert_eq!(stat.flushed_parquet_bytes, bytes);
+            assert_eq!(stat.ingested_parquet_bytes, bytes);
             let encoded = serde_json::to_vec(stat).unwrap();
+            let wire: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+            assert_eq!(wire["ingested_parquet_bytes"], bytes);
+            assert!(wire.get("flushed_parquet_bytes").is_none());
+            let mut old_wire = wire.clone();
+            old_wire
+                .as_object_mut()
+                .unwrap()
+                .remove("ingested_parquet_bytes");
+            old_wire["flushed_parquet_bytes"] = bytes.into();
+            assert_eq!(
+                &serde_json::from_value::<RegionStat>(old_wire).unwrap(),
+                stat
+            );
             let decoded: RegionStat = serde_json::from_slice(&encoded).unwrap();
             assert_eq!(&decoded, stat);
 
             let mut legacy = serde_json::to_value(&statistic).unwrap();
+            legacy
+                .as_object_mut()
+                .unwrap()
+                .remove("ingested_parquet_bytes");
+            legacy["flushed_parquet_bytes"] = bytes.into();
+            region.extensions.insert(
+                REGION_STATISTIC_KEY.to_string(),
+                serde_json::to_vec(&legacy).unwrap(),
+            );
+            assert_eq!(RegionStat::from(&region).ingested_parquet_bytes, bytes);
             legacy
                 .as_object_mut()
                 .unwrap()
@@ -749,12 +780,57 @@ mod tests {
                 REGION_STATISTIC_KEY.to_string(),
                 serde_json::to_vec(&legacy).unwrap(),
             );
-            assert_eq!(RegionStat::from(&region).flushed_parquet_bytes, 0);
+            assert_eq!(RegionStat::from(&region).ingested_parquet_bytes, 0);
         }
         assert_eq!(
-            RegionStat::from(&api::v1::meta::RegionStat::default()).flushed_parquet_bytes,
+            RegionStat::from(&api::v1::meta::RegionStat::default()).ingested_parquet_bytes,
             0
         );
+    }
+
+    #[test]
+    fn test_has_pending_tails_wire() {
+        // Frozen encodings of a release without the field.
+        let legacy_statistic: &[u8] = include_bytes!(
+            "../../../../tests/compatibility/wire/region_statistic_pending_tails/legacy_region_statistic.json"
+        );
+        let legacy_stat: &[u8] = include_bytes!(
+            "../../../../tests/compatibility/wire/region_statistic_pending_tails/legacy_region_stat.json"
+        );
+        let statistic: RegionStatistic = serde_json::from_slice(legacy_statistic).unwrap();
+        assert!(!statistic.has_pending_tails);
+        // A false flag is not written, so the encoding stays as it was.
+        assert_eq!(serde_json::to_vec(&statistic).unwrap(), legacy_statistic);
+        let stat: RegionStat = serde_json::from_slice(legacy_stat).unwrap();
+        assert!(!stat.has_pending_tails);
+        assert_eq!(serde_json::to_vec(&stat).unwrap(), legacy_stat);
+
+        // A true flag is written under this key, which readers that support the flag decode;
+        // older readers ignore it.
+        let statistic = RegionStatistic {
+            has_pending_tails: true,
+            ..statistic
+        };
+        let encoded = serde_json::to_value(&statistic).unwrap();
+        assert_eq!(encoded["has_pending_tails"], serde_json::Value::Bool(true));
+        let encoded = serde_json::to_value(RegionStat {
+            has_pending_tails: true,
+            ..stat
+        })
+        .unwrap();
+        assert_eq!(encoded["has_pending_tails"], serde_json::Value::Bool(true));
+
+        // A true flag travels from the heartbeat extension to the stored statistic.
+        let mut region = api::v1::meta::RegionStat::default();
+        region.extensions.insert(
+            REGION_STATISTIC_KEY.to_string(),
+            serde_json::to_vec(&statistic).unwrap(),
+        );
+        let stat = RegionStat::from(&region);
+        assert!(stat.has_pending_tails);
+        let stored: RegionStat =
+            serde_json::from_slice(&serde_json::to_vec(&stat).unwrap()).unwrap();
+        assert_eq!(stored, stat);
     }
 
     #[test]

@@ -16,7 +16,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
-use std::sync::OnceLock;
+use std::sync::{LazyLock, OnceLock};
 use std::time::Duration;
 
 use backon::{BackoffBuilder, ExponentialBuilder};
@@ -26,7 +26,7 @@ use crate::error::{Error, RdsTransactionRetryFailedSnafu, Result, UnexpectedSnaf
 use crate::kv_backend::txn::{
     Compare, Txn as KvTxn, TxnOp, TxnOpResponse, TxnResponse as KvTxnResponse,
 };
-use crate::kv_backend::{KvBackend, TxnService};
+use crate::kv_backend::{ClosableKvBackend, KvBackend, TxnService};
 use crate::metrics::METRIC_META_TXN_REQUEST;
 use crate::rpc::KeyValue;
 use crate::rpc::store::{
@@ -52,6 +52,15 @@ mod mysql;
 pub use mysql::MySqlStore;
 
 const RDS_STORE_TXN_RETRY_COUNT: usize = 3;
+
+/// Maximum keys or key-value pairs per statement, read once on first use.
+/// `GREPTIME_RDS_BATCH_SIZE` accepts 1..=65_535; other values use 65_535.
+/// Each backend additionally caps writes by its bind-parameter limit.
+#[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
+pub(crate) static RDS_BATCH_SIZE: LazyLock<usize> = LazyLock::new(|| {
+    let value = std::env::var("GREPTIME_RDS_BATCH_SIZE").ok();
+    parse_batch_size(value.as_deref())
+});
 
 #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
 static RUSTLS_CRYPTO_PROVIDER_INIT: OnceLock<std::result::Result<(), String>> = OnceLock::new();
@@ -103,6 +112,9 @@ pub trait Executor: Send + Sync {
     }
 
     async fn txn_executor<'a>(&'a mut self) -> Result<Self::Transaction<'a>>;
+
+    /// Starts a read-only transaction whose plain reads share one snapshot.
+    async fn read_only_txn_executor<'a>(&'a mut self) -> Result<Self::Transaction<'a>>;
 }
 
 /// Transaction query executor for rds. It can execute queries in transaction or commit the transaction.
@@ -121,6 +133,11 @@ pub trait Transaction<'a>: Send + Sync {
 /// Factory for creating default and transaction query executors.
 #[async_trait::async_trait]
 pub trait ExecutorFactory<T: Executor>: Send + Sync {
+    /// Closes the connection pool to new acquisitions. This affects all shared pool handles.
+    /// MySQL waits for checked-out connections to be returned; PostgreSQL allows them to
+    /// finish and releases them when returned. Stop consumers before closing the backend.
+    async fn close(&self);
+
     async fn default_executor(&self) -> Result<T>;
 
     async fn txn_executor<'a>(&self, default_executor: &'a mut T) -> Result<T::Transaction<'a>>;
@@ -585,6 +602,29 @@ where
     }
 }
 
+#[async_trait::async_trait]
+impl<T, S, R> ClosableKvBackend for RdsStore<T, S, R>
+where
+    R: 'static,
+    Self: KvQueryExecutor<T> + Send + Sync,
+    T: Executor + 'static,
+    S: ExecutorFactory<T> + 'static,
+{
+    async fn close(&self) -> Result<()> {
+        self.executor_factory.close().await;
+        Ok(())
+    }
+}
+
+/// Parses an optional row limit without exceeding the statement's parameter budget.
+#[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
+fn parse_batch_size(value: Option<&str>) -> usize {
+    value
+        .and_then(|value| value.parse().ok())
+        .filter(|size| (1..=u16::MAX as usize).contains(size))
+        .unwrap_or(u16::MAX as usize)
+}
+
 /// Checks if the transaction operations are the same type.
 fn check_txn_ops(txn_ops: &[TxnOp]) -> Result<bool> {
     if txn_ops.is_empty() {
@@ -617,4 +657,27 @@ macro_rules! record_rds_sql_execute_elapsed {
                     .observe(timer.elapsed().as_millis() as f64);
             })
     }};
+}
+
+#[cfg(all(test, any(feature = "pg_kvbackend", feature = "mysql_kvbackend")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_batch_size() {
+        for (value, expected) in [
+            (None, 65_535),
+            (Some("1"), 1),
+            (Some("1024"), 1024),
+            (Some("65535"), 65_535),
+            (Some("0"), 65_535),
+            (Some("65536"), 65_535),
+            (Some("-1"), 65_535),
+            (Some("invalid"), 65_535),
+            (Some(""), 65_535),
+            (Some("18446744073709551616"), 65_535),
+        ] {
+            assert_eq!(parse_batch_size(value), expected, "{value:?}");
+        }
+    }
 }

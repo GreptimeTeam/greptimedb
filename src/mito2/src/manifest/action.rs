@@ -14,7 +14,7 @@
 
 //! Defines [RegionMetaAction] related structs and [RegionCheckpoint].
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
 use chrono::Utc;
@@ -30,7 +30,8 @@ use crate::error::{RegionMetadataNotFoundSnafu, Result, SerdeJsonSnafu, Utf8Snaf
 use crate::manifest::manager::RemoveFileOptions;
 use crate::region::ManifestStats;
 use crate::sst::FormatType;
-use crate::sst::file::FileMeta;
+use crate::sst::file::{self, FileMeta, FileMetaRef};
+use crate::sst::file_metadata::FileMetadataInternerRef;
 use crate::wal::EntryId;
 
 /// Actions that can be applied to region manifest.
@@ -83,10 +84,14 @@ pub struct RegionChange {
     pub append_mode: Option<bool>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct RegionEdit {
     pub files_to_add: Vec<FileMeta>,
     pub files_to_remove: Vec<FileMeta>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub series_indexes_to_add: Vec<FileMeta>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub series_indexes_to_remove: Vec<file::RegionFileId>,
     /// event unix timestamp in milliseconds, help to determine file deletion time.
     #[serde(default)]
     pub timestamp_ms: Option<i64>,
@@ -95,6 +100,95 @@ pub struct RegionEdit {
     pub flushed_entry_id: Option<EntryId>,
     pub flushed_sequence: Option<SequenceNumber>,
     pub committed_sequence: Option<SequenceNumber>,
+    #[serde(flatten)]
+    pub wal_recovery: WalRecoveryEdit,
+}
+
+/// Changes an edit makes to the WAL ranges the region still has to recover.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct WalRecoveryEdit {
+    /// The new [RegionManifest::pending_tails], whose segments of each node keep the
+    /// order and bounds described there. `None` keeps them unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_tails: Option<Vec<PendingTail>>,
+    /// Replaces the handoff floor of one node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff_floor: Option<HandoffFloor>,
+}
+
+/// WAL entries of one node in `(after, upto]` that the region still has to recover.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct PendingTail {
+    /// Id of the datanode whose WAL holds the entries.
+    pub node_id: u64,
+    pub after: EntryId,
+    pub upto: EntryId,
+    pub upto_kind: UptoKind,
+}
+
+/// Where the upper bound of a [PendingTail] comes from.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UptoKind {
+    /// The last entry id the node reported, which names an entry that can be replayed.
+    Reported,
+    /// An upper bound found by listing the WAL objects of the node, which may name no entry.
+    Listed,
+}
+
+/// Entries of a node at or below `entry_id` are never recovered from its WAL, except
+/// those in a pending tail of the node.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HandoffFloor {
+    pub node_id: u64,
+    pub entry_id: EntryId,
+}
+
+/// Caps a release of the WAL of node `node_id` at `entry_id`, so that it keeps every
+/// pending tail of the node.
+pub(crate) fn cap_wal_release(
+    pending_tails: &[PendingTail],
+    node_id: Option<u64>,
+    entry_id: EntryId,
+) -> EntryId {
+    pending_tails
+        .iter()
+        .filter(|tail| Some(tail.node_id) == node_id)
+        .map(|tail| tail.after)
+        .fold(entry_id, EntryId::min)
+}
+
+impl RegionEdit {
+    /// Whether this edit adds or removes data files or series indexes.
+    pub(crate) fn has_file_changes(&self) -> bool {
+        !self.files_to_add.is_empty()
+            || !self.files_to_remove.is_empty()
+            || !self.series_indexes_to_add.is_empty()
+            || !self.series_indexes_to_remove.is_empty()
+    }
+
+    /// Shared reclassification must be add-only for a file ID: the manifest removes
+    /// by ID, while the in-memory Version removes from the specified level.
+    pub(crate) fn validate_shared_reclassification(&self, region_id: RegionId) -> Result<()> {
+        let shared_ids: HashSet<_> = self
+            .files_to_add
+            .iter()
+            .filter(|file| file.level == file::LEVEL_SHARED)
+            .map(|file| file.file_id)
+            .collect();
+        snafu::ensure!(
+            shared_ids.is_empty()
+                || self
+                    .files_to_remove
+                    .iter()
+                    .all(|file| !shared_ids.contains(&file.file_id)),
+            crate::error::InvalidRequestSnafu {
+                region_id,
+                reason: "Cannot add and remove the same shared SST in one edit",
+            }
+        );
+        Ok(())
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -136,7 +230,9 @@ pub struct RegionManifest {
     /// Metadata of the region.
     pub metadata: RegionMetadataRef,
     /// SST files.
-    pub files: HashMap<FileId, FileMeta>,
+    pub files: HashMap<FileId, FileMetaRef>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub series_indexes: HashMap<FileId, FileMetaRef>,
     /// Removed files, which are not in the current manifest but may still be kept for a while.
     /// This is a list of (set of files, timestamp) pairs, where the timestamp is the time when
     /// the files are removed from manifest. The timestamp is in milliseconds since unix epoch.
@@ -166,6 +262,50 @@ pub struct RegionManifest {
     /// Whether the region is in append mode.
     #[serde(default)]
     pub append_mode: Option<bool>,
+    /// WAL ranges the region still has to recover, in the order they were added.
+    ///
+    /// The segments of one node are increasing and do not overlap, and each has
+    /// `after < upto`: a new segment of a node takes as `after` the largest of the
+    /// flushed entry id, the `upto`s of the node's existing segments and its handoff
+    /// floor, and is added only if that is below its `upto`. So the entries of a node
+    /// between two of its segments are flushed, discarded or at or below a handoff floor
+    /// of the node, and need no replay.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_tails: Vec<PendingTail>,
+    /// The [HandoffFloor] of each node, removed once the flushed entry id reaches it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub handoff_floors: BTreeMap<u64, EntryId>,
+}
+
+impl RegionManifest {
+    pub(crate) fn all_files(&self) -> impl Iterator<Item = &FileMetaRef> {
+        self.files.values().chain(self.series_indexes.values())
+    }
+
+    /// Returns the entry id after which node `node_id` replays its WAL when it opens
+    /// the region. Entries up to it are flushed, discarded, left to the pending tails,
+    /// or below the handoff floor of the node.
+    ///
+    /// Entries of the node in `(after, upto]` of one of its tails belong to that tail.
+    /// Whoever adds a tail ensures that every entry id the node allocates afterwards is
+    /// above the tail's `upto`, so no later write of the node falls in a skipped range.
+    /// It also ensures that the node's WAL durably holds history through `upto`: a tail
+    /// commit or a discard can raise the flushed entry id to it, and an open of the region
+    /// checks that the WAL holds history through the flushed entry id where the log store
+    /// checks history (see [LogStore::check_region_history]). A discard raises the flushed
+    /// entry id on whichever node leads the region, so whoever adds a tail ensures both for
+    /// every node that may lead the region afterwards, not only for the tail's own node.
+    ///
+    /// [LogStore::check_region_history]: store_api::logstore::LogStore::check_region_history
+    pub(crate) fn wal_replay_start(&self, node_id: Option<u64>) -> EntryId {
+        let floor = node_id.and_then(|node_id| self.handoff_floors.get(&node_id).copied());
+        self.pending_tails
+            .iter()
+            .filter(|tail| Some(tail.node_id) == node_id)
+            .map(|tail| tail.upto)
+            .chain(floor)
+            .fold(self.flushed_entry_id, EntryId::max)
+    }
 }
 
 #[cfg(test)]
@@ -173,19 +313,33 @@ impl PartialEq for RegionManifest {
     fn eq(&self, other: &Self) -> bool {
         self.metadata == other.metadata
             && self.files == other.files
+            && self.series_indexes == other.series_indexes
             && self.flushed_entry_id == other.flushed_entry_id
             && self.flushed_sequence == other.flushed_sequence
             && self.manifest_version == other.manifest_version
             && self.truncated_entry_id == other.truncated_entry_id
             && self.compaction_time_window == other.compaction_time_window
             && self.committed_sequence == other.committed_sequence
+            && self.pending_tails == other.pending_tails
+            && self.handoff_floors == other.handoff_floors
+    }
+}
+
+impl RegionManifest {
+    /// Rejects prototype task state before deserializing, so callers cannot
+    /// silently drop recovery evidence that this build cannot interpret.
+    pub(crate) fn decode(bytes: &[u8]) -> Result<Self> {
+        crate::manifest::compat::validate_manifest(bytes)?;
+        serde_json::from_slice(bytes).context(SerdeJsonSnafu)
     }
 }
 
 #[derive(Debug, Default)]
 pub struct RegionManifestBuilder {
+    file_metadata_interner: FileMetadataInternerRef,
     metadata: Option<RegionMetadataRef>,
-    files: HashMap<FileId, FileMeta>,
+    files: HashMap<FileId, FileMetaRef>,
+    series_indexes: HashMap<FileId, FileMetaRef>,
     pub removed_files: RemovedFilesRecord,
     flushed_entry_id: EntryId,
     flushed_sequence: SequenceNumber,
@@ -195,24 +349,57 @@ pub struct RegionManifestBuilder {
     committed_sequence: Option<SequenceNumber>,
     sst_format: FormatType,
     append_mode: Option<bool>,
+    pending_tails: Vec<PendingTail>,
+    handoff_floors: BTreeMap<u64, EntryId>,
 }
 
 impl RegionManifestBuilder {
-    fn removed_file(&self, file: &FileMeta) -> RemovedFile {
-        let index_version = self
+    /// Creates an empty builder with the owner's metadata interner.
+    pub(crate) fn new(file_metadata_interner: FileMetadataInternerRef) -> Self {
+        Self {
+            file_metadata_interner,
+            ..Default::default()
+        }
+    }
+
+    /// Canonicalizes independently decoded checkpoint entries before publication.
+    pub(crate) fn with_checkpoint(
+        checkpoint: Option<RegionManifest>,
+        file_metadata_interner: FileMetadataInternerRef,
+    ) -> Self {
+        let mut builder = Self::from_shared_manifest(checkpoint, file_metadata_interner);
+        for meta in builder
             .files
-            .get(&file.file_id)
-            .and_then(FileMeta::index_version)
+            .values_mut()
+            .chain(builder.series_indexes.values_mut())
+        {
+            builder.file_metadata_interner.intern_in_place(meta);
+        }
+        builder
+    }
+
+    fn removed_file(&self, file: &FileMeta) -> RemovedFile {
+        let existing = self.files.get(&file.file_id);
+        if existing.is_some_and(|meta| !matches!(meta.format, file::FileFormat::Parquet)) {
+            return RemovedFile::Narthex(file.file_id);
+        }
+        let index_version = existing
+            .and_then(|meta| meta.index_version())
             .or_else(|| file.index_version());
         RemovedFile::File(file.file_id, index_version)
     }
 
-    /// Start with a checkpoint.
-    pub fn with_checkpoint(checkpoint: Option<RegionManifest>) -> Self {
+    /// Reuses entries from a snapshot already canonicalized by the same owner.
+    pub(crate) fn from_shared_manifest(
+        checkpoint: Option<RegionManifest>,
+        file_metadata_interner: FileMetadataInternerRef,
+    ) -> Self {
         if let Some(s) = checkpoint {
             Self {
+                file_metadata_interner,
                 metadata: Some(s.metadata),
                 files: s.files,
+                series_indexes: s.series_indexes,
                 removed_files: s.removed_files,
                 flushed_entry_id: s.flushed_entry_id,
                 manifest_version: s.manifest_version,
@@ -222,9 +409,11 @@ impl RegionManifestBuilder {
                 committed_sequence: s.committed_sequence,
                 sst_format: s.sst_format,
                 append_mode: s.append_mode,
+                pending_tails: s.pending_tails,
+                handoff_floors: s.handoff_floors,
             }
         } else {
-            Default::default()
+            Self::new(file_metadata_interner)
         }
     }
 
@@ -264,12 +453,27 @@ impl RegionManifestBuilder {
 
         let mut removed_files = vec![];
         for file in edit.files_to_add {
+            let file = FileMetaRef::from(file);
+            let file = self.file_metadata_interner.intern(file);
             if let Some(old_file) = self.files.insert(file.file_id, file.clone())
                 && let Some(old_index) = old_file.index_version()
                 && !old_file.is_index_up_to_date(&file)
             {
                 // The old file has an index that is now outdated.
                 removed_files.push(RemovedFile::Index(old_file.file_id, old_index));
+            }
+        }
+        for file in edit.series_indexes_to_add {
+            let file = self.file_metadata_interner.intern(file.into());
+            self.series_indexes.insert(file.file_id, file);
+        }
+        for id in edit.series_indexes_to_remove {
+            if let std::collections::hash_map::Entry::Occupied(entry) =
+                self.series_indexes.entry(id.file_id())
+                && entry.get().file_id() == id
+            {
+                entry.remove();
+                removed_files.push(RemovedFile::Narthex(id.file_id()));
             }
         }
         removed_files.extend(
@@ -301,6 +505,12 @@ impl RegionManifestBuilder {
         if let Some(window) = edit.compaction_time_window {
             self.compaction_time_window = Some(window);
         }
+        if let Some(pending_tails) = edit.wal_recovery.pending_tails {
+            self.pending_tails = pending_tails;
+        }
+        if let Some(floor) = edit.wal_recovery.handoff_floor {
+            self.handoff_floors.insert(floor.node_id, floor.entry_id);
+        }
     }
 
     pub fn apply_truncate(&mut self, manifest_version: ManifestVersion, truncate: RegionTruncate) {
@@ -316,13 +526,21 @@ impl RegionManifestBuilder {
                 self.removed_files.add_removed_files(
                     self.files
                         .values()
-                        .map(|f| RemovedFile::File(f.file_id, f.index_version()))
+                        .chain(self.series_indexes.values())
+                        .map(|f| {
+                            if matches!(f.format, file::FileFormat::Parquet) {
+                                RemovedFile::File(f.file_id, f.index_version())
+                            } else {
+                                RemovedFile::Narthex(f.file_id)
+                            }
+                        })
                         .collect(),
                     truncate
                         .timestamp_ms
                         .unwrap_or_else(|| Utc::now().timestamp_millis()),
                 );
                 self.files.clear();
+                self.series_indexes.clear();
             }
             TruncateKind::Partial { files_to_remove } => {
                 // With GC disabled, VersionControl may still hold an older
@@ -346,7 +564,7 @@ impl RegionManifestBuilder {
         }
     }
 
-    pub fn files(&self) -> &HashMap<FileId, FileMeta> {
+    pub fn files(&self) -> &HashMap<FileId, FileMetaRef> {
         &self.files
     }
 
@@ -355,11 +573,15 @@ impl RegionManifestBuilder {
         self.metadata.is_some()
     }
 
-    pub fn try_build(self) -> Result<RegionManifest> {
+    pub fn try_build(mut self) -> Result<RegionManifest> {
         let metadata = self.metadata.context(RegionMetadataNotFoundSnafu)?;
+        // A floor at or below the flushed entry id no longer raises the replay start.
+        self.handoff_floors
+            .retain(|_, floor| *floor > self.flushed_entry_id);
         Ok(RegionManifest {
             metadata,
             files: self.files,
+            series_indexes: self.series_indexes,
             removed_files: self.removed_files,
             flushed_entry_id: self.flushed_entry_id,
             flushed_sequence: self.flushed_sequence,
@@ -369,6 +591,8 @@ impl RegionManifestBuilder {
             compaction_time_window: self.compaction_time_window,
             sst_format: self.sst_format,
             append_mode: self.append_mode,
+            pending_tails: self.pending_tails,
+            handoff_floors: self.handoff_floors,
         })
     }
 }
@@ -421,6 +645,7 @@ pub struct RemovedFiles {
 /// A removed file, which can be a data file(optional paired with a index file) or an outdated index file.
 #[derive(Serialize, Hash, Clone, Debug, PartialEq, Eq)]
 pub enum RemovedFile {
+    Narthex(FileId),
     File(FileId, Option<IndexVersion>),
     Index(FileId, IndexVersion),
 }
@@ -442,6 +667,7 @@ impl<'de> Deserialize<'de> for RemovedFile {
 
         #[derive(Deserialize)]
         enum RemovedFileEnum {
+            Narthex(FileId),
             File(FileId, Option<IndexVersion>),
             Index(FileId, IndexVersion),
         }
@@ -450,6 +676,7 @@ impl<'de> Deserialize<'de> for RemovedFile {
         match compat {
             CompatRemovedFile::FileId(file_id) => Ok(RemovedFile::File(file_id, None)),
             CompatRemovedFile::Enum(e) => match e {
+                RemovedFileEnum::Narthex(id) => Ok(RemovedFile::Narthex(id)),
                 RemovedFileEnum::File(file_id, version) => Ok(RemovedFile::File(file_id, version)),
                 RemovedFileEnum::Index(file_id, version) => {
                     Ok(RemovedFile::Index(file_id, version))
@@ -462,13 +689,14 @@ impl<'de> Deserialize<'de> for RemovedFile {
 impl RemovedFile {
     pub fn file_id(&self) -> FileId {
         match self {
-            RemovedFile::File(file_id, _) => *file_id,
+            RemovedFile::Narthex(file_id) | RemovedFile::File(file_id, _) => *file_id,
             RemovedFile::Index(file_id, _) => *file_id,
         }
     }
 
     pub fn index_version(&self) -> Option<IndexVersion> {
         match self {
+            RemovedFile::Narthex(_) => None,
             RemovedFile::File(_, index_version) => *index_version,
             RemovedFile::Index(_, index_version) => Some(*index_version),
         }
@@ -526,12 +754,12 @@ impl RegionCheckpoint {
 
     pub fn decode(bytes: &[u8]) -> Result<Self> {
         let data = std::str::from_utf8(bytes).context(Utf8Snafu)?;
-
+        crate::manifest::compat::validate_checkpoint(data)?;
         serde_json::from_str(data).context(SerdeJsonSnafu)
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct RegionMetaActionList {
     pub actions: Vec<RegionMetaAction>,
 }
@@ -563,6 +791,7 @@ impl RegionMetaActionList {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            ..Default::default()
         };
         let mut partition_expr_change = None;
         let mut region_change = None;
@@ -578,6 +807,10 @@ impl RegionMetaActionList {
                     // Merge file adds/removes
                     edit.files_to_add.extend(region_edit.files_to_add);
                     edit.files_to_remove.extend(region_edit.files_to_remove);
+                    edit.series_indexes_to_add
+                        .extend(region_edit.series_indexes_to_add);
+                    edit.series_indexes_to_remove
+                        .extend(region_edit.series_indexes_to_remove);
                     // Max of flushed entry id / sequence
                     if let Some(eid) = region_edit.flushed_entry_id {
                         edit.flushed_entry_id =
@@ -614,21 +847,69 @@ impl RegionMetaActionList {
 
     pub fn decode(bytes: &[u8]) -> Result<Self> {
         let data = std::str::from_utf8(bytes).context(Utf8Snafu)?;
-
+        crate::manifest::compat::validate_actions(data)?;
         serde_json::from_str(data).context(SerdeJsonSnafu)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
 
     use common_time::Timestamp;
+
+    use crate::sst::file_metadata::MetadataRef;
 
     use super::*;
 
     // These tests are used to ensure backward compatibility of manifest files.
     // DO NOT modify the serialized string when they fail, check if your
     // modification to manifest-related structs is compatible with older manifests.
+    #[test]
+    fn test_sketch_index_manifest_fixture() {
+        use crate::sst::file::IndexType;
+
+        // Frozen persisted names. Keep this fixture unchanged when extending the format.
+        let fixture = r#"{"actions":[{"Edit":{"files_to_add":[{
+                "region_id":0,"file_id":"bc5896ec-e4d8-4017-a80d-f2de73188d55",
+                "time_range":[{"value":0,"unit":"Millisecond"},{"value":1,"unit":"Millisecond"}],
+                "level":0,"index_version":7,"index_file_size":128,
+                "available_indexes":["InvertedIndex","HllIndex","KllIndex","MgIndex"],
+                "indexes":[{"column_id":3,"created_indexes":["InvertedIndex","HllIndex","KllIndex","MgIndex"]}]
+            }],"files_to_remove":[],"compaction_time_window":null}}]}"#;
+        let actions = RegionMetaActionList::decode(fixture.as_bytes()).unwrap();
+        let RegionMetaAction::Edit(edit) = &actions.actions[0] else {
+            panic!("expected a file edit");
+        };
+        assert_eq!(actions.actions.len(), 1);
+        assert_eq!(edit.files_to_add.len(), 1);
+        let file = &edit.files_to_add[0];
+        let expected = [
+            IndexType::InvertedIndex,
+            IndexType::HllIndex,
+            IndexType::KllIndex,
+            IndexType::MgIndex,
+        ];
+        assert_eq!(file.available_indexes.as_slice(), expected);
+        assert_eq!(file.indexes.len(), 1);
+        assert_eq!(file.indexes[0].column_id, 3);
+        assert_eq!(file.indexes[0].created_indexes.as_slice(), expected);
+        assert_eq!(file.index_version(), Some(7));
+        assert_eq!(file.index_file_size, 128);
+        let encoded = actions.encode().unwrap();
+        assert_eq!(RegionMetaActionList::decode(&encoded).unwrap(), actions);
+        let encoded: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        let names = serde_json::json!(["InvertedIndex", "HllIndex", "KllIndex", "MgIndex"]);
+        assert_eq!(
+            encoded["actions"][0]["Edit"]["files_to_add"][0]["available_indexes"],
+            names
+        );
+        assert_eq!(
+            encoded["actions"][0]["Edit"]["files_to_add"][0]["indexes"][0]["created_indexes"],
+            names
+        );
+    }
+
     #[test]
     fn test_region_action_compatibility() {
         let region_edit = r#"{
@@ -912,6 +1193,9 @@ mod tests {
             },
             sst_format: FormatType::PrimaryKey,
             append_mode: None,
+            pending_tails: Default::default(),
+            series_indexes: Default::default(),
+            handoff_floors: Default::default(),
         };
 
         let json = serde_json::to_string(&manifest).unwrap();
@@ -947,6 +1231,7 @@ mod tests {
                 flushed_entry_id: None,
                 flushed_sequence: None,
                 committed_sequence: None,
+                ..Default::default()
             },
         );
         builder.apply_edit(
@@ -959,6 +1244,7 @@ mod tests {
                 flushed_entry_id: None,
                 flushed_sequence: None,
                 committed_sequence: None,
+                ..Default::default()
             },
         );
 
@@ -978,6 +1264,7 @@ mod tests {
                 flushed_entry_id: None,
                 flushed_sequence: None,
                 committed_sequence: None,
+                ..Default::default()
             },
         );
         builder.apply_truncate(
@@ -1092,6 +1379,9 @@ mod tests {
                 compaction_time_window: None,
                 sst_format: FormatType::PrimaryKey,
                 append_mode: None,
+                pending_tails: Default::default(),
+                series_indexes: Default::default(),
+                handoff_floors: Default::default(),
             }
         );
 
@@ -1107,6 +1397,9 @@ mod tests {
             compaction_time_window: None,
             sst_format: FormatType::PrimaryKey,
             append_mode: None,
+            pending_tails: Default::default(),
+            series_indexes: Default::default(),
+            handoff_floors: Default::default(),
         };
         let json = serde_json::to_string(&new_manifest).unwrap();
         let old_from_new: RegionManifestV1 = serde_json::from_str(&json).unwrap();
@@ -1151,6 +1444,7 @@ mod tests {
                 flushed_entry_id: None,
                 flushed_sequence: None,
                 committed_sequence: None,
+                ..Default::default()
             },
             new_from_old
         );
@@ -1164,6 +1458,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
+            ..Default::default()
         };
 
         let new_json = serde_json::to_string(&new).unwrap();
@@ -1323,5 +1618,373 @@ mod tests {
                 .files
                 .contains(&RemovedFile::File(file_id, None))
         );
+    }
+
+    fn tail(node_id: u64, after: EntryId, upto: EntryId) -> PendingTail {
+        PendingTail {
+            node_id,
+            after,
+            upto,
+            upto_kind: UptoKind::Reported,
+        }
+    }
+
+    fn wal_recovery_edit(
+        flushed_entry_id: Option<EntryId>,
+        wal_recovery: WalRecoveryEdit,
+    ) -> RegionEdit {
+        RegionEdit {
+            files_to_add: vec![],
+            files_to_remove: vec![],
+            timestamp_ms: None,
+            compaction_time_window: None,
+            flushed_entry_id,
+            flushed_sequence: None,
+            committed_sequence: None,
+            wal_recovery,
+            ..Default::default()
+        }
+    }
+
+    fn manifest_builder() -> RegionManifestBuilder {
+        let mut builder = RegionManifestBuilder::default();
+        builder.apply_change(
+            0,
+            RegionChange {
+                metadata: Arc::new(crate::manifest::tests::utils::basic_region_metadata()),
+                sst_format: FormatType::PrimaryKey,
+                append_mode: None,
+            },
+        );
+        builder
+    }
+
+    #[test]
+    fn test_narthex_manifest_fixture() {
+        let bytes = include_bytes!("../../../../tests/compatibility/manifest/narthex/delta.json");
+        let (_, _, edit) = RegionMetaActionList::decode(bytes)
+            .unwrap()
+            .split_region_change_and_edit();
+        let encoded = serde_json::to_value(&edit).unwrap();
+        assert!(encoded["files_to_add"][0]["format"]["narthex_samples"].is_object());
+        assert!(encoded["series_indexes_to_add"][0]["format"]["narthex_series_index"].is_object());
+        let mut builder = manifest_builder();
+        assert_eq!(edit.files_to_add.len(), 2);
+        assert_eq!(edit.series_indexes_to_add.len(), 1);
+        let index = edit.series_indexes_to_add[0].clone();
+        let first = edit.files_to_add[0].clone();
+        builder.apply_edit(1, edit);
+        let checkpoint = builder.try_build().unwrap();
+        let encoded = serde_json::to_vec(&checkpoint).unwrap();
+        let restored = RegionManifest::decode(&encoded).unwrap();
+        assert_eq!(checkpoint, restored);
+        assert_eq!(restored.series_indexes[&index.file_id].as_ref(), &index);
+        let mut builder =
+            RegionManifestBuilder::with_checkpoint(Some(restored), Default::default());
+        builder.apply_edit(
+            2,
+            RegionEdit {
+                files_to_remove: vec![first],
+                ..Default::default()
+            },
+        );
+        let replaced = builder.try_build().unwrap();
+        assert_eq!(replaced.files.len(), 1);
+        assert_eq!(replaced.series_indexes[&index.file_id].as_ref(), &index);
+        assert_eq!(checkpoint.series_indexes.len(), 1);
+        let legacy = include_bytes!(
+            "../../../../tests/compatibility/manifest/table_compaction/legacy-edit.json"
+        );
+        let (_, _, legacy) = RegionMetaActionList::decode(legacy)
+            .unwrap()
+            .split_region_change_and_edit();
+        assert!(
+            legacy
+                .files_to_add
+                .iter()
+                .all(|file| matches!(file.format, file::FileFormat::Parquet))
+        );
+        assert!(legacy.series_indexes_to_add.is_empty());
+    }
+
+    #[test]
+    fn test_checkpoint_sharing_preserves_owned_allocations() {
+        let mut checkpoint = manifest_builder().try_build().unwrap();
+        let expr = partition::expr::col("tag").lt(datatypes::value::Value::UInt32(10));
+        let mut allocations = HashMap::new();
+        for _ in 0..4 {
+            let meta = FileMetaRef::from(FileMeta {
+                region_id: RegionId::new(1, 1),
+                file_id: FileId::random(),
+                indexes: vec![crate::sst::file::ColumnIndexMetadata::default()],
+                partition_expr: Some(expr.clone().into()),
+                ..Default::default()
+            });
+            allocations.insert(
+                meta.file_id,
+                (std::ptr::from_ref(meta.as_ref()), meta.indexes.as_ptr()),
+            );
+            checkpoint.files.insert(meta.file_id, meta);
+        }
+        let interner = Arc::new(crate::sst::file_metadata::FileMetadataInterner::default());
+        let manifest = RegionManifestBuilder::with_checkpoint(Some(checkpoint), interner.clone())
+            .try_build()
+            .unwrap();
+        let expression = manifest
+            .files
+            .values()
+            .next()
+            .unwrap()
+            .partition_expr
+            .as_ref()
+            .unwrap();
+        for meta in manifest.files.values() {
+            assert_eq!(
+                allocations[&meta.file_id],
+                (std::ptr::from_ref(meta.as_ref()), meta.indexes.as_ptr())
+            );
+            assert!(MetadataRef::ptr_eq(
+                expression,
+                meta.partition_expr.as_ref().unwrap()
+            ));
+        }
+        let decoded = serde_json::from_slice(&serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let recovered = RegionManifestBuilder::with_checkpoint(Some(decoded), interner)
+            .try_build()
+            .unwrap();
+        for (id, meta) in &manifest.files {
+            assert!(MetadataRef::ptr_eq(meta, &recovered.files[id]));
+        }
+    }
+
+    #[test]
+    fn test_pending_tails_change_only_when_set() {
+        let mut builder = manifest_builder();
+        builder.apply_edit(
+            1,
+            wal_recovery_edit(
+                None,
+                WalRecoveryEdit {
+                    pending_tails: Some(vec![tail(1, 10, 20)]),
+                    handoff_floor: None,
+                },
+            ),
+        );
+        builder.apply_edit(2, wal_recovery_edit(Some(5), WalRecoveryEdit::default()));
+        assert_eq!(builder.pending_tails, vec![tail(1, 10, 20)]);
+
+        builder.apply_edit(
+            3,
+            wal_recovery_edit(
+                None,
+                WalRecoveryEdit {
+                    pending_tails: Some(vec![]),
+                    handoff_floor: None,
+                },
+            ),
+        );
+        assert!(builder.pending_tails.is_empty());
+    }
+
+    #[test]
+    fn test_flushed_entry_id_drops_reached_floors_and_keeps_tails() {
+        let mut builder = manifest_builder();
+        for (node_id, entry_id) in [(1, 20), (2, 30)] {
+            builder.apply_edit(
+                1,
+                wal_recovery_edit(
+                    None,
+                    WalRecoveryEdit {
+                        pending_tails: Some(vec![tail(1, 10, 20)]),
+                        handoff_floor: Some(HandoffFloor { node_id, entry_id }),
+                    },
+                ),
+            );
+        }
+        builder.apply_edit(2, wal_recovery_edit(Some(20), WalRecoveryEdit::default()));
+
+        let manifest = builder.try_build().unwrap();
+        assert_eq!(manifest.pending_tails, vec![tail(1, 10, 20)]);
+        assert_eq!(manifest.handoff_floors, BTreeMap::from([(2, 30)]));
+    }
+
+    #[test]
+    fn test_truncate_drops_reached_floors() {
+        let mut builder = manifest_builder();
+        builder.apply_edit(
+            1,
+            wal_recovery_edit(
+                None,
+                WalRecoveryEdit {
+                    pending_tails: None,
+                    handoff_floor: Some(HandoffFloor {
+                        node_id: 1,
+                        entry_id: 20,
+                    }),
+                },
+            ),
+        );
+        builder.apply_truncate(
+            2,
+            RegionTruncate {
+                region_id: RegionId::new(1, 1),
+                kind: TruncateKind::All {
+                    truncated_entry_id: 20,
+                    truncated_sequence: 20,
+                },
+                timestamp_ms: None,
+            },
+        );
+
+        assert!(builder.try_build().unwrap().handoff_floors.is_empty());
+    }
+
+    #[test]
+    fn test_wal_replay_start() {
+        let mut builder = manifest_builder();
+        // Node 1 was handed off at 40 after its first tail, so its second tail starts
+        // there and entries in (20, 40] belong to no tail.
+        builder.apply_edit(
+            1,
+            wal_recovery_edit(
+                Some(10),
+                WalRecoveryEdit {
+                    pending_tails: Some(vec![tail(1, 10, 20), tail(2, 30, 60), tail(1, 40, 50)]),
+                    handoff_floor: Some(HandoffFloor {
+                        node_id: 1,
+                        entry_id: 40,
+                    }),
+                },
+            ),
+        );
+        builder.apply_edit(
+            2,
+            wal_recovery_edit(
+                None,
+                WalRecoveryEdit {
+                    pending_tails: None,
+                    handoff_floor: Some(HandoffFloor {
+                        node_id: 3,
+                        entry_id: 40,
+                    }),
+                },
+            ),
+        );
+        let manifest = builder.try_build().unwrap();
+
+        assert_eq!(manifest.wal_replay_start(Some(1)), 50);
+        assert_eq!(manifest.wal_replay_start(Some(2)), 60);
+        assert_eq!(manifest.wal_replay_start(Some(3)), 40);
+        assert_eq!(manifest.wal_replay_start(Some(4)), 10);
+        assert_eq!(manifest.wal_replay_start(None), 10);
+    }
+
+    #[test]
+    fn test_cap_wal_release() {
+        let tails = [tail(1, 20, 25), tail(2, 5, 60), tail(1, 30, 40)];
+
+        assert_eq!(cap_wal_release(&tails, Some(1), 50), 20);
+        assert_eq!(cap_wal_release(&tails, Some(1), 10), 10);
+        assert_eq!(cap_wal_release(&tails, Some(3), 50), 50);
+        assert_eq!(cap_wal_release(&tails, None, 50), 50);
+    }
+
+    const PENDING_TAILS_DELTA: &str =
+        include_str!("../../../../tests/compatibility/manifest/pending_tails/delta.json");
+    const PENDING_TAILS_CHECKPOINT: &str =
+        include_str!("../../../../tests/compatibility/manifest/pending_tails/checkpoint.json");
+
+    fn fixture_pending_tails() -> Vec<PendingTail> {
+        vec![
+            tail(1, 1 << 32, (1 << 32) + 5),
+            PendingTail {
+                upto_kind: UptoKind::Listed,
+                ..tail(2, 2 << 32, 3 << 32)
+            },
+        ]
+    }
+
+    #[test]
+    fn test_pending_tails_fixtures() {
+        let delta = PENDING_TAILS_DELTA.trim_end();
+        let actions = RegionMetaActionList::decode(delta.as_bytes()).unwrap();
+        let [RegionMetaAction::Edit(edit)] = actions.actions.as_slice() else {
+            panic!("unexpected actions: {actions:?}");
+        };
+        let expected = WalRecoveryEdit {
+            pending_tails: Some(fixture_pending_tails()),
+            handoff_floor: Some(HandoffFloor {
+                node_id: 3,
+                entry_id: 4 << 32,
+            }),
+        };
+        assert_eq!(edit.wal_recovery, expected);
+        assert_eq!(actions.encode().unwrap(), delta.as_bytes());
+
+        let checkpoint = PENDING_TAILS_CHECKPOINT.trim_end();
+        let decoded = RegionCheckpoint::decode(checkpoint.as_bytes()).unwrap();
+        let manifest = decoded.checkpoint.as_ref().unwrap();
+        assert_eq!(manifest.pending_tails, fixture_pending_tails());
+        assert_eq!(manifest.handoff_floors, BTreeMap::from([(3, 4 << 32)]));
+        let encoded: serde_json::Value =
+            serde_json::from_slice(&decoded.encode().unwrap()).unwrap();
+        let frozen: serde_json::Value = serde_json::from_str(checkpoint).unwrap();
+        for key in ["pending_tails", "handoff_floors"] {
+            assert_eq!(encoded["checkpoint"][key], frozen["checkpoint"][key]);
+        }
+    }
+
+    /// Checks the fixtures against the shapes before pending tails were added.
+    #[test]
+    fn test_pending_tails_old_shape_compat() {
+        #[derive(Serialize, Deserialize)]
+        struct OldRegionEdit {
+            files_to_add: Vec<FileMeta>,
+            files_to_remove: Vec<FileMeta>,
+            #[serde(default)]
+            timestamp_ms: Option<i64>,
+            #[serde(with = "humantime_serde")]
+            compaction_time_window: Option<Duration>,
+            flushed_entry_id: Option<EntryId>,
+            flushed_sequence: Option<SequenceNumber>,
+            committed_sequence: Option<SequenceNumber>,
+        }
+
+        #[derive(Serialize, Deserialize)]
+        struct OldRegionManifest {
+            metadata: RegionMetadataRef,
+            files: HashMap<FileId, FileMeta>,
+            #[serde(default)]
+            removed_files: RemovedFilesRecord,
+            flushed_entry_id: EntryId,
+            flushed_sequence: SequenceNumber,
+            committed_sequence: Option<SequenceNumber>,
+            manifest_version: ManifestVersion,
+            truncated_entry_id: Option<EntryId>,
+            #[serde(with = "humantime_serde")]
+            compaction_time_window: Option<Duration>,
+            #[serde(default)]
+            sst_format: FormatType,
+            #[serde(default)]
+            append_mode: Option<bool>,
+        }
+
+        let delta: serde_json::Value = serde_json::from_str(PENDING_TAILS_DELTA).unwrap();
+        let old_edit: OldRegionEdit =
+            serde_json::from_value(delta["actions"][0]["Edit"].clone()).unwrap();
+        assert_eq!(old_edit.committed_sequence, Some((1 << 40) + 5));
+        let old_json = serde_json::to_string(&old_edit).unwrap();
+        let edit: RegionEdit = serde_json::from_str(&old_json).unwrap();
+        assert_eq!(edit.wal_recovery, WalRecoveryEdit::default());
+        assert_eq!(serde_json::to_string(&edit).unwrap(), old_json);
+
+        let checkpoint: serde_json::Value = serde_json::from_str(PENDING_TAILS_CHECKPOINT).unwrap();
+        let old_manifest: OldRegionManifest =
+            serde_json::from_value(checkpoint["checkpoint"].clone()).unwrap();
+        assert_eq!(old_manifest.flushed_entry_id, 1 << 32);
+        let old_json = serde_json::to_string(&old_manifest).unwrap();
+        let manifest: RegionManifest = serde_json::from_str(&old_json).unwrap();
+        assert!(manifest.pending_tails.is_empty() && manifest.handoff_floors.is_empty());
+        assert_eq!(serde_json::to_string(&manifest).unwrap(), old_json);
     }
 }

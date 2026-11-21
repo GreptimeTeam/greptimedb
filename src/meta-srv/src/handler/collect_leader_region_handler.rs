@@ -48,6 +48,7 @@ impl HeartbeatHandler for CollectLeaderRegionHandler {
             let value = LeaderRegion {
                 datanode_id: current_stat.id,
                 manifest,
+                has_pending_tails: stat.has_pending_tails,
             };
             key_values.push((stat.id, value));
         }
@@ -91,9 +92,10 @@ mod tests {
             min_timestamp: None,
             max_timestamp: None,
             written_bytes: 0,
-            flushed_parquet_bytes: 0,
+            ingested_parquet_bytes: 0,
             query_cpu_time: 0,
             query_scanned_bytes: 0,
+            has_pending_tails: false,
         }
     }
 
@@ -106,7 +108,10 @@ mod tests {
             stat: Some(Stat {
                 id: 1,
                 region_stats: vec![
-                    new_region_stat(RegionId::new(1, 1), 1, RegionRole::Leader),
+                    RegionStat {
+                        has_pending_tails: true,
+                        ..new_region_stat(RegionId::new(1, 1), 1, RegionRole::Leader)
+                    },
                     new_region_stat(RegionId::new(1, 2), 2, RegionRole::Follower),
                 ],
                 addr: "127.0.0.1:0000".to_string(),
@@ -136,6 +141,7 @@ mod tests {
                     flushed_entry_id: 0,
                     topic_latest_entry_id: 0,
                 },
+                has_pending_tails: true,
             })
         );
 
@@ -168,6 +174,7 @@ mod tests {
                     flushed_entry_id: 0,
                     topic_latest_entry_id: 0,
                 },
+                has_pending_tails: false,
             })
         );
 
@@ -201,6 +208,7 @@ mod tests {
                     flushed_entry_id: 0,
                     topic_latest_entry_id: 0,
                 },
+                has_pending_tails: false,
             })
         );
     }

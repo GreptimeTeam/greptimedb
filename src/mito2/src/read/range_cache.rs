@@ -897,11 +897,10 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(1024 * 1024, true)]
-    #[case(1, false)]
+    #[case(true)]
+    #[case(false)]
     #[tokio::test]
     async fn test_shared_range_read_preserves_batches_when_admission_budget_is_exhausted(
-        #[case] capacity: u64,
         #[case] cached: bool,
     ) {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -910,9 +909,25 @@ mod tests {
             new_stream_context(vec![col("k0").eq(lit("a"))], None, FileTimeRange::default()).await;
         ctx.input.cache_strategy = CacheStrategy::EnableAll(Arc::new(
             CacheManager::builder()
-                .range_result_cache_size(capacity)
+                .range_result_cache_size(1024 * 1024)
                 .build(),
         ));
+        let memory = ctx
+            .input
+            .cache_strategy
+            .range_result_cache()
+            .unwrap()
+            .retention_memory();
+        let available = memory.available_permits();
+        // A tiny cache still has one rounded-up permit. Hold the entire budget
+        // so compaction cannot reacquire it and admit the small test batches.
+        let blocker = (!cached).then(|| {
+            let permit = memory
+                .try_acquire(available * memory.permit_bytes())
+                .unwrap();
+            assert_eq!(0, memory.available_permits());
+            permit
+        });
         let key = build_range_cache_key(&ctx, &range, None).unwrap();
         let (_, metrics) = test_cache_context(&ctx.input.cache_strategy);
         let calls = Arc::new(AtomicUsize::new(0));
@@ -945,14 +960,9 @@ mod tests {
             ctx.input.cache_strategy.get_range_result(&key).is_some(),
             cached
         );
-        let memory = &ctx
-            .input
-            .cache_strategy
-            .range_result_cache()
-            .unwrap()
-            .retention_memory();
+        drop(blocker);
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while memory.available_permits() != (capacity as usize).div_ceil(1024) {
+            while memory.available_permits() != available {
                 tokio::task::yield_now().await;
             }
         })

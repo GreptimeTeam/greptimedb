@@ -36,12 +36,12 @@ use crate::error::{
     CreatePostgresPoolSnafu, GetPostgresConnectionSnafu, LoadTlsCertificateSnafu,
     PostgresExecutionSnafu, PostgresTlsConfigSnafu, PostgresTransactionSnafu, Result,
 };
-use crate::kv_backend::KvBackendRef;
+use crate::kv_backend::ClosableKvBackendRef;
 use crate::kv_backend::rds::{
-    Executor, ExecutorFactory, ExecutorImpl, KvQueryExecutor, RDS_STORE_OP_BATCH_DELETE,
-    RDS_STORE_OP_BATCH_GET, RDS_STORE_OP_BATCH_PUT, RDS_STORE_OP_RANGE_DELETE,
-    RDS_STORE_OP_RANGE_QUERY, RDS_STORE_TXN_RETRY_COUNT, RdsStore, Transaction,
-    ensure_rustls_crypto_provider_installed,
+    Executor, ExecutorFactory, ExecutorImpl, KvQueryExecutor, RDS_BATCH_SIZE,
+    RDS_STORE_OP_BATCH_DELETE, RDS_STORE_OP_BATCH_GET, RDS_STORE_OP_BATCH_PUT,
+    RDS_STORE_OP_RANGE_DELETE, RDS_STORE_OP_RANGE_QUERY, RDS_STORE_TXN_RETRY_COUNT, RdsStore,
+    Transaction, ensure_rustls_crypto_provider_installed,
 };
 use crate::rpc::KeyValue;
 use crate::rpc::store::{
@@ -344,6 +344,20 @@ impl Executor for PgClient {
             })?;
         Ok(PgTxnClient(txn))
     }
+
+    async fn read_only_txn_executor<'a>(&'a mut self) -> Result<Self::Transaction<'a>> {
+        let txn = self
+            .0
+            .build_transaction()
+            .isolation_level(IsolationLevel::RepeatableRead)
+            .read_only(true)
+            .start()
+            .await
+            .context(PostgresTransactionSnafu {
+                operation: "begin read-only".to_string(),
+            })?;
+        Ok(PgTxnClient(txn))
+    }
 }
 
 #[async_trait::async_trait]
@@ -389,6 +403,10 @@ impl PgExecutorFactory {
 
 #[async_trait::async_trait]
 impl ExecutorFactory<PgClient> for PgExecutorFactory {
+    async fn close(&self) {
+        self.pool.close();
+    }
+
     async fn default_executor(&self) -> Result<PgClient> {
         self.client().await
     }
@@ -706,34 +724,16 @@ impl KvQueryExecutor<PgClient> for PgStore {
         query_executor: &mut ExecutorImpl<'_, PgClient>,
         req: BatchPutRequest,
     ) -> Result<BatchPutResponse> {
-        let mut in_params = Vec::with_capacity(req.kvs.len() * 3);
-        let mut values_params = Vec::with_capacity(req.kvs.len() * 2);
-
-        for kv in &req.kvs {
-            let processed_key = &kv.key;
-            in_params.push(processed_key);
-
-            let processed_value = &kv.value;
-            values_params.push(processed_key);
-            values_params.push(processed_value);
+        let chunk_size = (*RDS_BATCH_SIZE).min(u16::MAX as usize / 3);
+        if req.kvs.len() > chunk_size
+            && let ExecutorImpl::Default(client) = query_executor
+        {
+            let mut transaction = ExecutorImpl::Txn(client.txn_executor().await?);
+            let response = self.put_chunks(&mut transaction, &req, chunk_size).await?;
+            transaction.commit().await?;
+            return Ok(response);
         }
-        in_params.extend(values_params);
-        let params = in_params.iter().map(|x| x as _).collect::<Vec<_>>();
-        let query = self
-            .sql_template_set
-            .generate_batch_upsert_query(req.kvs.len());
-
-        let kvs = crate::record_rds_sql_execute_elapsed!(
-            query_executor.query(&query, &params).await,
-            PG_STORE_NAME,
-            RDS_STORE_OP_BATCH_PUT,
-            ""
-        )?;
-        if req.prev_kv {
-            Ok(BatchPutResponse { prev_kvs: kvs })
-        } else {
-            Ok(BatchPutResponse::default())
-        }
+        self.put_chunks(query_executor, &req, chunk_size).await
     }
 
     /// Batch get with certain client. It's needed for a client with transaction.
@@ -745,17 +745,22 @@ impl KvQueryExecutor<PgClient> for PgStore {
         if req.keys.is_empty() {
             return Ok(BatchGetResponse { kvs: vec![] });
         }
-        let query = self
-            .sql_template_set
-            .generate_batch_get_query(req.keys.len());
-        let params = req.keys.iter().map(|x| x as _).collect::<Vec<_>>();
-        let kvs = crate::record_rds_sql_execute_elapsed!(
-            query_executor.query(&query, &params).await,
-            PG_STORE_NAME,
-            RDS_STORE_OP_BATCH_GET,
-            ""
-        )?;
-        Ok(BatchGetResponse { kvs })
+        // SQL IN returns each matching key once, including across chunks.
+        let mut keys = req.keys;
+        keys.sort_unstable();
+        keys.dedup();
+
+        let chunk_size = *RDS_BATCH_SIZE;
+        if keys.len() > chunk_size
+            && let ExecutorImpl::Default(client) = query_executor
+        {
+            // Share one snapshot without serializable read conflicts or row locks.
+            let mut transaction = ExecutorImpl::Txn(client.read_only_txn_executor().await?);
+            let response = self.get_chunks(&mut transaction, &keys, chunk_size).await?;
+            transaction.commit().await?;
+            return Ok(response);
+        }
+        self.get_chunks(query_executor, &keys, chunk_size).await
     }
 
     async fn delete_range_with_query_executor(
@@ -785,30 +790,23 @@ impl KvQueryExecutor<PgClient> for PgStore {
         query_executor: &mut ExecutorImpl<'_, PgClient>,
         req: BatchDeleteRequest,
     ) -> Result<BatchDeleteResponse> {
-        if req.keys.is_empty() {
-            return Ok(BatchDeleteResponse::default());
+        let chunk_size = *RDS_BATCH_SIZE;
+        if req.keys.len() > chunk_size
+            && let ExecutorImpl::Default(client) = query_executor
+        {
+            let mut transaction = ExecutorImpl::Txn(client.txn_executor().await?);
+            let response = self
+                .delete_chunks(&mut transaction, &req, chunk_size)
+                .await?;
+            transaction.commit().await?;
+            return Ok(response);
         }
-        let query = self
-            .sql_template_set
-            .generate_batch_delete_query(req.keys.len());
-        let params = req.keys.iter().map(|x| x as _).collect::<Vec<_>>();
-
-        let kvs = crate::record_rds_sql_execute_elapsed!(
-            query_executor.query(&query, &params).await,
-            PG_STORE_NAME,
-            RDS_STORE_OP_BATCH_DELETE,
-            ""
-        )?;
-        if req.prev_kv {
-            Ok(BatchDeleteResponse { prev_kvs: kvs })
-        } else {
-            Ok(BatchDeleteResponse::default())
-        }
+        self.delete_chunks(query_executor, &req, chunk_size).await
     }
 }
 
 impl PgStore {
-    /// Create [PgStore] impl of [KvBackendRef] from url with optional TLS support.
+    /// Create [PgStore] impl of [ClosableKvBackendRef] from url with optional TLS support.
     ///
     /// # Arguments
     ///
@@ -821,7 +819,7 @@ impl PgStore {
         table_name: &str,
         max_txn_ops: usize,
         tls_config: Option<TlsOption>,
-    ) -> Result<KvBackendRef> {
+    ) -> Result<ClosableKvBackendRef> {
         let mut cfg = Config::new();
         cfg.url = Some(url.to_string());
 
@@ -853,19 +851,23 @@ impl PgStore {
         Self::with_pg_pool(pool, None, table_name, max_txn_ops, false).await
     }
 
-    /// Create [PgStore] impl of [KvBackendRef] from url (backward compatibility).
-    pub async fn with_url(url: &str, table_name: &str, max_txn_ops: usize) -> Result<KvBackendRef> {
+    /// Create [PgStore] impl of [ClosableKvBackendRef] from url without TLS.
+    pub async fn with_url(
+        url: &str,
+        table_name: &str,
+        max_txn_ops: usize,
+    ) -> Result<ClosableKvBackendRef> {
         Self::with_url_and_tls(url, table_name, max_txn_ops, None).await
     }
 
-    /// Create [PgStore] impl of [KvBackendRef] from [deadpool_postgres::Pool] with optional schema.
+    /// Create [PgStore] impl of [ClosableKvBackendRef] from [deadpool_postgres::Pool] with optional schema.
     pub async fn with_pg_pool(
         pool: Pool,
         schema_name: Option<&str>,
         table_name: &str,
         max_txn_ops: usize,
         auto_create_schema: bool,
-    ) -> Result<KvBackendRef> {
+    ) -> Result<ClosableKvBackendRef> {
         // Ensure the postgres metadata backend is ready to use.
         let client = match pool.get().await {
             Ok(client) => client,
@@ -911,11 +913,97 @@ impl PgStore {
     }
 }
 
+impl PgStore {
+    async fn get_chunks(
+        &self,
+        query_executor: &mut ExecutorImpl<'_, PgClient>,
+        keys: &[Vec<u8>],
+        chunk_size: usize,
+    ) -> Result<BatchGetResponse> {
+        let mut params = Vec::with_capacity(keys.len().min(chunk_size));
+        let mut kvs = Vec::new();
+        for keys in keys.chunks(chunk_size) {
+            let query = self.sql_template_set.generate_batch_get_query(keys.len());
+            params.clear();
+            params.extend(keys.iter());
+            let chunk = crate::record_rds_sql_execute_elapsed!(
+                query_executor.query(&query, &params).await,
+                PG_STORE_NAME,
+                RDS_STORE_OP_BATCH_GET,
+                ""
+            )?;
+            if kvs.is_empty() {
+                kvs = chunk;
+            } else {
+                kvs.extend(chunk);
+            }
+        }
+        Ok(BatchGetResponse { kvs })
+    }
+
+    async fn put_chunks(
+        &self,
+        executor: &mut ExecutorImpl<'_, PgClient>,
+        req: &BatchPutRequest,
+        chunk_size: usize,
+    ) -> Result<BatchPutResponse> {
+        let mut prev_kvs = Vec::new();
+        for chunk in req.kvs.chunks(chunk_size) {
+            let mut params = Vec::with_capacity(chunk.len() * 3);
+            params.extend(chunk.iter().map(|kv| &kv.key));
+            for kv in chunk {
+                params.push(&kv.key);
+                params.push(&kv.value);
+            }
+            let query = self
+                .sql_template_set
+                .generate_batch_upsert_query(chunk.len());
+            let kvs = crate::record_rds_sql_execute_elapsed!(
+                executor.query(&query, &params).await,
+                PG_STORE_NAME,
+                RDS_STORE_OP_BATCH_PUT,
+                ""
+            )?;
+            if req.prev_kv {
+                prev_kvs.extend(kvs);
+            }
+        }
+        Ok(BatchPutResponse { prev_kvs })
+    }
+
+    async fn delete_chunks(
+        &self,
+        executor: &mut ExecutorImpl<'_, PgClient>,
+        req: &BatchDeleteRequest,
+        chunk_size: usize,
+    ) -> Result<BatchDeleteResponse> {
+        let mut prev_kvs = Vec::new();
+        for chunk in req.keys.chunks(chunk_size) {
+            let query = self
+                .sql_template_set
+                .generate_batch_delete_query(chunk.len());
+            let params = chunk.iter().collect::<Vec<_>>();
+            let kvs = crate::record_rds_sql_execute_elapsed!(
+                executor.query(&query, &params).await,
+                PG_STORE_NAME,
+                RDS_STORE_OP_BATCH_DELETE,
+                ""
+            )?;
+            if req.prev_kv {
+                prev_kvs.extend(kvs);
+            }
+        }
+        Ok(BatchDeleteResponse { prev_kvs })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kv_backend::KvBackend;
     use crate::kv_backend::test::{
-        prepare_kv_with_prefix, test_kv_batch_delete_with_prefix, test_kv_batch_get_with_prefix,
+        prepare_kv_with_prefix, test_kv_batch_delete_with_prefix,
+        test_kv_batch_get_concurrent_updates, test_kv_batch_get_with_prefix,
         test_kv_compare_and_put_with_prefix, test_kv_delete_range_with_prefix,
         test_kv_put_with_prefix, test_kv_range_2_with_prefix, test_kv_range_with_prefix,
         test_simple_kv_range, test_txn_compare_equal, test_txn_compare_greater,
@@ -924,6 +1012,68 @@ mod tests {
     };
     use crate::test_util::test_certs_dir;
     use crate::{maybe_skip_postgres_integration_test, maybe_skip_postgres15_integration_test};
+
+    #[tokio::test]
+    async fn test_close_backend() {
+        let mut config = Config::new();
+        config.host = Some("localhost".to_string());
+        config.user = Some("test".to_string());
+        config.dbname = Some("test".to_string());
+        let pool = config.create_pool(Some(Runtime::Tokio1), NoTls).unwrap();
+        let backend: ClosableKvBackendRef = Arc::new(PgStore {
+            max_txn_ops: 128,
+            txn_retry_count: RDS_STORE_TXN_RETRY_COUNT,
+            executor_factory: PgExecutorFactory { pool: pool.clone() },
+            sql_template_set: PgSqlTemplateFactory::new(None, "close_test").build(),
+            _phantom: PhantomData,
+        });
+        let shared_backend = backend.clone();
+        assert!(!pool.is_closed());
+        backend.close().await.unwrap();
+        assert!(pool.is_closed());
+        shared_backend.close().await.unwrap();
+        assert!(matches!(
+            pool.get().await,
+            Err(deadpool::managed::PoolError::Closed)
+        ));
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            shared_backend.put(crate::rpc::store::PutRequest {
+                key: b"key".to_vec(),
+                value: b"value".to_vec(),
+                prev_kv: false,
+            }),
+        )
+        .await
+        .expect("closed backend must reject writes promptly");
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_close_backend_with_checked_out_connection() {
+        maybe_skip_postgres_integration_test!();
+        let mut config = Config::new();
+        config.url = Some(std::env::var("GT_POSTGRES_ENDPOINTS").unwrap());
+        let pool = config.create_pool(Some(Runtime::Tokio1), NoTls).unwrap();
+        let backend = PgStore::with_pg_pool(pool.clone(), None, "close_held", 128, false)
+            .await
+            .unwrap();
+        let connection = pool.get().await.unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), backend.close())
+            .await
+            .expect("PostgreSQL close does not wait for checked-out connections")
+            .unwrap();
+        assert!(pool.is_closed());
+        assert!(matches!(
+            pool.get().await,
+            Err(deadpool::managed::PoolError::Closed)
+        ));
+        // Existing executors can finish even though new acquisitions are rejected.
+        connection.simple_query("SELECT 1").await.unwrap();
+        drop(connection);
+        backend.close().await.unwrap();
+    }
 
     async fn build_pg_kv_backend(table_name: &str) -> Option<PgStore> {
         let endpoints = std::env::var("GT_POSTGRES_ENDPOINTS").unwrap_or_default();
@@ -1151,6 +1301,376 @@ mod tests {
         prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
         test_kv_batch_get_with_prefix(&kv_backend, prefix.to_vec()).await;
         unprepare_kv(&kv_backend, prefix).await;
+    }
+
+    #[tokio::test]
+    async fn test_pg_batch_get_concurrent_updates() {
+        maybe_skip_postgres_integration_test!();
+        let backend = build_pg_kv_backend("batch_get_consistent").await.unwrap();
+        test_kv_batch_get_concurrent_updates(&backend, *RDS_BATCH_SIZE + 1).await;
+    }
+
+    #[tokio::test]
+    async fn test_pg_read_only_snapshot_avoids_serialization_failure() {
+        maybe_skip_postgres_integration_test!();
+        let backend = build_pg_kv_backend("read_snapshot_dependencies")
+            .await
+            .unwrap();
+        let initial = vec![
+            KeyValue {
+                key: b"a".to_vec(),
+                value: b"old".to_vec(),
+            },
+            KeyValue {
+                key: b"b".to_vec(),
+                value: b"old".to_vec(),
+            },
+        ];
+        backend
+            .batch_put(BatchPutRequest {
+                kvs: initial.clone(),
+                prev_kv: false,
+            })
+            .await
+            .unwrap();
+        let mut first_client = backend.executor_factory.default_executor().await.unwrap();
+        let mut second_client = backend.executor_factory.default_executor().await.unwrap();
+        let mut reader_client = backend.executor_factory.default_executor().await.unwrap();
+        let mut first = ExecutorImpl::Txn(first_client.txn_executor().await.unwrap());
+        let a = vec![b"a".to_vec()];
+        let b = vec![b"b".to_vec()];
+        assert_eq!(
+            backend.get_chunks(&mut first, &a, 1).await.unwrap().kvs,
+            vec![initial[0].clone()]
+        );
+        let mut second = ExecutorImpl::Txn(second_client.txn_executor().await.unwrap());
+        backend
+            .batch_put_with_query_executor(
+                &mut second,
+                BatchPutRequest {
+                    kvs: vec![KeyValue {
+                        key: a[0].clone(),
+                        value: b"new".to_vec(),
+                    }],
+                    prev_kv: false,
+                },
+            )
+            .await
+            .unwrap();
+        second.commit().await.unwrap();
+        let mut reader = ExecutorImpl::Txn(reader_client.read_only_txn_executor().await.unwrap());
+        assert_eq!(
+            backend.get_chunks(&mut reader, &a, 1).await.unwrap().kvs,
+            vec![KeyValue {
+                key: a[0].clone(),
+                value: b"new".to_vec()
+            }]
+        );
+        backend
+            .batch_put_with_query_executor(
+                &mut first,
+                BatchPutRequest {
+                    kvs: vec![KeyValue {
+                        key: b[0].clone(),
+                        value: b"new".to_vec(),
+                    }],
+                    prev_kv: false,
+                },
+            )
+            .await
+            .unwrap();
+        first.commit().await.unwrap();
+        // SERIALIZABLE fails here with 40001: the reader sees the second
+        // writer but not the first writer on which it depended. RR may read
+        // this committed snapshot without requiring a serial execution order.
+        assert_eq!(
+            backend.get_chunks(&mut reader, &b, 1).await.unwrap().kvs,
+            vec![initial[1].clone()]
+        );
+        reader.commit().await.unwrap();
+        let read_only = reader_client.read_only_txn_executor().await.unwrap();
+        let error = read_only
+            .0
+            .execute("DELETE FROM read_snapshot_dependencies", &[])
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.code(),
+            Some(&tokio_postgres::error::SqlState::READ_ONLY_SQL_TRANSACTION)
+        );
+        read_only.0.rollback().await.unwrap();
+        unprepare_kv(&backend, b"").await;
+    }
+
+    #[tokio::test]
+    async fn test_pg_batch_get_chunks() {
+        maybe_skip_postgres_integration_test!();
+        let kv_backend = build_pg_kv_backend("batch_get_chunks-test").await.unwrap();
+        let prefix = b"batch_get_chunks/";
+        prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
+        test_kv_batch_get_with_prefix(&kv_backend, prefix.to_vec()).await;
+
+        let present = [prefix.as_slice(), b"key1"].concat();
+        let last = KeyValue {
+            key: [prefix.as_slice(), b"zz_last"].concat(),
+            value: b"last_value".to_vec(),
+        };
+        kv_backend
+            .batch_put(BatchPutRequest {
+                kvs: vec![last.clone()],
+                prev_kv: false,
+            })
+            .await
+            .unwrap();
+        for count in [
+            u16::MAX as usize - 1,
+            u16::MAX as usize,
+            u16::MAX as usize + 1,
+        ] {
+            let mut keys = (0..count)
+                .map(|index| format!("batch_get_chunks/missing_{index:06}").into_bytes())
+                .collect::<Vec<_>>();
+            keys[0] = present.clone();
+            keys[count - 1] = last.key.clone();
+            // Keep the duplicate beyond the first chunk in the original request.
+            keys.push(present.clone());
+            let mut response = kv_backend
+                .batch_get(BatchGetRequest { keys })
+                .await
+                .unwrap();
+            response.kvs.sort_by(|left, right| left.key.cmp(&right.key));
+            assert_eq!(
+                response.kvs,
+                vec![
+                    KeyValue {
+                        key: present.clone(),
+                        value: b"val1".to_vec(),
+                    },
+                    last.clone()
+                ]
+            );
+        }
+        unprepare_kv(&kv_backend, prefix).await;
+    }
+
+    #[tokio::test]
+    async fn test_pg_batch_write_parameter_boundaries() {
+        maybe_skip_postgres_integration_test!();
+        let backend = build_pg_kv_backend("batch_write_boundaries").await.unwrap();
+        let prefix = b"write_boundaries/";
+        unprepare_kv(&backend, prefix).await;
+        for count in [
+            u16::MAX as usize / 3 - 1,
+            u16::MAX as usize / 3,
+            u16::MAX as usize / 3 + 1,
+            u16::MAX as usize - 1,
+            u16::MAX as usize,
+            u16::MAX as usize + 1,
+        ] {
+            let kvs = (0..count)
+                .map(|index| KeyValue {
+                    key: format!("write_boundaries/{index:06}").into_bytes(),
+                    value: b"old".to_vec(),
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                backend
+                    .batch_put(BatchPutRequest {
+                        kvs: kvs.clone(),
+                        prev_kv: true
+                    })
+                    .await
+                    .unwrap()
+                    .prev_kvs
+                    .is_empty()
+            );
+            let updated = kvs
+                .iter()
+                .map(|kv| KeyValue {
+                    key: kv.key.clone(),
+                    value: b"new".to_vec(),
+                })
+                .collect::<Vec<_>>();
+            let mut previous = backend
+                .batch_put(BatchPutRequest {
+                    kvs: updated.clone(),
+                    prev_kv: true,
+                })
+                .await
+                .unwrap()
+                .prev_kvs;
+            previous.sort_unstable_by(|a, b| a.key.cmp(&b.key));
+            assert_eq!(previous, kvs);
+            let mut keys = updated.iter().map(|kv| kv.key.clone()).collect::<Vec<_>>();
+            keys.push(b"write_boundaries/missing".to_vec());
+            let mut deleted = backend
+                .batch_delete(BatchDeleteRequest {
+                    keys,
+                    prev_kv: true,
+                })
+                .await
+                .unwrap()
+                .prev_kvs;
+            deleted.sort_unstable_by(|a, b| a.key.cmp(&b.key));
+            assert_eq!(deleted, updated);
+            assert!(
+                backend
+                    .batch_get(BatchGetRequest {
+                        keys: kvs.into_iter().map(|kv| kv.key).collect()
+                    })
+                    .await
+                    .unwrap()
+                    .kvs
+                    .is_empty()
+            );
+        }
+        unprepare_kv(&backend, prefix).await;
+    }
+
+    #[tokio::test]
+    async fn test_pg_later_write_chunk_failure_rolls_back() {
+        maybe_skip_postgres_integration_test!();
+        let backend = build_pg_kv_backend("write_chunk_rollback").await.unwrap();
+        let client = backend.executor_factory.pool.get().await.unwrap();
+        client.batch_execute("DROP TRIGGER IF EXISTS fail_delete ON write_chunk_rollback; DROP FUNCTION IF EXISTS fail_later_chunk_delete(); TRUNCATE write_chunk_rollback; ALTER TABLE write_chunk_rollback DROP CONSTRAINT IF EXISTS short_value; ALTER TABLE write_chunk_rollback ADD CONSTRAINT short_value CHECK (octet_length(v) = 1)").await.unwrap();
+        let mut kvs = (0..=(*RDS_BATCH_SIZE).min(u16::MAX as usize / 3))
+            .map(|index| KeyValue {
+                key: format!("rollback/{index:06}").into_bytes(),
+                value: b"a".to_vec(),
+            })
+            .collect::<Vec<_>>();
+        kvs.last_mut().unwrap().value = b"invalid".to_vec();
+        assert!(
+            backend
+                .batch_put(BatchPutRequest {
+                    kvs: kvs.clone(),
+                    prev_kv: false
+                })
+                .await
+                .is_err()
+        );
+        assert!(
+            backend
+                .batch_get(BatchGetRequest {
+                    keys: kvs.into_iter().map(|kv| kv.key).collect()
+                })
+                .await
+                .unwrap()
+                .kvs
+                .is_empty()
+        );
+
+        let kvs = (0..=*RDS_BATCH_SIZE)
+            .map(|index| KeyValue {
+                key: format!("rollback/{index:06}").into_bytes(),
+                value: b"a".to_vec(),
+            })
+            .collect::<Vec<_>>();
+        backend
+            .batch_put(BatchPutRequest {
+                kvs: kvs.clone(),
+                prev_kv: false,
+            })
+            .await
+            .unwrap();
+        let last_key = String::from_utf8(kvs.last().unwrap().key.clone()).unwrap();
+        client.batch_execute(&format!("CREATE OR REPLACE FUNCTION fail_later_chunk_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF OLD.k = convert_to('{last_key}', 'UTF8') THEN RAISE EXCEPTION 'injected later chunk failure'; END IF; RETURN OLD; END $$; CREATE TRIGGER fail_delete BEFORE DELETE ON write_chunk_rollback FOR EACH ROW EXECUTE FUNCTION fail_later_chunk_delete()" )).await.unwrap();
+        assert!(
+            backend
+                .batch_delete(BatchDeleteRequest {
+                    keys: kvs.iter().map(|kv| kv.key.clone()).collect(),
+                    prev_kv: true
+                })
+                .await
+                .is_err()
+        );
+        let mut actual = backend
+            .batch_get(BatchGetRequest {
+                keys: kvs.iter().map(|kv| kv.key.clone()).collect(),
+            })
+            .await
+            .unwrap()
+            .kvs;
+        actual.sort_unstable_by(|a, b| a.key.cmp(&b.key));
+        assert_eq!(actual, kvs);
+        client.batch_execute("DROP TRIGGER fail_delete ON write_chunk_rollback; DROP FUNCTION fail_later_chunk_delete(); ALTER TABLE write_chunk_rollback DROP CONSTRAINT short_value; TRUNCATE write_chunk_rollback").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_pg_chunked_writes_reuse_outer_transaction() {
+        maybe_skip_postgres_integration_test!();
+        let backend = build_pg_kv_backend("outer_write_transaction")
+            .await
+            .unwrap();
+        let kvs = (0..=*RDS_BATCH_SIZE)
+            .map(|index| KeyValue {
+                key: format!("outer/{index:06}").into_bytes(),
+                value: b"value".to_vec(),
+            })
+            .collect::<Vec<_>>();
+        let keys = kvs.iter().map(|kv| kv.key.clone()).collect::<Vec<_>>();
+        unprepare_kv(&backend, b"outer/").await;
+        let mut client = backend.executor_factory.default_executor().await.unwrap();
+        {
+            let mut transaction = ExecutorImpl::Txn(client.txn_executor().await.unwrap());
+            backend
+                .batch_put_with_query_executor(
+                    &mut transaction,
+                    BatchPutRequest {
+                        kvs: kvs.clone(),
+                        prev_kv: false,
+                    },
+                )
+                .await
+                .unwrap();
+            let mut inside = backend
+                .batch_get_with_query_executor(
+                    &mut transaction,
+                    BatchGetRequest { keys: keys.clone() },
+                )
+                .await
+                .unwrap()
+                .kvs;
+            inside.sort_unstable_by(|a, b| a.key.cmp(&b.key));
+            assert_eq!(inside, kvs);
+            // The helper must leave commit ownership to its caller.
+        }
+        assert!(
+            backend
+                .batch_get(BatchGetRequest { keys: keys.clone() })
+                .await
+                .unwrap()
+                .kvs
+                .is_empty()
+        );
+        backend
+            .batch_put(BatchPutRequest {
+                kvs: kvs.clone(),
+                prev_kv: false,
+            })
+            .await
+            .unwrap();
+        {
+            let mut transaction = ExecutorImpl::Txn(client.txn_executor().await.unwrap());
+            backend
+                .batch_delete_with_query_executor(
+                    &mut transaction,
+                    BatchDeleteRequest {
+                        keys: keys.clone(),
+                        prev_kv: false,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let mut actual = backend
+            .batch_get(BatchGetRequest { keys })
+            .await
+            .unwrap()
+            .kvs;
+        actual.sort_unstable_by(|a, b| a.key.cmp(&b.key));
+        assert_eq!(actual, kvs);
+        unprepare_kv(&backend, b"outer/").await;
     }
 
     #[tokio::test]

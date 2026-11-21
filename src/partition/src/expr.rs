@@ -44,14 +44,14 @@ use crate::partition::PartitionBound;
 /// by [`Self::to_parser_expr`].
 ///
 /// [Expr]: sqlparser::ast::Expr
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct PartitionExpr {
     pub lhs: Box<Operand>,
     pub op: RestrictedOp,
     pub rhs: Box<Operand>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Operand {
     Column(String),
     Value(Value),
@@ -186,7 +186,7 @@ impl Display for Operand {
 
 /// A restricted set of [Operator](datafusion_expr::Operator) that can be used in
 /// partition expressions.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum RestrictedOp {
     // Evaluate to binary
     Eq,
@@ -487,6 +487,27 @@ mod tests {
     use store_api::storage::RegionId;
 
     use super::*;
+
+    #[test]
+    fn test_expression_hash_respects_value_equality() {
+        use std::collections::hash_map::RandomState;
+        use std::hash::BuildHasher;
+
+        use common_time::Timestamp;
+
+        let seconds = col("ts").lt(Value::Timestamp(Timestamp::new_second(1)));
+        let millis = col("ts").lt(Value::Timestamp(Timestamp::new_millisecond(1000)));
+        assert_eq!(seconds, millis);
+        let hasher = RandomState::new();
+        assert_eq!(hasher.hash_one(&seconds), hasher.hash_one(&millis));
+        for value in [Value::Int32(10), Value::Int64(10)] {
+            let expr = col("tag").lt(value);
+            let decoded: PartitionExpr =
+                serde_json::from_slice(&serde_json::to_vec(&expr).unwrap()).unwrap();
+            assert_eq!(expr, decoded);
+            assert_eq!(hasher.hash_one(&expr), hasher.hash_one(&decoded));
+        }
+    }
 
     #[test]
     fn test_partition_expr() {

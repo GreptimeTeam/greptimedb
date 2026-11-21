@@ -28,6 +28,186 @@ use crate::config::MitoConfig;
 use crate::error::Error;
 use crate::test_util::{CreateRequestBuilder, TestEnv, build_rows, put_rows, rows_schema};
 
+#[cfg(feature = "enterprise")]
+#[rstest::rstest]
+#[case::shared_only(false, false)]
+#[case::mixed(true, false)]
+#[case::metadata_rejected_before_copy(true, true)]
+#[tokio::test]
+async fn test_copy_shared_reference_contract(#[case] mixed: bool, #[case] metadata: bool) {
+    use crate::manifest::action::RegionEdit;
+    use crate::sst::file::{FileMeta, LEVEL_SHARED, RegionFileId};
+    use crate::test_util::flush_region;
+    use std::collections::HashSet;
+    use store_api::region_request::PathType;
+
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            schedule_compaction_after_edit: false,
+            ..Default::default()
+        })
+        .await;
+    let owner_id = RegionId::new(1, 0);
+    let source_id = RegionId::new(1, 1);
+    let target_id = RegionId::new(1, 2);
+    let path_type = if metadata {
+        PathType::Metadata
+    } else {
+        PathType::Bare
+    };
+    let mut create = CreateRequestBuilder::new().build();
+    create.path_type = path_type;
+    for id in [owner_id, source_id, target_id] {
+        engine
+            .handle_request(id, RegionRequest::Create(create.clone()))
+            .await
+            .unwrap();
+    }
+    for (id, start) in [(owner_id, 0), (source_id, 10)] {
+        if id == source_id && !mixed {
+            continue;
+        }
+        put_rows(
+            &engine,
+            id,
+            Rows {
+                schema: rows_schema(&create),
+                rows: build_rows(start, start + 3),
+            },
+        )
+        .await;
+        flush_region(&engine, id, None).await;
+    }
+    let owner = engine.get_region(owner_id).unwrap();
+    let shared = FileMeta {
+        level: LEVEL_SHARED,
+        ..owner.version().ssts.levels()[0]
+            .files()
+            .next()
+            .unwrap()
+            .meta_ref()
+            .clone()
+    };
+    for id in [owner_id, source_id] {
+        engine
+            .edit_region(
+                id,
+                RegionEdit {
+                    files_to_add: vec![shared.clone()],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let source = engine
+        .get_region(source_id)
+        .unwrap()
+        .manifest_ctx
+        .manifest()
+        .await;
+    let target = engine.get_region(target_id).unwrap();
+    let before = target.manifest_ctx.manifest().await;
+    let target_path = |file_id| {
+        crate::sst::location::sst_file_path(
+            target.access_layer.table_dir(),
+            RegionFileId::new(target_id, file_id),
+            path_type,
+        )
+    };
+    let result = engine
+        .copy_region_from(
+            target_id,
+            MitoCopyRegionFromRequest {
+                source_region_id: source_id,
+                parallelism: 1,
+            },
+        )
+        .await;
+    if metadata {
+        assert!(matches!(result, Err(Error::InvalidRequest { .. })));
+        let after = target.manifest_ctx.manifest().await;
+        assert_eq!(before.manifest_version, after.manifest_version);
+        assert_eq!(before.files, after.files);
+        assert_eq!(0, target.version_control.current().last_sequence);
+        for id in source.files.keys() {
+            assert!(
+                !target
+                    .access_layer
+                    .object_store()
+                    .exists(&target_path(*id))
+                    .await
+                    .unwrap()
+            );
+        }
+        return;
+    }
+    let expected_ids = source.files.keys().copied().collect::<HashSet<_>>();
+    assert_eq!(
+        expected_ids,
+        result
+            .unwrap()
+            .copied_file_ids
+            .into_iter()
+            .collect::<HashSet<_>>()
+    );
+    let installed = target.manifest_ctx.manifest().await;
+    assert_eq!(
+        expected_ids,
+        installed.files.keys().copied().collect::<HashSet<_>>()
+    );
+    for file in installed.files.values() {
+        assert_eq!(
+            if file.level == LEVEL_SHARED {
+                owner_id
+            } else {
+                target_id
+            },
+            file.region_id
+        );
+        assert_eq!(
+            file.level != LEVEL_SHARED,
+            target
+                .access_layer
+                .object_store()
+                .exists(&target_path(file.file_id))
+                .await
+                .unwrap()
+        );
+        assert_eq!(Some(1), file.sequence.map(|sequence| sequence.get()));
+    }
+    let sequence = target.version_control.current().last_sequence;
+    let retry = engine
+        .copy_region_from(
+            target_id,
+            MitoCopyRegionFromRequest {
+                source_region_id: source_id,
+                parallelism: 1,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        expected_ids,
+        retry.copied_file_ids.into_iter().collect::<HashSet<_>>()
+    );
+    assert_eq!(installed.files, target.manifest_ctx.manifest().await.files);
+    assert_eq!(sequence, target.version_control.current().last_sequence);
+    let rows = RecordBatches::try_collect(
+        engine
+            .scan_to_stream(target_id, Default::default())
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        if mixed { 6 } else { 3 },
+        rows.iter().map(|batch| batch.num_rows()).sum::<usize>()
+    );
+}
+
 #[tokio::test]
 async fn test_engine_copy_region_from() {
     common_telemetry::init_default_ut_logging();

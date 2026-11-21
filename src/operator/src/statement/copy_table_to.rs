@@ -23,7 +23,7 @@ use common_datasource::file_format::Format;
 use common_datasource::file_format::csv::stream_to_csv;
 use common_datasource::file_format::json::stream_to_json;
 use common_datasource::file_format::parquet::stream_to_parquet;
-use common_datasource::object_store::build_backend_for_write_with_path;
+use common_datasource::object_store::{LocalFileAccess, build_backend_for_write_with_path};
 use common_datasource::packed_writer::PackedTableWriter;
 use common_datasource::parquet_writer::ParquetFileWriter;
 use common_query::Output;
@@ -62,7 +62,6 @@ const WRITE_CONCURRENCY: usize = 8;
 
 impl StatementExecutor {
     async fn stream_to_file(
-        &self,
         stream: SendableRecordBatchStream,
         format: &Format,
         object_store: ObjectStore,
@@ -187,8 +186,16 @@ impl StatementExecutor {
         } = &req;
 
         debug!("Copy table: {table_id} to location: {location}");
-        self.copy_to_file_managed(&format, output, location, connection, managed, packed)
-            .await
+        Self::copy_to_file_managed(
+            &self.local_file_access,
+            &format,
+            output,
+            location,
+            connection,
+            managed,
+            packed,
+        )
+        .await
     }
 
     pub(crate) async fn copy_to_file(
@@ -198,12 +205,20 @@ impl StatementExecutor {
         location: &str,
         connection: &HashMap<String, String>,
     ) -> Result<usize> {
-        self.copy_to_file_managed(format, output, location, connection, None, None)
-            .await
+        Self::copy_to_file_managed(
+            &self.local_file_access,
+            format,
+            output,
+            location,
+            connection,
+            None,
+            None,
+        )
+        .await
     }
 
     async fn copy_to_file_managed(
-        &self,
+        local_file_access: &LocalFileAccess,
         format: &Format,
         output: Output,
         location: &str,
@@ -224,28 +239,45 @@ impl StatementExecutor {
             _ => unreachable!(),
         };
 
-        let backend =
-            build_backend_for_write_with_path(location, connection, &self.local_file_access)
-                .await
-                .context(error::BuildBackendSnafu)?;
-        let filename = backend.object_path.context(error::UnexpectedSnafu {
-            violated: format!("Expected filename, path: {location}"),
-        })?;
+        if let (Some((budget, token)), Some(packed)) = (managed, packed) {
+            return stream_to_managed_parquet_with_packed(
+                stream,
+                ManagedParquetDestination::Packed(packed),
+                budget,
+                token,
+            )
+            .await;
+        }
+
+        let backend = build_backend_for_write_with_path(location, connection, local_file_access)
+            .await
+            .context(error::BuildBackendSnafu)?;
+        let filename = backend
+            .object_path
+            .with_context(|| error::UnexpectedSnafu {
+                violated: format!("Expected filename, path: {location}"),
+            })?;
         if let Some((budget, token)) = managed {
             stream_to_managed_parquet_with_packed(
                 stream,
-                backend.object_store,
-                &filename,
+                ManagedParquetDestination::Object {
+                    store: backend.object_store,
+                    path: filename,
+                },
                 budget,
                 token,
-                packed,
             )
             .await
         } else {
-            self.stream_to_file(stream, format, backend.object_store, &filename)
-                .await
+            Self::stream_to_file(stream, format, backend.object_store, &filename).await
         }
     }
+}
+
+/// File destinations own their object key; packed streams use their writer's stream name.
+enum ManagedParquetDestination {
+    Object { store: ObjectStore, path: String },
+    Packed(PackedTableWriter),
 }
 
 #[cfg(test)]
@@ -256,16 +288,23 @@ pub(crate) async fn stream_to_managed_parquet(
     budget: &ExportWriteBudget,
     token: &CancellationToken,
 ) -> Result<usize> {
-    stream_to_managed_parquet_with_packed(stream, store, path, budget, token, None).await
+    stream_to_managed_parquet_with_packed(
+        stream,
+        ManagedParquetDestination::Object {
+            store,
+            path: path.to_owned(),
+        },
+        budget,
+        token,
+    )
+    .await
 }
 
 async fn stream_to_managed_parquet_with_packed(
     mut stream: SendableRecordBatchStream,
-    store: ObjectStore,
-    path: &str,
+    destination: ManagedParquetDestination,
     budget: &ExportWriteBudget,
     token: &CancellationToken,
-    packed: Option<PackedTableWriter>,
 ) -> Result<usize> {
     use common_recordbatch::{RecordBatch, map_dictionary_to_values_schema};
     let original = stream.schema();
@@ -284,21 +323,25 @@ async fn stream_to_managed_parquet_with_packed(
     } else {
         expanded_schema.clone()
     };
-    let packed_destination = packed.is_some();
-    let mut writer = if let Some(packed) = packed {
-        ParquetFileWriter::open_packed(
-            output_schema.arrow_schema().clone(),
-            store,
+    let packed_destination = matches!(destination, ManagedParquetDestination::Packed(_));
+    let schema = output_schema.arrow_schema().clone();
+    let (writer, path) = match destination {
+        ManagedParquetDestination::Packed(packed) => {
+            let path = packed.path().to_owned();
+            let limits =
+                crate::statement::export_logical_tables::LogicalTableExportLimits::default();
+            (
+                ParquetFileWriter::open_packed(schema, Some(limits.writer), packed),
+                path,
+            )
+        }
+        ManagedParquetDestination::Object { store, path } => (
+            ParquetFileWriter::open(schema, store, &path, 1, None).await,
             path,
-            Some(
-                crate::statement::export_logical_tables::LogicalTableExportLimits::default().writer,
-            ),
-            packed,
-        )
-    } else {
-        ParquetFileWriter::open(output_schema.arrow_schema().clone(), store, path, 1, None).await
-    }
-    .context(error::WriteStreamToFileSnafu { path })?;
+        ),
+    };
+    let path = path.as_str();
+    let mut writer = writer.context(error::WriteStreamToFileSnafu { path })?;
     let mut started = false;
     let result = async {
         let mut rows = 0;
@@ -442,6 +485,100 @@ mod tests {
     use datatypes::schema::{ColumnSchema, Schema};
 
     use super::*;
+
+    #[tokio::test]
+    async fn managed_packed_copy_uses_shared_backend_and_stream_error_label() {
+        use common_datasource::packed_writer::PackedWriter;
+
+        let directory = common_test_util::temp_dir::create_temp_dir("managed_packed_copy");
+        let location = url::Url::from_directory_path(directory.path()).unwrap();
+        let access = LocalFileAccess::sandboxed(directory.path()).unwrap();
+        let store = object_store::secure_fs::SecureFsRoot::open(directory.path())
+            .unwrap()
+            .build_operator();
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "value",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        let output = |invalid_schema| {
+            let values: ArrayRef = if invalid_schema {
+                Arc::new(StringArray::from(vec!["a", "b", "c"]))
+            } else {
+                Arc::new(Int32Array::from(vec![1, 2, 3]))
+            };
+            let batch =
+                arrow::record_batch::RecordBatch::try_from_iter([("value", values)]).unwrap();
+            let stream = datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
+                schema.arrow_schema().clone(),
+                futures::stream::iter([Ok(batch)]),
+            );
+            let stream =
+                common_recordbatch::adapter::RecordBatchStreamAdapter::try_new(Box::pin(stream))
+                    .unwrap();
+            Output::new_with_stream(Box::pin(stream))
+        };
+        let format = Format::Parquet(Default::default());
+        let connection = HashMap::new();
+        let budget = ExportWriteBudget::new(1);
+        let token = CancellationToken::new();
+        let result = StatementExecutor::copy_to_file_managed(
+            &access,
+            &format,
+            output(false),
+            location.as_str(),
+            &connection,
+            Some((&budget, &token)),
+            None,
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(error::Error::BuildBackend {
+                source: common_datasource::error::Error::MissingObjectName { .. },
+                ..
+            })
+        ));
+
+        for (id, invalid_schema) in [(42, false), (43, true)] {
+            let shared = PackedWriter::new(store.clone()).unwrap();
+            let packed = PackedTableWriter::new(shared, "audit".into(), id, true);
+            let token = CancellationToken::new();
+            let result = StatementExecutor::copy_to_file_managed(
+                &access,
+                &format,
+                output(invalid_schema),
+                location.as_str(),
+                &connection,
+                Some((&budget, &token)),
+                Some(packed),
+            )
+            .await;
+            let path = format!("table-{id}.parquet");
+            if invalid_schema {
+                let error::Error::WriteStreamToFile {
+                    path: actual,
+                    source,
+                    ..
+                } = result.unwrap_err()
+                else {
+                    panic!("expected stream write error");
+                };
+                assert_eq!(actual, path);
+                assert!(
+                    matches!(source, common_datasource::error::Error::WriteParquet { path: actual, .. } if actual == path)
+                );
+                assert!(!store.exists(&path).await.unwrap());
+            } else {
+                assert_eq!(result.unwrap(), 3);
+                let reader = ParquetRecordBatchReaderBuilder::try_new(
+                    store.read(&path).await.unwrap().to_bytes(),
+                )
+                .unwrap();
+                assert_eq!(reader.metadata().file_metadata().num_rows(), 3);
+            }
+        }
+    }
 
     #[tokio::test]
     async fn managed_copy_preserves_existing_file_before_sink_open() {

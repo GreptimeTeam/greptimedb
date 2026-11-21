@@ -19,7 +19,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use clap::{Parser, ValueEnum};
 use common_error::ext::BoxedError;
-use common_telemetry::{debug, error, info};
+use common_telemetry::{debug, info};
 use object_store::ObjectStore;
 use serde_json::Value;
 use snafu::{OptionExt, ResultExt};
@@ -31,7 +31,7 @@ use crate::data::schema_export::append_schema_ddl;
 use crate::data::storage_export::{
     AzblobBackend, FsBackend, GcsBackend, OssBackend, S3Backend, StorageExport, StorageType,
 };
-use crate::data::{COPY_PATH_PLACEHOLDER, default_database};
+use crate::data::{COPY_PATH_PLACEHOLDER, collect_schema_job_results, default_database};
 use crate::database::{DatabaseClient, parse_proxy_opts};
 use crate::error::{
     EmptyResultSnafu, Error, OpenDalSnafu, OutputDirNotSetSnafu, Result, SchemaNotFoundSnafu,
@@ -379,14 +379,14 @@ impl Export {
         let operator = Arc::new(self.build_prefer_fs_operator().await?);
         let mut tasks = Vec::with_capacity(db_names.len());
 
-        for schema in db_names {
+        for schema in &db_names {
             let semaphore_moved = semaphore.clone();
             let export_self = self.clone();
             let operator = operator.clone();
             tasks.push(async move {
                 let _permit = semaphore_moved.acquire().await.unwrap();
                 let (metric_physical_tables, remaining_tables, views) = export_self
-                    .get_table_list(&export_self.catalog, &schema)
+                    .get_table_list(&export_self.catalog, schema)
                     .await?;
 
                 // Create directory if needed for file system storage
@@ -395,7 +395,7 @@ impl Export {
                     operator.create_dir(&db_dir).await.context(OpenDalSnafu)?;
                 }
 
-                let file_path = export_self.get_file_path(&schema, "create_tables.sql");
+                let file_path = export_self.get_file_path(schema, "create_tables.sql");
                 let mut content = String::new();
                 let objects = metric_physical_tables
                     .iter()
@@ -409,7 +409,7 @@ impl Export {
                 append_schema_ddl(
                     &export_self.database_client,
                     &export_self.catalog,
-                    &schema,
+                    schema,
                     objects,
                     &mut content,
                 )
@@ -431,11 +431,10 @@ impl Export {
             });
         }
 
-        for result in futures::future::join_all(tasks).await {
-            result?;
-        }
+        let results = futures::future::join_all(tasks).await;
+        collect_schema_job_results(&self.catalog, &db_names, results, "export database schema")?;
         let elapsed = timer.elapsed();
-        info!("Success {db_count}/{db_count} jobs, cost: {elapsed:?}");
+        info!("Success {db_count} jobs, cost: {elapsed:?}");
 
         Ok(())
     }
@@ -470,7 +469,7 @@ impl Export {
         let fs_first_operator = Arc::new(self.build_prefer_fs_operator().await?);
         let with_options = build_with_options(&self.start_time, &self.end_time, self.parallelism);
 
-        for schema in db_names {
+        for schema in &db_names {
             let semaphore_moved = semaphore.clone();
             let export_self = self.clone();
             let with_options_clone = with_options.clone();
@@ -488,7 +487,7 @@ impl Export {
 
                 let (path, connection_part) = export_self
                     .storage_type
-                    .get_storage_path(&export_self.catalog, &schema);
+                    .get_storage_path(&export_self.catalog, schema);
 
                 // Execute COPY DATABASE TO command
                 let sql = format!(
@@ -528,7 +527,7 @@ impl Export {
                     }
                 };
 
-                let copy_from_path = export_self.get_file_path(&schema, "copy_from.sql");
+                let copy_from_path = export_self.get_file_path(schema, "copy_from.sql");
                 export_self
                     .write_to_storage(
                         &fs_first_operator,
@@ -548,9 +547,10 @@ impl Export {
             });
         }
 
-        let success = self.execute_tasks(tasks).await;
+        let results = futures::future::join_all(tasks).await;
+        collect_schema_job_results(&self.catalog, &db_names, results, "export database data")?;
         let elapsed = timer.elapsed();
-        info!("Success {success}/{db_count} jobs, costs: {elapsed:?}");
+        info!("Success {db_count} jobs, costs: {elapsed:?}");
 
         Ok(())
     }
@@ -569,23 +569,6 @@ impl Export {
             .await
             .context(OpenDalSnafu)
             .map(|_| ())
-    }
-
-    async fn execute_tasks(
-        &self,
-        tasks: Vec<impl std::future::Future<Output = Result<()>>>,
-    ) -> usize {
-        futures::future::join_all(tasks)
-            .await
-            .into_iter()
-            .filter(|r| match r {
-                Ok(_) => true,
-                Err(e) => {
-                    error!(e; "export job failed");
-                    false
-                }
-            })
-            .count()
     }
 }
 

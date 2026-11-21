@@ -23,11 +23,11 @@ use api::v1::column_def::{
 };
 use api::v1::region::bulk_insert_request::Body;
 use api::v1::region::{
-    AlterRequest, AlterRequests, BuildIndexRequest, BulkInsertRequest,
+    AlterRequest, AlterRequests, BuildIndexRequest, BulkInsertRequest, CancelCompactionRequest,
     CleanUpRequest as PbCleanUpRequest, CloseRequest, CompactRequest, CreateRequest,
-    CreateRequests, DeleteRequests, DropRequest, DropRequests, FlushRequest, InsertRequests,
-    OpenRequest, TruncateRequest, alter_request, build_index_request, compact_request,
-    region_request, truncate_request,
+    CreateRequests, DeleteRequests, DiscardPendingTailsRequest, DropRequest, DropRequests,
+    FlushRequest, InsertRequests, OpenRequest, TruncateRequest, alter_request, build_index_request,
+    compact_request, region_request, truncate_request,
 };
 use api::v1::{
     self, Analyzer, ArrowIpc, FulltextBackend as PbFulltextBackend, Option as PbOption, Rows,
@@ -161,6 +161,8 @@ pub enum RegionRequest {
     Alter(RegionAlterRequest),
     Flush(RegionFlushRequest),
     Compact(RegionCompactRequest),
+    CancelCompaction(RegionCancelCompactionRequest),
+    DiscardPendingTails(RegionDiscardPendingTailsRequest),
     BuildIndex(RegionBuildIndexRequest),
     Truncate(RegionTruncateRequest),
     Catchup(RegionCatchupRequest),
@@ -184,6 +186,10 @@ impl RegionRequest {
             region_request::Body::Alter(alter) => make_region_alter(alter),
             region_request::Body::Flush(flush) => make_region_flush(flush),
             region_request::Body::Compact(compact) => make_region_compact(compact),
+            region_request::Body::CancelCompaction(cancel) => make_region_cancel_compaction(cancel),
+            region_request::Body::DiscardPendingTails(discard) => {
+                make_region_discard_pending_tails(discard)
+            }
             region_request::Body::BuildIndex(index) => make_region_build_index(index),
             region_request::Body::Truncate(truncate) => make_region_truncate(truncate),
             region_request::Body::Creates(creates) => make_region_creates(creates),
@@ -444,6 +450,36 @@ fn make_region_compact(compact: CompactRequest) -> Result<Vec<(RegionId, RegionR
             options,
             parallelism,
             time_range,
+        }),
+    )])
+}
+
+fn make_region_cancel_compaction(
+    cancel: CancelCompactionRequest,
+) -> Result<Vec<(RegionId, RegionRequest)>> {
+    let region_id = cancel.region_id.into();
+    ensure!(
+        !cancel.task_id.trim().is_empty(),
+        InvalidRegionRequestSnafu {
+            region_id,
+            err: "compaction task_id must not be empty".to_string(),
+        }
+    );
+    Ok(vec![(
+        region_id,
+        RegionRequest::CancelCompaction(RegionCancelCompactionRequest {
+            task_id: cancel.task_id,
+        }),
+    )])
+}
+
+fn make_region_discard_pending_tails(
+    discard: DiscardPendingTailsRequest,
+) -> Result<Vec<(RegionId, RegionRequest)>> {
+    Ok(vec![(
+        discard.region_id.into(),
+        RegionRequest::DiscardPendingTails(RegionDiscardPendingTailsRequest {
+            node_id: discard.datanode_id,
         }),
     )])
 }
@@ -1922,6 +1958,21 @@ pub struct RegionFlushRequest {
     pub reason: Option<RegionFlushReason>,
 }
 
+/// Cancels one exact live compaction identity without pausing future compactions.
+#[derive(Debug)]
+pub struct RegionCancelCompactionRequest {
+    pub task_id: String,
+}
+
+/// Discards the region's pending WAL tails, the WAL ranges it still has to recover, that
+/// datanode `node_id` wrote, without replaying them. Returns the number of discarded tails; a
+/// region without such tails returns 0 and changes nothing.
+#[derive(Debug)]
+pub struct RegionDiscardPendingTailsRequest {
+    /// The datanode that wrote the tails.
+    pub node_id: u64,
+}
+
 #[derive(Debug)]
 pub struct RegionCompactRequest {
     pub options: compact_request::Options,
@@ -1950,6 +2001,9 @@ pub struct RegionBuildIndexRequest {
 #[derive(Debug)]
 pub enum RegionTruncateRequest {
     /// Truncate all data in the region.
+    ///
+    /// Mito2 also retires this region's shared SST references. Other regions and
+    /// existing readers may still retain the physical objects.
     All,
     /// Discard all unflushed data while preserving persisted SST files.
     ///
@@ -1961,6 +2015,8 @@ pub enum RegionTruncateRequest {
     /// WAL is obsoleted last. Retrying is safe: a request against a region with nothing
     /// left to discard only re-attempts the WAL obsoletion.
     Unflushed,
+    /// Retires fully contained SST references, including shared SSTs in Mito2.
+    /// Physical reclamation still waits for other references and readers.
     ByTimeRanges {
         /// Time ranges to truncate. Both bound are inclusive.
         /// only files that are fully contained in the time range will be truncated.
@@ -2083,6 +2139,8 @@ impl fmt::Display for RegionRequest {
             RegionRequest::Alter(_) => write!(f, "Alter"),
             RegionRequest::Flush(_) => write!(f, "Flush"),
             RegionRequest::Compact(_) => write!(f, "Compact"),
+            RegionRequest::CancelCompaction(_) => write!(f, "CancelCompaction"),
+            RegionRequest::DiscardPendingTails(_) => write!(f, "DiscardPendingTails"),
             RegionRequest::BuildIndex(_) => write!(f, "BuildIndex"),
             RegionRequest::Truncate(_) => write!(f, "Truncate"),
             RegionRequest::Catchup(_) => write!(f, "Catchup"),
@@ -2107,6 +2165,54 @@ mod tests {
 
     use super::*;
     use crate::metadata::RegionMetadataBuilder;
+
+    #[test]
+    fn test_cancel_compaction_request_conversion() {
+        let region_id = RegionId::new(7, 3);
+        let requests = RegionRequest::try_from_request_body(
+            region_request::Body::CancelCompaction(CancelCompactionRequest {
+                region_id: region_id.as_u64(),
+                task_id: "task-1".to_string(),
+            }),
+        )
+        .unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].0, region_id);
+        let RegionRequest::CancelCompaction(request) = &requests[0].1 else {
+            panic!("expected cancellation")
+        };
+        assert_eq!(request.task_id, "task-1");
+        for task_id in ["", " ", "\t\n"] {
+            assert!(
+                RegionRequest::try_from_request_body(region_request::Body::CancelCompaction(
+                    CancelCompactionRequest {
+                        region_id: region_id.as_u64(),
+                        task_id: task_id.to_string()
+                    }
+                ))
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn test_discard_pending_tails_request_wire() {
+        use api::v1::region::RegionRequest as PbRegionRequest;
+        use prost::Message;
+
+        let bytes = include_bytes!(
+            "../../../tests/compatibility/wire/discard_pending_tails/discard_pending_tails.pb"
+        );
+        let request = PbRegionRequest::decode(bytes.as_slice()).unwrap();
+        assert_eq!(request.encode_to_vec(), bytes);
+        let mut requests = RegionRequest::try_from_request_body(request.body.unwrap()).unwrap();
+        let (region_id, request) = requests.remove(0);
+        assert_eq!(RegionId::new(1024, 1), region_id);
+        let RegionRequest::DiscardPendingTails(request) = request else {
+            panic!("expected a pending tails discard, got {request:?}")
+        };
+        assert_eq!(7, request.node_id);
+    }
 
     #[test]
     fn test_build_index_options_round_trip() {
