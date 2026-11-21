@@ -97,7 +97,7 @@ use crate::extension_plan::{RawSeriesSourceExec, SeriesRouting};
 use crate::grid_series::METADATA_LABELS;
 use crate::histogram_eval::HISTOGRAM_ROUTING_EXCLUDED_LABELS;
 use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
-use crate::native::metrics::{NodeMetricsSnapshot, is_node_metric};
+use crate::native::metrics::NodeMetricsSnapshot;
 use crate::native::plan::{
     AggregateStage, BoundMap, Grouping, InstantValue, MapOp, NativeExpr, NativeNode, NativeTree,
     NativeType, reads_across_series,
@@ -2134,6 +2134,11 @@ pub struct FusedSeriesExec {
     /// Shared with the tree's own registration, which reads these figures when a reader asks for
     /// the tree: that reader outlives this borrow, and must never keep the set alive.
     metric: Arc<ExecutionPlanMetricsSet>,
+    /// The fixed membership returned by `metrics()`: at construction only the `native.tree` Custom
+    /// is registered; later per-partition `native.<path>.*` figures were always filtered out.
+    /// If a physical operator metric is registered during execution, it must also be included here
+    /// or this cache must gain invalidation; otherwise the membership regression test will fail.
+    own_metrics: MetricsSet,
     format: FusedOutputFormat,
     matching_parallelism: Option<usize>,
     /// Whether this node is a partition-local canonical producer.
@@ -2778,6 +2783,7 @@ impl FusedSeriesExec {
         ));
         let metric = Arc::new(ExecutionPlanMetricsSet::new());
         register_tree_metric(&tree, &metric);
+        let own_metrics = metric.clone_inner();
         Ok(Self {
             promql,
             tree,
@@ -2793,6 +2799,7 @@ impl FusedSeriesExec {
                 claimed: Vec::new(),
             }),
             metric,
+            own_metrics,
             properties,
             format,
             matching_parallelism,
@@ -2866,16 +2873,7 @@ impl ExecutionPlan for FusedSeriesExec {
     /// registers as [`NativeTreeMetric`] - so they are left out here and this node reports only what
     /// an operator of its own would add.
     fn metrics(&self) -> Option<MetricsSet> {
-        let mut own = MetricsSet::new();
-        for metric in self.metric.clone_inner().iter() {
-            // The tree is not a figure of this node: it is what the node runs, reported on its own
-            // (see `NativeTreeMetric`), so it stays here rather than being flattened into a number.
-            let tree = matches!(metric.value(), MetricValue::Custom { .. });
-            if tree || !is_node_metric(metric.value().name()) {
-                own.push(Arc::clone(metric));
-            }
-        }
-        Some(own)
+        Some(self.own_metrics.clone())
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {
