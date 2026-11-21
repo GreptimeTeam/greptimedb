@@ -42,6 +42,10 @@ pub use crate::schema::column_schema::{
     METRIC_NAME_KEY, MG_KEY, Metadata, SKIPPING_INDEX_KEY, SkippingIndexOptions, SkippingIndexType,
     TIME_INDEX_KEY, is_metric_name_field, metric_name_field_metadata,
 };
+pub use crate::schema::column_schema::{
+    COLUMN_STORAGE_OPT_KEY_THRESHOLD, COLUMN_STORAGE_OPT_KEY_TYPE,
+    DEFAULT_EXTERNAL_STORAGE_THRESHOLD, STORAGE_KEY, StorageOptions, StorageType,
+};
 pub use crate::schema::constraint::ColumnDefaultConstraint;
 #[cfg(feature = "enterprise")]
 pub use crate::schema::sketch::{HllOptions, KllOptions, MgOptions};
