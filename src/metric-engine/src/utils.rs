@@ -29,16 +29,19 @@ use crate::error::{Result, SerializeRegionManifestInfoSnafu, UnexpectedRequestSn
 /// Rejects per-column SST options on a logical table column. Logical tables share
 /// the physical data region's SSTs, so these options would have no effect.
 pub(crate) fn ensure_no_logical_sst_column_options(column_schema: &ColumnSchema) -> Result<()> {
-    for (key, option) in [(COMPRESSION_KEY, "COMPRESSION"), (STORAGE_KEY, "STORAGE")] {
-        ensure!(
-            !column_schema.metadata().contains_key(key),
-            UnexpectedRequestSnafu {
-                reason: format!(
-                    "{option} is not supported on logical tables; configure it on the physical table"
-                ),
-            }
-        );
-    }
+    ensure!(
+        !column_schema.metadata().contains_key(COMPRESSION_KEY),
+        UnexpectedRequestSnafu {
+            reason: "COMPRESSION is not supported on logical tables; configure it on the physical table",
+        }
+    );
+    // Metric tables have no string or binary field columns, physical or logical.
+    ensure!(
+        !column_schema.metadata().contains_key(STORAGE_KEY),
+        UnexpectedRequestSnafu {
+            reason: "STORAGE is not supported on metric engine tables",
+        }
+    );
     Ok(())
 }
 
