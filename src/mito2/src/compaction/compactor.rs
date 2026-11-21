@@ -790,6 +790,7 @@ impl DefaultSstMerger {
             .join(",");
         let sequence_metadata = output_sequence_metadata(&context, &output.inputs);
         let builder = CompactionSstReaderBuilder {
+            narthex_format: context.region_options.sst_format == Some(FormatType::Narthex),
             metadata: context.region_metadata.clone(),
             sst_layer: context.access_layer.clone(),
             cache: context.cache_manager.clone(),
@@ -858,7 +859,11 @@ impl DefaultSstMerger {
                     // their effective sequences here could promote old rows above
                     // versions in SSTs that were not part of this merge.
                     max_sequence: None,
-                    sst_write_format: if flat_format {
+                    sst_write_format: if context.region_options.sst_format
+                        == Some(FormatType::Narthex)
+                    {
+                        FormatType::Narthex
+                    } else if flat_format {
                         FormatType::Flat
                     } else {
                         FormatType::PrimaryKey
@@ -1903,6 +1908,7 @@ mod tests {
                 deletes.clone()
             });
             let mut reader = CompactionSstReaderBuilder {
+                narthex_format: false,
                 metadata: compaction_region.region_metadata.clone(),
                 sst_layer: region.access_layer.clone(),
                 cache: engine.cache_manager(),
@@ -2024,6 +2030,7 @@ mod tests {
         assert_eq!(1, files.len());
         let outputs: Vec<_> = files.into_iter().map(new_file_handle).collect();
         let mut reader = CompactionSstReaderBuilder {
+            narthex_format: false,
             metadata: version.metadata.clone(),
             sst_layer: region.access_layer.clone(),
             cache: Arc::new(CacheManager::default()),

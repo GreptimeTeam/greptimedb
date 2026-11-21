@@ -523,12 +523,69 @@ fn is_zero(version: &u8) -> bool {
 }
 
 impl FileMeta {
+    /// Returns the authoritative object path, using the artifact manifest for narthex files.
+    pub fn file_path(&self, table_dir: &str, path_type: PathType) -> String {
+        match &self.format {
+            FileFormat::Parquet => location::sst_file_path(table_dir, self.file_id(), path_type),
+            _ => {
+                let region_dir =
+                    location::region_dir_from_table_dir(table_dir, self.region_id, path_type);
+                format!(
+                    "{}manifest.json",
+                    location::narthex_file_dir(&region_dir, self.file_id)
+                )
+            }
+        }
+    }
+
+    /// Resolves the ordered part inventory and manifest against the physical owner's directory.
+    pub(crate) fn narthex_objects(
+        &self,
+        region_dir: &str,
+    ) -> Option<Vec<crate::series_index::artifact::ArtifactObject>> {
+        use crate::series_index::artifact::ArtifactObject;
+        let (manifest, parts, extension) = match &self.format {
+            FileFormat::Parquet => return None,
+            FileFormat::NarthexSamples(meta) => (meta.manifest_size, &meta.parts, "samples"),
+            FileFormat::NarthexSeriesIndex(meta) => (meta.manifest_size, &meta.parts, "series"),
+        };
+        let dir = location::narthex_file_dir(region_dir, self.file_id);
+        let mut objects = Vec::with_capacity(parts.len() + 1);
+        for (id, part) in parts.iter().enumerate() {
+            objects.push(ArtifactObject {
+                path: format!("{dir}part-{id}.{extension}"),
+                file_size: part.file_size,
+            });
+        }
+        objects.push(ArtifactObject {
+            path: format!("{dir}manifest.json"),
+            file_size: manifest,
+        });
+        Some(objects)
+    }
+
+    /// Checks that a Narthex inventory describes one complete immutable artifact.
+    pub(crate) fn valid_inventory(&self) -> bool {
+        let (manifest, parts) = match &self.format {
+            FileFormat::Parquet => return true,
+            FileFormat::NarthexSamples(meta) => (meta.manifest_size, &meta.parts),
+            FileFormat::NarthexSeriesIndex(meta) => (meta.manifest_size, &meta.parts),
+        };
+        !parts.is_empty()
+            && parts
+                .iter()
+                .try_fold(manifest, |total, part| total.checked_add(part.file_size))
+                == Some(self.file_size)
+    }
+
     /// Returns whether this file's row sequences are trusted in the target region.
     ///
     /// Foreign files use their target-local sequence barrier; local files require
     /// the preserve marker because their physical sequences belong to this region.
     pub(crate) fn is_effective_target_sequence_trusted(&self, target_region_id: RegionId) -> bool {
-        if self.region_id != target_region_id {
+        if self.region_id != target_region_id
+            || matches!(&self.format, FileFormat::NarthexSamples(meta) if meta.use_file_sequence)
+        {
             self.sequence.is_some()
         } else {
             self.preserve_row_sequence
@@ -773,7 +830,7 @@ impl FileHandle {
 
     /// Returns the complete file path of the file.
     pub fn file_path(&self, table_dir: &str, path_type: PathType) -> String {
-        location::sst_file_path(table_dir, self.file_id(), path_type)
+        self.meta_ref().file_path(table_dir, path_type)
     }
 
     /// Returns the time range of the file.
@@ -1117,6 +1174,14 @@ pub(crate) struct UncommittedSsts {
 
 #[async_trait::async_trait]
 impl SstWriteGuard for UncommittedSsts {
+    async fn before_create_narthex(&self, file_id: RegionFileId) -> crate::error::Result<()> {
+        self.files
+            .lock()
+            .unwrap()
+            .insert(file_id.file_id(), UncommittedFile::Narthex);
+        Ok(())
+    }
+
     async fn before_create(&self, file_id: RegionFileId) -> crate::error::Result<()> {
         // An index can be created before its final metadata is available.
         self.track_before_upload(file_id.file_id(), true);
@@ -1359,6 +1424,48 @@ mod tests {
     use partition::expr::{PartitionExpr, col};
 
     use super::*;
+
+    #[test]
+    fn test_narthex_part_paths_follow_inventory_order() {
+        let samples = FileFormat::NarthexSamples(Box::new(NarthexSamplesMeta {
+            use_file_sequence: false,
+            manifest_size: 5,
+            parts: smallvec::smallvec![
+                NarthexPartMeta { file_size: 11 },
+                NarthexPartMeta { file_size: 7 }
+            ],
+        }));
+        let series = FileFormat::NarthexSeriesIndex(Box::new(NarthexSeriesIndexMeta {
+            sources: vec![],
+            manifest_size: 5,
+            parts: smallvec::smallvec![
+                NarthexPartMeta { file_size: 11 },
+                NarthexPartMeta { file_size: 7 }
+            ],
+        }));
+        for (format, extension) in [(samples, "samples"), (series, "series")] {
+            let meta = FileMeta {
+                file_size: 23,
+                format,
+                ..Default::default()
+            };
+            assert!(meta.valid_inventory());
+            let dir = format!("owner/{}/", meta.file_id);
+            let objects = meta.narthex_objects("owner/").unwrap();
+            let entries: Vec<_> = objects
+                .into_iter()
+                .map(|object| (object.path, object.file_size))
+                .collect();
+            assert_eq!(
+                entries,
+                [
+                    (format!("{dir}part-0.{extension}"), 11),
+                    (format!("{dir}part-1.{extension}"), 7),
+                    (format!("{dir}manifest.json"), 5),
+                ]
+            );
+        }
+    }
 
     #[test]
     fn test_narthex_file_metadata_compatibility() {

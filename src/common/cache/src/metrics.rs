@@ -43,6 +43,17 @@ pub struct OperationMetrics {
 }
 
 impl OperationMetrics {
+    /// Measures a fallible operation, including cancellation before completion.
+    pub async fn observe<T, E>(
+        &self,
+        operation: impl Future<Output = Result<T, E>>,
+    ) -> Result<T, E> {
+        let guard = self.start();
+        let result = operation.await;
+        guard.finish(&result);
+        result
+    }
+
     /// Starts tracking an operation and its elapsed time.
     pub(crate) fn start(&self) -> OperationGuard<'_> {
         self.started.inc();

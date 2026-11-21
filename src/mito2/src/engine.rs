@@ -869,10 +869,7 @@ impl MitoEngine {
 ///
 /// Only adding or removing files to region is considered valid now.
 fn is_valid_region_edit(edit: &RegionEdit) -> bool {
-    (!edit.files_to_add.is_empty()
-        || !edit.files_to_remove.is_empty()
-        || !edit.series_indexes_to_add.is_empty()
-        || !edit.series_indexes_to_remove.is_empty())
+    edit.has_file_changes()
         && matches!(
             edit,
             RegionEdit {

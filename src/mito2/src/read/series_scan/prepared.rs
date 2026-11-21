@@ -14,6 +14,7 @@
 
 //! Scanner-wide columnar candidates and independent, lazy sample reads.
 
+mod narthex;
 #[cfg(test)]
 mod tests;
 
@@ -26,9 +27,7 @@ use api::v1::SemanticType;
 use common_error::ext::BoxedError;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_time::Timestamp;
-use datafusion::execution::memory_pool::{
-    MemoryConsumer, MemoryPool, MemoryReservation, UnboundedMemoryPool,
-};
+use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool, MemoryReservation};
 use datafusion_expr::{Expr, utils::split_conjunction};
 use datatypes::arrow::array::{
     Array, ArrayRef, BinaryArray, BooleanArray, DictionaryArray, StringArray, UInt32Array,
@@ -84,6 +83,46 @@ pub(crate) struct Preparation {
 }
 
 impl Preparation {
+    pub(crate) async fn prepare_batches(
+        &self,
+        context: Arc<StreamContext>,
+        ranges: Vec<PartitionRange>,
+        metrics: PartitionMetrics,
+        scan_pool: Arc<dyn MemoryPool>,
+    ) -> Result<Arc<ColumnarPreparedSource>> {
+        let result = self
+            .source
+            .get_or_init(|| async {
+                let raw = RawScanPreparation {
+                    schema: Arc::new(datatypes::series::samples::SeriesSchema {
+                        fields: Vec::new().into(),
+                        eval_grid: None,
+                    }),
+                    fields: Vec::new(),
+                    predicates: Vec::new(),
+                };
+                ColumnarPreparedSource::prepare(
+                    context,
+                    ranges,
+                    RawLabelSource::Explicit,
+                    raw,
+                    metrics,
+                    scan_pool,
+                )
+                .await
+                .map(Arc::new)
+                .map_err(Arc::new)
+            })
+            .await;
+        let source = result
+            .as_ref()
+            .map_err(|error| crate::error::ScanSeriesSnafu.into_error(error.clone()))?;
+        if !matches!(source.labels, RawLabelSource::Explicit) {
+            return Err(invalid("cannot change prepared output representation"));
+        }
+        Ok(source.clone())
+    }
+
     pub(crate) async fn prepare(
         &self,
         context: Arc<StreamContext>,
@@ -91,6 +130,7 @@ impl Preparation {
         labels: RawLabelSource,
         raw: RawScanPreparation,
         metrics: PartitionMetrics,
+        scan_pool: Arc<dyn MemoryPool>,
     ) -> std::result::Result<Arc<dyn PreparedSeriesSource>, BoxedError> {
         // Per caller, including time awaiting another partition's shared preparation.
         // This overlaps prepare_wall and must not be added to its component timings.
@@ -101,7 +141,7 @@ impl Preparation {
         let result = self
             .source
             .get_or_init(|| async {
-                ColumnarPreparedSource::prepare(context, ranges, labels, raw, metrics)
+                ColumnarPreparedSource::prepare(context, ranges, labels, raw, metrics, scan_pool)
                     .await
                     .map(Arc::new)
                     .map_err(Arc::new)
@@ -150,15 +190,11 @@ pub(super) fn same_labels(left: &RawLabelSource, right: &RawLabelSource) -> bool
 ///
 /// Returns whether every assigned source can be read from columnar artifacts. `false` is not an
 /// error: the caller scans those sources with the ordinary reader instead.
-/// TODO(narthex-merge): the columnar series path does not receive
-/// `QueryScanContext::memory_pool` yet, so it is not accounted against
-/// `scan_memory_limit`. Thread the request pool through `ScanInput` when this path is
-/// wired into the shared scan memory accounting (main's #9101).
-fn unaccounted_scan_pool() -> Arc<dyn MemoryPool> {
-    Arc::new(UnboundedMemoryPool::default())
-}
-
 pub(crate) fn validate_inputs(context: &StreamContext, ranges: &[PartitionRange]) -> Result<bool> {
+    if context.input.requires_narthex_preparation() {
+        narthex::file_indices(context, ranges)?;
+        return Ok(true);
+    }
     collect_inputs(context, ranges).map(|inputs| inputs.is_some())
 }
 
@@ -336,16 +372,94 @@ struct Candidate {
     metric: Option<SeriesLabels>,
 }
 
-struct ColumnarPreparedSource {
+pub(crate) struct ColumnarPreparedSource {
     context: Arc<StreamContext>,
     labels: RawLabelSource,
     raw: Arc<RawScanPreparation>,
     sample_schema: Option<SchemaRef>,
+    merge_field_start: usize,
     candidates: Arc<Vec<Candidate>>,
     samples: Arc<Vec<Arc<dyn SamplesFormatReader>>>,
     metrics: PartitionMetrics,
+    scan_pool: Arc<dyn MemoryPool>,
     // Readers retain this reservation with the candidate set.
     reservation: Arc<MemoryReservation>,
+}
+
+/// Opens sidecar readers after validating their complete source coverage.
+async fn open_sidecar_sources(
+    context: &StreamContext,
+    ranges: &[PartitionRange],
+) -> Result<(
+    Vec<Arc<dyn SamplesFormatReader>>,
+    Vec<Box<dyn FormatReader>>,
+)> {
+    let input = &context.input;
+    let metadata = input.region_metadata();
+    let index = input
+        .series_index
+        .as_ref()
+        .ok_or_else(|| invalid("missing columnar index context"))?;
+    let Some((files, indexes)) = collect_inputs(context, ranges)? else {
+        // Readiness was checked before preparation, so this is a real capability change.
+        return Err(invalid(
+            "columnar series coverage changed after series preparation",
+        ));
+    };
+    let cache = input
+        .cache_strategy
+        .columnar_metadata(index.cache_namespace);
+    let mut samples = Vec::<Arc<dyn SamplesFormatReader>>::new();
+    let assigned: HashSet<_> = files
+        .iter()
+        .map(|i| input.files[*i].file_id().file_id())
+        .collect();
+    let allowed = assigned
+        .iter()
+        .chain(&input.time_pruned_files)
+        .copied()
+        .collect();
+    for handle in index.version.samples.values().filter(|h| {
+        if !h.entry().sources_visible(&allowed) || !assigned.iter().any(|id| h.entry().covers(*id))
+        {
+            return false;
+        }
+        // Coverage validation above still needs every day of each source. Only
+        // opening readers can omit daily artifacts outside the query range.
+        if let (Some(day), Some(range)) = (h.entry().window, input.time_range.as_ref()) {
+            let bounds = day
+                .checked_mul(86_400)
+                .zip(day.checked_add(1).and_then(|next| next.checked_mul(86_400)));
+            if let Some((start, end)) = bounds {
+                return range.intersects(
+                    &(Timestamp::new_second(start)..Timestamp::new_second(end)).into(),
+                );
+            }
+            // Retain extreme days whose bounds cannot be represented in seconds.
+        }
+        true
+    }) {
+        let reader = crate::series_index::samples::reader::SamplesReader::open_cached(
+            index.store.clone(),
+            handle.clone(),
+            cache.clone(),
+        )
+        .await?;
+        format::validate_sample_schema(&reader.schema(), metadata)?;
+        samples.push(Arc::new(reader));
+    }
+    let mut series = Vec::<Box<dyn FormatReader>>::new();
+    for id in indexes {
+        series.push(Box::new(
+            crate::series_index::columnar::reader::ColumnarReader::open_cached(
+                index.store.clone(),
+                index.version.series_indexes[&id].clone(),
+                cache.clone(),
+            )
+            .await?,
+        ));
+    }
+    Ok((samples, series))
 }
 
 impl ColumnarPreparedSource {
@@ -355,6 +469,7 @@ impl ColumnarPreparedSource {
         labels: RawLabelSource,
         raw: RawScanPreparation,
         metrics: PartitionMetrics,
+        scan_pool: Arc<dyn MemoryPool>,
     ) -> Result<Self> {
         let _prepare_timer = crate::metrics::READ_STAGE_ELAPSED
             .with_label_values(&["columnar_prepare_wall"])
@@ -364,90 +479,40 @@ impl ColumnarPreparedSource {
         let started = Instant::now();
         let input = &context.input;
         let metadata = input.region_metadata();
-        let index = input
-            .series_index
-            .as_ref()
-            .ok_or_else(|| invalid("missing columnar index context"))?;
-        let Some((files, indexes)) = collect_inputs(&context, &ranges)? else {
-            // Readiness was checked before preparation, so this is a real capability change.
-            return Err(invalid(
-                "columnar series coverage changed after series preparation",
-            ));
+        let (samples, series) = if context.input.requires_narthex_preparation() {
+            narthex::open_sources(&context, &ranges, &scan_pool).await?
+        } else {
+            open_sidecar_sources(&context, &ranges).await?
         };
         preparation_metrics.add_elapsed("columnar_prepare_coverage", started.elapsed());
-        let timer = preparation_metrics.timer("columnar_prepare_samples_open_wall");
-        let cache = input
-            .cache_strategy
-            .columnar_metadata(index.cache_namespace);
-        let mut samples = Vec::<Arc<dyn SamplesFormatReader>>::new();
-        let assigned: HashSet<_> = files
-            .iter()
-            .map(|i| input.files[*i].file_id().file_id())
-            .collect();
-        let allowed = assigned
-            .iter()
-            .chain(&input.time_pruned_files)
-            .copied()
-            .collect();
-        for handle in index.version.samples.values().filter(|h| {
-            if !h.entry().sources_visible(&allowed)
-                || !assigned.iter().any(|id| h.entry().covers(*id))
-            {
-                return false;
-            }
-            // Coverage validation above still needs every day of each source. Only
-            // opening readers can omit daily artifacts outside the query range.
-            if let (Some(day), Some(range)) = (h.entry().window, input.time_range.as_ref()) {
-                let bounds = day
-                    .checked_mul(86_400)
-                    .zip(day.checked_add(1).and_then(|next| next.checked_mul(86_400)));
-                if let Some((start, end)) = bounds {
-                    return range.intersects(
-                        &(Timestamp::new_second(start)..Timestamp::new_second(end)).into(),
-                    );
-                }
-                // Retain extreme days whose bounds cannot be represented in seconds.
-            }
-            true
-        }) {
-            let reader = crate::series_index::samples::reader::SamplesReader::open_cached(
-                index.store.clone(),
-                handle.clone(),
-                cache.clone(),
-            )
-            .await?
-            .with_payload_cache(input.cache_strategy.columnar_payload(index.cache_namespace));
-            format::validate_sample_schema(&reader.schema(), metadata)?;
-            samples.push(Arc::new(reader));
-        }
-        drop(timer);
         preparation_metrics
             .counts
             .insert("prepare_sample_readers", samples.len() as u64);
         preparation_metrics
             .counts
-            .insert("prepare_series_indexes", indexes.len() as u64);
-        let scan_pool = unaccounted_scan_pool();
+            .insert("prepare_series_indexes", series.len() as u64);
         let reservation = MemoryConsumer::new("ColumnarPreparedSource").register(&scan_pool);
         let started = Instant::now();
         let mut raw = raw;
-        let sample_schema = sample_merge_schema(&context, &mut raw)?;
+        let batch_output = matches!(labels, RawLabelSource::Explicit);
+        let sample_schema = if batch_output {
+            Some(input.mapper.input_arrow_schema(input.compaction))
+        } else {
+            sample_merge_schema(&context, &mut raw)?
+        };
+        let merge_field_start = if batch_output {
+            input.mapper.field_column_start()
+        } else {
+            0
+        };
         preparation_metrics.add_elapsed("columnar_prepare_schema", started.elapsed());
         preparation_metrics.bytes.insert("prepare_encoded_keys", 0);
         preparation_metrics.counts.insert("prepare_batch_series", 0);
-        let direct_labels = sample_schema.is_some();
+        let direct_labels = !batch_output && sample_schema.is_some();
         let conjuncts = predicate_conjuncts(input.predicate_group().predicate());
         let mut retained_rows = 0_usize;
         let mut candidates = BTreeMap::<ExactSeriesKey, Candidate>::new();
-        for id in indexes {
-            let timer = preparation_metrics.timer("columnar_prepare_series_open_wall");
-            let reader = crate::series_index::columnar::reader::ColumnarReader::open_cached(
-                index.store.clone(),
-                index.version.series_indexes[&id].clone(),
-                cache.clone(),
-            )
-            .await?;
-            drop(timer);
+        for reader in series {
             let started = Instant::now();
             let schema = reader.schema();
             format::validate_series_schema(&schema, metadata)?;
@@ -486,6 +551,16 @@ impl ColumnarPreparedSource {
                 filters.push(
                     Predicate::to_physical_expr(expr, &projected_schema)
                         .map_err(|e| invalid(e.to_string()))?,
+                );
+            }
+            if context.input.requires_narthex_preparation()
+                && let Some(partition) =
+                    narthex_partition_filter(metadata.partition_expr.as_deref(), None)?
+            {
+                filters.push(
+                    partition
+                        .try_as_physical_expr(&projected_schema)
+                        .map_err(|error| invalid(error.to_string()))?,
                 );
             }
             preparation_metrics.add_elapsed("columnar_prepare_compile", started.elapsed());
@@ -615,7 +690,6 @@ impl ColumnarPreparedSource {
                             ))
                         })
                         .collect::<Result<Vec<_>>>()?;
-                    let scan_pool = unaccounted_scan_pool();
                     let owner = Arc::new(
                         MemoryConsumer::new("ColumnarSeriesLabelBatch").register(&scan_pool),
                     );
@@ -633,7 +707,7 @@ impl ColumnarPreparedSource {
                 let mut batch_series = 0_u64;
                 for (retained_row, (exact, row)) in fresh.into_iter().enumerate() {
                     let mut values = HashMap::new();
-                    if !direct_labels {
+                    if !direct_labels && (!batch_output || !input.compaction) {
                         values.reserve(tag_arrays.len());
                         for (column_id, strings) in &tag_arrays {
                             values.insert(
@@ -668,7 +742,7 @@ impl ColumnarPreparedSource {
                         + 64;
                     reservation
                         .try_grow(bytes)
-                        .map_err(|e| invalid(e.to_string()))?;
+                        .context(crate::error::ScanMemoryExhaustedSnafu)?;
                     let metric = if let Some(label_batch) = &label_batch {
                         batch_series += 1;
                         let RawLabelSource::PrimaryKey { metric_name, .. } = &labels else {
@@ -731,37 +805,20 @@ impl ColumnarPreparedSource {
             labels,
             raw: Arc::new(raw),
             sample_schema,
+            merge_field_start,
             candidates: Arc::new(candidates),
             samples: Arc::new(samples),
             metrics,
+            scan_pool,
             reservation: Arc::new(reservation),
         })
     }
 }
 
-impl PreparedSeriesSource for ColumnarPreparedSource {
-    fn num_series(&self) -> usize {
-        self.candidates.len()
-    }
-    fn label_source(&self) -> &RawLabelSource {
-        &self.labels
-    }
-    fn series_info(&self, ordinal: usize) -> std::result::Result<SeriesInfo, BoxedError> {
-        let candidate = self
-            .candidates
-            .get(ordinal)
-            .ok_or_else(|| BoxedError::new(invalid("series ordinal out of bounds")))?;
-        Ok(SeriesInfo {
-            primary_key: candidate.key.clone(),
-            metric: candidate.metric.clone(),
-        })
-    }
-    fn read_series(
-        &self,
-        range: Range<usize>,
-    ) -> std::result::Result<SendableRawSeriesStream, BoxedError> {
+impl ColumnarPreparedSource {
+    pub(crate) fn read_batches(&self, range: Range<usize>) -> Result<BoxedRecordBatchStream> {
         if range.start > range.end || range.end > self.candidates.len() {
-            return Err(BoxedError::new(invalid("series range out of bounds")));
+            return Err(invalid("series range out of bounds"));
         }
         let context = self.context.clone();
         let sample_schema = self.sample_schema.clone();
@@ -769,6 +826,23 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
         let samples = self.samples.clone();
         let metrics = self.metrics.clone();
         let reservation = self.reservation.clone();
+        let scan_pool = self.scan_pool.clone();
+        let field_column_start = self.merge_field_start;
+        let filters =
+            if matches!(self.labels, RawLabelSource::Explicit) && !context.input.compaction {
+                predicate_conjuncts(context.input.predicate_group().predicate())
+                    .into_iter()
+                    .map(|expr| {
+                        Predicate::to_physical_expr(
+                            expr,
+                            &context.input.mapper.input_arrow_schema(false),
+                        )
+                        .map_err(|error| invalid(error.to_string()))
+                    })
+                    .collect::<Result<Vec<_>>>()?
+            } else {
+                Vec::new()
+            };
         let stream = async_stream::try_stream! {
             let _reservation = reservation;
             if range.is_empty() { return; }
@@ -783,8 +857,8 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
                 let context = context.clone();
                 let reader = reader.clone();
                 let sample_schema = sample_schema.clone();
+                let scan_pool = scan_pool.clone();
                 sources.push(Box::pin(async_stream::try_stream! {
-                    let scan_pool = unaccounted_scan_pool();
                     let reservation = MemoryConsumer::new("ColumnarSamplesRead").register(&scan_pool);
                     // Account for the selection retained by the samples reader, including
                     // B-tree node overhead, before allocating it. The exact-key selection and
@@ -814,7 +888,7 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
                     let mut stage_metrics = crate::metrics::ColumnarReadMetrics::default();
                     let mut batches = reader.read(SamplesReadRequest {
                         projection: sample_projection(&reader.schema(), &context),
-                        memory_pool: Some(unaccounted_scan_pool()),
+                        memory_pool: Some(scan_pool.clone()),
                         keys: Some(keys),
                         start,
                         end,
@@ -843,14 +917,49 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
                 }));
             }
             let mut merged = if let Some(schema) = sample_schema {
-                SeqScan::merge_flat_sources(&context, sources, Some(&metrics), false, schema, 0).await?
+                SeqScan::merge_flat_sources(&context, sources, Some(&metrics), false, schema, field_column_start).await?
             } else {
                 SeqScan::build_flat_reader_from_sources(&context, sources, None, Some(&metrics), false, 1).await?
             };
-            while let Some(batch) = merged.try_next().await? {
-                if batch.num_rows() > 0 {
-                    yield ScanBatch::RecordBatch(batch);
+            while let Some(mut batch) = merged.try_next().await? {
+                for filter in &filters {
+                    batch = common_recordbatch::filter::batch_filter(&batch, filter)
+                        .map_err(|error| invalid(error.to_string()))?;
                 }
+                if batch.num_rows() > 0 {
+                    yield batch;
+                }
+            }
+        };
+        Ok(Box::pin(stream))
+    }
+}
+
+impl PreparedSeriesSource for ColumnarPreparedSource {
+    fn num_series(&self) -> usize {
+        self.candidates.len()
+    }
+    fn label_source(&self) -> &RawLabelSource {
+        &self.labels
+    }
+    fn series_info(&self, ordinal: usize) -> std::result::Result<SeriesInfo, BoxedError> {
+        let candidate = self
+            .candidates
+            .get(ordinal)
+            .ok_or_else(|| BoxedError::new(invalid("series ordinal out of bounds")))?;
+        Ok(SeriesInfo {
+            primary_key: candidate.key.clone(),
+            metric: candidate.metric.clone(),
+        })
+    }
+    fn read_series(
+        &self,
+        range: Range<usize>,
+    ) -> std::result::Result<SendableRawSeriesStream, BoxedError> {
+        let mut batches = self.read_batches(range).map_err(BoxedError::new)?;
+        let stream = async_stream::try_stream! {
+            while let Some(batch) = batches.try_next().await? {
+                yield ScanBatch::RecordBatch(batch);
             }
         };
         let stream = raw::make_stream(
@@ -1005,10 +1114,14 @@ fn sample_to_flat(
                         Arc::new(StringArray::from(vec![value.as_deref(); batch.num_rows()]))
                     }
                 } else {
-                    batch
-                        .column_by_name(name)
-                        .ok_or_else(|| invalid("missing sample field"))?
-                        .clone()
+                    match batch.column_by_name(name) {
+                        Some(array) => array.clone(),
+                        None if field.is_nullable() => datatypes::arrow::array::new_null_array(
+                            field.data_type(),
+                            batch.num_rows(),
+                        ),
+                        None => return Err(invalid("missing non-null sample field")),
+                    }
                 }
             }
         };
@@ -1117,7 +1230,7 @@ fn filter_visibility(batch: RecordBatch, context: &StreamContext) -> Result<Reco
 }
 
 /// The mapper includes projected and residual-filter columns. Identity/time and
-/// merge visibility columns are always needed by the native source adapter. The exact
+/// merge visibility columns are always needed by the narthex source adapter. The exact
 /// series key is not projected: the samples reader returns it once per batch.
 fn sample_projection(
     schema: &datatypes::arrow::datatypes::Schema,
@@ -1134,4 +1247,41 @@ fn sample_projection(
         })
         .map(|(_, field)| field.name().clone())
         .collect()
+}
+
+/// Returns a partition rule only when metrics rows need filtering for this owner.
+fn narthex_partition_filter(
+    region_partition: Option<&str>,
+    file_partition: Option<&partition::expr::PartitionExpr>,
+) -> Result<Option<partition::expr::PartitionExpr>> {
+    Ok(region_partition
+        .map(|json| {
+            partition::expr::PartitionExpr::from_json_str(json)
+                .map_err(|error| invalid(error.to_string()))
+        })
+        .transpose()?
+        .flatten()
+        .filter(|partition| file_partition != Some(partition)))
+}
+
+/// Shares narthex discovery across partitions and assigns disjoint exact-series ranges.
+pub(crate) fn scan_batches(
+    preparation: Arc<Preparation>,
+    context: Arc<StreamContext>,
+    ranges: Vec<PartitionRange>,
+    partition: usize,
+    partitions: usize,
+    metrics: PartitionMetrics,
+    scan_pool: Arc<dyn MemoryPool>,
+) -> crate::read::stream::ScanBatchStream {
+    Box::pin(async_stream::try_stream! {
+        let source = preparation.prepare_batches(context, ranges, metrics, scan_pool).await?;
+        let n = source.candidates.len() as u128;
+        let start = (n * partition as u128 / partitions as u128) as usize;
+        let end = (n * (partition + 1) as u128 / partitions as u128) as usize;
+        let mut stream = source.read_batches(start..end)?;
+        while let Some(batch) = stream.try_next().await? {
+            yield ScanBatch::RecordBatch(batch);
+        }
+    })
 }

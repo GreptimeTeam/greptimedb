@@ -118,6 +118,11 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
 
 ## Gotchas
 
+- Parquet versus Narthex storage is fixed at region creation. ALTER cannot cross
+  that boundary; COPY, remap, and imported edits must reject mismatches before
+  publication. Readers and compaction select storage from region options, not
+  by inspecting individual files. Parquet flat/primary-key layouts may coexist.
+
 - Parquet row groups have uniform row counts except for the final group
   (`sst/parquet/row_selection.rs`). Memory-pressure flushing must not create
   arbitrary partial groups: readers and index row IDs rely on this layout.

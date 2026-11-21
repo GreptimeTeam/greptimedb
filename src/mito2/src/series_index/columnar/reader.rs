@@ -97,7 +97,7 @@ impl ColumnarReader {
             "series artifact identity mismatch",
         )?;
         let region = handle.file_id().region_id().as_u64();
-        let path = format!("{region}/series/{}/manifest.json", entry.index_uuid);
+        let path = handle.manifest_path();
         let mut objects = HashMap::with_capacity(artifact.objects.len());
         for object in &artifact.objects {
             require(
@@ -117,11 +117,16 @@ impl ColumnarReader {
         let bytes = read_range(&store, &path, 0, length).await?;
         // A manifest that the current format cannot read predates exact identity or is
         // corrupt; either way it must never be reused.
-        let manifest: Manifest = serde_json::from_slice(&bytes).map_err(|error| {
+        let mut manifest: Manifest = serde_json::from_slice(&bytes).map_err(|error| {
             invalid(format!(
                 "series manifest is not readable; rebuild the index: {error}"
             ))
         })?;
+        manifest.prefix = Some(
+            path.strip_suffix("manifest.json")
+                .ok_or_else(|| invalid("invalid narthex series manifest path"))?
+                .to_string(),
+        );
         if manifest.version != VERSION {
             return Err(unsupported("series manifest version"));
         }

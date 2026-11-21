@@ -92,13 +92,15 @@ impl<S> RegionWorkerLoop<S> {
 
             match region_edit {
                 Some(region_edit)
-                    if region_edit
-                        .files_to_add
-                        .iter()
-                        .any(|file| file.level == file::LEVEL_SHARED) =>
+                    if region.version().options.sst_format
+                        == Some(crate::sst::FormatType::Narthex)
+                        || region_edit
+                            .files_to_add
+                            .iter()
+                            .any(|file| file.level == file::LEVEL_SHARED) =>
                 {
-                    // Shared references and their target admission sequence must enter
-                    // the serialized edit lane, not the asynchronous physical-copy path.
+                    // Shared references and narthex artifacts enter the serialized
+                    // edit lane for destination admission sequences.
                     // The response lists installed references, including shared SSTs
                     // whose objects stay in place; it is not a physical COPY count.
                     let copied_file_ids = region_edit
@@ -203,6 +205,16 @@ impl<S> RegionWorkerLoop<S> {
             .context(MissingManifestSnafu {
                 region_id: source_region_id,
             })?;
+        let narthex_format =
+            region.version().options.sst_format == Some(crate::sst::FormatType::Narthex);
+        ensure!(
+            (source_region_manifest.sst_format == crate::sst::FormatType::Narthex)
+                == narthex_format,
+            InvalidRequestSnafu {
+                region_id: target_region_id,
+                reason: "Cannot copy between Parquet and Narthex regions",
+            }
+        );
         // Metadata sync transforms copied rows and then removes these references.
         // It cannot retire shared inputs through the ordinary edit API, so reject
         // them before either physical copying or extending the target manifest.
@@ -228,24 +240,57 @@ impl<S> RegionWorkerLoop<S> {
             "source region files: {:?}, source region id: {}",
             source_region_manifest.files, source_region_id
         );
+        let mut file_descriptors = Vec::new();
         for (file_id, file_meta) in &source_region_manifest.files {
-            if !target_region_manifest.files.contains_key(file_id) {
-                new_file_metas.push(if file_meta.level == file::LEVEL_SHARED {
-                    file_meta.as_ref().clone()
-                } else {
-                    remap_copied_file_meta(file_meta, target_region_id)
-                });
+            if target_region_manifest.files.contains_key(file_id) {
+                continue;
+            }
+            if file_meta.level == file::LEVEL_SHARED {
+                new_file_metas.push(file_meta.as_ref().clone());
+            } else if narthex_format {
+                let (copied, objects) = prepare_narthex_copy(region, file_meta).await?;
+                new_file_metas.push(copied);
+                file_descriptors.extend(objects);
+            } else {
+                let copied = remap_copied_file_meta(file_meta, target_region_id);
+                file_descriptors.extend(file_descriptors_for_meta(&copied));
+                new_file_metas.push(copied);
             }
         }
-        if new_file_metas.is_empty() {
+        let target_samples: std::collections::HashMap<_, _> = target_region_manifest
+            .files
+            .values()
+            .map(|meta| meta.as_ref())
+            .chain(new_file_metas.iter())
+            .filter_map(|target| {
+                let source = source_region_manifest.files.get(&target.file_id)?;
+                Some((source.file_id(), target.file_id()))
+            })
+            .collect();
+        let mut new_series_indexes = Vec::new();
+        for (id, index) in &source_region_manifest.series_indexes {
+            if target_region_manifest.series_indexes.contains_key(id) {
+                continue;
+            }
+            let (mut copied, objects) = prepare_narthex_copy(region, index).await?;
+            if let file::FileFormat::NarthexSeriesIndex(narthex) = &mut copied.format {
+                for source in &mut narthex.sources {
+                    // A retained index may refer to samples absent from this copy.
+                    if let Some(target) = target_samples.get(source) {
+                        *source = *target;
+                    }
+                }
+            }
+            // This index has its own physical target objects, even when some
+            // samples remain shared references to a different owner.
+            copied.level = 0;
+            new_series_indexes.push(copied);
+            file_descriptors.extend(objects);
+        }
+        if new_file_metas.is_empty() && new_series_indexes.is_empty() {
             return Ok((None, source_file_ids));
         }
 
-        let file_descriptors = new_file_metas
-            .iter()
-            .filter(|file| file.level != file::LEVEL_SHARED)
-            .flat_map(file_descriptors_for_meta)
-            .collect();
         debug!("File descriptors to copy: {:?}", file_descriptors);
         let copier = RegionFileCopier::new(region.access_layer());
         // TODO(weny): ensure the target region is empty.
@@ -258,6 +303,8 @@ impl<S> RegionWorkerLoop<S> {
             )
             .await?;
         let edit = RegionEdit {
+            series_indexes_to_add: new_series_indexes,
+            series_indexes_to_remove: Vec::new(),
             files_to_add: new_file_metas,
             files_to_remove: vec![],
             timestamp_ms: Some(chrono::Utc::now().timestamp_millis()),
@@ -267,10 +314,11 @@ impl<S> RegionWorkerLoop<S> {
             committed_sequence: None,
             ..Default::default()
         };
-        if edit
-            .files_to_add
-            .iter()
-            .any(|file| file.level == file::LEVEL_SHARED)
+        if narthex_format
+            || edit
+                .files_to_add
+                .iter()
+                .any(|file| file.level == file::LEVEL_SHARED)
         {
             return Ok((Some(edit), source_file_ids));
         }
@@ -326,4 +374,66 @@ fn file_descriptors_for_meta(file_meta: &FileMeta) -> Vec<FileDescriptor> {
     } else {
         vec![data]
     }
+}
+
+/// Prepares a physical narthex copy without rewriting encoded parts. The artifact
+/// manifest records the physical owner; paths are resolved from FileMeta on read.
+async fn prepare_narthex_copy(
+    region: &MitoRegionRef,
+    source: &FileMeta,
+) -> Result<(FileMeta, Vec<FileDescriptor>)> {
+    use crate::series_index::columnar::{invalid, require};
+    use crate::sst::file::FileFormat;
+
+    let layer = region.access_layer();
+    let source_objects = source
+        .narthex_objects(&layer.build_region_dir(source.region_id))
+        .ok_or_else(|| invalid("expected Narthex copy source"))?;
+    let (source_manifest, parts) = source_objects
+        .split_last()
+        .expect("Narthex inventory includes manifest");
+    let bytes = layer
+        .object_store()
+        .read(&source_manifest.path)
+        .await
+        .context(crate::error::OpenDalSnafu)?
+        .to_bytes();
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|error| invalid(error.to_string()))?;
+    require(
+        manifest["region_id"].as_u64() == Some(source.region_id.as_u64())
+            && manifest["generation"].as_str() == Some(source.file_id.to_string().as_str()),
+        "narthex copy manifest identity mismatch",
+    )?;
+    manifest["region_id"] = serde_json::json!(region.region_id.as_u64());
+    let bytes = bytes::Bytes::from(
+        serde_json::to_vec(&manifest).map_err(|error| invalid(error.to_string()))?,
+    );
+    let target_region_dir = layer.build_region_dir(region.region_id);
+    let mut copied = remap_copied_file_meta(source, region.region_id);
+    let manifest_size = bytes.len() as u64;
+    match &mut copied.format {
+        FileFormat::NarthexSamples(meta) => meta.manifest_size = manifest_size,
+        FileFormat::NarthexSeriesIndex(meta) => meta.manifest_size = manifest_size,
+        FileFormat::Parquet => return Err(invalid("expected Narthex copy source")),
+    }
+    let targets = copied
+        .narthex_objects(&target_region_dir)
+        .expect("Narthex copy");
+    let descriptors: Vec<_> = source_objects
+        .iter()
+        .zip(targets)
+        .enumerate()
+        .map(|(i, (object, target))| FileDescriptor::NarthexObject {
+            source: object.path.clone(),
+            target: target.path,
+            size: target.file_size,
+            manifest: (i == parts.len()).then(|| bytes.clone()),
+        })
+        .collect();
+    copied.file_size = descriptors.iter().try_fold(0u64, |size, object| {
+        size.checked_add(object.size())
+            .ok_or_else(|| invalid("narthex copy size overflow"))
+    })?;
+    Ok((copied, descriptors))
 }
