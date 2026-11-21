@@ -63,6 +63,8 @@ pub const INVERTED_INDEX_KEY: &str = "greptime:inverted_index";
 pub const SKIPPING_INDEX_KEY: &str = "greptime:skipping_index";
 /// Key used to store SST compression options in arrow field's metadata.
 pub const COMPRESSION_KEY: &str = "greptime:compression";
+/// Key used to store SST storage options in arrow field's metadata.
+pub const STORAGE_KEY: &str = "greptime:storage";
 /// Key used to store HLL options in arrow field's metadata.
 pub const HLL_KEY: &str = "greptime:hll";
 /// Key used to store KLL options in arrow field's metadata.
@@ -88,6 +90,12 @@ pub const COLUMN_COMPRESSION_OPT_KEY_TYPE: &str = "type";
 pub const COLUMN_COMPRESSION_OPT_KEY_LEVEL: &str = "level";
 pub const COLUMN_COMPRESSION_OPT_KEY_PAGE_SIZE: &str = "page_size";
 pub const COLUMN_COMPRESSION_OPT_KEY_ENCODING: &str = "encoding";
+
+/// Keys used in storage options
+pub const COLUMN_STORAGE_OPT_KEY_TYPE: &str = "type";
+pub const COLUMN_STORAGE_OPT_KEY_THRESHOLD: &str = "threshold";
+/// Values at least this long are stored outside SSTs when the threshold is not set.
+pub const DEFAULT_EXTERNAL_STORAGE_THRESHOLD: ReadableSize = ReadableSize::kb(64);
 
 pub const DEFAULT_GRANULARITY: u32 = 10240;
 
@@ -595,6 +603,51 @@ impl ColumnSchema {
             serde_json::to_string(&options).context(error::SerializeSnafu)?,
         );
         Ok(self)
+    }
+
+    /// Retrieves the SST storage options for the column.
+    pub fn storage_options(&self) -> Result<Option<StorageOptions>> {
+        match self.metadata.get(STORAGE_KEY) {
+            None => Ok(None),
+            Some(json) => {
+                let options = serde_json::from_str(json).map_err(|e| {
+                    error::InvalidStorageOptionSnafu {
+                        msg: format!("invalid storage metadata for column {}: {e}", self.name),
+                    }
+                    .build()
+                })?;
+                self.validate_storage_options(&options)?;
+                Ok(Some(options))
+            }
+        }
+    }
+
+    /// Sets the SST storage options. Only string and binary columns can store values
+    /// externally.
+    pub fn with_storage_options(mut self, options: StorageOptions) -> Result<Self> {
+        self.validate_storage_options(&options)?;
+        self.metadata.insert(
+            STORAGE_KEY.to_string(),
+            serde_json::to_string(&options).context(error::SerializeSnafu)?,
+        );
+        Ok(self)
+    }
+
+    fn validate_storage_options(&self, options: &StorageOptions) -> Result<()> {
+        options.validate()?;
+        ensure!(
+            matches!(
+                self.data_type,
+                ConcreteDataType::String(_) | ConcreteDataType::Binary(_)
+            ),
+            error::InvalidStorageOptionSnafu {
+                msg: format!(
+                    "storage options are only supported on string and binary columns, but column {} is {}",
+                    self.name, self.data_type
+                ),
+            }
+        );
+        Ok(())
     }
 
     fn validate_compression_options(&self, options: &CompressionOptions) -> Result<()> {
@@ -1264,6 +1317,105 @@ impl CompressionOptions {
     }
 }
 
+/// Where SSTs keep the values of a column.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageType {
+    /// Values at least `threshold` long are stored in a sidecar object next to each SST.
+    #[default]
+    External,
+}
+
+impl fmt::Display for StorageType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StorageType::External => write!(f, "external"),
+        }
+    }
+}
+
+/// SST storage settings for a column.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageOptions {
+    #[serde(rename = "type", default)]
+    pub storage_type: StorageType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threshold: Option<ReadableSize>,
+}
+
+impl StorageOptions {
+    /// Values at least this long are stored externally.
+    pub fn threshold(&self) -> ReadableSize {
+        self.threshold.unwrap_or(DEFAULT_EXTERNAL_STORAGE_THRESHOLD)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if let Some(threshold) = self.threshold {
+            ensure!(
+                threshold.as_bytes() > 0,
+                error::InvalidStorageOptionSnafu {
+                    msg: "threshold must be positive",
+                }
+            );
+        }
+        Ok(())
+    }
+
+    /// Returns the options as `STORAGE WITH (...)` key-value pairs.
+    pub fn to_options_map(&self) -> HashMap<String, String> {
+        let mut map = HashMap::from([(
+            COLUMN_STORAGE_OPT_KEY_TYPE.to_string(),
+            self.storage_type.to_string(),
+        )]);
+        if let Some(threshold) = self.threshold {
+            // `Display` rounds to one decimal; the serde form is exact and parses back.
+            let threshold = match serde_json::to_value(threshold) {
+                Ok(serde_json::Value::String(size)) => size,
+                _ => threshold.as_bytes().to_string(),
+            };
+            map.insert(COLUMN_STORAGE_OPT_KEY_THRESHOLD.to_string(), threshold);
+        }
+        map
+    }
+}
+
+impl TryFrom<HashMap<String, String>> for StorageOptions {
+    type Error = Error;
+
+    fn try_from(options: HashMap<String, String>) -> Result<Self> {
+        let storage_type = match options.get(COLUMN_STORAGE_OPT_KEY_TYPE) {
+            Some(value) if value.eq_ignore_ascii_case("external") => StorageType::External,
+            Some(value) => {
+                return error::InvalidStorageOptionSnafu {
+                    msg: format!("invalid type: {value}, expected: 'external'"),
+                }
+                .fail();
+            }
+            None => StorageType::default(),
+        };
+        let threshold = options
+            .get(COLUMN_STORAGE_OPT_KEY_THRESHOLD)
+            .map(|value| {
+                ReadableSize::from_str(value)
+                    .ok()
+                    .filter(|size| size.as_bytes() > 0)
+                    .ok_or_else(|| {
+                        error::InvalidStorageOptionSnafu {
+                            msg: format!(
+                                "invalid threshold: {value}, expected: a positive size such as '64KiB'"
+                            ),
+                        }
+                        .build()
+                    })
+            })
+            .transpose()?;
+        Ok(StorageOptions {
+            storage_type,
+            threshold,
+        })
+    }
+}
+
 /// Valid zstd levels, as accepted by the parquet writer.
 const ZSTD_LEVELS: std::ops::RangeInclusive<i32> = 1..=22;
 
@@ -1809,6 +1961,77 @@ mod tests {
             &[("encoding", "dictionary")],
         ] {
             assert!(parse(invalid).is_err(), "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn test_storage_options_from_map() {
+        let parse = |pairs: &[(&str, &str)]| {
+            StorageOptions::try_from(
+                pairs
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect::<HashMap<_, _>>(),
+            )
+        };
+
+        let options = parse(&[("type", "EXTERNAL"), ("threshold", "1MiB")]).unwrap();
+        assert_eq!(ReadableSize::mb(1), options.threshold());
+        // Stored in column metadata; this format must stay readable.
+        assert_eq!(
+            r#"{"type":"external","threshold":"1MiB"}"#,
+            serde_json::to_string(&options).unwrap()
+        );
+        assert_eq!(
+            options,
+            parse(
+                &options
+                    .to_options_map()
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.as_str()))
+                    .collect::<Vec<_>>()
+            )
+            .unwrap()
+        );
+
+        let defaults = parse(&[]).unwrap();
+        assert_eq!(DEFAULT_EXTERNAL_STORAGE_THRESHOLD, defaults.threshold());
+        assert_eq!(
+            r#"{"type":"external"}"#,
+            serde_json::to_string(&defaults).unwrap()
+        );
+
+        for invalid in [
+            &[("type", "inline")][..],
+            &[("threshold", "0")],
+            &[("threshold", "large")],
+        ] {
+            assert!(parse(invalid).is_err(), "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn test_storage_options_require_string_or_binary() {
+        let options = StorageOptions::default();
+        for data_type in [
+            ConcreteDataType::string_datatype(),
+            ConcreteDataType::binary_datatype(),
+        ] {
+            let column = ColumnSchema::new("v", data_type, true)
+                .with_storage_options(options)
+                .unwrap();
+            assert_eq!(Some(options), column.storage_options().unwrap());
+        }
+        for data_type in [
+            ConcreteDataType::int64_datatype(),
+            ConcreteDataType::json_datatype(),
+            ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::string_datatype())),
+        ] {
+            assert!(
+                ColumnSchema::new("v", data_type, true)
+                    .with_storage_options(options)
+                    .is_err()
+            );
         }
     }
 
