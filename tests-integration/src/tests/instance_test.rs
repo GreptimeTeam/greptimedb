@@ -148,6 +148,11 @@ fn cache_e2e_expected(value: f64) -> Vec<(i64, f64)> {
 
 /// An ordinary table, end to end.
 ///
+/// Every request asks `sum(cache_e2e)`: `sum` over a named selector is in the window
+/// allowlist, so the request is admitted and its chunks fill and hit. A bare selector
+/// bypasses the cache by design (before admission, so it neither fills nor serves), which
+/// this test would otherwise measure instead of the cache.
+///
 /// Nothing on the request path probes, so what a request may serve is decided by the last
 /// background round: a cold request serves nothing from memory, one round proves the table,
 /// the request after that round is a real fill, and only the request after it is served
@@ -179,8 +184,9 @@ async fn test_rollup_cache_end_to_end_overwrites() {
     let expected = cache_e2e_expected(1.0);
 
     // No round has proved the table yet, so no chunk may be served from memory: the cold
-    // request executes storage and reports no hit.
-    let cold = promql_range_points(&app, "cache_e2e", "900", "1500", "60", "60").await;
+    // request executes storage and reports no hit. The query is the cacheable
+    // `sum(cache_e2e)` fold, not the bare selector, which would bypass the cache instead.
+    let cold = promql_range_points(&app, "sum(cache_e2e)", "900", "1500", "60", "60").await;
     assert_eq!(expected, cold, "the cold answer is one point per step");
     assert_eq!(
         0,
@@ -200,7 +206,8 @@ async fn test_rollup_cache_end_to_end_overwrites() {
 
     // The request after the round is a real fill: the table is proved and nothing is
     // resident, so the request reads storage for every chunk it keeps.
-    let filled_answer = promql_range_points(&app, "cache_e2e", "900", "1500", "60", "60").await;
+    let filled_answer =
+        promql_range_points(&app, "sum(cache_e2e)", "900", "1500", "60", "60").await;
     assert_eq!(expected, filled_answer);
     let filled = cache.entry_count();
     assert_eq!(
@@ -216,7 +223,7 @@ async fn test_rollup_cache_end_to_end_overwrites() {
     // The same request again is served from memory. Both counters matter: an unchanged
     // entry count alone cannot tell a hit from a bypass, which would leave it unchanged
     // too, so the hit count is what proves the reuse.
-    let hit_answer = promql_range_points(&app, "cache_e2e", "900", "1500", "60", "60").await;
+    let hit_answer = promql_range_points(&app, "sum(cache_e2e)", "900", "1500", "60", "60").await;
     assert_eq!(expected, hit_answer);
     assert_eq!(
         filled,
@@ -237,7 +244,7 @@ async fn test_rollup_cache_end_to_end_overwrites() {
         cache.entry_count(),
         "a quiet round kept every chunk"
     );
-    let quiet = promql_range_points(&app, "cache_e2e", "900", "1500", "60", "60").await;
+    let quiet = promql_range_points(&app, "sum(cache_e2e)", "900", "1500", "60", "60").await;
     assert_eq!(expected, quiet);
     assert_eq!(
         filled,
@@ -266,7 +273,7 @@ async fn test_rollup_cache_end_to_end_overwrites() {
         "the round dropped the chunk the write reaches and kept the one it does not"
     );
     let overwritten_answer =
-        promql_range_points(&app, "cache_e2e", "900", "1500", "60", "60").await;
+        promql_range_points(&app, "sum(cache_e2e)", "900", "1500", "60", "60").await;
     assert_eq!(
         Some(&(1_020_000, 9.0)),
         overwritten_answer.get(2),
@@ -308,7 +315,7 @@ async fn test_rollup_cache_end_to_end_overwrites() {
 
     // The refilled chunk is an entry, not a bypass: repeating the request serves every
     // chunk from memory and still answers the overwritten value.
-    let repeated = promql_range_points(&app, "cache_e2e", "900", "1500", "60", "60").await;
+    let repeated = promql_range_points(&app, "sum(cache_e2e)", "900", "1500", "60", "60").await;
     assert_eq!(
         overwritten_answer, repeated,
         "the refilled answer is served again"
@@ -323,9 +330,16 @@ async fn test_rollup_cache_end_to_end_overwrites() {
     // A schema change must not break the query. Whether the cache can still answer it under
     // its own plan or hands the whole request back, the request answers the numbers it
     // answered before the change.
+    //
+    // `note` is added and dropped again before the round: a PromQL aggregate folds every
+    // field column of its input, so a lingering `note STRING` would make the cacheable
+    // `sum(cache_e2e)` fold plan `sum(note)` and answer a plan error instead of numbers.
+    // Both ALTERs still move the table's schema version under the chunks filled above, so
+    // the round has a schema change to prove before the request reads it.
     execute_sql(&frontend, "ALTER TABLE cache_e2e ADD COLUMN note STRING").await;
+    execute_sql(&frontend, "ALTER TABLE cache_e2e DROP COLUMN note").await;
     refresh_rollup_cache(&frontend).await;
-    let after_alter = promql_range_points(&app, "cache_e2e", "900", "1500", "60", "60").await;
+    let after_alter = promql_range_points(&app, "sum(cache_e2e)", "900", "1500", "60", "60").await;
     assert_eq!(
         overwritten_answer, after_alter,
         "the query answers the same numbers after the schema change"
@@ -334,6 +348,10 @@ async fn test_rollup_cache_end_to_end_overwrites() {
 
 /// A schema-only ALTER, end to end: dropping and re-adding the value column changes what
 /// every stored row reads as, while no row's sequence moves.
+///
+/// The requests ask the cacheable `sum(cache_schema)` fold (`sum` over a named selector is
+/// in the window allowlist); a bare selector would bypass the cache by design and then the
+/// round could be observed dropping nothing.
 ///
 /// The round is the only thing that may drop the chunks the old schema filled, so a cache
 /// that keys nothing but the source sequence would answer the dropped column's values
@@ -365,8 +383,9 @@ async fn test_rollup_cache_schema_only_alter() {
         .clone();
     let before = cache_e2e_expected(1.0);
 
-    // A cold request, one round that proves the table, and the request that really fills.
-    let cold = promql_range_points(&app, "cache_schema", "900", "1500", "60", "60").await;
+    // A cold request of the cacheable `sum(cache_schema)` fold, one round that proves the
+    // table, and the request that really fills.
+    let cold = promql_range_points(&app, "sum(cache_schema)", "900", "1500", "60", "60").await;
     assert_eq!(before, cold, "the cold answer is one point per step");
     assert_eq!(
         0,
@@ -379,7 +398,8 @@ async fn test_rollup_cache_schema_only_alter() {
         cache.entry_count(),
         "the first round covers the whole history and keeps no unproved chunk"
     );
-    let filled_answer = promql_range_points(&app, "cache_schema", "900", "1500", "60", "60").await;
+    let filled_answer =
+        promql_range_points(&app, "sum(cache_schema)", "900", "1500", "60", "60").await;
     assert_eq!(before, filled_answer);
     let filled = cache.entry_count();
     assert_eq!(
@@ -393,7 +413,8 @@ async fn test_rollup_cache_schema_only_alter() {
     );
 
     // The repeat is served from memory: the chunks the ALTER must not vouch for are resident.
-    let hit_answer = promql_range_points(&app, "cache_schema", "900", "1500", "60", "60").await;
+    let hit_answer =
+        promql_range_points(&app, "sum(cache_schema)", "900", "1500", "60", "60").await;
     assert_eq!(before, hit_answer);
     assert_eq!(filled, cache.entry_count(), "the repeat filled nothing new");
     assert_eq!(
@@ -431,7 +452,8 @@ async fn test_rollup_cache_schema_only_alter() {
     );
 
     let after = cache_e2e_expected(0.0);
-    let after_alter = promql_range_points(&app, "cache_schema", "900", "1500", "60", "60").await;
+    let after_alter =
+        promql_range_points(&app, "sum(cache_schema)", "900", "1500", "60", "60").await;
     assert_eq!(
         after, after_alter,
         "the request answers the new default for every point"
@@ -462,7 +484,7 @@ async fn test_rollup_cache_schema_only_alter() {
 
     // The refilled chunks are entries, not a bypass: the repeat is served from memory and
     // still answers the new default.
-    let repeated = promql_range_points(&app, "cache_schema", "900", "1500", "60", "60").await;
+    let repeated = promql_range_points(&app, "sum(cache_schema)", "900", "1500", "60", "60").await;
     assert_eq!(after, repeated, "the refilled answer is served again");
     assert_eq!(filled, cache.entry_count(), "the repeat filled nothing new");
     assert_eq!(
@@ -473,6 +495,10 @@ async fn test_rollup_cache_schema_only_alter() {
 }
 
 /// A metric engine logical table, end to end.
+///
+/// The requests ask the cacheable `sum(cache_metric_logical)` / `sum(cache_metric_other)`
+/// folds, because a bare selector bypasses the cache by design and would fill nothing to
+/// fill or serve.
 ///
 /// A logical table is read through the physical table underneath, so the round proves a
 /// table ID the scan does not name; and two logical tables of one physical table keep their
@@ -555,8 +581,9 @@ async fn test_rollup_cache_metric_logical_table() {
     let expected = cache_e2e_expected(1.0);
     let other_expected = cache_e2e_expected(2.0);
 
-    // A cold request serves nothing from memory.
-    let cold = promql_range_points(&app, "cache_metric_logical", "900", "1500", "60", "60").await;
+    // A cold request of the cacheable fold serves nothing from memory.
+    let cold =
+        promql_range_points(&app, "sum(cache_metric_logical)", "900", "1500", "60", "60").await;
     assert_eq!(
         expected, cold,
         "the logical table answers one point per step"
@@ -577,7 +604,7 @@ async fn test_rollup_cache_metric_logical_table() {
 
     // The request after it is a real fill of its own plan.
     let filled_answer =
-        promql_range_points(&app, "cache_metric_logical", "900", "1500", "60", "60").await;
+        promql_range_points(&app, "sum(cache_metric_logical)", "900", "1500", "60", "60").await;
     assert_eq!(expected, filled_answer);
     let filled = cache.entry_count();
     assert_eq!(
@@ -592,7 +619,7 @@ async fn test_rollup_cache_metric_logical_table() {
 
     // The same request again is served from memory.
     let hit_answer =
-        promql_range_points(&app, "cache_metric_logical", "900", "1500", "60", "60").await;
+        promql_range_points(&app, "sum(cache_metric_logical)", "900", "1500", "60", "60").await;
     assert_eq!(expected, hit_answer);
     assert_eq!(
         filled,
@@ -609,7 +636,7 @@ async fn test_rollup_cache_metric_logical_table() {
     // nothing: its chunks are filled under its own identity, and no entry of the first
     // table answered any of its points.
     let other_first =
-        promql_range_points(&app, "cache_metric_other", "900", "1500", "60", "60").await;
+        promql_range_points(&app, "sum(cache_metric_other)", "900", "1500", "60", "60").await;
     assert_eq!(
         other_expected, other_first,
         "the second logical table answers its own values"
@@ -635,7 +662,7 @@ async fn test_rollup_cache_metric_logical_table() {
     );
 
     let other_filled_answer =
-        promql_range_points(&app, "cache_metric_other", "900", "1500", "60", "60").await;
+        promql_range_points(&app, "sum(cache_metric_other)", "900", "1500", "60", "60").await;
     assert_eq!(other_expected, other_filled_answer);
     let other_filled = cache.entry_count();
     assert_eq!(
@@ -653,7 +680,7 @@ async fn test_rollup_cache_metric_logical_table() {
     // moves the other table's counters.
     let before_memory = cache.hit_count();
     let logical_again =
-        promql_range_points(&app, "cache_metric_logical", "900", "1500", "60", "60").await;
+        promql_range_points(&app, "sum(cache_metric_logical)", "900", "1500", "60", "60").await;
     assert_eq!(expected, logical_again);
     assert_eq!(
         before_memory + filled,
@@ -661,7 +688,7 @@ async fn test_rollup_cache_metric_logical_table() {
         "the first table served each of its {filled} chunks from memory"
     );
     let other_again =
-        promql_range_points(&app, "cache_metric_other", "900", "1500", "60", "60").await;
+        promql_range_points(&app, "sum(cache_metric_other)", "900", "1500", "60", "60").await;
     assert_eq!(other_expected, other_again);
     assert_eq!(
         before_memory + filled * 2,
