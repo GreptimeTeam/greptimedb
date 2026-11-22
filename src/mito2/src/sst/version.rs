@@ -184,15 +184,21 @@ impl SstVersion {
     /// Panics if the level of [FileMeta] has no storage slot.
     pub(crate) fn remove_files(&mut self, files_to_remove: impl Iterator<Item = FileMeta>) {
         let levels = Arc::make_mut(&mut self.levels);
+        let mut removed = false;
         for file in files_to_remove {
             let Some(slot) = file::level_slot(file.level) else {
                 panic!("Unsupported SST level {}", file.level);
             };
             if let Some(handle) = levels[slot].files.remove(&file.file_id) {
                 handle.mark_deleted();
+                removed = true;
             }
         }
-        self.retire_unreferenced_blobs();
+        // Only a removed file can drop the last reference to a sidecar; an add-only edit such as
+        // a flush skips the scan over every file.
+        if removed {
+            self.retire_unreferenced_blobs();
+        }
     }
 
     /// Deletes sidecars that no file of the version references, once their readers finish.

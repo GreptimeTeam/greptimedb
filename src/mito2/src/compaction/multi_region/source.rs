@@ -59,7 +59,7 @@ use crate::sst::parquet::flat_format::{
 };
 use crate::sst::parquet::format::{PrimaryKeyArray, need_override_sequence};
 use crate::sst::parquet::reader::{MetadataCacheMetrics, ParquetReader, ReaderMetrics};
-use crate::sst::parquet::{Json2RewriteTargets, Json2TargetLayout};
+use crate::sst::parquet::{Json2RewriteTargets, Json2TargetLayout, decoded_input_size};
 
 pub(crate) struct SourceEvent {
     pub(crate) region_id: RegionId,
@@ -114,6 +114,8 @@ pub(crate) struct SharedSource {
     window: (Timestamp, Timestamp),
     pub(crate) limits: MemoryLimits,
     pub(crate) index_plans: BTreeMap<RegionId, Arc<IndexBuildPlan>>,
+    /// Rows and decoded bytes of the sources, which size output row groups.
+    pub(crate) input_size: (u64, u64),
     peak_group_bytes: AtomicU64,
     cancellation: CancellationToken,
     stop: CancellationToken,
@@ -172,6 +174,7 @@ impl SharedSource {
             .iter()
             .map(|footer| footer.file_metadata().num_rows())
             .collect();
+        let input_size = decoded_input_size(footers.iter().map(Arc::as_ref));
         let layouts = collect_json2_rewrite_plans_from_parquet(&metadata, &footers)?;
         let mut json2 = BTreeMap::new();
         for (name, layout) in layouts {
@@ -280,6 +283,7 @@ impl SharedSource {
             ),
             limits,
             index_plans,
+            input_size,
             peak_group_bytes: AtomicU64::new(0),
             cancellation: context.cancellation.clone(),
             stop: CancellationToken::new(),

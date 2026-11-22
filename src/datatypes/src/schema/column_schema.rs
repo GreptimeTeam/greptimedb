@@ -1348,6 +1348,27 @@ pub struct StorageOptions {
 }
 
 impl StorageOptions {
+    /// Keys of the JSON form of [StorageOptions].
+    const KEYS: [&str; 2] = ["type", "threshold"];
+
+    /// Rejects keys that [StorageOptions] does not define in options given by a user. Stored
+    /// metadata is read by [ColumnSchema::storage_options], which ignores unknown keys.
+    pub fn check_user_keys(json: &str) -> Result<()> {
+        let invalid = |msg: String| error::InvalidStorageOptionSnafu { msg }.build();
+        let value: serde_json::Value = serde_json::from_str(json)
+            .map_err(|e| invalid(format!("invalid storage options: {e}")))?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| invalid(format!("storage options must be an object: {json}")))?;
+        if let Some(key) = object
+            .keys()
+            .find(|key| !Self::KEYS.contains(&key.as_str()))
+        {
+            return Err(invalid(format!("unknown storage option: {key}")));
+        }
+        Ok(())
+    }
+
     /// Values at least this long are stored externally.
     pub fn threshold(&self) -> ReadableSize {
         self.threshold.unwrap_or(DEFAULT_EXTERNAL_STORAGE_THRESHOLD)
@@ -1966,6 +1987,25 @@ mod tests {
         ] {
             assert!(parse(invalid).is_err(), "{invalid:?}");
         }
+    }
+
+    #[test]
+    fn test_storage_option_keys_from_users() {
+        StorageOptions::check_user_keys(r#"{"type":"external","threshold":"1MiB"}"#).unwrap();
+        for json in [r#"{"thresholdd":"1MiB"}"#, r#"["threshold"]"#, "not json"] {
+            assert!(StorageOptions::check_user_keys(json).is_err(), "{json}");
+        }
+        // The accepted keys are exactly the fields that `StorageOptions` serializes.
+        let full = StorageOptions {
+            storage_type: StorageType::External,
+            threshold: Some(ReadableSize::mb(1)),
+        };
+        let value = serde_json::to_value(full).unwrap();
+        let mut keys: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        let mut expected = StorageOptions::KEYS.to_vec();
+        expected.sort();
+        assert_eq!(expected, keys);
     }
 
     #[test]

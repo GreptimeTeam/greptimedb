@@ -76,7 +76,9 @@ use crate::sst::index::fulltext_index::applier::{
 use crate::sst::index::inverted_index::applier::{
     InvertedIndexApplierRef, InvertedIndexApplyMetrics,
 };
-use crate::sst::parquet::blob::{BlobResolver, KeptRefs, PendingBatch, blob_columns};
+use crate::sst::parquet::blob::{
+    BlobResolver, KeptRefs, PendingBatch, blob_columns, blob_file_size,
+};
 use crate::sst::parquet::file_range::{
     FileRangeContext, FileRangeContextRef, PartitionFilterContext, PreFilterMode, RangeBase,
 };
@@ -2629,7 +2631,15 @@ impl FlatRowGroupReader {
             .read_format()
             .new_override_sequence_array(DEFAULT_READ_BATCH_SIZE);
         let builder = context.reader_builder();
-        let blob_columns = blob_columns(builder.parquet_metadata());
+        // Only an SST with a sidecar or with references to other SSTs' sidecars has references
+        // to resolve.
+        let has_refs = blob_file_size(builder.parquet_metadata()).is_some()
+            || !builder.file_handle().meta_ref().blob_refs.is_empty();
+        let blob_columns = if has_refs {
+            blob_columns(builder.parquet_metadata())
+        } else {
+            Vec::new()
+        };
         let blob_resolver = (!blob_columns.is_empty()).then(|| {
             let file = builder.file_handle();
             let meta = file.meta_ref();

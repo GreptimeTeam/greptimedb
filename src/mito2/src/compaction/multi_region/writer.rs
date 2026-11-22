@@ -19,7 +19,6 @@ use store_api::codec::PrimaryKeyEncoding;
 use tokio_util::sync::CancellationToken;
 
 use crate::access_layer::{Metrics, OperationType, SstWriteRequest, WriteType};
-use crate::compaction::compactor::row_group_size_for_inputs;
 use crate::compaction::multi_region::memory::{self, MemoryLimits};
 use crate::compaction::multi_region::{MultiRegionCompactionContext, MultiRegionTarget};
 use crate::error::{ComputeArrowSnafu, Result};
@@ -31,7 +30,7 @@ use crate::sst::index::registry::IndexBuildPlan;
 use crate::sst::parquet::metadata::extract_primary_key_range;
 use crate::sst::parquet::parallel_writer::EncodeRuntime;
 use crate::sst::parquet::writer::SstWriteContext;
-use crate::sst::parquet::{SstInfo, WriteOptions};
+use crate::sst::parquet::{SstInfo, WriteOptions, row_group_size_for};
 
 pub(crate) struct TargetWriter<'a> {
     target: &'a MultiRegionTarget,
@@ -39,6 +38,8 @@ pub(crate) struct TargetWriter<'a> {
     limits: &'a MemoryLimits,
     index_plan: Arc<IndexBuildPlan>,
     max_file_size: usize,
+    /// Rows and decoded bytes of the shared sources.
+    input_size: (u64, u64),
     sequence: Option<NonZeroU64>,
     preserve_row_sequence: bool,
 }
@@ -49,6 +50,7 @@ impl<'a> TargetWriter<'a> {
         context: &'a MultiRegionCompactionContext,
         limits: &'a MemoryLimits,
         max_file_size: usize,
+        input_size: (u64, u64),
         index_plan: Arc<IndexBuildPlan>,
     ) -> Self {
         let sequence = crate::sst::file::known_max_input_sequence(target.inputs.values());
@@ -63,6 +65,7 @@ impl<'a> TargetWriter<'a> {
             limits,
             index_plan,
             max_file_size,
+            input_size,
             sequence,
             preserve_row_sequence,
         }
@@ -138,14 +141,15 @@ impl<'a> TargetWriter<'a> {
         })
     }
 
-    fn options(&self) -> WriteOptions {
+    pub(super) fn options(&self) -> WriteOptions {
         WriteOptions {
             write_buffer_size: ReadableSize(self.limits.batch as u64),
             max_file_size: Some(self.max_file_size),
             // Capped so each admitted encoder stays within the task budget; see
             // [memory::MAX_ROW_GROUP_SIZE].
-            row_group_size: row_group_size_for_inputs(
-                self.target.inputs.values(),
+            row_group_size: row_group_size_for(
+                self.input_size.0,
+                self.input_size.1,
                 self.target
                     .options
                     .row_group_size()
@@ -195,6 +199,7 @@ impl<'a> TargetWriter<'a> {
             level: 0,
             file_size: info.file_size,
             max_row_group_uncompressed_size: info.max_row_group_uncompressed_size,
+            max_row_group_decoded_size: info.max_row_group_decoded_size,
             available_indexes: info.index_metadata.build_available_indexes(),
             indexes: info.index_metadata.build_indexes()?,
             index_file_size: info.index_metadata.file_size,

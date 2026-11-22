@@ -119,18 +119,13 @@ impl PlannedIndex for InvertedPlan {
         &self,
         context: &BuildContext<'_>,
     ) -> Result<Option<Box<dyn IndexCreator>>, BoxedError> {
-        let mut segment = self.segment_row_count;
-        if let Some(row_group_size) = context.row_group_size.and_then(NonZeroUsize::new)
-            && row_group_size.get() % segment.get() != 0
-        {
-            segment = row_group_size;
-        }
+        // Segments may span row groups; readers split them at row group boundaries.
         Ok(Some(Box::new(InvertedIndexer::new(
             context.output.file_id(),
             context.metadata,
             context.intermediate_manager.clone(),
             self.config.mem_threshold_on_create(),
-            segment,
+            self.segment_row_count,
             self.targets.clone(),
         ))))
     }
