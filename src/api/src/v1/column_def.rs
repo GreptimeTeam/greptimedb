@@ -18,7 +18,7 @@ use arrow_schema::extension::{EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_K
 use datatypes::schema::{
     COMMENT_KEY, COMPRESSION_KEY, ColumnDefaultConstraint, ColumnSchema, CompressionOptions,
     FULLTEXT_KEY, FulltextAnalyzer, FulltextBackend, FulltextOptions, INVERTED_INDEX_KEY, Metadata,
-    SKIPPING_INDEX_KEY, STORAGE_KEY, SkippingIndexOptions, SkippingIndexType,
+    SKIPPING_INDEX_KEY, STORAGE_KEY, SkippingIndexOptions, SkippingIndexType, StorageOptions,
 };
 use greptime_proto::v1::{
     Analyzer, FulltextBackend as PbFulltextBackend, SkippingIndexType as PbSkippingIndexType,
@@ -51,6 +51,21 @@ const COLUMN_OPTION_MAPPINGS: [(&str, &str); 7] = [
 ];
 
 /// Tries to construct a `ColumnSchema` from the given  `ColumnDef`.
+/// Checks options that a user gives in a column definition more strictly than
+/// [try_as_column_schema], which also reads definitions produced from stored metadata.
+pub fn validate_column_def_options(column_def: &ColumnDef) -> Result<()> {
+    if let Some(storage) = column_def
+        .options
+        .as_ref()
+        .and_then(|options| options.options.get(STORAGE_GRPC_KEY))
+    {
+        StorageOptions::check_user_keys(storage).context(error::InvalidColumnStorageSnafu {
+            column: &column_def.name,
+        })?;
+    }
+    Ok(())
+}
+
 pub fn try_as_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
     let data_type = ColumnDataTypeWrapper::try_new(
         column_def.data_type,
@@ -516,6 +531,19 @@ mod tests {
                 "{semantic_type:?}: {err}"
             );
         }
+    }
+
+    #[test]
+    fn test_unknown_storage_keys_are_rejected_only_in_user_input() {
+        let schema = ColumnSchema::new("payload", ConcreteDataType::string_datatype(), true)
+            .with_metadata(HashMap::from([(
+                STORAGE_KEY.to_string(),
+                r#"{"thresholdd":"1MiB"}"#.to_string(),
+            )]));
+        let column_def = try_as_column_def(&schema, false).unwrap();
+        assert!(validate_column_def_options(&column_def).is_err());
+        // Definitions built from stored metadata keep working when a later version adds keys.
+        try_as_column_schema(&column_def).unwrap();
     }
 
     #[test]

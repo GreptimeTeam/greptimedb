@@ -642,6 +642,9 @@ pub fn validate_create_expr(create: &CreateTableExpr) -> Result<()> {
             .fail();
         }
         column_to_indices.insert(&column.name, idx);
+        column_def::validate_column_def_options(column).context(InvalidColumnDefSnafu {
+            column: &column.name,
+        })?;
     }
 
     // verify time_index exists
@@ -1437,6 +1440,36 @@ mod tests {
     use store_api::storage::ColumnDefaultConstraint;
 
     use super::*;
+
+    #[test]
+    fn test_create_expr_rejects_unknown_storage_option_keys() {
+        let sql = "CREATE TABLE t (ts TIMESTAMP TIME INDEX, payload STRING STORAGE WITH (threshold = '1MiB'))";
+        let Statement::CreateTable(create) =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap()
+        else {
+            unreachable!()
+        };
+        let mut expr = create_to_expr(&create, &QueryContext::arc()).unwrap();
+        // A gRPC client writes the storage JSON itself; a misspelled key must not fall back to
+        // the default threshold.
+        expr.column_defs[1]
+            .options
+            .as_mut()
+            .unwrap()
+            .options
+            .insert(
+                "storage".to_string(),
+                r#"{"thresholdd":"1MiB"}"#.to_string(),
+            );
+        let err = validate_create_expr(&expr).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("unknown storage option: thresholdd"),
+            "{err:?}"
+        );
+    }
 
     #[test]
     fn test_to_alter_add_json2_column_preserves_extension() {

@@ -76,7 +76,8 @@ use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyArrayBuilder};
 use crate::sst::parquet::{
     COLUMN_INDEX_TRUNCATE_LENGTH, PARQUET_METADATA_KEY, RowGroupValueBytes, SstInfo,
     apply_column_compression, apply_float_field_encoding, apply_internal_column_encoding,
-    large_value_fields, max_row_group_decoded_size, skip_statistics, var_len_value_bytes,
+    large_value_fields, max_row_group_decoded_size, max_row_group_uncompressed_size,
+    skip_statistics, var_len_value_bytes,
 };
 
 const INIT_DICT_VALUE_CAPACITY: usize = 8;
@@ -1317,6 +1318,8 @@ impl EncodedBulkPart {
     pub(crate) fn to_sst_info(&self, file_id: FileId) -> SstInfo {
         let unit = self.metadata.region_metadata.time_index_type().unit();
         let max_row_group_uncompressed_size =
+            max_row_group_uncompressed_size(&self.metadata.parquet_metadata);
+        let max_row_group_decoded_size =
             max_row_group_decoded_size(&self.metadata.parquet_metadata);
         SstInfo {
             file_id,
@@ -1326,6 +1329,7 @@ impl EncodedBulkPart {
             ),
             file_size: self.data.len() as u64,
             max_row_group_uncompressed_size,
+            max_row_group_decoded_size,
             num_rows: self.metadata.num_rows,
             num_row_groups: self.metadata.parquet_metadata.num_row_groups() as u64,
             file_metadata: Some(self.metadata.parquet_metadata.clone()),

@@ -68,7 +68,7 @@ use crate::sst::location::region_dir_from_table_dir;
 use crate::sst::parquet::metadata::extract_primary_key_range;
 use crate::sst::parquet::parallel_writer::EncodeRuntime;
 use crate::sst::parquet::writer::SstWriteContext;
-use crate::sst::parquet::{SstInfo, WriteOptions, row_group_size_for};
+use crate::sst::parquet::{SstInfo, WriteOptions};
 use crate::sst::version::{SstVersion, SstVersionRef};
 
 /// Region version for compaction that does not hold memtables.
@@ -564,9 +564,10 @@ impl CompactionContext {
 /// Remote compaction runs off-process and ships `MergeOutput` over the wire;
 /// [`MergeOutput::sst_infos`] is `#[serde(skip)]` because the parquet footer
 /// (`ParquetMetaData`) is not serde-serializable. To avoid feeding the hook
-/// default (zero) values for real SSTs, this rebuilds the seven fields `FileMeta`
+/// default (zero) values for real SSTs, this rebuilds the eight fields `FileMeta`
 /// and `SstInfo` share: `file_id`, `time_range`, `file_size`,
-/// `max_row_group_uncompressed_size`, `num_rows`, `num_row_groups`, `num_series`.
+/// `max_row_group_uncompressed_size`, `max_row_group_decoded_size`, `num_rows`,
+/// `num_row_groups`, `num_series`.
 ///
 /// Two fields stay default and **cannot be recovered on the datanode**:
 /// - `file_metadata` — the parquet footer, whose column min/max/null-count
@@ -586,6 +587,7 @@ fn sst_info_from_file_meta(meta: &FileMeta) -> SstInfo {
         time_range: meta.time_range,
         file_size: meta.file_size,
         max_row_group_uncompressed_size: meta.max_row_group_uncompressed_size,
+        max_row_group_decoded_size: meta.max_row_group_decoded_size,
         num_rows: meta.num_rows as usize,
         num_row_groups: meta.num_row_groups,
         num_series: meta.num_series,
@@ -845,7 +847,12 @@ impl DefaultSstMerger {
         let source = tokio::select! {
             biased;
             _ = cancellation.cancelled() => return error::CompactionCancelledSnafu.fail(),
-            source = builder.build_flat_sst_reader() => source?,
+            source = builder.build_flat_sst_reader_and_row_group_size(write_opts.row_group_size) => source?,
+        };
+        let (source, row_group_size) = source;
+        let write_opts = WriteOptions {
+            row_group_size,
+            ..write_opts
         };
         let source = spawn_merge(source);
 
@@ -904,6 +911,7 @@ impl DefaultSstMerger {
                     level: output.output_level,
                     file_size: sst_info.file_size,
                     max_row_group_uncompressed_size: sst_info.max_row_group_uncompressed_size,
+                    max_row_group_decoded_size: sst_info.max_row_group_decoded_size,
                     available_indexes: sst_info.index_metadata.build_available_indexes(),
                     indexes: sst_info.index_metadata.build_indexes()?,
                     index_file_size: sst_info.index_metadata.file_size,
@@ -1017,10 +1025,8 @@ impl<M: SstMerger> DefaultCompactor<M> {
                     WriteOptions {
                         write_buffer_size: context.engine_config.sst_write_buffer_size,
                         max_file_size: unit.max_file_size,
-                        row_group_size: row_group_size_for_inputs(
-                            unit.inputs.iter().map(FileHandle::meta_ref),
-                            context.region_options.row_group_size(),
-                        ),
+                        // Narrowed by the decoded sizes of the inputs once their footers are read.
+                        row_group_size: context.region_options.row_group_size(),
                         float_field_encoding: context.region_options.float_field_encoding,
                         encode_parallelism: context
                             .region_options
@@ -1100,10 +1106,8 @@ where
             let write_opts = WriteOptions {
                 write_buffer_size: compaction_region.engine_config.sst_write_buffer_size,
                 max_file_size: picker_output.max_file_size,
-                row_group_size: row_group_size_for_inputs(
-                    output.inputs.iter().map(FileHandle::meta_ref),
-                    compaction_region.region_options.row_group_size(),
-                ),
+                // Narrowed by the decoded sizes of the inputs once their footers are read.
+                row_group_size: compaction_region.region_options.row_group_size(),
                 float_field_encoding: compaction_region.region_options.float_field_encoding,
                 encode_parallelism: compaction_region
                     .region_options
@@ -1220,29 +1224,6 @@ where
             .update_manifest(merge_output)
             .await
     }
-}
-
-/// Returns the output row group size from the average row width of `inputs`.
-///
-/// Input bytes are estimated as the largest row group times the number of row groups, an upper
-/// bound, so skewed inputs only make output row groups smaller. Files without size metadata
-/// (written by old versions) are left out.
-pub(crate) fn row_group_size_for_inputs<'a>(
-    inputs: impl IntoIterator<Item = &'a FileMeta>,
-    configured: usize,
-) -> usize {
-    let (rows, bytes) = inputs
-        .into_iter()
-        .filter(|meta| {
-            meta.num_rows > 0 && meta.num_row_groups > 0 && meta.max_row_group_uncompressed_size > 0
-        })
-        .fold((0u64, 0u64), |(rows, bytes), meta| {
-            (
-                rows + meta.num_rows,
-                bytes + meta.max_row_group_uncompressed_size * meta.num_row_groups,
-            )
-        });
-    row_group_size_for(rows, bytes, configured)
 }
 
 #[cfg(test)]
@@ -2610,33 +2591,5 @@ mod tests {
         let merged = compactor.merge_ssts(&region, picker_output).await.unwrap();
         assert!(merged.is_empty());
         assert_eq!(0, calls.load(Ordering::SeqCst));
-    }
-
-    fn file_with_rows(num_rows: u64, num_row_groups: u64, max_row_group_bytes: u64) -> FileMeta {
-        FileMeta {
-            num_rows,
-            num_row_groups,
-            max_row_group_uncompressed_size: max_row_group_bytes,
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn test_row_group_size_for_inputs_uses_average_width() {
-        // 64 rows of 4 MiB fill two 128 MiB row groups.
-        let wide = file_with_rows(64, 1, 256 << 20);
-        assert_eq!(32, row_group_size_for_inputs([&wide], 102_400));
-
-        // A few wide rows next to many narrow ones must not shrink the output row groups.
-        let narrow = file_with_rows(10 << 20, 100, 10 << 20);
-        let few_wide = file_with_rows(2, 1, 100 << 20);
-        assert_eq!(
-            102_400,
-            row_group_size_for_inputs([&narrow, &few_wide], 102_400)
-        );
-
-        // Files without size metadata do not count.
-        let legacy = file_with_rows(0, 0, 0);
-        assert_eq!(32, row_group_size_for_inputs([&wide, &legacy], 102_400));
     }
 }

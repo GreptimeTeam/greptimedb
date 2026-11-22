@@ -1104,29 +1104,10 @@ impl IndexBuildTask {
             .access_layer
             .read_sst(self.file.clone())
             .expected_metadata(Some(self.target_region_metadata.clone()));
-        let plan = self.indexer_builder.plan();
-        // Inverted segments must align with the actual SST row groups. Other
-        // creators can decide input reuse without opening the Parquet file.
-        let needs_row_group_size = plan
-            .entries()
-            .any(|entry| entry.kind.index_type() == IndexType::InvertedIndex);
-        let mut parquet_reader = if needs_row_group_size {
-            reader_builder.build().await?
-        } else {
-            None
-        };
-
-        let row_group_size = parquet_reader.as_ref().and_then(|reader| {
-            reader
-                .parquet_metadata()
-                .row_groups()
-                .first()
-                .map(|row_group| row_group.num_rows() as usize)
-                .filter(|size| *size > 0)
-        });
+        // Creators decide input reuse without opening the Parquet file.
         let mut indexer = self
             .indexer_builder
-            .build(region_file_id, new_index_version, row_group_size)
+            .build(region_file_id, new_index_version, None)
             .await;
         self.check_rebuild_indexer_or_abort(&mut indexer).await?;
         if indexer.is_empty() {
@@ -1136,18 +1117,18 @@ impl IndexBuildTask {
             return Ok(ControlFlow::Break(self.aborted("No index to build")));
         }
 
-        if indexer.requires_row_scan() && !needs_row_group_size {
-            parquet_reader = match reader_builder.build().await {
+        let parquet_reader = if indexer.requires_row_scan() {
+            match reader_builder.build().await {
                 Ok(reader) => reader,
                 Err(err) => {
                     indexer.abort().await;
                     return Err(err);
                 }
-            };
-        }
-        if indexer.requires_row_scan()
-            && let Some(mut reader) = parquet_reader.take()
-        {
+            }
+        } else {
+            None
+        };
+        if let Some(mut reader) = parquet_reader {
             while indexer.requires_row_scan() {
                 match reader.next_record_batch().await {
                     Ok(Some(batch)) => {

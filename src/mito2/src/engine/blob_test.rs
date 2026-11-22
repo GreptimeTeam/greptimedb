@@ -210,8 +210,7 @@ async fn test_large_values_survive_flush_filter_and_compaction() {
         for level in version.ssts.levels() {
             for file in level.files.values() {
                 assert!(
-                    file.meta_ref().max_row_group_uncompressed_size
-                        >= 2 * payload(0, 0).len() as u64
+                    file.meta_ref().max_row_group_decoded_size >= 2 * payload(0, 0).len() as u64
                 );
                 assert!(file.meta_ref().blob_file_size > 0);
             }

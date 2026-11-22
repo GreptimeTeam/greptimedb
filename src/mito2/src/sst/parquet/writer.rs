@@ -58,7 +58,8 @@ use crate::read::FlatSource;
 use crate::sst::file::RegionFileId;
 use crate::sst::index::{Indexer, IndexerBuilder};
 use crate::sst::parquet::blob::{
-    BlobFileWriter, ExternalColumn, blob_path, compress_external_values, external_columns,
+    BlobFileWriter, ExternalColumn, blob_column_entries, blob_path, compress_external_values,
+    external_columns,
 };
 use crate::sst::parquet::flat_format::{
     FlatWriteFormat, primary_key_column_index, time_index_column_index,
@@ -69,7 +70,7 @@ use crate::sst::parquet::{
     COLUMN_INDEX_TRUNCATE_LENGTH, PARQUET_EXTERNAL_METADATA_KEY, PARQUET_METADATA_KEY,
     RowGroupValueBytes, SstInfo, WriteOptions, apply_column_compression,
     apply_float_field_encoding, apply_internal_column_encoding, large_value_fields,
-    max_row_group_decoded_size, skip_statistics,
+    max_row_group_decoded_size, max_row_group_uncompressed_size, skip_statistics,
 };
 use crate::sst::upload::{self, UploadError};
 use crate::sst::{
@@ -573,13 +574,15 @@ where
             );
 
             // The SST must not outlive or precede its values, so the sidecar completes first.
-            if let Some(blob_writer) = self.blob_writer.take() {
-                let columns = self.external_columns.as_deref().unwrap_or_default();
-                let entries = blob_writer.finish(columns).await?;
-                if let Some(writer) = &mut self.writer {
-                    for entry in entries {
-                        writer.append_key_value_metadata(entry);
-                    }
+            let columns = self.external_columns.as_deref().unwrap_or_default();
+            let entries = match self.blob_writer.take() {
+                Some(blob_writer) => blob_writer.finish(columns).await?,
+                // Without a sidecar the entries still tell compaction how the columns are encoded.
+                None => blob_column_entries(columns),
+            };
+            if let Some(writer) = &mut self.writer {
+                for entry in entries {
+                    writer.append_key_value_metadata(entry);
                 }
             }
 
@@ -625,13 +628,16 @@ where
             // Safety: num rows > 0 so we must have min/max.
             let time_range = stats.time_range.unwrap();
 
-            let max_row_group_uncompressed_size = max_row_group_decoded_size(&parquet_metadata);
+            let max_row_group_uncompressed_size =
+                max_row_group_uncompressed_size(&parquet_metadata);
+            let max_row_group_decoded_size = max_row_group_decoded_size(&parquet_metadata);
             let num_series = stats.series_estimator.finish();
             ssts.push(SstInfo {
                 file_id: self.current_file,
                 time_range,
                 file_size,
                 max_row_group_uncompressed_size,
+                max_row_group_decoded_size,
                 num_rows: stats.num_rows,
                 num_row_groups: parquet_metadata.num_row_groups() as u64,
                 file_metadata: Some(Arc::new(parquet_metadata)),

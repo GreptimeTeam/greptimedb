@@ -426,6 +426,13 @@ async fn test_invalid_results_preserve_inputs_and_reopen_can_replan() {
         ),
         (
             FileMeta {
+                max_row_group_decoded_size: output.max_row_group_decoded_size + 1,
+                ..output.clone()
+            },
+            statistics_mismatch,
+        ),
+        (
+            FileMeta {
                 primary_key_min: Some(Bytes::from_static(b"not-the-footer-minimum")),
                 ..output.clone()
             },
@@ -614,10 +621,16 @@ async fn test_invalid_results_preserve_inputs_and_reopen_can_replan() {
     let fresh = engine.table_compaction_snapshot(region_id).unwrap();
     let fresh: TableCompactionSnapshot =
         serde_json::from_value(serde_json::to_value(&fresh).unwrap()).unwrap();
+    // Writers of older versions leave the decoded size unknown.
+    assert!(output.max_row_group_decoded_size > 0);
+    let legacy_output = FileMeta {
+        max_row_group_decoded_size: 0,
+        ..output
+    };
     assert_eq!(
         PublicationOutcome::Applied,
         engine
-            .publish_table_compaction(region_id, fresh, vec![output])
+            .publish_table_compaction(region_id, fresh, vec![legacy_output])
             .await
             .unwrap()
     );
@@ -1211,11 +1224,9 @@ async fn test_failed_verification_does_not_notify_hook() {
     assert_eq!(6, row_count(&engine, region_id).await);
 }
 
-#[tokio::test]
-async fn test_output_missing_its_sidecar_is_not_published() {
-    let mut env = TestEnv::new().await;
-    let engine = env.create_engine(config()).await;
-    let region_id = RegionId::new(1, 1);
+/// Creates a region whose string field stores values of at least 16 bytes externally, and
+/// flushes three rows holding `value`.
+async fn flush_storage_rows(engine: &MitoEngine, region_id: RegionId, value: &str) {
     let mut create = CreateRequestBuilder::new()
         .field_datatype(ConcreteDataType::string_datatype())
         .build();
@@ -1240,13 +1251,13 @@ async fn test_output_missing_its_sidecar_is_not_published() {
         .map(|i| {
             row(vec![
                 ValueData::StringValue(i.to_string()),
-                ValueData::StringValue("v".repeat(64)),
+                ValueData::StringValue(value.to_string()),
                 ValueData::TimestampMillisecondValue(i * 1000),
             ])
         })
         .collect();
     put_rows(
-        &engine,
+        engine,
         region_id,
         Rows {
             schema: rows_schema(&create),
@@ -1254,7 +1265,15 @@ async fn test_output_missing_its_sidecar_is_not_published() {
         },
     )
     .await;
-    flush_region(&engine, region_id, None).await;
+    flush_region(engine, region_id, None).await;
+}
+
+#[tokio::test]
+async fn test_output_missing_its_sidecar_is_not_published() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(config()).await;
+    let region_id = RegionId::new(1, 1);
+    flush_storage_rows(&engine, region_id, &"v".repeat(64)).await;
 
     let region = engine.get_region(region_id).unwrap();
     let access = &region.access_layer;
@@ -1298,6 +1317,51 @@ async fn test_output_missing_its_sidecar_is_not_published() {
     );
 
     store.rename(&stash, &sidecar).await.unwrap();
+    assert_eq!(
+        PublicationOutcome::Applied,
+        engine
+            .publish_table_compaction(region_id, snapshot, vec![output])
+            .await
+            .unwrap()
+    );
+    assert_eq!(3, row_count(&engine, region_id).await);
+}
+
+#[tokio::test]
+async fn test_output_with_only_inline_values_is_published() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(config()).await;
+    let region_id = RegionId::new(1, 1);
+    flush_storage_rows(&engine, region_id, "short").await;
+    let region = engine.get_region(region_id).unwrap();
+    let original = region.version().ssts.levels()[0]
+        .files()
+        .next()
+        .unwrap()
+        .meta_ref()
+        .clone();
+    let shared = rewrite_sst(&region, &original, LEVEL_SHARED).await;
+    engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                files_to_add: vec![shared],
+                files_to_remove: vec![original],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let snapshot = engine.table_compaction_snapshot(region_id).unwrap();
+    let output = rewrite_sst(&region, &snapshot.inputs[0], 0).await;
+    // The footer declares the external column without a sidecar.
+    assert_eq!(0, output.blob_file_size);
+    let access = &region.access_layer;
+    let path = location::sst_file_path(access.table_dir(), output.file_id(), access.path_type());
+    let bytes = access.object_store().read(&path).await.unwrap().to_bytes();
+    let reader = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
+    assert!(!blob_columns(reader.metadata()).is_empty());
+
     assert_eq!(
         PublicationOutcome::Applied,
         engine
