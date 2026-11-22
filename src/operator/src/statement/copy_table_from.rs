@@ -241,9 +241,13 @@ impl StatementExecutor {
                 let options = CsvOptions::default()
                     .with_has_header(format.has_header)
                     .with_delimiter(format.delimiter);
-                let csv_source = CsvSource::new(schema.clone())
-                    .with_csv_options(options)
-                    .with_batch_size(DEFAULT_BATCH_SIZE);
+                let csv_source = CsvSource::new(Arc::new(exact_numeric_reader_schema(
+                    schema,
+                    &compat_schema,
+                    can_csv_reader_parse_exactly,
+                )))
+                .with_csv_options(options)
+                .with_batch_size(DEFAULT_BATCH_SIZE);
                 let stream = if format.skip_bad_records {
                     let reader_schema =
                         csv_reader_schema_for_skip_bad_records(schema, &compat_schema);
@@ -292,8 +296,12 @@ impl StatementExecutor {
                         .context(error::ProjectSchemaSnafu)?,
                 );
 
-                let json_source =
-                    JsonSource::new(schema.clone()).with_batch_size(DEFAULT_BATCH_SIZE);
+                let json_source = JsonSource::new(Arc::new(exact_numeric_reader_schema(
+                    schema,
+                    &compat_schema,
+                    can_json_reader_parse_exactly,
+                )))
+                .with_batch_size(DEFAULT_BATCH_SIZE);
                 let stream = file_to_stream(
                     object_store,
                     path,
@@ -720,6 +728,63 @@ fn can_cast_types_for_greptime(from: &ArrowDataType, to: &ArrowDataType) -> bool
 
     // For all other cases, use Arrow's built-in can_cast_types
     can_cast_types(from, to)
+}
+
+/// Returns the schema to read the file with.
+///
+/// Schema inference reads a number as `Int64` or `Float64`. Casting such a column to a wider
+/// table type afterwards rounds every value a `Float64` can't hold, and a value outside the
+/// `Int64` range fails to parse. So a column with one of those inferred types takes its table
+/// type when `can_parse_exactly` says the reader parses that type from the text.
+fn exact_numeric_reader_schema(
+    file: &SchemaRef,
+    compat: &SchemaRef,
+    can_parse_exactly: fn(&ArrowDataType) -> bool,
+) -> Schema {
+    let fields = file
+        .fields()
+        .iter()
+        .enumerate()
+        .map(|(idx, file_field)| match compat.fields().get(idx) {
+            Some(compat_field)
+                if matches!(
+                    file_field.data_type(),
+                    ArrowDataType::Int64 | ArrowDataType::Float64
+                ) && can_parse_exactly(compat_field.data_type()) =>
+            {
+                Arc::new(
+                    file_field
+                        .as_ref()
+                        .clone()
+                        .with_data_type(compat_field.data_type().clone()),
+                )
+            }
+            _ => file_field.clone(),
+        })
+        .collect::<Vec<_>>();
+
+    Schema::new_with_metadata(fields, file.metadata().clone())
+}
+
+fn is_decimal_type(data_type: &ArrowDataType) -> bool {
+    matches!(
+        data_type,
+        ArrowDataType::Decimal32(_, _)
+            | ArrowDataType::Decimal64(_, _)
+            | ArrowDataType::Decimal128(_, _)
+            | ArrowDataType::Decimal256(_, _)
+    )
+}
+
+/// The CSV reader parses a decimal from any number, but an unsigned integer only from digits,
+/// so a `UInt64` column keeps the inferred type and still accepts a value such as `1.0`.
+fn can_csv_reader_parse_exactly(data_type: &ArrowDataType) -> bool {
+    is_decimal_type(data_type)
+}
+
+/// The JSON reader parses a decimal and an unsigned integer from any number.
+fn can_json_reader_parse_exactly(data_type: &ArrowDataType) -> bool {
+    is_decimal_type(data_type) || data_type == &ArrowDataType::UInt64
 }
 
 fn csv_reader_schema_for_skip_bad_records(file: &SchemaRef, compat: &SchemaRef) -> Schema {
@@ -1418,6 +1483,63 @@ mod tests {
             reader_schema.field(2).data_type(),
             compat_schema.field(2).data_type()
         );
+    }
+
+    #[test]
+    fn test_exact_numeric_reader_schema() {
+        let file_schema = make_test_schema(&[
+            Field::new("price", DataType::Float64, true),
+            Field::new("amount", DataType::Int64, true),
+            Field::new("count", DataType::Float64, true),
+            Field::new("id", DataType::Int64, true),
+            Field::new("cpu", DataType::Float64, true),
+            Field::new("quoted", DataType::Utf8, true),
+            Field::new("extra", DataType::Float64, true),
+        ]);
+        let compat_schema = make_test_schema(&[
+            Field::new("price", DataType::Decimal128(38, 10), false),
+            Field::new("amount", DataType::Decimal128(20, 2), true),
+            Field::new("count", DataType::UInt64, true),
+            Field::new("id", DataType::UInt64, true),
+            Field::new("cpu", DataType::Float64, true),
+            Field::new("quoted", DataType::Decimal128(38, 10), true),
+        ]);
+
+        let csv_schema =
+            exact_numeric_reader_schema(&file_schema, &compat_schema, can_csv_reader_parse_exactly);
+        assert_eq!(
+            csv_schema.field(0),
+            &Field::new("price", DataType::Decimal128(38, 10), true)
+        );
+        assert_eq!(
+            csv_schema.field(1),
+            &Field::new("amount", DataType::Decimal128(20, 2), true)
+        );
+        for idx in 2..file_schema.fields().len() {
+            assert_eq!(csv_schema.field(idx), file_schema.field(idx));
+        }
+
+        let json_schema = exact_numeric_reader_schema(
+            &file_schema,
+            &compat_schema,
+            can_json_reader_parse_exactly,
+        );
+        assert_eq!(
+            json_schema.field(0),
+            &Field::new("price", DataType::Decimal128(38, 10), true)
+        );
+        assert_eq!(
+            json_schema.field(1),
+            &Field::new("amount", DataType::Decimal128(20, 2), true)
+        );
+        assert_eq!(
+            json_schema.field(2),
+            &Field::new("count", DataType::UInt64, true)
+        );
+        assert_eq!(json_schema.field(3), &Field::new("id", DataType::UInt64, true));
+        for idx in 4..file_schema.fields().len() {
+            assert_eq!(json_schema.field(idx), file_schema.field(idx));
+        }
     }
 
     fn make_csv_metadata(schema: Arc<Schema>, has_header: bool) -> FileMetadata {
