@@ -69,7 +69,7 @@ use crate::sst::parquet::{
     COLUMN_INDEX_TRUNCATE_LENGTH, PARQUET_EXTERNAL_METADATA_KEY, PARQUET_METADATA_KEY,
     RowGroupValueBytes, SstInfo, WriteOptions, apply_column_compression,
     apply_float_field_encoding, apply_internal_column_encoding, large_value_fields,
-    max_row_group_decoded_size, skip_statistics,
+    max_row_group_decoded_size, max_row_group_uncompressed_size, skip_statistics,
 };
 use crate::sst::upload::{self, UploadError};
 use crate::sst::{
@@ -625,13 +625,16 @@ where
             // Safety: num rows > 0 so we must have min/max.
             let time_range = stats.time_range.unwrap();
 
-            let max_row_group_uncompressed_size = max_row_group_decoded_size(&parquet_metadata);
+            let max_row_group_uncompressed_size =
+                max_row_group_uncompressed_size(&parquet_metadata);
+            let max_row_group_decoded_size = max_row_group_decoded_size(&parquet_metadata);
             let num_series = stats.series_estimator.finish();
             ssts.push(SstInfo {
                 file_id: self.current_file,
                 time_range,
                 file_size,
                 max_row_group_uncompressed_size,
+                max_row_group_decoded_size,
                 num_rows: stats.num_rows,
                 num_row_groups: parquet_metadata.num_row_groups() as u64,
                 file_metadata: Some(Arc::new(parquet_metadata)),

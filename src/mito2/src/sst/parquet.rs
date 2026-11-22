@@ -149,6 +149,21 @@ pub(crate) fn row_group_size_for(rows: u64, bytes: u64, configured: usize) -> us
     (TARGET_ROW_GROUP_BYTES / row_width).clamp(1, configured as u64) as usize
 }
 
+/// Returns the rows and the decoded bytes of the SSTs with `footers`, for [row_group_size_for].
+///
+/// Bytes are the largest decoded row group times the number of row groups, an upper bound, so
+/// skewed inputs only make output row groups smaller.
+pub(crate) fn decoded_input_size<'a>(
+    footers: impl IntoIterator<Item = &'a ParquetMetaData>,
+) -> (u64, u64) {
+    footers.into_iter().fold((0, 0), |(rows, bytes), footer| {
+        (
+            rows + footer.file_metadata().num_rows() as u64,
+            bytes + max_row_group_decoded_size(footer) * footer.num_row_groups() as u64,
+        )
+    })
+}
+
 /// Returns the bytes of string and binary values in `batch` once decoded.
 ///
 /// Encoded parquet sizes undercount these values when dictionary encoding stores repeated
@@ -260,12 +275,13 @@ impl RowGroupValueBytes {
     }
 }
 
-/// Returns the size of the largest row group of `metadata`, counting string and binary values
-/// at their decoded size when the footer records it under [MAX_ROW_GROUP_VALUE_BYTES_KEY].
+/// Returns the uncompressed size of the largest row group of `metadata`, summed over its column
+/// chunks.
 ///
-/// Writers and the verifier of compaction outputs must both use this to agree on the value.
-pub(crate) fn max_row_group_decoded_size(metadata: &ParquetMetaData) -> u64 {
-    let max_encoded = metadata
+/// This is the value of `FileMeta::max_row_group_uncompressed_size`. Writers and the verifier of
+/// compaction outputs, including older versions, compute it the same way.
+pub(crate) fn max_row_group_uncompressed_size(metadata: &ParquetMetaData) -> u64 {
+    metadata
         .row_groups()
         .iter()
         .map(|row_group| {
@@ -276,8 +292,13 @@ pub(crate) fn max_row_group_decoded_size(metadata: &ParquetMetaData) -> u64 {
                 .sum::<u64>()
         })
         .max()
-        .unwrap_or(0);
-    max_encoded.max(max_row_group_value_bytes(metadata))
+        .unwrap_or(0)
+}
+
+/// Returns the size of the largest row group of `metadata`, counting string and binary values
+/// at their decoded size when the footer records it under [MAX_ROW_GROUP_VALUE_BYTES_KEY].
+pub(crate) fn max_row_group_decoded_size(metadata: &ParquetMetaData) -> u64 {
+    max_row_group_uncompressed_size(metadata).max(max_row_group_value_bytes(metadata))
 }
 
 /// Returns the [MAX_ROW_GROUP_VALUE_BYTES_KEY] value of the footer, or 0 when it is absent.
@@ -466,6 +487,9 @@ pub struct SstInfo {
     pub file_size: u64,
     /// Maximum uncompressed row group size in bytes. 0 if unknown.
     pub max_row_group_uncompressed_size: u64,
+    /// Maximum row group size in bytes with string and binary values counted decoded. 0 if
+    /// unknown.
+    pub max_row_group_decoded_size: u64,
     /// Number of rows.
     pub num_rows: usize,
     /// Number of row groups
@@ -1589,7 +1613,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_row_group_size_counts_dictionary_encoded_values_decoded() {
+    async fn test_dictionary_encoded_values_keep_file_meta_size_and_record_decoded_size() {
         let mut env = TestEnv::new().await;
         let object_store = env.init_object_store_manager();
         let handle = sst_file_handle(0, 1000);
@@ -1626,15 +1650,30 @@ mod tests {
             .find(|i| schema.column(*i).name() == "field_0")
             .unwrap();
         assert!(parquet_meta.row_group(0).column(field).uncompressed_size() < 1024 * 1024);
-        assert!(info.max_row_group_uncompressed_size >= 2048 * 64 * 1024);
-        // Compaction outputs are verified by recomputing the size from the stored footer.
         let footer = MetadataLoader::new(object_store, &sst_path, info.file_size)
             .load(&mut Default::default())
             .await
             .unwrap();
+        // Verifiers of compaction outputs, including older versions, sum the column chunk sizes
+        // of the stored footer and require the file metadata to match.
+        let column_chunk_sum = footer
+            .row_groups()
+            .iter()
+            .map(|rg| {
+                rg.columns()
+                    .iter()
+                    .map(|c| c.uncompressed_size() as u64)
+                    .sum::<u64>()
+            })
+            .max()
+            .unwrap();
+        assert_eq!(column_chunk_sum, info.max_row_group_uncompressed_size);
+        // Row group sizing reads the decoded size from the footer, and compaction admission from
+        // the file metadata.
+        assert!(max_row_group_decoded_size(&footer) >= 2048 * 64 * 1024);
         assert_eq!(
-            info.max_row_group_uncompressed_size,
-            max_row_group_decoded_size(&footer)
+            max_row_group_decoded_size(&footer),
+            info.max_row_group_decoded_size
         );
         // Readers size batches by the decoded 64 KiB values, not the dictionary-encoded size.
         assert_eq!(
@@ -1683,13 +1722,24 @@ mod tests {
             .unwrap()
             .remove(0);
         assert_eq!(10, info.num_row_groups);
-        assert!(info.max_row_group_uncompressed_size >= 2 * 64 * 1024);
         // The tail holds 64 KiB rows although the full row groups have eight rows.
         let footer = info.file_metadata.as_ref().unwrap();
         assert_eq!(
             1024,
             estimate_batch_size(widest_row_group_statistic(footer))
         );
+    }
+
+    #[test]
+    fn test_row_group_size_for_uses_average_width() {
+        // 64 rows of 4 MiB fill two 128 MiB row groups.
+        assert_eq!(32, row_group_size_for(64, 256 << 20, 102_400));
+        // A few wide rows next to many narrow ones must not shrink the row groups.
+        assert_eq!(
+            102_400,
+            row_group_size_for((10 << 20) + 2, (10 << 20) * 100 + (100 << 20), 102_400)
+        );
+        assert_eq!(102_400, row_group_size_for(0, 0, 102_400));
     }
 
     #[rstest::rstest]

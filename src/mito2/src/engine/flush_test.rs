@@ -2376,5 +2376,7 @@ async fn test_flush_bounds_row_group_bytes_of_wide_rows() {
             meta.num_rows.div_ceil(meta.num_row_groups) <= 32,
             "{meta:?}"
         );
+        // A row group holds up to 32 rows of 4 MiB.
+        assert!(meta.max_row_group_decoded_size >= 4 << 20, "{meta:?}");
     }
 }

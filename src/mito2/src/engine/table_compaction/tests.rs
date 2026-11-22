@@ -426,6 +426,13 @@ async fn test_invalid_results_preserve_inputs_and_reopen_can_replan() {
         ),
         (
             FileMeta {
+                max_row_group_decoded_size: output.max_row_group_decoded_size + 1,
+                ..output.clone()
+            },
+            statistics_mismatch,
+        ),
+        (
+            FileMeta {
                 primary_key_min: Some(Bytes::from_static(b"not-the-footer-minimum")),
                 ..output.clone()
             },
@@ -614,10 +621,16 @@ async fn test_invalid_results_preserve_inputs_and_reopen_can_replan() {
     let fresh = engine.table_compaction_snapshot(region_id).unwrap();
     let fresh: TableCompactionSnapshot =
         serde_json::from_value(serde_json::to_value(&fresh).unwrap()).unwrap();
+    // Writers of older versions leave the decoded size unknown.
+    assert!(output.max_row_group_decoded_size > 0);
+    let legacy_output = FileMeta {
+        max_row_group_decoded_size: 0,
+        ..output
+    };
     assert_eq!(
         PublicationOutcome::Applied,
         engine
-            .publish_table_compaction(region_id, fresh, vec![output])
+            .publish_table_compaction(region_id, fresh, vec![legacy_output])
             .await
             .unwrap()
     );
