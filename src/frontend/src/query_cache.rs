@@ -25,10 +25,16 @@
 //! Chunk bounds are quantized to absolute time, not to the request: with a grid
 //! phase `p = start_ms.rem_euclid(step_ms)` and a chunk of `c` milliseconds, chunk
 //! `k` covers `[p + k*c, p + (k+1)*c)`, where `k` is the floor of
-//! `(t - p) / c`. Planning therefore requires `c` to be a whole multiple of the
-//! step ([`BypassReason::MisalignedChunk`] otherwise), so every bound is a grid
-//! point of every request with the same step and phase, and two requests with
-//! different phases can never produce the same bound.
+//! `(t - p) / c`. Every bound is a grid point of every request with the same step
+//! and phase, and two requests with different phases can never produce the same
+//! bound.
+//!
+//! The configured `chunk` is a *target* rather than the length used, because it is
+//! global while the step belongs to the query: planning aligns it down to a whole
+//! number of the query's steps, and at least one step, so `c` is always a multiple
+//! of the step and no step is refused. `c` is therefore step-dependent, but for one
+//! query step it is one fixed length, so the canonical bounds of a sliding window do
+//! not move.
 //!
 //! Only a chunk whose points are *all* requested and *all* older than the tail
 //! cutoff is cacheable. Partial chunks at either end of a window, and every point
@@ -582,9 +588,6 @@ pub enum BypassReason {
     InvalidSpan,
     /// The grid arithmetic, or a chunk bound, cannot be represented.
     Overflow,
-    /// The configured chunk is not a whole multiple of the query's step, so
-    /// canonical chunk bounds would fall between the evaluation grid's points.
-    MisalignedChunk,
     /// The identity's step is not the step the statement is evaluated with, so its
     /// chunks would be keyed as spans of another grid.
     StepMismatch,
@@ -598,9 +601,6 @@ impl fmt::Display for BypassReason {
             Self::NotWindowable => f.write_str("the expression is not windowable"),
             Self::InvalidSpan => f.write_str("the statement cannot be split into chunks"),
             Self::Overflow => f.write_str("a chunk bound overflows the time grid"),
-            Self::MisalignedChunk => {
-                f.write_str("the chunk is not a whole multiple of the query's step")
-            }
             Self::StepMismatch => f.write_str("the identity's step is not the statement's step"),
             Self::EmptyChunk => f.write_str("the chunk is empty"),
         }
@@ -650,10 +650,10 @@ impl ChunkSpans {
 ///
 /// The rule, in one place:
 ///
-/// - chunk bounds are canonical: with phase `p = start_ms.rem_euclid(step_ms)` and
-///   chunk length `chunk`, they are `p + k * chunk`, which requires `chunk` to be
-///   a whole multiple of the statement's step
-///   ([`BypassReason::MisalignedChunk`] otherwise);
+/// - chunk bounds are canonical: the configured `chunk` is a target that is
+///   aligned down to a whole number of the statement's steps, at least one, so
+///   with phase `p = start_ms.rem_euclid(step_ms)` and the aligned chunk length
+///   `c` a bound is `p + k * c`;
 /// - a chunk is cacheable only when every one of its points is requested and every
 ///   one of them is older than `now - tail`;
 /// - everything else — the partial chunks at either end and the whole tail — is
@@ -672,8 +672,12 @@ pub fn plan_chunks(
         return Err(BypassReason::NotWindowable);
     }
     let grid = EvalGrid::of(stmt)?;
-    let chunk_in_steps = chunk_steps(chunk, grid.step_ms()).ok_or(BypassReason::MisalignedChunk)?;
-    let chunk_ms = i64::try_from(chunk.as_millis()).map_err(|_| BypassReason::Overflow)?;
+    let chunk_in_steps = chunk_steps(chunk, grid.step_ms())?;
+    // The aligned chunk, not the configured target: `chunk_in_steps` whole steps.
+    let chunk_ms = i64::try_from(chunk_in_steps)
+        .ok()
+        .and_then(|steps| steps.checked_mul(grid.step_ms()))
+        .ok_or(BypassReason::Overflow)?;
     let now_ms = signed_millis_since_epoch(now).map_err(|_| BypassReason::Overflow)?;
     let tail_ms = i64::try_from(tail.as_millis()).unwrap_or(i64::MAX);
     let cutoff_ms = now_ms.saturating_sub(tail_ms);
@@ -718,16 +722,21 @@ pub fn plan_chunks(
     })
 }
 
-/// The configured chunk as a whole number of steps of `step_ms`.
+/// The configured target chunk as a whole number of steps of `step_ms`.
 ///
-/// `None` means canonical chunk bounds would fall between the grid's points, so no
-/// span of that query could be cached at that chunk length.
-fn chunk_steps(chunk: Duration, step_ms: i64) -> Option<u64> {
-    let chunk_ms = i64::try_from(chunk.as_millis()).ok()?;
-    if step_ms <= 0 || chunk_ms <= 0 || chunk_ms % step_ms != 0 {
-        return None;
-    }
-    u64::try_from(chunk_ms / step_ms).ok()
+/// The target is global while the step belongs to the query, so it is rounded
+/// *down* to a whole number of steps — never to zero — and the result is the
+/// chunk planning uses. Every step therefore plans: no query bypasses merely
+/// because the target is not a multiple of its step. For one step the result is
+/// one fixed length, so the canonical bounds of a sliding window do not move.
+///
+/// Only an arithmetic that cannot be represented fails, with
+/// [`BypassReason::Overflow`]; `step_ms` is positive by construction
+/// ([`EvalGrid`] rejects anything else).
+fn chunk_steps(chunk: Duration, step_ms: i64) -> Result<u64, BypassReason> {
+    let chunk_ms = i64::try_from(chunk.as_millis()).map_err(|_| BypassReason::Overflow)?;
+    let steps = (chunk_ms / step_ms).max(1);
+    u64::try_from(steps).map_err(|_| BypassReason::Overflow)
 }
 
 /// `value / divisor` rounded towards positive infinity, for a positive `divisor`.
@@ -1089,10 +1098,10 @@ impl std::error::Error for ConfigError {}
 /// check; `max_bytes`, `chunk`, `refresh_interval`, and `max_age` all have to be
 /// positive.
 ///
-/// `chunk` cannot be validated against the step here, because the step belongs to
-/// the query, not the cache: planning compares the two and bypasses the cache
-/// ([`BypassReason::MisalignedChunk`]) when the chunk is not a whole number of the
-/// statement's steps.
+/// `chunk` cannot be resolved into a chunk length here, because the length is the
+/// target aligned down to the query's steps and the step belongs to the query, not
+/// the cache: planning aligns it, so the cache never bypasses a query merely because
+/// the target is not a multiple of its step.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RollupCacheConfig {
     max_bytes: u64,
@@ -1142,7 +1151,11 @@ impl RollupCacheConfig {
         self.tail
     }
 
-    /// How much of the grid one chunk covers.
+    /// The target span of the grid one chunk covers.
+    ///
+    /// It is a target, not the length used: planning aligns it down to a whole
+    /// number of the statement's steps, at least one, so a query at a coarser step
+    /// than this target gets one step per chunk.
     pub fn chunk(&self) -> Duration {
         self.chunk
     }
@@ -1385,6 +1398,10 @@ impl RollupCache {
     ///
     /// The returned direct spans are the caller's to send to storage; their points
     /// are never cached.
+    ///
+    /// The step is the only thing the identity and the statement must agree on: the
+    /// configured chunk is a target aligned down to the statement's steps, so a
+    /// target that is not a multiple of this statement's step never bypasses here.
     pub fn plan(&self, identity: QueryIdentity, stmt: &EvalStmt, now: SystemTime) -> ChunkPlan {
         // The identity claims the grid its chunks were cut from; a statement on a
         // different step would key the same span under the wrong grid.
@@ -2091,10 +2108,15 @@ mod tests {
     }
 
     fn config() -> RollupCacheConfig {
+        config_targeting(CHUNK)
+    }
+
+    /// The test configuration with `chunk` as its target chunk duration.
+    fn config_targeting(chunk: Duration) -> RollupCacheConfig {
         RollupCacheConfig::new(
             1 << 20,
             Duration::ZERO,
-            CHUNK,
+            chunk,
             Duration::from_secs(1),
             Duration::from_secs(3_600),
         )
@@ -2103,6 +2125,11 @@ mod tests {
 
     fn cache() -> RollupCache {
         RollupCache::new(config())
+    }
+
+    /// A cache whose target chunk is `chunk`, everything else as [`config`] has it.
+    fn cache_targeting(chunk: Duration) -> RollupCache {
+        RollupCache::new(config_targeting(chunk))
     }
 
     /// The metadata version every test round reports, so a round only empties a table when
@@ -2269,21 +2296,88 @@ mod tests {
     }
 
     #[test]
-    fn a_chunk_that_is_not_a_whole_number_of_steps_bypasses() {
-        // A chunk of 90 seconds is not a whole number of one-minute steps.
-        let short = RollupCacheConfig::new(
-            1 << 20,
-            Duration::ZERO,
-            Duration::from_secs(90),
-            Duration::from_secs(1),
-            Duration::from_secs(3_600),
-        )
-        .unwrap();
-        let cache = RollupCache::new(short);
+    fn a_target_chunk_is_aligned_down_to_whole_steps() {
+        // 90 seconds against a 60-second step is one step, not one and a half: the
+        // query plans instead of bypassing, and every chunk is exactly one step long.
+        let cache = cache_targeting(Duration::from_secs(90));
         let stmt = stmt_from("rate(http_requests_total[5m])", HEAD_MS, 10, STEP_MS);
+        let (span, chunks, direct, _) = planned(&cache, &stmt, at(LATER_MS));
+        assert_partition(span, &chunks, &direct);
+        assert!(direct.is_empty());
+        assert_eq!(chunks.len(), 10);
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| chunk.end_ms() - chunk.start_ms() == STEP_MS),
+            "every chunk is one step: {chunks:?}"
+        );
         assert_eq!(
-            cache.plan(identity(), &stmt, at(LATER_MS)),
-            ChunkPlan::Bypass(BypassReason::MisalignedChunk)
+            chunks.first(),
+            Some(&TimeChunk::new(HEAD_MS, HEAD_MS + STEP_MS))
+        );
+
+        // A sliding window therefore keeps the same canonical bounds: one step later,
+        // the interior chunks are the very same spans.
+        let slid = stmt_from(
+            "rate(http_requests_total[5m])",
+            HEAD_MS + STEP_MS,
+            10,
+            STEP_MS,
+        );
+        let (_, slid_chunks, _, _) = planned(&cache, &slid, at(LATER_MS));
+        assert_eq!(&chunks[1..], &slid_chunks[..chunks.len() - 1]);
+
+        // A 5m target against a 2m step is two steps, so 4m chunks.
+        let two_min = 2 * STEP_MS;
+        let cache = cache_targeting(CHUNK);
+        let stmt = stmt_from("rate(http_requests_total[5m])", HEAD_MS, 10, two_min);
+        let (span, chunks, direct, _) = planned_for(
+            QueryIdentity {
+                step_ms: two_min,
+                ..identity()
+            },
+            &cache,
+            &stmt,
+            at(LATER_MS),
+        );
+        assert_partition(span, &chunks, &direct);
+        assert!(direct.is_empty());
+        assert_eq!(
+            chunks,
+            vec![
+                TimeChunk::new(HEAD_MS, HEAD_MS + 4 * 60_000),
+                TimeChunk::new(HEAD_MS + 4 * 60_000, HEAD_MS + 8 * 60_000),
+                TimeChunk::new(HEAD_MS + 8 * 60_000, HEAD_MS + 12 * 60_000),
+                TimeChunk::new(HEAD_MS + 12 * 60_000, HEAD_MS + 16 * 60_000),
+                TimeChunk::new(HEAD_MS + 16 * 60_000, HEAD_MS + 20 * 60_000),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_target_coarser_than_the_step_chunks_one_step() {
+        // A 1m target against a 5m step cannot hold even one step, so planning keeps
+        // the one-step floor rather than an empty chunk.
+        let cache = cache_targeting(Duration::from_secs(60));
+        let stmt = stmt_from("rate(http_requests_total[5m])", HEAD_MS, 4, CHUNK_MS);
+        let (span, chunks, direct, _) = planned_for(
+            QueryIdentity {
+                step_ms: CHUNK_MS,
+                ..identity()
+            },
+            &cache,
+            &stmt,
+            at(LATER_MS),
+        );
+        assert_partition(span, &chunks, &direct);
+        assert_eq!(
+            chunks,
+            vec![
+                TimeChunk::new(HEAD_MS, HEAD_MS + CHUNK_MS),
+                TimeChunk::new(HEAD_MS + CHUNK_MS, HEAD_MS + 2 * CHUNK_MS),
+                TimeChunk::new(HEAD_MS + 2 * CHUNK_MS, HEAD_MS + 3 * CHUNK_MS),
+                TimeChunk::new(HEAD_MS + 3 * CHUNK_MS, HEAD_MS + 4 * CHUNK_MS),
+            ]
         );
     }
 

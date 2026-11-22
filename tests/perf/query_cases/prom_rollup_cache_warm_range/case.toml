@@ -9,8 +9,10 @@
 # - writes historical data in 2024, so every evaluated point is older than the
 #   wall clock and `tail = "0s"` leaves the whole range cacheable;
 # - evaluates a 6h range at a 5m step, 02:00–08:00 inclusive, which is 73
-#   points; a 5m chunk holds one grid point per chunk, so all 73 are cacheable
-#   and the request has zero direct spans;
+#   points; the configured chunk is a target that planning aligns down to whole
+#   steps (at least one), so the 5m target meets the 5m step exactly and holds one
+#   grid point per chunk: all 73 are cacheable and the request has zero direct
+#   spans;
 # - queries the Prometheus HTTP range API (`kind = "prom_http"`), the path that
 #   marks the output unordered and is therefore the one the cache serves, with
 #   `rate(...)` and a `sum` fold of `rate(...)`, both cacheable;
@@ -31,11 +33,10 @@
 #
 # `min_candidate_latency_speedup_pct` on the two cached shapes is what keeps this
 # case honest: a candidate whose cache did not take effect (option ignored,
-# expression outside the allowlist, chunk not a multiple of the step, table never
-# proved) measures the same latency as the base and fails the threshold instead of
-# passing quietly. The selector query and the TQL control carry
-# `max_candidate_latency_regression_pct` instead, because neither is expected to
-# be faster than the base.
+# expression outside the allowlist, table never proved) measures the same latency
+# as the base and fails the threshold instead of passing quietly. The selector
+# query and the TQL control carry `max_candidate_latency_regression_pct` instead,
+# because neither is expected to be faster than the base.
 
 [case]
 name = "prom_rollup_cache_warm_range"
@@ -69,13 +70,14 @@ step = 0.125
 pending_rows_flush_interval = "1s"
 max_batch_rows = 100000
 
-# Candidate only. `chunk = "5m"` is a whole multiple of the 5m step, `tail =
-# "0s"` keeps the 2024 data inside the cacheable range, and `refresh_interval =
-# "1s"` lets a round prove the table well inside `settle_ms`. `max_age` is the
-# last-resort backstop for what the sequence probe cannot describe and for a
-# stalled refresher, never the freshness bound: freshness comes from the rounds,
-# which run every `refresh_interval`. An hour, the frontend's default, is far
-# longer than the measurement, so no entry ages out while it runs.
+# Candidate only. `chunk = "5m"` is a target that planning aligns down to whole
+# steps, here one 5m step, `tail = "0s"` keeps the 2024 data inside the cacheable
+# range, and `refresh_interval = "1s"` lets a round prove the table well inside
+# `settle_ms`. `max_age` is the last-resort backstop for what the sequence probe
+# cannot describe and for a stalled refresher, never the freshness bound:
+# freshness comes from the rounds, which run every `refresh_interval`. An hour,
+# the frontend's default, is far longer than the measurement, so no entry ages
+# out while it runs.
 [scenario.remote_write.prom_store.candidate_rollup_cache]
 max_bytes = "256MB"
 chunk = "5m"

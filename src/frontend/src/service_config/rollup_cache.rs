@@ -38,8 +38,9 @@ pub struct RollupCacheOptions {
     pub enable: bool,
     /// The total memory budget for cached chunks and their annotations.
     pub max_bytes: ReadableSize,
-    /// The canonical chunk duration. A query whose step does not divide it
-    /// bypasses the cache.
+    /// The target chunk duration. It is global while the step belongs to the query,
+    /// so planning aligns it down to a whole number of the query's steps, at least
+    /// one: any step is cacheable, and the actual chunk stays fixed for that step.
     #[serde(with = "humantime_serde")]
     pub chunk: Duration,
     /// Output points this close to wall-clock now may still be receiving data,

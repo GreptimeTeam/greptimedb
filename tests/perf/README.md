@@ -242,14 +242,16 @@ opposite mistake would pass quietly.
 
 The cache only serves PromQL range queries whose expression is in the
 `selector`/`rate`/`sum` allowlist (`src/query/src/promql/window.rs`), whose
-`chunk` is a whole multiple of the step, whose points are all older than
-`now - tail`, and whose source table a background round has proved. A bare
-top-level selector is on that allowlist but bypasses the cache
+points are all older than `now - tail`, and whose source table a background
+round has proved. `chunk` is a target rather than the length used: planning
+aligns it down to a whole number of the step, at least one step, so any step is
+served and the actual chunk is fixed for that step. A bare top-level selector
+is on that allowlist but bypasses the cache
 (`windowed_expr_is_bare_selector` in `src/frontend/src/instance.rs`), because
 serving it out of a cached payload measured slower than scanning it. Use
 `kind = "prom_http"` queries (the Prometheus HTTP range API marks the output
-unordered, which is the path the cache serves), historical data so the points are
-really older than the tail, and `settle_ms` after the warmup so a round can
+unordered, which is the path the cache serves), historical data so the points
+are really older than the tail, and `settle_ms` after the warmup so a round can
 publish the table before the measured iterations. `max_age` only bounds how long
 an entry may survive what the sequence probe cannot describe, so it is the last
 resort rather than a freshness setting (see above); it is not what makes a warm
@@ -307,8 +309,8 @@ frontend rollup cache serving warm historical PromQL ranges. It writes 2048
 series × 720 one-minute samples starting 2024-01-01 through remote-write, then
 evaluates 2024-01-01T02:00Z–08:00Z at a `5m` step through the Prometheus HTTP
 range API with `rate(...)`, `sum by (host) (rate(...))`, and a bare named
-selector. The range is six hours inclusive, so it is 73 points; a `5m` chunk is a
-whole multiple of the step and holds one grid point per chunk, so all 73 are
+selector. The range is six hours inclusive, so it is 73 points; the `5m`
+target aligns with the `5m` step, one step per chunk, so all 73 points are
 cacheable and the request has zero direct spans. The data is historical and
 `tail = "0s"`, so nothing falls into the tail either, and every measured
 iteration of the two cached shapes should be a real hit.
