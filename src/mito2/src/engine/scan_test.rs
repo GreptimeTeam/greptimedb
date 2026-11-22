@@ -7782,4 +7782,16 @@ async fn test_seq_scan_reads_files_with_disjoint_keys_in_parallel() {
 | c     | 20.0    | 1970-01-01T00:00:10 |
 +-------+---------+---------------------+";
     assert_eq!(expected, sort_batches_and_print(&batches, &["tag_0", "ts"]));
+
+    // Per-series scans still group the files by time only.
+    let request = ScanRequest {
+        distribution: Some(TimeSeriesDistribution::PerSeries),
+        ..Default::default()
+    };
+    let scanner = engine.scanner(region_id, request).await.unwrap();
+    let Scanner::Series(scanner) = scanner else {
+        panic!("Scanner should be series scan");
+    };
+    let ranges: Vec<_> = scanner.properties().partitions.iter().flatten().collect();
+    assert_eq!(2, ranges.len(), "unexpected ranges: {ranges:?}");
 }

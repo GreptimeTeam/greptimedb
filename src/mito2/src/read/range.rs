@@ -14,6 +14,8 @@
 
 //! Structs for partition ranges.
 
+use std::collections::BTreeMap;
+
 use bytes::Bytes;
 use common_time::Timestamp;
 use futures::future::BoxFuture;
@@ -22,7 +24,7 @@ use store_api::region_engine::PartitionRange;
 use store_api::storage::TimeSeriesDistribution;
 
 use crate::cache::CacheStrategy;
-use crate::compaction::run::{merge_primary_key_ranges, primary_key_ranges_overlap};
+use crate::compaction::run::merge_primary_key_ranges;
 use crate::memtable::{MemtableRange, MemtableStats};
 use crate::read::scan_region::ScanInput;
 use crate::sst::file::{FileHandle, FileTimeRange, overlaps};
@@ -99,21 +101,24 @@ impl RangeMeta {
         #[cfg(feature = "enterprise")]
         Self::push_extension_ranges(input, &mut ranges);
 
+        let per_series = input.distribution == Some(TimeSeriesDistribution::PerSeries);
         let num_memtables = input.memtables.len();
         let mapper = input.primary_key_mapper();
         let ranges = ranges
             .into_iter()
             .map(|range| {
+                // Per-series scans keep grouping ranges by time only.
                 let primary_keys = range.indices[0]
                     .index
                     .checked_sub(num_memtables)
                     .and_then(|i| input.files.get(i))
+                    .filter(|_| !per_series)
                     .and_then(|file| file.primary_key_range(mapper));
                 (range, primary_keys)
             })
             .collect();
         let ranges = group_ranges_for_seq_scan(ranges);
-        if input.compaction || input.distribution == Some(TimeSeriesDistribution::PerSeries) {
+        if input.compaction || per_series {
             // We don't split ranges in compaction or TimeSeriesDistribution::PerSeries.
             return ranges;
         }
@@ -369,45 +374,72 @@ fn group_ranges_for_seq_scan(
     // Sorts ranges by time range (start asc, end desc).
     ranges.sort_unstable_by(|(a, _), (b, _)| compare_time_ranges(a, b));
     let mut groups = Vec::with_capacity(ranges.len());
-    // Groups that may still overlap a later range in time. They all contain the start of the
-    // range being placed, so they overlap it and each other in time and have disjoint keys.
-    let mut active: Vec<(RangeMeta, Option<(Bytes, Bytes)>)> = Vec::new();
+    // Groups with known keys, by min key to (max key, group). Their key ranges are disjoint.
+    // A group that ended before the current range starts is closed when a lookup reaches it.
+    let mut keyed: BTreeMap<Bytes, (Bytes, RangeMeta)> = BTreeMap::new();
+    // A group with unknown keys. While it is open, `keyed` is empty.
+    let mut unknown: Option<RangeMeta> = None;
     for (range, primary_keys) in ranges {
         // Later ranges start no earlier than this one, so groups ending before it are complete.
         let start = range.time_range.0;
-        groups.extend(
-            active
-                .extract_if(.., |(group, _)| group.time_range.1 < start)
-                .map(|(group, _)| group),
-        );
-
-        // A group whose keys miss this range cannot overlap the union of the range with the
-        // groups it does overlap, so one pass finds every group to merge.
-        let overlapping: Vec<_> = active
-            .extract_if(.., |(_, keys)| keys_may_overlap(keys, &primary_keys))
-            .collect();
-        let mut current = (range, primary_keys);
-        for (mut group, keys) in overlapping {
-            group.merge(current.0);
-            current = (group, merge_primary_key_ranges(keys, current.1));
+        let mut current = range;
+        let mut current_keys = primary_keys;
+        if let Some(group) = unknown.take() {
+            if group.time_range.1 < start {
+                groups.push(group);
+            } else {
+                current = merge_into(group, current);
+                current_keys = None;
+            }
         }
-        active.push(current);
+
+        // Open groups all contain `start`, so they overlap `current` in time. A group whose keys
+        // miss this range cannot overlap the union of the range with the groups it does overlap,
+        // so one lookup finds every group to merge.
+        let candidates: Vec<_> = match &current_keys {
+            Some((min, max)) => keyed
+                .range(..=max.clone())
+                .rev()
+                .take_while(|(_, (group_max, _))| group_max >= min)
+                .map(|(group_min, _)| group_min.clone())
+                .collect(),
+            None => keyed.keys().cloned().collect(),
+        };
+        for group_min in candidates {
+            let (group_max, group) = keyed.remove(&group_min).unwrap();
+            if group.time_range.1 < start {
+                groups.push(group);
+            } else {
+                current = merge_into(group, current);
+                current_keys = merge_primary_key_ranges(current_keys, Some((group_min, group_max)));
+            }
+        }
+
+        match current_keys {
+            Some((min, max)) => {
+                keyed.insert(min, (max, current));
+            }
+            None => {
+                // Unknown keys overlap every group, so the lookup above emptied `keyed`.
+                debug_assert!(keyed.is_empty());
+                unknown = Some(current);
+            }
+        }
     }
-    groups.extend(active.into_iter().map(|(group, _)| group));
+    groups.extend(unknown);
+    groups.extend(keyed.into_values().map(|(_, group)| group));
     groups.sort_unstable_by(compare_time_ranges);
     groups
+}
+
+fn merge_into(mut group: RangeMeta, range: RangeMeta) -> RangeMeta {
+    group.merge(range);
+    group
 }
 
 fn compare_time_ranges(a: &RangeMeta, b: &RangeMeta) -> std::cmp::Ordering {
     let (l, r) = (a.time_range, b.time_range);
     l.0.cmp(&r.0).then_with(|| r.1.cmp(&l.1))
-}
-
-fn keys_may_overlap(lhs: &Option<(Bytes, Bytes)>, rhs: &Option<(Bytes, Bytes)>) -> bool {
-    match (lhs, rhs) {
-        (Some(lhs), Some(rhs)) => primary_key_ranges_overlap(lhs, rhs),
-        _ => true,
-    }
 }
 
 /// Splits the range into multiple smaller ranges.
@@ -668,6 +700,65 @@ mod tests {
             (4, 15, 30, Some(("c", "c"))),
         ];
         assert_eq!(vec![vec![1, 2, 3], vec![4]], group_with_keys(&input));
+
+        // A group that ended before a range starts stays apart even if their keys overlap.
+        let input = [
+            (1, 0, 10, Some(("a", "b"))),
+            (2, 20, 30, Some(("a", "b"))),
+            (3, 20, 30, Some(("c", "c"))),
+        ];
+        assert_eq!(vec![vec![1], vec![2], vec![3]], group_with_keys(&input));
+
+        // An open group with unknown keys takes every range it overlaps in time.
+        let input = [
+            (1, 0, 50, None),
+            (2, 10, 20, Some(("a", "a"))),
+            (3, 40, 60, Some(("b", "b"))),
+            (4, 70, 80, Some(("a", "a"))),
+            (5, 70, 80, Some(("b", "b"))),
+        ];
+        assert_eq!(
+            vec![vec![1, 2, 3], vec![4], vec![5]],
+            group_with_keys(&input)
+        );
+    }
+
+    #[test]
+    fn test_group_ranges_never_split_overlapping_ranges() {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+
+        const KEYS: [&str; 8] = ["a", "b", "c", "d", "e", "f", "g", "h"];
+        let mut rng = StdRng::seed_from_u64(42);
+        for _ in 0..200 {
+            let input: Vec<KeyedRange> = (0..rng.random_range(1..40))
+                .map(|idx| {
+                    let start = rng.random_range(0..100);
+                    let end = start + rng.random_range(0..20);
+                    let keys = rng.random_bool(0.9).then(|| {
+                        let lo = rng.random_range(0..KEYS.len());
+                        let hi = rng.random_range(lo..KEYS.len());
+                        (KEYS[lo], KEYS[hi])
+                    });
+                    (idx, start, end, keys)
+                })
+                .collect();
+            let groups = group_with_keys(&input);
+            let group_of = |idx: usize| groups.iter().position(|g| g.contains(&idx)).unwrap();
+            assert_eq!(input.len(), groups.iter().map(Vec::len).sum::<usize>());
+            for (i, (_, a_start, a_end, a_keys)) in input.iter().enumerate() {
+                for (j, (_, b_start, b_end, b_keys)) in input.iter().enumerate().skip(i + 1) {
+                    let times = a_start.max(b_start) <= a_end.min(b_end);
+                    let keys = match (a_keys, b_keys) {
+                        (Some(a), Some(b)) => a.0.max(b.0) <= a.1.min(b.1),
+                        _ => true,
+                    };
+                    if times && keys {
+                        assert_eq!(group_of(i), group_of(j), "{input:?}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]
