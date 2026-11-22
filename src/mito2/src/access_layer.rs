@@ -52,6 +52,7 @@ use crate::sst::index::puffin_manager::{PuffinManagerFactory, SstPuffinManager};
 use crate::sst::index::registry::IndexRegistry;
 use crate::sst::index::{IndexerBuilderImpl, build_index_from_parquet_bytes};
 use crate::sst::location::{self, region_dir_from_table_dir};
+use crate::sst::parquet::blob::blob_path;
 use crate::sst::parquet::reader::ParquetReaderBuilder;
 use crate::sst::parquet::writer::{ParquetWriter, SstWriteContext};
 use crate::sst::parquet::{SstInfo, WriteOptions};
@@ -271,16 +272,18 @@ impl AccessLayer {
 
         let attempted_files = file_ids.to_vec();
         // Deleter does not normalize leading slashes like Operator::delete does.
+        // Each SST may have a blob sidecar; deleting a missing one is a no-op.
         let paths: Vec<_> = file_ids
             .iter()
-            .map(|file_id| {
-                location::sst_file_path(
+            .flat_map(|file_id| {
+                let sst = location::sst_file_path(
                     &self.table_dir,
                     RegionFileId::new(region_id, *file_id),
                     self.path_type,
                 )
                 .trim_start_matches('/')
-                .to_string()
+                .to_string();
+                [blob_path(&sst), sst]
             })
             .collect();
 
@@ -469,7 +472,7 @@ impl AccessLayer {
                 request.metadata,
                 request.index_config,
                 indexer_builder,
-                path_provider,
+                path_provider.clone(),
                 metrics,
             )
             .await
@@ -481,7 +484,8 @@ impl AccessLayer {
             })
             .with_write_guard(guard)
             .with_cancellation(cancellation)
-            .with_memory_limits(limits);
+            .with_memory_limits(limits)
+            .with_blob_target(self.object_store.clone(), Arc::new(path_provider));
             match request.sst_write_format {
                 FormatType::PrimaryKey => {
                     writer
@@ -750,13 +754,14 @@ impl TempFileCleaner {
         }
     }
 
-    /// Removes the SST and index file from the local atomic dir by the file id.
+    /// Removes the SST, its blob sidecar, and its index file from the local atomic dir by the file id.
     /// This only removes the initial index, since the index version is always 0 for a new SST, this method should be safe to pass 0.
     pub(crate) async fn clean_by_file_id(&self, file_id: FileId) {
         let sst_key = IndexKey::new(self.region_id, file_id, FileType::Parquet).to_string();
+        let blob_key = IndexKey::new(self.region_id, file_id, FileType::Blob).to_string();
         let index_key = IndexKey::new(self.region_id, file_id, FileType::Puffin(0)).to_string();
 
-        Self::clean_atomic_dir_files(&self.object_store, &[&sst_key, &index_key]).await;
+        Self::clean_atomic_dir_files(&self.object_store, &[&sst_key, &blob_key, &index_key]).await;
     }
 
     /// Removes the files from the local atomic dir by their names.

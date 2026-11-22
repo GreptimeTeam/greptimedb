@@ -125,8 +125,14 @@ impl CompactionUnit {
         if self.outputs.is_empty() {
             return 0;
         }
+        // Dictionary encoding hides decoded values from the uncompressed size; files written
+        // before the decoded size was recorded report 0 for it.
         self.inputs.iter().fold(0u64, |total, file| {
-            total.saturating_add(file.meta_ref().max_row_group_uncompressed_size)
+            let meta = file.meta_ref();
+            total.saturating_add(
+                meta.max_row_group_uncompressed_size
+                    .max(meta.max_row_group_decoded_size),
+            )
         })
     }
 }
@@ -146,6 +152,29 @@ mod tests {
 
     use super::*;
     use crate::compaction::test_util::{new_file_handle, new_file_handle_with_size_and_sequence};
+
+    #[test]
+    fn test_estimated_memory_counts_decoded_row_groups() {
+        let file = |uncompressed, decoded| {
+            FileHandle::new(
+                crate::sst::file::FileMeta {
+                    file_id: FileId::random(),
+                    max_row_group_uncompressed_size: uncompressed,
+                    max_row_group_decoded_size: decoded,
+                    ..Default::default()
+                },
+                crate::test_util::new_noop_file_purger(),
+            )
+        };
+        // A dictionary-encoded file decodes to more than its uncompressed size; a file written
+        // before the decoded size was recorded reports 0 for it.
+        let units = CompactionUnit::from_picker(PickerOutput {
+            outputs: vec![output(vec![file(1 << 20, 128 << 20), file(4 << 20, 0)])],
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!((128 << 20) + (4 << 20), units[0].estimated_memory_bytes());
+    }
 
     /// Builds an L1 output that preserves deletion markers for grouping tests.
     fn output(inputs: Vec<FileHandle>) -> CompactionOutput {

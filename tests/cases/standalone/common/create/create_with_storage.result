@@ -1,0 +1,157 @@
+CREATE TABLE blobs (
+    ts TIMESTAMP TIME INDEX,
+    host STRING PRIMARY KEY,
+    payload BINARY STORAGE WITH (type = 'external', threshold = '64KiB'),
+    body STRING STORAGE WITH (threshold = '1MiB') COMPRESSION WITH (level = 3),
+    note STRING STORAGE WITH (type = 'EXTERNAL'),
+);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE blobs;
+
++-------+------------------------------------------------------------------------------------------------------------------------+
+| Table | Create Table                                                                                                           |
++-------+------------------------------------------------------------------------------------------------------------------------+
+| blobs | CREATE TABLE IF NOT EXISTS "blobs" (                                                                                   |
+|       |   "ts" TIMESTAMP(3) NOT NULL,                                                                                          |
+|       |   "host" STRING NULL,                                                                                                  |
+|       |   "payload" VARBINARY NULL STORAGE WITH(threshold = '64KiB', type = 'external'),                                       |
+|       |   "body" STRING NULL COMPRESSION WITH(level = '3', type = 'zstd') STORAGE WITH(threshold = '1MiB', type = 'external'), |
+|       |   "note" STRING NULL STORAGE WITH(type = 'external'),                                                                  |
+|       |   TIME INDEX ("ts"),                                                                                                   |
+|       |   PRIMARY KEY ("host")                                                                                                 |
+|       | )                                                                                                                      |
+|       |                                                                                                                        |
+|       | ENGINE=mito                                                                                                            |
+|       |                                                                                                                        |
++-------+------------------------------------------------------------------------------------------------------------------------+
+
+INSERT INTO blobs VALUES
+    (1, 'h1', 'abc', 'first body', 'n1'),
+    (2, 'h1', NULL, 'second body', NULL),
+    (3, 'h2', 'xyz', NULL, 'n3');
+
+Affected Rows: 3
+
+ADMIN flush_table('blobs');
+
++----------------------------+
+| ADMIN flush_table('blobs') |
++----------------------------+
+| 0                          |
++----------------------------+
+
+SELECT ts, host, payload, body, note FROM blobs ORDER BY ts;
+
++-------------------------+------+---------+-------------+------+
+| ts                      | host | payload | body        | note |
++-------------------------+------+---------+-------------+------+
+| 1970-01-01T00:00:00.001 | h1   | 616263  | first body  | n1   |
+| 1970-01-01T00:00:00.002 | h1   |         | second body |      |
+| 1970-01-01T00:00:00.003 | h2   | 78797a  |             | n3   |
++-------------------------+------+---------+-------------+------+
+
+ALTER TABLE blobs MODIFY COLUMN body BIGINT;
+
+Error: 1004(InvalidArguments), Invalid storage option: storage options are only supported on string and binary columns, but column body is Int64
+
+ALTER TABLE blobs ADD COLUMN extra STRING STORAGE WITH (threshold = '4KiB');
+
+Affected Rows: 0
+
+ALTER TABLE blobs ADD COLUMN region STRING PRIMARY KEY STORAGE WITH (threshold = '4KiB');
+
+Error: 1004(InvalidArguments), STORAGE option is only supported on field columns, but column region is not a field column
+
+ALTER TABLE blobs ADD COLUMN n BIGINT STORAGE WITH (threshold = '4KiB');
+
+Error: 1004(InvalidArguments), Invalid storage option: storage options are only supported on string and binary columns, but column n is Int64
+
+CREATE TABLE blobs_like LIKE blobs;
+
+Affected Rows: 0
+
+SHOW CREATE TABLE blobs_like;
+
++------------+------------------------------------------------------------------------------------------------------------------------+
+| Table      | Create Table                                                                                                           |
++------------+------------------------------------------------------------------------------------------------------------------------+
+| blobs_like | CREATE TABLE IF NOT EXISTS "blobs_like" (                                                                              |
+|            |   "ts" TIMESTAMP(3) NOT NULL,                                                                                          |
+|            |   "host" STRING NULL,                                                                                                  |
+|            |   "payload" VARBINARY NULL STORAGE WITH(threshold = '64KiB', type = 'external'),                                       |
+|            |   "body" STRING NULL COMPRESSION WITH(level = '3', type = 'zstd') STORAGE WITH(threshold = '1MiB', type = 'external'), |
+|            |   "note" STRING NULL STORAGE WITH(type = 'external'),                                                                  |
+|            |   "extra" STRING NULL STORAGE WITH(threshold = '4KiB', type = 'external'),                                             |
+|            |   TIME INDEX ("ts"),                                                                                                   |
+|            |   PRIMARY KEY ("host")                                                                                                 |
+|            | )                                                                                                                      |
+|            |                                                                                                                        |
+|            | ENGINE=mito                                                                                                            |
+|            |                                                                                                                        |
++------------+------------------------------------------------------------------------------------------------------------------------+
+
+DROP TABLE blobs_like;
+
+Affected Rows: 0
+
+SHOW CREATE TABLE blobs;
+
++-------+------------------------------------------------------------------------------------------------------------------------+
+| Table | Create Table                                                                                                           |
++-------+------------------------------------------------------------------------------------------------------------------------+
+| blobs | CREATE TABLE IF NOT EXISTS "blobs" (                                                                                   |
+|       |   "ts" TIMESTAMP(3) NOT NULL,                                                                                          |
+|       |   "host" STRING NULL,                                                                                                  |
+|       |   "payload" VARBINARY NULL STORAGE WITH(threshold = '64KiB', type = 'external'),                                       |
+|       |   "body" STRING NULL COMPRESSION WITH(level = '3', type = 'zstd') STORAGE WITH(threshold = '1MiB', type = 'external'), |
+|       |   "note" STRING NULL STORAGE WITH(type = 'external'),                                                                  |
+|       |   "extra" STRING NULL STORAGE WITH(threshold = '4KiB', type = 'external'),                                             |
+|       |   TIME INDEX ("ts"),                                                                                                   |
+|       |   PRIMARY KEY ("host")                                                                                                 |
+|       | )                                                                                                                      |
+|       |                                                                                                                        |
+|       | ENGINE=mito                                                                                                            |
+|       |                                                                                                                        |
++-------+------------------------------------------------------------------------------------------------------------------------+
+
+DROP TABLE blobs;
+
+Affected Rows: 0
+
+CREATE TABLE bad (ts TIMESTAMP TIME INDEX, s STRING STORAGE WITH (type = 'inline'));
+
+Error: 1004(InvalidArguments), Invalid storage option: invalid type: inline, expected: 'external'
+
+CREATE TABLE bad (ts TIMESTAMP TIME INDEX, s STRING STORAGE WITH (threshold = '0'));
+
+Error: 1004(InvalidArguments), Invalid storage option: invalid threshold: 0, expected: a positive size such as '64KiB'
+
+CREATE TABLE bad (ts TIMESTAMP TIME INDEX, s STRING STORAGE WITH (threshold = 'large'));
+
+Error: 1004(InvalidArguments), Invalid storage option: invalid threshold: large, expected: a positive size such as '64KiB'
+
+CREATE TABLE bad (ts TIMESTAMP TIME INDEX, s STRING STORAGE WITH (size = '1MiB'));
+
+Error: 1004(InvalidArguments), Invalid column option, column name: s, error: invalid STORAGE option: size
+
+CREATE TABLE bad (ts TIMESTAMP TIME INDEX, s STRING STORAGE);
+
+Error: 1004(InvalidArguments), Invalid column option, column name: s, error: expect WITH (...) after STORAGE keyword
+
+CREATE TABLE bad (ts TIMESTAMP TIME INDEX, n BIGINT STORAGE WITH (type = 'external'));
+
+Error: 1004(InvalidArguments), Invalid storage option: storage options are only supported on string and binary columns, but column n is Int64
+
+CREATE TABLE bad (
+    ts TIMESTAMP TIME INDEX,
+    host STRING PRIMARY KEY STORAGE WITH (type = 'external')
+);
+
+Error: 1004(InvalidArguments), STORAGE option is only supported on field columns, but column host is not a field column
+
+CREATE TABLE bad (ts TIMESTAMP TIME INDEX STORAGE WITH (type = 'external'));
+
+Error: 1004(InvalidArguments), Invalid storage option: storage options are only supported on string and binary columns, but column ts is TimestampMillisecond
+

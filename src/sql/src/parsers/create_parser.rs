@@ -49,6 +49,7 @@ use crate::parsers::tql_parser;
 use crate::parsers::utils::{
     self, parse_with_options, validate_column_compression_create_option,
     validate_column_fulltext_create_option, validate_column_skipping_index_create_option,
+    validate_column_storage_create_option,
 };
 use crate::statements::create::{
     Column, ColumnExtensions, CreateDatabase, CreateExternalTable, CreateFlow, CreateTable,
@@ -891,7 +892,7 @@ impl<'a> ParserContext<'a> {
     /// This function will handle:
     /// - Vector type
     /// - Indexes
-    /// - SST compression options
+    /// - SST compression and storage options
     fn parse_column_extensions(
         parser: &mut Parser<'_>,
         column_name: &Ident,
@@ -1064,49 +1065,78 @@ impl<'a> ParserContext<'a> {
 
         // SST compression
         if parser.parse_keyword(Keyword::COMPRESSION) {
-            ensure!(
-                column_extensions.compression_options.is_none(),
-                InvalidColumnOptionSnafu {
-                    name: column_name.to_string(),
-                    msg: "duplicated COMPRESSION option",
-                }
-            );
+            column_extensions.compression_options = Some(Self::parse_sst_column_options(
+                parser,
+                column_name,
+                "COMPRESSION",
+                column_extensions.compression_options.is_some(),
+                validate_column_compression_create_option,
+            )?);
+            is_extension_declared |= true;
+        }
 
-            let options = parser
-                .parse_options(Keyword::WITH)
-                .context(error::SyntaxSnafu)?
-                .into_iter()
-                .map(parse_option_string)
-                .collect::<Result<Vec<_>>>()?;
-            ensure!(
-                !options.is_empty(),
-                InvalidColumnOptionSnafu {
-                    name: column_name.to_string(),
-                    msg: "expect WITH (...) after COMPRESSION keyword",
-                }
-            );
-            for (key, value) in options.iter() {
-                ensure!(
-                    value.as_string().is_some(),
-                    InvalidColumnOptionSnafu {
-                        name: column_name.to_string(),
-                        msg: format!("COMPRESSION option {key} requires a scalar value"),
-                    }
-                );
-                ensure!(
-                    validate_column_compression_create_option(key),
-                    InvalidColumnOptionSnafu {
-                        name: column_name.to_string(),
-                        msg: format!("invalid COMPRESSION option: {key}"),
-                    }
-                );
-            }
-
-            column_extensions.compression_options = Some(OptionMap::new(options));
+        // SST storage
+        if parser.parse_keyword(Keyword::STORAGE) {
+            column_extensions.storage_options = Some(Self::parse_sst_column_options(
+                parser,
+                column_name,
+                "STORAGE",
+                column_extensions.storage_options.is_some(),
+                validate_column_storage_create_option,
+            )?);
             is_extension_declared |= true;
         }
 
         Ok(is_extension_declared)
+    }
+
+    /// Parses the `WITH (...)` part of an SST column option such as `COMPRESSION`.
+    fn parse_sst_column_options(
+        parser: &mut Parser<'_>,
+        column_name: &Ident,
+        option_name: &str,
+        declared: bool,
+        is_valid_key: fn(&str) -> bool,
+    ) -> Result<OptionMap> {
+        ensure!(
+            !declared,
+            InvalidColumnOptionSnafu {
+                name: column_name.to_string(),
+                msg: format!("duplicated {option_name} option"),
+            }
+        );
+
+        let options = parser
+            .parse_options(Keyword::WITH)
+            .context(error::SyntaxSnafu)?
+            .into_iter()
+            .map(parse_option_string)
+            .collect::<Result<Vec<_>>>()?;
+        ensure!(
+            !options.is_empty(),
+            InvalidColumnOptionSnafu {
+                name: column_name.to_string(),
+                msg: format!("expect WITH (...) after {option_name} keyword"),
+            }
+        );
+        for (key, value) in options.iter() {
+            ensure!(
+                value.as_string().is_some(),
+                InvalidColumnOptionSnafu {
+                    name: column_name.to_string(),
+                    msg: format!("{option_name} option {key} requires a scalar value"),
+                }
+            );
+            ensure!(
+                is_valid_key(key),
+                InvalidColumnOptionSnafu {
+                    name: column_name.to_string(),
+                    msg: format!("invalid {option_name} option: {key}"),
+                }
+            );
+        }
+
+        Ok(OptionMap::new(options))
     }
 
     fn parse_optional_table_constraint(&mut self) -> Result<Option<TableConstraint>> {
@@ -3316,6 +3346,64 @@ CREATE TABLE spans (
             (
                 "CREATE TABLE t (ts TIMESTAMP TIME INDEX, s STRING COMPRESSION WITH (level='3') COMPRESSION WITH (level='5'))",
                 "duplicated COMPRESSION option",
+            ),
+        ] {
+            let result = parse(sql);
+            assert!(
+                result.as_ref().is_err_and(|e| e.to_string().contains(err)),
+                "{sql}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_create_table_storage_options() {
+        let parse = |sql: &str| {
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+        };
+
+        let sql = r"
+CREATE TABLE spans (
+    ts TIMESTAMP TIME INDEX,
+    payload BINARY STORAGE WITH (threshold='1MiB') COMPRESSION WITH (level='3'),
+)";
+        let result = parse(sql).unwrap();
+        let Statement::CreateTable(c) = &result[0] else {
+            panic!("should be create_table statement");
+        };
+        let payload = &c.columns[1];
+        assert!(payload.extensions.compression_options.is_some());
+        // Display must produce SQL that parses back to the same column.
+        let reparsed = parse(&format!(
+            "CREATE TABLE t (ts TIMESTAMP TIME INDEX, {payload})"
+        ))
+        .unwrap();
+        let Statement::CreateTable(r) = &reparsed[0] else {
+            panic!("should be create_table statement");
+        };
+        assert_eq!(payload.extensions, r.columns[1].extensions);
+        assert_eq!(
+            Some("1MiB"),
+            r.columns[1]
+                .extensions
+                .storage_options
+                .as_ref()
+                .unwrap()
+                .get("threshold")
+        );
+
+        for (sql, err) in [
+            (
+                "CREATE TABLE t (ts TIMESTAMP TIME INDEX, s STRING STORAGE)",
+                "expect WITH (...) after STORAGE keyword",
+            ),
+            (
+                "CREATE TABLE t (ts TIMESTAMP TIME INDEX, s STRING STORAGE WITH (size='1MiB'))",
+                "invalid STORAGE option: size",
+            ),
+            (
+                "CREATE TABLE t (ts TIMESTAMP TIME INDEX, s STRING STORAGE WITH (type='external') STORAGE WITH (type='external'))",
+                "duplicated STORAGE option",
             ),
         ] {
             let result = parse(sql);

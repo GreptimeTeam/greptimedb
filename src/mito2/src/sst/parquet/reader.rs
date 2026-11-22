@@ -53,6 +53,7 @@ use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 use store_api::storage::{ColumnId, FileId};
 use table::predicate::Predicate;
 
+use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::index::result_cache::PredicateKey;
 use crate::cache::{
     CacheStrategy, CachedSstMeta, SstMetaObservation, SstMetaPreparation, SstMetaResolution,
@@ -75,6 +76,9 @@ use crate::sst::index::fulltext_index::applier::{
 };
 use crate::sst::index::inverted_index::applier::{
     InvertedIndexApplierRef, InvertedIndexApplyMetrics,
+};
+use crate::sst::parquet::blob::{
+    BlobCache, BlobResolver, PendingBatch, blob_columns, blob_file_size,
 };
 use crate::sst::parquet::file_range::{
     FileRangeContext, FileRangeContextRef, PartitionFilterContext, PreFilterMode, RangeBase,
@@ -1809,6 +1813,10 @@ pub(crate) struct RowGroupBuildContext<'a> {
 
 impl RowGroupReaderBuilder {
     /// Path of the file to read.
+    pub(crate) fn object_store(&self) -> &ObjectStore {
+        &self.object_store
+    }
+
     pub(crate) fn file_path(&self) -> &str {
         &self.file_path
     }
@@ -2593,6 +2601,10 @@ pub(crate) struct FlatRowGroupReader {
     stream: ProjectedRecordBatchStream,
     /// Cached sequence array to override sequences.
     override_sequence: Option<ArrayRef>,
+    /// Resolves out-of-line values when the file stores some columns in a blob sidecar.
+    blob_resolver: Option<BlobResolver>,
+    /// Decoded batch whose remaining rows still hold references.
+    pending: Option<PendingBatch>,
 }
 
 impl FlatRowGroupReader {
@@ -2602,16 +2614,51 @@ impl FlatRowGroupReader {
         let override_sequence = context
             .read_format()
             .new_override_sequence_array(DEFAULT_READ_BATCH_SIZE);
+        let builder = context.reader_builder();
+        // Only an SST with a sidecar has references to resolve.
+        let blob_columns = blob_file_size(builder.parquet_metadata())
+            .map(|_| blob_columns(builder.parquet_metadata()))
+            .unwrap_or_default();
+        let blob_resolver = (!blob_columns.is_empty()).then(|| {
+            let file = builder.file_handle();
+            let resolver = BlobResolver::new(
+                file.file_id().file_id(),
+                builder.object_store().clone(),
+                builder.file_path(),
+                blob_columns,
+            );
+            let cache_strategy = builder.cache_strategy();
+            if !cache_strategy
+                .write_cache()
+                .is_some_and(|cache| cache.cache_blobs())
+            {
+                return resolver;
+            }
+            let key = IndexKey::new(file.region_id(), file.file_id().file_id(), FileType::Blob);
+            resolver.with_cache(BlobCache::new(
+                cache_strategy.clone(),
+                key,
+                file.meta_ref().blob_file_size,
+            ))
+        });
 
         Self {
             context,
             stream,
             override_sequence,
+            blob_resolver,
+            pending: None,
         }
     }
 
     /// Returns the next RecordBatch.
     pub(crate) async fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
+        if let (Some(resolver), Some(pending)) = (&self.blob_resolver, &mut self.pending) {
+            if let Some(batch) = resolver.next_chunk(pending).await? {
+                return Ok(Some(batch));
+            }
+            self.pending = None;
+        }
         match self.stream.next().await {
             Some(batch_result) => {
                 let record_batch = batch_result?;
@@ -2620,7 +2667,18 @@ impl FlatRowGroupReader {
                     .context
                     .read_format()
                     .convert_batch(record_batch, self.override_sequence.as_ref())?;
-                Ok(Some(record_batch))
+                let Some(resolver) = &self.blob_resolver else {
+                    return Ok(Some(record_batch));
+                };
+                if record_batch.num_rows() == 0 {
+                    return Ok(Some(record_batch));
+                }
+                let Some(mut pending) = resolver.prepare(record_batch.clone())? else {
+                    return Ok(Some(record_batch));
+                };
+                let first = resolver.next_chunk(&mut pending).await?;
+                self.pending = Some(pending);
+                Ok(first)
             }
             None => Ok(None),
         }

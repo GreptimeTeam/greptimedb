@@ -1,0 +1,8 @@
+name = "column_storage_downgrade"
+reason = "A binary without external storage support must reject SSTs that store values in a blob sidecar instead of returning references as values."
+introduced_by = "PR #10554"
+topologies = ["distributed", "standalone"]
+from_range = [">=v1.4.0-alpha.0"]
+to_range = ["=v1.3.1"]
+features = ["table", "downgrade", "sst", "read"]
+owner = "storage"

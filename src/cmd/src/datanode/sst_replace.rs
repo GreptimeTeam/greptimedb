@@ -165,13 +165,20 @@ impl SstReplaceCommand {
         })?;
         let new_num_rows = parquet_meta.file_metadata().num_rows() as u64;
         let new_num_row_groups = parquet_meta.num_row_groups() as u64;
-        validate_replacement(&old_file, new_num_rows, new_num_row_groups)?;
+        validate_replacement(
+            &old_file,
+            new_num_rows,
+            new_num_row_groups,
+            mito2::sst::parquet::sidecar_size(&parquet_meta).is_some(),
+        )?;
 
         let mut new_file = old_file.as_ref().clone();
         new_file.file_size = new_file_size;
         new_file.num_rows = new_num_rows;
         new_file.num_row_groups = new_num_row_groups;
         new_file.max_row_group_uncompressed_size = max_row_group_uncompressed_size(&parquet_meta);
+        // The old file's decoded size does not describe the replacement.
+        new_file.max_row_group_decoded_size = 0;
 
         println!("{} Region: {}", "[ok]".green(), region_id);
         println!("{} Target SST: {}", "[ok]".green(), target_path.cyan());
@@ -285,7 +292,18 @@ fn validate_replacement(
     old_file: &mito2::sst::file::FileMeta,
     new_num_rows: u64,
     new_num_row_groups: u64,
+    new_has_sidecar: bool,
 ) -> error::Result<()> {
+    // References name the sidecar of the SST that wrote them, so a replacement's references
+    // cannot be read under the target's file id, and the target's sidecar cannot be checked
+    // against the replacement.
+    if old_file.blob_file_size > 0 || new_has_sidecar {
+        return error::IllegalConfigSnafu {
+            msg: "replacing an SST that has or references a blob sidecar is not supported"
+                .to_string(),
+        }
+        .fail();
+    }
     if old_file.num_rows != 0 && old_file.num_rows != new_num_rows {
         return error::IllegalConfigSnafu {
             msg: format!(
@@ -358,11 +376,26 @@ mod tests {
             num_row_groups: 1,
             ..Default::default()
         };
-        assert!(validate_replacement(&old_file, 4, 1).is_ok());
-        assert!(validate_replacement(&old_file, 3, 1).is_err());
-        assert!(validate_replacement(&old_file, 4, 2).is_err());
+        assert!(validate_replacement(&old_file, 4, 1, false).is_ok());
+        assert!(validate_replacement(&old_file, 3, 1, false).is_err());
+        assert!(validate_replacement(&old_file, 4, 2, false).is_err());
 
         let legacy_file = mito2::sst::file::FileMeta::default();
-        assert!(validate_replacement(&legacy_file, 4, 1).is_ok());
+        assert!(validate_replacement(&legacy_file, 4, 1, false).is_ok());
+    }
+
+    #[test]
+    fn test_validate_replacement_rejects_sidecars() {
+        let old_file = mito2::sst::file::FileMeta {
+            num_rows: 4,
+            num_row_groups: 1,
+            ..Default::default()
+        };
+        assert!(validate_replacement(&old_file, 4, 1, true).is_err());
+        let with_sidecar = mito2::sst::file::FileMeta {
+            blob_file_size: 1024,
+            ..old_file
+        };
+        assert!(validate_replacement(&with_sidecar, 4, 1, false).is_err());
     }
 }

@@ -310,6 +310,11 @@ pub struct FileMeta {
     pub file_size: u64,
     /// Maximum uncompressed row group size of the file. 0 means unknown.
     pub max_row_group_uncompressed_size: u64,
+    /// Maximum row group size of the file with string and binary values counted at their decoded
+    /// size, which dictionary encoding hides from `max_row_group_uncompressed_size`. 0 means
+    /// unknown (files written before this field), which is omitted from manifests.
+    #[serde(skip_serializing_if = "is_zero_size")]
+    pub max_row_group_decoded_size: u64,
     /// Available indexes of the file.
     pub available_indexes: IndexTypes,
     /// Created indexes of the file for each column.
@@ -391,10 +396,18 @@ pub struct FileMeta {
     /// Physical encoding, omitted for legacy Parquet files.
     #[serde(default, skip_serializing_if = "FileFormat::is_parquet")]
     pub format: FileFormat,
+    /// Size of the blob sidecar that holds the file's external values, at the SST path with a
+    /// `.blob` extension. 0 means the file has no sidecar.
+    #[serde(default, skip_serializing_if = "is_zero_size")]
+    pub blob_file_size: u64,
 }
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+fn is_zero_size(value: &u64) -> bool {
+    *value == 0
 }
 
 /// Formats a debug field with a custom closure, as a stable replacement for
@@ -438,12 +451,19 @@ impl Debug for FileMeta {
             .field(
                 "max_row_group_uncompressed_size",
                 &ReadableSize(self.max_row_group_uncompressed_size),
+            )
+            .field(
+                "max_row_group_decoded_size",
+                &ReadableSize(self.max_row_group_decoded_size),
             );
         if self.exists_index() {
             debug_struct
                 .field("available_indexes", &self.available_indexes)
                 .field("indexes", &self.indexes)
                 .field("index_file_size", &ReadableSize(self.index_file_size));
+        }
+        if self.blob_file_size > 0 {
+            debug_struct.field("blob_file_size", &ReadableSize(self.blob_file_size));
         }
         debug_struct
             .field("num_rows", &self.num_rows)
@@ -1327,9 +1347,12 @@ async fn purge_index_cache_stager(
                 .await;
         }
 
-        // Remove the SST file from the cache.
+        // Remove the SST file and its blob sidecar from the cache.
         write_cache
             .remove(IndexKey::new(region_id, file_id, FileType::Parquet))
+            .await;
+        write_cache
+            .remove(IndexKey::new(region_id, file_id, FileType::Blob))
             .await;
     }
 

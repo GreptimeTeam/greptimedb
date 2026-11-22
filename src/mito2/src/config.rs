@@ -190,6 +190,9 @@ pub struct MitoConfig {
     /// TTL for write cache.
     #[serde(with = "humantime_serde")]
     pub write_cache_ttl: Option<Duration>,
+    /// Whether the write cache also holds the files of externally stored column values
+    /// (`STORAGE WITH (type = 'external')`). They share the data (parquet) part of the capacity.
+    pub write_cache_blobs: bool,
     /// Preload index (puffin) files into cache on region open (default: true).
     pub preload_index_cache: bool,
     /// Percentage of write cache capacity allocated for index (puffin) files (default: 20).
@@ -288,6 +291,7 @@ impl Default for MitoConfig {
             write_cache_path: String::new(),
             write_cache_size: ReadableSize::gb(5),
             write_cache_ttl: None,
+            write_cache_blobs: true,
             preload_index_cache: true,
             index_cache_percent: DEFAULT_INDEX_CACHE_PERCENT,
             enable_refill_cache_on_read: true,

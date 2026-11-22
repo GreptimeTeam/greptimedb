@@ -51,20 +51,26 @@ use tokio_util::sync::CancellationToken;
 use crate::access_layer::{FilePathProvider, Metrics, SstInfoArray, TempFileCleaner};
 use crate::config::{IndexBuildMode, IndexConfig};
 use crate::error::{
-    Error, InvalidMetadataSnafu, InvalidRecordBatchSnafu, OpenDalSnafu, Result, UnexpectedSnafu,
-    WriteParquetSnafu,
+    Error, InvalidMetadataSnafu, InvalidRecordBatchSnafu, NewRecordBatchSnafu, OpenDalSnafu,
+    Result, UnexpectedSnafu, WriteParquetSnafu,
 };
 use crate::read::FlatSource;
 use crate::sst::file::RegionFileId;
 use crate::sst::index::{Indexer, IndexerBuilder};
+use crate::sst::parquet::blob::{
+    BlobFileWriter, ExternalColumn, blob_column_entries, blob_path, compress_external_values,
+    external_columns,
+};
 use crate::sst::parquet::flat_format::{
     FlatWriteFormat, primary_key_column_index, time_index_column_index,
 };
 use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyWriteFormat};
 use crate::sst::parquet::parallel_writer::ParallelArrowWriter;
 use crate::sst::parquet::{
-    COLUMN_INDEX_TRUNCATE_LENGTH, PARQUET_METADATA_KEY, SstInfo, WriteOptions,
-    apply_column_compression, apply_float_field_encoding, apply_internal_column_encoding,
+    COLUMN_INDEX_TRUNCATE_LENGTH, PARQUET_EXTERNAL_METADATA_KEY, PARQUET_METADATA_KEY,
+    RowGroupValueBytes, SstInfo, WriteOptions, apply_column_compression,
+    apply_float_field_encoding, apply_internal_column_encoding, large_value_fields,
+    max_row_group_decoded_size, max_row_group_uncompressed_size, skip_statistics,
 };
 use crate::sst::upload::{self, UploadError};
 use crate::sst::{
@@ -181,6 +187,13 @@ impl<W: AsyncFileWriter> SstArrowWriter<W> {
         }
     }
 
+    fn append_key_value_metadata(&mut self, kv: KeyValue) {
+        match self {
+            SstArrowWriter::Serial(writer) => writer.append_key_value_metadata(kv),
+            SstArrowWriter::Parallel(writer) => writer.append_key_value_metadata(kv),
+        }
+    }
+
     async fn finish(&mut self) -> parquet::errors::Result<ParquetMetaData> {
         match self {
             SstArrowWriter::Serial(writer) => writer.finish().await,
@@ -253,6 +266,16 @@ pub struct ParquetWriter<'a, F: WriterFactory, I: IndexerBuilder, P: FilePathPro
     write_guard: Option<Arc<dyn SstWriteGuard>>,
     cancellation: Option<CancellationToken>,
     memory: WriteMemory,
+    /// Store of the blob sidecars and the provider of the SST paths they sit next to.
+    blob_target: Option<(ObjectStore, Arc<dyn FilePathProvider>)>,
+    /// Field columns with external storage, read from the region metadata on first use.
+    external_columns: Option<Vec<ExternalColumn>>,
+    /// Blob sidecar of the current file, created for its first external value.
+    blob_writer: Option<BlobFileWriter>,
+    /// Field columns of the current file that skip min/max statistics, picked from its first batch.
+    large_value_columns: Vec<String>,
+    /// Decoded value bytes per row group of the current file.
+    row_group_value_bytes: Option<RowGroupValueBytes>,
 }
 
 /// Registers output ownership before either an SST or its index is created in storage.
@@ -451,7 +474,23 @@ where
             metrics,
             write_guard: None,
             cancellation: None,
+            blob_target: None,
+            external_columns: None,
+            blob_writer: None,
+            large_value_columns: Vec::new(),
+            row_group_value_bytes: None,
         }
+    }
+
+    /// Stores external field values in a sidecar in `store`, next to the SST path that
+    /// `sst_paths` gives. The SST itself may be written elsewhere, e.g. to the write cache.
+    pub(crate) fn with_blob_target(
+        mut self,
+        store: ObjectStore,
+        sst_paths: Arc<dyn FilePathProvider>,
+    ) -> Self {
+        self.blob_target = Some((store, sst_paths));
+        self
     }
 
     pub(crate) fn with_cancellation(mut self, cancellation: Option<CancellationToken>) -> Self {
@@ -487,12 +526,17 @@ where
         let Some(limits) = self.memory.limits else {
             return Ok(());
         };
+        let blob_buffer = self
+            .blob_writer
+            .as_ref()
+            .map_or(0, BlobFileWriter::buffer_bytes);
         if let Some(SstArrowWriter::Serial(writer)) = &mut self.writer {
+            let bytes = writer.memory_size() + blob_buffer;
             ensure!(
-                writer.memory_size() <= limits.working_bytes,
+                bytes <= limits.working_bytes,
                 crate::error::SstWriteMemoryExceededSnafu {
                     kind: "encoder",
-                    bytes: writer.memory_size(),
+                    bytes,
                     limit: limits.working_bytes,
                 }
             );
@@ -529,6 +573,19 @@ where
                 stats.num_rows
             );
 
+            // The SST must not outlive or precede its values, so the sidecar completes first.
+            let columns = self.external_columns.as_deref().unwrap_or_default();
+            let entries = match self.blob_writer.take() {
+                Some(blob_writer) => blob_writer.finish(columns).await?,
+                // Without a sidecar the entries still tell compaction how the columns are encoded.
+                None => blob_column_entries(columns),
+            };
+            if let Some(writer) = &mut self.writer {
+                for entry in entries {
+                    writer.append_key_value_metadata(entry);
+                }
+            }
+
             // Finish indexer and writer.
             // safety: writer and index can only be both present or not.
             let index_output = self.current_indexer.as_mut().unwrap().finish().await;
@@ -544,15 +601,18 @@ where
             self.check_cancelled()?;
             // Keep the upload owned until finalization succeeds, so an error
             // still reaches the common abort path.
-            let parquet_metadata = self
-                .writer
-                .as_mut()
-                .context(UnexpectedSnafu {
-                    reason: "Missing SST writer during finalization",
-                })?
-                .finish()
-                .await
-                .map_err(map_write_error)?;
+            let writer = self.writer.as_mut().context(UnexpectedSnafu {
+                reason: "Missing SST writer during finalization",
+            })?;
+            for kv in self
+                .row_group_value_bytes
+                .take()
+                .map(RowGroupValueBytes::into_key_values)
+                .unwrap_or_default()
+            {
+                writer.append_key_value_metadata(kv);
+            }
+            let parquet_metadata = writer.finish().await.map_err(map_write_error)?;
             self.writer.take();
             let file_size = self.bytes_written.load(Ordering::Relaxed) as u64;
             if self.memory.limits.is_some() {
@@ -568,23 +628,16 @@ where
             // Safety: num rows > 0 so we must have min/max.
             let time_range = stats.time_range.unwrap();
 
-            let max_row_group_uncompressed_size: u64 = parquet_metadata
-                .row_groups()
-                .iter()
-                .map(|rg| {
-                    rg.columns()
-                        .iter()
-                        .map(|c| c.uncompressed_size() as u64)
-                        .sum::<u64>()
-                })
-                .max()
-                .unwrap_or(0);
+            let max_row_group_uncompressed_size =
+                max_row_group_uncompressed_size(&parquet_metadata);
+            let max_row_group_decoded_size = max_row_group_decoded_size(&parquet_metadata);
             let num_series = stats.series_estimator.finish();
             ssts.push(SstInfo {
                 file_id: self.current_file,
                 time_range,
                 file_size,
                 max_row_group_uncompressed_size,
+                max_row_group_decoded_size,
                 num_rows: stats.num_rows,
                 num_row_groups: parquet_metadata.num_row_groups() as u64,
                 file_metadata: Some(Arc::new(parquet_metadata)),
@@ -754,11 +807,32 @@ where
             let arrow_batch = converter.convert_batch(batch)?;
             self.check_cancelled()?;
             let start = Instant::now();
+            if self.writer.is_none() {
+                // The first non-empty batch of a file decides which columns skip statistics.
+                if arrow_batch.num_rows() == 0 {
+                    return Ok(());
+                }
+                self.large_value_columns = large_value_fields(&self.metadata, &arrow_batch);
+            }
+            if self.external_columns.is_none() {
+                self.external_columns = Some(external_columns(&self.metadata)?);
+            }
+            // Creating the SST registers its ownership, which must precede its sidecar.
             self.maybe_init_writer(arrow_batch.schema_ref(), opts)
-                .await?
-                .write(&arrow_batch)
+                .await?;
+            let stored_batch = self.store_external_values(&arrow_batch, opts).await?;
+            self.writer
+                .as_mut()
+                .context(UnexpectedSnafu {
+                    reason: "Missing SST writer after initialization",
+                })?
+                .write(&stored_batch)
                 .await
                 .map_err(map_write_error)?;
+            // Row group sizes count external values at their decoded size.
+            if let Some(value_bytes) = &mut self.row_group_value_bytes {
+                value_bytes.update(&arrow_batch);
+            }
             self.metrics.write_batch += start.elapsed();
 
             self.check_cancelled()?;
@@ -787,12 +861,94 @@ where
     }
 
     fn exceeds_max_file_size(&self, opts: &WriteOptions) -> bool {
-        opts.max_file_size
-            .is_some_and(|max_size| self.bytes_written.load(Ordering::Relaxed) >= max_size)
+        let blob_bytes = self
+            .blob_writer
+            .as_ref()
+            .map_or(0, |writer| writer.written_bytes() as usize);
+        opts.max_file_size.is_some_and(|max_size| {
+            self.bytes_written.load(Ordering::Relaxed) + blob_bytes >= max_size
+        })
+    }
+
+    /// Moves values of external columns into the sidecar of the current file and returns the
+    /// batch to write to the SST.
+    async fn store_external_values(
+        &mut self,
+        batch: &RecordBatch,
+        opts: &WriteOptions,
+    ) -> Result<RecordBatch> {
+        let columns = self.external_columns.as_deref().unwrap_or_default();
+        if columns.is_empty() {
+            return Ok(batch.clone());
+        }
+        let Some((store, sst_paths)) = &self.blob_target else {
+            return UnexpectedSnafu {
+                reason: format!(
+                    "region {} has external columns but the SST writer has no blob target",
+                    self.metadata.region_id
+                ),
+            }
+            .fail();
+        };
+        let mut arrays = batch.columns().to_vec();
+        for column in columns {
+            let Some((index, _)) = batch.schema().column_with_name(&column.name) else {
+                continue;
+            };
+            let values = compress_external_values(arrays[index].clone(), column.threshold).await?;
+            if values.iter().all(Option::is_none) {
+                continue;
+            }
+            if self.blob_writer.is_none() {
+                let sst_path = sst_paths.build_sst_file_path(RegionFileId::new(
+                    self.metadata.region_id,
+                    self.current_file,
+                ));
+                // Bounded writes upload one chunk at a time, like their SST.
+                let concurrency = if self.memory.limits.is_some() {
+                    1
+                } else {
+                    DEFAULT_WRITE_CONCURRENCY
+                };
+                self.blob_writer = Some(
+                    BlobFileWriter::new(
+                        self.current_file,
+                        store,
+                        &blob_path(&sst_path),
+                        opts.write_buffer_size.as_bytes() as usize,
+                        concurrency,
+                    )
+                    .await?,
+                );
+            }
+            let blob_writer = self.blob_writer.as_mut().unwrap();
+            arrays[index] = blob_writer.externalize(&arrays[index], values).await?;
+        }
+        RecordBatch::try_new(batch.schema(), arrays).context(NewRecordBatchSnafu)
     }
 
     /// Joins encoders before dropping the writer and deleting its failed output.
     async fn abort_current_file(&mut self) {
+        if let Some(blob_writer) = self.blob_writer.take()
+            && let Err(error) = blob_writer.abort().await
+        {
+            common_telemetry::warn!(error; "Failed to abort blob writer, file: {}", self.current_file);
+        }
+        // A sidecar may already be complete when the SST fails to finish.
+        if let Some((store, sst_paths)) = &self.blob_target
+            && self
+                .external_columns
+                .as_ref()
+                .is_some_and(|columns| !columns.is_empty())
+        {
+            let sst_path = sst_paths.build_sst_file_path(RegionFileId::new(
+                self.metadata.region_id,
+                self.current_file,
+            ));
+            if let Err(error) = store.delete(&blob_path(&sst_path)).await {
+                common_telemetry::warn!(error; "Failed to delete blob of aborted file {}", self.current_file);
+            }
+        }
         if let Some(writer) = self.writer.take() {
             let output = writer.abort().await;
             if let Err(error) = F::abort(output.inner).await {
@@ -820,17 +976,33 @@ where
             Ok(w)
         } else {
             let json = self.metadata.to_json().context(InvalidMetadataSnafu)?;
-            let key_value_meta = KeyValue::new(PARQUET_METADATA_KEY.to_string(), json);
+            let metadata_key = if external_columns(&self.metadata)?.is_empty() {
+                PARQUET_METADATA_KEY
+            } else {
+                PARQUET_EXTERNAL_METADATA_KEY
+            };
+            let key_value_meta = vec![KeyValue::new(metadata_key.to_string(), json)];
 
             // TODO(yingwen): Find and set proper column encoding for internal columns: op type and tsid.
             let props_builder = WriterProperties::builder()
-                .set_key_value_metadata(Some(vec![key_value_meta]))
+                .set_key_value_metadata(Some(key_value_meta))
                 .set_compression(Compression::ZSTD(ZstdLevel::default()))
                 .set_encoding(Encoding::PLAIN)
                 .set_max_row_group_row_count(Some(opts.row_group_size))
                 .set_column_index_truncate_length(COLUMN_INDEX_TRUNCATE_LENGTH)
                 .set_statistics_truncate_length(None);
             let props_builder = apply_internal_column_encoding(props_builder, &self.metadata);
+            // References have no order meaning, so statistics on them would mislead pruning.
+            let external_columns: Vec<_> = self
+                .external_columns
+                .iter()
+                .flatten()
+                .map(|column| column.name.clone())
+                .collect();
+            let props_builder = skip_statistics(props_builder, &external_columns);
+            let props_builder =
+                skip_statistics(props_builder, &mem::take(&mut self.large_value_columns));
+            self.row_group_value_bytes = Some(RowGroupValueBytes::new(opts.row_group_size));
             let props_builder = apply_float_field_encoding(
                 props_builder,
                 &self.metadata,

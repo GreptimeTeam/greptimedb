@@ -302,6 +302,8 @@ fn file_meta_from_sst_info(
         level: 0,
         file_size: info.file_size,
         max_row_group_uncompressed_size: info.max_row_group_uncompressed_size,
+        blob_file_size: info.blob_file_size(),
+        max_row_group_decoded_size: info.max_row_group_decoded_size,
         available_indexes: Default::default(),
         indexes: Default::default(),
         index_file_size: 0,

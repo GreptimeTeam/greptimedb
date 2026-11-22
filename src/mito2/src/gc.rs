@@ -1045,6 +1045,7 @@ impl LocalGcWorker {
         unknown_file_may_linger_until: chrono::DateTime<chrono::Utc>,
     ) -> (Vec<RemovedFile>, bool) {
         let mut ready_for_delete = vec![];
+        let mut deleted_ssts = HashSet::new();
         let mut deferred_unknown = false;
         // Every index-version reader needs the same Parquet file.
         let referenced_ssts: HashSet<_> = in_tmp_ref.iter().map(|(file_id, _)| *file_id).collect();
@@ -1109,7 +1110,8 @@ impl LocalGcWorker {
             };
 
             let should_delete = match file_type {
-                FileType::Parquet => {
+                // A blob sidecar shares its SST's fate: deleting the SST deletes the sidecar too.
+                FileType::Parquet | FileType::Blob => {
                     let is_in_manifest = in_manifest.contains_key(&file_id);
                     let is_in_tmp_ref = referenced_ssts.contains(&file_id);
                     let is_linger = may_linger_files.contains_key(&file_id);
@@ -1165,7 +1167,10 @@ impl LocalGcWorker {
 
             if should_delete {
                 let removed_file = match file_type {
-                    FileType::Parquet => {
+                    FileType::Parquet | FileType::Blob => {
+                        if !deleted_ssts.insert(file_id) {
+                            continue;
+                        }
                         // notice this cause we don't track index version for parquet files
                         // since entries comes from listing, we can't get index version from path
                         RemovedFile::File(file_id, None)
