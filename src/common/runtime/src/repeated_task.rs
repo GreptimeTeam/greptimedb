@@ -166,12 +166,52 @@ impl<E: ErrorExt + 'static> RepeatedTask<E> {
 
         Ok(())
     }
+
+    /// Stops the task without waiting for it.
+    ///
+    /// It cancels the task, marks it not started, and aborts the task's future: a call
+    /// that is in flight is dropped at its next await point instead of being allowed to
+    /// finish, and this returns immediately after requesting the abort rather than
+    /// waiting for it to take effect. Use [`RepeatedTask::stop`] when the caller must
+    /// observe the task end, and this when the caller must not be delayed by a slow
+    /// call, such as a shutdown path.
+    ///
+    /// Aborting drops the call's future in place, so everything it held is released and no
+    /// further round runs. A call that must not be interrupted halfway through a side
+    /// effect therefore does not belong in a task stopped this way.
+    ///
+    /// Like [`RepeatedTask::stop`], it is idempotent: calling it on a task that is not
+    /// started, or calling it multiple times, succeeds without doing anything.
+    pub fn stop_now(&self) -> Result<()> {
+        let handle = {
+            let mut inner = self.inner.lock().unwrap();
+            if inner.task_handle.is_none() {
+                // We allow stop the task multiple times.
+                return Ok(());
+            }
+
+            self.cancel_token.cancel();
+            self.started.store(false, Ordering::Relaxed);
+            // Safety: The task is not stopped.
+            inner.task_handle.take().unwrap()
+        };
+
+        // Dropping the handle would detach the task and let an in-flight call run to
+        // completion; aborting it drops that call at its next await point instead.
+        handle.abort();
+
+        debug!("Repeated task {} aborted without waiting", self.name);
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicI32;
+
+    use tokio::sync::Notify;
 
     use super::*;
     use crate::error::Error;
@@ -223,5 +263,75 @@ mod tests {
         task.stop().await.unwrap();
 
         assert!(n.load(Ordering::Relaxed) >= 4);
+    }
+
+    /// Signals its own drop, which is how an aborted call reports that it was dropped.
+    struct DroppedSignal(Arc<Notify>);
+
+    impl Drop for DroppedSignal {
+        fn drop(&mut self) {
+            // Dropping is synchronous and `notify_one` keeps a permit for a waiter that
+            // has not started waiting yet, so the signal cannot be lost.
+            self.0.notify_one();
+        }
+    }
+
+    /// A task whose first call signals that it started and then never returns.
+    struct BlockingTask {
+        entered: Arc<Notify>,
+        dropped: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl TaskFunction<Error> for BlockingTask {
+        fn name(&self) -> &str {
+            "blocking"
+        }
+
+        async fn call(&mut self) -> Result<()> {
+            let _dropped = DroppedSignal(self.dropped.clone());
+            self.entered.notify_one();
+            // Block the call forever: it only ever ends by being dropped, so the test
+            // cannot pass by the call finishing on its own.
+            std::future::pending::<()>().await;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_stop_now_aborts_an_in_flight_call() {
+        common_telemetry::init_default_ut_logging();
+
+        let entered = Arc::new(Notify::new());
+        let dropped = Arc::new(Notify::new());
+        let task = RepeatedTask::new(
+            // Far longer than the test, so only the initial delay can start the call.
+            Duration::from_secs(3600),
+            Box::new(BlockingTask {
+                entered: entered.clone(),
+                dropped: dropped.clone(),
+            }),
+        )
+        .with_initial_delay(Some(Duration::ZERO));
+
+        task.start(crate::global_runtime()).unwrap();
+        // Waiting for the signal, not for a duration: the call either started or the
+        // task is broken.
+        entered.notified().await;
+        assert!(task.started());
+
+        // Returns while the call is still in flight.
+        task.stop_now().unwrap();
+        assert!(!task.started());
+
+        // The abort drops the in-flight call. The bound only turns a dropped abort into
+        // a failure; the signal itself is deterministic.
+        tokio::time::timeout(Duration::from_secs(30), dropped.notified())
+            .await
+            .expect("stop_now must abort the call that is in flight");
+
+        // Stopping again is a no-op, like `stop`: the handle was already taken.
+        task.stop_now().unwrap();
+        assert!(!task.started());
     }
 }

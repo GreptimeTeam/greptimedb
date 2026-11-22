@@ -216,8 +216,15 @@ impl Frontend {
         }
 
         if let Err(source) = self.servers.start_all().await {
+            // A frontend that cannot serve anything must not keep the tasks that only
+            // serve requests: the heartbeat would announce a frontend that never comes up,
+            // and the refresher would probe tables nobody can read. Neither is waited for
+            // here, so a slow probe cannot delay the error either.
             if let Some(t) = &self.heartbeat_task {
                 t.shutdown().await;
+            }
+            if let Err(error) = self.instance.stop_rollup_cache_refresher().await {
+                common_telemetry::error!(error; "Failed to stop the rollup cache refresher");
             }
             return Err(source).context(error::StartServerSnafu);
         }

@@ -23,7 +23,7 @@ use common_query::{Output, OutputData};
 use common_recordbatch::RecordBatch;
 use common_recordbatch::adapter::RecordBatchMetrics;
 use common_runtime::{RepeatedTask, TaskFunction, global_runtime};
-use common_telemetry::debug;
+use common_telemetry::{debug, warn};
 use common_time::{Timestamp, timestamp::TimeUnit};
 use datafusion::common::ScalarValue;
 use datatypes::value::Value;
@@ -121,6 +121,21 @@ fn physical_watermarks(
     (physical.len() == paired.len() && physical.len() == high.len()).then_some(physical)
 }
 
+/// How long one round lets a single source table's probe run.
+///
+/// Two refresh intervals, and never less than a second: the bound has to fit the normal
+/// probe of a table with a slow query, while the floor keeps a very short refresh
+/// interval from turning every ordinary probe into a timeout. Expressed against the
+/// interval so a frontend configured to refresh slowly also waits longer before it
+/// gives up on a table.
+fn probe_timeout(cache: &RollupCache) -> Duration {
+    cache
+        .config()
+        .refresh_interval()
+        .saturating_mul(2)
+        .max(Duration::from_secs(1))
+}
+
 /// The background refresher of the rollup cache.
 ///
 /// One instance runs repeated rounds, one round over every active source table. The
@@ -181,15 +196,20 @@ impl Instance {
         Ok(())
     }
 
-    /// Stops the background refresher and waits for the round it is running.
+    /// Stops the background refresher without waiting for an in-flight probe.
+    ///
+    /// The task is cancelled and aborted, so the round it is running is dropped at its
+    /// next await point and this returns immediately: shutdown is not delayed by a probe
+    /// of a slow table. A round that is dropped commits nothing, and the cursors stay
+    /// where the last proved round left them, so the next refresher starts from the same
+    /// delta.
     ///
     /// A frontend without a rollup cache, and one whose refresher was never started,
     /// stop successfully without doing anything.
     pub async fn stop_rollup_cache_refresher(&self) -> Result<()> {
         let task = self.rollup_cache_refresher.lock().unwrap().take();
         if let Some(task) = task {
-            task.stop()
-                .await
+            task.stop_now()
                 .map_err(BoxedError::new)
                 .context(ExternalSnafu)?;
         }
@@ -213,13 +233,31 @@ impl Instance {
     /// Nothing here is on a request's path: a request reads the readiness the last
     /// round published, and a round that cannot prove a table closes that readiness
     /// instead of guessing.
+    ///
+    /// A probe is bounded by [`probe_timeout`]: a table whose probe outlives that bound
+    /// is closed for this round and the round moves on, so one slow table cannot hold
+    /// the round — and with it, shutdown — open indefinitely.
     pub(crate) async fn refresh_rollup_cache_once(&self) {
         let Some(cache) = self.rollup_cache.as_ref() else {
             return;
         };
+        let probe_timeout = probe_timeout(cache);
         let now = Instant::now();
         for table in cache.tables_to_refresh(now) {
-            match self.refresh_source_table(cache, &table).await {
+            let probed =
+                match tokio::time::timeout(probe_timeout, self.refresh_source_table(cache, &table))
+                    .await
+                {
+                    Ok(probed) => probed,
+                    Err(_) => {
+                        // A probe that did not answer in time proved nothing, exactly like
+                        // one that returned `None`: close the table and retry next round.
+                        warn!("Rollup cache probe of {table} timed out after {probe_timeout:?}");
+                        cache.record_failure(&table);
+                        continue;
+                    }
+                };
+            match probed {
                 // A round that cannot commit its vector leaves the cursors where they were:
                 // the next round sees the same delta and retries.
                 Some((cursors, source_version, source_table_id, dirty)) => {
