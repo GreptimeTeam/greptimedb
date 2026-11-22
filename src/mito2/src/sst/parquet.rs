@@ -504,6 +504,11 @@ pub struct SstInfo {
     pub format: FileFormat,
 }
 
+/// Returns the sidecar size recorded in an SST footer, or `None` when the SST has no sidecar.
+pub fn sidecar_size(metadata: &ParquetMetaData) -> Option<u64> {
+    blob::blob_file_size(metadata)
+}
+
 impl SstInfo {
     /// Size of the blob sidecar recorded in the footer, 0 when the SST has none.
     pub fn blob_file_size(&self) -> u64 {
