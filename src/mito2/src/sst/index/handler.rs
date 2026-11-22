@@ -83,7 +83,7 @@ pub struct BuildContext<'a> {
     /// operation budget and its plan ceiling. `None` applies no limit at this layer.
     /// Built-in creators use spill budgets.
     pub memory_limit: Option<usize>,
-    /// Actual output row-group size used to align inverted-index segments.
+    /// Row count of the output's row groups, except the last, when the writer knows it.
     pub row_group_size: Option<usize>,
     /// Exact row count when rebuilding an existing SST; unknown for compaction outputs.
     pub output_rows: Option<u64>,

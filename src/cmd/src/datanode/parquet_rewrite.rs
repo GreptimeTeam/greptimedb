@@ -197,7 +197,7 @@ fn infer_rewrite_properties(metadata: &ParquetMetaData) -> RewriteProperties {
         .is_some_and(|key_values| {
             key_values
                 .iter()
-                .any(|key_value| key_value.key == mito2::sst::parquet::PARQUET_METADATA_KEY)
+                .any(|key_value| mito2::sst::parquet::is_region_metadata_key(&key_value.key))
         });
     let truncate_length = is_greptime_sst.then_some(0);
     let first_column = metadata

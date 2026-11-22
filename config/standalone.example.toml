@@ -903,6 +903,10 @@ write_cache_size = "5GiB"
 ## @toml2docs:none-default
 write_cache_ttl = "8h"
 
+## Whether the write cache also holds the files of externally stored column values
+## (`STORAGE WITH (type = 'external')`). They share the data (parquet) part of the capacity.
+write_cache_blobs = true
+
 ## Preload index (puffin) files into cache on region open (default: true).
 ## When enabled, index files are loaded into the write cache during region initialization,
 ## which can improve query performance at the cost of longer startup times.

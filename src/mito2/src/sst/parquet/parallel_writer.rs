@@ -29,7 +29,7 @@ use parquet::arrow::arrow_writer::{
 };
 use parquet::arrow::async_writer::AsyncFileWriter;
 use parquet::errors::{ParquetError, Result};
-use parquet::file::metadata::ParquetMetaData;
+use parquet::file::metadata::{KeyValue, ParquetMetaData};
 use parquet::file::properties::WriterProperties;
 use parquet::file::writer::SerializedFileWriter;
 use tokio_util::sync::CancellationToken;
@@ -176,6 +176,10 @@ impl<W: AsyncFileWriter> ParallelArrowWriter<W> {
     /// Writes the remaining rows and the footer, then completes the async writer.
     pub async fn close(mut self) -> Result<ParquetMetaData> {
         self.finish().await
+    }
+
+    pub(crate) fn append_key_value_metadata(&mut self, kv: KeyValue) {
+        self.file_writer.append_key_value_metadata(kv);
     }
 
     /// Finalizes the file while retaining the upload for abort if it fails.

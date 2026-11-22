@@ -564,9 +564,10 @@ impl CompactionContext {
 /// Remote compaction runs off-process and ships `MergeOutput` over the wire;
 /// [`MergeOutput::sst_infos`] is `#[serde(skip)]` because the parquet footer
 /// (`ParquetMetaData`) is not serde-serializable. To avoid feeding the hook
-/// default (zero) values for real SSTs, this rebuilds the seven fields `FileMeta`
+/// default (zero) values for real SSTs, this rebuilds the eight fields `FileMeta`
 /// and `SstInfo` share: `file_id`, `time_range`, `file_size`,
-/// `max_row_group_uncompressed_size`, `num_rows`, `num_row_groups`, `num_series`.
+/// `max_row_group_uncompressed_size`, `max_row_group_decoded_size`, `num_rows`,
+/// `num_row_groups`, `num_series`.
 ///
 /// Two fields stay default and **cannot be recovered on the datanode**:
 /// - `file_metadata` — the parquet footer, whose column min/max/null-count
@@ -586,6 +587,7 @@ fn sst_info_from_file_meta(meta: &FileMeta) -> SstInfo {
         time_range: meta.time_range,
         file_size: meta.file_size,
         max_row_group_uncompressed_size: meta.max_row_group_uncompressed_size,
+        max_row_group_decoded_size: meta.max_row_group_decoded_size,
         num_rows: meta.num_rows as usize,
         num_row_groups: meta.num_row_groups,
         num_series: meta.num_series,
@@ -610,11 +612,17 @@ impl MergeOutput {
     }
 
     pub fn input_file_size(&self) -> u64 {
-        self.files_to_remove.iter().map(|f| f.file_size).sum()
+        self.files_to_remove
+            .iter()
+            .map(|f| f.file_size + f.blob_file_size)
+            .sum()
     }
 
     pub fn output_file_size(&self) -> u64 {
-        self.files_to_add.iter().map(|f| f.file_size).sum()
+        self.files_to_add
+            .iter()
+            .map(|f| f.file_size + f.blob_file_size)
+            .sum()
     }
 }
 
@@ -839,7 +847,12 @@ impl DefaultSstMerger {
         let source = tokio::select! {
             biased;
             _ = cancellation.cancelled() => return error::CompactionCancelledSnafu.fail(),
-            source = builder.build_flat_sst_reader() => source?,
+            source = builder.build_flat_sst_reader_and_row_group_size(write_opts.row_group_size) => source?,
+        };
+        let (source, row_group_size) = source;
+        let write_opts = WriteOptions {
+            row_group_size,
+            ..write_opts
         };
         let source = spawn_merge(source);
 
@@ -898,6 +911,7 @@ impl DefaultSstMerger {
                     level: output.output_level,
                     file_size: sst_info.file_size,
                     max_row_group_uncompressed_size: sst_info.max_row_group_uncompressed_size,
+                    max_row_group_decoded_size: sst_info.max_row_group_decoded_size,
                     available_indexes: sst_info.index_metadata.build_available_indexes(),
                     indexes: sst_info.index_metadata.build_indexes()?,
                     index_file_size: sst_info.index_metadata.file_size,
@@ -911,6 +925,8 @@ impl DefaultSstMerger {
                     primary_key_max,
                     preserve_row_sequence: sequence_metadata.exact_sequence_trusted,
                     format: sst_info.format.clone(),
+                    blob_file_size: sst_info.blob_file_size(),
+                    blob_refs: Vec::new(),
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -1009,6 +1025,7 @@ impl<M: SstMerger> DefaultCompactor<M> {
                     WriteOptions {
                         write_buffer_size: context.engine_config.sst_write_buffer_size,
                         max_file_size: unit.max_file_size,
+                        // Narrowed by the decoded sizes of the inputs once their footers are read.
                         row_group_size: context.region_options.row_group_size(),
                         float_field_encoding: context.region_options.float_field_encoding,
                         encode_parallelism: context
@@ -1089,6 +1106,7 @@ where
             let write_opts = WriteOptions {
                 write_buffer_size: compaction_region.engine_config.sst_write_buffer_size,
                 max_file_size: picker_output.max_file_size,
+                // Narrowed by the decoded sizes of the inputs once their footers are read.
                 row_group_size: compaction_region.region_options.row_group_size(),
                 float_field_encoding: compaction_region.region_options.float_field_encoding,
                 encode_parallelism: compaction_region

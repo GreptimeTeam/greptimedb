@@ -34,6 +34,7 @@ use crate::region::options::RegionOptions;
 use crate::sst::file::{RegionFileId, RegionIndexId};
 use crate::sst::file_metadata::FileMetadataInternerRef;
 use crate::sst::location;
+use crate::sst::parquet::blob::blob_path;
 
 /// A loader for loading metadata from a region dir.
 #[derive(Debug, Clone)]
@@ -114,13 +115,15 @@ pub enum FileDescriptor {
     },
     /// A data file.
     Data { file_id: FileId, size: u64 },
+    /// The blob sidecar of a data file.
+    Blob { file_id: FileId, size: u64 },
 }
 
 impl FileDescriptor {
     pub fn size(&self) -> u64 {
         match self {
             FileDescriptor::Index { size, .. } => *size,
-            FileDescriptor::Data { size, .. } => *size,
+            FileDescriptor::Data { size, .. } | FileDescriptor::Blob { size, .. } => *size,
         }
     }
 
@@ -136,6 +139,11 @@ impl FileDescriptor {
             FileDescriptor::Data { file_id, .. } => {
                 location::sst_file_path(table_dir, RegionFileId::new(region_id, file_id), path_type)
             }
+            FileDescriptor::Blob { file_id, .. } => blob_path(&location::sst_file_path(
+                table_dir,
+                RegionFileId::new(region_id, file_id),
+                path_type,
+            )),
         }
     }
 }
@@ -227,6 +235,23 @@ impl RegionFileCopier {
                         path_type,
                     );
                     let now = Instant::now();
+                    // A sidecar that does not match its manifest entry leaves the copy
+                    // unreadable, so fail here instead of at query time.
+                    if let FileDescriptor::Blob { size, .. } = file_desc {
+                        let actual = object_store
+                            .stat(&source_path)
+                            .await
+                            .context(error::OpenDalSnafu)?
+                            .content_length();
+                        ensure!(
+                            actual == size,
+                            error::UnexpectedSnafu {
+                                reason: format!(
+                                    "sidecar {source_path} has {actual} bytes, expected {size}"
+                                ),
+                            }
+                        );
+                    }
                     object_store
                         .copy(&source_path, &target_path)
                         .await

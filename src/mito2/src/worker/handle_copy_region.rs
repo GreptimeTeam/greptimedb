@@ -241,10 +241,26 @@ impl<S> RegionWorkerLoop<S> {
             return Ok((None, source_file_ids));
         }
 
-        let file_descriptors = new_file_metas
+        let copied: Vec<_> = new_file_metas
             .iter()
             .filter(|file| file.level != file::LEVEL_SHARED)
+            .collect();
+        // A sidecar is copied once, however many files reference it.
+        let mut blobs: Vec<_> = copied
+            .iter()
+            .flat_map(|file| file.blob_files())
+            .map(|blob| (blob.file_id, blob.size))
+            .collect();
+        blobs.sort_unstable();
+        blobs.dedup();
+        let file_descriptors = copied
+            .into_iter()
             .flat_map(file_descriptors_for_meta)
+            .chain(
+                blobs
+                    .into_iter()
+                    .map(|(file_id, size)| FileDescriptor::Blob { file_id, size }),
+            )
             .collect();
         debug!("File descriptors to copy: {:?}", file_descriptors);
         let copier = RegionFileCopier::new(region.access_layer());
@@ -309,21 +325,17 @@ fn remap_copied_file_meta(file_meta: &FileMeta, target_region_id: RegionId) -> F
 }
 
 fn file_descriptors_for_meta(file_meta: &FileMeta) -> Vec<FileDescriptor> {
-    let data = FileDescriptor::Data {
+    let mut descriptors = vec![FileDescriptor::Data {
         file_id: file_meta.file_id,
         size: file_meta.file_size,
-    };
+    }];
     if file_meta.exists_index() {
         let region_index_id = file_meta.index_id();
-        vec![
-            data,
-            FileDescriptor::Index {
-                file_id: region_index_id.file_id.file_id(),
-                version: region_index_id.version,
-                size: file_meta.index_file_size(),
-            },
-        ]
-    } else {
-        vec![data]
+        descriptors.push(FileDescriptor::Index {
+            file_id: region_index_id.file_id.file_id(),
+            version: region_index_id.version,
+            size: file_meta.index_file_size(),
+        });
     }
+    descriptors
 }

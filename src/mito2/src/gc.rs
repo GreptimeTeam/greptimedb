@@ -52,7 +52,7 @@ use crate::metrics::{
     GC_ORPHANED_INDEX_FILES, GC_RUNS_TOTAL, GC_SKIPPED_UNPARSABLE_FILES,
 };
 use crate::region::{MitoRegionRef, RegionRoleState};
-use crate::sst::file::{RegionFileId, RegionIndexId, delete_files, delete_indexes};
+use crate::sst::file::{RegionFileId, RegionIndexId, delete_blobs, delete_files, delete_indexes};
 use crate::sst::location::{self};
 use crate::worker::DROPPING_MARKER_FILE;
 
@@ -554,6 +554,17 @@ impl LocalGcWorker {
             })
             .unwrap_or_default();
 
+        // Sidecars outlive the SST that wrote them while other files reference their values.
+        let referenced_blobs = manifest
+            .as_ref()
+            .map(|manifest| {
+                manifest
+                    .all_files()
+                    .flat_map(|file| file.blob_files().map(|blob| blob.file_id))
+                    .collect::<HashSet<_>>()
+            })
+            .unwrap_or_default();
+
         let is_region_dropped = region.is_none();
 
         let in_tmp_ref = tmp_ref_files
@@ -631,7 +642,8 @@ impl LocalGcWorker {
             );
             deletable_files.clear();
         } else {
-            self.delete_files(region_id, &deletable_files).await?;
+            self.delete_files(region_id, &deletable_files, &referenced_blobs)
+                .await?;
             debug!(
                 "Successfully deleted {} unused files for region {}",
                 deletable_files.len(),
@@ -701,7 +713,14 @@ impl LocalGcWorker {
         skip_all,
         fields(region_id = %region_id, removed_file_count = removed_files.len())
     )]
-    async fn delete_files(&self, region_id: RegionId, removed_files: &[RemovedFile]) -> Result<()> {
+    /// Deletes `removed_files`. A removed SST's sidecar is deleted with it unless
+    /// `referenced_blobs` still holds it.
+    async fn delete_files(
+        &self,
+        region_id: RegionId,
+        removed_files: &[RemovedFile],
+        referenced_blobs: &HashSet<FileId>,
+    ) -> Result<()> {
         let mut index_ids = vec![];
         let file_pairs = removed_files
             .iter()
@@ -724,6 +743,12 @@ impl LocalGcWorker {
             &self.cache_manager,
         )
         .await?;
+        let blobs = file_pairs
+            .iter()
+            .map(|(file_id, _)| *file_id)
+            .filter(|file_id| !referenced_blobs.contains(file_id))
+            .collect_vec();
+        delete_blobs(region_id, &blobs, &self.access_layer, &self.cache_manager).await?;
 
         for removed in removed_files {
             if let RemovedFile::Narthex(id) = removed {
@@ -1045,6 +1070,7 @@ impl LocalGcWorker {
         unknown_file_may_linger_until: chrono::DateTime<chrono::Utc>,
     ) -> (Vec<RemovedFile>, bool) {
         let mut ready_for_delete = vec![];
+        let mut deleted_ssts = HashSet::new();
         let mut deferred_unknown = false;
         // Every index-version reader needs the same Parquet file.
         let referenced_ssts: HashSet<_> = in_tmp_ref.iter().map(|(file_id, _)| *file_id).collect();
@@ -1109,7 +1135,9 @@ impl LocalGcWorker {
             };
 
             let should_delete = match file_type {
-                FileType::Parquet => {
+                // Removing a sidecar's id removes its SST; the sidecar itself stays while
+                // other files reference it (see `delete_files`).
+                FileType::Parquet | FileType::Blob => {
                     let is_in_manifest = in_manifest.contains_key(&file_id);
                     let is_in_tmp_ref = referenced_ssts.contains(&file_id);
                     let is_linger = may_linger_files.contains_key(&file_id);
@@ -1165,7 +1193,10 @@ impl LocalGcWorker {
 
             if should_delete {
                 let removed_file = match file_type {
-                    FileType::Parquet => {
+                    FileType::Parquet | FileType::Blob => {
+                        if !deleted_ssts.insert(file_id) {
+                            continue;
+                        }
                         // notice this cause we don't track index version for parquet files
                         // since entries comes from listing, we can't get index version from path
                         RemovedFile::File(file_id, None)

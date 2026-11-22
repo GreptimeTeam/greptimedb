@@ -124,11 +124,7 @@ impl FileReferenceManager {
                     ref_files
                         .entry(meta.region_id)
                         .or_insert_with(HashSet::new)
-                        .insert(FileRef::new(
-                            meta.region_id,
-                            meta.file_id,
-                            meta.index_version(),
-                        ));
+                        .extend(file_refs(meta));
                 }
             }
             manifest_version.insert(dst_region.region_id(), manifest.manifest_version);
@@ -163,33 +159,27 @@ impl FileReferenceManager {
             .files_per_region
             .entry(file_meta.region_id)
             .or_default();
-        let file_ref = FileRef::new(
-            file_meta.region_id,
-            file_meta.file_id,
-            file_meta.index_version(),
-        );
-        let count = region.files.entry(file_ref).or_insert_with(|| {
-            GC_REF_FILE_CNT.inc();
-            0
-        });
-        *count += 1;
+        for file_ref in file_refs(file_meta) {
+            let count = region.files.entry(file_ref).or_insert_with(|| {
+                GC_REF_FILE_CNT.inc();
+                0
+            });
+            *count += 1;
+        }
     }
 
     /// Releases a metadata view's reference, regardless of whether the SST was retired.
     pub(crate) fn remove_file(&self, file_meta: &FileMeta) {
-        let file_ref = FileRef::new(
-            file_meta.region_id,
-            file_meta.file_id,
-            file_meta.index_version(),
-        );
         if let Entry::Occupied(mut region) = self.files_per_region.entry(file_meta.region_id) {
-            if let std::collections::hash_map::Entry::Occupied(mut file) =
-                region.get_mut().files.entry(file_ref)
-            {
-                *file.get_mut() -= 1;
-                if *file.get() == 0 {
-                    file.remove();
-                    GC_REF_FILE_CNT.dec();
+            for file_ref in file_refs(file_meta) {
+                if let std::collections::hash_map::Entry::Occupied(mut file) =
+                    region.get_mut().files.entry(file_ref)
+                {
+                    *file.get_mut() -= 1;
+                    if *file.get() == 0 {
+                        file.remove();
+                        GC_REF_FILE_CNT.dec();
+                    }
                 }
             }
             if region.get().files.is_empty() {
@@ -201,6 +191,21 @@ impl FileReferenceManager {
     pub fn node_id(&self) -> Option<u64> {
         self.node_id
     }
+}
+
+/// References that keep a file and the sidecars of other SSTs it reads from GC.
+/// A sidecar's id is the id of the SST that wrote it, so GC protects the pair by id.
+fn file_refs(meta: &FileMeta) -> impl Iterator<Item = FileRef> + '_ {
+    std::iter::once(FileRef::new(
+        meta.region_id,
+        meta.file_id,
+        meta.index_version(),
+    ))
+    .chain(
+        meta.blob_refs
+            .iter()
+            .map(|blob| FileRef::new(meta.region_id, blob.file_id, None)),
+    )
 }
 
 #[cfg(test)]
@@ -241,6 +246,32 @@ mod tests {
             HashSet::from([FileRef::new(meta.region_id, meta.file_id, Some(2))])
         );
         manager.remove_file(&updated);
+        assert!(manager.ref_file_set(meta.region_id).is_none());
+    }
+
+    #[test]
+    fn test_readers_protect_the_sidecars_they_reference() {
+        let manager = FileReferenceManager::new(None);
+        let sidecar = FileId::random();
+        let meta = FileMeta {
+            region_id: RegionId::new(1, 1),
+            file_id: FileId::random(),
+            blob_refs: vec![crate::sst::file::BlobFileRef {
+                file_id: sidecar,
+                size: 10,
+                referenced_bytes: 5,
+            }],
+            ..Default::default()
+        };
+        manager.register_file(&meta);
+        assert_eq!(
+            manager.ref_file_set(meta.region_id).unwrap(),
+            HashSet::from([
+                FileRef::new(meta.region_id, meta.file_id, None),
+                FileRef::new(meta.region_id, sidecar, None),
+            ])
+        );
+        manager.remove_file(&meta);
         assert!(manager.ref_file_set(meta.region_id).is_none());
     }
 }

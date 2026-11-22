@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! SST version.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
@@ -21,7 +21,10 @@ use common_time::{TimeToLive, Timestamp};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{FileId, RegionId};
 
-use crate::sst::file::{self, FileHandle, FileMeta, FileMetaRef, FileTimeRange, Level};
+use crate::sst::file::{
+    self, BlobLifetime, BlobLifetimeRef, FileHandle, FileMeta, FileMetaRef, FileTimeRange, Level,
+    RegionFileId,
+};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::primary_key::PrimaryKeyRangeMapper;
 
@@ -32,6 +35,8 @@ pub(crate) struct SstVersion {
     levels: Arc<LevelMetaArray>,
     series_indexes: Arc<HashMap<FileId, FileHandle>>,
     primary_key_mapper: Arc<PrimaryKeyRangeMapper>,
+    /// Blob sidecars referenced by files of the version.
+    blob_files: Arc<HashMap<RegionFileId, BlobLifetimeRef>>,
 }
 
 pub(crate) type SstVersionRef = Arc<SstVersion>;
@@ -43,6 +48,7 @@ impl SstVersion {
             levels: Arc::new(new_level_meta_vec()),
             series_indexes: Arc::new(HashMap::new()),
             primary_key_mapper: Arc::new(PrimaryKeyRangeMapper::new(metadata)),
+            blob_files: Arc::new(HashMap::new()),
         }
     }
 
@@ -113,6 +119,7 @@ impl SstVersion {
         files_to_add: impl Iterator<Item = impl Into<FileMetaRef>>,
     ) {
         let levels = Arc::make_mut(&mut self.levels);
+        let blob_files = Arc::make_mut(&mut self.blob_files);
         for file in files_to_add {
             let file = file.into();
             let level = file.level;
@@ -148,7 +155,25 @@ impl SstVersion {
                     }
                 })
                 .or_insert_with(|| {
-                    FileHandle::new(file.clone(), file_purger.clone())
+                    let blobs = file
+                        .blob_files()
+                        .map(|blob| {
+                            let lifetime = blob_files
+                                .entry(RegionFileId::new(file.region_id, blob.file_id))
+                                .or_insert_with(|| {
+                                    Arc::new(BlobLifetime::new(
+                                        file.region_id,
+                                        blob,
+                                        file_purger.clone(),
+                                    ))
+                                });
+                            if level == file::LEVEL_SHARED {
+                                lifetime.mark_shared();
+                            }
+                            lifetime.clone()
+                        })
+                        .collect();
+                    FileHandle::with_blobs(file.clone(), file_purger.clone(), blobs)
                 });
         }
     }
@@ -159,18 +184,53 @@ impl SstVersion {
     /// Panics if the level of [FileMeta] has no storage slot.
     pub(crate) fn remove_files(&mut self, files_to_remove: impl Iterator<Item = FileMeta>) {
         let levels = Arc::make_mut(&mut self.levels);
+        let mut removed = false;
         for file in files_to_remove {
             let Some(slot) = file::level_slot(file.level) else {
                 panic!("Unsupported SST level {}", file.level);
             };
             if let Some(handle) = levels[slot].files.remove(&file.file_id) {
                 handle.mark_deleted();
+                removed = true;
             }
         }
+        // Only a removed file can drop the last reference to a sidecar; an add-only edit such as
+        // a flush skips the scan over every file.
+        if removed {
+            self.retire_unreferenced_blobs();
+        }
+    }
+
+    /// Deletes sidecars that no file of the version references, once their readers finish.
+    fn retire_unreferenced_blobs(&mut self) {
+        if self.blob_files.is_empty() {
+            return;
+        }
+        let referenced: HashSet<_> = self
+            .levels
+            .iter()
+            .flat_map(|level| level.files.values())
+            .flat_map(|handle| {
+                let meta = handle.meta_ref();
+                meta.blob_files()
+                    .map(|blob| RegionFileId::new(meta.region_id, blob.file_id))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        Arc::make_mut(&mut self.blob_files).retain(|id, lifetime| {
+            let keep = referenced.contains(id);
+            if !keep {
+                lifetime.mark_deleted();
+            }
+            keep
+        });
     }
 
     /// Marks all SSTs in this version as deleted.
     pub(crate) fn mark_all_deleted(&self) {
+        for blob in self.blob_files.values() {
+            blob.mark_deleted();
+        }
         for file in self.series_indexes.values() {
             file.mark_deleted();
         }
@@ -227,22 +287,23 @@ impl SstVersion {
             .reduce(|(min_a, max_a), (min_b, max_b)| (min_a.min(min_b), max_a.max(max_b)))
     }
 
-    /// Returns the space occupied by SST data files owned by `region_id`.
+    /// Returns the space occupied by SST data files and the sidecars owned by `region_id`.
+    /// A sidecar counts once however many files reference it.
     pub(crate) fn owned_sst_usage(&self, region_id: RegionId) -> u64 {
-        self.levels
+        let files: u64 = self
+            .levels
             .iter()
-            .map(|level_meta| {
-                level_meta
-                    .files
-                    .values()
-                    .filter(|file_handle| file_handle.region_id() == region_id)
-                    .map(|file_handle| {
-                        let meta = file_handle.meta_ref();
-                        meta.file_size
-                    })
-                    .sum::<u64>()
-            })
-            .sum()
+            .flat_map(|level_meta| level_meta.files.values())
+            .filter(|file_handle| file_handle.region_id() == region_id)
+            .map(|file_handle| file_handle.meta_ref().file_size)
+            .sum();
+        let blobs: u64 = self
+            .blob_files
+            .values()
+            .filter(|blob| blob.region_id() == region_id)
+            .map(|blob| blob.size())
+            .sum();
+        files + blobs
     }
 
     /// Returns the space occupied by SST index files owned by `region_id`.
@@ -534,5 +595,83 @@ mod tests {
         assert_eq!(1, version.owned_num_files(other_region_id));
         assert_eq!(300, version.owned_sst_usage(other_region_id));
         assert_eq!(30, version.owned_index_usage(other_region_id));
+    }
+}
+
+#[cfg(test)]
+mod blob_tests {
+    use std::sync::Mutex;
+
+    use super::*;
+    use crate::sst::file::BlobFileRef;
+    use crate::sst::file_purger::FilePurger;
+
+    #[derive(Debug, Default)]
+    struct BlobPurger {
+        purged: Mutex<Vec<FileId>>,
+    }
+
+    impl FilePurger for BlobPurger {
+        fn purge_file(&self, _: FileMeta) {}
+
+        fn purge_blob(&self, _: RegionId, file_id: FileId) {
+            self.purged.lock().unwrap().push(file_id);
+        }
+    }
+
+    fn files(level: Level) -> (FileMeta, FileMeta) {
+        let region_id = RegionId::new(1, 1);
+        let writer = FileMeta {
+            region_id,
+            file_id: FileId::random(),
+            level,
+            file_size: 10,
+            blob_file_size: 100,
+            ..Default::default()
+        };
+        let reader = FileMeta {
+            region_id,
+            file_id: FileId::random(),
+            level,
+            file_size: 20,
+            blob_refs: vec![BlobFileRef {
+                file_id: writer.file_id,
+                size: 100,
+                referenced_bytes: 60,
+            }],
+            ..Default::default()
+        };
+        (writer, reader)
+    }
+
+    #[test]
+    fn test_sidecar_outlives_its_sst_while_referenced() {
+        let purger = Arc::new(BlobPurger::default());
+        let (writer, reader) = files(0);
+        let mut version = SstVersion::new(crate::test_util::memtable_util::metadata_for_test());
+        version.add_files(purger.clone(), [writer.clone(), reader.clone()].into_iter());
+        // The sidecar counts once although two files reference it.
+        assert_eq!(130, version.owned_sst_usage(writer.region_id));
+
+        version.remove_files([writer.clone()].into_iter());
+        assert!(purger.purged.lock().unwrap().is_empty());
+        assert_eq!(120, version.owned_sst_usage(writer.region_id));
+
+        // A reader of the last referencing file keeps the sidecar.
+        let held = version.levels()[0].files[&reader.file_id].clone();
+        version.remove_files([reader].into_iter());
+        assert!(purger.purged.lock().unwrap().is_empty());
+        drop(held);
+        assert_eq!(vec![writer.file_id], *purger.purged.lock().unwrap());
+    }
+
+    #[test]
+    fn test_sidecars_of_shared_files_are_left_to_gc() {
+        let purger = Arc::new(BlobPurger::default());
+        let (writer, reader) = files(file::LEVEL_SHARED);
+        let mut version = SstVersion::new(crate::test_util::memtable_util::metadata_for_test());
+        version.add_files(purger.clone(), [writer.clone(), reader.clone()].into_iter());
+        version.remove_files([writer, reader].into_iter());
+        assert!(purger.purged.lock().unwrap().is_empty());
     }
 }

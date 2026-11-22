@@ -85,7 +85,7 @@ impl FileCacheInner {
     /// Returns the appropriate memory index for the given file type.
     fn memory_index(&self, file_type: FileType) -> &Cache<IndexKey, IndexValue> {
         match file_type {
-            FileType::Parquet => &self.parquet_index,
+            FileType::Parquet | FileType::Blob => &self.parquet_index,
             FileType::Puffin { .. } => &self.puffin_index,
         }
     }
@@ -144,7 +144,7 @@ impl FileCacheInner {
 
             // Track sizes separately for each file type
             match key.file_type {
-                FileType::Parquet => parquet_size += size,
+                FileType::Parquet | FileType::Blob => parquet_size += size,
                 FileType::Puffin { .. } => puffin_size += size,
             }
         }
@@ -194,6 +194,7 @@ impl FileCacheInner {
             .with_label_values(&[match file_type {
                 FileType::Parquet => "download_parquet",
                 FileType::Puffin { .. } => "download_puffin",
+                FileType::Blob => "download_blob",
             }])
             .start_timer();
 
@@ -785,6 +786,8 @@ pub enum FileType {
     Parquet,
     /// Puffin file.
     Puffin(u64),
+    /// Sidecar of a Parquet file that holds its externally stored values.
+    Blob,
 }
 
 impl fmt::Display for FileType {
@@ -792,6 +795,7 @@ impl fmt::Display for FileType {
         match self {
             FileType::Parquet => write!(f, "parquet"),
             FileType::Puffin(version) => write!(f, "{}.puffin", version),
+            FileType::Blob => write!(f, "blob"),
         }
     }
 }
@@ -802,6 +806,7 @@ impl FileType {
         match s {
             "parquet" => Some(FileType::Parquet),
             "puffin" => Some(FileType::Puffin(0)),
+            "blob" => Some(FileType::Blob),
             _ => {
                 // if post-fix with .puffin, try to parse the version
                 if let Some(version_str) = s.strip_suffix(".puffin") {
@@ -817,7 +822,7 @@ impl FileType {
     /// Returns the metric label for this file type.
     fn metric_label(&self) -> &'static str {
         match self {
-            FileType::Parquet => FILE_TYPE,
+            FileType::Parquet | FileType::Blob => FILE_TYPE,
             FileType::Puffin(_) => INDEX_TYPE,
         }
     }
@@ -1157,6 +1162,10 @@ mod tests {
             IndexKey::new(region_id, file_id, FileType::Puffin(42)),
             parse_index_key("5299989643269.3368731b-a556-42b8-a5df-9c31ce155095.42.puffin")
                 .unwrap()
+        );
+        assert_eq!(
+            IndexKey::new(region_id, file_id, FileType::Blob),
+            parse_index_key("5299989643269.3368731b-a556-42b8-a5df-9c31ce155095.blob").unwrap()
         );
         assert!(parse_index_key("").is_none());
         assert!(parse_index_key(".").is_none());

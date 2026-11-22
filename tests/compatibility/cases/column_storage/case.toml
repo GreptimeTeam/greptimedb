@@ -1,0 +1,8 @@
+name = "column_storage"
+reason = "Read legacy column metadata after upgrade, then persist storage options across restart."
+introduced_by = "PR #10557"
+topologies = ["distributed", "standalone"]
+from_range = ["*"]
+to_range = [">=v1.4.0-alpha.0"]
+features = ["table", "metadata", "write", "read"]
+owner = "storage"
