@@ -14,9 +14,12 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use crate::batch_size::estimate_batch_size;
 use crate::compaction::CompactionOutput;
 use crate::compaction::picker::PickerOutput;
-use crate::sst::file::FileHandle;
+use crate::read::scan_util::compute_parallel_channel_size;
+use crate::sst::file::{FileHandle, FileMeta};
+use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 
 /// A complete input dependency group, merged and published atomically.
 ///
@@ -126,9 +129,35 @@ impl CompactionUnit {
             return 0;
         }
         self.inputs.iter().fold(0u64, |total, file| {
-            total.saturating_add(file.meta_ref().max_row_group_uncompressed_size)
+            total.saturating_add(input_memory_bytes(file.meta_ref()))
         })
     }
+}
+
+/// Estimates the memory compaction needs to read `meta`: its largest row group, or the batches
+/// its reader holds ahead of the merge when those are larger.
+///
+/// Compaction reads each input in its own task. The task buffers a channel of batches and one
+/// more batch it is sending, and the merge holds one batch of every input. Inputs with small row
+/// groups can buffer more than one row group, up to the whole file.
+fn input_memory_bytes(meta: &FileMeta) -> u64 {
+    let row_group_bytes = meta.max_row_group_uncompressed_size;
+    if meta.num_rows == 0 || meta.num_row_groups == 0 {
+        return row_group_bytes;
+    }
+    // File metadata keeps no per-row-group row counts, so the row width is approximated from
+    // the largest row group and the average row count.
+    let rows_per_row_group = (meta.num_rows / meta.num_row_groups).max(1);
+    let row_width = row_group_bytes.div_ceil(rows_per_row_group);
+    // Compaction picks one batch size for all inputs from the widest row, so batches of this
+    // input are at most this many rows.
+    let batch_rows = estimate_batch_size([(rows_per_row_group, row_group_bytes)]) as u64;
+    let read_ahead_batches = compute_parallel_channel_size(DEFAULT_READ_BATCH_SIZE) as u64 + 2;
+    let read_ahead_bytes = read_ahead_batches
+        .saturating_mul(batch_rows)
+        .saturating_mul(row_width)
+        .min(row_group_bytes.saturating_mul(meta.num_row_groups));
+    row_group_bytes.max(read_ahead_bytes)
 }
 
 /// Finds a dependency group's representative while shortening the parent chain.
@@ -235,6 +264,33 @@ mod tests {
         assert_eq!(files[2].file_id(), units[0].inputs[0].file_id());
         assert_eq!(files[1].file_id(), units[1].inputs[0].file_id());
         assert_eq!(files[0].file_id(), units[2].inputs[0].file_id());
+    }
+
+    #[test]
+    fn test_input_memory_covers_read_ahead_of_small_row_groups() {
+        const MIB: u64 = 1024 * 1024;
+        let meta = |row_group_bytes: u64, rows_per_row_group: u64, num_row_groups: u64| FileMeta {
+            max_row_group_uncompressed_size: row_group_bytes,
+            num_rows: rows_per_row_group * num_row_groups,
+            num_row_groups,
+            ..Default::default()
+        };
+
+        // 8192-row batches of 512-byte rows are 4 MiB, far below a 50 MiB row group.
+        assert_eq!(
+            50 * MIB,
+            input_memory_bytes(&meta(50 * MIB, 100 * 1024, 10))
+        );
+        // 64 MiB batches of 1 MiB rows: the reader holds 4 batches, not one 4 MiB row group.
+        assert_eq!(256 * MIB, input_memory_bytes(&meta(4 * MIB, 4, 1000)));
+        // Read-ahead never exceeds the whole file.
+        assert_eq!(40 * MIB, input_memory_bytes(&meta(4 * MIB, 4, 10)));
+        // Without row counts, only the row group is known.
+        let unknown_rows = FileMeta {
+            max_row_group_uncompressed_size: 4 * MIB,
+            ..Default::default()
+        };
+        assert_eq!(4 * MIB, input_memory_bytes(&unknown_rows));
     }
 
     #[test]
