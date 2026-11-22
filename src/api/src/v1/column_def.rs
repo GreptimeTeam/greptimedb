@@ -18,7 +18,7 @@ use arrow_schema::extension::{EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_K
 use datatypes::schema::{
     COMMENT_KEY, COMPRESSION_KEY, ColumnDefaultConstraint, ColumnSchema, CompressionOptions,
     FULLTEXT_KEY, FulltextAnalyzer, FulltextBackend, FulltextOptions, INVERTED_INDEX_KEY, Metadata,
-    SKIPPING_INDEX_KEY, SkippingIndexOptions, SkippingIndexType,
+    SKIPPING_INDEX_KEY, STORAGE_KEY, SkippingIndexOptions, SkippingIndexType, StorageOptions,
 };
 use greptime_proto::v1::{
     Analyzer, FulltextBackend as PbFulltextBackend, SkippingIndexType as PbSkippingIndexType,
@@ -37,17 +37,35 @@ const INVERTED_INDEX_GRPC_KEY: &str = "inverted_index";
 const SKIPPING_INDEX_GRPC_KEY: &str = "skipping_index";
 /// Key used to store SST compression options in gRPC column options.
 const COMPRESSION_GRPC_KEY: &str = "compression";
+/// Key used to store SST storage options in gRPC column options.
+const STORAGE_GRPC_KEY: &str = "storage";
 
-const COLUMN_OPTION_MAPPINGS: [(&str, &str); 6] = [
+const COLUMN_OPTION_MAPPINGS: [(&str, &str); 7] = [
     (FULLTEXT_GRPC_KEY, FULLTEXT_KEY),
     (INVERTED_INDEX_GRPC_KEY, INVERTED_INDEX_KEY),
     (SKIPPING_INDEX_GRPC_KEY, SKIPPING_INDEX_KEY),
     (COMPRESSION_GRPC_KEY, COMPRESSION_KEY),
+    (STORAGE_GRPC_KEY, STORAGE_KEY),
     (EXTENSION_TYPE_NAME_KEY, EXTENSION_TYPE_NAME_KEY),
     (EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_METADATA_KEY),
 ];
 
 /// Tries to construct a `ColumnSchema` from the given  `ColumnDef`.
+/// Checks options that a user gives in a column definition more strictly than
+/// [try_as_column_schema], which also reads definitions produced from stored metadata.
+pub fn validate_column_def_options(column_def: &ColumnDef) -> Result<()> {
+    if let Some(storage) = column_def
+        .options
+        .as_ref()
+        .and_then(|options| options.options.get(STORAGE_GRPC_KEY))
+    {
+        StorageOptions::check_user_keys(storage).context(error::InvalidColumnStorageSnafu {
+            column: &column_def.name,
+        })?;
+    }
+    Ok(())
+}
+
 pub fn try_as_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
     let data_type = ColumnDataTypeWrapper::try_new(
         column_def.data_type,
@@ -83,6 +101,9 @@ pub fn try_as_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
         if let Some(compression) = options.options.get(COMPRESSION_GRPC_KEY) {
             metadata.insert(COMPRESSION_KEY.to_string(), compression.to_owned());
         }
+        if let Some(storage) = options.options.get(STORAGE_GRPC_KEY) {
+            metadata.insert(STORAGE_KEY.to_string(), storage.to_owned());
+        }
         if let Some(extension_name) = options.options.get(EXTENSION_TYPE_NAME_KEY) {
             metadata.insert(EXTENSION_TYPE_NAME_KEY.to_string(), extension_name.clone());
         }
@@ -101,6 +122,22 @@ pub fn try_as_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
         .context(error::InvalidColumnCompressionSnafu {
             column: &column_def.name,
         })?;
+    if schema
+        .storage_options()
+        .context(error::InvalidColumnStorageSnafu {
+            column: &column_def.name,
+        })?
+        .is_some()
+    {
+        // Tags are encoded into the primary key, and a string column can still be declared as
+        // the time index here, so check the semantic type rather than the data type.
+        if column_def.semantic_type() != SemanticType::Field {
+            return error::StorageOnNonFieldColumnSnafu {
+                column: &column_def.name,
+            }
+            .fail();
+        }
+    }
     schema
         .with_time_index(column_def.semantic_type() == SemanticType::Timestamp)
         .with_default_constraint(constraint)
@@ -188,6 +225,11 @@ pub fn options_from_column_schema(column_schema: &ColumnSchema) -> Option<Column
         options
             .options
             .insert(COMPRESSION_GRPC_KEY.to_string(), compression.clone());
+    }
+    if let Some(storage) = column_schema.metadata().get(STORAGE_KEY) {
+        options
+            .options
+            .insert(STORAGE_GRPC_KEY.to_string(), storage.clone());
     }
     if let Some(extension_name) = column_schema.metadata().get(EXTENSION_TYPE_NAME_KEY) {
         options
@@ -347,7 +389,9 @@ pub fn json_skipping_options_from_proto(
 mod tests {
     use common_base::readable_size::ReadableSize;
     use datatypes::data_type::ConcreteDataType;
-    use datatypes::schema::{CompressionOptions, FulltextAnalyzer, FulltextBackend};
+    use datatypes::schema::{
+        CompressionOptions, FulltextAnalyzer, FulltextBackend, StorageOptions,
+    };
 
     use super::*;
     use crate::v1::ColumnDataType;
@@ -457,6 +501,64 @@ mod tests {
                     COMPRESSION_KEY.to_string(),
                     json.to_string(),
                 )]));
+            let column_def = try_as_column_def(&schema, false).unwrap();
+            let err = try_as_column_schema(&column_def).unwrap_err();
+            assert_eq!(StatusCode::InvalidArguments, err.status_code(), "{json}");
+        }
+    }
+
+    #[test]
+    fn test_storage_options_round_trip() {
+        let options = StorageOptions {
+            threshold: Some(ReadableSize::kb(512)),
+            ..Default::default()
+        };
+        let schema = ColumnSchema::new("payload", ConcreteDataType::binary_datatype(), true)
+            .with_storage_options(options)
+            .unwrap();
+
+        let column_def = try_as_column_def(&schema, false).unwrap();
+        let decoded = try_as_column_schema(&column_def).unwrap();
+        assert_eq!(Some(options), decoded.storage_options().unwrap());
+
+        for semantic_type in [SemanticType::Tag, SemanticType::Timestamp] {
+            let mut column_def = try_as_column_def(&schema, false).unwrap();
+            column_def.data_type = ColumnDataType::String as i32;
+            column_def.set_semantic_type(semantic_type);
+            let err = try_as_column_schema(&column_def).unwrap_err();
+            assert!(
+                err.to_string().contains("only supported on field columns"),
+                "{semantic_type:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_unknown_storage_keys_are_rejected_only_in_user_input() {
+        let schema = ColumnSchema::new("payload", ConcreteDataType::string_datatype(), true)
+            .with_metadata(HashMap::from([(
+                STORAGE_KEY.to_string(),
+                r#"{"thresholdd":"1MiB"}"#.to_string(),
+            )]));
+        let column_def = try_as_column_def(&schema, false).unwrap();
+        assert!(validate_column_def_options(&column_def).is_err());
+        // Definitions built from stored metadata keep working when a later version adds keys.
+        try_as_column_schema(&column_def).unwrap();
+    }
+
+    #[test]
+    fn test_reject_invalid_storage_metadata() {
+        use common_error::ext::ErrorExt;
+        use common_error::status_code::StatusCode;
+
+        for (data_type, json) in [
+            (ConcreteDataType::string_datatype(), r#"{"type":"inline"}"#),
+            (ConcreteDataType::string_datatype(), r#"{"threshold":"0B"}"#),
+            (ConcreteDataType::string_datatype(), "not json"),
+            (ConcreteDataType::int64_datatype(), r#"{"type":"external"}"#),
+        ] {
+            let schema = ColumnSchema::new("test", data_type, true)
+                .with_metadata(HashMap::from([(STORAGE_KEY.to_string(), json.to_string())]));
             let column_def = try_as_column_def(&schema, false).unwrap();
             let err = try_as_column_schema(&column_def).unwrap_err();
             assert_eq!(StatusCode::InvalidArguments, err.status_code(), "{json}");
