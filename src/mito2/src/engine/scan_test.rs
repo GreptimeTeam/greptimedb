@@ -70,6 +70,7 @@ use crate::read::read_columns::ReadColumns;
 use crate::read::scan_region::Scanner;
 use crate::sst::file::{FileHandle, FileMeta};
 use crate::test_util;
+use crate::test_util::batch_util::sort_batches_and_print;
 use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
 use crate::test_util::{CreateRequestBuilder, TestEnv, reopen_region};
 
@@ -7718,4 +7719,67 @@ async fn test_mito_raw_series_invalid_binding_before_legacy_read() {
             .execute(0, Arc::new(TaskContext::default()))
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn test_seq_scan_reads_files_with_disjoint_keys_in_parallel() {
+    let mut env = TestEnv::with_prefix("test_seq_scan_disjoint_keys").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let put_flush = async |key: &str, start, end, value_start| {
+        let rows = Rows {
+            schema: column_schemas.clone(),
+            rows: test_util::build_rows_for_key(key, start, end, value_start),
+        };
+        test_util::put_rows(&engine, region_id, rows).await;
+        test_util::flush_region(&engine, region_id, None).await;
+    };
+    // Three files over the same time range. The last one overwrites a row of the first.
+    put_flush("a", 0, 3, 0).await;
+    put_flush("b", 0, 3, 10).await;
+    put_flush("a", 1, 2, 100).await;
+    // A memtable outside the files' time range gets its own range.
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: test_util::build_rows_for_key("c", 10, 11, 20),
+    };
+    test_util::put_rows(&engine, region_id, rows).await;
+
+    let scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let Scanner::Seq(scanner) = scanner else {
+        panic!("Scanner should be seq scan");
+    };
+    // Files of key "a" share a range; the file of key "b" gets its own.
+    assert_eq!(
+        3,
+        scanner.properties().partitions[0].len(),
+        "unexpected ranges: {:?}",
+        scanner.properties().partitions
+    );
+    let batches = RecordBatches::try_collect(scanner.build_stream().unwrap())
+        .await
+        .unwrap();
+    let expected = "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| a     | 0.0     | 1970-01-01T00:00:00 |
+| a     | 100.0   | 1970-01-01T00:00:01 |
+| a     | 2.0     | 1970-01-01T00:00:02 |
+| b     | 10.0    | 1970-01-01T00:00:00 |
+| b     | 11.0    | 1970-01-01T00:00:01 |
+| b     | 12.0    | 1970-01-01T00:00:02 |
+| c     | 20.0    | 1970-01-01T00:00:10 |
++-------+---------+---------------------+";
+    assert_eq!(expected, sort_batches_and_print(&batches, &["tag_0", "ts"]));
 }
