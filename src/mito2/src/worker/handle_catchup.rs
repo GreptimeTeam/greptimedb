@@ -17,8 +17,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use common_telemetry::tracing::warn;
-use common_telemetry::{debug, error, info};
+use common_telemetry::{debug, error, info, warn};
 use snafu::ensure;
 use store_api::logstore::LogStore;
 use store_api::region_engine::SettableRegionRoleState;
@@ -33,7 +32,9 @@ use crate::region::opener::RegionOpener;
 use crate::region::{
     CatchupRegionsRef, MitoRegion, MitoRegionRef, RegionLeaderState, RegionRoleState,
 };
-use crate::request::{BackgroundNotify, BuildIndexRequest, OptionOutputTx, WorkerRequestWithTime};
+use crate::request::{
+    BackgroundNotify, BuildIndexRequest, CaughtUpAgain, OptionOutputTx, WorkerRequestWithTime,
+};
 use crate::sst::index::IndexBuildType;
 use crate::tail_replay::notify_worker;
 #[cfg(feature = "hdfs-object-store")]
@@ -44,12 +45,12 @@ use crate::worker::{
 };
 
 impl<S: LogStore> RegionWorkerLoop<S> {
-    /// Catches the region up from its WAL. A catchup of a writable region that awaits its Leader
-    /// lease demotes it and catches it up again, reopening it when needed, so its memtable holds
-    /// only the rows its WAL replays: unflushed rows written with `skip_wal`, and unflushed rows
-    /// under a local WAL, are dropped, while flushed rows stay in its SSTs. Only a catchup with
-    /// `set_writable` promotes the region again. The replay first waits until the entries the
-    /// region acknowledged are durable.
+    /// Catches the region up from its WAL. A region that awaits its Leader lease is caught up
+    /// again into a replacement instance, which replaces it only if the replay succeeds, see
+    /// [Self::catch_up_again]. The replacement holds only the rows its WAL replays: unflushed rows
+    /// written with `skip_wal`, and unflushed rows under a local WAL, are dropped, while flushed
+    /// rows stay in its SSTs. Only a catchup with `set_writable` promotes the region again. The
+    /// replay of a remote WAL first waits until the entries the region acknowledged are durable.
     pub(crate) async fn handle_catchup_request(
         &mut self,
         region_id: RegionId,
@@ -78,20 +79,21 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
 
         // A Leader lease may have ended the region's wait since the check above.
-        let Some(catching_up_again) = region.manifest_ctx.begin_catchup(region_id) else {
+        let Some(awaits_leader_lease) = region.manifest_ctx.begin_catchup(region_id) else {
             debug!("Region {region_id} is writable, skip catchup");
             sender.send(Ok(0));
             return;
         };
-        if catching_up_again {
-            // Another catchup made the region writable and no Leader lease followed, so the
-            // region may lack what the leader has written since. It catches up again.
-            warn!("Region {region_id} is writable without a Leader lease, catching up again");
-            self.cancel_tail_replay(region_id);
+        // A catchup promoted the region and no Leader lease followed, so the region may lack
+        // what the leader has written since, also when a failed catchup again demoted it.
+        if awaits_leader_lease {
+            self.catch_up_again(region, request, entry_receiver, sender)
+                .await;
+            return;
         }
 
-        // The worker writes a region inline and a Follower takes no writes, so every
-        // acknowledged write has an entry id at or below this one.
+        // The worker writes a region inline, so every write acknowledged so far has an entry id
+        // at or below this one.
         let last_entry_id = region.version_control.current().last_entry_id;
         // If the memtable is not empty or the manifest has been updated, we need to reopen the region.
         let region = match self.reopen_region_if_needed(region.clone()).await {
@@ -141,6 +143,141 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     }
                 }
             }
+        });
+    }
+
+    /// Catches up again a region that a catchup promoted and that no Leader lease followed. The
+    /// region stays registered, demoted unless it is in a transient leader state, while a
+    /// replacement opened from its manifest replays the WAL outside the worker;
+    /// [Self::handle_caught_up_again] registers the replacement only if its replay succeeded (on
+    /// a remote WAL it must reach the entries the region acknowledged) and the region took no
+    /// write and made no commit meanwhile. Otherwise the region keeps its memtable, so a later
+    /// Leader lease can promote it; one that waits for a reload is reloaded instead.
+    async fn catch_up_again(
+        &mut self,
+        region: MitoRegionRef,
+        request: RegionCatchupRequest,
+        entry_receiver: Option<WalEntryReceiver>,
+        sender: OptionOutputTx,
+    ) {
+        let region_id = region.region_id;
+        warn!("Region {region_id} awaits its Leader lease, catching it up again");
+        self.cancel_tail_replay(region_id);
+        // The worker writes a region inline, so every write acknowledged so far has an entry id
+        // at or below this one, and a later write changes the last sequence.
+        let current = region.version_control.current();
+        let (acknowledged_entry_id, last_sequence) = (current.last_entry_id, current.last_sequence);
+        let opener = match self.region_reopener(&region) {
+            Ok(opener) => opener.skip_wal_replay(true),
+            Err(e) => {
+                region.manifest_ctx.end_catchup();
+                sender.send(Err(e));
+                return;
+            }
+        };
+        let manifest_version = region.manifest_ctx.manifest_version().await;
+        self.catchup_regions.insert_region(region_id);
+        let wal = self.wal.clone();
+        let config = self.config.clone();
+        let worker_sender = self.sender.clone();
+        common_runtime::spawn_global(async move {
+            let result = async {
+                let replacement = opener.open(&config, &wal).await?;
+                RegionCatchupTask::new(replacement.clone(), wal, config.allow_stale_entries)
+                    .with_entry_receiver(entry_receiver)
+                    .with_expected_last_entry_id(request.entry_id)
+                    .with_replay_checkpoint_entry_id(request.checkpoint.map(|c| c.entry_id))
+                    .with_acknowledged_entry_id(acknowledged_entry_id)
+                    .run()
+                    .await?;
+                Ok(replacement)
+            }
+            .await;
+            let notify = BackgroundNotify::CaughtUpAgain(CaughtUpAgain {
+                old: region,
+                manifest_version,
+                last_sequence,
+                result,
+                set_writable: request.set_writable,
+                sender,
+            });
+            notify_worker(&worker_sender, region_id, notify).await;
+        });
+    }
+
+    /// Replaces the region with the instance its catchup again replayed into, or keeps the region
+    /// if the replay failed, the region was closed or reopened, waits for a reload or a flush, or
+    /// committed or took a write since the catchup began. A kept region ends its catchup, so a
+    /// later Leader lease can promote it with its memtable; one that waits for a reload is
+    /// reloaded instead.
+    pub(crate) async fn handle_caught_up_again(
+        &mut self,
+        region_id: RegionId,
+        caught_up: CaughtUpAgain,
+    ) {
+        let CaughtUpAgain {
+            old,
+            manifest_version,
+            last_sequence,
+            result,
+            set_writable,
+            sender,
+        } = caught_up;
+        let registered = self
+            .regions
+            .get_region(region_id)
+            .is_some_and(|registered| Arc::ptr_eq(&registered, &old));
+        // Commits of the old instance wait until the replacement is registered.
+        let manager = old.manifest_ctx.manifest_manager.read().await;
+        let unchanged = !old.manifest_ctx.is_reload_pending()
+            // Its own commits only: a version that only storage has is the replacement's.
+            && manager.manifest().manifest_version == manifest_version
+            && !self.flush_scheduler.is_flush_requested(region_id)
+            // The catchup does not demote a region in a transient leader state: an edit that fails
+            // meanwhile makes it writable again, and the replay misses the writes it then
+            // acknowledges, with or without the WAL.
+            && old.version_control.current().last_sequence == last_sequence;
+        let replacement = match result {
+            _ if !registered => Err(error::RegionNotFoundSnafu { region_id }.build()),
+            Ok(_) if !unchanged => Err(error::RegionBusySnafu { region_id }.build()),
+            result => result,
+        };
+        let replacement = match replacement {
+            Ok(replacement) => replacement,
+            Err(e) => {
+                drop(manager);
+                warn!(e; "Region {region_id} is not replaced by its catchup again");
+                self.catchup_regions.remove_region(region_id);
+                old.manifest_ctx.end_catchup();
+                sender.send(Err(e));
+                return;
+            }
+        };
+        // Preserve allocated sequences without publishing the old memtables.
+        replacement
+            .version_control
+            .update_last_sequence(old.version_control.current().last_sequence);
+        // Leases apply through the shared region map, so only those from heartbeats sent after
+        // the replacement may promote the new instance.
+        replacement.manifest_ctx.ignore_earlier_promotions();
+        // Requests waiting for the old instance are rejected as a close rejects them.
+        self.fail_region_stalled_requests_as_not_found(&region_id);
+        self.reject_region_requests_as_not_found(region_id);
+        self.register_region(replacement.clone());
+        drop(manager);
+        if let Some(state) = &self.series_index_task_state {
+            state.wake();
+        }
+        info!("Region {region_id} is caught up again into a new instance");
+        let promoted = set_writable && {
+            // The region takes writes under the node lease until its next Leader grant.
+            self.node_lease
+                .seed(&replacement.manifest_ctx.leader_deadline);
+            replacement.manifest_ctx.promote_after_catchup(region_id)
+        };
+        let finish = self.catchup_finish(replacement, sender);
+        common_runtime::spawn_global(async move {
+            finish.run(promoted).await;
         });
     }
 
@@ -219,9 +356,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         .options(region.version().options.clone())
     }
 
-    /// Reopens `region` if its memtable is not empty or its manifest changed. A region that a
-    /// catchup promoted and that awaits its Leader lease may hold rows, also after a failed catchup
-    /// again demoted it; any other region should have none.
     async fn reopen_region_if_needed(
         &mut self,
         region: Arc<MitoRegion>,
@@ -233,7 +367,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         // Utilizes the short circuit evaluation.
         let region = if !is_empty_memtable || region.manifest_ctx.has_update().await? {
-            if !is_empty_memtable && !region.manifest_ctx.awaits_leader_lease() {
+            if !is_empty_memtable {
                 warn!(
                     "Region {} memtables is not empty, which should not happen, manifest version: {}, last entry id: {}",
                     region.region_id,

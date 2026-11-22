@@ -188,12 +188,13 @@ async fn test_leader_lease_after_failed_catchup_reopen_promotes() {
 
 /// A region that a catchup made writable, with no Leader lease since, catches up again: the
 /// leader it took over from may have acknowledged writes after that catchup, for example once the
-/// migration rolled back. With `kept`, the leader flushed before the first catchup, so the region
-/// keeps its instance and replays the later writes up to the expected last entry id.
+/// migration rolled back. With `flushed`, the leader flushed before the first catchup, so the
+/// region's memtable is empty, and its replacement replays the later writes up to the expected
+/// last entry id.
 #[apply(single_kafka_log_store_factory)]
 async fn test_catchup_again_reads_writes_after_previous_catchup(
     factory: Option<LogStoreFactory>,
-    #[values(false, true)] kept: bool,
+    #[values(false, true)] flushed: bool,
 ) {
     common_telemetry::init_default_ut_logging();
     let Some(factory) = factory else {
@@ -267,7 +268,7 @@ async fn test_catchup_again_reads_writes_after_previous_catchup(
     };
 
     put(0, 3).await;
-    if kept {
+    if flushed {
         flush_region(&leader_engine, region_id, None).await;
     }
     catchup(None).await.unwrap();
@@ -276,7 +277,7 @@ async fn test_catchup_again_reads_writes_after_previous_catchup(
     assert!(region.manifest_ctx.awaits_leader_lease());
     assert_eq!(count_rows().await, 3);
 
-    if !kept {
+    if !flushed {
         // The waiting region acknowledges a write, then the leader writes more.
         put_rows(
             &follower_engine,
@@ -295,11 +296,13 @@ async fn test_catchup_again_reads_writes_after_previous_catchup(
         .version_control
         .current()
         .last_entry_id;
-    catchup(kept.then_some(leader_last_entry_id)).await.unwrap();
+    catchup(flushed.then_some(leader_last_entry_id))
+        .await
+        .unwrap();
 
-    assert_eq!(count_rows().await, if kept { 6 } else { 7 });
+    assert_eq!(count_rows().await, if flushed { 6 } else { 7 });
     let caught_up = follower_engine.get_region(region_id).unwrap();
-    assert_eq!(Arc::ptr_eq(&region, &caught_up), kept);
+    assert!(!Arc::ptr_eq(&region, &caught_up));
     assert!(caught_up.is_writable());
     assert!(caught_up.manifest_ctx.awaits_leader_lease());
 }

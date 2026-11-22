@@ -2061,8 +2061,9 @@ impl ManifestContext {
         self.promotion_fence.lock().unwrap().reload_pending
     }
 
-    /// Ignores the promotions issued before now. The worker calls it on a reloaded instance when
-    /// it replaces the old one, whose time a downgrade during the reload raised instead.
+    /// Ignores the promotions issued before now. The worker calls it on a reloaded instance, and
+    /// on the replacement of a catchup again, when it replaces the old one, whose time a downgrade
+    /// meanwhile raised instead.
     pub(crate) fn ignore_earlier_promotions(&self) {
         self.promotion_fence.lock().unwrap().downgrade_started_at = Instant::now();
     }
@@ -2255,18 +2256,19 @@ impl ManifestContext {
 
     /// Begins a catchup unless the region is writable (a writable or staging leader, as
     /// [MitoRegion::is_writable]) and does not [await its Leader lease](Self::awaits_leader_lease),
-    /// and returns whether it demoted a writable region, None if it begins none. Until the catchup
-    /// ends, Leader leases do not promote the region, see [Self::promote_after_catchup] and
-    /// [Self::end_catchup]; the caller ends it on every path. A writable region is demoted to
-    /// Follower and ignores the Leader leases sent before. A lease that ends the wait of a
-    /// writable region holds the same lock.
+    /// and returns whether the region awaits its Leader lease, None if it begins none. Until the
+    /// catchup ends, Leader leases do not promote the region and end no wait, see
+    /// [Self::promote_after_catchup] and [Self::end_catchup]; the caller ends it on every path. A
+    /// writable region is demoted to Follower and ignores the Leader leases sent before. A lease
+    /// that ends the wait of a writable region holds the same lock.
     pub(crate) fn begin_catchup(&self, region_id: RegionId) -> Option<bool> {
         let mut fence = self.promotion_fence.lock().unwrap();
         let writable = matches!(
             self.state.load(),
             RegionRoleState::Leader(RegionLeaderState::Writable | RegionLeaderState::Staging)
         );
-        if writable && !self.awaits_leader_lease() {
+        let awaits_leader_lease = self.awaits_leader_lease();
+        if writable && !awaits_leader_lease {
             return None;
         }
         fence.catching_up = true;
@@ -2274,7 +2276,7 @@ impl ManifestContext {
             fence.downgrade_started_at = Instant::now();
             self.set_role(RegionRole::Follower, region_id);
         }
-        Some(writable)
+        Some(awaits_leader_lease)
     }
 
     /// Records a StagingLeader lease as [Self::record_leader_lease] does, unless a catchup runs on

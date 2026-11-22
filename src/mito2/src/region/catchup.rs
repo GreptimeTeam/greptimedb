@@ -59,7 +59,7 @@ impl<S: LogStore> RegionCatchupTask<S> {
     }
 
     /// Sets the largest entry id the region acknowledged on this node, which the replay of a
-    /// remote WAL waits to be durable.
+    /// remote WAL waits to be durable and must reach.
     pub(crate) fn with_acknowledged_entry_id(mut self, acknowledged_entry_id: u64) -> Self {
         self.acknowledged_entry_id = acknowledged_entry_id;
         self
@@ -129,23 +129,31 @@ impl<S: LogStore> RegionCatchupTask<S> {
         )
         .await?;
         info!(
-            "Elapsed: {:?}, region: {region_id}, provider: {:?} catchup finished. replay from entry id: {replay_from_entry_id}, flushed entry id: {flushed_entry_id}, last entry id: {last_entry_id}, expected: {:?}.",
+            "Elapsed: {:?}, region: {region_id}, provider: {:?} catchup finished. replay from entry id: {replay_from_entry_id}, flushed entry id: {flushed_entry_id}, last entry id: {last_entry_id}, expected: {:?}, acknowledged: {}.",
             timer.elapsed(),
             self.region.provider,
-            self.expected_last_entry_id
+            self.expected_last_entry_id,
+            self.acknowledged_entry_id
         );
-        if let Some(expected_last_entry_id) = self.expected_last_entry_id {
-            ensure!(
-                // The replayed last entry id may be greater than the `expected_last_entry_id`.
-                last_entry_id >= expected_last_entry_id,
-                error::UnexpectedSnafu {
-                    reason: format!(
-                        "Failed to catchup region {}, it was expected to replay to {}, but actually replayed to {}",
-                        region_id, expected_last_entry_id, last_entry_id,
-                    ),
-                }
-            )
-        }
+        // The replay also reaches the entries the region acknowledged on this node.
+        let expected_last_entry_id = self
+            .expected_last_entry_id
+            .unwrap_or_default()
+            .max(self.acknowledged_entry_id);
+        ensure!(
+            // The replayed last entry id may be greater than the `expected_last_entry_id`.
+            last_entry_id >= expected_last_entry_id,
+            error::UnexpectedSnafu {
+                reason: format!(
+                    "Failed to catchup region {}, it was expected to replay to {} (expected: {:?}, acknowledged: {}), but actually replayed to {}",
+                    region_id,
+                    expected_last_entry_id,
+                    self.expected_last_entry_id,
+                    self.acknowledged_entry_id,
+                    last_entry_id,
+                ),
+            }
+        );
         Ok(())
     }
 

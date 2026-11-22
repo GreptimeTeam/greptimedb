@@ -251,6 +251,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 return;
             }
         };
+        // A region that awaits its Leader lease keeps its memtable for that lease or for a
+        // catchup again.
+        if region.manifest_ctx.awaits_leader_lease() {
+            let _ = sender.send(Err(RegionBusySnafu { region_id }.build()));
+            return;
+        }
 
         let original_manifest_version = region.manifest_ctx.manifest_version().await;
         let manifest = match region

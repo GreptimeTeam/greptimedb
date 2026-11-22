@@ -1391,11 +1391,11 @@ async fn test_cancelled_replay_does_not_publish_after_promotion() {
     assert_eq!(2, region.listener.commits());
 }
 
-/// A catchup of a writable region that awaits its Leader lease, which keeps the instance when
-/// its memtable is empty and its manifest unchanged, demotes it and cancels the tail replay the
-/// first catchup started; the replay of the catchup again commits instead.
+/// A catchup of a writable region that awaits its Leader lease demotes it and cancels the tail
+/// replay the first catchup started; the replay of the instance the catchup again replaced it
+/// with commits instead.
 #[tokio::test]
-async fn test_catchup_again_cancels_replay_of_kept_region() {
+async fn test_catchup_again_cancels_replay_of_demoted_region() {
     let region = TestRegion::new("tail-replay-catchup-again", true, None).await;
     let last = region.write_remote_rows(region.region_id, 6, 9).await;
     // The catchups replay nothing into the memtable, which stays empty.
@@ -1414,8 +1414,8 @@ async fn test_catchup_again_cancels_replay_of_kept_region() {
 
     region.catchup().await;
 
-    let kept = region.engine.get_region(region.region_id).unwrap();
-    assert!(Arc::ptr_eq(&first, &kept));
+    let caught_up = region.engine.get_region(region.region_id).unwrap();
+    assert!(!Arc::ptr_eq(&first, &caught_up));
     region.listener.hold_from(0);
     region.wait_until_replayed().await;
     // The cancelled replay committed nothing, so the replay that the catchup again started did.

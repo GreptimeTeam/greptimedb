@@ -1871,6 +1871,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             BackgroundNotify::RegionReloaded { old, result } => {
                 self.handle_region_reloaded(region_id, old, result).await
             }
+            BackgroundNotify::CaughtUpAgain(caught_up) => {
+                self.handle_caught_up_again(region_id, caught_up).await
+            }
             BackgroundNotify::RegionBecameWritable => self.maybe_replay_tails(region_id),
             BackgroundNotify::LeaderLeaseWaitEnded => {
                 self.handle_leader_lease_wait_ended(region_id).await
