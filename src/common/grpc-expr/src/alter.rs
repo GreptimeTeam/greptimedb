@@ -199,6 +199,11 @@ pub fn alter_expr_to_request(
                         field: "column_def",
                     })?;
 
+                    column_def::validate_column_def_options(&column_def).context(
+                        InvalidColumnDefSnafu {
+                            column: &column_def.name,
+                        },
+                    )?;
                     let schema = column_def::try_as_column_schema(&column_def).context(
                         InvalidColumnDefSnafu {
                             column: &column_def.name,
