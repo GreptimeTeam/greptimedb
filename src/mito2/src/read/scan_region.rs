@@ -41,6 +41,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::types::json_type::JsonNativeType;
 use datatypes::value::timestamp_to_scalar_value;
 use futures::StreamExt;
+use mito_codec::row_converter::{SortField, build_primary_key_codec_with_fields};
 use partition::expr::PartitionExpr;
 use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -1541,7 +1542,37 @@ impl ScanInput {
             min_scalar: timestamp_to_scalar_value(time_index_unit, Some(min_ts.value())),
             max_scalar: timestamp_to_scalar_value(time_index_unit, Some(max_ts.value())),
             time_index_col_name: time_index.column_schema.name.clone(),
+            first_primary_key: self.first_primary_key_stats(file),
         })
+    }
+
+    /// Returns the name, min and max of the first primary key column in `file`, decoded from
+    /// the primary key range in its file metadata. `None` when the range is unknown.
+    fn first_primary_key_stats(&self, file: &FileHandle) -> Option<(String, ArrayRef, ArrayRef)> {
+        use datatypes::data_type::DataType as _;
+
+        file.meta_ref().primary_key_min.as_ref()?;
+        let metadata = self.mapper.metadata();
+        let column = metadata.column_by_id(*metadata.primary_key.first()?)?;
+        let (min, max) = file.primary_key_range(self.primary_key_mapper())?;
+        let codec = build_primary_key_codec_with_fields(
+            metadata.primary_key_encoding,
+            std::iter::once((
+                column.column_id,
+                SortField::new(column.column_schema.data_type.clone()),
+            )),
+        );
+        let to_array = |bytes: &[u8]| -> Option<ArrayRef> {
+            let value = codec.decode_leftmost(bytes).ok()??;
+            let mut builder = column.column_schema.data_type.create_mutable_vector(1);
+            builder.try_push_value_ref(&value.as_value_ref()).ok()?;
+            Some(builder.to_vector().to_arrow_array())
+        };
+        Some((
+            column.column_schema.name.clone(),
+            to_array(&min)?,
+            to_array(&max)?,
+        ))
     }
 
     /// Checks whether a file can be definitively pruned using only its manifest-level
@@ -1880,6 +1911,8 @@ pub(crate) struct FileLevelPruningStats {
     pub(crate) max_scalar: ScalarValue,
     /// Name of the time index column.
     pub(crate) time_index_col_name: String,
+    /// Name, min and max of the first primary key column, when the file's key range is known.
+    pub(crate) first_primary_key: Option<(String, ArrayRef, ArrayRef)>,
 }
 
 impl PruningStatistics for FileLevelPruningStats {
@@ -1887,7 +1920,10 @@ impl PruningStatistics for FileLevelPruningStats {
         if column.name == self.time_index_col_name {
             ScalarValue::iter_to_array(std::iter::once(self.min_scalar.clone())).ok()
         } else {
-            None
+            self.first_primary_key
+                .as_ref()
+                .filter(|(name, _, _)| *name == column.name)
+                .map(|(_, min, _)| min.clone())
         }
     }
 
@@ -1895,7 +1931,10 @@ impl PruningStatistics for FileLevelPruningStats {
         if column.name == self.time_index_col_name {
             ScalarValue::iter_to_array(std::iter::once(self.max_scalar.clone())).ok()
         } else {
-            None
+            self.first_primary_key
+                .as_ref()
+                .filter(|(name, _, _)| *name == column.name)
+                .map(|(_, _, max)| max.clone())
         }
     }
 
@@ -3209,6 +3248,7 @@ mod tests {
             min_scalar: ScalarValue::TimestampMillisecond(Some(0), None),
             max_scalar: ScalarValue::TimestampMillisecond(Some(500), None),
             time_index_col_name: ts_col_name.to_string(),
+            first_primary_key: None,
         };
         assert_eq!(
             vec![false],
@@ -3220,6 +3260,7 @@ mod tests {
             min_scalar: ScalarValue::TimestampMillisecond(Some(0), None),
             max_scalar: ScalarValue::TimestampMillisecond(Some(2000), None),
             time_index_col_name: ts_col_name.to_string(),
+            first_primary_key: None,
         };
         assert_eq!(
             vec![true],
@@ -3236,6 +3277,7 @@ mod tests {
             min_scalar: ScalarValue::TimestampMillisecond(Some(0), None),
             max_scalar: ScalarValue::TimestampMillisecond(Some(500), None),
             time_index_col_name: "ts".to_string(),
+            first_primary_key: None,
         };
         let arrow_schema = Arc::new(ArrowSchema::new(Vec::<Field>::new()));
         assert_eq!(
@@ -3296,6 +3338,7 @@ mod tests {
             min_scalar: ScalarValue::TimestampMillisecond(Some(0), None),
             max_scalar: ScalarValue::TimestampMillisecond(Some(1000), None),
             time_index_col_name: ts_col_name.to_string(),
+            first_primary_key: None,
         };
 
         assert_eq!(
@@ -3331,6 +3374,58 @@ mod tests {
         let mut ranges = SmallVec::new();
         builder.build_ranges(-1, &mut ranges);
         assert!(ranges.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_manifest_pruning_uses_first_primary_key_range() {
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
+        let predicate_group = PredicateGroup::new(
+            metadata.as_ref(),
+            &[datafusion_expr::col("k0").eq(datafusion_expr::lit("b"))],
+        )
+        .unwrap();
+        let input = ScanInput::builder(SchedulerEnv::new().await.access_layer.clone(), mapper)
+            .with_predicate(predicate_group)
+            .build();
+        use mito_codec::row_converter::PrimaryKeyCodec as _;
+
+        let key = |k0: &str| {
+            let mut bytes = Vec::new();
+            mito_codec::row_converter::DensePrimaryKeyCodec::new(&metadata)
+                .encode_values(
+                    &[
+                        (0, datatypes::value::Value::from(k0)),
+                        (1, datatypes::value::Value::from(1u32)),
+                    ],
+                    &mut bytes,
+                )
+                .unwrap();
+            bytes::Bytes::from(bytes)
+        };
+        let file = |range: Option<(&str, &str)>| {
+            FileHandle::new(
+                FileMeta {
+                    region_id: metadata.region_id,
+                    time_range: (
+                        Timestamp::new_millisecond(0),
+                        Timestamp::new_millisecond(1000),
+                    ),
+                    primary_key_min: range.map(|(min, _)| key(min)),
+                    primary_key_max: range.map(|(_, max)| key(max)),
+                    ..Default::default()
+                },
+                Arc::new(crate::sst::file_purger::NoopFilePurger),
+            )
+        };
+
+        // Files whose first-tag range excludes `k0 = 'b'` are pruned before reading their footer.
+        assert!(input.can_manifest_prune_file(&file(Some(("a", "a")))));
+        assert!(input.can_manifest_prune_file(&file(Some(("c", "d")))));
+        assert!(!input.can_manifest_prune_file(&file(Some(("a", "c")))));
+        assert!(!input.can_manifest_prune_file(&file(Some(("b", "b")))));
+        // Files without a recorded range are kept.
+        assert!(!input.can_manifest_prune_file(&file(None)));
     }
 
     #[tokio::test]
