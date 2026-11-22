@@ -2163,6 +2163,13 @@ mod tests {
             row_counts.iter().all(|rows| *rows <= 2048),
             "{row_counts:?}"
         );
+        // The part flushes as an SST that records the decoded size for compaction admission.
+        let info = part.to_sst_info(FileId::random());
+        assert!(info.max_row_group_uncompressed_size < 1 << 20, "{info:?}");
+        assert!(
+            info.max_row_group_decoded_size >= 1024 * 64 * 1024,
+            "{info:?}"
+        );
     }
 
     #[test]

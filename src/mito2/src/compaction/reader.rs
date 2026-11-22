@@ -43,7 +43,7 @@ use crate::region::options::MergeMode;
 use crate::sst::file::FileHandle;
 use crate::sst::parquet::reader::MetadataCacheMetrics;
 use crate::sst::parquet::{Json2RewriteTargets, Json2TargetLayout};
-use crate::sst::parquet::{max_row_group_decoded_size, row_group_size_for};
+use crate::sst::parquet::{decoded_input_size, row_group_size_for};
 
 /// Builders to create [BoxedRecordBatchStream] for compaction.
 pub(crate) struct CompactionSstReaderBuilder<'a> {
@@ -75,14 +75,7 @@ impl CompactionSstReaderBuilder<'_> {
         configured: usize,
     ) -> Result<(FlatSource, usize)> {
         let parquet_metadata = self.collect_parquet_metadata().await?;
-        let (rows, bytes) = parquet_metadata
-            .iter()
-            .fold((0u64, 0u64), |(rows, bytes), meta| {
-                (
-                    rows + meta.file_metadata().num_rows() as u64,
-                    bytes + max_row_group_decoded_size(meta) * meta.num_row_groups() as u64,
-                )
-            });
+        let (rows, bytes) = decoded_input_size(parquet_metadata.iter().map(Arc::as_ref));
         let source = self.build_flat_sst_reader_from(parquet_metadata).await?;
         Ok((source, row_group_size_for(rows, bytes, configured)))
     }
@@ -375,13 +368,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_compaction_row_group_size_counts_decoded_values() {
+    async fn test_compaction_counts_decoded_values() {
         use api::v1::SemanticType;
         use api::v1::helper::row;
         use api::v1::value::ValueData;
         use datatypes::prelude::ConcreteDataType;
-
-        use crate::compaction::compactor::row_group_size_for_inputs;
 
         let mut env = TestEnv::new().await;
         let engine = env.create_engine(Default::default()).await;
@@ -432,11 +423,13 @@ mod tests {
         let version = region.version();
         let inputs: Vec<_> = version.ssts.levels()[0].files().cloned().collect();
         assert_eq!(2, inputs.len());
-        // File metadata holds the dictionary-encoded size, which suggests full row groups.
-        assert_eq!(
-            102_400,
-            row_group_size_for_inputs(inputs.iter().map(|f| f.meta_ref()), 102_400)
-        );
+        // File metadata holds the dictionary-encoded size, which would allow full row groups.
+        let encoded = inputs
+            .iter()
+            .map(|f| f.meta_ref().max_row_group_uncompressed_size)
+            .max()
+            .unwrap();
+        assert!(encoded < 1024 * 1024, "{encoded}");
 
         let (_, row_group_size) = CompactionSstReaderBuilder {
             metadata: version.metadata.clone(),
@@ -454,5 +447,34 @@ mod tests {
         .unwrap();
         // 128 MiB of 64 KiB rows.
         assert_eq!(2048, row_group_size);
+
+        // The output records its decoded size for compaction memory admission.
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Compact(store_api::region_request::RegionCompactRequest {
+                    options: api::v1::region::compact_request::Options::StrictWindow(
+                        api::v1::region::StrictWindow {
+                            window_seconds: 3600,
+                        },
+                    ),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        let version = region.version();
+        assert!(version.ssts.levels()[0].files.is_empty());
+        let outputs: Vec<_> = version.ssts.levels()[1].files().collect();
+        assert_eq!(1, outputs.len());
+        let output = outputs[0].meta_ref();
+        assert!(
+            output.max_row_group_uncompressed_size < 1024 * 1024,
+            "{output:?}"
+        );
+        assert!(
+            output.max_row_group_decoded_size >= 512 * 64 * 1024,
+            "{output:?}"
+        );
     }
 }

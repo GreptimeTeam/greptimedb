@@ -1000,6 +1000,7 @@ impl MemtableSstWriter {
             level: 0,
             file_size: sst_info.file_size,
             max_row_group_uncompressed_size: sst_info.max_row_group_uncompressed_size,
+            max_row_group_decoded_size: sst_info.max_row_group_decoded_size,
             available_indexes: sst_info.index_metadata.build_available_indexes(),
             indexes: sst_info.index_metadata.build_indexes()?,
             index_file_size: sst_info.index_metadata.file_size,

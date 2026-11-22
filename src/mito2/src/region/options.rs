@@ -46,7 +46,7 @@ use crate::memtable::bulk::BulkMemtableConfig;
 use crate::sst::FormatType;
 use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
 
-pub(crate) const DEFAULT_INDEX_SEGMENT_ROW_COUNT: usize = 1024;
+const DEFAULT_INDEX_SEGMENT_ROW_COUNT: usize = 1024;
 const MEMTABLE_PARTITION_TREE_PREFIX: &str = "memtable.partition_tree.";
 const MEMTABLE_BULK_PREFIX: &str = "memtable.bulk.";
 const MEMTABLE_BULK_ENCODE_BYTES_THRESHOLD: &str = "memtable.bulk.encode_bytes_threshold";

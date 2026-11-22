@@ -37,7 +37,6 @@ use store_api::storage::consts::{OP_TYPE_COLUMN_NAME, SEQUENCE_COLUMN_NAME};
 use store_api::storage::{ColumnId, FileId};
 
 use crate::error::{CompressionOptionsSnafu, Result, WriteParquetSnafu};
-use crate::region::options::DEFAULT_INDEX_SEGMENT_ROW_COUNT;
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
 use crate::sst::file::{FileFormat, FileTimeRange};
 use crate::sst::index::IndexOutput;
@@ -131,21 +130,27 @@ const TARGET_ROW_GROUP_BYTES: u64 = 128 * 1024 * 1024;
 /// The size comes from the average row width of the whole input, so a few wide rows at the
 /// start of a file do not shrink the row groups of the rest. Rows wider than the average can
 /// still make single row groups larger than the target.
-///
-/// A size below `configured` is rounded down to a multiple of the default inverted index
-/// segment. The index widens its segments to the row group size when the row group size is
-/// not a multiple of them, which would make an index match select whole row groups.
 pub(crate) fn row_group_size_for(rows: u64, bytes: u64, configured: usize) -> usize {
     if rows == 0 || bytes == 0 {
         return configured;
     }
     let row_width = bytes.div_ceil(rows);
-    let size = (TARGET_ROW_GROUP_BYTES / row_width).clamp(1, configured as u64) as usize;
-    if size < configured && size >= DEFAULT_INDEX_SEGMENT_ROW_COUNT {
-        size - size % DEFAULT_INDEX_SEGMENT_ROW_COUNT
-    } else {
-        size
-    }
+    (TARGET_ROW_GROUP_BYTES / row_width).clamp(1, configured as u64) as usize
+}
+
+/// Returns the rows and the decoded bytes of the SSTs with `footers`, for [row_group_size_for].
+///
+/// Bytes are the largest decoded row group times the number of row groups, an upper bound, so
+/// skewed inputs only make output row groups smaller.
+pub(crate) fn decoded_input_size<'a>(
+    footers: impl IntoIterator<Item = &'a ParquetMetaData>,
+) -> (u64, u64) {
+    footers.into_iter().fold((0, 0), |(rows, bytes), footer| {
+        (
+            rows + footer.file_metadata().num_rows() as u64,
+            bytes + max_row_group_decoded_size(footer) * footer.num_row_groups() as u64,
+        )
+    })
 }
 
 /// Returns the bytes of string and binary values in `batch` once decoded.
@@ -471,6 +476,9 @@ pub struct SstInfo {
     pub file_size: u64,
     /// Maximum uncompressed row group size in bytes. 0 if unknown.
     pub max_row_group_uncompressed_size: u64,
+    /// Maximum row group size in bytes with string and binary values counted decoded. 0 if
+    /// unknown.
+    pub max_row_group_decoded_size: u64,
     /// Number of rows.
     pub num_rows: usize,
     /// Number of row groups
@@ -1639,8 +1647,13 @@ mod tests {
             .max()
             .unwrap();
         assert_eq!(column_chunk_sum, info.max_row_group_uncompressed_size);
-        // Row group sizing reads the decoded size from the footer.
+        // Row group sizing reads the decoded size from the footer, and compaction admission from
+        // the file metadata.
         assert!(max_row_group_decoded_size(&footer) >= 2048 * 64 * 1024);
+        assert_eq!(
+            max_row_group_decoded_size(&footer),
+            info.max_row_group_decoded_size
+        );
         // Readers size batches by the decoded 64 KiB values, not the dictionary-encoded size.
         assert_eq!(
             1024,
@@ -1697,14 +1710,15 @@ mod tests {
     }
 
     #[test]
-    fn test_row_group_size_for_aligns_to_index_segments() {
-        let rows = 1_000_000;
-        // 2,049-byte rows fit 65,504 rows in the target, rounded down to 63 index segments.
-        assert_eq!(64_512, row_group_size_for(rows, rows * 2_049, 102_400));
-        // Row groups narrower than one segment are kept; the index uses them as its segments.
-        assert_eq!(512, row_group_size_for(rows, rows * 256 * 1024, 102_400));
-        // The configured size is kept even when it is not a multiple of a segment.
-        assert_eq!(1_500, row_group_size_for(rows, rows, 1_500));
+    fn test_row_group_size_for_uses_average_width() {
+        // 64 rows of 4 MiB fill two 128 MiB row groups.
+        assert_eq!(32, row_group_size_for(64, 256 << 20, 102_400));
+        // A few wide rows next to many narrow ones must not shrink the row groups.
+        assert_eq!(
+            102_400,
+            row_group_size_for((10 << 20) + 2, (10 << 20) * 100 + (100 << 20), 102_400)
+        );
+        assert_eq!(102_400, row_group_size_for(0, 0, 102_400));
     }
 
     #[rstest::rstest]
