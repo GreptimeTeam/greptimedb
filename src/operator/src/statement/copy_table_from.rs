@@ -1536,7 +1536,10 @@ mod tests {
             json_schema.field(2),
             &Field::new("count", DataType::UInt64, true)
         );
-        assert_eq!(json_schema.field(3), &Field::new("id", DataType::UInt64, true));
+        assert_eq!(
+            json_schema.field(3),
+            &Field::new("id", DataType::UInt64, true)
+        );
         for idx in 4..file_schema.fields().len() {
             assert_eq!(json_schema.field(idx), file_schema.field(idx));
         }
