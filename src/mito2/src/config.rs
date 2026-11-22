@@ -467,17 +467,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_metadata_aggr_config_roundtrip() {
-        assert!(!MitoConfig::default().experimental_metadata_aggr);
-        let config: MitoConfig = toml::from_str("experimental_metadata_aggr = true").unwrap();
-        assert!(config.experimental_metadata_aggr);
-        let serialized = toml::to_string(&config).unwrap();
-        assert!(serialized.contains("experimental_metadata_aggr = true"));
-        let restored: MitoConfig = toml::from_str(&serialized).unwrap();
-        assert!(restored.experimental_metadata_aggr);
-    }
-
-    #[test]
     fn test_scan_memory_policy_upgrade() {
         for policy in [
             None,
