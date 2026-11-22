@@ -281,7 +281,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         });
     }
 
-    /// Returns what ends a successful catchup of `region`, which replies to `sender`.
     fn catchup_finish(&self, region: MitoRegionRef, sender: OptionOutputTx) -> CatchupFinish {
         CatchupFinish {
             region,

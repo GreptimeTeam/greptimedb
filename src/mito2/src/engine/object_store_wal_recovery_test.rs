@@ -1484,7 +1484,6 @@ async fn waiting_region(prefix: &str, ack_mode: AckMode) -> WaitingRegion {
 
 type CatchupHandle = tokio::task::JoinHandle<Result<api::region::RegionResponse, BoxedError>>;
 
-/// Catches the region up with `set_writable` and `entry_id` in the background.
 fn spawn_catchup(engine: &MitoEngine, set_writable: bool, entry_id: Option<u64>) -> CatchupHandle {
     let engine = engine.clone();
     tokio::spawn(async move {
