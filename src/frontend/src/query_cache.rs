@@ -2031,7 +2031,7 @@ mod tests {
 
     /// One minute, the step every clock-aligned test uses.
     const STEP_MS: i64 = 60_000;
-    /// Five minutes: a whole number of steps, so canonical bounds are grid points.
+    /// Five minutes: the chunk target the tests configure.
     const CHUNK_MS: i64 = 300_000;
     /// The five-minute chunk every clock-aligned test plans with.
     const CHUNK: Duration = Duration::from_millis(CHUNK_MS as u64);

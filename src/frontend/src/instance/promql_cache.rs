@@ -401,7 +401,7 @@ mod tests {
 
     /// One minute, the step every test statement evaluates on.
     const STEP_MS: i64 = 60_000;
-    /// Five minutes: a whole number of steps, so canonical bounds are grid points.
+    /// Five minutes: the chunk target the tests configure.
     const CHUNK_MS: i64 = 300_000;
     /// A five-minute-aligned instant, standing in for 10:00.
     const HEAD_MS: i64 = 36_000_000;
@@ -938,19 +938,6 @@ mod tests {
         let cache = test_cache();
         // Four points are shorter than one chunk, so every point is an edge span.
         let stmt = range_stmt("cpu", HEAD_MS, 4, STEP_MS);
-
-        assert!(matches!(
-            run(&ForbiddenExecutor, &cache, &stmt, "cpu").await.unwrap(),
-            RangeOutcome::Bypassed
-        ));
-        assert_eq!(0, cache.entry_count());
-    }
-
-    #[tokio::test]
-    async fn a_step_that_does_not_divide_the_chunk_bypasses_the_cache() {
-        let cache = test_cache();
-        // A seven-minute step puts canonical chunk bounds between grid points.
-        let stmt = range_stmt("cpu", HEAD_MS, 10, 7 * STEP_MS);
 
         assert!(matches!(
             run(&ForbiddenExecutor, &cache, &stmt, "cpu").await.unwrap(),

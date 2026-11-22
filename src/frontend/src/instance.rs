@@ -1626,8 +1626,8 @@ impl Instance {
     /// the request's collector below.
     ///
     /// The statement itself then has to survive [`RollupCache::plan`], which refuses
-    /// anything outside the window allowlist and any grid whose chunk bounds would
-    /// fall between its points.
+    /// anything outside the window allowlist and any grid it cannot split into whole
+    /// chunks of whole steps (`InvalidSpan` or `Overflow`).
     #[allow(clippy::too_many_arguments)]
     async fn cached_range_output(
         &self,
