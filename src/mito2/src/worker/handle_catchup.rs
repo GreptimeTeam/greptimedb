@@ -114,10 +114,17 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             let mut task = RegionCatchupTask::new(region.clone(), wal, allow_stale_entries)
                 .with_entry_receiver(entry_receiver)
                 .with_expected_last_entry_id(request.entry_id)
+                .with_set_writable(request.set_writable)
                 .with_replay_checkpoint_entry_id(request.checkpoint.map(|c| c.entry_id))
                 .with_acknowledged_entry_id(last_entry_id);
 
-            match task.run().await {
+            // Under conditional manifest publication, the region becomes writable only once its
+            // catchup committed the next manifest version.
+            let result = match task.run().await {
+                Ok(_) if request.set_writable => region.manifest_ctx.commit_catchup().await,
+                result => result,
+            };
+            match result {
                 Ok(_) => {
                     let promoted = if !request.set_writable {
                         region.manifest_ctx.end_catchup();

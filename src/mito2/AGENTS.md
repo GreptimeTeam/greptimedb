@@ -230,7 +230,10 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   `ManifestContext::update_locked` refuses its commits unless they are staged or the region is
   downgrading (a close that must flush downgrades first); only a replay of tails
   (`TailsEditor::Replay`) skips the check, a discard does not, and ending staging checks it
-  before `commit_staged_locked`. No flush or compaction trigger starts work for a waiting region except
+  before `commit_staged_locked`. The catchup itself commits, as a Follower and before the
+  promotion, an empty edit (`ManifestContext::commit_catchup`) that skips the deadline check,
+  starts no checkpoint, does not fence the region on a conflict and commits nothing without
+  conditional publication. No flush or compaction trigger starts work for a waiting region except
   a downgrade's flush. The lease that ends the wait wakes the worker
   (`handle_leader_lease_wait_ended`) to schedule the flushes the wait deferred and, only if the
   region is then a writable leader, start a compaction, build missing indexes, re-issue the
