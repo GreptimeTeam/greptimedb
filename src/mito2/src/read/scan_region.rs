@@ -1524,8 +1524,8 @@ impl ScanInput {
         }
     }
 
-    /// Tries to build file-level pruning statistics using only the [FileHandle]'s manifest-level
-    /// time range, without reading any parquet metadata.
+    /// Tries to build file-level pruning statistics from the [FileHandle]'s manifest-level
+    /// time range and primary key range, without reading any parquet metadata.
     ///
     /// Returns `None` if timestamp unit conversion overflows (conservative: keep the file).
     fn try_file_level_pruning_stats(&self, file: &FileHandle) -> Option<FileLevelPruningStats> {
@@ -1576,7 +1576,8 @@ impl ScanInput {
     }
 
     /// Checks whether a file can be definitively pruned using only its manifest-level
-    /// time range and the current predicate, without reading any parquet metadata.
+    /// time and primary key ranges and the current predicate, without reading any parquet
+    /// metadata.
     ///
     /// Returns `true` if [PruningStatistics] proves the file cannot contain matching rows.
     #[inline]
@@ -1619,7 +1620,7 @@ impl ScanInput {
     ) -> Result<FileRangeBuilder> {
         let predicate = self.predicate_for_file(file);
 
-        // Early file-level pruning using manifest time range before any parquet metadata access.
+        // Early file-level pruning using manifest ranges before any parquet metadata access.
         if self.manifest_prunes_file(file, predicate.as_ref()) {
             reader_metrics.filter_metrics.files_time_range_pruned += 1;
             return Ok(FileRangeBuilder::default());
@@ -1901,9 +1902,9 @@ impl ScanInput {
     }
 }
 
-/// Lightweight [PruningStatistics] that only uses the file-level time range from manifest
-/// metadata, avoiding any parquet metadata reads. Used for early file-level pruning before
-/// accessing row-group-level statistics.
+/// Lightweight [PruningStatistics] that only uses the file-level time range and first primary
+/// key range from manifest metadata, avoiding any parquet metadata reads. Used for early
+/// file-level pruning before accessing row-group-level statistics.
 pub(crate) struct FileLevelPruningStats {
     /// Scalar value for the file's minimum timestamp in the time index column's unit.
     pub(crate) min_scalar: ScalarValue,

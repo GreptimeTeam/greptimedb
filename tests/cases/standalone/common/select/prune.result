@@ -197,3 +197,128 @@ DROP TABLE test_time_filter;
 
 Affected Rows: 0
 
+-- Files whose primary key range excludes the predicate are pruned before reading them.
+CREATE TABLE pk_range_prune(ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING, idc STRING, PRIMARY KEY(host, idc));
+
+Affected Rows: 0
+
+INSERT INTO pk_range_prune VALUES (1, 1, 'a', 'idc1'), (2, 2, 'b', 'idc2');
+
+Affected Rows: 2
+
+ADMIN flush_table('pk_range_prune');
+
++-------------------------------------+
+| ADMIN flush_table('pk_range_prune') |
++-------------------------------------+
+| 0                                   |
++-------------------------------------+
+
+INSERT INTO pk_range_prune VALUES (1, 3, 'c', 'idc1'), (2, 4, 'd', 'idc2');
+
+Affected Rows: 2
+
+ADMIN flush_table('pk_range_prune');
+
++-------------------------------------+
+| ADMIN flush_table('pk_range_prune') |
++-------------------------------------+
+| 0                                   |
++-------------------------------------+
+
+SELECT * FROM pk_range_prune WHERE host = 'c';
+
++-------------------------+-----+------+------+
+| ts                      | val | host | idc  |
++-------------------------+-----+------+------+
+| 1970-01-01T00:00:00.001 | 3.0 | c    | idc1 |
++-------------------------+-----+------+------+
+
+SELECT * FROM pk_range_prune WHERE host >= 'b' ORDER BY host;
+
++-------------------------+-----+------+------+
+| ts                      | val | host | idc  |
++-------------------------+-----+------+------+
+| 1970-01-01T00:00:00.002 | 2.0 | b    | idc2 |
+| 1970-01-01T00:00:00.001 | 3.0 | c    | idc1 |
+| 1970-01-01T00:00:00.002 | 4.0 | d    | idc2 |
++-------------------------+-----+------+------+
+
+SELECT * FROM pk_range_prune WHERE host < 'b';
+
++-------------------------+-----+------+------+
+| ts                      | val | host | idc  |
++-------------------------+-----+------+------+
+| 1970-01-01T00:00:00.001 | 1.0 | a    | idc1 |
++-------------------------+-----+------+------+
+
+DROP TABLE pk_range_prune;
+
+Affected Rows: 0
+
+CREATE TABLE pk_range_phy (ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE = metric WITH ("physical_metric_table" = "");
+
+Affected Rows: 0
+
+CREATE TABLE pk_range_t1 (ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING PRIMARY KEY) ENGINE = metric WITH ("on_physical_table" = "pk_range_phy");
+
+Affected Rows: 0
+
+CREATE TABLE pk_range_t2 (ts TIMESTAMP TIME INDEX, val DOUBLE, job STRING PRIMARY KEY) ENGINE = metric WITH ("on_physical_table" = "pk_range_phy");
+
+Affected Rows: 0
+
+INSERT INTO pk_range_t1 VALUES ('host1', 0, 1), ('host2', 1, 2);
+
+Affected Rows: 2
+
+ADMIN flush_table('pk_range_phy');
+
++-----------------------------------+
+| ADMIN flush_table('pk_range_phy') |
++-----------------------------------+
+| 0                                 |
++-----------------------------------+
+
+INSERT INTO pk_range_t2 VALUES ('job1', 0, 3), ('job2', 1, 4);
+
+Affected Rows: 2
+
+ADMIN flush_table('pk_range_phy');
+
++-----------------------------------+
+| ADMIN flush_table('pk_range_phy') |
++-----------------------------------+
+| 0                                 |
++-----------------------------------+
+
+SELECT * FROM pk_range_t1 ORDER BY host;
+
++-------+-------------------------+-----+
+| host  | ts                      | val |
++-------+-------------------------+-----+
+| host1 | 1970-01-01T00:00:00     | 1.0 |
+| host2 | 1970-01-01T00:00:00.001 | 2.0 |
++-------+-------------------------+-----+
+
+SELECT * FROM pk_range_t2 ORDER BY job;
+
++------+-------------------------+-----+
+| job  | ts                      | val |
++------+-------------------------+-----+
+| job1 | 1970-01-01T00:00:00     | 3.0 |
+| job2 | 1970-01-01T00:00:00.001 | 4.0 |
++------+-------------------------+-----+
+
+DROP TABLE pk_range_t1;
+
+Affected Rows: 0
+
+DROP TABLE pk_range_t2;
+
+Affected Rows: 0
+
+DROP TABLE pk_range_phy;
+
+Affected Rows: 0
+
