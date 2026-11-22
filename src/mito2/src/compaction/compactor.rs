@@ -594,6 +594,11 @@ fn sst_info_from_file_meta(meta: &FileMeta) -> SstInfo {
     }
 }
 
+/// Minimum number of input files a compaction reads concurrently, each in its own task so
+/// that fetching and decoding inputs overlap the merge. This is independent of the output
+/// encoding parallelism. Each concurrent input buffers two batches.
+const COMPACTION_READ_PARALLELISM: usize = 8;
+
 /// `[MergeOutput]` represents the output of merging SST files.
 #[derive(Default, Debug, Serialize, Deserialize)]
 pub struct MergeOutput {
@@ -798,7 +803,9 @@ impl DefaultSstMerger {
             filter_deleted: output.filter_deleted,
             time_range: output.output_time_range,
             merge_mode,
-            read_parallelism: write_opts.encode_parallelism,
+            read_parallelism: write_opts
+                .encode_parallelism
+                .max(COMPACTION_READ_PARALLELISM),
         };
         // Matching file scopes need no additional region filtering. Rollover and
         // time slicing still require output-scoped accumulation.
