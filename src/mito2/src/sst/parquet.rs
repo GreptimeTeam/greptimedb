@@ -482,7 +482,7 @@ pub struct SstInfo {
 
 impl SstInfo {
     /// Size of the blob sidecar recorded in the footer, 0 when the SST has none.
-    pub(crate) fn blob_file_size(&self) -> u64 {
+    pub fn blob_file_size(&self) -> u64 {
         self.file_metadata
             .as_deref()
             .and_then(blob::blob_file_size)
