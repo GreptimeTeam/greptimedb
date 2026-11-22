@@ -341,6 +341,14 @@ impl StateMergeHelper {
     }
 }
 
+/// Returns whether this is a distributed state wrapper over DataFusion's builtin COUNT.
+pub fn is_builtin_count_state(function: &AggregateUDF) -> bool {
+    function
+        .inner()
+        .downcast_ref::<StateWrapper>()
+        .is_some_and(|wrapper| wrapper.inner().inner().is::<Count>())
+}
+
 /// Wrapper to make an aggregate function out of a state function.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StateWrapper {

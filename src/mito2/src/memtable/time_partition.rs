@@ -38,7 +38,6 @@ use store_api::metadata::RegionMetadataRef;
 use crate::error;
 use crate::error::{InvalidRequestSnafu, Result};
 use crate::memtable::bulk::part::{BulkPart, BulkPartConverter};
-use crate::memtable::version::{SmallMemtableVec, SmallPartTimeRangeVec};
 use crate::memtable::{KeyValues, MemtableBuilderRef, MemtableId, MemtableRef};
 use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
 
@@ -406,7 +405,7 @@ impl TimePartitions {
     /// Appends memtables in partitions with their partition time ranges.
     pub(crate) fn list_memtables_with_time_ranges(
         &self,
-        memtables: &mut Vec<(MemtableRef, PartTimeRange)>,
+        memtables: &mut impl Extend<(MemtableRef, PartTimeRange)>,
     ) {
         let inner = self.inner.lock().unwrap();
         memtables.extend(
@@ -517,18 +516,6 @@ impl TimePartitions {
             .iter()
             .map(|part| part.memtable.stats().num_rows as u64)
             .sum()
-    }
-
-    /// Append memtables in partitions to small vec, and their partition time
-    /// ranges to `time_ranges` in the same order.
-    pub(crate) fn list_memtables_to_small_vec(
-        &self,
-        memtables: &mut SmallMemtableVec,
-        time_ranges: &mut SmallPartTimeRangeVec,
-    ) {
-        let inner = self.inner.lock().unwrap();
-        memtables.extend(inner.parts.iter().map(|part| part.memtable.clone()));
-        time_ranges.extend(inner.parts.iter().map(|part| part.time_range));
     }
 
     /// Returns the next memtable id.

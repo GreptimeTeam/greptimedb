@@ -17,12 +17,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use common_function::aggrs::aggr_wrapper::{aggr_state_func_name, is_builtin_count_state};
+use common_function::function_registry::FUNCTION_REGISTRY;
 use datafusion::catalog::Session;
 use datafusion::datasource::TableProvider;
 use datafusion::logical_expr::{Expr, TableType};
 use datafusion::physical_plan::expressions::Column;
 use datafusion::physical_plan::projection::ProjectionExec;
-use datafusion::physical_plan::{ExecutionPlan, displayable};
+use datafusion::physical_plan::{ExecutionPlan, collect, displayable};
 use datafusion::prelude::SessionContext;
 use datafusion_common::ScalarValue;
 use datafusion_expr::{col, lit};
@@ -84,12 +86,21 @@ fn count_context() -> SessionContext {
         .iter()
         .position(|rule| rule.name() == "aggregate_statistics")
         .unwrap();
-    rules.insert(index, Arc::new(PartialAggrRule::default()));
+    rules.insert(
+        index,
+        Arc::new(PartialAggrRule::with_count_state(is_builtin_count_state)),
+    );
     let state = datafusion::execution::session_state::SessionStateBuilder::new()
         .with_default_features()
         .with_physical_optimizer_rules(rules)
         .build();
-    SessionContext::new_with_state(state)
+    let ctx = SessionContext::new_with_state(state);
+    ctx.register_udaf(
+        FUNCTION_REGISTRY
+            .get_aggr_func(&aggr_state_func_name("count"))
+            .unwrap(),
+    );
+    ctx
 }
 
 /// Plans and runs `SELECT count(*)` over a scan of the region with the query
@@ -99,6 +110,20 @@ async fn sql_count(
     region_id: RegionId,
     request: ScanRequest,
 ) -> (String, i64) {
+    let (plan, result) = sql_aggregate(engine, region_id, request, "SELECT count(*) FROM t").await;
+    let ScalarValue::Int64(Some(count)) = result else {
+        unreachable!()
+    };
+    (plan, count)
+}
+
+/// Plans once: creating the physical plan can consume the scan's one-shot split.
+async fn sql_aggregate(
+    engine: &MitoEngine,
+    region_id: RegionId,
+    request: ScanRequest,
+    sql: &str,
+) -> (String, ScalarValue) {
     let scanner = engine
         .handle_query(region_id, request.clone())
         .await
@@ -107,16 +132,17 @@ async fn sql_count(
     let ctx = count_context();
     ctx.register_table("t", Arc::new(CountTable { plan }))
         .unwrap();
-    let df = ctx.sql("SELECT count(*) FROM t").await.unwrap();
-    let plan = df.clone().create_physical_plan().await.unwrap();
+    let plan = ctx
+        .sql(sql)
+        .await
+        .unwrap()
+        .create_physical_plan()
+        .await
+        .unwrap();
     let text = displayable(plan.as_ref()).indent(true).to_string();
-    let batches = df.collect().await.unwrap();
-    let ScalarValue::Int64(Some(count)) =
-        ScalarValue::try_from_array(batches[0].column(0), 0).unwrap()
-    else {
-        unreachable!()
-    };
-    (text, count)
+    let batches = collect(plan, ctx.task_ctx()).await.unwrap();
+    let result = ScalarValue::try_from_array(batches[0].column(0), 0).unwrap();
+    (text, result)
 }
 
 #[tokio::test]
@@ -856,6 +882,24 @@ async fn test_metadata_aggr_exec_merges_metadata_rows() {
     let (plan, count) = sql_count(&engine, region_id, hinted.clone()).await;
     assert!(plan.contains("MetadataAggrExec: exact_rows=12"), "{plan}");
     assert_eq!(count, 15);
+
+    // Distributed planning uses the registered state wrapper; its final
+    // aggregate returns a struct whose first field is the merged COUNT state.
+    let (plan, state) = sql_aggregate(
+        &engine,
+        region_id,
+        hinted.clone(),
+        "SELECT __count_state(1) FROM t",
+    )
+    .await;
+    assert!(plan.contains("MetadataAggrExec: exact_rows=12"), "{plan}");
+    let ScalarValue::Struct(state) = state else {
+        panic!("expected a COUNT state struct");
+    };
+    assert_eq!(
+        ScalarValue::try_from_array(state.column(0), 0).unwrap(),
+        ScalarValue::Int64(Some(15)),
+    );
 
     // Without the hint the scan carries no split.
     let (plan, count) = sql_count(&engine, region_id, ScanRequest::default()).await;
