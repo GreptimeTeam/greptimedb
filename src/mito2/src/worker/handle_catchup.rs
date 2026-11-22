@@ -30,7 +30,9 @@ use crate::config::IndexBuildMode;
 use crate::error::{self, Result};
 use crate::region::catchup::RegionCatchupTask;
 use crate::region::opener::RegionOpener;
-use crate::region::{MitoRegion, MitoRegionRef, RegionLeaderState, RegionRoleState};
+use crate::region::{
+    CatchupRegionsRef, MitoRegion, MitoRegionRef, RegionLeaderState, RegionRoleState,
+};
 use crate::request::{BackgroundNotify, BuildIndexRequest, OptionOutputTx, WorkerRequestWithTime};
 use crate::sst::index::IndexBuildType;
 use crate::tail_replay::notify_worker;
@@ -102,15 +104,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         };
 
         self.catchup_regions.insert_region(region_id);
-        let catchup_regions = self.catchup_regions.clone();
+        let finish = self.catchup_finish(region.clone(), sender);
         let wal = self.wal.clone();
         let allow_stale_entries = self.config.allow_stale_entries;
-        #[cfg(feature = "hdfs-object-store")]
-        let sweep_older_than = self.config.gc.unknown_file_lingering_time;
-        #[cfg(feature = "hdfs-object-store")]
-        let sweep_limiter = self.sweep_limiter.clone();
         let node_lease = self.node_lease.clone();
-        let worker_sender = self.sender.clone();
         common_runtime::spawn_global(async move {
             let mut task = RegionCatchupTask::new(region.clone(), wal, allow_stale_entries)
                 .with_entry_receiver(entry_receiver)
@@ -120,59 +117,45 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
             match task.run().await {
                 Ok(_) => {
-                    if !request.set_writable {
+                    let promoted = if !request.set_writable {
                         region.manifest_ctx.end_catchup();
+                        false
                     } else {
                         // The region takes writes under the node lease until its next Leader
                         // grant.
                         node_lease.seed(&region.manifest_ctx.leader_deadline);
-                        if region.manifest_ctx.promote_after_catchup(region_id) {
-                            // Finalize leadership: persist backfilled metadata.
-                            let drain = drain_ended_staging(&worker_sender, region_id);
-                            match region
-                                .set_role_state_gracefully(SettableRegionRoleState::Leader, drain)
-                                .await
-                            {
-                                Ok(()) => {
-                                    #[cfg(feature = "hdfs-object-store")]
-                                    temp_file_sweeper::spawn_region_sweep(
-                                        region.access_layer(),
-                                        region_id,
-                                        sweep_older_than,
-                                        sweep_limiter,
-                                    );
-                                }
-                                Err(err) => {
-                                    error!(err; "Failed to set region {region_id} to leader");
-                                }
-                            }
-                            handle_tail_replay::notify_writable(&worker_sender, &region);
-                        }
-                    }
-                    catchup_regions.remove_region(region_id);
-                    // A close during the catchup stopped the region, which no longer serves it.
-                    // A commit during the catchup, including the backfill above, may have found
-                    // a newer manifest.
-                    if region.manifest_ctx.is_stopped() {
-                        sender.send(Err(error::RegionNotFoundSnafu { region_id }.build()));
-                    } else if region.manifest_ctx.is_reload_pending() {
-                        sender.send(Err(error::RegionBusySnafu { region_id }.build()));
-                    } else {
-                        sender.send(Ok(0));
-                    }
+                        region.manifest_ctx.promote_after_catchup(region_id)
+                    };
+                    finish.run(promoted).await;
                 }
                 Err(err) => {
                     error!(err; "Failed to catchup region {region_id}");
                     region.manifest_ctx.end_catchup();
-                    catchup_regions.remove_region(region_id);
+                    finish.catchup_regions.remove_region(region_id);
                     if region.manifest_ctx.is_stopped() {
-                        sender.send(Err(error::RegionNotFoundSnafu { region_id }.build()));
+                        finish
+                            .sender
+                            .send(Err(error::RegionNotFoundSnafu { region_id }.build()));
                     } else {
-                        sender.send(Err(err));
+                        finish.sender.send(Err(err));
                     }
                 }
             }
         });
+    }
+
+    /// Returns what ends a successful catchup of `region`, which replies to `sender`.
+    fn catchup_finish(&self, region: MitoRegionRef, sender: OptionOutputTx) -> CatchupFinish {
+        CatchupFinish {
+            region,
+            sender,
+            catchup_regions: self.catchup_regions.clone(),
+            worker_sender: self.sender.clone(),
+            #[cfg(feature = "hdfs-object-store")]
+            sweep_older_than: self.config.gc.unknown_file_lingering_time,
+            #[cfg(feature = "hdfs-object-store")]
+            sweep_limiter: self.sweep_limiter.clone(),
+        }
     }
 
     /// Reopens a region for its catchup, which keeps Leader leases from promoting the reopened
@@ -312,6 +295,60 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         };
         self.handle_rebuild_index(request, OptionOutputTx::new(None))
             .await;
+    }
+}
+
+/// What ends a successful catchup: it finalizes the leadership of a promoted region, ends the
+/// catchup and replies.
+struct CatchupFinish {
+    region: MitoRegionRef,
+    sender: OptionOutputTx,
+    catchup_regions: CatchupRegionsRef,
+    worker_sender: Sender<WorkerRequestWithTime>,
+    #[cfg(feature = "hdfs-object-store")]
+    sweep_older_than: std::time::Duration,
+    #[cfg(feature = "hdfs-object-store")]
+    sweep_limiter: Option<Arc<tokio::sync::Semaphore>>,
+}
+
+impl CatchupFinish {
+    async fn run(self, promoted: bool) {
+        let region = self.region;
+        let region_id = region.region_id;
+        if promoted {
+            // Finalize leadership: persist backfilled metadata.
+            let drain = drain_ended_staging(&self.worker_sender, region_id);
+            match region
+                .set_role_state_gracefully(SettableRegionRoleState::Leader, drain)
+                .await
+            {
+                Ok(()) => {
+                    #[cfg(feature = "hdfs-object-store")]
+                    temp_file_sweeper::spawn_region_sweep(
+                        region.access_layer(),
+                        region_id,
+                        self.sweep_older_than,
+                        self.sweep_limiter,
+                    );
+                }
+                Err(err) => {
+                    error!(err; "Failed to set region {region_id} to leader");
+                }
+            }
+            handle_tail_replay::notify_writable(&self.worker_sender, &region);
+        }
+        self.catchup_regions.remove_region(region_id);
+        // A close during the catchup stopped the region, which no longer serves it. A commit
+        // during the catchup, including the backfill above, may have found a newer manifest.
+        if region.manifest_ctx.is_stopped() {
+            self.sender
+                .send(Err(error::RegionNotFoundSnafu { region_id }.build()));
+        } else if region.manifest_ctx.is_reload_pending() {
+            self.sender
+                .send(Err(error::RegionBusySnafu { region_id }.build()));
+        } else {
+            self.sender.send(Ok(0));
+        }
     }
 }
 

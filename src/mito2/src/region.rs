@@ -2205,8 +2205,9 @@ impl ManifestContext {
     }
 
     /// Promotes the region to a writable leader unless a downgrade started after `issued_at`, a
-    /// catchup runs on it, it waits for a reload or it was stopped. `promoted` is false if the promotion is ignored
-    /// for one of these reasons; otherwise the role changes as [`Self::set_role`] allows.
+    /// catchup runs on it, it waits for a reload or it was stopped. `promoted` is false if the
+    /// promotion is ignored for one of these reasons; otherwise the role changes as
+    /// [`Self::set_role`] allows.
     /// `ended_wait` tells whether this lease ended the region's wait for its Leader lease. A lease
     /// ignored for a downgrade or a catchup ends no wait.
     pub(crate) fn promote_unless_downgrade_started_after(
@@ -2254,10 +2255,11 @@ impl ManifestContext {
 
     /// Begins a catchup unless the region is writable (a writable or staging leader, as
     /// [MitoRegion::is_writable]) and does not [await its Leader lease](Self::awaits_leader_lease),
-    /// and returns whether it demoted a writable region, None if it begins none. Until the catchup ends, Leader leases do not promote the
-    /// region, see [Self::promote_after_catchup] and [Self::end_catchup]; the caller ends it on
-    /// every path. A writable region is demoted to Follower and ignores the Leader leases sent
-    /// before. A lease that ends the wait of a writable region holds the same lock.
+    /// and returns whether it demoted a writable region, None if it begins none. Until the catchup
+    /// ends, Leader leases do not promote the region, see [Self::promote_after_catchup] and
+    /// [Self::end_catchup]; the caller ends it on every path. A writable region is demoted to
+    /// Follower and ignores the Leader leases sent before. A lease that ends the wait of a
+    /// writable region holds the same lock.
     pub(crate) fn begin_catchup(&self, region_id: RegionId) -> Option<bool> {
         let mut fence = self.promotion_fence.lock().unwrap();
         let writable = matches!(
