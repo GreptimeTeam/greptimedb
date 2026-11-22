@@ -702,6 +702,155 @@ async fn test_rollup_cache_metric_logical_table() {
     );
 }
 
+/// A concurrent writer, query loop and refresh loop over the same cached table.
+///
+/// During the race a request may see the old value (1.0) or the overwritten value
+/// (9.0): the acceptance target allows stale reads until a round invalidates the
+/// affected chunk. Every request must still see exactly one of those values at the
+/// overwritten timestamp and 1.0 everywhere else. After the writer and the refresh
+/// loop stop, one final round and query must converge on 9.0, and a second query
+/// must be served from a resident cache entry.
+#[tokio::test]
+async fn test_rollup_cache_concurrent_writes_queries_and_refresh() {
+    const RACY_TS: i64 = 1_020_000;
+
+    fn assert_answer(answer: &[(i64, f64)], final_value: Option<f64>) {
+        assert_eq!(11, answer.len(), "one point per step: {answer:?}");
+        for (ts, value) in answer {
+            if *ts == RACY_TS {
+                match final_value {
+                    Some(expected) => assert_eq!(expected, *value, "at {ts}: {answer:?}"),
+                    None => assert!(
+                        *value == 1.0 || *value == 9.0,
+                        "the race may serve the old or the new value at {ts}, got {answer:?}"
+                    ),
+                }
+            } else {
+                assert_eq!(
+                    1.0, *value,
+                    "only the overwritten point changes at {ts}: {answer:?}"
+                );
+            }
+        }
+    }
+
+    let instance = standalone_with_rollup_cache().await;
+    let frontend = instance.frontend();
+    execute_sql(
+        &frontend,
+        "CREATE TABLE cache_racy (host STRING PRIMARY KEY, ts TIMESTAMP(3) TIME INDEX, val DOUBLE)",
+    )
+    .await;
+    let rows = (15..=25)
+        .map(|minute| format!("('a', {}, 1.0)", minute * 60_000))
+        .collect::<Vec<_>>()
+        .join(", ");
+    execute_sql(
+        &frontend,
+        &format!("INSERT INTO cache_racy (host, ts, val) VALUES {rows}"),
+    )
+    .await;
+
+    let app = prometheus_http_app(&frontend);
+    let cache = frontend
+        .rollup_cache()
+        .expect("the test instance installs the cache")
+        .clone();
+
+    // Prove the table and fill its two five-minute chunks before the race, so the
+    // concurrent requests start from a warm cache instead of all filling at once.
+    refresh_rollup_cache(&frontend).await;
+    let initial = promql_range_points(&app, "sum(cache_racy)", "900", "1500", "60", "60").await;
+    assert_answer(&initial, Some(1.0));
+    assert!(cache.entry_count() > 0, "the warm-up filled the two chunks");
+
+    let barrier = Arc::new(tokio::sync::Barrier::new(3));
+    let writer = {
+        let frontend = frontend.clone();
+        let barrier = barrier.clone();
+        tokio::spawn(async move {
+            barrier.wait().await;
+            for i in 0..10 {
+                let value = if i % 2 == 0 { 9.0 } else { 1.0 };
+                execute_sql(
+                    &frontend,
+                    &format!(
+                        "INSERT INTO cache_racy (host, ts, val) VALUES ('a', {RACY_TS}, {value})"
+                    ),
+                )
+                .await;
+                tokio::task::yield_now().await;
+            }
+            // Leave the final value deterministic for the convergence assertion.
+            execute_sql(
+                &frontend,
+                &format!("INSERT INTO cache_racy (host, ts, val) VALUES ('a', {RACY_TS}, 9.0)"),
+            )
+            .await;
+        })
+    };
+    let queries = {
+        let app = app.clone();
+        let barrier = barrier.clone();
+        tokio::spawn(async move {
+            barrier.wait().await;
+            for _ in 0..12 {
+                let answer =
+                    promql_range_points(&app, "sum(cache_racy)", "900", "1500", "60", "60").await;
+                assert_answer(&answer, None);
+                tokio::task::yield_now().await;
+            }
+        })
+    };
+    let refreshes = {
+        let frontend = frontend.clone();
+        let barrier = barrier.clone();
+        tokio::spawn(async move {
+            barrier.wait().await;
+            for _ in 0..6 {
+                refresh_rollup_cache(&frontend).await;
+                tokio::task::yield_now().await;
+            }
+        })
+    };
+
+    let raced = tokio::time::timeout(std::time::Duration::from_secs(120), async {
+        let (writer, queries, refreshes) = tokio::join!(writer, queries, refreshes);
+        writer.expect("the concurrent writer completed");
+        queries.expect("the concurrent queries completed");
+        refreshes.expect("the concurrent refreshes completed");
+    })
+    .await;
+    assert!(
+        raced.is_ok(),
+        "the concurrent writer/query/refresh test timed out"
+    );
+
+    // Quiesce the writer, prove the final sequence, and require eventual consistency.
+    execute_sql(
+        &frontend,
+        &format!("INSERT INTO cache_racy (host, ts, val) VALUES ('a', {RACY_TS}, 9.0)"),
+    )
+    .await;
+    refresh_rollup_cache(&frontend).await;
+    let final_answer =
+        promql_range_points(&app, "sum(cache_racy)", "900", "1500", "60", "60").await;
+    assert_answer(&final_answer, Some(9.0));
+    assert!(
+        cache.entry_count() > 0,
+        "the final query left a resident cache entry"
+    );
+
+    // The first post-quiescence query may have refilled; the next is a real hit.
+    let hits_before = cache.hit_count();
+    let repeated = promql_range_points(&app, "sum(cache_racy)", "900", "1500", "60", "60").await;
+    assert_answer(&repeated, Some(9.0));
+    assert!(
+        cache.hit_count() > hits_before,
+        "the repeated final query served a resident chunk from memory"
+    );
+}
+
 #[apply(both_instances_cases)]
 async fn test_sparse_primary_key_schema_validation(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
