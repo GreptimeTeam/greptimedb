@@ -363,10 +363,9 @@ impl RangeMeta {
     }
 }
 
-/// Groups ranges that may hold rows of the same key, so that each group can be merged and
-/// deduplicated on its own. Two ranges may share a key only if both their time ranges and their
-/// primary key ranges overlap; a range without a known primary key range overlaps every key.
-/// Two ranges in different groups never share a key.
+/// Groups ranges so that all versions of a (primary key, timestamp) pair stay
+/// together for deduplication. Ranges with disjoint time or primary key ranges
+/// can be scanned independently. An unknown primary key range can match any key.
 /// It assumes each input range only contains a file or a memtable.
 fn group_ranges_for_seq_scan(
     mut ranges: Vec<(RangeMeta, Option<(Bytes, Bytes)>)>,
@@ -393,9 +392,8 @@ fn group_ranges_for_seq_scan(
             }
         }
 
-        // Open groups all contain `start`, so they overlap `current` in time. A group whose keys
-        // miss this range cannot overlap the union of the range with the groups it does overlap,
-        // so one lookup finds every group to merge.
+        // The key ranges are disjoint, so their upper bounds have the same order as
+        // their lower bounds. Walking backward, stop at the first range ending below `min`.
         let candidates: Vec<_> = match &current_keys {
             Some((min, max)) => keyed
                 .range(..=max.clone())
