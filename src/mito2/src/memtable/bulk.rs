@@ -332,8 +332,6 @@ impl BulkParts {
         CollectedParts { groups }
     }
 
-    /// Installs merged parts and removes the original parts by file ids.
-    /// Returns the total number of rows in the merged parts.
     /// Replaces the parts in `merged_file_ids` with `merged_parts`. Returns the output rows and
     /// the estimated bytes of the removed parts and of the installed parts.
     fn install_merged_parts<I>(
