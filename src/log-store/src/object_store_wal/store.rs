@@ -10842,7 +10842,7 @@ mod tests {
             let one = region(1);
             // Stop sets its flag before the actor handles a command, so a
             // hand-off the actor handles after that fails as stopped, also on a
-            // poisoned store, and does not answer with its bound.
+            // poisoned store, and keeps no floor, record or waiter.
             let (stopped, next_object_seq, records, waiters) =
                 inspect_actor(&store, move |actor| {
                     if poisoned {
