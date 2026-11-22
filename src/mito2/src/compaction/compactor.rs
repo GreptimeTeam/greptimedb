@@ -839,7 +839,12 @@ impl DefaultSstMerger {
         let source = tokio::select! {
             biased;
             _ = cancellation.cancelled() => return error::CompactionCancelledSnafu.fail(),
-            source = builder.build_flat_sst_reader() => source?,
+            source = builder.build_flat_sst_reader_and_row_group_size(write_opts.row_group_size) => source?,
+        };
+        let (source, row_group_size) = source;
+        let write_opts = WriteOptions {
+            row_group_size,
+            ..write_opts
         };
         let source = spawn_merge(source);
 
@@ -1009,10 +1014,8 @@ impl<M: SstMerger> DefaultCompactor<M> {
                     WriteOptions {
                         write_buffer_size: context.engine_config.sst_write_buffer_size,
                         max_file_size: unit.max_file_size,
-                        row_group_size: row_group_size_for_inputs(
-                            unit.inputs.iter().map(FileHandle::meta_ref),
-                            context.region_options.row_group_size(),
-                        ),
+                        // Narrowed by the decoded sizes of the inputs once their footers are read.
+                        row_group_size: context.region_options.row_group_size(),
                         float_field_encoding: context.region_options.float_field_encoding,
                         encode_parallelism: context
                             .region_options
@@ -1092,10 +1095,8 @@ where
             let write_opts = WriteOptions {
                 write_buffer_size: compaction_region.engine_config.sst_write_buffer_size,
                 max_file_size: picker_output.max_file_size,
-                row_group_size: row_group_size_for_inputs(
-                    output.inputs.iter().map(FileHandle::meta_ref),
-                    compaction_region.region_options.row_group_size(),
-                ),
+                // Narrowed by the decoded sizes of the inputs once their footers are read.
+                row_group_size: compaction_region.region_options.row_group_size(),
                 float_field_encoding: compaction_region.region_options.float_field_encoding,
                 encode_parallelism: compaction_region
                     .region_options

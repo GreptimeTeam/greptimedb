@@ -43,6 +43,7 @@ use crate::region::options::MergeMode;
 use crate::sst::file::FileHandle;
 use crate::sst::parquet::reader::MetadataCacheMetrics;
 use crate::sst::parquet::{Json2RewriteTargets, Json2TargetLayout};
+use crate::sst::parquet::{max_row_group_decoded_size, row_group_size_for};
 
 /// Builders to create [BoxedRecordBatchStream] for compaction.
 pub(crate) struct CompactionSstReaderBuilder<'a> {
@@ -61,8 +62,35 @@ pub(crate) struct CompactionSstReaderBuilder<'a> {
 impl CompactionSstReaderBuilder<'_> {
     /// Build a [FlatSource] that yields Arrow `RecordBatch`s from reading all the input SST files,
     /// for compaction. The schema of the [FlatSource] is unified.
+    #[cfg(test)]
     pub(crate) async fn build_flat_sst_reader(self) -> Result<FlatSource> {
         let parquet_metadata = self.collect_parquet_metadata().await?;
+        self.build_flat_sst_reader_from(parquet_metadata).await
+    }
+
+    /// Like [Self::build_flat_sst_reader], and also returns the output row group size for
+    /// `configured` from the decoded value bytes that the input footers record.
+    pub(crate) async fn build_flat_sst_reader_and_row_group_size(
+        self,
+        configured: usize,
+    ) -> Result<(FlatSource, usize)> {
+        let parquet_metadata = self.collect_parquet_metadata().await?;
+        let (rows, bytes) = parquet_metadata
+            .iter()
+            .fold((0u64, 0u64), |(rows, bytes), meta| {
+                (
+                    rows + meta.file_metadata().num_rows() as u64,
+                    bytes + max_row_group_decoded_size(meta) * meta.num_row_groups() as u64,
+                )
+            });
+        let source = self.build_flat_sst_reader_from(parquet_metadata).await?;
+        Ok((source, row_group_size_for(rows, bytes, configured)))
+    }
+
+    async fn build_flat_sst_reader_from(
+        self,
+        parquet_metadata: Vec<Arc<ParquetMetaData>>,
+    ) -> Result<FlatSource> {
         let plans = collect_json2_rewrite_plans_from_parquet(&self.metadata, &parquet_metadata)?;
         let scan_input = self.build_scan_input(&parquet_metadata, &plans)?;
 
@@ -344,5 +372,87 @@ mod tests {
         // Splitting by series would yield a batch per series and file, 200 in total.
         assert_eq!(2000, num_rows);
         assert!(num_batches < 20, "got {num_batches} batches");
+    }
+
+    #[tokio::test]
+    async fn test_compaction_row_group_size_counts_decoded_values() {
+        use api::v1::SemanticType;
+        use api::v1::helper::row;
+        use api::v1::value::ValueData;
+        use datatypes::prelude::ConcreteDataType;
+
+        use crate::compaction::compactor::row_group_size_for_inputs;
+
+        let mut env = TestEnv::new().await;
+        let engine = env.create_engine(Default::default()).await;
+        let region_id = RegionId::new(1, 1);
+        let mut request = CreateRequestBuilder::new().tag_num(1).field_num(1).build();
+        request
+            .column_metadatas
+            .iter_mut()
+            .find(|c| c.semantic_type == SemanticType::Field)
+            .unwrap()
+            .column_schema
+            .data_type = ConcreteDataType::string_datatype();
+        let schema = rows_schema(&request);
+        engine
+            .handle_request(region_id, RegionRequest::Create(request))
+            .await
+            .unwrap();
+        // One 64 KiB value repeated: tiny once dictionary-encoded, 64 KiB per row decoded.
+        let value = "v".repeat(64 * 1024);
+        for file in 0..2i64 {
+            let rows = (0..256)
+                .map(|i| {
+                    row(vec![
+                        ValueData::StringValue("a".to_string()),
+                        ValueData::StringValue(value.clone()),
+                        ValueData::TimestampMillisecondValue(file * 1_000_000 + i * 1000),
+                    ])
+                })
+                .collect();
+            put_rows(
+                &engine,
+                region_id,
+                Rows {
+                    schema: schema.clone(),
+                    rows,
+                },
+            )
+            .await;
+            engine
+                .handle_request(
+                    region_id,
+                    RegionRequest::Flush(RegionFlushRequest::default()),
+                )
+                .await
+                .unwrap();
+        }
+        let region = engine.get_region(region_id).unwrap();
+        let version = region.version();
+        let inputs: Vec<_> = version.ssts.levels()[0].files().cloned().collect();
+        assert_eq!(2, inputs.len());
+        // File metadata holds the dictionary-encoded size, which suggests full row groups.
+        assert_eq!(
+            102_400,
+            row_group_size_for_inputs(inputs.iter().map(|f| f.meta_ref()), 102_400)
+        );
+
+        let (_, row_group_size) = CompactionSstReaderBuilder {
+            metadata: version.metadata.clone(),
+            sst_layer: region.access_layer.clone(),
+            cache: engine.cache_manager(),
+            inputs: &inputs,
+            append_mode: false,
+            filter_deleted: true,
+            time_range: None,
+            merge_mode: MergeMode::LastRow,
+            read_parallelism: 1,
+        }
+        .build_flat_sst_reader_and_row_group_size(102_400)
+        .await
+        .unwrap();
+        // 128 MiB of 64 KiB rows.
+        assert_eq!(2048, row_group_size);
     }
 }

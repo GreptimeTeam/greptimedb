@@ -37,6 +37,7 @@ use store_api::storage::consts::{OP_TYPE_COLUMN_NAME, SEQUENCE_COLUMN_NAME};
 use store_api::storage::{ColumnId, FileId};
 
 use crate::error::{CompressionOptionsSnafu, Result, WriteParquetSnafu};
+use crate::region::options::DEFAULT_INDEX_SEGMENT_ROW_COUNT;
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
 use crate::sst::file::{FileFormat, FileTimeRange};
 use crate::sst::index::IndexOutput;
@@ -130,12 +131,21 @@ const TARGET_ROW_GROUP_BYTES: u64 = 128 * 1024 * 1024;
 /// The size comes from the average row width of the whole input, so a few wide rows at the
 /// start of a file do not shrink the row groups of the rest. Rows wider than the average can
 /// still make single row groups larger than the target.
+///
+/// A size below `configured` is rounded down to a multiple of the default inverted index
+/// segment. The index widens its segments to the row group size when the row group size is
+/// not a multiple of them, which would make an index match select whole row groups.
 pub(crate) fn row_group_size_for(rows: u64, bytes: u64, configured: usize) -> usize {
     if rows == 0 || bytes == 0 {
         return configured;
     }
     let row_width = bytes.div_ceil(rows);
-    (TARGET_ROW_GROUP_BYTES / row_width).clamp(1, configured as u64) as usize
+    let size = (TARGET_ROW_GROUP_BYTES / row_width).clamp(1, configured as u64) as usize;
+    if size < configured && size >= DEFAULT_INDEX_SEGMENT_ROW_COUNT {
+        size - size % DEFAULT_INDEX_SEGMENT_ROW_COUNT
+    } else {
+        size
+    }
 }
 
 /// Returns the bytes of string and binary values in `batch` once decoded.
@@ -249,12 +259,13 @@ impl RowGroupValueBytes {
     }
 }
 
-/// Returns the size of the largest row group of `metadata`, counting string and binary values
-/// at their decoded size when the footer records it under [MAX_ROW_GROUP_VALUE_BYTES_KEY].
+/// Returns the uncompressed size of the largest row group of `metadata`, summed over its column
+/// chunks.
 ///
-/// Writers and the verifier of compaction outputs must both use this to agree on the value.
-pub(crate) fn max_row_group_decoded_size(metadata: &ParquetMetaData) -> u64 {
-    let max_encoded = metadata
+/// This is the value of `FileMeta::max_row_group_uncompressed_size`. Writers and the verifier of
+/// compaction outputs, including older versions, compute it the same way.
+pub(crate) fn max_row_group_uncompressed_size(metadata: &ParquetMetaData) -> u64 {
+    metadata
         .row_groups()
         .iter()
         .map(|row_group| {
@@ -265,8 +276,13 @@ pub(crate) fn max_row_group_decoded_size(metadata: &ParquetMetaData) -> u64 {
                 .sum::<u64>()
         })
         .max()
-        .unwrap_or(0);
-    max_encoded.max(max_row_group_value_bytes(metadata))
+        .unwrap_or(0)
+}
+
+/// Returns the size of the largest row group of `metadata`, counting string and binary values
+/// at their decoded size when the footer records it under [MAX_ROW_GROUP_VALUE_BYTES_KEY].
+pub(crate) fn max_row_group_decoded_size(metadata: &ParquetMetaData) -> u64 {
+    max_row_group_uncompressed_size(metadata).max(max_row_group_value_bytes(metadata))
 }
 
 /// Returns the [MAX_ROW_GROUP_VALUE_BYTES_KEY] value of the footer, or 0 when it is absent.
@@ -1568,7 +1584,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_row_group_size_counts_dictionary_encoded_values_decoded() {
+    async fn test_dictionary_encoded_values_keep_file_meta_size_and_record_decoded_size() {
         let mut env = TestEnv::new().await;
         let object_store = env.init_object_store_manager();
         let handle = sst_file_handle(0, 1000);
@@ -1605,16 +1621,26 @@ mod tests {
             .find(|i| schema.column(*i).name() == "field_0")
             .unwrap();
         assert!(parquet_meta.row_group(0).column(field).uncompressed_size() < 1024 * 1024);
-        assert!(info.max_row_group_uncompressed_size >= 2048 * 64 * 1024);
-        // Compaction outputs are verified by recomputing the size from the stored footer.
         let footer = MetadataLoader::new(object_store, &sst_path, info.file_size)
             .load(&mut Default::default())
             .await
             .unwrap();
-        assert_eq!(
-            info.max_row_group_uncompressed_size,
-            max_row_group_decoded_size(&footer)
-        );
+        // Verifiers of compaction outputs, including older versions, sum the column chunk sizes
+        // of the stored footer and require the file metadata to match.
+        let column_chunk_sum = footer
+            .row_groups()
+            .iter()
+            .map(|rg| {
+                rg.columns()
+                    .iter()
+                    .map(|c| c.uncompressed_size() as u64)
+                    .sum::<u64>()
+            })
+            .max()
+            .unwrap();
+        assert_eq!(column_chunk_sum, info.max_row_group_uncompressed_size);
+        // Row group sizing reads the decoded size from the footer.
+        assert!(max_row_group_decoded_size(&footer) >= 2048 * 64 * 1024);
         // Readers size batches by the decoded 64 KiB values, not the dictionary-encoded size.
         assert_eq!(
             1024,
@@ -1662,13 +1688,23 @@ mod tests {
             .unwrap()
             .remove(0);
         assert_eq!(10, info.num_row_groups);
-        assert!(info.max_row_group_uncompressed_size >= 2 * 64 * 1024);
         // The tail holds 64 KiB rows although the full row groups have eight rows.
         let footer = info.file_metadata.as_ref().unwrap();
         assert_eq!(
             1024,
             estimate_batch_size(widest_row_group_statistic(footer))
         );
+    }
+
+    #[test]
+    fn test_row_group_size_for_aligns_to_index_segments() {
+        let rows = 1_000_000;
+        // 2,049-byte rows fit 65,504 rows in the target, rounded down to 63 index segments.
+        assert_eq!(64_512, row_group_size_for(rows, rows * 2_049, 102_400));
+        // Row groups narrower than one segment are kept; the index uses them as its segments.
+        assert_eq!(512, row_group_size_for(rows, rows * 256 * 1024, 102_400));
+        // The configured size is kept even when it is not a multiple of a segment.
+        assert_eq!(1_500, row_group_size_for(rows, rows, 1_500));
     }
 
     #[rstest::rstest]
