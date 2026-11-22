@@ -56,6 +56,8 @@ Issue #8085 asks for a bounded Frontend buffer with persistence. This RFC covers
 - Replacing retry behavior for Delete, BulkInsert, or metric-engine logical-batcher flushes.
 - Global ordering across Frontends, Regions, or concurrent live writes.
 - An atomic DDL fence or a transaction boundary across a FanOut lineage.
+- A dead-letter query API.
+- Recovery from failure of the queue's own coordination component.
 
 ## Request Scope and Retry Ownership
 
@@ -266,9 +268,8 @@ If FanOut is interrupted, only successors whose admission committed remain publi
 successor set. Parent settlement as `rebuilt` does not itself release destination barriers.
 
 Client cancellation is distinct from queue shutdown. Client cancellation ends only the client wait. Queue shutdown stops new replay authorization and closes active FanOut admission. It classifies
-authorized in-flight invocations without observed results as `issue_unknown`, finalizes active parent admission from committed successors, and wakes pending completion waiters with their selected
-first-round errors. Shutdown does not drain the queue, recover records, or prove that in-flight remote requests did not apply. Forced process termination may discard all remaining queue state. v1 does
-not claim recovery from failure of the queue's own coordination component.
+authorized in-flight invocations without observed results as `issue_unknown` and finalizes active parent admission from committed successors. Shutdown does not drain the queue, recover records, or prove
+that in-flight remote requests did not apply. Forced process termination may discard all remaining queue state.
 
 ## Routing, FanOut, and Destination Ordering
 
@@ -279,8 +280,8 @@ append-mode state, instant-TTL state, plan-time Flow-source status, and `partiti
 `TableIdent.version`. `TableRouteValue.version` is route bookkeeping, not by itself a write-path correctness fence.
 
 Replay reloads current table metadata and rejects the record if the table identity, `TableIdent.version`, engine, append-mode state, or instant-TTL state no longer matches the captured plan.
-Flow-source status is captured at plan time and is not re-read; a Flow status change after planning is a known residual risk. The initial request must carry a non-empty `partition_expr_version`;
-otherwise the attempt is rejected as `UnsafeContext`, because the Datanode's partition-expression check cannot fence a stale request when that version is absent.
+Flow-source status is captured at plan time and is not re-read; a Flow status change after planning is a known residual risk. Replay uses the captured partition-expression version to determine whether
+the original request may still be accepted after a partition-expression change. The Datanode-side protection for this check is part of the destination-ordering argument below.
 
 A transient metadata or route lookup failure is deferred with backoff and is not treated as proof that a Region was removed. When the response indicates a stale route, missing Region, or
 partition-expression mismatch, replay must perform the equivalent of the existing reroute refresh before rebuilding:
@@ -300,12 +301,11 @@ The current validation boundary is not an atomic DDL fence:
 | Physical or logical `ALTER` that changes `TableIdent.version` | Reject replay when the captured and current versions differ | DDL can commit after metadata validation but before RPC submission; cross-Frontend cache propagation is asynchronous |
 | `TRUNCATE` | The current version check may not detect it because `TableIdent.version` is not incremented by the existing path | A queued write may replay after truncate; a stronger generation fence is outside this RFC |
 | `DROP` | A missing table is terminal | A later `UNDROP` may require additional incarnation validation; same-identity restoration behavior must be confirmed before enablement |
-| Repartition / partition-expression change | Refresh route and partitioner; rebuild when the old target or expression is no longer valid | Correctness depends on the non-empty captured expression version and Datanode stale-request rejection |
+| Repartition / partition-expression change | Refresh route and partitioner; rebuild when the old target or expression is no longer valid | Correctness depends on the captured expression version and Datanode stale-request rejection |
 | Flow-source creation or removal | Use the plan-time Flow-source snapshot for eligibility | A change after planning is not detected by this check |
 
-The design relies on the Datanode rejecting a late request to a removed Region and rejecting a request carrying an obsolete, non-empty `partition_expr_version` when the Region's partition expression
-has changed. If either protection is unavailable for a supported request, the queue must fail closed rather than assume the old request cannot affect a rebuilt destination. The `None`
-partition-expression-version case is therefore ineligible for v1.
+The destination-ordering argument relies on the Datanode rejecting a late request to a removed Region and rejecting an obsolete request-side partition-expression version after the Region's partition
+expression changes. These are the source-side protections assumed by this proposal; their behavior must be validated for the supported Mito-backed write path.
 
 ### Retarget
 
@@ -349,9 +349,8 @@ failure, and an invocation unresolved at the retry deadline are not ordering-saf
 
 **First-round relevance is destination-scoped.** A first-round request is relevant to destination `D` when it was addressed to `D` and may still be accepted by `D`. A whole-RPC failure without
 per-entry results for such a request keeps `D`'s barrier closed. A first-round request addressed to an obsolete source Region `R != D` does not by itself keep `D`'s barrier closed after route refresh
-has established that a late request to `R` cannot be applied to `D`: the old Region is absent, or the old request's captured non-empty `partition_expr_version` is rejected by the Datanode after the
-partition expression changes. If the implementation cannot establish that fencing condition, it must not release the barrier on that assumption; the attempt is ineligible for FanOut under this v1
-contract.
+has established that a late request to `R` cannot be applied to `D`: the old Region is absent, or the old request's captured partition-expression version is rejected by the Datanode after the partition
+expression changes. If the implementation cannot establish that destination-specific fencing condition, the barrier remains closed; this does not permit publishing a successor without its barrier.
 
 This destination-scoped rule avoids making every newly discovered destination wait forever for a whole-RPC outcome from an obsolete source Region, while still preventing a barrier from overtaking an
 unknown first-round write that could be accepted by that same destination. The proof depends on the Datanode's Region-removal and partition-expression checks described above; it is not a generic
@@ -396,10 +395,17 @@ grows with its backlog. All queue limits, transient memory, and replay concurren
 
 ### Observability
 
-Metrics should expose queue behavior without high-cardinality table or Region labels. The useful operational dimensions are retained records/bytes, transient rebuild bytes and reservation rejection,
-admission outcomes, replay authorizations and outcomes, retry-deadline expiry, lineage-cap exhaustion, give-up/terminal outcomes by low-cardinality reason, unresolved `issue_unknown`, barrier count
-and blocked duration, FanOut partial admission, replay latency, and worker failures. Table, Region, record, lineage, and invocation identities belong in structured logs rather than metric labels. v1
-provides metrics and diagnostic logs only; it does not provide a dead-letter query API or durable dead-letter storage.
+Operational visibility should let operators answer the following questions:
+
+- How much work is retained, and how close is the queue to its retained and transient capacity limits?
+- Are failed attempts being admitted, rejected, replayed, or given up, and what broad reasons explain rejection or give-up?
+- Are replay attempts making progress, reaching terminal outcomes, or expiring at the retry deadline?
+- Are unresolved outcomes or destination barriers accumulating, and how long are destinations being blocked?
+- Are FanOut rebuilds being partially admitted or rejected because transient capacity is unavailable?
+- Are replay latency or worker failures preventing the queue from making recovery progress?
+
+Metrics should use low-cardinality dimensions and must not use table, Region, record, lineage, or invocation identities as metric labels. Those identifiers belong in structured diagnostic logs. The RFC
+defines the operational questions and cardinality constraints; concrete metric names and instrumentation are implementation choices.
 
 ## Configuration and Rollout
 
@@ -467,8 +473,8 @@ Validation should establish the behavior of the design rather than prescribe spe
 - **Dispatcher and ownership:** with the queue disabled, existing behavior is unchanged. With queue mode enabled, first-round writes still produce per-entry outcomes and retained per-Region requests,
   but transferred attempts do not enter the inline retry loop. Delete, BulkInsert, and logical-batcher flush paths remain inline. Rejected queue attempts never fall back to inline retry.
 - **Plan snapshot and eligibility:** mutate table version, engine, append mode, TTL, Flow status, and partition-expression metadata after planning; verify that impure defaults on
-  primary-key/time-index columns are rejected while non-key defaults do not cause unnecessary rejection; replay must compare against the captured plan snapshot. Missing or ambiguous required metadata,
-  unsupported engine, and missing partition-expression version must fail closed. Exercise `handle_metric_row_inserts` separately from metric logical-batcher flush.
+  primary-key/time-index columns are rejected while non-key defaults do not cause unnecessary rejection; replay must compare against the captured plan snapshot. Verify admission rejects missing or ambiguous
+  required metadata, unsupported engines, and an absent captured partition-expression version. Validate metric logical-row inserts separately from metric logical-batcher flushes.
 - **Selected error and client contract:** verify terminal-error precedence, dispatcher-attempt-order selection, partial admission, wait-deadline behavior, `affected_rows`, cancellation, and the
   specified shutdown behavior for pending waiters.
 - **Replay history:** verify that a later `applied` invocation does not erase an earlier `issue_unknown`, late responses do not rewrite terminal invocation outcomes, and record settlement labels do
@@ -487,8 +493,7 @@ Validation should establish the behavior of the design rather than prescribe spe
 ## Questions for Review
 
 - Is the v1 engine boundary correct: Mito-backed physical Region writes only, with metric logical-row requests eligible only after normalization to supported physical targets?
-- Is the destination-scoped first-round relevance rule sufficiently justified by Region removal and non-empty `partition_expr_version` rejection, including the explicit fail-closed behavior when the
-  version is absent?
+- Is the destination-scoped first-round relevance rule sufficiently supported by the Datanode's Region-removal and partition-expression checks?
 - Is the remaining DDL boundary acceptable for v1, particularly `TRUNCATE`, `DROP`/`UNDROP`, asynchronous metadata propagation, and the check-to-RPC race?
 - Is lineage-wide quiescence an acceptable availability trade-off for destination barriers, given that a descendant in another Region can delay release?
 - Are separate retained and transient memory ledgers acceptable when their limits are planned together against the Frontend memory budget, or is an aggregate queue-memory ceiling required?
