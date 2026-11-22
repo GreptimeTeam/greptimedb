@@ -388,7 +388,7 @@ fn group_ranges_for_seq_scan(
             if group.time_range.1 < start {
                 groups.push(group);
             } else {
-                current = merge_into(group, current);
+                current = merge_ranges(group, current);
                 current_keys = None;
             }
         }
@@ -410,7 +410,7 @@ fn group_ranges_for_seq_scan(
             if group.time_range.1 < start {
                 groups.push(group);
             } else {
-                current = merge_into(group, current);
+                current = merge_ranges(group, current);
                 current_keys = merge_primary_key_ranges(current_keys, Some((group_min, group_max)));
             }
         }
@@ -432,9 +432,16 @@ fn group_ranges_for_seq_scan(
     groups
 }
 
-fn merge_into(mut group: RangeMeta, range: RangeMeta) -> RangeMeta {
-    group.merge(range);
-    group
+/// Appends the smaller range to the larger one, so each index is copied O(log n) times over
+/// all merges of a scan.
+fn merge_ranges(a: RangeMeta, b: RangeMeta) -> RangeMeta {
+    let (mut larger, smaller) = if a.row_group_indices.len() >= b.row_group_indices.len() {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    larger.merge(smaller);
+    larger
 }
 
 fn compare_time_ranges(a: &RangeMeta, b: &RangeMeta) -> std::cmp::Ordering {
