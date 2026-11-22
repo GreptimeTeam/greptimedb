@@ -138,6 +138,7 @@ responsibility until its retry deadline or a terminal outcome.
 | Success | No record | None |
 | Retryable per-entry failure with a retained Region request | Admit independently if eligible and capacity is available | Queue if admitted; otherwise none |
 | Retryable whole-RPC failure that can be represented as retained per-Region attempts | Admit each eligible attempt independently; preserve that the first-round result may be unknown | Queue per admitted attempt; otherwise none |
+| Retryable single-entry-collapsed failure with a recoverable original Region request and plan snapshot | Admit the single Region attempt under the same eligibility and capacity rules | Queue if admitted; otherwise none |
 | Terminal failure with no retained request | No record | None |
 | Unsupported shape/engine or unsafe plan context | Reject without waiting for queue capacity | None |
 | Capacity exhausted or queue closed | Reject without waiting for queue capacity | None |
@@ -378,8 +379,25 @@ be left outside both record accounting and barrier accounting. A settled record 
 remains charged until no barrier can reference it. This separates retained payload capacity from the lifetime of ordering evidence.
 
 Transient rebuild memory has a separate per-Frontend ledger shared by concurrent FanOut rebuilds. It covers destination payload construction and the temporary row-selection, partitioning, and encoding
-allocations included in the accepted accounting model. The budget is an internal limit, not currently a public TOML parameter. Its value must be measured against representative FanOut workloads and
-the Frontend memory budget before enablement.
+allocations included in the accepted accounting model. The budget is an internal limit, not currently a public TOML parameter. Its value is selected from representative FanOut shapes and concurrent
+rebuild measurements against the Frontend memory budget; it is not a new public tuning knob.
+
+The estimator has two paths. Replay reuses the retained request, so its transient estimate covers the replay encoding buffer, per-call transport wrapper, and any body copy observed in the selected
+send path. Rebuild estimates the maximum simultaneously live materialization stage, including row-selection/index state, partitioning state, live destination payloads, per-destination schema/header/
+container overhead, and overlap between intermediate and output buffers. The shared transient budget must cover concurrent replay and rebuild reservations:
+
+```text
+E_replay = E_encode + E_transport_wrapper + E_measured_body_copy
+E_rebuild_peak = max_over_live_stages(
+    E_row_selection + E_partition_state + E_live_destination_payloads
+    + E_destination_metadata + E_intermediate_overlap
+)
+E_transient = sum(all concurrently live replay and rebuild reservations)
+```
+
+The estimates are accounting models, not RSS formulas. They must be conservative enough to reserve before the corresponding allocations. If an eager FanOut path materializes the complete destination collection
+before the estimate or reservation can be enforced, the ledger does not impose a hard bound on that actual peak. In that case the rebuild peak remains explicitly unbounded until incremental materialization
+or another enforceable pre-allocation bound is available; the RFC must not describe `write_queue.max_transient_bytes` as a hard FanOut memory ceiling. This limitation is part of the enablement assessment, not evidence that the public configuration values above have been rejected.
 
 The implementation must reserve transient capacity before materializing each destination payload. If the materialized output exceeds its reservation, the successor is rejected before publication. On
 commit, the reservation is converted to retained-record accounting; on rejection, cancellation, worker failure, or shutdown, it is released exactly once. A failed reservation rejects only the current
@@ -392,6 +410,26 @@ ready. A Region waiting for backoff, a leader, or an earlier barrier is not runn
 
 This gives currently runnable Regions an opportunity to make progress; it does not provide a bounded waiting time or per-record latency guarantee. A hot Region remains serialized, and its tail delay
 grows with its backlog. All queue limits, transient memory, and replay concurrency are per Frontend, not cluster-wide.
+
+### Drain-time model and workload envelope
+
+The queue has both a per-Region serialization limit and a Frontend-wide concurrency limit. A useful optimistic lower bound for a Region with `K_i` queued records is:
+
+```text
+T_region >= K_i * (L_i + D_i)
+```
+
+where `L_i` is the average cumulative RPC service time per record for the declared failure mix (including any repeated invocations), and `D_i` is the average cumulative delay per record from backoff or leaderless deferral. In the single-attempt, no-retry case, `L_i` is simply the mean replay RPC service time. Across `N` records, when at least `replay_concurrency` Regions are runnable and cumulative service times are approximately uniform, the aggregate lower bound is:
+
+```text
+T_frontend >= (N / replay_concurrency) * L
+```
+
+These are optimistic lower bounds, not drain-time guarantees. The aggregate bound uses cumulative RPC service work and excludes periods when replay slots are idle; both bounds still omit route lookup, metadata refresh, rebuild, admission, scheduler overhead, transport variance, and failures beyond those represented in the workload averages. The per-Region bound can dominate even when the Frontend has idle replay slots; increasing global concurrency cannot accelerate a hot Region whose records must be replayed serially.
+
+For illustration only, assuming one replay RPC per record, `100000` records, `replay_concurrency = 8`, and an assumed mean RPC service time of `24ms` imply an aggregate lower bound of `300s` before route, rebuild, scheduling, or other overhead. A single Region with `50000` records at the same assumed service time has a serial lower bound of `1200s`. These are arithmetic examples, not measured GreptimeDB latency or a claim that the proposed `5m` retry budget drains either workload. They show why `max_records = 100000` is a provisional test point rather than a supported-capacity or drain-time guarantee.
+
+The validation workload envelope should state total backlog, per-Region depth distribution (including the hottest Region), replay RPC latency distribution, no-leader fraction, FanOut width, and expected failure mix. Report time-to-first-authorization, the fraction authorized before the retry deadline, total drain time, hottest-Region drain time, deadline expiries, and transient-budget rejections. The envelope is used to evaluate and tune the proposed starting values; it does not turn each public configuration value into a separate maintainer-approval item.
 
 ### Observability
 
@@ -409,7 +447,7 @@ defines the operational questions and cardinality constraints; concrete metric n
 
 ## Configuration and Rollout
 
-The public queue settings use the `write_queue.` prefix. Values below are proposed starting points, not benchmark-validated production defaults.
+The public queue settings use the `write_queue.` prefix. Values below are the author's proposed starting values, not benchmark claims. They are not individually open maintainer-approval questions; workload measurements may justify tuning them before rollout. `write_queue.max_records = 100000` is explicitly a provisional test point, not a capacity or drain-time guarantee. Internal lineage and transient limits are implementation bounds whose concrete values must be selected and validated before enablement.
 
 | Parameter | Scope | Purpose | Proposed value / status |
 |---|---|---|---|
@@ -439,13 +477,18 @@ records.
 - Replay performs the required cache invalidation, table-identity check, metadata reload, and refreshed-partitioner rebuild.
 - Destination-scoped barrier release is validated against the Datanode's Region-removal and non-empty partition-expression-version checks.
 - FanOut, record/invocation limits, retained-history accounting, transient memory limits, shutdown waiters, and failure semantics pass the validation plan below.
-- `max_lineage_records`, the invocation cap, and transient rebuild budget have fixed values validated against an accepted workload envelope.
+- `max_lineage_records`, the invocation cap, and transient rebuild budget have concrete implementation values selected and validated against the declared workload envelope; these internal values are not public configuration knobs.
+- The transient estimator is validated against representative replay and FanOut shapes. If the rebuild path cannot enforce a conservative reservation before materialization, its peak remains explicitly unbounded and must not be described as hard-bounded.
 - Maintainers accept the DDL residual risks, duplicate-capable retry semantics, and fail-closed barrier behavior.
-- The client contract, failure-path overhead, and drain-time workload objective have been reviewed.
+- The client contract is reviewed, and failure-path/drain measurements are reported against the declared workload envelope.
 
-The queue also depends on three write-path improvements landing before enablement: bounded completion waiting, broader classification/admission of retryable failures (including the relevant whole-RPC
-and single-entry-collapse cases), and an absolute time budget. These are prerequisites, not claims that the queue or those improvements are already implemented. Durability and restart recovery are
-outside this RFC and are not prerequisites for this in-memory proposal.
+The queue depends on three write-path improvements before enablement:
+
+- **Bounded completion wait:** the caller waits only within one absolute budget that includes first-round result processing and queue admission.
+- **Broader retryable-failure admission:** classification and retention cover eligible per-entry failures, retryable whole-RPC failures, and retryable single-entry-collapsed failures when the original per-Region request and plan context can be retained. A whole-RPC error without a recoverable request is not made queue-eligible merely because it is retryable.
+- **Absolute time budget:** each admitted lineage has one retry deadline inherited by all FanOut successors; route lookup, rebuild, backoff, and leaderless deferral consume that same budget.
+
+These enhancements are designed together as one retry contract, but may be implemented and merged independently. Queue enablement requires all three to be available and validated; none is claimed to be already implemented by this RFC. Durability and restart recovery remain a separate proposal and are not prerequisites for this in-memory queue.
 
 ## Risks and Limitations
 
@@ -471,7 +514,7 @@ outside this RFC and are not prerequisites for this in-memory proposal.
 Validation should establish the behavior of the design rather than prescribe specific internal data structures or test harness APIs.
 
 - **Dispatcher and ownership:** with the queue disabled, existing behavior is unchanged. With queue mode enabled, first-round writes still produce per-entry outcomes and retained per-Region requests,
-  but transferred attempts do not enter the inline retry loop. Delete, BulkInsert, and logical-batcher flush paths remain inline. Rejected queue attempts never fall back to inline retry.
+  but transferred attempts do not enter the inline retry loop. Cover eligible retryable per-entry, whole-RPC, and single-entry-collapsed failures when their original per-Region request and plan snapshot are recoverable. Delete, BulkInsert, and logical-batcher flush paths remain inline. Rejected queue attempts never fall back to inline retry.
 - **Plan snapshot and eligibility:** mutate table version, engine, append mode, TTL, Flow status, and partition-expression metadata after planning; verify that impure defaults on
   primary-key/time-index columns are rejected while non-key defaults do not cause unnecessary rejection; replay must compare against the captured plan snapshot. Verify admission rejects missing or ambiguous
   required metadata, unsupported engines, and an absent captured partition-expression version. Validate metric logical-row inserts separately from metric logical-batcher flushes.
@@ -485,10 +528,12 @@ Validation should establish the behavior of the design rather than prescribe spe
   destination only when Region removal or a non-empty partition-expression-version mismatch fences the old request. Conversely, a whole-RPC unknown addressed to the destination itself must keep that
   destination's barrier closed. Test multiple and nested barriers, intervening normal records, and unresolved replay invocations.
 - **Resource and failure behavior:** force retained, transient, record, and invocation limits to exhaust. Verify history remains accounted while referenced by barriers, settled payload can be released
-  safely, and reservations are not leaked or double charged. Inject worker failure before and after authorization, partial FanOut interruption, shutdown during replay, and queue-coordination failure.
-- **Performance and workload envelope:** compare queue-disabled and queue-enabled failure paths under the same load. Measure admission overhead, retained/transient memory, FanOut width, hot-Region
-  depth, time-to-first-authorization, deadline expiry, and barrier blocking. A production enablement threshold must be agreed with maintainers; measurements alone are not a pass/fail guarantee until
-  that threshold is defined.
+  safely, and reservations are not leaked or double charged. Compare estimator outputs with measured replay and FanOut peaks across representative shapes; verify that no allocation described as bounded
+  occurs before its reservation. Inject worker failure before and after authorization, partial FanOut interruption, shutdown during replay, and queue-coordination failure.
+- **Performance and workload envelope:** compare queue-disabled and queue-enabled failure paths under the same declared workload. Measure admission overhead, retained/transient memory, FanOut width,
+  per-Region depth/skew, RPC latency distribution, time-to-first-authorization, fraction authorized before deadline, drain time, deadline expiry, and barrier blocking. Use the lower-bound model above to
+  interpret results. These measurements validate or motivate tuning of the proposed settings; this RFC does not invent an additional numeric overhead threshold or require separate maintainer approval of each
+  configuration value.
 
 ## Questions for Review
 
@@ -498,7 +543,6 @@ Validation should establish the behavior of the design rather than prescribe spe
 - Is lineage-wide quiescence an acceptable availability trade-off for destination barriers, given that a descendant in another Region can delay release?
 - Are separate retained and transient memory ledgers acceptable when their limits are planned together against the Frontend memory budget, or is an aggregate queue-memory ceiling required?
 - Is FanOut-local ordering sufficient, or must a destination also wait for queued old-key records from other lineages that may later rebuild into it?
-- What workload envelope and performance threshold should govern the initial values for queue capacity, FanOut width, time-to-first-authorization, and acceptable deadline expiry?
 
 ## Alternatives and Future Work
 
