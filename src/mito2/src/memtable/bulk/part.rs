@@ -1332,6 +1332,7 @@ impl EncodedBulkPart {
             index_metadata: IndexOutput::default(),
             num_series: self.metadata.num_series,
             format: Default::default(),
+            blob_refs: Vec::new(),
         }
     }
 

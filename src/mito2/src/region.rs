@@ -2140,6 +2140,31 @@ impl ManifestContext {
                     reason: "Ordinary manifest edits cannot modify shared SSTs",
                 }
             );
+            // A compaction output points into its inputs' sidecars, which stay only while a
+            // file of the manifest references them. Inputs that disappeared during the
+            // compaction may have taken those sidecars with them.
+            if !edit.files_to_remove.is_empty() {
+                let live: HashSet<_> = manifest
+                    .files
+                    .values()
+                    .flat_map(|file| file.blob_files().map(|blob| blob.file_id))
+                    .chain(
+                        edit.files_to_add
+                            .iter()
+                            .filter(|file| file.blob_file_size > 0)
+                            .map(|file| file.file_id),
+                    )
+                    .collect();
+                ensure!(
+                    edit.files_to_add
+                        .iter()
+                        .flat_map(|file| file.blob_refs.iter())
+                        .all(|blob| live.contains(&blob.file_id)),
+                    RegionTruncatedSnafu {
+                        region_id: manifest.metadata.region_id,
+                    }
+                );
+            }
 
             // Checks whether the region is truncated.
             let Some(truncated_entry_id) = manifest.truncated_entry_id else {

@@ -87,6 +87,7 @@ use crate::sst::index::fulltext_index::applier::builder::FulltextIndexApplierBui
 use crate::sst::index::inverted_index::applier::InvertedIndexApplierRef;
 use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
 use crate::sst::parquet::Json2RewriteTargets;
+use crate::sst::parquet::blob::KeptRefs;
 use crate::sst::parquet::file_range::PreFilterMode;
 use crate::sst::parquet::reader::ReaderMetrics;
 use crate::sst::primary_key::PrimaryKeyRangeMapper;
@@ -1027,6 +1028,8 @@ pub struct ScanInput {
     /// Max number of compaction inputs decoded concurrently ahead of the merge.
     /// Values below 2 decode inputs on the merging task.
     pub(crate) compaction_read_parallelism: usize,
+    /// References compaction keeps instead of resolving.
+    kept_blob_refs: Option<Arc<KeptRefs>>,
     /// Compaction-only JSON2 physical rewrite targets.
     json2_rewrite_targets: Json2RewriteTargets,
     /// Counters that should receive query-load metrics.
@@ -1094,6 +1097,7 @@ impl ScanInput {
                 sequence_range: None,
                 compaction: false,
                 compaction_read_parallelism: 1,
+                kept_blob_refs: None,
                 json2_rewrite_targets: Arc::default(),
                 query_stat_counters: None,
                 #[cfg(feature = "enterprise")]
@@ -1461,6 +1465,13 @@ impl ScanInputBuilder {
         self
     }
 
+    /// Leaves the references that `kept` keeps unresolved.
+    #[must_use]
+    pub(crate) fn with_kept_blob_refs(mut self, kept: Option<Arc<KeptRefs>>) -> Self {
+        self.input.kept_blob_refs = kept;
+        self
+    }
+
     /// Sets the max number of compaction inputs decoded concurrently.
     #[must_use]
     pub(crate) fn with_compaction_read_parallelism(mut self, parallelism: usize) -> Self {
@@ -1646,6 +1657,7 @@ impl ScanInput {
         let res = reader
             .expected_metadata(Some(self.mapper.metadata().clone()))
             .compaction(self.compaction)
+            .kept_blob_refs(self.kept_blob_refs.clone())
             .pre_filter_mode(pre_filter_mode)
             .enable_predicate_prefilter(enable_predicate_prefilter)
             .postpone_time_index_filter(postpone_time_index_filter)

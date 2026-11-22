@@ -58,7 +58,8 @@ use crate::read::FlatSource;
 use crate::sst::file::RegionFileId;
 use crate::sst::index::{Indexer, IndexerBuilder};
 use crate::sst::parquet::blob::{
-    BlobFileWriter, ExternalColumn, blob_path, compress_external_values, external_columns,
+    BlobFileWriter, ExternalColumn, add_kept_ref_bytes, blob_column_entries, blob_path,
+    compress_external_values, external_columns,
 };
 use crate::sst::parquet::flat_format::{
     FlatWriteFormat, primary_key_column_index, time_index_column_index,
@@ -271,6 +272,8 @@ pub struct ParquetWriter<'a, F: WriterFactory, I: IndexerBuilder, P: FilePathPro
     external_columns: Option<Vec<ExternalColumn>>,
     /// Blob sidecar of the current file, created for its first external value.
     blob_writer: Option<BlobFileWriter>,
+    /// Compressed bytes that the current file's kept references point to, per sidecar.
+    kept_ref_bytes: HashMap<FileId, u64>,
     /// Field columns of the current file that skip min/max statistics, picked from its first batch.
     large_value_columns: Vec<String>,
     /// Decoded value bytes per row group of the current file.
@@ -476,6 +479,7 @@ where
             blob_target: None,
             external_columns: None,
             blob_writer: None,
+            kept_ref_bytes: HashMap::new(),
             large_value_columns: Vec::new(),
             row_group_value_bytes: None,
         }
@@ -573,15 +577,23 @@ where
             );
 
             // The SST must not outlive or precede its values, so the sidecar completes first.
-            if let Some(blob_writer) = self.blob_writer.take() {
-                let columns = self.external_columns.as_deref().unwrap_or_default();
-                let entries = blob_writer.finish(columns).await?;
-                if let Some(writer) = &mut self.writer {
-                    for entry in entries {
-                        writer.append_key_value_metadata(entry);
-                    }
+            let columns = self.external_columns.as_deref().unwrap_or_default();
+            let entries = if let Some(blob_writer) = self.blob_writer.take() {
+                blob_writer.finish(columns).await?
+            } else if !self.kept_ref_bytes.is_empty() {
+                // Readers find external columns through the footer, even when every value
+                // sits in another SST's sidecar.
+                blob_column_entries(columns)
+            } else {
+                Vec::new()
+            };
+            if let Some(writer) = &mut self.writer {
+                for entry in entries {
+                    writer.append_key_value_metadata(entry);
                 }
             }
+            let mut blob_refs: Vec<_> = mem::take(&mut self.kept_ref_bytes).into_iter().collect();
+            blob_refs.sort_unstable();
 
             // Finish indexer and writer.
             // safety: writer and index can only be both present or not.
@@ -638,6 +650,7 @@ where
                 index_metadata: index_output,
                 num_series,
                 format: Default::default(),
+                blob_refs,
             });
             self.current_file = FileId::random();
             self.bytes_written.store(0, Ordering::Relaxed)
@@ -814,7 +827,7 @@ where
             // Creating the SST registers its ownership, which must precede its sidecar.
             self.maybe_init_writer(arrow_batch.schema_ref(), opts)
                 .await?;
-            let stored_batch = self.store_external_values(&arrow_batch, opts).await?;
+            let (stored_batch, kept_extra) = self.store_external_values(&arrow_batch, opts).await?;
             self.writer
                 .as_mut()
                 .context(UnexpectedSnafu {
@@ -823,9 +836,9 @@ where
                 .write(&stored_batch)
                 .await
                 .map_err(map_write_error)?;
-            // Row group sizes count external values at their decoded size.
+            // Row group sizes count external values at their decoded size, kept references too.
             if let Some(value_bytes) = &mut self.row_group_value_bytes {
-                value_bytes.update(&arrow_batch);
+                value_bytes.update_with_extra(&arrow_batch, &kept_extra);
             }
             self.metrics.write_batch += start.elapsed();
 
@@ -865,15 +878,16 @@ where
     }
 
     /// Moves values of external columns into the sidecar of the current file and returns the
-    /// batch to write to the SST.
+    /// batch to write to the SST, with how many bytes each row's kept references stand for
+    /// beyond their own length (empty when the batch keeps none).
     async fn store_external_values(
         &mut self,
         batch: &RecordBatch,
         opts: &WriteOptions,
-    ) -> Result<RecordBatch> {
+    ) -> Result<(RecordBatch, Vec<u64>)> {
         let columns = self.external_columns.as_deref().unwrap_or_default();
         if columns.is_empty() {
-            return Ok(batch.clone());
+            return Ok((batch.clone(), Vec::new()));
         }
         let Some((store, sst_paths)) = &self.blob_target else {
             return UnexpectedSnafu {
@@ -885,11 +899,22 @@ where
             .fail();
         };
         let mut arrays = batch.columns().to_vec();
+        let mut kept_extra = Vec::new();
         for column in columns {
             let Some((index, _)) = batch.schema().column_with_name(&column.name) else {
                 continue;
             };
-            let values = compress_external_values(arrays[index].clone(), column.threshold).await?;
+            let keep_refs = opts
+                .kept_blob_refs
+                .as_deref()
+                .is_some_and(|kept| kept.columns.contains(&column.name));
+            if keep_refs {
+                kept_extra.resize(batch.num_rows(), 0);
+                add_kept_ref_bytes(&arrays[index], &mut self.kept_ref_bytes, &mut kept_extra)?;
+            }
+            let values =
+                compress_external_values(arrays[index].clone(), column.threshold, keep_refs)
+                    .await?;
             if values.iter().all(Option::is_none) {
                 continue;
             }
@@ -918,11 +943,13 @@ where
             let blob_writer = self.blob_writer.as_mut().unwrap();
             arrays[index] = blob_writer.externalize(&arrays[index], values).await?;
         }
-        RecordBatch::try_new(batch.schema(), arrays).context(NewRecordBatchSnafu)
+        let batch = RecordBatch::try_new(batch.schema(), arrays).context(NewRecordBatchSnafu)?;
+        Ok((batch, kept_extra))
     }
 
     /// Joins encoders before dropping the writer and deleting its failed output.
     async fn abort_current_file(&mut self) {
+        self.kept_ref_bytes.clear();
         if let Some(blob_writer) = self.blob_writer.take()
             && let Err(error) = blob_writer.abort().await
         {

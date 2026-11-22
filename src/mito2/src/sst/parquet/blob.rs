@@ -29,6 +29,7 @@
 //! Readers resolve references right after decoding a row group, so filters, merges and
 //! compaction see the original values.
 
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -44,11 +45,12 @@ use object_store::ObjectStore;
 use parquet::file::metadata::{KeyValue, ParquetMetaData};
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadata;
-use store_api::storage::FileId;
+use store_api::storage::{FileId, RegionId};
 
 use crate::cache::CacheStrategy;
-use crate::cache::file_cache::IndexKey;
+use crate::cache::file_cache::{FileType, IndexKey};
 use crate::error::{Error, JoinSnafu, NewRecordBatchSnafu, OpenDalSnafu, Result, UnexpectedSnafu};
+use crate::sst::file::BlobFileRef;
 
 /// Prefix of footer keys that mark a column as stored externally; the column name follows it.
 /// One key per column keeps any column name intact.
@@ -198,14 +200,19 @@ pub(crate) struct CompressedValue {
 
 /// Compresses the values of `array` that must be stored externally: values at least
 /// `threshold` long and values that look like references. Other positions are `None`.
+///
+/// With `keep_refs`, values that look like references are references that the input kept, and
+/// stay as they are.
 pub(crate) async fn compress_external_values(
     array: ArrayRef,
     threshold: usize,
+    keep_refs: bool,
 ) -> Result<Vec<Option<CompressedValue>>> {
     // Compressing multi-MiB values is CPU-bound; keep it off the async workers.
     spawn_blocking_global(move || {
         byte_values(&array)?
             .map(|value| match value {
+                Some(v) if keep_refs && v.starts_with(REF_PREFIX.as_bytes()) => Ok(None),
                 Some(v) if v.len() >= threshold || v.starts_with(REF_PREFIX.as_bytes()) => {
                     let data = zstd::bulk::compress(v, ZSTD_LEVEL).map_err(|e| {
                         UnexpectedSnafu {
@@ -224,6 +231,38 @@ pub(crate) async fn compress_external_values(
     })
     .await
     .context(JoinSnafu)?
+}
+
+/// Adds the compressed bytes that the kept references in `array` point to, per sidecar, and
+/// to `decoded_extra` how much larger each row's value is than its reference.
+pub(crate) fn add_kept_ref_bytes(
+    array: &ArrayRef,
+    bytes: &mut HashMap<FileId, u64>,
+    decoded_extra: &mut [u64],
+) -> Result<()> {
+    for (value, extra) in byte_values(array)?.zip(decoded_extra) {
+        if let Some(value) = value
+            && let Some(blob_ref) = BlobRef::decode(value)?
+        {
+            *bytes.entry(blob_ref.file_id).or_default() += blob_ref.compressed_len;
+            *extra += blob_ref.len.saturating_sub(value.len() as u64);
+        }
+    }
+    Ok(())
+}
+
+/// Footer entries that list the external columns of an SST without a sidecar of its own,
+/// whose values all sit in other SSTs' sidecars.
+pub(crate) fn blob_column_entries(columns: &[ExternalColumn]) -> Vec<KeyValue> {
+    columns
+        .iter()
+        .map(|column| {
+            KeyValue::new(
+                format!("{BLOB_COLUMN_KEY_PREFIX}{}", column.name),
+                String::new(),
+            )
+        })
+        .collect()
 }
 
 /// Appends values of one SST to its blob object.
@@ -310,15 +349,7 @@ impl BlobFileWriter {
             }
             return Err(error).context(OpenDalSnafu);
         }
-        let mut entries: Vec<_> = columns
-            .iter()
-            .map(|column| {
-                KeyValue::new(
-                    format!("{BLOB_COLUMN_KEY_PREFIX}{}", column.name),
-                    String::new(),
-                )
-            })
-            .collect();
+        let mut entries = blob_column_entries(columns);
         entries.push(KeyValue::new(
             BLOB_FILE_SIZE_KEY.to_string(),
             self.offset.to_string(),
@@ -335,6 +366,8 @@ impl BlobFileWriter {
 pub(crate) struct PendingBatch {
     batch: RecordBatch,
     targets: Vec<(usize, Vec<Option<BlobRef>>)>,
+    /// Columns whose references the reader otherwise keeps; see [decode_rows].
+    kept_columns: Arc<HashSet<usize>>,
     next_row: usize,
 }
 
@@ -342,73 +375,117 @@ pub(crate) struct PendingBatch {
 pub(crate) struct BlobResolver {
     file_id: FileId,
     store: ObjectStore,
-    path: String,
+    /// Sidecars the SST may reference, by id.
+    sources: HashMap<FileId, BlobSource>,
     columns: Vec<String>,
     /// Upper bound of resolved value bytes in one output batch.
     chunk_bytes: usize,
-    cache: Option<BlobCache>,
+    /// Write cache lookup of the sidecars, keyed by the region they belong to.
+    cache: Option<(CacheStrategy, RegionId)>,
+    /// References that stay unresolved, for compaction outputs that keep pointing at the
+    /// same values.
+    kept: Option<Arc<KeptRefs>>,
 }
 
-/// Where the resolver finds the sidecar in the write cache.
-pub(crate) struct BlobCache {
-    strategy: CacheStrategy,
-    key: IndexKey,
+/// A sidecar that an SST may reference.
+struct BlobSource {
+    path: String,
     /// Size recorded in the manifest, 0 when unknown.
-    file_size: u64,
+    size: u64,
     download_requested: AtomicBool,
 }
 
-impl BlobCache {
-    pub(crate) fn new(strategy: CacheStrategy, key: IndexKey, file_size: u64) -> Self {
-        Self {
-            strategy,
-            key,
-            file_size,
-            download_requested: AtomicBool::new(false),
-        }
-    }
+/// References that compaction keeps instead of copying their values.
+#[derive(Debug)]
+pub(crate) struct KeptRefs {
+    /// Region of the output; only references of its own files can be kept, since sidecars
+    /// sit next to the SSTs of their region.
+    pub(crate) region_id: RegionId,
+    /// Columns whose references may be kept.
+    pub(crate) columns: HashSet<String>,
+    /// Sidecars whose values are copied to the output's own sidecar so they can be deleted.
+    pub(crate) rewritten: HashSet<FileId>,
 }
 
 impl BlobResolver {
+    /// Creates a resolver of the SST at `sst_path`, which may reference its own sidecar.
     pub(crate) fn new(
         file_id: FileId,
         store: ObjectStore,
         sst_path: &str,
         columns: Vec<String>,
     ) -> Self {
+        let sources = HashMap::from([(file_id, BlobSource::new(blob_path(sst_path), 0))]);
         Self {
             file_id,
             store,
-            path: blob_path(sst_path),
+            sources,
             columns,
             chunk_bytes: MAX_RESOLVED_BATCH_BYTES,
             cache: None,
+            kept: None,
         }
     }
 
-    /// Reads the sidecar from the write cache when it is there, and on a miss asks for
-    /// it to be downloaded, as the reader does for the SST.
-    pub(crate) fn with_cache(mut self, cache: BlobCache) -> Self {
-        self.cache = Some(cache);
+    /// Allows references to `blobs`, which sit next to the SST at `sst_path`.
+    pub(crate) fn with_blobs(
+        mut self,
+        sst_path: &str,
+        blobs: impl Iterator<Item = BlobFileRef>,
+    ) -> Self {
+        for blob in blobs {
+            self.sources.insert(
+                blob.file_id,
+                BlobSource::new(sibling_blob_path(sst_path, blob.file_id), blob.size),
+            );
+        }
         self
     }
 
-    /// Parses references in `batch`. Returns `None` when the batch holds no reference.
+    /// Reads sidecars from the write cache when they are there, and on a miss asks for
+    /// them to be downloaded, as the reader does for the SST.
+    pub(crate) fn with_cache(mut self, strategy: CacheStrategy, region_id: RegionId) -> Self {
+        self.cache = Some((strategy, region_id));
+        self
+    }
+
+    /// Leaves the references that `kept` keeps unresolved.
+    pub(crate) fn with_kept_refs(mut self, kept: Arc<KeptRefs>) -> Self {
+        self.kept = Some(kept);
+        self
+    }
+
+    /// Parses references in `batch`. Returns `None` when the batch holds no reference
+    /// to resolve.
     pub(crate) fn prepare(&self, batch: RecordBatch) -> Result<Option<PendingBatch>> {
         let mut targets = Vec::new();
+        let mut kept_columns = HashSet::new();
         for name in &self.columns {
             if let Some((index, _)) = batch.schema().column_with_name(name) {
-                let refs = byte_values(batch.column(index))?
-                    .map(|v| Ok(v.map(BlobRef::decode).transpose()?.flatten()))
-                    .collect::<Result<Vec<_>>>()?;
-                if let Some(other) = refs.iter().flatten().find(|r| r.file_id != self.file_id) {
-                    return UnexpectedSnafu {
-                        reason: format!(
-                            "SST {} references blob file {}, but only its own sidecar is supported",
-                            self.file_id, other.file_id
-                        ),
+                let kept = self
+                    .kept
+                    .as_deref()
+                    .filter(|kept| kept.columns.contains(name));
+                if kept.is_some() {
+                    kept_columns.insert(index);
+                }
+                let mut refs = Vec::with_capacity(batch.num_rows());
+                for value in byte_values(batch.column(index))? {
+                    let blob_ref = value.map(BlobRef::decode).transpose()?.flatten();
+                    if let Some(blob_ref) = &blob_ref
+                        && !self.sources.contains_key(&blob_ref.file_id)
+                    {
+                        return UnexpectedSnafu {
+                            reason: format!(
+                                "SST {} references blob file {} that its metadata does not list",
+                                self.file_id, blob_ref.file_id
+                            ),
+                        }
+                        .fail();
                     }
-                    .fail();
+                    refs.push(blob_ref.filter(|blob_ref| {
+                        kept.is_none_or(|kept| kept.rewritten.contains(&blob_ref.file_id))
+                    }));
                 }
                 if refs.iter().any(Option::is_some) {
                     targets.push((index, refs));
@@ -418,6 +495,7 @@ impl BlobResolver {
         Ok((!targets.is_empty()).then_some(PendingBatch {
             batch,
             targets,
+            kept_columns: Arc::new(kept_columns),
             next_row: 0,
         }))
     }
@@ -447,15 +525,21 @@ impl BlobResolver {
             end += 1;
         }
         pending.next_row = end;
-        self.resolve_rows(&pending.batch, &pending.targets, start..end)
-            .await
-            .map(Some)
+        self.resolve_rows(
+            &pending.batch,
+            &pending.targets,
+            pending.kept_columns.clone(),
+            start..end,
+        )
+        .await
+        .map(Some)
     }
 
     async fn resolve_rows(
         &self,
         batch: &RecordBatch,
         targets: &[(usize, Vec<Option<BlobRef>>)],
+        kept_columns: Arc<HashSet<usize>>,
         rows: Range<usize>,
     ) -> Result<RecordBatch> {
         let sliced = batch.slice(rows.start, rows.len());
@@ -463,44 +547,46 @@ impl BlobResolver {
             .iter()
             .map(|(index, refs)| (*index, refs[rows.clone()].to_vec()))
             .collect();
-        let mut wanted: Vec<BlobRef> = targets
-            .iter()
-            .flat_map(|(_, refs)| refs.iter().flatten().copied())
-            .collect();
-        wanted.sort_by_key(|r| r.offset);
-        wanted.dedup();
-        let fetched = self.fetch(&wanted).await?;
+        let mut wanted: BTreeMap<FileId, Vec<BlobRef>> = BTreeMap::new();
+        for blob_ref in targets.iter().flat_map(|(_, refs)| refs.iter().flatten()) {
+            wanted.entry(blob_ref.file_id).or_default().push(*blob_ref);
+        }
+        let mut fetched = HashMap::with_capacity(wanted.len());
+        for (file_id, mut refs) in wanted {
+            refs.sort_by_key(|r| r.offset);
+            refs.dedup();
+            fetched.insert(file_id, self.fetch(file_id, &refs).await?);
+        }
         // Decompressing up to MAX_RESOLVED_BATCH_BYTES is CPU-bound; keep it off the async workers.
-        spawn_blocking_global(move || decode_rows(sliced, targets, &fetched))
+        spawn_blocking_global(move || decode_rows(sliced, targets, &kept_columns, &fetched))
             .await
             .context(JoinSnafu)?
     }
 
-    /// Fetches `refs` (sorted by offset) with coalesced range requests.
-    async fn fetch(&self, refs: &[BlobRef]) -> Result<Vec<(Range<u64>, Bytes)>> {
+    /// Fetches `refs` (sorted by offset) of one sidecar with coalesced range requests.
+    async fn fetch(&self, file_id: FileId, refs: &[BlobRef]) -> Result<Vec<(Range<u64>, Bytes)>> {
+        let source = &self.sources[&file_id];
         let ranges = coalesce_ranges(refs);
-        if let Some(cache) = &self.cache {
-            if let Some(write_cache) = cache.strategy.write_cache()
-                && let Some(data) = write_cache
-                    .file_cache()
-                    .read_ranges(cache.key, &ranges)
-                    .await
+        if let Some((strategy, region_id)) = &self.cache {
+            let key = IndexKey::new(*region_id, file_id, FileType::Blob);
+            if let Some(write_cache) = strategy.write_cache()
+                && let Some(data) = write_cache.file_cache().read_ranges(key, &ranges).await
             {
                 return Ok(ranges.into_iter().zip(data).collect());
             }
-            if cache.file_size > 0 && !cache.download_requested.swap(true, Ordering::Relaxed) {
-                cache.strategy.maybe_download_background(
-                    cache.key,
-                    self.path.clone(),
+            if source.size > 0 && !source.download_requested.swap(true, Ordering::Relaxed) {
+                strategy.maybe_download_background(
+                    key,
+                    source.path.clone(),
                     self.store.clone(),
-                    cache.file_size,
+                    source.size,
                 );
             }
         }
         let reads = ranges.into_iter().map(|range| async move {
             let data = self
                 .store
-                .read_with(&self.path)
+                .read_with(&source.path)
                 .range(range.clone())
                 .await
                 .context(OpenDalSnafu)?;
@@ -511,6 +597,22 @@ impl BlobResolver {
             .try_collect()
             .await
     }
+}
+
+impl BlobSource {
+    fn new(path: String, size: u64) -> Self {
+        Self {
+            path,
+            size,
+            download_requested: AtomicBool::new(false),
+        }
+    }
+}
+
+/// Returns the path of sidecar `file_id`, which sits in the directory of the SST at `sst_path`.
+fn sibling_blob_path(sst_path: &str, file_id: FileId) -> String {
+    let dir = sst_path.rfind('/').map_or("", |i| &sst_path[..=i]);
+    format!("{dir}{file_id}.blob")
 }
 
 /// Merges the ranges of `refs` (sorted by offset) into requests. A request never spans more
@@ -593,23 +695,29 @@ impl ByteBuilder {
 }
 
 /// Replaces references of `targets` in `batch` with values from `fetched`, which holds
-/// coalesced ranges sorted by offset that cover every reference.
+/// coalesced ranges of each sidecar sorted by offset that cover every reference.
+///
+/// In `kept_columns`, a value that itself starts with [REF_PREFIX] keeps its reference: the
+/// writer takes every prefixed value there for a kept reference, so the value cannot be
+/// handed over inline. Its sidecar then stays until a later compaction rewrites it.
 fn decode_rows(
     batch: RecordBatch,
     targets: Vec<(usize, Vec<Option<BlobRef>>)>,
-    fetched: &[(Range<u64>, Bytes)],
+    kept_columns: &HashSet<usize>,
+    fetched: &HashMap<FileId, Vec<(Range<u64>, Bytes)>>,
 ) -> Result<RecordBatch> {
     // Locates the compressed frame of `r` and checks that it decodes to `r.len` bytes.
     let frame_of = |r: &BlobRef| -> Result<&[u8]> {
         let corrupted = || {
             UnexpectedSnafu {
                 reason: format!(
-                    "blob value at {} of {} bytes is missing from the blob object",
-                    r.offset, r.compressed_len
+                    "blob value at {} of {} bytes is missing from blob file {}",
+                    r.offset, r.compressed_len, r.file_id
                 ),
             }
             .build()
         };
+        let fetched = fetched.get(&r.file_id).ok_or_else(corrupted)?;
         let pos = fetched
             .partition_point(|(range, _)| range.start <= r.offset)
             .checked_sub(1)
@@ -662,10 +770,18 @@ fn decode_rows(
                 None => value.map_or(0, <[u8]>::len),
             };
         }
+        let keep_prefixed = kept_columns.contains(&index);
         let mut builder = ByteBuilder::new(column.data_type(), refs.len(), data_bytes);
         for (value, blob_ref) in byte_values(column)?.zip(&refs) {
             match blob_ref {
-                Some(blob_ref) => builder.append(Some(&value_of(blob_ref)?))?,
+                Some(blob_ref) => {
+                    let resolved = value_of(blob_ref)?;
+                    if keep_prefixed && resolved.starts_with(REF_PREFIX.as_bytes()) {
+                        builder.append(value)?;
+                    } else {
+                        builder.append(Some(&resolved))?;
+                    }
+                }
                 None => builder.append(value)?,
             }
         }
@@ -698,7 +814,7 @@ mod tests {
             Some(prefixed.as_str()),
         ]));
         for array in [binary, string] {
-            let external: Vec<_> = compress_external_values(array, 8)
+            let external: Vec<_> = compress_external_values(array, 8, false)
                 .await
                 .unwrap()
                 .iter()
@@ -742,7 +858,7 @@ mod tests {
             .unwrap();
         let mut stored = Vec::new();
         for (array, column) in [binary, string].iter().zip(&columns) {
-            let values = compress_external_values(array.clone(), column.threshold)
+            let values = compress_external_values(array.clone(), column.threshold, false)
                 .await
                 .unwrap();
             stored.push(writer.externalize(array, values).await.unwrap());
@@ -786,8 +902,16 @@ mod tests {
         };
         let column: ArrayRef = Arc::new(BinaryArray::from(vec![blob_ref.encode().as_bytes()]));
         let batch = RecordBatch::try_from_iter([("bin", column)]).unwrap();
-        let fetched = [(blob_ref.range(), frame)];
-        assert!(decode_rows(batch, vec![(0, vec![Some(blob_ref)])], &fetched).is_err());
+        let fetched = HashMap::from([(blob_ref.file_id, vec![(blob_ref.range(), frame)])]);
+        assert!(
+            decode_rows(
+                batch,
+                vec![(0, vec![Some(blob_ref)])],
+                &HashSet::new(),
+                &fetched
+            )
+            .is_err()
+        );
     }
 
     #[test]

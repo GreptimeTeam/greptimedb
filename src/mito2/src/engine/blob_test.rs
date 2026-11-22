@@ -14,6 +14,7 @@
 
 //! Tests for external storage of large field values.
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use api::v1::helper::row;
@@ -34,11 +35,13 @@ use crate::cache::file_cache::{FileType, IndexKey};
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::engine::compaction_test::compact;
+use crate::manifest::action::RegionEdit;
+use crate::sst::file::{BlobFileRef, FileMeta};
 use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::{PARQUET_EXTERNAL_METADATA_KEY, PARQUET_METADATA_KEY};
 use crate::test_util::{
     CreateRequestBuilder, TestEnv, delete_rows, delete_rows_schema, flush_region, put_rows,
-    rows_schema,
+    reopen_region, rows_schema,
 };
 
 /// Long values on even rows go to the sidecar; odd rows stay inline, and one of them looks
@@ -127,6 +130,55 @@ async fn sst_footer_keys(env: &TestEnv) -> Vec<Vec<String>> {
         );
     }
     keys
+}
+
+/// Returns the ids of the sidecars in the object store.
+async fn stored_blobs(env: &TestEnv) -> HashSet<FileId> {
+    let store = env.get_object_store().unwrap();
+    store
+        .list_with("")
+        .recursive(true)
+        .await
+        .unwrap()
+        .iter()
+        .filter_map(|e| e.name().strip_suffix(".blob"))
+        .map(|id| FileId::parse_str(id).unwrap())
+        .collect()
+}
+
+/// Returns the ids of the sidecars that the region's SSTs reference.
+fn referenced_blobs(engine: &MitoEngine, region_id: RegionId) -> HashSet<FileId> {
+    engine
+        .get_region(region_id)
+        .unwrap()
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .flat_map(|file| {
+            file.meta_ref()
+                .blob_files()
+                .map(|blob| blob.file_id)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// Waits until the object store holds exactly the sidecars the region references.
+async fn assert_stored_blobs_are_referenced(
+    env: &TestEnv,
+    engine: &MitoEngine,
+    region_id: RegionId,
+) {
+    let referenced = referenced_blobs(engine, region_id);
+    for _ in 0..50 {
+        if stored_blobs(env).await == referenced {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(referenced, stored_blobs(env).await);
 }
 
 async fn blob_files(env: &TestEnv) -> usize {
@@ -258,25 +310,8 @@ async fn test_large_values_survive_flush_filter_and_compaction() {
         scan(&engine, region_id, ScanRequest::default()).await
     );
 
-    // Compacted inputs take their sidecars with them.
-    let ssts = engine
-        .get_region(region_id)
-        .unwrap()
-        .version()
-        .ssts
-        .levels()
-        .iter()
-        .map(|l| l.files.len())
-        .sum::<usize>();
-    let mut blobs = blob_files(&env).await;
-    for _ in 0..50 {
-        if blobs == ssts {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        blobs = blob_files(&env).await;
-    }
-    assert_eq!(ssts, blobs);
+    // Sidecars no output references are deleted with the compacted inputs.
+    assert_stored_blobs_are_referenced(&env, &engine, region_id).await;
 }
 
 #[tokio::test]
@@ -378,21 +413,18 @@ async fn test_sidecars_are_served_from_write_cache() {
         expected,
         scan(&engine, region_id, ScanRequest::default()).await
     );
+    // The output keeps pointing at the cached sidecars of its inputs.
     compact(&engine, region_id).await;
-    let outputs = sst_ids(&engine, region_id);
-    assert!(outputs.iter().all(|id| !inputs.contains(id) && cached(*id)));
-    assert_eq!(1, blob_files(&env).await);
-
-    // Purged inputs leave the cache too.
-    for _ in 0..50 {
-        if inputs.iter().all(|id| !cached(*id)) {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    assert!(inputs.iter().all(|id| !cached(*id)));
-
-    delete_remote_sidecars(&env).await;
+    assert!(
+        sst_ids(&engine, region_id)
+            .iter()
+            .all(|id| !inputs.contains(id))
+    );
+    assert_eq!(
+        inputs.iter().copied().collect::<HashSet<_>>(),
+        referenced_blobs(&engine, region_id)
+    );
+    assert!(inputs.iter().all(|id| cached(*id)));
     assert_eq!(
         expected,
         scan(&engine, region_id, ScanRequest::default()).await
@@ -433,7 +465,7 @@ async fn test_sidecars_bypass_write_cache_when_disabled() {
         scan(&engine, region_id, ScanRequest::default()).await
     );
     compact(&engine, region_id).await;
-    assert_eq!(1, blob_files(&env).await);
+    assert_eq!(2, blob_files(&env).await);
     assert_eq!(
         expected,
         scan(&engine, region_id, ScanRequest::default()).await
@@ -441,4 +473,252 @@ async fn test_sidecars_bypass_write_cache_when_disabled() {
     // Reads must not refill the cache with sidecars either.
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(sst_ids(&engine, region_id).iter().all(|id| !cached(*id)));
+}
+
+#[tokio::test]
+async fn test_compaction_keeps_references_to_input_sidecars() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let request = create_request(true);
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+    put(&engine, region_id, &schema, &[0, 1, 2, 3], 0).await;
+    flush_region(&engine, region_id, None).await;
+    put(&engine, region_id, &schema, &[4, 5, 6, 7], 0).await;
+    flush_region(&engine, region_id, None).await;
+    let inputs: HashSet<_> = sst_ids(&engine, region_id).into_iter().collect();
+
+    compact(&engine, region_id).await;
+    let region = engine.get_region(region_id).unwrap();
+    let version = region.version();
+    let outputs: Vec<_> = version
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .collect();
+    assert_eq!(1, outputs.len());
+    let output = outputs[0].meta_ref();
+    // No value is copied: the output has no sidecar and references both inputs' in full.
+    assert_eq!(0, output.blob_file_size);
+    assert_eq!(
+        inputs,
+        output.blob_refs.iter().map(|blob| blob.file_id).collect()
+    );
+    assert!(
+        output
+            .blob_refs
+            .iter()
+            .all(|blob| blob.referenced_bytes == blob.size)
+    );
+    // Row group sizing counts kept values at their decoded size, like the inputs did.
+    assert!(output.max_row_group_uncompressed_size >= payload(0, 0).len() as u64);
+    assert_stored_blobs_are_referenced(&env, &engine, region_id).await;
+
+    let expected: Vec<_> = (0..8).map(|i| (i as i64 * 1000, payload(i, 0))).collect();
+    assert_eq!(
+        expected,
+        scan(&engine, region_id, ScanRequest::default()).await
+    );
+    // The references survive in the manifest.
+    let table_dir = region.access_layer.table_dir().to_string();
+    drop(version);
+    drop(region);
+    reopen_region(&engine, region_id, table_dir, true, Default::default()).await;
+    assert_eq!(
+        expected,
+        scan(&engine, region_id, ScanRequest::default()).await
+    );
+}
+
+/// Writes `first` to one SST, overwrites `overwritten` in a second one, and compacts twice:
+/// after the first compaction the first sidecar is mostly garbage, so the second one copies
+/// its live values out. Returns the id of the first sidecar.
+async fn rewrite_garbage_sidecar(
+    engine: &MitoEngine,
+    region_id: RegionId,
+    first: &[usize],
+    overwritten: &[usize],
+) -> FileId {
+    let schema = rows_schema(&create_request(true));
+    put(engine, region_id, &schema, first, 0).await;
+    flush_region(engine, region_id, None).await;
+    let sidecar = sst_ids(engine, region_id)[0];
+    put(engine, region_id, &schema, overwritten, 1).await;
+    flush_region(engine, region_id, None).await;
+    compact(engine, region_id).await;
+    assert!(referenced_blobs(engine, region_id).contains(&sidecar));
+
+    put(engine, region_id, &schema, &[8], 0).await;
+    flush_region(engine, region_id, None).await;
+    compact(engine, region_id).await;
+    sidecar
+}
+
+#[tokio::test]
+async fn test_compaction_rewrites_sidecars_that_are_mostly_garbage() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    engine
+        .handle_request(region_id, RegionRequest::Create(create_request(true)))
+        .await
+        .unwrap();
+    let first = rewrite_garbage_sidecar(&engine, region_id, &[0, 2, 4, 6], &[0, 2, 4]).await;
+
+    let expected = vec![
+        (0, payload(0, 1)),
+        (2000, payload(2, 1)),
+        (4000, payload(4, 1)),
+        (6000, payload(6, 0)),
+        (8000, payload(8, 0)),
+    ];
+    assert_eq!(
+        expected,
+        scan(&engine, region_id, ScanRequest::default()).await
+    );
+    assert!(!referenced_blobs(&engine, region_id).contains(&first));
+    assert_stored_blobs_are_referenced(&env, &engine, region_id).await;
+}
+
+#[tokio::test]
+async fn test_rewritten_sidecar_keeps_values_that_look_like_references() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    engine
+        .handle_request(region_id, RegionRequest::Create(create_request(true)))
+        .await
+        .unwrap();
+    // Row 3 holds a value that starts like a reference, so it always sits in a sidecar.
+    let first = rewrite_garbage_sidecar(&engine, region_id, &[0, 2, 3, 4], &[0, 2, 4]).await;
+
+    let expected = vec![
+        (0, payload(0, 1)),
+        (2000, payload(2, 1)),
+        (3000, payload(3, 0)),
+        (4000, payload(4, 1)),
+        (8000, payload(8, 0)),
+    ];
+    assert_eq!(
+        expected,
+        scan(&engine, region_id, ScanRequest::default()).await
+    );
+    // Handing that value over inline would make it a reference, so it keeps its own.
+    assert!(referenced_blobs(&engine, region_id).contains(&first));
+    assert_stored_blobs_are_referenced(&env, &engine, region_id).await;
+}
+
+/// A hex value that compresses only about two to one, unlike [payload].
+fn noisy_payload(i: usize, version: usize) -> String {
+    let mut state = (i as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ version as u64;
+    (0..256 * 1024)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            char::from_digit((state & 0xF) as u32, 16).unwrap()
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn test_files_pointing_at_garbage_sidecars_are_rewritten_without_new_data() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let request = create_request(true);
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let put = |ts: &[usize], version: usize| {
+        let rows = ts
+            .iter()
+            .map(|i| {
+                row(vec![
+                    ValueData::StringValue("a".to_string()),
+                    ValueData::StringValue(noisy_payload(*i, version)),
+                    ValueData::TimestampMillisecondValue(*i as i64 * 1000),
+                ])
+            })
+            .collect();
+        put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: schema.clone(),
+                rows,
+            },
+        )
+    };
+    put(&[0, 1, 2, 3], 0).await;
+    flush_region(&engine, region_id, None).await;
+    let first = sst_ids(&engine, region_id)[0];
+    put(&[0, 1, 2], 1).await;
+    flush_region(&engine, region_id, None).await;
+    compact(&engine, region_id).await;
+    assert!(referenced_blobs(&engine, region_id).contains(&first));
+
+    // The window gets no new data, yet the file that keeps the garbage alive is rewritten.
+    compact(&engine, region_id).await;
+    assert!(!referenced_blobs(&engine, region_id).contains(&first));
+    let expected: Vec<_> = [(0, 1), (1, 1), (2, 1), (3, 0)]
+        .into_iter()
+        .map(|(i, version)| (i as i64 * 1000, noisy_payload(i, version)))
+        .collect();
+    assert_eq!(
+        expected,
+        scan(&engine, region_id, ScanRequest::default()).await
+    );
+    assert_stored_blobs_are_referenced(&env, &engine, region_id).await;
+}
+
+#[tokio::test]
+async fn test_compaction_edit_rejects_references_to_dropped_sidecars() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let request = create_request(true);
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    put(&engine, region_id, &schema, &[0, 2], 0).await;
+    flush_region(&engine, region_id, None).await;
+    let input = engine
+        .get_region(region_id)
+        .unwrap()
+        .version()
+        .ssts
+        .levels()[0]
+        .files()
+        .next()
+        .unwrap()
+        .meta_ref()
+        .clone();
+    // An output pointing at a sidecar that no file of the region references any more, as
+    // when its inputs were removed while the compaction ran.
+    let output = FileMeta {
+        file_id: FileId::random(),
+        blob_file_size: 0,
+        blob_refs: vec![BlobFileRef {
+            file_id: FileId::random(),
+            size: 10,
+            referenced_bytes: 10,
+        }],
+        ..input.clone()
+    };
+    let edit = RegionEdit {
+        files_to_add: vec![output],
+        files_to_remove: vec![input],
+        ..Default::default()
+    };
+    assert!(engine.edit_region(region_id, edit).await.is_err());
 }

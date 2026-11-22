@@ -40,6 +40,7 @@ use crate::error::{CompressionOptionsSnafu, Result, WriteParquetSnafu};
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
 use crate::sst::file::{FileFormat, FileTimeRange};
 use crate::sst::index::IndexOutput;
+use crate::sst::parquet::blob::KeptRefs;
 use crate::sst::parquet::parallel_writer::EncodeRuntime;
 
 pub(crate) mod blob;
@@ -218,10 +219,19 @@ impl RowGroupValueBytes {
 
     /// Adds the next batch written to the file.
     pub(crate) fn update(&mut self, batch: &RecordBatch) {
+        self.update_with_extra(batch, &[]);
+    }
+
+    /// Adds the next batch, with `extra` bytes per row on top of its values (none when empty),
+    /// for values the batch holds as references.
+    pub(crate) fn update_with_extra(&mut self, batch: &RecordBatch, extra: &[u64]) {
         let mut offset = 0;
         while offset < batch.num_rows() {
             let len = (self.row_group_rows - self.rows_in_current).min(batch.num_rows() - offset);
             self.current += var_len_value_bytes(&batch.slice(offset, len));
+            self.current += extra
+                .get(offset..offset + len)
+                .map_or(0, |e| e.iter().sum());
             self.rows_in_current += len;
             offset += len;
             if self.rows_in_current == self.row_group_rows {
@@ -439,6 +449,8 @@ pub struct WriteOptions {
     pub encode_parallelism: usize,
     /// Runtime whose blocking pool runs the parallel column encoding.
     pub encode_runtime: EncodeRuntime,
+    /// References into other sidecars that the input keeps unresolved and the output keeps.
+    pub(crate) kept_blob_refs: Option<Arc<KeptRefs>>,
 }
 
 impl Default for WriteOptions {
@@ -450,6 +462,7 @@ impl Default for WriteOptions {
             float_field_encoding: FloatFieldEncoding::default(),
             encode_parallelism: 1,
             encode_runtime: EncodeRuntime::default(),
+            kept_blob_refs: None,
         }
     }
 }
@@ -478,6 +491,8 @@ pub struct SstInfo {
     pub num_series: u64,
     /// Physical encoding and inventory of the finalized output.
     pub format: FileFormat,
+    /// Sidecars of other SSTs that the file references, with the compressed bytes it points to.
+    pub(crate) blob_refs: Vec<(FileId, u64)>,
 }
 
 impl SstInfo {

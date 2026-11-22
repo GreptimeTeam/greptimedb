@@ -31,7 +31,7 @@ use store_api::storage::RegionId;
 
 use crate::compaction::CompactionOutput;
 use crate::compaction::buckets::infer_time_bucket;
-use crate::compaction::compactor::CompactionRegion;
+use crate::compaction::compactor::{BLOB_GARBAGE_RATIO, CompactionRegion};
 use crate::compaction::picker::{Picker, PickerOutput, get_expired_ssts};
 use crate::compaction::run::{
     Ranged, SortedRun, files_overlap, files_overlap_inclusive, find_sorted_runs,
@@ -1099,7 +1099,10 @@ impl TwcsPicker {
         let candidates = self
             .discover_with_limit(compaction_region, max_outputs, false)
             .await?;
-        let output = candidates.finish().await?;
+        let mut output = candidates.finish().await?;
+        if output.outputs.is_empty() {
+            output.outputs = blob_gc_outputs(compaction_region, max_outputs);
+        }
         Ok((!output.outputs.is_empty() || !output.expired_ssts.is_empty()).then_some(output))
     }
 
@@ -1194,6 +1197,47 @@ impl TwcsPicker {
         )
         .await
     }
+}
+
+/// Bytes a file must point to in garbage-heavy sidecars before it is rewritten on its own.
+/// A value that looks like a reference keeps its reference into such a sidecar (see
+/// `blob::decode_rows`), so a file holding only those would otherwise be rewritten again
+/// and again.
+const MIN_BLOB_GC_BYTES: u64 = 64 * 1024;
+
+/// Rewrites, one by one, files that point into sidecars which are mostly garbage. Windows that
+/// no longer receive data are never compacted again, so their garbage would otherwise stay.
+fn blob_gc_outputs(region: &CompactionRegion, max_outputs: Option<usize>) -> Vec<CompactionOutput> {
+    let ssts = &region.current_version.ssts;
+    let garbage = ssts.garbage_blobs(region.region_id, BLOB_GARBAGE_RATIO);
+    if garbage.is_empty() {
+        return Vec::new();
+    }
+    ssts.levels()
+        .iter()
+        .flat_map(LevelMeta::files)
+        .filter(|file| {
+            !file.compacting()
+                && file.level() < file::LEVEL_SHARED
+                && file.region_id() == region.region_id
+        })
+        .filter(|file| {
+            file.meta_ref()
+                .blob_refs
+                .iter()
+                .filter(|blob| garbage.contains(&blob.file_id))
+                .map(|blob| blob.referenced_bytes)
+                .sum::<u64>()
+                >= MIN_BLOB_GC_BYTES
+        })
+        .take(max_outputs.unwrap_or(usize::MAX))
+        .map(|file| CompactionOutput {
+            output_level: file.level(),
+            inputs: vec![file.clone()],
+            filter_deleted: false,
+            output_time_range: None,
+        })
+        .collect()
 }
 
 #[derive(Clone)]

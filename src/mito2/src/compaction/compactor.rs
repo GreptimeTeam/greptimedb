@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,7 +31,7 @@ use snafu::{OptionExt, ResultExt, ensure};
 use store_api::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::PathType;
-use store_api::storage::{RegionId, SequenceNumber};
+use store_api::storage::{FileId, RegionId, SequenceNumber};
 use tokio_util::sync::CancellationToken;
 
 use crate::access_layer::{
@@ -55,7 +55,7 @@ use crate::region::version::VersionRef;
 use crate::region::{ManifestContext, RegionLeaderState, RegionRoleState};
 use crate::schedule::scheduler::LocalScheduler;
 use crate::sst::FormatType;
-use crate::sst::file::{self, FileHandle, FileMeta, RegionFileId, UncommittedSsts};
+use crate::sst::file::{self, BlobFileRef, FileHandle, FileMeta, RegionFileId, UncommittedSsts};
 use crate::sst::file_metadata::{FileMetadataInterner, FileMetadataInternerRef};
 use crate::sst::file_purger::LocalFilePurger;
 use crate::sst::index::IndexBuildType;
@@ -65,6 +65,7 @@ use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::sst::index::registry::{IndexBuildPlan, IndexRegistry};
 use crate::sst::location::region_dir_from_table_dir;
+use crate::sst::parquet::blob::{KeptRefs, external_columns};
 use crate::sst::parquet::metadata::extract_primary_key_range;
 use crate::sst::parquet::parallel_writer::EncodeRuntime;
 use crate::sst::parquet::writer::SstWriteContext;
@@ -154,6 +155,8 @@ pub struct CompactionContext {
     index_plan: Arc<IndexBuildPlan>,
     index_registry: Arc<IndexRegistry>,
     existing_index_inputs: Option<Arc<HashSet<RegionFileId>>>,
+    /// Sidecars with so much garbage that compaction copies their live values out.
+    rewritten_blobs: Arc<HashSet<FileId>>,
 }
 
 impl TryFrom<&CompactionRegion> for CompactionContext {
@@ -183,7 +186,61 @@ impl TryFrom<&CompactionRegion> for CompactionContext {
             index_plan,
             index_registry: Arc::new(registry),
             existing_index_inputs: None,
+            rewritten_blobs: Arc::new(
+                region
+                    .current_version
+                    .ssts
+                    .garbage_blobs(region.region_id, BLOB_GARBAGE_RATIO),
+            ),
         })
+    }
+}
+
+/// Garbage share at which compaction copies a sidecar's live values out so it can be deleted.
+pub(crate) const BLOB_GARBAGE_RATIO: f64 = 0.5;
+
+impl CompactionContext {
+    /// Returns the references to other sidecars that compaction of `inputs` keeps, or `None`
+    /// when it copies every external value to the outputs' own sidecars.
+    fn kept_blob_refs(&self, inputs: &[FileHandle]) -> Result<Option<Arc<KeptRefs>>> {
+        // A sidecar sits next to the SSTs of its region, where outputs of other regions
+        // cannot reach it.
+        if inputs
+            .iter()
+            .any(|input| input.region_id() != self.region_id)
+        {
+            return Ok(None);
+        }
+        // Indexes and partition filters read the values, so their columns are always resolved.
+        let indexed: HashSet<_> = self.index_plan.entries().map(|e| e.column_id).collect();
+        let mut partition_columns = HashSet::new();
+        if let Some(expr) = self.region_metadata.partition_expr.as_deref()
+            && let Some(expr) =
+                PartitionExpr::from_json_str(expr).with_context(|_| InvalidPartitionExprSnafu {
+                    expr: expr.to_string(),
+                })?
+        {
+            expr.collect_column_names(&mut partition_columns);
+        }
+        let columns: HashSet<_> = external_columns(&self.region_metadata)?
+            .into_iter()
+            .filter(|column| {
+                !partition_columns.contains(&column.name)
+                    && self
+                        .region_metadata
+                        .column_by_name(&column.name)
+                        .is_some_and(|c| !indexed.contains(&c.column_id))
+            })
+            .map(|column| column.name)
+            .collect();
+        if columns.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(Arc::new(KeptRefs {
+            region_id: self.region_id,
+            columns,
+            rewritten: (*self.rewritten_blobs).clone(),
+        })))
     }
 }
 
@@ -775,6 +832,9 @@ impl DefaultSstMerger {
     ) -> Result<(Vec<FileMeta>, Vec<SstInfo>)> {
         let region_id = context.region_id;
         validate_region_compaction_output(region_id, &output)?;
+        let kept_blob_refs = context.kept_blob_refs(&output.inputs)?;
+        let mut write_opts = write_opts;
+        write_opts.kept_blob_refs = kept_blob_refs.clone();
         let index_options = context.version_options.index_options.clone();
         let append_mode = context.version_options.append_mode;
         let merge_mode = context.version_options.merge_mode();
@@ -805,6 +865,7 @@ impl DefaultSstMerger {
             time_range: output.output_time_range,
             merge_mode,
             read_parallelism: write_opts.encode_parallelism,
+            kept_blob_refs,
         };
         // Matching file scopes need no additional region filtering. Rollover and
         // time slicing still require output-scoped accumulation.
@@ -885,9 +946,34 @@ impl DefaultSstMerger {
                 },
             )
             .await?;
+        // Kept references point at sidecars that the inputs list.
+        let blob_sizes: HashMap<_, _> = output
+            .inputs
+            .iter()
+            .flat_map(|input| input.meta_ref().blob_files())
+            .map(|blob| (blob.file_id, blob.size))
+            .collect();
         let output_files = sst_infos
             .iter()
             .map(|sst_info| {
+                let blob_refs = sst_info
+                    .blob_refs
+                    .iter()
+                    .map(|(file_id, referenced_bytes)| {
+                        let size = blob_sizes.get(file_id).copied().with_context(|| {
+                            error::UnexpectedSnafu {
+                                reason: format!(
+                                    "compaction output references blob file {file_id} that no input lists"
+                                ),
+                            }
+                        })?;
+                        Ok(BlobFileRef {
+                            file_id: *file_id,
+                            size,
+                            referenced_bytes: *referenced_bytes,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
                 let pk_range = sst_info
                     .file_metadata
                     .as_ref()
@@ -918,7 +1004,7 @@ impl DefaultSstMerger {
                     preserve_row_sequence: sequence_metadata.exact_sequence_trusted,
                     format: sst_info.format.clone(),
                     blob_file_size: sst_info.blob_file_size(),
-                    blob_refs: Vec::new(),
+                    blob_refs,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -1030,6 +1116,7 @@ impl<M: SstMerger> DefaultCompactor<M> {
                                     .experimental_compaction_output_parallelism,
                             ),
                         encode_runtime: EncodeRuntime::Compact,
+                        kept_blob_refs: None,
                     },
                     self.cancel_token.clone(),
                 )
@@ -1113,6 +1200,7 @@ where
                             .experimental_compaction_output_parallelism,
                     ),
                 encode_runtime: EncodeRuntime::Compact,
+                kept_blob_refs: None,
             };
             let merger = self.merger.clone();
             let context = context.clone();
@@ -1949,6 +2037,7 @@ mod tests {
                 time_range: None,
                 merge_mode: MergeMode::LastRow,
                 read_parallelism: 1,
+                kept_blob_refs: None,
             }
             .build_flat_sst_reader()
             .await
@@ -2039,6 +2128,7 @@ mod tests {
                 Default::default(),
             )),
             existing_index_inputs: None,
+            rewritten_blobs: Arc::default(),
         };
         region
             .access_layer
@@ -2070,6 +2160,7 @@ mod tests {
             time_range: None,
             merge_mode: MergeMode::LastRow,
             read_parallelism: 1,
+            kept_blob_refs: None,
         }
         .build_flat_sst_reader()
         .await

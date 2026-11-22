@@ -300,6 +300,29 @@ impl SstVersion {
         files + blobs
     }
 
+    /// Returns the sidecars of `region_id` whose share of bytes that no file references is at
+    /// least `ratio`.
+    pub(crate) fn garbage_blobs(&self, region_id: RegionId, ratio: f64) -> HashSet<FileId> {
+        let mut live: HashMap<FileId, (u64, u64)> = HashMap::new();
+        for handle in self.levels.iter().flat_map(|level| level.files.values()) {
+            let meta = handle.meta_ref();
+            if meta.region_id != region_id {
+                continue;
+            }
+            for blob in meta.blob_files() {
+                let (size, referenced) = live.entry(blob.file_id).or_insert((blob.size, 0));
+                *referenced += blob.referenced_bytes;
+                *size = blob.size;
+            }
+        }
+        live.into_iter()
+            .filter(|(_, (size, referenced))| {
+                *size > 0 && (size.saturating_sub(*referenced)) as f64 >= ratio * *size as f64
+            })
+            .map(|(file_id, _)| file_id)
+            .collect()
+    }
+
     /// Returns the space occupied by SST index files owned by `region_id`.
     pub(crate) fn owned_index_usage(&self, region_id: RegionId) -> u64 {
         let parquet = self

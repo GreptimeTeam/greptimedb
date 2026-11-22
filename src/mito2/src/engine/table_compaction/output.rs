@@ -21,7 +21,7 @@ use crate::cache::CachedSstMeta;
 use crate::engine::region_hook::VerifiedSstFileInfo;
 use crate::error::{InvalidRequestSnafu, OpenDalSnafu, Result};
 use crate::region::MitoRegionRef;
-use crate::sst::file::FileMeta;
+use crate::sst::file::{FileMeta, RegionFileId};
 use crate::sst::location;
 use crate::sst::parquet::blob::{blob_columns, blob_file_size, blob_path};
 use crate::sst::parquet::max_row_group_decoded_size;
@@ -93,14 +93,15 @@ async fn verify_file(
     );
     let footer = cached.parquet_metadata();
     verify_statistics(&footer, metadata, file)?;
-    let footer_blob_size = if blob_columns(&footer).is_empty() {
-        0
-    } else {
-        blob_file_size(&footer).context(InvalidRequestSnafu {
+    // An output whose external values all sit in other SSTs' sidecars has no sidecar size.
+    let footer_blob_size = blob_file_size(&footer).unwrap_or(0);
+    ensure!(
+        blob_columns(&footer).is_empty() || footer_blob_size > 0 || !file.blob_refs.is_empty(),
+        InvalidRequestSnafu {
             region_id,
-            reason: "Output declares external columns without a sidecar size",
-        })?
-    };
+            reason: "Output declares external columns without a sidecar",
+        }
+    );
     ensure!(
         footer_blob_size == file.blob_file_size,
         InvalidRequestSnafu {
@@ -108,15 +109,20 @@ async fn verify_file(
             reason: "Output sidecar size differs from its footer"
         }
     );
-    if file.blob_file_size > 0 {
+    for blob in file.blob_files() {
+        let blob_path = blob_path(&location::sst_file_path(
+            access.table_dir(),
+            RegionFileId::new(file.region_id, blob.file_id),
+            access.path_type(),
+        ));
         let blob_size = access
             .object_store()
-            .stat(&blob_path(&path))
+            .stat(&blob_path)
             .await
             .context(OpenDalSnafu)?
             .content_length();
         ensure!(
-            blob_size == file.blob_file_size,
+            blob_size == blob.size,
             InvalidRequestSnafu {
                 region_id,
                 reason: "Output sidecar size mismatch"

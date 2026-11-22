@@ -41,6 +41,7 @@ use crate::read::seq_scan::SeqScan;
 use crate::read::stream::spawn_compact_stream;
 use crate::region::options::MergeMode;
 use crate::sst::file::FileHandle;
+use crate::sst::parquet::blob::KeptRefs;
 use crate::sst::parquet::reader::MetadataCacheMetrics;
 use crate::sst::parquet::{Json2RewriteTargets, Json2TargetLayout};
 
@@ -56,6 +57,8 @@ pub(crate) struct CompactionSstReaderBuilder<'a> {
     pub(crate) merge_mode: MergeMode,
     /// Max number of inputs decoded concurrently ahead of the merge.
     pub(crate) read_parallelism: usize,
+    /// References to other sidecars that the reader leaves unresolved.
+    pub(crate) kept_blob_refs: Option<Arc<KeptRefs>>,
 }
 
 impl CompactionSstReaderBuilder<'_> {
@@ -130,6 +133,7 @@ impl CompactionSstReaderBuilder<'_> {
             .with_json2_rewrite_targets(targets)
             .with_files(self.inputs.to_vec())
             .with_compaction(true)
+            .with_kept_blob_refs(self.kept_blob_refs)
             .with_compaction_read_parallelism(self.read_parallelism)
             .with_batch_size(batch_size)
             .with_append_mode(self.append_mode)
@@ -330,6 +334,7 @@ mod tests {
             time_range: None,
             merge_mode: MergeMode::LastRow,
             read_parallelism: 1,
+            kept_blob_refs: None,
         }
         .build_flat_sst_reader()
         .await

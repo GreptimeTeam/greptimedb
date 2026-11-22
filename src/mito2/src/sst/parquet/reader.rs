@@ -53,7 +53,6 @@ use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 use store_api::storage::{ColumnId, FileId};
 use table::predicate::Predicate;
 
-use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::index::result_cache::PredicateKey;
 use crate::cache::{
     CacheStrategy, CachedSstMeta, SstMetaObservation, SstMetaPreparation, SstMetaResolution,
@@ -77,7 +76,7 @@ use crate::sst::index::fulltext_index::applier::{
 use crate::sst::index::inverted_index::applier::{
     InvertedIndexApplierRef, InvertedIndexApplyMetrics,
 };
-use crate::sst::parquet::blob::{BlobCache, BlobResolver, PendingBatch, blob_columns};
+use crate::sst::parquet::blob::{BlobResolver, KeptRefs, PendingBatch, blob_columns};
 use crate::sst::parquet::file_range::{
     FileRangeContext, FileRangeContextRef, PartitionFilterContext, PreFilterMode, RangeBase,
 };
@@ -217,6 +216,8 @@ pub struct ParquetReaderBuilder {
     expected_metadata: Option<RegionMetadataRef>,
     /// Whether this reader is for compaction.
     compaction: bool,
+    /// References compaction keeps instead of resolving.
+    kept_blob_refs: Option<Arc<KeptRefs>>,
     /// Mode to pre-filter columns.
     pre_filter_mode: PreFilterMode,
     /// Whether to run the reduced-column predicate prefilter pass.
@@ -263,6 +264,7 @@ impl ParquetReaderBuilder {
             fulltext_index_appliers: [None, None],
             expected_metadata: None,
             compaction: false,
+            kept_blob_refs: None,
             pre_filter_mode: PreFilterMode::All,
             enable_predicate_prefilter: true,
             postpone_time_index_filter: false,
@@ -358,6 +360,13 @@ impl ParquetReaderBuilder {
     #[must_use]
     pub fn compaction(mut self, compaction: bool) -> Self {
         self.compaction = compaction;
+        self
+    }
+
+    /// Leaves the references that `kept` keeps unresolved.
+    #[must_use]
+    pub(crate) fn kept_blob_refs(mut self, kept: Option<Arc<KeptRefs>>) -> Self {
+        self.kept_blob_refs = kept;
         self
     }
 
@@ -663,6 +672,7 @@ impl ParquetReaderBuilder {
             cache_strategy: self.cache_strategy.clone(),
             prefilter_builder: filter_plan.prefilter_builder,
             batch_size: self.batch_size,
+            kept_blob_refs: self.kept_blob_refs.clone(),
         };
 
         let partition_filter = self.build_partition_filter(&read_format, &prune_schema)?;
@@ -1796,6 +1806,8 @@ pub(crate) struct RowGroupReaderBuilder {
     batch_size: usize,
     /// Optional shared quota for projected row-group decoding.
     memory_tracker: Option<QueryMemoryTracker>,
+    /// References compaction keeps instead of resolving.
+    kept_blob_refs: Option<Arc<KeptRefs>>,
 }
 
 /// Context passed to [RowGroupReaderBuilder::build()] carrying all information
@@ -1830,6 +1842,10 @@ impl RowGroupReaderBuilder {
 
     pub(crate) fn parquet_metadata_size(&self) -> usize {
         self.parquet_metadata_size
+    }
+
+    pub(crate) fn kept_blob_refs(&self) -> Option<&Arc<KeptRefs>> {
+        self.kept_blob_refs.as_ref()
     }
 
     pub(crate) fn cache_strategy(&self) -> &CacheStrategy {
@@ -2616,25 +2632,27 @@ impl FlatRowGroupReader {
         let blob_columns = blob_columns(builder.parquet_metadata());
         let blob_resolver = (!blob_columns.is_empty()).then(|| {
             let file = builder.file_handle();
-            let resolver = BlobResolver::new(
-                file.file_id().file_id(),
+            let meta = file.meta_ref();
+            let mut resolver = BlobResolver::new(
+                meta.file_id,
                 builder.object_store().clone(),
                 builder.file_path(),
                 blob_columns,
-            );
+            )
+            .with_blobs(builder.file_path(), meta.blob_files());
             let cache_strategy = builder.cache_strategy();
-            if !cache_strategy
+            if cache_strategy
                 .write_cache()
                 .is_some_and(|cache| cache.cache_blobs())
             {
-                return resolver;
+                resolver = resolver.with_cache(cache_strategy.clone(), meta.region_id);
             }
-            let key = IndexKey::new(file.region_id(), file.file_id().file_id(), FileType::Blob);
-            resolver.with_cache(BlobCache::new(
-                cache_strategy.clone(),
-                key,
-                file.meta_ref().blob_file_size,
-            ))
+            match builder.kept_blob_refs() {
+                Some(kept) if kept.region_id == meta.region_id => {
+                    resolver.with_kept_refs(kept.clone())
+                }
+                _ => resolver,
+            }
         });
 
         Self {
@@ -3260,6 +3278,7 @@ mod tests {
                 cache_strategy,
                 prefilter_builder: filter_plan.prefilter_builder,
                 batch_size: DEFAULT_READ_BATCH_SIZE,
+                kept_blob_refs: None,
             },
             metadata,
         )

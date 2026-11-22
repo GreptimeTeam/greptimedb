@@ -155,6 +155,8 @@ impl<'a> TargetWriter<'a> {
             // Every resident encoder and its finish workspace are admitted together.
             encode_parallelism: 1,
             encode_runtime: EncodeRuntime::Compact,
+            // Outputs move to another region, away from the sidecars of the inputs.
+            kept_blob_refs: None,
         }
     }
 
