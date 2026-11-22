@@ -334,15 +334,24 @@ impl BulkParts {
 
     /// Installs merged parts and removes the original parts by file ids.
     /// Returns the total number of rows in the merged parts.
+    /// Replaces the parts in `merged_file_ids` with `merged_parts`. Returns the output rows and
+    /// the estimated bytes of the removed parts and of the installed parts.
     fn install_merged_parts<I>(
         &mut self,
         merged_parts: I,
         merged_file_ids: &HashSet<FileId>,
-    ) -> usize
+    ) -> (usize, usize, usize)
     where
         I: IntoIterator<Item = MergedPart>,
     {
         let mut total_output_rows = 0;
+        let removed_bytes: usize = self
+            .parts
+            .iter()
+            .filter(|wrapper| merged_file_ids.contains(&wrapper.file_id()))
+            .map(|wrapper| wrapper.part.estimated_size())
+            .sum();
+        let num_parts = self.parts.len();
 
         for merged_part in merged_parts {
             match merged_part {
@@ -369,10 +378,14 @@ impl BulkParts {
             }
         }
 
+        let installed_bytes: usize = self.parts[num_parts..]
+            .iter()
+            .map(|wrapper| wrapper.part.estimated_size())
+            .sum();
         self.parts
             .retain(|wrapper| !merged_file_ids.contains(&wrapper.file_id()));
 
-        total_output_rows
+        (total_output_rows, removed_bytes, installed_bytes)
     }
 
     /// Resets merging flag for parts with the given file ids.
@@ -428,7 +441,7 @@ pub struct BulkMemtable {
     config: BulkMemtableConfig,
     parts: Arc<RwLock<BulkParts>>,
     metadata: RegionMetadataRef,
-    alloc_tracker: AllocTracker,
+    alloc_tracker: Arc<AllocTracker>,
     max_timestamp: AtomicI64,
     min_timestamp: AtomicI64,
     max_sequence: AtomicU64,
@@ -685,12 +698,14 @@ impl Memtable for BulkMemtable {
             return Ok(());
         }
 
-        compactor.merge_parts(
+        let released = compactor.merge_parts(
             &self.parts,
             &self.metadata,
             !self.append_mode,
             self.merge_mode,
-        )
+        )?;
+        self.alloc_tracker.on_deallocation(released);
+        Ok(())
     }
 }
 
@@ -701,7 +716,7 @@ impl BulkMemtable {
             config: self.config.clone(),
             parts: Arc::new(RwLock::new(BulkParts::default())),
             metadata: metadata.clone(),
-            alloc_tracker: AllocTracker::new(self.alloc_tracker.write_buffer_manager()),
+            alloc_tracker: Arc::new(AllocTracker::new(self.alloc_tracker.write_buffer_manager())),
             max_timestamp: AtomicI64::new(i64::MIN),
             min_timestamp: AtomicI64::new(i64::MAX),
             max_sequence: AtomicU64::new(0),
@@ -790,7 +805,7 @@ impl BulkMemtable {
             config: config.clone(),
             parts: Arc::new(RwLock::new(BulkParts::default())),
             metadata,
-            alloc_tracker: AllocTracker::new(write_buffer_manager),
+            alloc_tracker: Arc::new(AllocTracker::new(write_buffer_manager)),
             max_timestamp: AtomicI64::new(i64::MIN),
             min_timestamp: AtomicI64::new(i64::MAX),
             max_sequence: AtomicU64::new(0),
@@ -882,6 +897,7 @@ impl BulkMemtable {
                 parts: self.parts.clone(),
                 _guard: guard,
                 compactor: self.compactor.clone(),
+                alloc_tracker: self.alloc_tracker.clone(),
                 append_mode: self.append_mode,
                 merge_mode: self.merge_mode,
             };
@@ -1251,7 +1267,7 @@ impl MemtableCompactor {
         metadata: &RegionMetadataRef,
         dedup: bool,
         merge_mode: MergeMode,
-    ) -> Result<()> {
+    ) -> Result<usize> {
         let start = Instant::now();
 
         let collected = {
@@ -1264,7 +1280,7 @@ impl MemtableCompactor {
         };
 
         if collected.groups.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
 
         // Collect all file IDs for tracking
@@ -1303,7 +1319,7 @@ impl MemtableCompactor {
             .collect::<Result<Vec<Option<MergedPart>>>>()?;
 
         // Install all merged parts
-        let total_output_rows = {
+        let (total_output_rows, removed_bytes, installed_bytes) = {
             let mut parts = bulk_parts.write().unwrap();
             parts.install_merged_parts(merged_parts.into_iter().flatten(), &merged_file_ids)
         };
@@ -1320,7 +1336,8 @@ impl MemtableCompactor {
             start.elapsed()
         );
 
-        Ok(())
+        // Only shrinkage is released: merging bulk parts without encoding keeps their batches.
+        Ok(removed_bytes.saturating_sub(installed_bytes))
     }
 
     /// Merges a group of parts into a single part (either MultiBulkPart or EncodedBulkPart).
@@ -1520,6 +1537,8 @@ struct MemCompactTask {
     _guard: CompactTaskGuard,
     /// Compactor for merging bulk parts
     compactor: Arc<Mutex<MemtableCompactor>>,
+    /// Memory accounting of the memtable, which releases the bytes merging saves.
+    alloc_tracker: Arc<AllocTracker>,
     /// Whether the append mode is enabled
     append_mode: bool,
     /// Mode to handle duplicate rows while merging
@@ -1528,12 +1547,14 @@ struct MemCompactTask {
 
 impl MemCompactTask {
     fn compact(&self) -> Result<()> {
-        self.compactor.lock().unwrap().merge_parts(
+        let released = self.compactor.lock().unwrap().merge_parts(
             &self.parts,
             &self.metadata,
             !self.append_mode,
             self.merge_mode,
-        )
+        )?;
+        self.alloc_tracker.on_deallocation(released);
+        Ok(())
     }
 }
 
@@ -2290,6 +2311,41 @@ mod tests {
 
         let stats_after_freeze = memtable.stats();
         assert_eq!(1, stats_after_freeze.num_rows);
+    }
+
+    #[test]
+    fn test_encoding_parts_releases_their_written_bytes() {
+        let metadata = metadata_for_test();
+        let config = BulkMemtableConfig {
+            merge_threshold: 2,
+            encode_row_threshold: 1,
+            ..Default::default()
+        };
+        let memtable =
+            BulkMemtable::new(999, config, metadata, None, None, false, MergeMode::LastRow);
+        let mut written = 0;
+        for i in 0..32u32 {
+            let ts: Vec<i64> = (0..4096).map(|t| i as i64 * 10_000 + t).collect();
+            let values: Vec<Option<f64>> = (0..4096).map(|v| Some((v % 7) as f64)).collect();
+            let part =
+                create_bulk_part_with_converter("host", i, ts, values, 100 + i as u64).unwrap();
+            written += part.estimated_size();
+            memtable.write_bulk(part).unwrap();
+        }
+        for _ in 0..8 {
+            memtable.compact(false).unwrap();
+        }
+        let held: usize = memtable
+            .parts
+            .read()
+            .unwrap()
+            .parts
+            .iter()
+            .map(|wrapper| wrapper.part.estimated_size())
+            .sum();
+        // Encoded parts hold far fewer bytes than the batches written into them.
+        assert!(held * 4 < written, "held {held}, written {written}");
+        assert_eq!(held, memtable.stats().estimated_bytes);
     }
 
     #[test]

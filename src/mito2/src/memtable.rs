@@ -356,6 +356,9 @@ pub struct AllocTracker {
     bytes_allocated: AtomicUsize,
     /// Whether allocating is done.
     is_done_allocating: AtomicBool,
+    /// Serializes [Self::done_allocating] and [Self::on_deallocation], which both decide how
+    /// much to remove from the mutable memory of the write buffer.
+    release: std::sync::Mutex<()>,
 }
 
 impl fmt::Debug for AllocTracker {
@@ -374,6 +377,7 @@ impl AllocTracker {
             write_buffer_manager,
             bytes_allocated: AtomicUsize::new(0),
             is_done_allocating: AtomicBool::new(false),
+            release: std::sync::Mutex::new(()),
         }
     }
 
@@ -391,6 +395,7 @@ impl AllocTracker {
     ///
     /// The region MUST ensure that it calls this method inside the region writer's write lock.
     pub(crate) fn done_allocating(&self) {
+        let _release = self.release.lock().unwrap();
         if let Some(write_buffer_manager) = &self.write_buffer_manager
             && self
                 .is_done_allocating
@@ -398,6 +403,26 @@ impl AllocTracker {
                 .is_ok()
         {
             write_buffer_manager.schedule_free_mem(self.bytes_allocated.load(Ordering::Relaxed));
+        }
+    }
+
+    /// Tracks that `bytes` of the allocated memory is released, for example after the memtable
+    /// encodes its data into a smaller form.
+    pub(crate) fn on_deallocation(&self, bytes: usize) {
+        let _release = self.release.lock().unwrap();
+        let bytes = bytes.min(self.bytes_allocated.load(Ordering::Relaxed));
+        if bytes == 0 {
+            return;
+        }
+        self.bytes_allocated.fetch_sub(bytes, Ordering::Relaxed);
+        WRITE_BUFFER_BYTES.sub(bytes as i64);
+        if let Some(write_buffer_manager) = &self.write_buffer_manager {
+            // Before freezing, the bytes still count as mutable memory; freezing removes
+            // whatever remains allocated at that time.
+            if !self.is_done_allocating.load(Ordering::Relaxed) {
+                write_buffer_manager.schedule_free_mem(bytes);
+            }
+            write_buffer_manager.free_mem(bytes);
         }
     }
 
@@ -893,6 +918,34 @@ mod tests {
             }
         }
 
+        assert_eq!(0, manager.memory_usage());
+        assert_eq!(0, manager.mutable_usage());
+    }
+
+    #[test]
+    fn test_alloc_tracker_releases_before_and_after_freezing() {
+        let manager = Arc::new(WriteBufferManagerImpl::new(1000));
+        {
+            let tracker = AllocTracker::new(Some(manager.clone() as WriteBufferManagerRef));
+            tracker.on_allocation(100);
+            // A mutable memtable releases both its total and its mutable usage.
+            tracker.on_deallocation(30);
+            assert_eq!(70, tracker.bytes_allocated());
+            assert_eq!(70, manager.memory_usage());
+            assert_eq!(70, manager.mutable_usage());
+
+            // Freezing already removed the remaining bytes from the mutable usage.
+            tracker.done_allocating();
+            tracker.on_deallocation(20);
+            assert_eq!(50, tracker.bytes_allocated());
+            assert_eq!(50, manager.memory_usage());
+            assert_eq!(0, manager.mutable_usage());
+
+            // Releasing more than allocated stops at zero.
+            tracker.on_deallocation(1000);
+            assert_eq!(0, tracker.bytes_allocated());
+            assert_eq!(0, manager.memory_usage());
+        }
         assert_eq!(0, manager.memory_usage());
         assert_eq!(0, manager.mutable_usage());
     }
