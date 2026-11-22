@@ -58,7 +58,8 @@ use crate::read::FlatSource;
 use crate::sst::file::RegionFileId;
 use crate::sst::index::{Indexer, IndexerBuilder};
 use crate::sst::parquet::blob::{
-    BlobFileWriter, ExternalColumn, blob_path, compress_external_values, external_columns,
+    BlobFileWriter, ExternalColumn, blob_column_entries, blob_path, compress_external_values,
+    external_columns,
 };
 use crate::sst::parquet::flat_format::{
     FlatWriteFormat, primary_key_column_index, time_index_column_index,
@@ -573,13 +574,15 @@ where
             );
 
             // The SST must not outlive or precede its values, so the sidecar completes first.
-            if let Some(blob_writer) = self.blob_writer.take() {
-                let columns = self.external_columns.as_deref().unwrap_or_default();
-                let entries = blob_writer.finish(columns).await?;
-                if let Some(writer) = &mut self.writer {
-                    for entry in entries {
-                        writer.append_key_value_metadata(entry);
-                    }
+            let columns = self.external_columns.as_deref().unwrap_or_default();
+            let entries = match self.blob_writer.take() {
+                Some(blob_writer) => blob_writer.finish(columns).await?,
+                // Without a sidecar the entries still tell compaction how the columns are encoded.
+                None => blob_column_entries(columns),
+            };
+            if let Some(writer) = &mut self.writer {
+                for entry in entries {
+                    writer.append_key_value_metadata(entry);
                 }
             }
 

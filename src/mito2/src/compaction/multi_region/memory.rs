@@ -24,7 +24,7 @@ use crate::compaction::multi_region::{
 };
 use crate::config::{FulltextIndexConfig, MitoConfig};
 use crate::error::{IndexOptionsSnafu, MultiRegionCompactionResourceSnafu, Result};
-use crate::sst::parquet::blob::{MAX_RESOLVED_BATCH_BYTES, blob_columns};
+use crate::sst::parquet::blob::{MAX_RESOLVED_BATCH_BYTES, blob_file_size};
 use crate::sst::parquet::max_row_group_value_bytes;
 use crate::sst::parquet::writer::SstWriteLimits;
 
@@ -233,7 +233,7 @@ pub(super) fn reader_bytes(footer: &ParquetMetaData) -> u64 {
         .max()
         .unwrap_or(0);
     // Readers materialize external values outside the Parquet pages, one bounded chunk at a time.
-    let external = if blob_columns(footer).is_empty() {
+    let external = if blob_file_size(footer).is_none() {
         0
     } else {
         max_row_group_value_bytes(footer).min(MAX_RESOLVED_BATCH_BYTES as u64)

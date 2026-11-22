@@ -52,7 +52,7 @@ use crate::error::{
     ComputeArrowSnafu, DecodeSnafu, EvalPartitionFilterSnafu, NewRecordBatchSnafu,
     RecordBatchSnafu, Result, UnexpectedSnafu,
 };
-use crate::sst::parquet::blob::blob_columns;
+use crate::sst::parquet::blob::blob_file_size;
 use crate::sst::parquet::file_range::PreFilterMode;
 use crate::sst::parquet::flat_format::FlatReadFormat;
 use crate::sst::parquet::format::{PrimaryKeyArray, StatValues};
@@ -442,7 +442,7 @@ pub(crate) fn build_reader_filter_plan(
     // Out-of-line columns hold references until the row group reader resolves them, so
     // field predicates must wait for the normal read path.
     let field_prefilter_enabled =
-        pre_filter_mode == PreFilterMode::All && blob_columns(parquet_metadata).is_empty();
+        pre_filter_mode == PreFilterMode::All && blob_file_size(parquet_metadata).is_none();
     // When true, tag columns are encoded in the primary key column and are NOT
     // stored as separate parquet columns. Tag predicates must go through PK
     // decoding rather than direct column reads.

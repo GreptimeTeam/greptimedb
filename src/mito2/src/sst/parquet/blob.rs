@@ -21,10 +21,14 @@
 //! [REF_PREFIX] are stored externally regardless of their size, so a value is a reference if and
 //! only if it starts with the prefix.
 //!
-//! An SST with a sidecar lists its external columns in footer keys starting with
-//! [BLOB_COLUMN_KEY_PREFIX] and records the sidecar size under [BLOB_FILE_SIZE_KEY]. The sidecar
-//! shares the SST's file id and is deleted with it, so every reference names its own SST. The id
-//! is in the reference so that SSTs can later share blob files without a format change.
+//! Every SST that a writer with external columns produces lists them in footer keys starting
+//! with [BLOB_COLUMN_KEY_PREFIX], with or without a sidecar. An entry guarantees that in this SST
+//! every physical value of the column that starts with [REF_PREFIX] is a reference; SSTs written
+//! before the column became external carry no entry and may hold such values as plain data. An
+//! SST with a sidecar also records the sidecar size under [BLOB_FILE_SIZE_KEY], and only such an
+//! SST has references to resolve. The sidecar shares the SST's file id and is deleted with it, so
+//! every reference names its own SST. The id is in the reference so that SSTs can later share
+//! blob files without a format change.
 //!
 //! Readers resolve references right after decoding a row group, so filters, merges and
 //! compaction see the original values.
@@ -81,6 +85,19 @@ pub(crate) fn blob_columns(meta: &ParquetMetaData) -> Vec<String> {
         .flatten()
         .filter_map(|kv| kv.key.strip_prefix(BLOB_COLUMN_KEY_PREFIX))
         .map(str::to_string)
+        .collect()
+}
+
+/// Footer entries that declare `columns` external in an SST; see the module documentation.
+pub(crate) fn blob_column_entries(columns: &[ExternalColumn]) -> Vec<KeyValue> {
+    columns
+        .iter()
+        .map(|column| {
+            KeyValue::new(
+                format!("{BLOB_COLUMN_KEY_PREFIX}{}", column.name),
+                String::new(),
+            )
+        })
         .collect()
 }
 
@@ -310,15 +327,7 @@ impl BlobFileWriter {
             }
             return Err(error).context(OpenDalSnafu);
         }
-        let mut entries: Vec<_> = columns
-            .iter()
-            .map(|column| {
-                KeyValue::new(
-                    format!("{BLOB_COLUMN_KEY_PREFIX}{}", column.name),
-                    String::new(),
-                )
-            })
-            .collect();
+        let mut entries = blob_column_entries(columns);
         entries.push(KeyValue::new(
             BLOB_FILE_SIZE_KEY.to_string(),
             self.offset.to_string(),

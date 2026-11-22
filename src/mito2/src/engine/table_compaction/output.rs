@@ -23,7 +23,7 @@ use crate::error::{InvalidRequestSnafu, OpenDalSnafu, Result};
 use crate::region::MitoRegionRef;
 use crate::sst::file::FileMeta;
 use crate::sst::location;
-use crate::sst::parquet::blob::{blob_columns, blob_file_size, blob_path};
+use crate::sst::parquet::blob::{blob_file_size, blob_path};
 use crate::sst::parquet::metadata::{MetadataLoader, extract_primary_key_range};
 use crate::sst::parquet::{max_row_group_decoded_size, max_row_group_uncompressed_size};
 
@@ -93,14 +93,8 @@ async fn verify_file(
     );
     let footer = cached.parquet_metadata();
     verify_statistics(&footer, metadata, file)?;
-    let footer_blob_size = if blob_columns(&footer).is_empty() {
-        0
-    } else {
-        blob_file_size(&footer).context(InvalidRequestSnafu {
-            region_id,
-            reason: "Output declares external columns without a sidecar size",
-        })?
-    };
+    // Column entries alone are valid: they declare the encoding of an SST without large values.
+    let footer_blob_size = blob_file_size(&footer).unwrap_or(0);
     ensure!(
         footer_blob_size == file.blob_file_size,
         InvalidRequestSnafu {
