@@ -474,6 +474,8 @@ impl ObjectStoreLogStore {
             durable_reclaim_boundary: reclaim_boundary,
             unindexed: unindexed.into_iter().chain(moved_past).collect(),
             pending_releases: BTreeMap::new(),
+            handoff_waiters: Vec::new(),
+            deferred_handoffs: HashMap::new(),
             release_retry: RetryBackoff::default(),
             release_retry_logged_at: None,
             creating: HashSet::new(),
@@ -1326,6 +1328,51 @@ impl LogStore for ObjectStoreLogStore {
         Ok(())
     }
 
+    /// Raises the sequence of the next object above the object that holds
+    /// the bound, sealing the open batch first if it holds ids under the
+    /// current sequence, and returns once a release record of the region's
+    /// current watermark is durable and indexed in an object at or above that
+    /// sequence. A store opened later takes its next sequence from that
+    /// object, and the watermark does not move. The record joins the next
+    /// sealed batch, so hand-offs within one flush interval share an object.
+    ///
+    /// In the `enqueued` mode a bound at or below an id the store already
+    /// assigned the region needs no raised sequence, as that mode never
+    /// assigns an id twice: the record may then share the object of that id,
+    /// and every later id of the region is above it.
+    ///
+    /// A store that is failing or lacks I/O permission keeps the raised
+    /// sequence and the record and fails the call; the record is written
+    /// with a later batch. If the open batch holds ids under the floor and
+    /// cannot be sealed, the floor and the record wait for that seal instead,
+    /// unless the store stops first.
+    ///
+    /// The wait usually ends with the next periodic seal. It is longer while
+    /// the object store returns errors: in the `enqueued` mode the create is
+    /// repeated until it succeeds, and in the `durable` mode a seal that only
+    /// carries records waits for the backoff of earlier rollbacks. A hand-off
+    /// pending when stop begins is answered with the outcome of the object
+    /// stop creates, which may be success.
+    async fn handoff(&self, provider: &Provider, entry_id: EntryId) -> Result<()> {
+        let region_id = self.region_of(provider)?;
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(Command::Handoff {
+                region_id,
+                entry_id,
+                response: response_tx,
+            })
+            .await
+            .ok()
+            .context(ObjectStoreWalStoppedSnafu)?;
+        let persisted = response_rx
+            .await
+            .ok()
+            .context(ObjectStoreWalStoppedSnafu)??;
+        persisted.await.ok().context(ObjectStoreWalStoppedSnafu)??;
+        self.start_region_history(provider)
+    }
+
     async fn read_node(
         &self,
         node_id: u64,
@@ -1371,6 +1418,13 @@ enum Command {
         region_id: RegionId,
         full: bool,
         response: oneshot::Sender<Result<()>>,
+    },
+    /// Answered with the bound and a receiver of the outcome of the object
+    /// that carries the release record, see [`Actor::handle_handoff`].
+    Handoff {
+        region_id: RegionId,
+        entry_id: EntryId,
+        response: oneshot::Sender<Result<oneshot::Receiver<Result<()>>>>,
     },
     /// Answered once the actor has accepted the bounded release for its next
     /// batch. Unlike `Release`, this does not wait for persistence.
@@ -1560,9 +1614,9 @@ impl Failing {
 /// | --- | --- | --- | --- |
 /// | created, or identical retry | advances | acknowledged in order | healthy |
 /// | transient error, `durable` mode | never reused: a create that reported an error may have written its object | every batch that is not indexed fails, created ones included; retries are assigned new ids | healthy: the next batch links to the last indexed object, so no chain reaches a failed batch; retained releases back off before a release-only retry |
-/// | transient error, `enqueued` mode | unchanged | already acknowledged, except a permanent release, which waits for the repeat | healthy: the create is repeated with the same bytes after [`CREATE_RETRY_DELAY`], which an identical retry accepts |
-/// | error that requires intervention, `enqueued` mode | unchanged | already acknowledged, except a permanent release, which fails while its record stays in the backlog; later appends and permanent releases are rejected with a retryable error | failing, see [`Failing`]: the lowest pending create is repeated alone with backoff, and the first create that succeeds ends it |
-/// | object store error, `enqueued` mode after `stop` began | never reused | already acknowledged, except a permanent release, which fails with the stopped error | the backlog is dropped and `stop` reports the error |
+/// | transient error, `enqueued` mode | unchanged | already acknowledged, except a permanent release or a hand-off, which waits for the repeat | healthy: the create is repeated with the same bytes after [`CREATE_RETRY_DELAY`], which an identical retry accepts |
+/// | error that requires intervention, `enqueued` mode | unchanged | already acknowledged, except a permanent release or a hand-off, which fails while its record stays in the backlog; later appends, permanent releases and hand-offs are rejected with a retryable error | failing, see [`Failing`]: the lowest pending create is repeated alone with backoff, and the first create that succeeds ends it |
+/// | object store error, `enqueued` mode after `stop` began | never reused | already acknowledged, except a permanent release or a hand-off, which fails with the stopped error | the backlog is dropped and `stop` reports the error |
 /// | an object of an earlier epoch holds the sequence, `durable` mode | never reused | as for a transient error | healthy: that object can never be on the chain |
 /// | an object of the same or a later epoch holds the sequence, any conflicting object in the `enqueued` mode, encoding or catalog error | unchanged | every batch that is not indexed fails | poisoned |
 /// | created at the last representable sequence | cannot advance | acknowledged | poisoned: no later batch can be allocated a sequence |
@@ -1656,6 +1710,15 @@ struct Actor {
     /// region for the next sealed batch. Timer ticks seal them when no entries
     /// arrive, after any durable rollback backoff; shutdown drains them in both modes.
     pending_releases: BTreeMap<RegionId, EntryId>,
+    /// Callers of a hand-off whose record is in `pending_releases`; the next
+    /// sealed batch carries them.
+    handoff_waiters: Vec<oneshot::Sender<Result<()>>>,
+    /// Regions and bounds of hand-offs that found the open batch holding ids
+    /// under a sequence their floor must pass and could not seal it, keeping
+    /// the largest bound of each region. Once it is sealed, the floors move
+    /// and the next batch carries their records, unless the store stops
+    /// first: a stopped store assigns no ids, and their hand-offs failed.
+    deferred_handoffs: HashMap<RegionId, EntryId>,
     /// Backoff for release-only sealing after a durable rollback retains records.
     release_retry: RetryBackoff,
     /// Last warning about retained release records after a durable rollback.
@@ -1729,6 +1792,10 @@ impl Actor {
                     }
                     Some(Command::Release { region_id, full, response }) => {
                         self.handle_release(region_id, full, response);
+                    }
+                    Some(Command::Handoff { region_id, entry_id, response }) => {
+                        let result = self.handle_handoff(region_id, entry_id);
+                        let _ = response.send(result);
                     }
                     Some(Command::ReleaseEntries { region_id, entry_id, response }) => {
                         let result = self.handle_release_entries(region_id, entry_id);
@@ -2023,11 +2090,19 @@ impl Actor {
             sealed_at: Instant::now(),
             attempts: 0,
             waiters: std::mem::take(&mut self.pending),
-            release_waiters: Vec::new(),
+            // Their records were pending, so the batch carries them.
+            release_waiters: std::mem::take(&mut self.handoff_waiters),
             #[cfg(any(test, feature = "testing"))]
             seal_waiters: Vec::new(),
             state: CreateState::Pending,
         });
+        // The open batch is sealed, so the deferred floors can move, and a
+        // later batch carries their records.
+        for (region_id, bound) in std::mem::take(&mut self.deferred_handoffs) {
+            if matches!(self.raise_sequence_floor(region_id, bound), Ok(true)) {
+                self.keep_watermark_record(region_id);
+            }
+        }
         self.start_creates();
         true
     }
@@ -2271,10 +2346,13 @@ impl Actor {
         }
         // So would a release. Its record stays in the backlog and becomes
         // durable with it.
-        for batch in &mut self.sealed {
-            for waiter in batch.release_waiters.drain(..) {
-                let _ = waiter.send(Err(failing.reject()));
-            }
+        for waiter in self
+            .sealed
+            .iter_mut()
+            .flat_map(|batch| batch.release_waiters.drain(..))
+            .chain(self.handoff_waiters.drain(..))
+        {
+            let _ = waiter.send(Err(failing.reject()));
         }
     }
 
@@ -2520,13 +2598,17 @@ impl Actor {
         self.fail_waiters(error);
     }
 
-    /// Fails the waiters of the open batch and the durability waiters.
+    /// Fails the waiters of the open batch, the durability waiters and the
+    /// hand-offs whose records are pending; the records stay pending.
     fn fail_waiters(&mut self, error: impl Fn() -> Error) {
         for pending in self.pending.drain(..) {
             let _ = pending.response.send(Err(error()));
         }
         for waiter in self.durable_waiters.drain(..) {
             let _ = waiter.response.send(Err(error()));
+        }
+        for waiter in self.handoff_waiters.drain(..) {
+            let _ = waiter.send(Err(error()));
         }
     }
 
@@ -2702,6 +2784,80 @@ impl Actor {
         self.update_reclaim_boundary();
         self.collect();
         Ok(())
+    }
+
+    /// Raises the sequence floor to the larger of `entry_id` and the largest
+    /// id issued for the region, which it returns, and keeps a release record
+    /// of the region's current watermark for the next sealed batch, whose
+    /// sequence is at or above the floor. The receiver it returns is answered
+    /// with the outcome of that batch.
+    ///
+    /// The open batch is sealed first when it holds ids under a sequence the
+    /// floor must pass; if it cannot be sealed, the floor and the record wait
+    /// for it unless the store stops first, see `deferred_handoffs`. A
+    /// failing store or one without I/O permission keeps the floor and the
+    /// record, and fails at once.
+    fn handle_handoff(
+        &mut self,
+        region_id: RegionId,
+        entry_id: EntryId,
+    ) -> Result<oneshot::Receiver<Result<()>>> {
+        let bound = entry_id.max(self.issued_entry_ids.get(&region_id).copied().unwrap_or(0));
+        // Stop, then a terminal error, are checked only by the raise, so a
+        // hand-off handled after stop began fails as stopped.
+        match self.raise_sequence_floor(region_id, bound) {
+            Ok(raised) => ensure!(raised, ObjectStoreWalStoppedSnafu),
+            Err(Error::WalObjectSequenceUnsettled { .. }) => {
+                if !self.flush_open_batch() {
+                    // A `durable` store without I/O permission rolled the open
+                    // batch back, so the floor can move now; the `enqueued`
+                    // mode keeps the batch, and the floor waits for its seal.
+                    if self.open_batch.is_empty() {
+                        ensure!(
+                            self.raise_sequence_floor(region_id, bound)?,
+                            ObjectStoreWalStoppedSnafu
+                        );
+                        self.keep_watermark_record(region_id);
+                    } else {
+                        let deferred = self.deferred_handoffs.entry(region_id).or_default();
+                        *deferred = (*deferred).max(bound);
+                    }
+                    return Err(terminal(&self.terminal_error).map_or_else(
+                        || ObjectStoreWalLeaseExpiredSnafu.build(),
+                        |error| shared(&error),
+                    ));
+                }
+                ensure!(
+                    self.raise_sequence_floor(region_id, bound)?,
+                    ObjectStoreWalStoppedSnafu
+                );
+            }
+            Err(error) => return Err(error),
+        }
+        self.keep_watermark_record(region_id);
+        if let Some(failing) = &mut self.failing {
+            return Err(failing.reject());
+        }
+        ensure!(self.io_allowed(), ObjectStoreWalLeaseExpiredSnafu);
+        let (response, receiver) = oneshot::channel();
+        self.handoff_waiters.push(response);
+        Ok(receiver)
+    }
+
+    /// Keeps a release record of the region's current watermark, or of 0
+    /// without one, for the next sealed batch.
+    fn keep_watermark_record(&mut self, region_id: RegionId) {
+        let watermark = self
+            .obsolete_entry_ids
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&region_id)
+            .copied()
+            .unwrap_or(0);
+        self.keep_release(Release {
+            region_id,
+            entry_id: watermark,
+        });
     }
 
     /// Moves the watermark of the region up to the release and seals the
@@ -2898,10 +3054,11 @@ impl Actor {
     /// `entry_id` unless it is there already. The move fails while the open
     /// batch has handed out ids under the next sequence. A floor that does
     /// not fit an entry id poisons the store like an exhausted sequence.
-    fn raise_sequence_floor(&mut self, region_id: RegionId, entry_id: EntryId) -> Result<()> {
-        // Nothing is assigned an id after stop began.
+    /// Returns false if stop began, which leaves the floor where it is, as
+    /// nothing is assigned an id any more.
+    fn raise_sequence_floor(&mut self, region_id: RegionId, entry_id: EntryId) -> Result<bool> {
         if self.is_stopped() {
-            return Ok(());
+            return Ok(false);
         }
         if let Some(error) = terminal(&self.terminal_error) {
             return Err(shared(&error));
@@ -2914,14 +3071,14 @@ impl Actor {
         if self.ack_mode == AckMode::Enqueued
             && entry_id <= self.issued_entry_ids.get(&region_id).copied().unwrap_or(0)
         {
-            return Ok(());
+            return Ok(true);
         }
         let sequence_floor = sequence_floor(entry_id);
         let Some(next_object_seq) = self.next_object_seq else {
-            return Ok(());
+            return Ok(true);
         };
         if next_object_seq >= sequence_floor {
-            return Ok(());
+            return Ok(true);
         }
         ensure!(
             self.open_batch.is_empty(),
@@ -2931,7 +3088,7 @@ impl Actor {
         );
         if sequence_floor < OBJECT_SEQ_LIMIT {
             self.next_object_seq = Some(sequence_floor);
-            Ok(())
+            Ok(true)
         } else {
             self.next_object_seq = None;
             let error = self.poison(
@@ -4129,6 +4286,18 @@ mod tests {
 
     /// Appends `count` single-entry batches, waiting for each to be admitted
     /// before the next is sent, so they are admitted in order.
+    /// Waits until `count` hand-offs wait for the object that carries their
+    /// records.
+    async fn wait_for_handoff_waiters(store: &ObjectStoreLogStore, count: usize) {
+        timeout(WAIT, async {
+            while inspect_actor(store, |actor| actor.handoff_waiters.len()).await < count {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
     async fn spawn_appends(
         store: &Arc<ObjectStoreLogStore>,
         region_id: RegionId,
@@ -10582,6 +10751,465 @@ mod tests {
             vec![provider(one), provider(two)],
             store.list_namespaces().await.unwrap()
         );
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_handoff_raises_ids_above_the_bound_and_keeps_the_watermark() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        let config = config(MIN_FLUSH_INTERVAL, u64::MAX);
+        let store = open(object_store.clone(), &config).await;
+        let one = region(1);
+        let first = append(&store, one, "a1").await.unwrap().last_entry_ids[&one];
+        assert_eq!(id(1, 1), first);
+
+        // A bound below the ids issued for the region hands it over too.
+        store.handoff(&provider(one), 0).await.unwrap();
+        // A larger bound moves the next sequence past its object, and the
+        // object carrying the record is the first at that sequence. The record
+        // keeps the region's watermark, which it has none of.
+        let bound = id(5, 3);
+        store.handoff(&provider(one), bound).await.unwrap();
+        assert_eq!(
+            vec![release(one, 0)],
+            releases_of(store.io.as_ref(), 6).await
+        );
+        assert_eq!(None, watermark(&store, one));
+        assert_eq!(
+            expected_entries(one, &[(first, "a1")]),
+            read_entries(&store, one, 0).await
+        );
+        store.stop().await.unwrap();
+        assert!(matches!(
+            store.handoff(&provider(one), bound).await,
+            Err(Error::ObjectStoreWalStopped { .. })
+        ));
+
+        // A store opened later, whose newest object is the record's, holds
+        // the history through the bound, assigns ids above it and still reads
+        // the region's entries.
+        let store = open(object_store, &config).await;
+        assert_eq!(None, missing_history(&store, one, bound).await);
+        let next = append(&store, one, "a3").await.unwrap().last_entry_ids[&one];
+        assert!(next > bound, "{next} is not above {bound}");
+        assert_eq!(first, read_entries(&store, one, 0).await[0].entry_id());
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_handoff_records_the_current_watermark_of_the_region() {
+        let _serialized = SERIALIZED.lock().await;
+        let store = open(memory_store(), &config(MIN_FLUSH_INTERVAL, u64::MAX)).await;
+        let one = region(1);
+        let first = append(&store, one, "a1").await.unwrap().last_entry_ids[&one];
+        let second = append(&store, one, "a2").await.unwrap().last_entry_ids[&one];
+        store.obsolete(&provider(one), one, first).await.unwrap();
+        assert_eq!(Some(first), watermark(&store, one));
+
+        // Each hand-off records the watermark, not its bound, and the entry
+        // above the watermark stays readable.
+        let bound = id(5, 3);
+        store.handoff(&provider(one), bound).await.unwrap();
+        assert_eq!(
+            vec![release(one, first)],
+            releases_of(store.io.as_ref(), 6).await
+        );
+        let bound = id(7, 1);
+        store.handoff(&provider(one), bound).await.unwrap();
+        assert_eq!(
+            vec![release(one, first)],
+            releases_of(store.io.as_ref(), 8).await
+        );
+        assert_eq!(Some(first), watermark(&store, one));
+        assert_eq!(
+            expected_entries(one, &[(second, "a2")]),
+            read_entries(&store, one, 0).await
+        );
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_handoff_admitted_after_stop_began_keeps_nothing() {
+        let _serialized = SERIALIZED.lock().await;
+        for poisoned in [false, true] {
+            let store = open(memory_store(), &manual()).await;
+            let one = region(1);
+            // Stop sets its flag before the actor handles a command, so a
+            // hand-off the actor handles after that fails as stopped, also on a
+            // poisoned store, and does not answer with its bound.
+            let (stopped, next_object_seq, records, waiters) =
+                inspect_actor(&store, move |actor| {
+                    if poisoned {
+                        set_terminal(
+                            &actor.terminal_error,
+                            WalObjectSequenceExhaustedSnafu {
+                                last_object_seq: 1_u64,
+                            }
+                            .build(),
+                        );
+                    }
+                    let next_object_seq = actor.next_object_seq;
+                    actor.stopped.store(true, Ordering::Release);
+                    let result = actor.handle_handoff(one, id(9, 1));
+                    actor.stopped.store(false, Ordering::Release);
+                    (
+                        matches!(result, Err(Error::ObjectStoreWalStopped { .. })),
+                        actor.next_object_seq == next_object_seq,
+                        actor.pending_releases.len(),
+                        actor.handoff_waiters.len(),
+                    )
+                })
+                .await;
+            assert!(stopped, "poisoned: {poisoned}");
+            assert!(next_object_seq);
+            assert_eq!(0, records);
+            assert_eq!(0, waiters);
+            let _ = store.stop().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_store_handoff_starts_the_region_history_on_a_prefix_found_empty() {
+        let _serialized = SERIALIZED.lock().await;
+        let store = open(memory_store(), &config(MIN_FLUSH_INTERVAL, u64::MAX)).await;
+        let (one, two) = (region(1), region(2));
+        let bound = id(9, 1);
+        store.handoff(&provider(one), bound).await.unwrap();
+
+        // The store accepts the history of the region handed over to it,
+        // though it found its prefix empty, and only that one. The record
+        // object reclaims the start object, and the store goes on taking
+        // appends.
+        assert_eq!(None, missing_history(&store, one, bound).await);
+        assert!(missing_history(&store, two, 0).await.is_some());
+        assert_eq!(vec![10], collected_object_seqs(&store).await);
+        append(&store, two, "b1").await.unwrap();
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_handoffs_in_one_interval_share_an_object() {
+        let _serialized = SERIALIZED.lock().await;
+        let store = open(memory_store(), &manual()).await;
+        let (one, two) = (region(1), region(2));
+        let handoffs = [one, two].map(|region_id| {
+            let store = store.clone();
+            tokio::spawn(async move { store.handoff(&provider(region_id), 0).await })
+        });
+        wait_for_handoff_waiters(&store, 2).await;
+        assert!(handoffs.iter().all(|handoff| !handoff.is_finished()));
+
+        store.seal_open_batch().await.unwrap();
+        for handoff in handoffs {
+            handoff.await.unwrap().unwrap();
+        }
+        assert_eq!(vec![1], collected_object_seqs(&store).await);
+        assert_eq!(
+            vec![release(one, 0), release(two, 0)],
+            releases_of(store.io.as_ref(), 1).await
+        );
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_handoff_seals_the_open_batch_below_the_floor() {
+        let _serialized = SERIALIZED.lock().await;
+        let store = open(memory_store(), &manual()).await;
+        let (one, two) = (region(1), region(2));
+        let [append_two] = spawn_appends(&store, two, 1).await.try_into().unwrap();
+        let bound = id(5, 1);
+        let handoff = {
+            let store = store.clone();
+            tokio::spawn(async move { store.handoff(&provider(one), bound).await })
+        };
+
+        // The entry admitted under sequence 1 is sealed there before the
+        // sequence moves, and the record goes to the first object above the
+        // bound.
+        let appended = timeout(WAIT, append_two).await.unwrap().unwrap().unwrap();
+        assert_eq!(id(1, 1), appended.last_entry_ids[&two]);
+        wait_for_handoff_waiters(&store, 1).await;
+        store.seal_open_batch().await.unwrap();
+        handoff.await.unwrap().unwrap();
+        assert_eq!(vec![1, 6], collected_object_seqs(&store).await);
+        assert_eq!(
+            vec![release(one, 0)],
+            releases_of(store.io.as_ref(), 6).await
+        );
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_handoff_without_io_permission_keeps_the_floor_and_the_record() {
+        let _serialized = SERIALIZED.lock().await;
+        let store = open(memory_store(), &manual()).await;
+        let permit = Arc::new(TestIoPermit::default());
+        store.set_io_permit(permit.clone()).unwrap();
+        let one = region(1);
+        let bound = id(5, 1);
+        let error = store.handoff(&provider(one), bound).await.unwrap_err();
+        assert!(
+            matches!(error, Error::ObjectStoreWalLeaseExpired { .. }),
+            "unexpected error: {error:?}"
+        );
+        assert!(error.retry_hint().is_retryable());
+
+        // Once permission returns, the record goes into an object above the
+        // bound, and later ids of the region are above it too.
+        permit.0.store(true, Ordering::Release);
+        store.seal_open_batch().await.unwrap();
+        assert_eq!(
+            vec![release(one, 0)],
+            releases_of(store.io.as_ref(), 6).await
+        );
+        let [append_one] = spawn_appends(&store, one, 1).await.try_into().unwrap();
+        store.seal_open_batch().await.unwrap();
+        let next = timeout(WAIT, append_one)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .last_entry_ids[&one];
+        assert!(next > bound, "{next} is not above {bound}");
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_enqueued_handoff_behind_an_open_batch_without_io_permission_keeps_the_floor()
+     {
+        let _serialized = SERIALIZED.lock().await;
+        let store = open(memory_store(), &enqueued(manual())).await;
+        let permit = Arc::new(TestIoPermit(AtomicBool::new(true)));
+        store.set_io_permit(permit.clone()).unwrap();
+        let (one, two) = (region(1), region(2));
+        // Acknowledged on admission, the entry stays in the open batch under
+        // sequence 1.
+        let appended = append(&store, two, "b1").await.unwrap().last_entry_ids[&two];
+        assert_eq!(id(1, 1), appended);
+        permit.0.store(false, Ordering::Release);
+        let bound = id(5, 1);
+        let error = store.handoff(&provider(one), bound).await.unwrap_err();
+        assert!(
+            matches!(error, Error::ObjectStoreWalLeaseExpired { .. }),
+            "unexpected error: {error:?}"
+        );
+        assert!(error.retry_hint().is_retryable());
+        // Retries keep one deferred bound per region, the largest.
+        let largest = id(9, 1);
+        for retry in [bound, largest, bound] {
+            assert!(store.handoff(&provider(one), retry).await.is_err());
+        }
+        assert_eq!(
+            vec![(one, largest)],
+            inspect_actor(&store, |actor| actor
+                .deferred_handoffs
+                .iter()
+                .map(|(region_id, bound)| (*region_id, *bound))
+                .collect::<Vec<_>>())
+            .await
+        );
+        let bound = largest;
+
+        // Once permission returns, the open batch is sealed under its own
+        // sequence and the record goes into the first object above the
+        // bound, without another hand-off.
+        permit.0.store(true, Ordering::Release);
+        store.seal_open_batch().await.unwrap();
+        store.seal_open_batch().await.unwrap();
+        assert_eq!(
+            vec![release(one, 0)],
+            releases_of(store.io.as_ref(), 10).await
+        );
+        assert_eq!(
+            expected_entries(two, &[(appended, "b1")]),
+            read_entries(&store, two, 0).await
+        );
+        let next = append(&store, one, "a1").await.unwrap().last_entry_ids[&one];
+        assert!(next > bound, "{next} is not above {bound}");
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_deferred_handoff_sealed_after_stop_began_keeps_no_record() {
+        let _serialized = SERIALIZED.lock().await;
+        let store = open(memory_store(), &enqueued(manual())).await;
+        let permit = Arc::new(TestIoPermit(AtomicBool::new(true)));
+        store.set_io_permit(permit.clone()).unwrap();
+        let (one, two) = (region(1), region(2));
+        append(&store, two, "b1").await.unwrap();
+        permit.0.store(false, Ordering::Release);
+        assert!(store.handoff(&provider(one), id(5, 1)).await.is_err());
+        permit.0.store(true, Ordering::Release);
+        // A seal after stop began moves no deferred floor, so it keeps no record.
+        let records = inspect_actor(&store, |actor| {
+            actor.stopped.store(true, Ordering::Release);
+            actor.flush_open_batch();
+            actor.stopped.store(false, Ordering::Release);
+            actor.pending_releases.len()
+        })
+        .await;
+        assert_eq!(0, records);
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_durable_handoff_behind_an_open_batch_without_io_permission_keeps_the_floor()
+    {
+        let _serialized = SERIALIZED.lock().await;
+        let store = open(memory_store(), &manual()).await;
+        let permit = Arc::new(TestIoPermit(AtomicBool::new(true)));
+        store.set_io_permit(permit.clone()).unwrap();
+        let (one, two) = (region(1), region(2));
+        // The append waits in the open batch under sequence 1.
+        let appended = spawn_appends(&store, two, 1).await.pop().unwrap();
+        permit.0.store(false, Ordering::Release);
+        let bound = id(5, 1);
+        let error = store.handoff(&provider(one), bound).await.unwrap_err();
+        assert!(
+            matches!(error, Error::ObjectStoreWalLeaseExpired { .. }),
+            "unexpected error: {error:?}"
+        );
+        assert!(error.retry_hint().is_retryable());
+        // Losing permission rolled the open batch back.
+        assert!(timeout(WAIT, appended).await.unwrap().unwrap().is_err());
+
+        // Once permission returns, the record goes into the first object
+        // above the bound without another hand-off or append.
+        permit.0.store(true, Ordering::Release);
+        store.seal_open_batch().await.unwrap();
+        assert_eq!(
+            vec![release(one, 0)],
+            releases_of(store.io.as_ref(), 6).await
+        );
+        let next = spawn_appends(&store, one, 1).await.pop().unwrap();
+        store.seal_open_batch().await.unwrap();
+        let next = timeout(WAIT, next)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .last_entry_ids[&one];
+        assert!(next > bound, "{next} is not above {bound}");
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_handoff_fails_while_the_store_is_failing_and_keeps_the_floor() {
+        let _serialized = SERIALIZED.lock().await;
+        let (store, io, mut parked) =
+            open_parking_creates(memory_store(), &enqueued(manual())).await;
+        let (one, two, three) = (region(1), region(2), region(3));
+        let appended = append(&store, two, "b1").await.unwrap().last_entry_ids[&two];
+        let sealed = {
+            let store = store.clone();
+            tokio::spawn(async move { store.seal_open_batch().await })
+        };
+        let (object_seq, create) = next_parked_operation(&mut parked).await;
+        assert_eq!(1, object_seq);
+        let (one_bound, three_bound) = (id(5, 1), id(7, 1));
+        let waiting = {
+            let store = store.clone();
+            tokio::spawn(async move { store.handoff(&provider(one), one_bound).await })
+        };
+        wait_for_handoff_waiters(&store, 1).await;
+
+        // The refused create makes the store fail: the waiting hand-off and
+        // one admitted afterwards fail at once.
+        io.creates_refused.store(true, Ordering::SeqCst);
+        create.send(false).unwrap();
+        let error = timeout(WAIT, waiting).await.unwrap().unwrap().unwrap_err();
+        assert_rejected(&error, ErrorKind::PermissionDenied);
+        let error = store
+            .handoff(&provider(three), three_bound)
+            .await
+            .unwrap_err();
+        assert_rejected(&error, ErrorKind::PermissionDenied);
+
+        // Once a create succeeds, both records go into the first object above
+        // both bounds without another hand-off, and later ids are above them.
+        io.creates_refused.store(false, Ordering::SeqCst);
+        let (object_seq, create) = next_parked_operation(&mut parked).await;
+        assert_eq!(1, object_seq);
+        create.send(true).unwrap();
+        timeout(WAIT, sealed).await.unwrap().unwrap().unwrap();
+        assert_eq!(0, failing_stores());
+        assert_eq!(
+            expected_entries(two, &[(appended, "b1")]),
+            read_entries(&store, two, 0).await
+        );
+        let sealed = {
+            let store = store.clone();
+            tokio::spawn(async move { store.seal_open_batch().await })
+        };
+        let (object_seq, create) = next_parked_operation(&mut parked).await;
+        assert_eq!(8, object_seq);
+        create.send(true).unwrap();
+        timeout(WAIT, sealed).await.unwrap().unwrap().unwrap();
+        assert_eq!(
+            vec![release(one, 0), release(three, 0)],
+            releases_of(io.as_ref(), 8).await
+        );
+        io.creates_parked.store(false, Ordering::SeqCst);
+        let next = append(&store, one, "a1").await.unwrap().last_entry_ids[&one];
+        assert!(next > three_bound, "{next} is not above {three_bound}");
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_handoff_waiting_for_its_object_fails_when_io_permission_is_lost() {
+        let _serialized = SERIALIZED.lock().await;
+        let store = open(memory_store(), &manual()).await;
+        let permit = Arc::new(TestIoPermit(AtomicBool::new(true)));
+        store.set_io_permit(permit.clone()).unwrap();
+        let one = region(1);
+        let bound = id(5, 1);
+        let handoff = {
+            let store = store.clone();
+            tokio::spawn(async move { store.handoff(&provider(one), bound).await })
+        };
+        wait_for_handoff_waiters(&store, 1).await;
+
+        // The hand-off fails as soon as the store loses permission, and its
+        // record goes above the bound once permission returns.
+        permit.0.store(false, Ordering::Release);
+        assert!(store.seal_open_batch().await.is_err());
+        let error = timeout(WAIT, handoff).await.unwrap().unwrap().unwrap_err();
+        assert!(error.retry_hint().is_retryable(), "{error:?}");
+        assert!(
+            format!("{error:?}").contains("node lease is unavailable or expired"),
+            "unexpected error: {error:?}"
+        );
+        permit.0.store(true, Ordering::Release);
+        store.seal_open_batch().await.unwrap();
+        assert_eq!(
+            vec![release(one, 0)],
+            releases_of(store.io.as_ref(), 6).await
+        );
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_enqueued_handoff_answers_once_its_object_is_durable() {
+        let _serialized = SERIALIZED.lock().await;
+        let store = open(memory_store(), &enqueued(manual())).await;
+        let one = region(1);
+        store.hold_creates();
+        let handoff = {
+            let store = store.clone();
+            tokio::spawn(async move { store.handoff(&provider(one), 0).await })
+        };
+        wait_for_handoff_waiters(&store, 1).await;
+        let seal = {
+            let store = store.clone();
+            tokio::spawn(async move { store.seal_open_batch().await })
+        };
+        store.wait_for_parked_creates(1).await.unwrap();
+        assert!(!handoff.is_finished());
+
+        store.release_creates();
+        timeout(WAIT, seal).await.unwrap().unwrap().unwrap();
+        timeout(WAIT, handoff).await.unwrap().unwrap().unwrap();
         store.stop().await.unwrap();
     }
 
