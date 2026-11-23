@@ -121,14 +121,17 @@
 //! tail replay task), immediately after SST files are written but **before** the manifest
 //! is committed.
 //!
-//! `on_manifest_updated` is funneled through [`ManifestContext::update_locked`],
-//! which calls the low-level [`RegionManifestManager::update_with_verification`]
+//! `on_manifest_updated` is funneled through the shared write that
+//! [`ManifestContext::update_locked`] makes after it checks the Leader lease; the
+//! write calls the low-level [`RegionManifestManager::update_with_verification`]
 //! and packages each successful write into a [`PendingManifestHook`]. The caller
 //! owns the write lock, drops it, and *then* fires the receipt — the hook must
 //! never run under the lock. [`ManifestContext::update_manifest`] is the common
 //! case: it acquires the lock, delegates to `update_locked`, and fires the
-//! receipt in one go. Multi-step sequences (staging-exit, role-state backfill)
-//! call `update_locked` directly under their own held guard.
+//! receipt in one go. The role-state backfill and the table-compaction publication
+//! call `update_locked` directly under their own held guard; a replay of pending
+//! tails makes the same write without the Leader lease check, and the end of
+//! staging builds its receipt in `commit_staged_locked`.
 //!
 //! Non-logical writes (GC, staging bookkeeping) call the manager's own methods
 //! directly and intentionally do not fire the hook.
@@ -171,7 +174,8 @@ use crate::sst::file::{FileMeta, RegionFileId};
 use crate::sst::parquet::SstInfo;
 
 /// A deferred [`RegionHook::on_manifest_updated`] notification produced by a
-/// logical manifest write via [`ManifestContext::update_locked`](crate::region::ManifestContext::update_locked).
+/// logical manifest write via [`ManifestContext::update_locked`](crate::region::ManifestContext::update_locked),
+/// a replay of pending tails or the end of staging.
 ///
 /// Must be [`fire`](Self::fire)d **after** the manifest write lock is released
 /// (the hook may read the manifest). `#[must_use]` so a forgotten receipt warns.

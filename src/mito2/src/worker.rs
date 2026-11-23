@@ -36,6 +36,9 @@ mod handle_tail_replay;
 mod handle_truncate;
 mod handle_write;
 
+#[cfg(test)]
+pub(crate) use handle_catchup::persist_backfilled_metadata_and_notify_if_fenced;
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
@@ -81,8 +84,8 @@ use crate::region::{
     RegionMapRef,
 };
 use crate::request::{
-    BackgroundNotify, BulkInsertRequest, DdlRequest, OptionOutputTx, SenderBulkRequest,
-    SenderDdlRequest, SenderWriteRequest, WorkerRequest, WorkerRequestWithTime,
+    BackgroundNotify, BuildIndexRequest, BulkInsertRequest, DdlRequest, OptionOutputTx,
+    SenderBulkRequest, SenderDdlRequest, SenderWriteRequest, WorkerRequest, WorkerRequestWithTime,
 };
 use crate::schedule::CancellableTaskState;
 use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
@@ -438,6 +441,15 @@ impl WorkerGroup {
     /// Returns the latest lease each region of this group received.
     pub(crate) fn granted_leases(&self) -> &GrantedLeases {
         &self.granted_leases
+    }
+
+    /// Tells the worker of `region` that a lease ended its wait for its Leader lease, without
+    /// waiting.
+    pub(crate) fn notify_leader_lease_wait_ended(&self, region: &MitoRegionRef) {
+        handle_catchup::notify_leader_lease_wait_ended(
+            &self.worker(region.region_id).sender,
+            region,
+        );
     }
 
     /// Asks the worker of `region` to replay its pending tails, if it has any, without waiting.
@@ -895,6 +907,7 @@ impl<S: LogStore> WorkerStarter<S> {
             granted_leases: self.granted_leases,
             staging_regions: self.staging_regions,
             tail_replays: HashMap::new(),
+            lease_deferred_index_retries: HashMap::new(),
         };
         let handle = common_runtime::spawn_global(async move {
             worker_thread.run().await;
@@ -1361,6 +1374,9 @@ struct RegionWorkerLoop<S> {
     staging_regions: StagingRegionsRef,
     /// Running tail replays, which stay here until they report their end.
     tail_replays: HashMap<RegionId, CancellableTaskState>,
+    /// Index build retries refused while their region awaited its Leader lease, which the end of
+    /// the wait re-issues.
+    lease_deferred_index_retries: HashMap<RegionId, Vec<BuildIndexRequest>>,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -1860,6 +1876,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 self.handle_region_reloaded(region_id, old, result).await
             }
             BackgroundNotify::RegionBecameWritable => self.maybe_replay_tails(region_id),
+            BackgroundNotify::LeaderLeaseWaitEnded => {
+                self.handle_leader_lease_wait_ended(region_id).await
+            }
             BackgroundNotify::RegionCannotReplay { region } => {
                 self.handle_region_cannot_replay(region_id, region)
             }
@@ -1963,7 +1982,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
 impl<S> RegionWorkerLoop<S> {
     /// Cleans up the worker.
-    async fn clean(&self) {
+    async fn clean(&mut self) {
         for state in self.tail_replays.values() {
             let _ = state.request_cancel();
         }
@@ -1986,6 +2005,7 @@ impl<S> RegionWorkerLoop<S> {
         self.regions.clear();
         for region in regions {
             self.granted_leases.remove(region.region_id);
+            self.lease_deferred_index_retries.remove(&region.region_id);
         }
     }
 
@@ -2059,6 +2079,22 @@ impl WorkerListener {
         #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {
             listener.on_discarded_tails_wal_released(_region_id);
+        }
+    }
+
+    /// The worker handled the end of the region's wait for its Leader lease.
+    pub(crate) fn on_leader_lease_wait_ended(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_leader_lease_wait_ended(_region_id);
+        }
+    }
+
+    /// The worker spawns the persisting of the region's backfilled metadata.
+    pub(crate) fn on_persist_backfilled_metadata_begin(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_persist_backfilled_metadata_begin(_region_id);
         }
     }
 

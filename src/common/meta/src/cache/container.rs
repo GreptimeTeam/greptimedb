@@ -29,14 +29,6 @@ use crate::error::{self, Error, Result};
 use crate::instruction::CacheIdent;
 use crate::metrics;
 
-/// Filters out unused [CacheToken]s
-pub type TokenFilter<CacheToken> = Box<dyn Fn(&CacheToken) -> bool + Send + Sync>;
-
-/// Invalidates cached values by [CacheToken]s.
-pub type Invalidator<K, V, CacheToken> = Box<
-    dyn for<'a> Fn(&'a Cache<K, V>, &'a [&CacheToken]) -> BoxFuture<'a, Result<()>> + Send + Sync,
->;
-
 /// Initializes value (i.e., fetches from remote).
 pub type Initializer<K, V> = Arc<dyn Fn(&'_ K) -> BoxFuture<'_, Result<Option<V>>> + Send + Sync>;
 
@@ -44,75 +36,88 @@ pub type Initializer<K, V> = Arc<dyn Fn(&'_ K) -> BoxFuture<'_, Result<Option<V>
 pub type BatchInitializer<K, V> =
     Arc<dyn Fn(Vec<K>) -> BoxFuture<'static, Result<HashMap<K, V>>> + Send + Sync>;
 
-/// Loading and invalidation policy, fixed at construction.
-enum InitStrategy<K, V, T> {
-    // TODO: Migrate the remaining unchecked caches and remove this variant.
-    Unchecked {
-        cache: Cache<K, V>,
-        invalidator: Invalidator<K, V, T>,
-        filter: fn(&T) -> bool,
-    },
-    /// Loads and removals of the same key execute serially. A reader overlapping
-    /// invalidation may see the old value. Once removal returns, later readers cannot
-    /// hit that value. Other keys keep their cached values.
-    Coordinated {
-        cache: Cache<(usize, K), V>,
-        key: fn(&T) -> Option<&K>,
-    },
+pub(crate) type EventHandler<K, V, T> =
+    Box<dyn for<'a> Fn(CacheEntries<'a, K, V>, &'a [T]) -> BoxFuture<'a, ()> + Send + Sync>;
+
+pub(crate) enum Invalidation<K, V, T> {
+    Key(fn(&T) -> Option<&K>),
+    Events(EventHandler<K, V, T>),
+}
+
+/// Event handlers use the same epoch and per-key compute lock as cache loads.
+pub(crate) struct CacheEntries<'a, K, V> {
+    cache: &'a Cache<(usize, K), V>,
+    epoch: &'a AtomicUsize,
+}
+
+impl<K, V> CacheEntries<'_, K, V>
+where
+    K: Clone + Eq + Hash + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
+{
+    pub(crate) async fn compute(&self, key: &K, update: impl FnOnce(Option<V>) -> Op<V>) {
+        let key = (self.epoch.load(Ordering::Acquire), key.clone());
+        self.cache
+            .entry(key.clone())
+            .and_compute_with(|entry| async move {
+                match update(entry.map(|entry| entry.into_value())) {
+                    Op::Put(value) => self.cache.insert(key, value).await,
+                    Op::Remove => self.cache.invalidate(&key).await,
+                    Op::Nop => {}
+                }
+                Op::Nop
+            })
+            .await;
+    }
+
+    pub(crate) fn invalidate_all(&self) {
+        self.epoch.fetch_add(1, Ordering::AcqRel);
+        self.cache.invalidate_all();
+    }
 }
 
 /// Caches metadata and coalesces backend reads for concurrent callers.
 pub struct CacheContainer<K, V, CacheToken> {
     name: String,
-    strategy: InitStrategy<K, V, CacheToken>,
+    cache: Cache<(usize, K), V>,
+    invalidation: Invalidation<K, V, CacheToken>,
     initializer: Initializer<K, V>,
     batch_initializer: Option<BatchInitializer<K, V>>,
-    version: Arc<AtomicUsize>,
+    epoch: AtomicUsize,
 }
 
 impl<K, V, CacheToken> CacheContainer<K, V, CacheToken>
 where
-    K: Send + Sync,
-    V: Send + Sync,
+    K: Clone + Hash + Eq + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
     CacheToken: Send + Sync,
 {
-    /// Constructs an unchecked cache. A load overlapping invalidation may repopulate the entry.
-    pub fn new(
-        name: String,
-        cache: Cache<K, V>,
-        invalidator: Invalidator<K, V, CacheToken>,
-        initializer: Initializer<K, V>,
-        filter: fn(&CacheToken) -> bool,
-    ) -> Self {
-        Self {
-            name,
-            strategy: InitStrategy::Unchecked {
-                cache,
-                invalidator,
-                filter,
-            },
-            initializer,
-            batch_initializer: None,
-            version: Arc::default(),
-        }
-    }
-
     /// Coordinates misses and targeted invalidation through Moka's per-key compute lock.
     /// Invalidation can wait for a backend read. An overlapping reader may return its
     /// old result, but a read started after invalidation returns cannot hit that result.
     /// A synchronous full clear advances the epoch, isolating any late publication.
-    pub fn new_coordinated(
+    pub fn new(
         name: String,
         cache: Cache<(usize, K), V>,
         initializer: Initializer<K, V>,
         key: fn(&CacheToken) -> Option<&K>,
     ) -> Self {
+        Self::with_invalidation(name, cache, initializer, Invalidation::Key(key))
+    }
+
+    pub(crate) fn with_invalidation(
+        name: String,
+        cache: Cache<(usize, K), V>,
+        initializer: Initializer<K, V>,
+        invalidation: Invalidation<K, V, CacheToken>,
+    ) -> Self {
         Self {
             name,
-            strategy: InitStrategy::Coordinated { cache, key },
+            cache,
+            invalidation,
             initializer,
             batch_initializer: None,
-            version: Arc::default(),
+            epoch: AtomicUsize::default(),
         }
     }
 
@@ -156,11 +161,7 @@ where
     }
 
     fn invalidate_all(&self) -> Result<()> {
-        self.version.fetch_add(1, Ordering::AcqRel);
-        match &self.strategy {
-            InitStrategy::Unchecked { cache, .. } => cache.invalidate_all(),
-            InitStrategy::Coordinated { cache, .. } => cache.invalidate_all(),
-        }
+        self.entries().invalidate_all();
         Ok(())
     }
 }
@@ -171,33 +172,23 @@ where
     V: Clone + Send + Sync + 'static,
     CacheToken: Send + Sync,
 {
-    /// Applies matching invalidations; coordinated removals wait for the active load.
+    fn entries(&self) -> CacheEntries<'_, K, V> {
+        CacheEntries {
+            cache: &self.cache,
+            epoch: &self.epoch,
+        }
+    }
+
+    /// Applies matching invalidations, waiting for active loads of the affected keys.
     pub async fn invalidate(&self, tokens: &[CacheToken]) -> Result<()> {
-        match &self.strategy {
-            InitStrategy::Unchecked {
-                cache,
-                invalidator,
-                filter,
-            } => {
-                let tokens: Vec<_> = tokens.iter().filter(|t| filter(t)).collect();
-                if !tokens.is_empty() {
-                    self.version.fetch_add(1, Ordering::Relaxed);
-                    invalidator(cache, &tokens).await?;
+        let entries = self.entries();
+        match &self.invalidation {
+            Invalidation::Key(key_of) => {
+                for key in tokens.iter().filter_map(key_of) {
+                    entries.compute(key, |_| Op::Remove).await;
                 }
             }
-            InitStrategy::Coordinated { cache, key } => {
-                for k in tokens.iter().filter_map(key) {
-                    let epoch = self.version.load(Ordering::Acquire);
-                    let storage_key = (epoch, k.clone());
-                    cache
-                        .entry(storage_key.clone())
-                        .and_compute_with(|_| async {
-                            cache.invalidate(&storage_key).await;
-                            Op::Nop
-                        })
-                        .await;
-                }
-            }
+            Invalidation::Events(handler) => handler(entries, tokens).await,
         }
         Ok(())
     }
@@ -208,15 +199,11 @@ where
         K: Borrow<Q>,
         Q: ToOwned<Owned = K> + Hash + Eq + ?Sized,
     {
-        match &self.strategy {
-            InitStrategy::Unchecked { cache, .. } => cache.contains_key(key),
-            InitStrategy::Coordinated { cache, .. } => {
-                cache.contains_key(&(self.version.load(Ordering::Acquire), key.to_owned()))
-            }
-        }
+        self.cache
+            .contains_key(&(self.epoch.load(Ordering::Acquire), key.to_owned()))
     }
 
-    /// Returns the cached value or initializes it using the configured strategy.
+    /// Returns the cached value or initializes it.
     pub async fn get(&self, key: K) -> Result<Option<V>> {
         self.get_by_ref(&key).await
     }
@@ -235,14 +222,9 @@ where
         K: Borrow<Q>,
         Q: ToOwned<Owned = K> + Hash + Eq + ?Sized,
     {
-        match &self.strategy {
-            InitStrategy::Unchecked { cache, .. } => cache.get(key).await,
-            InitStrategy::Coordinated { cache, .. } => {
-                cache
-                    .get(&(self.version.load(Ordering::Acquire), key.to_owned()))
-                    .await
-            }
-        }
+        self.cache
+            .get(&(self.epoch.load(Ordering::Acquire), key.to_owned()))
+            .await
     }
 
     async fn get_by_ref_with<Q>(&self, key: &Q, initializer: Initializer<K, V>) -> Result<Option<V>>
@@ -253,45 +235,31 @@ where
         metrics::CACHE_CONTAINER_CACHE_GET
             .with_label_values(&[&self.name])
             .inc();
-        let result = match &self.strategy {
-            InitStrategy::Unchecked { cache, .. } => {
-                cache
-                    .try_get_with_by_ref(key, init(initializer, key.to_owned(), &self.name))
-                    .await
-            }
-            InitStrategy::Coordinated { cache, .. } => {
-                let storage_key = (self.version.load(Ordering::Acquire), key.to_owned());
-                if let Some(value) = cache.get(&storage_key).await {
-                    return Ok(Some(value));
+        let cache = &self.cache;
+        let storage_key = (self.epoch.load(Ordering::Acquire), key.to_owned());
+        if let Some(value) = cache.get(&storage_key).await {
+            return Ok(Some(value));
+        }
+        let load = init(initializer, key.to_owned(), &self.name);
+        let mut loaded = None;
+        let output = &mut loaded;
+        let result = cache
+            .entry(storage_key.clone())
+            .and_try_compute_with(|entry| async move {
+                if entry.is_none() {
+                    let value = load.await?;
+                    // Moka 0.12.10 releases the compute lock before applying Op::Put
+                    // or Op::Remove. Publish here, while removals still wait.
+                    cache.insert(storage_key, value.clone()).await;
+                    *output = Some(value);
                 }
-                let load = init(initializer, key.to_owned(), &self.name);
-                let mut loaded = None;
-                let output = &mut loaded;
-                let result = cache
-                    .entry(storage_key.clone())
-                    .and_try_compute_with(|entry| async move {
-                        if entry.is_none() {
-                            let value = load.await?;
-                            // Moka 0.12.10 releases the compute lock before applying Op::Put
-                            // or Op::Remove. Publish here, while removals still wait.
-                            cache.insert(storage_key, value.clone()).await;
-                            *output = Some(value);
-                        }
-                        Ok(Op::Nop)
-                    })
-                    .await;
-                match result {
-                    Ok(result) => {
-                        return Ok(loaded.or_else(|| result.into_entry().map(|e| e.into_value())));
-                    }
-                    Err(e) => Err(Arc::new(e)),
-                }
-            }
-        };
+                Ok(Op::Nop)
+            })
+            .await;
         match result {
-            Ok(value) => Ok(Some(value)),
-            Err(err) if matches!(err.as_ref(), Error::ValueNotExist { .. }) => Ok(None),
-            Err(err) => Err(err).context(error::GetCacheSnafu),
+            Ok(result) => Ok(loaded.or_else(|| result.into_entry().map(|e| e.into_value()))),
+            Err(Error::ValueNotExist { .. }) => Ok(None),
+            Err(err) => Err(Arc::new(err)).context(error::GetCacheSnafu),
         }
     }
 
@@ -302,7 +270,7 @@ where
     /// Cache hits do not reach the batch loader. Misses use the same Moka
     /// initialization entries as single-key reads. Only the keys whose loaders
     /// this call owns are submitted to its batch loader. Results do not form a multi-key
-    /// snapshot. In coordinated mode a waiter may retry a failed or missing load.
+    /// snapshot. A waiter may retry a failed or missing load.
     pub async fn get_many(&self, keys: &[K]) -> Result<Vec<Option<V>>> {
         let Some(batch_initializer) = &self.batch_initializer else {
             return try_join_all(keys.iter().map(|key| self.get_by_ref(key))).await;
@@ -328,7 +296,7 @@ where
         }
 
         let loads = |requests| {
-            let initializer = self.queued_initializer(requests);
+            let initializer = Self::queued_initializer(requests);
             misses.into_values().map(move |index| {
                 let read = self.get_by_ref_with(&keys[index], initializer.clone());
                 async move { read.await.map(|value| (index, value)) }
@@ -354,23 +322,10 @@ where
         Ok(values)
     }
 
-    fn queued_initializer(
-        &self,
-        requests: batch::BatchSender<K, BatchResult<K, V>>,
-    ) -> Initializer<K, V> {
-        let unchecked = matches!(self.strategy, InitStrategy::Unchecked { .. });
-        let generation = self.version.load(Ordering::Relaxed);
-        let version = self.version.clone();
-        let fallback = self.initializer.clone();
+    fn queued_initializer(requests: batch::BatchSender<K, BatchResult<K, V>>) -> Initializer<K, V> {
         Arc::new(move |key| {
-            let version = version.clone();
-            let fallback = fallback.clone();
             let requests = requests.clone();
             Box::pin(async move {
-                if unchecked && generation != version.load(Ordering::Relaxed) {
-                    return fallback(key).await;
-                }
-
                 let values =
                     requests
                         .request(key.clone())
@@ -378,9 +333,6 @@ where
                         .context(error::UnexpectedSnafu {
                             err_msg: "Cache batch reply dropped",
                         })?;
-                if unchecked && generation != version.load(Ordering::Relaxed) {
-                    return fallback(key).await;
-                }
                 Ok(values.context(error::GetCacheSnafu)?.get(key).cloned())
             })
         })
@@ -394,8 +346,6 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicI32, Ordering};
 
-    use moka::future::{Cache, CacheBuilder};
-
     use super::*;
 
     use std::time::Duration;
@@ -403,30 +353,11 @@ mod tests {
     fn batch_test_cache(
         initializer: Initializer<u32, u32>,
     ) -> CacheContainer<u32, u32, CacheIdent> {
-        CacheContainer::new_coordinated(
+        CacheContainer::new(
             "batch_test".into(),
             Cache::new(64),
             initializer,
             CacheIdent::table_id_key,
-        )
-    }
-
-    fn unchecked_test_cache(
-        initializer: Initializer<u32, u32>,
-    ) -> CacheContainer<u32, u32, CacheIdent> {
-        CacheContainer::new(
-            "batch_test".into(),
-            Cache::new(64),
-            Box::new(|cache, tokens| {
-                Box::pin(async move {
-                    for key in tokens.iter().filter_map(|t| t.table_id_key()) {
-                        cache.invalidate(key).await;
-                    }
-                    Ok(())
-                })
-            }),
-            initializer,
-            |t| t.table_id_key().is_some(),
         )
     }
 
@@ -475,7 +406,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_many_without_batch_initializer() {
-        let cache = unchecked_test_cache(Arc::new(|&key| {
+        let cache = batch_test_cache(Arc::new(|&key| {
             Box::pin(async move { Ok((key != 3).then_some(key * 10)) })
         }));
         assert_eq!(cache.get(1).await.unwrap(), Some(10));
@@ -487,16 +418,14 @@ mod tests {
 
     type BatchGate = (Vec<u32>, tokio::sync::oneshot::Sender<Result<()>>);
 
-    fn gated_batch_cache(
-        make_cache: fn(Initializer<u32, u32>) -> CacheContainer<u32, u32, CacheIdent>,
-    ) -> (
+    fn gated_batch_cache() -> (
         CacheContainer<u32, u32, CacheIdent>,
         tokio::sync::mpsc::UnboundedReceiver<BatchGate>,
     ) {
         let (observed, batches) = tokio::sync::mpsc::unbounded_channel();
         let init: Initializer<u32, u32> =
             Arc::new(|_| Box::pin(async { panic!("unexpected single load") }));
-        let cache = make_cache(init).with_batch_initializer(Arc::new(move |mut keys| {
+        let cache = batch_test_cache(init).with_batch_initializer(Arc::new(move |mut keys| {
             let (resume, gate) = tokio::sync::oneshot::channel();
             keys.sort_unstable();
             observed.send((keys.clone(), resume)).unwrap();
@@ -510,7 +439,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_overlapping_batches_load_each_key_once() {
-        let (cache, mut batches) = gated_batch_cache(batch_test_cache);
+        let (cache, mut batches) = gated_batch_cache();
         let mut first = Box::pin(cache.get_many(&[1, 2]));
         assert!(futures::poll!(&mut first).is_pending());
         let (keys, resume_first) = batches.try_recv().unwrap();
@@ -530,7 +459,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_batch_waiter_promoted_after_cancellation() {
-        let (cache, mut batches) = gated_batch_cache(batch_test_cache);
+        let (cache, mut batches) = gated_batch_cache();
         let mut owner = Box::pin(cache.get_many(&[1]));
         assert!(futures::poll!(&mut owner).is_pending());
         let (keys, cancelled) = batches.try_recv().unwrap();
@@ -558,8 +487,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_coordinated_waiter_reloads_after_owner_error() {
-        let (cache, mut batches) = gated_batch_cache(batch_test_cache);
+    async fn test_waiter_reloads_after_owner_error() {
+        let (cache, mut batches) = gated_batch_cache();
         let mut owner = Box::pin(cache.get_many(&[1]));
         assert!(futures::poll!(&mut owner).is_pending());
         let (_, fail) = batches.try_recv().unwrap();
@@ -578,30 +507,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_shared_error_cancels_unrelated_pending_load() {
-        let (cache, mut batches) = gated_batch_cache(unchecked_test_cache);
-        let mut owner = Box::pin(cache.get_many(&[1]));
-        assert!(futures::poll!(&mut owner).is_pending());
-        let (_, fail) = batches.try_recv().unwrap();
-
-        let mut waiter = Box::pin(cache.get_many(&[2, 1]));
-        assert!(futures::poll!(&mut waiter).is_pending());
-        let (keys, blocked) = batches.try_recv().unwrap();
-        assert_eq!(keys, [2]);
-
-        fail.send(error::GetLatestCacheRetryExceededSnafu { attempts: 1usize }.fail())
-            .unwrap();
-        assert!(owner.await.is_err());
-        let result = tokio::time::timeout(Duration::from_secs(5), waiter)
-            .await
-            .unwrap();
-        assert!(result.is_err());
-        assert!(blocked.send(Ok(())).is_err());
-    }
-
-    #[tokio::test]
     async fn test_large_cold_batch_loads_ready_keys_together() {
-        let (cache, mut batches) = gated_batch_cache(batch_test_cache);
+        let (cache, mut batches) = gated_batch_cache();
         let keys: Vec<_> = (0..128).collect();
         let mut read = Box::pin(cache.get_many(&keys));
         assert!(futures::poll!(&mut read).is_pending());
@@ -612,41 +519,6 @@ mod tests {
             read.await.unwrap(),
             keys.into_iter().map(Some).collect::<Vec<_>>()
         );
-    }
-
-    #[tokio::test]
-    async fn test_get_many_invalidated_load_uses_current_value() {
-        let started = Arc::new(tokio::sync::Notify::new());
-        let resume = Arc::new(tokio::sync::Notify::new());
-        let value = Arc::new(AtomicUsize::new(10));
-        let current = value.clone();
-        let cache = unchecked_test_cache(Arc::new(move |_| {
-            let current = current.clone();
-            Box::pin(async move { Ok(Some(current.load(Ordering::SeqCst) as u32)) })
-        }))
-        .with_batch_initializer(Arc::new({
-            let started = started.clone();
-            let resume = resume.clone();
-            move |_| {
-                let started = started.clone();
-                let resume = resume.clone();
-                Box::pin(async move {
-                    started.notify_one();
-                    resume.notified().await;
-                    Ok(HashMap::from([(1, 10)]))
-                })
-            }
-        }));
-        let read = cache.get_many(&[1]);
-        let invalidate = async {
-            started.notified().await;
-            value.store(20, Ordering::SeqCst);
-            cache.invalidate(&[CacheIdent::TableId(1)]).await.unwrap();
-            resume.notify_one();
-        };
-        let (result, ()) = tokio::join!(read, invalidate);
-        assert_eq!(result.unwrap(), vec![Some(20)]);
-        assert_eq!(cache.get(1).await.unwrap(), Some(20));
     }
 
     #[tokio::test]
@@ -748,129 +620,83 @@ mod tests {
         name: &'a str,
     }
 
-    fn always_true_filter(_: &String) -> bool {
-        true
-    }
-
     #[tokio::test]
     async fn test_get() {
-        let cache: Cache<NameKey, String> = CacheBuilder::new(128).build();
+        let cache = Cache::new(128);
         let counter = Arc::new(AtomicI32::new(0));
         let moved_counter = counter.clone();
         let init: Initializer<NameKey, String> = Arc::new(move |_| {
             moved_counter.fetch_add(1, Ordering::Relaxed);
             Box::pin(async { Ok(Some("hi".to_string())) })
         });
-        let invalidator: Invalidator<NameKey, String, String> =
-            Box::new(|_, _| Box::pin(async { Ok(()) }));
-
-        let adv_cache = CacheContainer::new(
-            "test".to_string(),
-            cache,
-            invalidator,
-            init,
-            always_true_filter,
-        );
+        let cache = CacheContainer::new("test".to_string(), cache, init, |_: &String| None);
         let key = NameKey { name: "key" };
-        let value = adv_cache.get(key).await.unwrap().unwrap();
+        let value = cache.get(key).await.unwrap().unwrap();
         assert_eq!(value, "hi");
         assert_eq!(counter.load(Ordering::Relaxed), 1);
         let key = NameKey { name: "key" };
-        let value = adv_cache.get(key).await.unwrap().unwrap();
+        let value = cache.get(key).await.unwrap().unwrap();
         assert_eq!(value, "hi");
         assert_eq!(counter.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
     async fn test_get_by_ref() {
-        let cache: Cache<String, String> = CacheBuilder::new(128).build();
+        let cache = Cache::new(128);
         let counter = Arc::new(AtomicI32::new(0));
         let moved_counter = counter.clone();
         let init: Initializer<String, String> = Arc::new(move |_| {
             moved_counter.fetch_add(1, Ordering::Relaxed);
             Box::pin(async { Ok(Some("hi".to_string())) })
         });
-        let invalidator: Invalidator<String, String, String> =
-            Box::new(|_, _| Box::pin(async { Ok(()) }));
-
-        let adv_cache = CacheContainer::new(
-            "test".to_string(),
-            cache,
-            invalidator,
-            init,
-            always_true_filter,
-        );
-        let value = adv_cache.get_by_ref("foo").await.unwrap().unwrap();
+        let cache = CacheContainer::new("test".to_string(), cache, init, |_: &String| None);
+        let value = cache.get_by_ref("foo").await.unwrap().unwrap();
         assert_eq!(value, "hi");
-        let value = adv_cache.get_by_ref("foo").await.unwrap().unwrap();
+        let value = cache.get_by_ref("foo").await.unwrap().unwrap();
         assert_eq!(value, "hi");
         assert_eq!(counter.load(Ordering::Relaxed), 1);
-        let value = adv_cache.get_by_ref("bar").await.unwrap().unwrap();
+        let value = cache.get_by_ref("bar").await.unwrap().unwrap();
         assert_eq!(value, "hi");
         assert_eq!(counter.load(Ordering::Relaxed), 2);
     }
 
     #[tokio::test]
     async fn test_get_value_not_exits() {
-        let cache: Cache<String, String> = CacheBuilder::new(128).build();
+        let cache = Cache::new(128);
         let init: Initializer<String, String> =
             Arc::new(move |_| Box::pin(async { error::ValueNotExistSnafu {}.fail() }));
-        let invalidator: Invalidator<String, String, String> =
-            Box::new(|_, _| Box::pin(async { Ok(()) }));
-
-        let adv_cache = CacheContainer::new(
-            "test".to_string(),
-            cache,
-            invalidator,
-            init,
-            always_true_filter,
-        );
-        let value = adv_cache.get_by_ref("foo").await.unwrap();
+        let cache = CacheContainer::new("test".to_string(), cache, init, |_: &String| None);
+        let value = cache.get_by_ref("foo").await.unwrap();
         assert!(value.is_none());
     }
 
     #[tokio::test]
-    async fn test_invalidate() {
-        let cache: Cache<String, String> = CacheBuilder::new(128).build();
+    async fn test_invalidate_with_borrowed_keys() {
+        let foo = String::from("foo");
+        let bar = String::from("bar");
+        let cache = Cache::new(128);
         let counter = Arc::new(AtomicI32::new(0));
         let moved_counter = counter.clone();
         let init: Initializer<String, String> = Arc::new(move |_| {
             moved_counter.fetch_add(1, Ordering::Relaxed);
             Box::pin(async { Ok(Some("hi".to_string())) })
         });
-        let invalidator: Invalidator<String, String, String> = Box::new(|cache, keys| {
-            Box::pin(async move {
-                for key in keys {
-                    cache.invalidate(*key).await;
-                }
-                Ok(())
-            })
-        });
-
-        let adv_cache = CacheContainer::new(
-            "test".to_string(),
-            cache,
-            invalidator,
-            init,
-            always_true_filter,
-        );
-        let value = adv_cache.get_by_ref("foo").await.unwrap().unwrap();
+        let cache =
+            CacheContainer::new("test".to_string(), cache, init, |key: &&String| Some(*key));
+        let value = cache.get_by_ref("foo").await.unwrap().unwrap();
         assert_eq!(value, "hi");
-        let value = adv_cache.get_by_ref("foo").await.unwrap().unwrap();
+        let value = cache.get_by_ref("foo").await.unwrap().unwrap();
         assert_eq!(value, "hi");
         assert_eq!(counter.load(Ordering::Relaxed), 1);
-        adv_cache
-            .invalidate(&["foo".to_string(), "bar".to_string()])
-            .await
-            .unwrap();
-        let value = adv_cache.get_by_ref("foo").await.unwrap().unwrap();
+        cache.invalidate(&[&foo, &bar]).await.unwrap();
+        let value = cache.get_by_ref("foo").await.unwrap().unwrap();
         assert_eq!(value, "hi");
         assert_eq!(counter.load(Ordering::Relaxed), 2);
     }
 
     #[tokio::test]
-    async fn coordinated_removal_waits_for_publication() {
-        let (cache, mut batches) = gated_batch_cache(batch_test_cache);
+    async fn removal_waits_for_publication() {
+        let (cache, mut batches) = gated_batch_cache();
         let mut reader = Box::pin(cache.get_many(&[1]));
         assert!(futures::poll!(&mut reader).is_pending());
         let (_, resume) = batches.try_recv().unwrap();
@@ -932,7 +758,7 @@ mod tests {
             };
             let single = read.clone();
             let cache = Arc::new(
-                CacheContainer::new_coordinated(
+                CacheContainer::new(
                     "test".into(),
                     Cache::new(8),
                     Arc::new(move |_| {
@@ -967,6 +793,18 @@ mod tests {
             assert_eq!(reader.await.unwrap(), 10);
             assert_eq!(cache.get(1).await.unwrap().unwrap().id, 20);
         }
+    }
+
+    #[tokio::test]
+    async fn full_clear_isolates_an_inflight_batch_load() {
+        let (cache, mut batches) = gated_batch_cache();
+        let mut old = Box::pin(cache.get_many(&[1]));
+        assert!(futures::poll!(&mut old).is_pending());
+        let (_, resume) = batches.try_recv().unwrap();
+        cache.invalidate_all().unwrap();
+        resume.send(Ok(())).unwrap();
+        assert_eq!(old.await.unwrap(), [Some(1)]);
+        assert!(!cache.contains_key(&1));
     }
 
     #[tokio::test]

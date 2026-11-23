@@ -39,8 +39,8 @@ pub fn new_table_name_cache(
     let table_name_manager = Arc::new(TableNameManager::new(kv_backend));
     let init = init_factory(table_name_manager.clone());
 
-    CacheContainer::new_coordinated(name, cache, init, CacheIdent::table_name_key)
-        .with_batch_initializer(Arc::new(move |names| {
+    CacheContainer::new(name, cache, init, CacheIdent::table_name_key).with_batch_initializer(
+        Arc::new(move |names| {
             let manager = table_name_manager.clone();
             Box::pin(async move {
                 let keys = names
@@ -56,7 +56,8 @@ pub fn new_table_name_cache(
                     .filter_map(|(name, id)| id.map(|id| (name, id.table_id())))
                     .collect())
             })
-        }))
+        }),
+    )
 }
 
 fn init_factory(table_name_manager: TableNameManagerRef) -> Initializer<TableName, TableId> {

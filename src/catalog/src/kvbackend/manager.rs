@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, OnceLock, Weak};
 
 use async_stream::try_stream;
@@ -35,7 +35,8 @@ use common_meta::key::table_name::TableNameKey;
 use common_meta::kv_backend::KvBackendRef;
 use common_procedure::ProcedureManagerRef;
 use futures_util::stream::BoxStream;
-use futures_util::{StreamExt, TryStreamExt};
+use futures_util::{Stream, StreamExt, TryStreamExt};
+use itertools::Either;
 use moka::sync::Cache;
 use partition::manager::PartitionRuleManagerRef;
 use session::context::{Channel, QueryContext};
@@ -46,10 +47,9 @@ use table::dist_table::DistTable;
 use table::metadata::{TableId, TableInfoRef};
 use table::table::PartitionRules;
 use table::table_name::TableName;
-use tokio::sync::Semaphore;
-use tokio_stream::wrappers::ReceiverStream;
 
 use crate::CatalogManager;
+use crate::batch_scan::BatchScanner;
 use crate::error::{
     CacheNotFoundSnafu, GetTableCacheSnafu, ListCatalogsSnafu, ListSchemasSnafu, ListTablesSnafu,
     Result, TableMetadataManagerSnafu,
@@ -97,6 +97,26 @@ impl KvBackendCatalogManager {
     /// Returns the registered system tables, excluding user-created metadata.
     pub fn information_schema_provider(&self) -> &InformationSchemaProvider {
         &self.system_catalog.information_schema_provider
+    }
+
+    pub(crate) async fn schema_options(&self, catalog: &str) -> Result<BTreeMap<String, String>> {
+        let mut schemas = self
+            .table_metadata_manager
+            .schema_manager()
+            .schemas(catalog)
+            .map_ok(|(name, value)| (name, value.to_string()))
+            .try_collect::<BTreeMap<_, _>>()
+            .await
+            .map_err(BoxedError::new)
+            .context(ListSchemasSnafu { catalog })?;
+        for name in self.system_catalog.schema_names(None) {
+            schemas.entry(name).or_default();
+        }
+        Ok(schemas)
+    }
+
+    pub(crate) fn flow_info_cache(&self) -> Option<common_meta::cache::FlowInfoCacheRef> {
+        self.cache_registry.get()
     }
 
     pub fn view_info_cache(&self) -> Result<ViewInfoCacheRef> {
@@ -156,53 +176,108 @@ impl KvBackendCatalogManager {
                 .await
                 .context(TableMetadataManagerSnafu)?
         {
-            let mut new_table_info = (*table.table_info()).clone();
-
-            let mut phy_part_cols_not_in_logical_table = vec![];
-
-            // Remap partition key indices from physical table to logical table
-            new_table_info.meta.partition_key_indices = physical_table_info
-                .meta
-                .partition_key_indices
-                .iter()
-                .filter_map(|&physical_index| {
-                    // Get the column name from the physical table using the physical index
-                    physical_table_info
-                        .meta
-                        .schema
-                        .column_schemas()
-                        .get(physical_index)
-                        .and_then(|physical_column| {
-                            // Find the corresponding index in the logical table schema
-                            let idx = new_table_info
-                                .meta
-                                .schema
-                                .column_index_by_name(physical_column.name.as_str());
-                            if idx.is_none() {
-                                // not all part columns in physical table that are also in logical table
-                                phy_part_cols_not_in_logical_table
-                                    .push(physical_column.name.clone());
-                            }
-
-                            idx
-                        })
-                })
-                .collect();
-
-            let partition_rules = if !phy_part_cols_not_in_logical_table.is_empty() {
-                Some(PartitionRules {
-                    extra_phy_cols_not_in_logical_table: phy_part_cols_not_in_logical_table,
-                })
-            } else {
-                None
-            };
-
-            let new_table = DistTable::table_partitioned(Arc::new(new_table_info), partition_rules);
-
-            return Ok(new_table);
+            return Ok(Self::logical_table(
+                table.table_info(),
+                &physical_table_info,
+            ));
         }
-
         Ok(table)
+    }
+
+    async fn load_tables(
+        ids: Vec<TableId>,
+        infos: &TableInfoCacheRef,
+        routes: &TableRouteCacheRef,
+    ) -> Result<impl Iterator<Item = TableRef> + use<>> {
+        let tables: Vec<_> = infos
+            .get_many(&ids)
+            .await
+            .context(TableMetadataManagerSnafu)?
+            .into_iter()
+            .flatten()
+            .collect();
+        let metric_ids: Vec<_> = tables
+            .iter()
+            .filter(|info| info.meta.engine == METRIC_ENGINE_NAME)
+            .map(|info| info.table_id())
+            .collect();
+        let metric_routes = routes
+            .get_many(&metric_ids)
+            .await
+            .context(TableMetadataManagerSnafu)?;
+        let logical: HashMap<_, _> = metric_ids
+            .into_iter()
+            .zip(metric_routes)
+            .filter_map(|(id, route)| match route.as_deref()? {
+                TableRoute::Logical(route) => Some((id, route.physical_table_id())),
+                TableRoute::Physical(_) => None,
+            })
+            .collect();
+        let physical_ids: BTreeSet<_> = logical.values().copied().collect();
+        let physical_ids: Vec<_> = physical_ids.into_iter().collect();
+        let physical = infos
+            .get_many(&physical_ids)
+            .await
+            .context(TableMetadataManagerSnafu)?;
+        let physical: HashMap<_, _> = physical_ids
+            .into_iter()
+            .zip(physical)
+            .filter_map(|(id, info)| Some((id, info?)))
+            .collect();
+        Ok(tables.into_iter().map(move |info| {
+            if let Some(physical) = logical
+                .get(&info.table_id())
+                .and_then(|id| physical.get(id))
+            {
+                Self::logical_table(info, physical)
+            } else {
+                DistTable::table(info)
+            }
+        }))
+    }
+
+    fn logical_table(info: TableInfoRef, physical_table_info: &TableInfoRef) -> TableRef {
+        let mut new_table_info = info.as_ref().clone();
+
+        let mut phy_part_cols_not_in_logical_table = vec![];
+
+        // Remap partition key indices from physical table to logical table
+        new_table_info.meta.partition_key_indices = physical_table_info
+            .meta
+            .partition_key_indices
+            .iter()
+            .filter_map(|&physical_index| {
+                // Get the column name from the physical table using the physical index
+                physical_table_info
+                    .meta
+                    .schema
+                    .column_schemas()
+                    .get(physical_index)
+                    .and_then(|physical_column| {
+                        // Find the corresponding index in the logical table schema
+                        let idx = new_table_info
+                            .meta
+                            .schema
+                            .column_index_by_name(physical_column.name.as_str());
+                        if idx.is_none() {
+                            // not all part columns in physical table that are also in logical table
+                            phy_part_cols_not_in_logical_table.push(physical_column.name.clone());
+                        }
+
+                        idx
+                    })
+            })
+            .collect();
+
+        let partition_rules = if !phy_part_cols_not_in_logical_table.is_empty() {
+            Some(PartitionRules {
+                extra_phy_cols_not_in_logical_table: phy_part_cols_not_in_logical_table,
+            })
+        } else {
+            None
+        };
+
+        DistTable::table_partitioned(Arc::new(new_table_info), partition_rules)
     }
 }
 
@@ -498,113 +573,81 @@ impl CatalogManager for KvBackendCatalogManager {
         schema: &'a str,
         query_ctx: Option<&'a QueryContext>,
     ) -> BoxStream<'a, Result<TableRef>> {
-        let sys_tables = try_stream!({
-            // System tables
-            let sys_table_names = self.system_catalog.table_names(schema, query_ctx);
-            for table_name in sys_table_names {
-                if let Some(table) =
-                    self.system_catalog
-                        .table(catalog, schema, &table_name, query_ctx)
-                {
+        try_stream! {
+            for table in self.system_tables(catalog, schema, query_ctx) {
+                yield table;
+            }
+            let (infos, routes) = self.table_caches()?;
+            let ids = self.user_table_ids(catalog, schema);
+            let batches =
+                BatchScanner::METADATA.scan(ids, |ids| Self::load_tables(ids, &infos, &routes));
+            let mut batches = std::pin::pin!(batches);
+            while let Some(batch) = batches.try_next().await? {
+                for table in batch {
                     yield table;
                 }
             }
-        });
+        }
+        .boxed()
+    }
+}
 
-        const BATCH_SIZE: usize = 128;
-        const CONCURRENCY: usize = 8;
+impl KvBackendCatalogManager {
+    fn system_tables<'a>(
+        &'a self,
+        catalog: &'a str,
+        schema: &'a str,
+        query_ctx: Option<&'a QueryContext>,
+    ) -> impl Iterator<Item = TableRef> + 'a {
+        self.system_catalog
+            .table_names(schema, query_ctx)
+            .into_iter()
+            .filter_map(move |name| self.system_catalog.table(catalog, schema, &name, query_ctx))
+    }
 
-        let (tx, rx) = tokio::sync::mpsc::channel(64);
-        let metadata_manager = self.table_metadata_manager.clone();
-        let catalog = catalog.to_string();
-        let schema = schema.to_string();
-        let semaphore = Arc::new(Semaphore::new(CONCURRENCY));
-        let table_route_cache: Result<TableRouteCacheRef> =
-            self.cache_registry.get().context(CacheNotFoundSnafu {
-                name: "table_route_cache",
-            });
-        let table_info_cache: Result<TableInfoCacheRef> =
-            self.cache_registry.get().context(CacheNotFoundSnafu {
-                name: "table_info_cache",
-            });
-
-        common_runtime::spawn_global(async move {
-            let table_route_cache = match table_route_cache {
-                Ok(table_route_cache) => table_route_cache,
-                Err(e) => {
-                    let _ = tx.send(Err(e)).await;
-                    return;
-                }
-            };
-            let table_info_cache = match table_info_cache {
-                Ok(table_info_cache) => table_info_cache,
-                Err(e) => {
-                    let _ = tx.send(Err(e)).await;
-                    return;
-                }
-            };
-
-            let table_id_stream = metadata_manager
-                .table_name_manager()
-                .tables(&catalog, &schema)
-                .map_ok(|(_, v)| v.table_id());
-            // Split table ids into chunks
-            let mut table_id_chunks = table_id_stream.ready_chunks(BATCH_SIZE);
-
-            while let Some(table_ids) = table_id_chunks.next().await {
-                let table_ids = match table_ids
-                    .into_iter()
-                    .collect::<std::result::Result<Vec<_>, _>>()
+    fn user_table_ids<'a>(
+        &'a self,
+        catalog: &'a str,
+        schema: &'a str,
+    ) -> impl Stream<Item = Result<TableId>> + 'a {
+        self.table_metadata_manager
+            .table_name_manager()
+            .tables(catalog, schema)
+            .map(move |entry| {
+                entry
+                    .map(|(_, value)| value.table_id())
                     .map_err(BoxedError::new)
-                    .context(ListTablesSnafu {
-                        catalog: &catalog,
-                        schema: &schema,
-                    }) {
-                    Ok(table_ids) => table_ids,
-                    Err(e) => {
-                        let _ = tx.send(Err(e)).await;
-                        return;
-                    }
-                };
+                    .context(ListTablesSnafu { catalog, schema })
+            })
+    }
 
-                let metadata_manager = metadata_manager.clone();
-                let tx = tx.clone();
-                let semaphore = semaphore.clone();
-                let table_route_cache = table_route_cache.clone();
-                let table_info_cache = table_info_cache.clone();
-                common_runtime::spawn_global(async move {
-                    // we don't explicitly close the semaphore so just ignore the potential error.
-                    let _ = semaphore.acquire().await;
-                    let table_info_values = match metadata_manager
-                        .table_info_manager()
-                        .batch_get(&table_ids)
-                        .await
-                        .context(TableMetadataManagerSnafu)
-                    {
-                        Ok(table_info_values) => table_info_values,
-                        Err(e) => {
-                            let _ = tx.send(Err(e)).await;
-                            return;
-                        }
-                    };
+    fn table_caches(&self) -> Result<(TableInfoCacheRef, TableRouteCacheRef)> {
+        let routes = self.cache_registry.get().context(CacheNotFoundSnafu {
+            name: "table_route_cache",
+        })?;
+        let infos = self.cache_registry.get().context(CacheNotFoundSnafu {
+            name: "table_info_cache",
+        })?;
+        Ok((infos, routes))
+    }
 
-                    for table in table_info_values.into_values().map(build_table) {
-                        let table = Self::override_logical_table_partition_key_indices(
-                            &table_route_cache,
-                            &table_info_cache,
-                            table,
-                        )
-                        .await;
-                        if tx.send(table).await.is_err() {
-                            return;
-                        }
-                    }
-                });
+    /// Yields a complete table batch before starting the next metadata load.
+    pub(crate) fn sequential_table_batches<'a>(
+        &'a self,
+        catalog: &'a str,
+        schema: &'a str,
+    ) -> impl Stream<Item = Result<impl Iterator<Item = TableRef> + 'a>> + 'a {
+        const BATCH_SIZE: usize = 128;
+        try_stream! {
+            yield Either::Left(self.system_tables(catalog, schema, None));
+
+            let (infos, routes) = self.table_caches()?;
+            let mut batches = self.user_table_ids(catalog, schema).ready_chunks(BATCH_SIZE);
+            while let Some(batch) = batches.next().await {
+                let ids = batch.into_iter().collect::<Result<Vec<_>>>()?;
+                yield Either::Right(Self::load_tables(ids, &infos, &routes).await?);
             }
-        });
-
-        let user_tables = ReceiverStream::new(rx);
-        Box::pin(sys_tables.chain(user_tables))
+        }
     }
 }
 
@@ -754,6 +797,7 @@ mod tests {
         CacheContainer, CacheRegistryBuilder, Initializer, LayeredCacheRegistryBuilder,
     };
     use common_meta::ddl::test_util::create_table::test_create_table_task;
+    use common_meta::instruction::CacheIdent;
     use common_meta::key::table_route::{LogicalTableRouteValue, TableRouteValue};
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use moka::future::Cache as FutureCache;
@@ -875,6 +919,221 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_schema_options_preserve_user_options_and_system_schema() {
+        use std::time::Duration;
+
+        use common_meta::key::schema_name::SchemaNameValue;
+        use datatypes::arrow_array::string_array_value_at_index;
+
+        let backend = Arc::new(MemoryKvBackend::default());
+        let registry = cache::build_datanode_layered_cache_registry(backend.clone());
+        let manager = batch_lookup_manager(backend, Arc::new(registry));
+        let options = SchemaNameValue {
+            ttl: Some(Duration::from_secs(9).into()),
+            extra_options: [("region".into(), "east".into())].into(),
+            ..Default::default()
+        };
+        manager
+            .table_metadata_manager
+            .schema_manager()
+            .create(
+                SchemaNameKey::new(DEFAULT_CATALOG_NAME, "user_schema"),
+                Some(options),
+                true,
+            )
+            .await
+            .unwrap();
+        let schemata = manager
+            .table(
+                DEFAULT_CATALOG_NAME,
+                INFORMATION_SCHEMA_NAME,
+                "schemata",
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let batches: Vec<_> = schemata
+            .scan_to_stream(Default::default())
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        let mut rows = Vec::new();
+        for batch in &batches {
+            let names = batch.column_by_name("schema_name").unwrap();
+            let options = batch.column_by_name("options").unwrap();
+            for row in 0..batch.num_rows() {
+                rows.push((
+                    string_array_value_at_index(names, row),
+                    string_array_value_at_index(options, row),
+                ));
+            }
+        }
+        rows.sort_unstable();
+        assert_eq!(
+            rows,
+            [
+                (Some(INFORMATION_SCHEMA_NAME), Some("")),
+                (Some("user_schema"), Some("'ttl'='9s'\n'region'='east'\n")),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tables_reuse_batch_loaded_metadata() {
+        use std::collections::HashMap;
+        use std::sync::Mutex;
+
+        use common_meta::key::table_info::TableInfoKey;
+        use common_meta::key::table_name::TableNameValue;
+        use common_meta::key::{MetadataKey, MetadataValue};
+        use common_meta::kv_backend::test_util::MockKvBackendBuilder;
+        use common_meta::rpc::KeyValue;
+        use common_meta::rpc::store::{BatchGetResponse, RangeResponse};
+
+        let mut names = Vec::new();
+        let mut infos = HashMap::new();
+        for id in [1024, 1025] {
+            let name = format!("table_{id}");
+            names.push(KeyValue {
+                key: TableNameKey::new(DEFAULT_CATALOG_NAME, "scan_test", &name).to_bytes(),
+                value: TableNameValue::new(id).try_as_raw_value().unwrap(),
+            });
+            let info = test_create_table_task(&name, id).table_info;
+            infos.insert(
+                TableInfoKey::new(id).to_bytes(),
+                TableInfoValue::new(info).try_as_raw_value().unwrap(),
+            );
+        }
+        let reads = Arc::new(Mutex::new(Vec::new()));
+        let observed = reads.clone();
+        let backend = MockKvBackendBuilder::default()
+            .range_fn(Arc::new(move |_| {
+                Ok(RangeResponse {
+                    kvs: names.clone(),
+                    more: false,
+                })
+            }))
+            .batch_get_fn(Arc::new(move |req| {
+                let mut keys = req.keys;
+                keys.sort();
+                observed.lock().unwrap().push(keys.clone());
+                Ok(BatchGetResponse {
+                    kvs: keys
+                        .into_iter()
+                        .map(|key| KeyValue {
+                            value: infos[&key].clone(),
+                            key,
+                        })
+                        .collect(),
+                })
+            }))
+            .max_txn_ops(128)
+            .build()
+            .unwrap();
+        let backend = Arc::new(backend);
+        let registry = cache::build_datanode_layered_cache_registry(backend.clone());
+        let manager = batch_lookup_manager(backend, Arc::new(registry));
+        let ids = [1024, 1025];
+        let keys = ids.map(|id| TableInfoKey::new(id).to_bytes()).to_vec();
+        for _ in 0..3 {
+            let baseline = manager
+                .table_metadata_manager
+                .table_info_manager()
+                .batch_get(&ids)
+                .await
+                .unwrap();
+            assert_eq!(baseline.len(), ids.len());
+        }
+        assert_eq!(
+            std::mem::take(&mut *reads.lock().unwrap()),
+            vec![keys.clone(); 3]
+        );
+        for _ in 0..3 {
+            let ids_read: Vec<_> = manager
+                .tables(DEFAULT_CATALOG_NAME, "scan_test", None)
+                .map_ok(|table| table.table_info().table_id())
+                .try_collect()
+                .await
+                .unwrap();
+            assert_eq!(ids_read, ids);
+        }
+        assert_eq!(*reads.lock().unwrap(), vec![keys]);
+    }
+
+    #[tokio::test]
+    async fn test_views_scan_yields_incremental_batches() {
+        let backend = Arc::new(MemoryKvBackend::default());
+        let registry = cache::with_default_composite_cache_registry(
+            LayeredCacheRegistryBuilder::default()
+                .add_cache_registry(cache::build_fundamental_cache_registry(backend.clone())),
+        )
+        .unwrap()
+        .build();
+        let manager = batch_lookup_manager(backend, Arc::new(registry));
+        let views = manager
+            .table(DEFAULT_CATALOG_NAME, INFORMATION_SCHEMA_NAME, "views", None)
+            .await
+            .unwrap()
+            .unwrap();
+        let empty: Vec<_> = views
+            .scan_to_stream(Default::default())
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(empty.len(), 1);
+        assert_eq!(empty[0].num_rows(), 0);
+        manager
+            .table_metadata_manager
+            .schema_manager()
+            .create(
+                SchemaNameKey::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME),
+                None,
+                true,
+            )
+            .await
+            .unwrap();
+        for id in 1024..1153 {
+            let name = format!("view_{id}");
+            let mut info = test_create_table_task(&name, id).table_info;
+            info.catalog_name = DEFAULT_CATALOG_NAME.into();
+            info.schema_name = DEFAULT_SCHEMA_NAME.into();
+            info.table_type = table::metadata::TableType::View;
+            manager
+                .table_metadata_manager
+                .create_view_metadata(
+                    info,
+                    vec![],
+                    Default::default(),
+                    vec![],
+                    vec![],
+                    format!("SELECT {id}"),
+                )
+                .await
+                .unwrap();
+        }
+        let batches: Vec<_> = views
+            .scan_to_stream(Default::default())
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert!(batches.len() > 1);
+        assert_eq!(
+            batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+            129
+        );
+        let cache = manager.view_info_cache().unwrap();
+        assert!(cache.contains_key(&1024));
+        assert!(cache.contains_key(&1152));
+    }
+
     fn metric_table_info(
         table_id: TableId,
         table_name: &str,
@@ -901,9 +1160,8 @@ mod tests {
         let table_route_cache = Arc::new(CacheContainer::new(
             "test_table_route_cache".to_string(),
             FutureCache::new(16),
-            Box::new(|_, _| Box::pin(async { Ok(()) })),
             route_initializer,
-            |_| true,
+            CacheIdent::table_id_key,
         ));
 
         let load_count = Arc::new(AtomicUsize::new(0));
@@ -921,9 +1179,8 @@ mod tests {
         let table_info_cache = Arc::new(CacheContainer::new(
             "test_table_info_cache".to_string(),
             FutureCache::new(16),
-            Box::new(|_, _| Box::pin(async { Ok(()) })),
             table_info_initializer,
-            |_| true,
+            CacheIdent::table_id_key,
         ));
 
         let logical_table = DistTable::table(Arc::new(metric_table_info(

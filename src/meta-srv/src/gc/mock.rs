@@ -456,5 +456,6 @@ fn mock_region_stat(
         ingested_parquet_bytes: 0,
         query_cpu_time: 0,
         query_scanned_bytes: 0,
+        has_pending_tails: false,
     }
 }

@@ -21,33 +21,9 @@ use store_api::storage::TableId;
 use crate::cache::{CacheContainer, Initializer};
 use crate::error;
 use crate::instruction::CacheIdent;
-use crate::key::table_route::{
-    LogicalTableRouteValue, PhysicalTableRouteValue, TableRouteManager, TableRouteManagerRef,
-    TableRouteValue,
-};
+pub use crate::key::table_route::TableRoute;
+use crate::key::table_route::{TableRouteManager, TableRouteManagerRef};
 use crate::kv_backend::KvBackendRef;
-
-/// [TableRoute] stores `Arc` wrapped table route.
-#[derive(Clone)]
-pub enum TableRoute {
-    Physical(Arc<PhysicalTableRouteValue>),
-    Logical(Arc<LogicalTableRouteValue>),
-}
-
-impl TableRoute {
-    /// Returns true if it's physical table.
-    pub fn is_physical(&self) -> bool {
-        matches!(self, TableRoute::Physical(_))
-    }
-
-    /// Returns [PhysicalTableRouteValue] reference if it's [TableRoute::Physical]; Otherwise it returns [None].
-    pub fn as_physical_table_route_ref(&self) -> Option<&Arc<PhysicalTableRouteValue>> {
-        match self {
-            TableRoute::Physical(table_route) => Some(table_route),
-            TableRoute::Logical(_) => None,
-        }
-    }
-}
 
 /// [TableRouteCache] caches the [TableId] to [TableRoute] mapping.
 pub type TableRouteCache = CacheContainer<TableId, Arc<TableRoute>, CacheIdent>;
@@ -60,10 +36,24 @@ pub fn new_table_route_cache(
     cache: Cache<(usize, TableId), Arc<TableRoute>>,
     kv_backend: KvBackendRef,
 ) -> TableRouteCache {
-    let table_info_manager = Arc::new(TableRouteManager::new(kv_backend));
-    let init = init_factory(table_info_manager);
+    let table_route_manager = Arc::new(TableRouteManager::new(kv_backend));
+    let init = init_factory(table_route_manager.clone());
 
-    CacheContainer::new_coordinated(name, cache, init, CacheIdent::table_id_key)
+    CacheContainer::new(name, cache, init, CacheIdent::table_id_key).with_batch_initializer(
+        Arc::new(move |ids| {
+            let manager = table_route_manager.clone();
+            Box::pin(async move {
+                let routes = manager.table_route_storage().batch_get(&ids).await?;
+                Ok(ids
+                    .into_iter()
+                    .zip(routes)
+                    .filter_map(|(id, route)| {
+                        route.map(|route| (id, Arc::new(TableRoute::from(route))))
+                    })
+                    .collect())
+            })
+        }),
+    )
 }
 
 fn init_factory(
@@ -78,12 +68,7 @@ fn init_factory(
                 .await?
                 .context(error::ValueNotExistSnafu {})?;
 
-            let table_route = match table_route_value {
-                TableRouteValue::Physical(physical) => TableRoute::Physical(Arc::new(physical)),
-                TableRouteValue::Logical(logical) => TableRoute::Logical(Arc::new(logical)),
-            };
-
-            Ok(Some(Arc::new(table_route)))
+            Ok(Some(Arc::new(TableRoute::from(table_route_value))))
         })
     })
 }

@@ -1712,7 +1712,6 @@ dependencies = [
  "common-procedure",
  "common-query",
  "common-recordbatch",
- "common-runtime",
  "common-telemetry",
  "common-time",
  "common-version",
@@ -1741,7 +1740,6 @@ dependencies = [
  "store-api",
  "table",
  "tokio",
- "tokio-stream",
 ]
 
 [[package]]
@@ -2859,6 +2857,7 @@ dependencies = [
  "jsonb",
  "pin-project",
  "regex",
+ "regex-automata",
  "serde",
  "serde_json",
  "snafu 0.8.6",

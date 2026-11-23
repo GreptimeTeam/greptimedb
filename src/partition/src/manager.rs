@@ -141,6 +141,19 @@ impl PartitionRuleManager {
         Ok(table_region_routes)
     }
 
+    /// Loads cached routing metadata for callers that only inspect region IDs or partitions.
+    /// Peer-address consumers use `batch_find_region_routes` to refresh node addresses.
+    pub async fn batch_cached_physical_table_routes(
+        &self,
+        table_ids: &[TableId],
+    ) -> Result<HashMap<TableId, Arc<PhysicalTableRouteValue>>> {
+        TableRouteManager::resolve_physical_table_routes(table_ids, |ids| async move {
+            self.table_route_cache.get_many(&ids).await
+        })
+        .await
+        .context(error::TableRouteManagerSnafu)
+    }
+
     /// Returns the physical partition info with version.
     pub async fn find_physical_partition_info(
         &self,
@@ -178,14 +191,14 @@ impl PartitionRuleManager {
         &self,
         table_ids: &[TableId],
     ) -> Result<HashMap<TableId, Vec<PartitionInfo>>> {
-        let batch_region_routes = self.batch_find_region_routes(table_ids).await?;
+        let routes = self.batch_cached_physical_table_routes(table_ids).await?;
 
         let mut results = HashMap::with_capacity(table_ids.len());
 
-        for (table_id, region_routes) in batch_region_routes {
+        for (table_id, route) in routes {
             results.insert(
                 table_id,
-                create_partitions_from_region_routes(table_id, &region_routes)?,
+                create_partitions_from_region_routes(table_id, &route.region_routes)?,
             );
         }
 

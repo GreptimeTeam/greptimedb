@@ -28,6 +28,8 @@ use crate::datanode::{RegionManifestInfo, RegionStat};
 pub struct LeaderRegion {
     pub datanode_id: u64,
     pub manifest: LeaderRegionManifestInfo,
+    /// Whether the region still had WAL ranges to recover when it last reported.
+    pub has_pending_tails: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

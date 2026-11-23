@@ -811,6 +811,16 @@ pub enum Error {
     },
 
     #[snafu(display(
+        "Region {} has not received a leader lease since a catchup made it writable",
+        region_id
+    ))]
+    RegionLeaseNotReceived {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
         "Region {} lost its leader lease while writing to the WAL, the write may have been applied",
         region_id
     ))]
@@ -1645,6 +1655,7 @@ impl Error {
             | Error::RegionTruncated { .. }
             | Error::RegionStopped { .. }
             | Error::RegionLeaseExpired { .. }
+            | Error::RegionLeaseNotReceived { .. }
             | Error::EndStagingPending { .. }
             | Error::SerdeJson { .. }
             | Error::CompressObject { .. } => false,
@@ -1792,7 +1803,9 @@ impl ErrorExt for Error {
             CompatReader { .. } => StatusCode::Unexpected,
             InvalidRegionRequest { source, .. } => source.status_code(),
             RegionState { .. } | UpdateManifest { .. } => StatusCode::RegionNotReady,
-            RegionLeaseExpired { .. } | UnacknowledgedWrite { .. } => StatusCode::RegionNotReady,
+            RegionLeaseExpired { .. }
+            | RegionLeaseNotReceived { .. }
+            | UnacknowledgedWrite { .. } => StatusCode::RegionNotReady,
             RegionPendingTails { .. } => StatusCode::RegionNotReady,
             RemoteWalUnsupported { .. } => StatusCode::Unsupported,
             TailEntryMissing { .. } => StatusCode::StorageUnavailable,
@@ -1897,6 +1910,7 @@ impl ErrorExt for Error {
             | RegionClosed { .. }
             | RejectWriteInStaging { .. }
             | RegionLeaseExpired { .. }
+            | RegionLeaseNotReceived { .. }
             | UnacknowledgedWrite { .. }
             | RegionState {
                 state: RegionRoleState::Follower,
@@ -2153,6 +2167,12 @@ mod tests {
         // A commit refused before its PUT because the Leader deadline has passed.
         let error = RegionLeaseExpiredSnafu { region_id }.build();
         assert!(!error.may_have_persisted_manifest_update());
+
+        // A commit refused before its PUT because no Leader lease has confirmed the catchup.
+        let error = RegionLeaseNotReceivedSnafu { region_id }.build();
+        assert!(!error.may_have_persisted_manifest_update());
+        assert_eq!(error.status_code(), StatusCode::RegionNotReady);
+        assert!(error.retry_hint().is_retryable());
 
         // This can be raised while applying an edit after its manifest file was saved.
         let error = RegionMetadataNotFoundSnafu {}.build();

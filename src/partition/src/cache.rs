@@ -118,7 +118,7 @@ pub fn new_partition_info_cache(
     cache: Cache<(usize, TableId), CachedPartitionInfo>,
     table_route_cache: TableRouteCacheRef,
 ) -> PartitionInfoCache {
-    CacheContainer::new_coordinated(
+    CacheContainer::new(
         name,
         cache,
         init_factory(table_route_cache),
