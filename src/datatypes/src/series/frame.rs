@@ -2449,29 +2449,59 @@ pub struct StateFrameRow {
     state: AggregateStateSchema,
 }
 
-impl StateFrameRow {
-    /// One producer group as the state row a consumer merges.
+/// The Arrow layout the state rows of one publication are encoded against.
+///
+/// Building a row needs three things that depend on the state layout and the series it is of rather
+/// than on the group: the `fields` column's item struct, the components each item carries, and the
+/// grid the positions are on. Resolving them once makes a group cost its own encoding and nothing
+/// else, which is what a consumer merging the groups of one publication wants.
+///
+/// One constructor builds every row of every group ([`StateRowLayout::row`]), so a producer that
+/// hands a row over in process and a frame a boundary reads cannot disagree about what a row is.
+pub struct StateRowLayout {
+    /// The layout every row is validated against, and the one its fields encode.
+    state: AggregateStateSchema,
+    /// How many series fields a row carries.
+    fields: usize,
+    /// The grid a row's positions are on.
+    grid: Arc<EvalGrid>,
+    /// The `fields` column's item struct, resolved from the frame schema once.
+    field_types: Fields,
+}
+
+impl StateRowLayout {
+    /// The layout `schema`'s export declares, as the rows of its groups are built against it.
     ///
-    /// The group already is the row: field-major state on sparse absolute positions, the labels it
-    /// was folded under, and whether it closes its chain. Building it here is what lets a producer
-    /// hand the row over in process instead of packing a frame and decoding it back, and it is the
-    /// same construction the frame encoder uses ([`encode_state_fields`]), so the two readings of
-    /// one export cannot disagree.
-    ///
-    /// `state` is the layout the export declares and `schema` the series it is of: both are checked
-    /// against the group before anything is built, exactly as the frame decoder checks them against
-    /// the frame it reads.
-    pub fn from_state_series(
-        state: &AggregateStateSchema,
-        schema: &SeriesSchema,
-        series: StateSeries,
-        is_last: bool,
-    ) -> Result<Self> {
+    /// `state` is the layout the export declares: it is checked against itself once here, so a
+    /// layout no row could encode is refused before any group is built against it.
+    pub fn try_new(state: &AggregateStateSchema, schema: &SeriesSchema) -> Result<Self> {
         let grid = schema
             .eval_grid
             .clone()
             .ok_or_else(|| err("an aggregate state chunk needs an evaluation grid"))?;
-        if series.states.len() != schema.fields.len()
+        let state = AggregateStateSchema::try_new(state.kind, state.components.to_vec())?;
+        let frame_schema = aggregate_state_frame_schema(&state, schema, FrameLabelMode::Explicit)?;
+        let DataType::Struct(field_types) = frame_schema.field(3).data_type() else {
+            return invalid_series("fields schema mismatch");
+        };
+        Ok(Self {
+            state,
+            fields: schema.fields.len(),
+            grid,
+            field_types: field_types.clone(),
+        })
+    }
+
+    /// One producer group as the state row a consumer merges.
+    ///
+    /// The group already is the row: field-major state on sparse absolute positions, the labels it
+    /// was folded under, and whether it closes its chain. What the group must also be is a row of
+    /// this layout: its positions on this grid, its field count the series', and every position it
+    /// carries a contribution from at least one field. Those are checked here rather than where the
+    /// row is consumed, so a row that exists is a row a merge can read - exactly what the frame
+    /// decoder checks of a decoded frame row.
+    pub fn row(&self, series: StateSeries, is_last: bool) -> Result<StateFrameRow> {
+        if series.states.len() != self.fields
             || series
                 .states
                 .iter()
@@ -2479,16 +2509,21 @@ impl StateFrameRow {
         {
             return invalid_series("aggregate state fields do not match the carried positions");
         }
-        let frame_schema = aggregate_state_frame_schema(state, schema, FrameLabelMode::Explicit)?;
-        let DataType::Struct(field_types) = frame_schema.field(3).data_type() else {
-            return invalid_series("fields schema mismatch");
-        };
+        // A position is addressed on the grid this layout declares: a group folded on another grid
+        // would name positions this node's merge does not have.
+        if !series
+            .time
+            .grid()
+            .is_some_and(|grid| grid.spec() == self.grid.spec())
+        {
+            return invalid_series("aggregate state positions are not on the series grid");
+        }
         let spans = series
             .time
             .runs()
             .map(|run| GridSpan::new(run.position, run.len))
             .collect::<Vec<_>>();
-        let axis = TimeAxis::from_grid_spans(grid, spans)?;
+        let axis = TimeAxis::from_grid_spans(Arc::clone(&self.grid), spans)?;
         let row = FrameRow {
             key: None,
             metric: Some(series.metric.clone()),
@@ -2501,11 +2536,11 @@ impl StateFrameRow {
             payload: RowPayload::States(series.states),
             bytes: 0,
         };
-        let fields = encode_state_fields(field_types, std::slice::from_ref(&row))?;
+        let fields = encode_state_fields(&self.field_types, std::slice::from_ref(&row))?;
         // The row is checked against the layout it declares, so a consumer that merges it reads the
         // components this producer wrote and nothing else - the same check the frame decoder makes.
-        let validated = StateFieldsBatch::try_from_arrow(fields.clone(), state)?;
-        if validated.len() != schema.fields.len() {
+        let validated = StateFieldsBatch::try_from_arrow(fields.clone(), &self.state)?;
+        if validated.len() != self.fields {
             return invalid_series("aggregate state field count mismatch");
         }
         for field in 0..validated.len() {
@@ -2516,13 +2551,47 @@ impl StateFrameRow {
                 return invalid_series("state list length does not match carried positions");
             }
         }
-        Ok(Self {
+        // A carried position exists because a field has a contribution there; one no field carries
+        // is a position the merge would have to invent a state for, so it is refused here.
+        for position in 0..axis.len() {
+            let mut present = false;
+            for field in 0..validated.len() {
+                present |= validated.is_present(field, position)?;
+            }
+            if !present {
+                return invalid_series("aggregate state names a position with no contribution");
+            }
+        }
+        Ok(StateFrameRow {
             metric: series.metric,
             time: axis,
             is_last,
             fields,
-            state: state.clone(),
+            state: self.state.clone(),
         })
+    }
+}
+
+impl StateFrameRow {
+    /// One producer group as the state row a consumer merges.
+    ///
+    /// The group already is the row: field-major state on sparse absolute positions, the labels it
+    /// was folded under, and whether it closes its chain. Building it here is what lets a producer
+    /// hand the row over in process instead of packing a frame and decoding it back, and it is the
+    /// same construction the frame encoder uses ([`encode_state_fields`]), so the two readings of
+    /// one export cannot disagree.
+    ///
+    /// `state` is the layout the export declares and `schema` the series it is of: both are checked
+    /// against the group before anything is built, exactly as the frame decoder checks them against
+    /// the frame it reads. Building many groups of one export is what [`StateRowLayout`] is for; this
+    /// is that layout resolved for one row.
+    pub fn from_state_series(
+        state: &AggregateStateSchema,
+        schema: &SeriesSchema,
+        series: StateSeries,
+        is_last: bool,
+    ) -> Result<Self> {
+        StateRowLayout::try_new(state, schema)?.row(series, is_last)
     }
 
     /// Complete group identity for this row.

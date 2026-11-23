@@ -1712,6 +1712,359 @@ async fn aggregate_state_router_cancelled_consumer_releases_queued_charge() {
     assert_eq!(0, pool.reserved(), "cancelled consumer holds nothing");
 }
 
+/// A router that reads its child's chunks keeps the child's charge on the groups it hands over.
+///
+/// A `StateChunk::Row` is a zero-copy slice of the batch it was decoded out of, and `state_bytes`
+/// bills only the slice: the parent's buffers are charged to the child's publication, and they are
+/// live for exactly as long as a group cut from it is. A router that released that charge once it had
+/// charged its own figures would leave those buffers charged to nobody while a consumer still holds
+/// them - which is what the frame path avoids by sharing one charge across every row of a batch.
+///
+/// The figure is read at the moment only the group is left: the stream that produced it, the router
+/// and the region under it are gone, so what the pool still counts is what the held group accounts
+/// for.
+#[tokio::test]
+async fn a_chunk_fed_state_router_holds_the_parent_batch_until_its_row_is_dropped() {
+    const GROUPS: usize = 32;
+    const POINTS: usize = 4;
+    let series = schema();
+    let wire = Arc::new(
+        AggregateStateSchema::try_new(
+            AggregateStateKind::Sum,
+            vec![StateComponent::Value, StateComponent::Compensation],
+        )
+        .unwrap(),
+    );
+    let rows = (0..GROUPS)
+        .map(|group| {
+            let states = (0..POINTS)
+                .map(|point| {
+                    Some(StatePayload::Float(AggregateStateValues {
+                        value: (group * POINTS + point) as f64,
+                        compensation: 0.0,
+                        ..Default::default()
+                    }))
+                })
+                .collect();
+            Ok((
+                StateSeries {
+                    metric: labels(&format!("group-{group:03}")),
+                    time: TimeAxis::from_grid_spans(
+                        series.eval_grid.clone().unwrap(),
+                        vec![GridSpan::new(0, POINTS)],
+                    )
+                    .unwrap(),
+                    states: vec![states],
+                },
+                true,
+            ))
+        })
+        .collect::<Vec<_>>();
+    let batch = common_query::series_frame::pack_aggregate_state(
+        Box::pin(futures::stream::iter(rows)),
+        Arc::clone(&wire),
+        Arc::clone(&series),
+    )
+    .unwrap()
+    .try_collect::<Vec<_>>()
+    .await
+    .unwrap()
+    .remove(0);
+    assert_eq!(GROUPS, batch.num_rows(), "all groups share one parent");
+    let parent_payload = std::mem::size_of::<RecordBatch>()
+        + batch.num_columns() * std::mem::size_of::<datafusion::arrow::array::ArrayRef>()
+        + batch.get_array_memory_size();
+    let child_schema = batch.schema();
+    let source: Arc<dyn ExecutionPlan> =
+        MemorySourceConfig::try_new_exec(&[vec![batch]], child_schema, None).unwrap();
+    // The region's exit forwards the packed frame, exactly as a region hands one over; the router
+    // above it reads that node's chunks instead of its frames.
+    let region: Arc<dyn ExecutionPlan> =
+        Arc::new(SeriesRepartitionExec::try_new(source, 1).unwrap());
+    let router = Arc::new(SeriesRepartitionExec::try_new(Arc::clone(&region), 2).unwrap());
+    let pool = Arc::new(GreedyMemoryPool::new(usize::MAX));
+    let context = task_context(&pool);
+    let mut chunks = series_execution_plan(router.as_ref())
+        .expect("a router hands its groups over")
+        .execute_series(0, Arc::clone(&context))
+        .expect("the output is claimed");
+    // The other owner is claimed too, so the read ends on its own instead of being stopped: what the
+    // pool counts afterwards is then what the streams released, not what an abort has yet to.
+    let mut sibling = series_execution_plan(router.as_ref())
+        .expect("a router hands its groups over")
+        .execute_series(1, Arc::clone(&context))
+        .expect("the second output is claimed once");
+    let row = futures::future::poll_fn(|cx| chunks.as_mut().poll_next(cx))
+        .await
+        .expect("the router routes a group")
+        .expect("a group arrives");
+    assert!(
+        matches!(row.chunk(), SeriesChunk::State(StateChunk::Row(_))),
+        "a router reading another router's rows hands over rows: {:?}",
+        row.chunk()
+    );
+
+    // Read the export to its end while keeping the one group: every charge the read had is released
+    // as it finishes, except the one the group holds.
+    chunks
+        .by_ref()
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("the router's output ends instead of failing");
+    sibling
+        .by_ref()
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("the sibling output ends instead of failing");
+    drop(chunks);
+    drop(sibling);
+    drop(router);
+    drop(region);
+    assert!(
+        pool.reserved() >= parent_payload,
+        "the held group keeps the parent batch it was cut from charged: {} reserved, {parent_payload} of parent",
+        pool.reserved()
+    );
+
+    drop(row);
+    assert_eq!(
+        0,
+        pool.reserved(),
+        "dropping the last group of a finished read releases everything"
+    );
+}
+
+/// Every contribution of a duplicated state input survives the chunk path as it does the frame path.
+///
+/// `aggregate_state_router_slices_and_preserves_group_validity` states the rule for a frame: two
+/// producers contributing one group at the same grid point are two rows the owner forwards, never a
+/// duplicate collapsed into one. A chunk input is routed by the same rule - the form of the
+/// publication is not the identity of a contribution - so the twin below is that fixture read as
+/// chunks, through `execute_series`, and it has to count the same four rows with the overlapping
+/// point counted twice.
+#[tokio::test]
+async fn a_duplicated_state_input_survives_the_chunk_path_as_it_does_the_frame_path() {
+    let series = schema();
+    let wire = Arc::new(
+        AggregateStateSchema::try_new(AggregateStateKind::Group, Vec::new())
+            .expect("Group has no components"),
+    );
+    // Two producers both contribute to the same group, including the same grid point.
+    let mut batches = [vec![0, 1], vec![0, 2]]
+        .into_iter()
+        .map(|positions| {
+            let states = positions
+                .into_iter()
+                .map(|position| {
+                    Ok((
+                        StateSeries {
+                            metric: labels("same"),
+                            time: TimeAxis::from_grid_spans(
+                                series.eval_grid.clone().unwrap(),
+                                vec![GridSpan::new(position, 1)],
+                            )
+                            .unwrap(),
+                            states: vec![vec![None]],
+                        },
+                        true,
+                    ))
+                })
+                .collect::<Vec<_>>();
+            let frames = common_query::series_frame::pack_aggregate_state(
+                Box::pin(futures::stream::iter(states)),
+                Arc::clone(&wire),
+                Arc::clone(&series),
+            )
+            .unwrap();
+            let mut frames = frames;
+            futures::executor::block_on(futures::future::poll_fn(|cx| {
+                match frames.as_mut().poll_next(cx) {
+                    Poll::Ready(batch) => Poll::Ready(batch.expect("state batch is emitted")),
+                    Poll::Pending => Poll::Pending,
+                }
+            }))
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let child_schema = batches[0].schema();
+    let source: Arc<dyn ExecutionPlan> = MemorySourceConfig::try_new_exec(
+        &[vec![batches.remove(0)], vec![batches.remove(0)]],
+        child_schema,
+        None,
+    )
+    .unwrap();
+    // The region's exit publishes the producers' rows as chunks; the router above routes them.
+    let region: Arc<dyn ExecutionPlan> =
+        Arc::new(SeriesRepartitionExec::try_new(source, 1).unwrap());
+    let plan = Arc::new(SeriesRepartitionExec::try_new(Arc::clone(&region), 2).unwrap());
+    let pool = Arc::new(GreedyMemoryPool::new(usize::MAX));
+    let context = task_context(&pool);
+    let mut outputs = (0..2)
+        .map(|output| {
+            series_execution_plan(plan.as_ref())
+                .expect("a router hands its groups over")
+                .execute_series(output, Arc::clone(&context))
+                .expect("each output is claimed once")
+        })
+        .collect::<Vec<_>>();
+    let mut carried = Vec::new();
+    for output in &mut outputs {
+        for handed in output.by_ref().try_collect::<Vec<_>>().await.unwrap() {
+            let (chunk, _charge) = handed.into_parts();
+            let SeriesChunk::State(StateChunk::Row(row)) = chunk else {
+                panic!("a chunk-fed state router hands over rows");
+            };
+            carried.push(
+                row.time
+                    .positions()
+                    .map(|(point, _)| point)
+                    .collect::<Vec<_>>(),
+            );
+        }
+    }
+    assert_eq!(
+        4,
+        carried.len(),
+        "both producers' rows are forwarded, including their overlapping point: {carried:?}"
+    );
+    assert_eq!(
+        2,
+        carried.iter().filter(|points| points.contains(&0)).count(),
+        "the point both producers contribute is two contributions, not one: {carried:?}"
+    );
+    assert!(
+        carried.iter().any(|points| points.contains(&1))
+            && carried.iter().any(|points| points.contains(&2)),
+        "each producer's other point survives too: {carried:?}"
+    );
+    drop(outputs);
+    drop(plan);
+    drop(region);
+    wait_until("the finished read releases everything", || {
+        pool.reserved() == 0
+    })
+    .await;
+}
+
+/// A chunk of another state than the one this node declared is refused, as a batch of one is.
+///
+/// A state frame says what it is in its schema, so `read_state_batches` refuses a batch under any
+/// other schema before routing a row of it. A chunk says the same thing on the value, and the chunk
+/// path has to make the same check: a publication of another kind, layout or grid names state this
+/// node's owners would merge as theirs, which is not a merge any declaration allows.
+///
+/// The reader is driven directly because no real producer can make that publication: every node in
+/// the chain publishes the same declaration it hands over, which is what makes the check a guard
+/// rather than a filter on ordinary input.
+#[tokio::test]
+async fn a_state_router_refuses_a_chunk_of_another_state() {
+    let series = schema();
+    let declared = Arc::new(
+        AggregateStateSchema::try_new(
+            AggregateStateKind::Sum,
+            vec![StateComponent::Value, StateComponent::Compensation],
+        )
+        .unwrap(),
+    );
+    // The same publication, declaring another aggregate on another grid.
+    let other = Arc::new(crate::native::plan::AggregateStateSchema {
+        group: crate::native::plan::Grouping::By(Arc::from([])),
+        kind: AggregateStateKind::Count,
+        components: Arc::from([StateComponent::Count]),
+        accumulators: series.fields.clone(),
+        grid: Arc::new(
+            EvalGrid::try_new(GridSpec::try_new(GRID_START, GRID_STEP * 2, 2).unwrap()).unwrap(),
+        ),
+    });
+    let declared_layout = Arc::new(crate::native::plan::AggregateStateSchema {
+        group: crate::native::plan::Grouping::By(Arc::from([])),
+        kind: AggregateStateKind::Sum,
+        components: Arc::from([StateComponent::Value, StateComponent::Compensation]),
+        accumulators: series.fields.clone(),
+        grid: grid(),
+    });
+    let publication = |state: Arc<crate::native::plan::AggregateStateSchema>, charted: usize| {
+        let grid = Arc::clone(&state.grid);
+        let time = TimeAxis::from_grid_spans(grid, vec![GridSpan::new(charted, 1)]).unwrap();
+        let states = (0..series.fields.len())
+            .map(|_| vec![Some(StatePayload::Float(AggregateStateValues::default()))])
+            .collect();
+        HandedSeriesChunk::uncharged(SeriesChunk::State(StateChunk::Series {
+            series: vec![StateSeries {
+                metric: labels("handed"),
+                time,
+                states,
+            }],
+            state_schema: state,
+            reservation: None,
+        }))
+    };
+    let routing = Routing::new(2);
+    let mut senders = Vec::new();
+    let mut receivers = Vec::new();
+    for _ in 0..routing.outputs {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        senders.push(sender);
+        receivers.push(receiver);
+    }
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(usize::MAX));
+    let read_ahead = MemoryConsumer::new("SeriesRepartitionStateTest").register(&pool);
+
+    let mut chunks: SendableSeriesStream =
+        Box::pin(futures::stream::iter(vec![Ok(publication(other, 0))]));
+    let stop = read_state_chunks(
+        &mut chunks,
+        0,
+        &routing,
+        &senders,
+        &read_ahead,
+        &declared,
+        &series,
+    )
+    .await;
+    let Stop::Failed(error) = stop else {
+        panic!("a publication of another state is refused");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("aggregate state chunk schema mismatch"),
+        "{error}"
+    );
+    assert!(
+        receivers
+            .iter_mut()
+            .all(|receiver| receiver.try_recv().is_err()),
+        "nothing of another state is routed"
+    );
+
+    // The same publication declared as this node declared it is routed.
+    let mut chunks: SendableSeriesStream = Box::pin(futures::stream::iter(vec![Ok(publication(
+        declared_layout,
+        1,
+    ))]));
+    let stop = read_state_chunks(
+        &mut chunks,
+        0,
+        &routing,
+        &senders,
+        &read_ahead,
+        &declared,
+        &series,
+    )
+    .await;
+    assert!(matches!(stop, Stop::Ended), "the declared state is routed");
+    let queued = receivers
+        .iter_mut()
+        .filter_map(|receiver| receiver.try_recv().ok())
+        .collect::<Vec<_>>();
+    assert_eq!(1, queued.len(), "the one group is queued once");
+    assert!(
+        matches!(queued[0], Queued::StateChunk { .. }),
+        "a group reaches its owner as the group it is"
+    );
+}
+
 /// The raw owner over `child` routing by an explicit policy.
 fn raw_node_with_routing(
     child: Arc<dyn ExecutionPlan>,
@@ -8262,7 +8615,7 @@ async fn the_child_is_read_the_way_the_consumer_reads_this_node() {
     )
     .unwrap();
     assert!(
-        matches!(handed, RoutedInput::StateChunks(_)),
+        matches!(handed, RoutedInput::StateChunks(..)),
         "a chunk read asks the child for its chunks"
     );
 

@@ -120,7 +120,7 @@ use crate::native::plan::{
     BoundMap, BoundScalar, BoundVectorOp, BoundWindow, Grouping, InstantValue, MapOp, NativeExpr,
     NativeNode, NativeTree, NativeType, ParameterizedOp,
 };
-use crate::native::state::StateChunk;
+use crate::native::state::{StateChunk, state_bytes};
 use crate::range_eval::{RangeFunction, RangeWindow};
 use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
 use common_query::series_frame::series_frame_ordering;
@@ -6960,7 +6960,7 @@ async fn a_partial_root_exports_state_frames_from_every_partition() {
 ///
 /// This is lifecycle coverage, not the regression for the producer hand-off: other reservations are
 /// alive at the same moment, so a positive figure here would not by itself prove the batch is the
-/// charged one. `a_handed_over_state_chunk_keeps_its_charge_until_it_is_dropped` owns that claim.
+/// charged one. `a_handed_state_chunk_holds_its_charge_until_it_is_dropped` owns that claim.
 #[tokio::test]
 async fn a_state_export_releases_its_charge_on_drain_and_on_early_drop() {
     const GROUPS: usize = 600;
@@ -11016,6 +11016,92 @@ async fn a_handed_state_group_keeps_the_export_charged() {
     drop(chunks);
     drop(producer);
     assert_eq!(0, pool.reserved(), "the finished export holds nothing");
+}
+
+/// A state export whose first partition folds two groups, so a reader can keep one and read on.
+fn two_group_state_producer() -> Arc<dyn ExecutionPlan> {
+    let rows = series_samples(1.0);
+    let first = [(HOST, "web-0"), (JOB, "first")];
+    let second = [(HOST, "web-1"), (JOB, "second")];
+    let partitions = vec![frames(&[
+        labelled_chunk("web-0", &first, &rows[..4], true),
+        labelled_chunk("web-1", &second, &rows[..4], true),
+    ])];
+    partial_plan(
+        rate_tree(),
+        memory_exec_partitioned(partitions),
+        partial_op(AggregateKind::Sum, &[JOB]),
+        &[JOB],
+    )
+    .expect("a rate tree with a partial sum is executable")
+}
+
+/// A group a reader keeps stays charged after the export that produced it is gone.
+///
+/// The reviewer's case, and the one the sibling above does not cover: a consumer polls a group, keeps
+/// it, and then exhausts or drops the export. The reservation the export carried has to travel with
+/// the group rather than stay in the stream, or reading to the end - or letting the stream go - would
+/// release bytes the reader is still holding, and the pool would hand them to somebody else.
+///
+/// The figures are read once the export and its producer are gone, so what the pool counts is the
+/// group's alone; the second figure is what that group holds by itself, so a reservation released
+/// with the stream cannot pass on the strength of the group's own bytes.
+#[tokio::test]
+async fn a_held_state_group_outlives_the_export_that_produced_it() {
+    let pool = Arc::new(GreedyMemoryPool::new(usize::MAX));
+    let context = task_context(&pool);
+    let producer = two_group_state_producer();
+    let mut chunks = series_execution_plan(producer.as_ref())
+        .expect("a Partial hands its state over")
+        .execute_series(0, Arc::clone(&context))
+        .expect("the output is claimed");
+
+    let kept = futures::future::poll_fn(|cx| chunks.as_mut().poll_next(cx))
+        .await
+        .expect("the partial exports a group")
+        .expect("the group arrives");
+    // The export's other group, read and dropped: the reservation the two share is the kept group's
+    // to hold, so letting the sibling go must not release it.
+    let sibling = futures::future::poll_fn(|cx| chunks.as_mut().poll_next(cx))
+        .await
+        .expect("the partial exports its second group")
+        .expect("the group arrives");
+    let held = pool.reserved();
+    drop(sibling);
+    assert!(held > 0, "a held state group keeps its export charged");
+
+    // Drain the rest of the export and drop everything but the group: the stream, the rows it
+    // handed over and the plan that produced them.
+    let rest = chunks
+        .by_ref()
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("the export ends instead of failing");
+    drop(rest);
+    drop(chunks);
+    drop(producer);
+    let after = pool.reserved();
+    let group_bytes = match kept.chunk() {
+        SeriesChunk::State(chunk) => state_bytes(chunk),
+        other => panic!("a partial hands its groups over, not {other:?}"),
+    };
+    assert!(
+        after >= group_bytes,
+        "the group alone keeps its export charged: {held} held while it was read, {after} still \
+         reserved once the export and its producer are gone, and the group alone holds {group_bytes}"
+    );
+    assert!(
+        after <= held,
+        "nothing the export held is left besides the reservation the group keeps: {after} reserved, \
+         {held} while the export was being read"
+    );
+
+    drop(kept);
+    assert_eq!(
+        0,
+        pool.reserved(),
+        "dropping the last group of a finished export releases everything"
+    );
 }
 
 /// The two entry points cannot be mixed on one execution, and the refusal names both.

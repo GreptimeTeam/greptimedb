@@ -255,7 +255,14 @@ fn routed_input(
             FrameContent::Raw => {
                 RoutedInput::Raw(HeldSeriesCharges::raw(chunks, Arc::clone(series_schema)))
             }
-            FrameContent::AggregateState => RoutedInput::StateChunks(chunks),
+            FrameContent::AggregateState => {
+                // A chunk carries its own declaration, so the state this node declared is what the
+                // read is held to; without it there is nothing to hold the chunk to.
+                let state = state.ok_or_else(|| {
+                    DataFusionError::Plan("aggregate state declaration is missing".into())
+                })?;
+                RoutedInput::StateChunks(chunks, Arc::clone(state), Arc::clone(series_schema))
+            }
         });
     }
     let frames = input.execute(partition, Arc::clone(context))?;
@@ -1046,17 +1053,24 @@ impl Stream for StateChunkOutputStream {
                         ));
                     }
                 }
-                Poll::Ready(Some(Queued::StateChunk {
-                    chunk,
-                    _charge,
-                    _metadata,
-                })) => {
+                Poll::Ready(Some(Queued::StateChunk(queued))) => {
+                    let QueuedStateChunk {
+                        chunk,
+                        _charge,
+                        _metadata,
+                        child,
+                    } = *queued;
                     // A child that answered with its chunks has already done what this output's
                     // frame form would do, so the group is handed on as it is; only the charge this
-                    // node queued it with moves onto the value.
+                    // node queued it with moves onto the value, together with what the child charged
+                    // for the publication the group was cut from. The group is a slice of that
+                    // publication, so those bytes are still live while it is held.
+                    let mut shared = child.map_or_else(Vec::new, |child| (*child).clone());
+                    shared.push(Arc::new(_charge));
+                    shared.push(Arc::new(_metadata));
                     this.pending.push_back(HandedSeriesChunk::charged(
                         SeriesChunk::State(chunk),
-                        SeriesCharge::shared(vec![Arc::new(_charge), Arc::new(_metadata)]),
+                        SeriesCharge::shared(shared),
                     ));
                 }
                 Poll::Ready(Some(Queued::Eof { .. })) => {
@@ -1822,12 +1836,53 @@ async fn read_state_batches(
     Stop::Ended
 }
 
+/// Whether `chunk` is a publication of the state this node declared it routes.
+///
+/// A state frame says what it is in its schema: the aggregate kind, the ordered component layout and
+/// the series - fields and evaluation grid - it is of are all part of the frame `read_state_batches`
+/// decodes, so a batch under any other schema is refused there before a row of it is routed. A chunk
+/// says the same three things on the value: the layout in the [`StateChunk::Series`] it carries (or
+/// in the row's fields), and the grid each group's axis is on. This is what holds a handed-over
+/// publication to the standard the frame path holds a batch to; anything less would let a child hand
+/// over state this node never declared and have it merged as that state.
+fn declared_state_of(
+    declared: &AggregateStateSchema,
+    series: &SeriesSchema,
+    chunk: &StateChunk,
+) -> bool {
+    let declared_grid = series.eval_grid.as_ref().map(|grid| grid.spec());
+    let same_grid = |grid: Option<&Arc<datatypes::series::time::EvalGrid>>| {
+        declared_grid.is_some_and(|declared| grid.is_some_and(|grid| grid.spec() == declared))
+    };
+    match chunk {
+        StateChunk::Series {
+            series: groups,
+            state_schema,
+            ..
+        } => {
+            state_schema.kind == declared.kind
+                && state_schema.components == declared.components
+                && declared_grid.is_some_and(|declared| state_schema.grid.spec() == declared)
+                && groups.iter().all(|group| {
+                    group.states.len() == series.fields.len() && same_grid(group.time.grid())
+                })
+        }
+        StateChunk::Row(row) => {
+            row.kind == declared.kind
+                && row.fields.components() == declared.components.as_ref()
+                && row.fields.len() == series.fields.len()
+                && same_grid(row.time.grid())
+        }
+    }
+}
+
 /// Reads a child's handed-over state, routing each group to the owner that folds it.
 ///
 /// A state publication is not merged here: every group the child folded is one row of its export, and
 /// which owner folds it is the hash of its labels, exactly as a state frame's row is routed. What
 /// differs is only the form - the group arrives as the child's own chunk instead of as a batch - so
-/// the charge this node queues it with is grown while the child's charge is still in hand.
+/// the charge this node queues it with is grown while the child's charge is still in hand, and the
+/// child's own charge moves onto the groups rather than going with the publication it is for.
 async fn read_state_chunks(
     stream: &mut SendableSeriesStream,
     // The queue item names the group, not the partition it came from: a state publication is routed
@@ -1836,6 +1891,8 @@ async fn read_state_chunks(
     routing: &Routing,
     senders: &[mpsc::UnboundedSender<Queued>],
     read_ahead: &MemoryReservation,
+    declared: &Arc<AggregateStateSchema>,
+    series: &Arc<SeriesSchema>,
 ) -> Stop {
     loop {
         tokio::task::coop::consume_budget().await;
@@ -1848,15 +1905,25 @@ async fn read_state_chunks(
                         "an aggregate-state input handed over {chunk:?}"
                     ))));
                 };
+                // The check the frame path makes of a batch's schema, made of the declaration the
+                // chunk carries: a publication of another kind, layout or grid is refused here
+                // rather than routed under a state this node never declared.
+                if !declared_state_of(declared, series, &chunk) {
+                    return Stop::Failed(Arc::new(DataFusionError::Execution(
+                        "aggregate state chunk schema mismatch".into(),
+                    )));
+                }
                 // One publication may hold several groups; each is routed on its own labels, and
-                // the charge the child put on the whole of it rides on all of them until this node
-                // has charged what it queued.
-                let (groups, child_reservation) = match chunk {
+                // the charge the child put on the whole of it rides on all of them - a group is a
+                // slice of that publication, so its bytes stay live until the last group is dropped.
+                let mut publication = child_charge.map_or_else(Vec::new, SeriesCharge::into_shared);
+                let groups = match chunk {
                     StateChunk::Series {
                         series,
                         state_schema,
                         reservation,
-                    } => (
+                    } => {
+                        publication.extend(reservation.map(Arc::new));
                         series
                             .into_iter()
                             .map(|series| StateChunk::Series {
@@ -1864,11 +1931,12 @@ async fn read_state_chunks(
                                 state_schema: Arc::clone(&state_schema),
                                 reservation: None,
                             })
-                            .collect::<Vec<_>>(),
-                        reservation,
-                    ),
-                    row @ StateChunk::Row(_) => (vec![row], None),
+                            .collect::<Vec<_>>()
+                    }
+                    StateChunk::Row(row) => vec![StateChunk::Row(row)],
                 };
+                // One reference to the publication's charge, shared by every group cut from it.
+                let publication = (!publication.is_empty()).then(|| Arc::new(publication));
                 for group in groups {
                     let metric = match &group {
                         StateChunk::Series { series, .. } => &series[0].metric,
@@ -1884,22 +1952,28 @@ async fn read_state_chunks(
                     if let Err(error) = charge.try_grow(state_bytes(&group)) {
                         return Stop::Failed(Arc::new(error));
                     }
+                    // The message and the boxed group it points at, which is this content's own
+                    // share of what a queue holds for one item.
                     let metadata = read_ahead.new_empty();
-                    if let Err(error) = metadata.try_grow(std::mem::size_of::<Queued>()) {
+                    if let Err(error) = metadata.try_grow(
+                        std::mem::size_of::<Queued>()
+                            .saturating_add(std::mem::size_of::<QueuedStateChunk>()),
+                    ) {
                         return Stop::Failed(Arc::new(error));
                     }
-                    if let Err(error) = senders[output].send(Queued::StateChunk {
-                        chunk: group,
-                        _charge: charge,
-                        _metadata: metadata,
-                    }) {
+                    if let Err(error) =
+                        senders[output].send(Queued::StateChunk(Box::new(QueuedStateChunk {
+                            chunk: group,
+                            _charge: charge,
+                            _metadata: metadata,
+                            // One reference per queued group, so none of them is this task's to
+                            // hold: the publication's charge goes when its last group does.
+                            child: publication.clone(),
+                        })))
+                    {
                         drop(error.0);
                     }
                 }
-                // Every group this node queued is charged above; only now does the child's charge
-                // for the same publication go.
-                drop(child_reservation);
-                drop(child_charge);
             }
             Some(Err(error)) => {
                 return Stop::Failed(Arc::new(DataFusionError::External(Box::new(error))));
@@ -1930,8 +2004,17 @@ async fn route_partition(
         RoutedInput::Raw(stream) => {
             read_raw_chains(stream, partition, &routing, &senders, &read_ahead).await
         }
-        RoutedInput::StateChunks(stream) => {
-            read_state_chunks(stream, partition, &routing, &senders, &read_ahead).await
+        RoutedInput::StateChunks(stream, state, series) => {
+            read_state_chunks(
+                stream,
+                partition,
+                &routing,
+                &senders,
+                &read_ahead,
+                state,
+                series,
+            )
+            .await
         }
         RoutedInput::State(stream, state, series) => {
             read_state_batches(
@@ -2378,8 +2461,13 @@ enum Ending {
 enum RoutedInput {
     Evaluated(SendableEvaluatedSeriesStream),
     Raw(SendableRawSeriesStream),
-    /// Exported state a child handed over, one publication at a time.
-    StateChunks(SendableSeriesStream),
+    /// Exported state a child handed over, one publication at a time, with the state and the series
+    /// this node declared those publications to be.
+    StateChunks(
+        SendableSeriesStream,
+        Arc<AggregateStateSchema>,
+        Arc<SeriesSchema>,
+    ),
     State(
         SendableRecordBatchStream,
         Arc<AggregateStateSchema>,
@@ -2411,12 +2499,28 @@ enum Queued {
         _metadata: MemoryReservation,
     },
     /// One group of exported state, as the child that folded it handed it over.
-    StateChunk {
-        chunk: StateChunk,
-        /// What this node queued it with: the payload the group holds.
-        _charge: MemoryReservation,
-        _metadata: MemoryReservation,
-    },
+    ///
+    /// Boxed because the queue message is charged for by its own size, and every chain and every row
+    /// of every other content pays that charge too: a state publication carries more than a chain
+    /// does, and it is the only content that does.
+    StateChunk(Box<QueuedStateChunk>),
+}
+
+/// What one queued state group holds: the group, and the charges it keeps alive.
+struct QueuedStateChunk {
+    chunk: StateChunk,
+    /// What this node queued it with: the payload the group holds.
+    _charge: MemoryReservation,
+    _metadata: MemoryReservation,
+    /// What the child charged for the publication this group was cut from.
+    ///
+    /// A group is a slice of the publication it came from - a row's state columns still point into
+    /// the batch they were decoded out of - so the bytes the child reserved for that publication are
+    /// live for as long as any group cut from it is. They ride on the group for that reason: released
+    /// here they would be released while the group is still held, and the pool would hand the
+    /// parent's buffers to somebody else. The reference is taken once per publication and cloned per
+    /// group, so the publication's charge goes when its last group does.
+    child: Option<Arc<Vec<Arc<MemoryReservation>>>>,
 }
 
 type ExactIdentity = (Option<Arc<str>>, Vec<(Arc<str>, Arc<str>)>);
@@ -2721,7 +2825,7 @@ impl Stream for StateBatchOutputStream {
                     let _ = input;
                     drop(_metadata);
                 }
-                Poll::Ready(Some(Queued::StateChunk { .. })) => {
+                Poll::Ready(Some(Queued::StateChunk(_))) => {
                     let error = DataFusionError::Internal(
                         "a state frame output received a handed-over group".into(),
                     );
@@ -3113,7 +3217,7 @@ impl Stream for RepartitionStream {
             }
             match this.receiver.poll_recv(cx) {
                 Poll::Ready(Some(Queued::StateBatch { .. }))
-                | Poll::Ready(Some(Queued::StateChunk { .. })) => {
+                | Poll::Ready(Some(Queued::StateChunk(_))) => {
                     this.lease.fail(Arc::new(DataFusionError::Internal(
                         "a series output received aggregate state".into(),
                     )));

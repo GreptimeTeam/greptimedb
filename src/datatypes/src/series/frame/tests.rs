@@ -4846,6 +4846,95 @@ mod aggregate_state_acceptance {
         }
     }
 
+    /// A group whose positions are on another grid is refused where the row is built.
+    ///
+    /// A row addresses positions on the grid its export declares; one folded on a different grid
+    /// names positions that grid does not have, so a merge reading it would either drop the
+    /// contribution or read another point's. The frame decoder never meets such a row - it builds
+    /// every axis on the grid the frame declares - so the in-process construction is where the
+    /// claim has to be checked, once, instead of at the merge.
+    #[test]
+    fn a_state_row_refuses_positions_on_another_grid() {
+        let schema = state_schema(&["v"], 3);
+        let state = AggregateStateSchema::try_new(
+            Kind::Sum,
+            vec![Component::Value, Component::Compensation],
+        )
+        .unwrap();
+        let other_grid = Arc::new(
+            crate::series::time::EvalGrid::try_new(
+                crate::series::time::GridSpec::try_new(0, 2, 3).unwrap(),
+            )
+            .unwrap(),
+        );
+        let series = StateSeries {
+            metric: metric(Some("m"), &[("job", "x")]),
+            time: TimeAxis::from_grid_spans(other_grid, vec![GridSpan::new(0, 1)]).unwrap(),
+            states: vec![values(1, 1.0)],
+        };
+        let error = match StateFrameRow::from_state_series(&state, &schema, series, true) {
+            Ok(_) => panic!("a group on another grid is not a row of this export"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("aggregate state positions are not on the series grid"),
+            "{error}"
+        );
+    }
+
+    /// A carried position no field contributes to is refused where the row is built.
+    ///
+    /// A position exists because a field has a contribution there: an all-absent one is a position
+    /// the merge would have to invent a state for, which is the same refusal `merge_row` makes of a
+    /// decoded row. Checking it here means both readings of one export refuse it in the same place,
+    /// before any row exists to merge.
+    #[test]
+    fn a_state_row_refuses_a_position_no_field_carries() {
+        let schema = state_schema(&["v"], 2);
+        let state = AggregateStateSchema::try_new(
+            Kind::Sum,
+            vec![Component::Value, Component::Compensation],
+        )
+        .unwrap();
+        let mut states = values(2, 1.0);
+        states[1] = None;
+        let series = StateSeries {
+            metric: metric(Some("m"), &[("job", "x")]),
+            time: TimeAxis::from_grid_spans(
+                schema.eval_grid.clone().unwrap(),
+                vec![GridSpan::new(0, 2)],
+            )
+            .unwrap(),
+            states: vec![states],
+        };
+        let error = match StateFrameRow::from_state_series(&state, &schema, series, true) {
+            Ok(_) => panic!("a position no field carries is not a row of this export"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("aggregate state names a position with no contribution"),
+            "{error}"
+        );
+
+        // The same group with a contribution at that position is a row.
+        let series = StateSeries {
+            metric: metric(Some("m"), &[("job", "x")]),
+            time: TimeAxis::from_grid_spans(
+                schema.eval_grid.clone().unwrap(),
+                vec![GridSpan::new(0, 2)],
+            )
+            .unwrap(),
+            states: vec![values(2, 1.0)],
+        };
+        let row = StateFrameRow::from_state_series(&state, &schema, series, true)
+            .expect("a contribution at every carried position is a row");
+        assert_eq!(2, row.time().len());
+    }
+
     fn floats(n: usize, seed: f64) -> Vec<Option<Values>> {
         (0..n)
             .map(|i| {

@@ -164,6 +164,19 @@ impl SeriesCharge {
             _shared: shared,
         }
     }
+
+    /// Every reservation this charge holds, as references a publication can be cut into.
+    ///
+    /// A consumer that receives a publication and hands its parts on - a router that routes each
+    /// group to its owner - cannot keep the charge itself: the charge has to travel with the parts,
+    /// or the bytes it accounts for would be released while the parts are still held. This is the
+    /// one conversion that makes that possible from outside this type, whose fields stay private so
+    /// nothing else can drop a reservation early either.
+    pub(crate) fn into_shared(self) -> Vec<Arc<MemoryReservation>> {
+        let mut shared = self._shared;
+        shared.extend(self._owned.into_iter().map(Arc::new));
+        shared
+    }
 }
 
 /// One chunk handed over in process, and what it is charged to.
