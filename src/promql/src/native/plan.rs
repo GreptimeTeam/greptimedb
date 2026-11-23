@@ -1533,6 +1533,10 @@ fn map_writes_existing_label(
 ///   one label set once they are gone. Their presence anywhere in `node`'s output is therefore
 ///   enough to withhold the proof.
 ///
+/// A node whose own kernel answers one series per label set - a fold, a match between two vectors, a
+/// set operation, `info`, `count_values` - has already told those series apart, so a drop above it is
+/// proved whatever metrics it reads ([`answers_one_series_per_label_set`]).
+///
 /// A node whose labels already lost the name - `abs`, a name-dropping window below it - has no name
 /// of its own left to remove, and what its surviving labels tell apart is then only as good as the
 /// metrics below it: a drop that happened on the way there removed a name without asking this walk,
@@ -1572,13 +1576,61 @@ fn metadata_labels_keep_series_apart(
         return false;
     }
     if !tags.iter().any(|tag| tag == METRIC_NAME) {
-        // No name is left to lose, so what the surviving labels tell apart is decided by the sources
-        // below: every one of them reading the same single metric is what says a name dropped on the
-        // way here could not have folded two metrics together either. `abs` and a name-dropping
-        // window both drop the name without asking, so without that fact nothing below is proved.
+        // A node whose own kernel already answers one series per label set told those series apart
+        // itself, so the drop above it removes a name no two of them were told apart by: `1 - a / b`
+        // matches the two metrics and refuses two values of one field at one point, and the broadcast
+        // above that match only drops a name the match no longer carries. Nothing is collected for
+        // such a consumer, whatever metrics it reads.
+        if answers_one_series_per_label_set(node) {
+            return true;
+        }
+        // Otherwise no name is left to lose, so what the surviving labels tell apart is decided by
+        // the sources below: every one of them reading the same single metric is what says a name
+        // dropped on the way here could not have folded two metrics together either. `abs` and a
+        // name-dropping window both drop the name without asking, so without that fact nothing
+        // below is proved.
         return single_source_metric(node, source_metrics).is_some();
     }
     single_metric_name(node, source_metrics).is_some()
+}
+
+/// Whether `node` answers one series per label set by construction.
+///
+/// These are the nodes whose own kernel files or folds its rows by the label set a sample ends
+/// under, so two of the series it answers are distinct label sets whatever its inputs held: a fold
+/// answers one series per group, a match between two vectors and a set operation file their rows by
+/// the result label set and refuse two values of one field at one point, `info` merges the results
+/// that share a label set, and the functions that build one series out of many - `absent`,
+/// `count_values` and the histogram functions - answer a set of their own.
+///
+/// A metadata drop above one of them therefore cannot fold two of its series by removing the name:
+/// the identity that told them apart is the label set the kernel filed them under, and that set is
+/// what the drop is handed.
+///
+/// A [`NativeExpr::Merge`] is deliberately not one of them. It answers one series per *canonical*
+/// label set, and that set includes the name: a merge keeps `a{job="x"}` and `b{job="x"}` apart, so a
+/// drop above it that removes the name does fold those two, and it is collected
+/// (`a_merge_below_a_drop_does_not_answer_the_metadata_labels`).
+fn answers_one_series_per_label_set(node: &NativeNode) -> bool {
+    match &node.expr {
+        NativeExpr::Aggregate { .. }
+        | NativeExpr::Set { .. }
+        | NativeExpr::Info { .. }
+        | NativeExpr::ParameterizedHistogram { .. } => true,
+        // A match between two vectors is the one `Binary` shape that files its rows by the result
+        // label set; a node with a scalar on one side reaches each series of its vector side as it
+        // is, which tells nothing apart on its own.
+        NativeExpr::Binary { left, right, .. } => {
+            left.output.samples().is_some() && right.output.samples().is_some()
+        }
+        NativeExpr::Vector { op, .. } => matches!(
+            op,
+            BoundVectorOp::Absent { .. }
+                | BoundVectorOp::Histogram(_)
+                | BoundVectorOp::CountValues { .. }
+        ),
+        _ => false,
+    }
 }
 
 /// Whether a [`NativeExpr::Merge`] collects the series `node` hands over, at it or below it.

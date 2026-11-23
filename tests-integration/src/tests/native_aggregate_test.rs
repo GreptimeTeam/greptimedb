@@ -2491,9 +2491,9 @@ async fn native_aggregate_topk_over_global_partitions() {
     assert_native_schema(&native, &expression_name(&promql), &expected, &sql);
     assert_rows(&native.rows, &expected, &format!("expected `{sql}`"));
     // `topk` above a global aggregate is not split, so the scan side answers the rate it reads and
-    // the ranking runs above the merged groups. The route lays that out as a chain of fused pieces -
-    // the scan reader, the fold above it and the ranking on top - and #10412 can add the canonical
-    // merge the drop over these nullable tables pays for, which makes the chain one piece longer.
+    // the ranking runs above the merged groups. The route lays that out as fused pieces, and the
+    // metadata drop each of them performs is judged by its labels alone: nothing is collected
+    // between the fold and the ranking, so those two are one piece rather than a chain of three.
     // Each piece is classified by what it reads and by its own tree, never by a rendered plan's text
     // (that text includes the pieces below it, so an ancestor would look like the scan reader).
     let producers: Vec<_> = capture
@@ -2532,22 +2532,24 @@ async fn native_aggregate_topk_over_global_partitions() {
             && ranked_text.contains("Input: evaluated samples source=0, contiguous"),
         "the ranking reads the fold's answer whole, with nothing below it re-read:\n{ranked_text}"
     );
-    // The fold the ranking reads is the piece directly below it, and it answers every group it
-    // folded - the ranking ranks that answer whole rather than one partition's share of it.
-    let fold = ranked[0]
-        .children()
-        .into_iter()
-        .find(|child| child.downcast_ref::<FusedSeriesExec>().is_some())
-        .unwrap_or_else(|| {
-            panic!(
-                "the ranking must read the fold's piece: {}",
-                own_tree(ranked[0])
-            )
-        });
-    assert!(
-        own_tree(fold).contains("Aggregate: sum by [hostname] complete"),
-        "the fold answers the merged sources below the ranking:\n{}",
+    // The ranking ranks the fold's whole answer rather than one partition's share of it. No
+    // canonical merge sits between them - `topk` drops a label set the fold already answered one
+    // series of per group, which its labels prove - so the fold is in the ranking's own tree; when a
+    // collection does sit between two such pieces, the fold is the piece directly below instead.
+    let ranked_tree = own_tree(ranked[0]);
+    let fold_tree = if ranked_tree.contains("Aggregate: sum by [hostname] complete") {
+        ranked_tree
+    } else {
+        let fold = ranked[0]
+            .children()
+            .into_iter()
+            .find(|child| child.downcast_ref::<FusedSeriesExec>().is_some())
+            .unwrap_or_else(|| panic!("the ranking must read the fold's piece: {ranked_tree}"));
         own_tree(fold)
+    };
+    assert!(
+        fold_tree.contains("Aggregate: sum by [hostname] complete"),
+        "the fold answers the merged sources below the ranking:\n{fold_tree}"
     );
     // The cross-producer requirement lives in the deterministic fixtures instead, which pin which
     // suffixes the split accepts above the cut and which it declines
