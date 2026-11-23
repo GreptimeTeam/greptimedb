@@ -186,13 +186,27 @@ async fn test_regions_per_table_threshold() {
         candidates.len()
     );
     if let Some(table_candidates) = candidates.get(&table_id) {
-        // Should be limited to 3 regions
+        // `regions_per_table_threshold` bounds the score channel; the listing-staleness
+        // fallback appends one more slice of the same size, so 10 equally scored
+        // regions yield the top 3 by score plus the 3 most overdue of the rest.
         assert_eq!(
             table_candidates.len(),
-            3,
-            "Expected 3 candidates for table {}, got {}",
+            6,
+            "Expected 2 * regions_per_table_threshold candidates for table {}, got {}",
             table_id,
             table_candidates.len()
+        );
+
+        let mut region_ids: Vec<RegionId> = table_candidates
+            .iter()
+            .map(|candidate| candidate.region_id)
+            .collect();
+        region_ids.sort_unstable();
+        region_ids.dedup();
+        assert_eq!(
+            region_ids.len(),
+            6,
+            "a region must not be selected by both the score and the fallback channel"
         );
     } else {
         panic!("Expected table {} to have candidates", table_id);

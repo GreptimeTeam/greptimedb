@@ -361,28 +361,57 @@ async fn test_gc_candidate_regions_per_table_threshold() {
     );
 
     if let Some(table_candidates) = candidates.get(&table_id) {
-        // Should only have 3 candidates due to regions_per_table_threshold
+        // `regions_per_table_threshold` bounds the score channel only; the
+        // listing-staleness fallback appends one more slice of the same size, so a
+        // table of 10 qualified regions yields at most 2 * 3 candidates.
         assert_eq!(
             table_candidates.len(),
-            3,
-            "Expected 3 candidates for table {} due to regions_per_table_threshold, got {}",
+            6,
+            "Expected 2 * regions_per_table_threshold candidates for table {}, got {}",
             table_id,
             table_candidates.len()
         );
 
         // Verify that the top 3 scoring regions are selected
         // Regions 8, 9, 10 should have the highest scores (file_removed_cnt: 16, 18, 20)
-        // They should be returned in descending order by score
-        let expected_regions = vec![10, 9, 8];
-        let actual_regions: Vec<u32> = table_candidates
+        // They should be returned first, in descending order by score
+        let expected_top_regions = vec![10, 9, 8];
+        let actual_top_regions: Vec<u32> = table_candidates
             .iter()
+            .take(3)
             .map(|c| c.region_id.region_number())
             .collect();
 
         assert_eq!(
-            actual_regions, expected_regions,
-            "Expected regions {:?} to be selected, got {:?}",
-            expected_regions, actual_regions
+            actual_top_regions, expected_top_regions,
+            "Expected regions {:?} to be selected by score, got {:?}",
+            expected_top_regions, actual_top_regions
+        );
+
+        // The appended fallback slice holds regions outside the top 3, never a
+        // duplicate of a score-selected one. None of the regions was ever tracked as
+        // fully listed, so all of them are equally stale and the tie-break is score:
+        // ranks 7, 6, 5 are the best-scoring of the remaining 7.
+        let fallback_regions: Vec<u32> = table_candidates
+            .iter()
+            .skip(3)
+            .map(|c| c.region_id.region_number())
+            .collect();
+        assert_eq!(
+            fallback_regions,
+            vec![7, 6, 5],
+            "Expected the fallback slice to be the most overdue non-top-3 ranks, got {:?}",
+            fallback_regions
+        );
+
+        let mut unique_regions: Vec<u32> = actual_top_regions;
+        unique_regions.extend(fallback_regions);
+        unique_regions.sort_unstable();
+        unique_regions.dedup();
+        assert_eq!(
+            unique_regions.len(),
+            6,
+            "a region must not be selected by both channels"
         );
 
         // Verify they are sorted by score in descending order
@@ -478,12 +507,14 @@ fn route_leader(ctx: &MockSchedulerCtx, table_id: TableId, region_id: RegionId) 
 /// `process_datanode_gc`, receipt handling); only the stats, routes, per-region
 /// reports and the inter-tick elapsed time are injected.
 ///
-/// Currently red: the top 20 are re-selected whenever their cooldown clears, so the
-/// steady state only alternates ranks 1..=20 with ranks 21..=40 and the last ranked
-/// region never gets a dispatch, i.e. it is starved forever. The assertion below
-/// reports the never-dispatched ranks together with every round's selection.
+/// Without the listing-staleness fallback channel this scenario is red: the top 20 are
+/// re-selected whenever their cooldown clears, so the steady state only alternates
+/// ranks 1..=20 with ranks 21..=40 and rank 41 never gets a dispatch. The fallback
+/// channel of [`GcScheduler::select_gc_candidates`] appends the most overdue regions
+/// after the score-selected top-N, which is what closes the gap; the per-round checks
+/// below still pin the score channel to the exact top-N of every tick, so the fix
+/// cannot have been bought by weakening the scoring order.
 #[tokio::test]
-#[ignore = "known starvation: top-N selection without rotation leaves ranks >= 41 unselected forever"]
 async fn test_gc_candidate_selection_never_starves_ranked_regions() {
     init_default_ut_logging();
 
@@ -565,8 +596,9 @@ async fn test_gc_candidate_selection_never_starves_ranked_regions() {
         last_tracker_cleanup: Arc::new(tokio::sync::Mutex::new(Instant::now())),
     };
 
-    // Phase A re-selects the top 20, phase B shifts to ranks 21..=40; the alternation
-    // is exactly the steady state the equal cooldown/ticker period produces.
+    // Phase A re-selects the top 20 (plus the most overdue regions), phase B shifts to
+    // the ranks the cooldown left eligible; the alternation is exactly the steady state
+    // the equal cooldown/ticker period produces.
     let phases = [
         TickPhase::FirstTick,
         TickPhase::PreviousRoundFinishedLate,
@@ -575,7 +607,6 @@ async fn test_gc_candidate_selection_never_starves_ranked_regions() {
         TickPhase::PreviousGroupPastCooldown,
         TickPhase::PreviousRoundFinishedLate,
     ];
-    let capacity = CAPACITY as u32;
 
     let mut selections: Vec<(TickPhase, HashSet<RegionId>)> = Vec::with_capacity(phases.len());
     let mut previous: HashSet<RegionId> = HashSet::new();
@@ -603,11 +634,13 @@ async fn test_gc_candidate_selection_never_starves_ranked_regions() {
             .flat_map(|record| record.region_ids.iter().copied())
             .collect();
 
-        // Per-round check 1: a tick never hands out more slots than the capacity and
-        // never dispatches the same region twice within one tick.
+        // Per-round check 1: a tick never hands out more slots than the score channel
+        // (`CAPACITY`) plus the listing-staleness fallback channel (`CAPACITY` again),
+        // and never dispatches the same region twice within one tick.
         assert!(
-            dispatched.len() <= CAPACITY,
-            "round {round} ({phase:?}): dispatched {} regions with capacity {CAPACITY}",
+            dispatched.len() <= 2 * CAPACITY,
+            "round {round} ({phase:?}): dispatched {} regions with capacity {CAPACITY} plus a \
+             fallback slice of {CAPACITY}",
             dispatched.len()
         );
         assert_eq!(
@@ -666,19 +699,31 @@ async fn test_gc_candidate_selection_never_starves_ranked_regions() {
         );
 
         // Per-round check 4: the phase's own expectation, which pins down the model.
-        let expected: HashSet<RegionId> = match phase {
-            TickPhase::FirstTick | TickPhase::PreviousGroupPastCooldown => (1..=capacity)
-                .map(|rank| RegionId::new(TABLE_ID, rank))
-                .collect(),
-            TickPhase::PreviousRoundFinishedLate => (capacity + 1..=2 * capacity)
-                .map(|rank| RegionId::new(TABLE_ID, rank))
-                .collect(),
-        };
-        assert_eq!(
-            dispatched, expected,
-            "round {round} ({phase:?}): ranks are ordered by score (rank 1 = highest, \
-             all 41 ranked regions are leaders over the size threshold with a positive \
-             score), so this tick should have dispatched exactly {expected:?}"
+        // Eligibility follows the modelled clock: phase A has nothing cooling down, while
+        // phase B still has the previous round in cooldown.
+        let mut eligible: Vec<RegionId> = (1..=RANKED)
+            .map(|rank| RegionId::new(TABLE_ID, rank))
+            .filter(|region_id| match phase {
+                TickPhase::FirstTick | TickPhase::PreviousGroupPastCooldown => true,
+                TickPhase::PreviousRoundFinishedLate => !previous.contains(region_id),
+            })
+            .collect();
+        // Ranks are ordered by score (rank 1 is the highest), so the score channel of this
+        // tick is exactly the `CAPACITY` best-scoring eligible ranks.
+        eligible.sort_by_key(|region_id| region_id.region_number());
+        let score_selected: HashSet<RegionId> = eligible.iter().copied().take(CAPACITY).collect();
+        assert!(
+            dispatched.is_superset(&score_selected),
+            "round {round} ({phase:?}): the top-{CAPACITY} eligible ranks {score_selected:?} must \
+             always win their slots — the listing-staleness fallback only appends after them and \
+             never displaces a higher score — but this tick dispatched {dispatched:?}"
+        );
+        let eligible: HashSet<RegionId> = eligible.into_iter().collect();
+        assert!(
+            eligible.is_superset(&dispatched),
+            "round {round} ({phase:?}): every dispatched region must be eligible (leader, over the \
+             size threshold, positive score, not cooling down); got {:?} outside {eligible:?}",
+            dispatched.difference(&eligible).collect::<Vec<_>>()
         );
 
         previous = dispatched.clone();
@@ -722,5 +767,303 @@ async fn test_gc_candidate_selection_never_starves_ranked_regions() {
         starved_ranks.len(),
         selections.len(),
         per_round.join("\n"),
+    );
+
+    // The covered set is exactly the 41 ranked ids: no legitimate candidate is left
+    // out (the assertion above) and nothing outside the contract leaks in (the
+    // zero-score control region is checked separately just above).
+    let expected_covered: HashSet<RegionId> = (1..=RANKED)
+        .map(|rank| RegionId::new(TABLE_ID, rank))
+        .collect();
+    assert_eq!(
+        covered,
+        expected_covered,
+        "the union of {} ticks must cover exactly the {RANKED} ranked regions; per-round \
+         dispatch:\n{}",
+        selections.len(),
+        per_round.join("\n"),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// GC candidate selection: the listing-staleness fallback channel
+// ---------------------------------------------------------------------------
+
+/// The fallback channel must never displace a higher score.
+///
+/// Scenario: one very high scoring region that was *fully listed just now*, so a purely
+/// staleness-driven selector would put it last, plus 12 much lower scoring regions that
+/// have been overdue for an hour. `regions_per_table_threshold == 2` gives the score
+/// channel two slots and the fallback two more, so the fallback pool is
+/// over-subscribed. The high score region keeps its slot on every tick: the fallback
+/// only appends after the score channel and can never take a slot away from it.
+#[tokio::test]
+async fn test_gc_fallback_channel_never_preempts_top_n_score() {
+    init_default_ut_logging();
+
+    const TABLE_ID: TableId = 1;
+    /// `regions_per_table_threshold`, i.e. slots of the score channel.
+    const CAPACITY: usize = 2;
+    const OVERDUE_REGIONS: u32 = 12;
+
+    let hot_region = RegionId::new(TABLE_ID, 1);
+    let mut hot_stat = mock_region_stat(hot_region, RegionRole::Leader, TEST_REGION_SIZE_200MB, 10);
+    if let RegionManifestInfo::Mito {
+        file_removed_cnt, ..
+    } = &mut hot_stat.region_manifest
+    {
+        // score = 10 * 0.5 + 100 * 1.0 = 105.0
+        *file_removed_cnt = 100;
+    }
+
+    let mut region_stats = vec![hot_stat];
+    let mut overdue = Vec::with_capacity(OVERDUE_REGIONS as usize);
+    for rank in 2..=OVERDUE_REGIONS + 1 {
+        let region_id = RegionId::new(TABLE_ID, rank);
+        // Same sst count, no removals: an identical, much lower score of 5.0 each.
+        region_stats.push(mock_region_stat(
+            region_id,
+            RegionRole::Leader,
+            TEST_REGION_SIZE_200MB,
+            10,
+        ));
+        overdue.push(region_id);
+    }
+
+    let table_stats = HashMap::from([(TABLE_ID, region_stats)]);
+
+    let ctx = Arc::new(MockSchedulerCtx {
+        table_to_region_stats: Arc::new(Mutex::new(Some(table_stats.clone()))),
+        ..Default::default()
+    });
+
+    let config = GcSchedulerOptions {
+        regions_per_table_threshold: CAPACITY,
+        ..Default::default()
+    };
+
+    // Seeding: the high score region was fully listed *now*, every other region an hour
+    // ago. Staleness alone would therefore pick the overdue regions first.
+    let now = Instant::now();
+    let long_ago = now
+        .checked_sub(Duration::from_secs(60 * 60))
+        .expect("the test needs monotonic uptime longer than one hour");
+    let mut tracker = HashMap::new();
+    tracker.insert(
+        hot_region,
+        crate::gc::tracker::RegionGcInfo {
+            last_gc_time: long_ago,
+            last_full_listing_time: Some(now),
+        },
+    );
+    for region_id in &overdue {
+        tracker.insert(
+            *region_id,
+            crate::gc::tracker::RegionGcInfo {
+                last_gc_time: long_ago,
+                last_full_listing_time: Some(long_ago),
+            },
+        );
+    }
+
+    let scheduler = GcScheduler {
+        ctx: ctx.clone(),
+        runtime_switch_manager: crate::gc::scheduler::new_test_runtime_switch_manager(),
+        receiver: GcScheduler::channel().1,
+        config,
+        region_gc_tracker: Arc::new(tokio::sync::Mutex::new(tracker)),
+        last_tracker_cleanup: Arc::new(tokio::sync::Mutex::new(Instant::now())),
+    };
+
+    // Three consecutive ticks over the same stats and tracker: a region that wins a slot
+    // by score keeps winning it.
+    let mut first_round: Option<Vec<RegionId>> = None;
+    for round in 1..=3 {
+        let candidates = scheduler
+            .select_gc_candidates(&table_stats)
+            .await
+            .unwrap_or_else(|e| panic!("round {round}: selection failed: {e:?}"));
+        let table_candidates = candidates.get(&TABLE_ID).unwrap_or_else(|| {
+            panic!("round {round}: expected table {TABLE_ID} to have candidates")
+        });
+
+        // Score channel + fallback slice, both full: the fallback pool is not exhausted.
+        assert_eq!(
+            table_candidates.len(),
+            2 * CAPACITY,
+            "round {round}: expected the {CAPACITY} score slots plus {CAPACITY} fallback \
+             slots, got {table_candidates:?}"
+        );
+        // The high score region wins the first slot even though it is the *least* overdue.
+        assert_eq!(
+            table_candidates[0].region_id, hot_region,
+            "round {round}: the highest score must keep the first slot, got {:?}",
+            table_candidates[0].region_id
+        );
+        assert_eq!(
+            table_candidates
+                .iter()
+                .filter(|candidate| candidate.region_id == hot_region)
+                .count(),
+            1,
+            "round {round}: the fallback channel must not append a region the score channel \
+             already selected: {table_candidates:?}"
+        );
+        // Every appended fallback candidate is an overdue low score region.
+        for candidate in table_candidates.iter().skip(CAPACITY) {
+            assert!(
+                overdue.contains(&candidate.region_id),
+                "round {round}: fallback slot went to {}, expected one of the overdue regions",
+                candidate.region_id
+            );
+            assert!(
+                candidate.score < table_candidates[0].score,
+                "round {round}: a fallback candidate must not outrank the score channel"
+            );
+        }
+
+        let ids: Vec<RegionId> = table_candidates
+            .iter()
+            .map(|candidate| candidate.region_id)
+            .collect();
+        match &first_round {
+            None => first_round = Some(ids),
+            Some(expected) => assert_eq!(
+                &ids, expected,
+                "round {round}: selection is deterministic, a tick must not drop the high \
+                 score region"
+            ),
+        }
+    }
+}
+
+/// The fallback channel is subject to the same cooldown as the score channel: a region
+/// picked because its listing is overdue must not be dispatched again on the next tick
+/// while it is still cooling down.
+#[tokio::test]
+async fn test_gc_fallback_candidates_respect_cooldown() {
+    init_default_ut_logging();
+
+    const TABLE_ID: TableId = 1;
+    /// `regions_per_table_threshold`, i.e. slots of the score channel.
+    const CAPACITY: usize = 2;
+    const REGIONS: u32 = 5;
+    const ROUNDS: usize = 3;
+
+    let peer = Peer::new(1, "127.0.0.1:3001");
+
+    // Every region shares the same positive score, so the candidates beyond the score
+    // channel can only come from the staleness fallback channel.
+    let mut region_stats = Vec::with_capacity(REGIONS as usize);
+    let mut region_routes = Vec::with_capacity(REGIONS as usize);
+    let mut gc_reports = HashMap::new();
+    for rank in 1..=REGIONS {
+        let region_id = RegionId::new(TABLE_ID, rank);
+        region_stats.push(mock_region_stat(
+            region_id,
+            RegionRole::Leader,
+            TEST_REGION_SIZE_200MB,
+            10,
+        ));
+        region_routes.push((region_id, peer.clone()));
+        gc_reports.insert(region_id, new_empty_report_with([region_id]));
+    }
+
+    let ctx = Arc::new(
+        MockSchedulerCtx {
+            table_to_region_stats: Arc::new(Mutex::new(Some(HashMap::from([(
+                TABLE_ID,
+                region_stats,
+            )])))),
+            gc_reports: Arc::new(Mutex::new(gc_reports)),
+            ..Default::default()
+        }
+        .with_table_routes(HashMap::from([(TABLE_ID, (TABLE_ID, region_routes))])),
+    );
+
+    let config = GcSchedulerOptions {
+        regions_per_table_threshold: CAPACITY,
+        ..Default::default()
+    };
+
+    let scheduler = GcScheduler {
+        ctx: ctx.clone(),
+        runtime_switch_manager: crate::gc::scheduler::new_test_runtime_switch_manager(),
+        receiver: GcScheduler::channel().1,
+        config,
+        region_gc_tracker: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        last_tracker_cleanup: Arc::new(tokio::sync::Mutex::new(Instant::now())),
+    };
+
+    let all: HashSet<RegionId> = (1..=REGIONS)
+        .map(|rank| RegionId::new(TABLE_ID, rank))
+        .collect();
+    let mut previous: HashSet<RegionId> = HashSet::new();
+    let mut dispatched_per_round: Vec<HashSet<RegionId>> = Vec::with_capacity(ROUNDS);
+
+    for round in 1..=ROUNDS {
+        // Nothing is tracked on the first tick; after it, the previous round is exactly
+        // the group that is still cooling down at the next tick boundary.
+        if round > 1 {
+            model_tick_clock(&scheduler, &previous).await;
+        }
+
+        ctx.begin_dispatch_round(round);
+        scheduler
+            .handle_tick()
+            .await
+            .unwrap_or_else(|e| panic!("round {round}: gc tick failed: {e:?}"));
+
+        let records = ctx.dispatches_in_round(round);
+        let dispatched: HashSet<RegionId> = records
+            .iter()
+            .flat_map(|record| record.region_ids.iter().copied())
+            .collect();
+
+        if round == 1 {
+            // Nothing is cooling down, so both channels fill: `CAPACITY` by score plus
+            // `CAPACITY` by staleness.
+            assert_eq!(
+                dispatched.len(),
+                2 * CAPACITY,
+                "round 1: expected the {CAPACITY} score slots plus {CAPACITY} fallback \
+                 slots, got {dispatched:?}"
+            );
+        }
+        // The cooldown holds for every dispatched region, including the fallback ones: no
+        // region is dispatched twice in a row.
+        assert!(
+            dispatched.is_disjoint(&previous),
+            "round {round}: regions dispatched on the previous tick are still cooling down, but \
+             {:?} were dispatched again",
+            dispatched.intersection(&previous).collect::<Vec<_>>()
+        );
+        assert!(
+            !dispatched.is_empty(),
+            "round {round}: at least one region must be eligible"
+        );
+        assert!(
+            dispatched.len() <= 2 * CAPACITY,
+            "round {round}: dispatched {} regions with {CAPACITY} score slots plus \
+             {CAPACITY} fallback slots",
+            dispatched.len()
+        );
+        assert!(
+            all.is_superset(&dispatched),
+            "round {round}: only the table's own regions may be dispatched, got {:?}",
+            dispatched.difference(&all).collect::<Vec<_>>()
+        );
+
+        previous = dispatched.clone();
+        dispatched_per_round.push(dispatched);
+    }
+
+    // The cooldown must rotate instead of blocking: within the window every region is
+    // dispatched once.
+    let covered: HashSet<RegionId> = dispatched_per_round.iter().flatten().copied().collect();
+    assert_eq!(
+        covered, all,
+        "every region must be dispatched within {ROUNDS} ticks when the fallback channel \
+         obeys the cooldown; per-round dispatch: {dispatched_per_round:?}"
     );
 }
