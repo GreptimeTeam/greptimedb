@@ -312,6 +312,7 @@ async fn test_edit_region_schedule_compaction_with_format(
 async fn test_edit_region_fill_cache(
     #[values(false, true)] flat_format: bool,
     #[case] index_file_size: Option<u64>,
+    #[values(false, true)] ingestion: bool,
 ) {
     let mut env = TestEnv::new().await;
 
@@ -399,7 +400,28 @@ async fn test_edit_region_fill_cache(
         committed_sequence: None,
         ..Default::default()
     };
-    engine.edit_region(region.region_id, edit).await.unwrap();
+    if ingestion {
+        engine.ingest_ssts(region.region_id, edit).await.unwrap();
+    } else {
+        engine.edit_region(region.region_id, edit).await.unwrap();
+    }
+
+    if ingestion && !*super::INGEST_PRELOAD_SST_CACHE {
+        // Publication completes even though neither artifact is warmed.
+        assert!(
+            region
+                .version()
+                .ssts
+                .levels()
+                .iter()
+                .any(|level| level.files.contains_key(&file_id))
+        );
+        let cache_manager = engine.cache_manager();
+        let file_cache = cache_manager.write_cache().unwrap().file_cache();
+        assert!(!file_cache.contains_key(&IndexKey::new(region_id, file_id, FileType::Parquet)));
+        assert!(!file_cache.contains_key(&IndexKey::new(region_id, file_id, FileType::Puffin(3))));
+        return;
+    }
 
     // Asserts that the background downloading of the SST is succeeded.
     let actual = tokio::time::timeout(Duration::from_secs(9), rx)

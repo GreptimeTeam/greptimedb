@@ -108,7 +108,7 @@ mod puffin_index;
 
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, LazyLock, RwLock};
 use std::time::{Duration, Instant};
 
 use api::region::RegionResponse;
@@ -296,6 +296,31 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
         Ok(MitoEngine {
             inner: Arc::new(inner),
         })
+    }
+}
+
+const INGEST_PRELOAD_SST_CACHE_ENV: &str = "GREPTIMEDB_EXPERIMENTAL_INGEST_PRELOAD_SST_CACHE";
+
+/// PoC switch, read once on first ingestion. Cache warming never gates publication.
+static INGEST_PRELOAD_SST_CACHE: LazyLock<bool> = LazyLock::new(|| {
+    let value = std::env::var(INGEST_PRELOAD_SST_CACHE_ENV).ok();
+    let enabled = parse_ingest_preload_sst_cache(value.as_deref());
+    info!(
+        "Bulk ingestion SST cache preloading: {enabled}, configured by {INGEST_PRELOAD_SST_CACHE_ENV}"
+    );
+    enabled
+});
+
+fn parse_ingest_preload_sst_cache(value: Option<&str>) -> bool {
+    match value {
+        None | Some("true" | "1") => true,
+        Some("false" | "0") => false,
+        Some(_) => {
+            warn!(
+                "Invalid {INGEST_PRELOAD_SST_CACHE_ENV}: expected true, false, 1 or 0; preloading remains enabled"
+            );
+            true
+        }
     }
 }
 
@@ -586,7 +611,11 @@ impl MitoEngine {
         );
 
         let (tx, rx) = oneshot::channel();
-        let mut request = RegionEditRequest::new(region_id, edit, true, tx);
+        // Only external ingestion uses this switch. Imports retain their existing
+        // policy; staging publication already explicitly disables preloading.
+        let preload_sst_cache =
+            !matches!(kind, RegionEditKind::Ingest) || *INGEST_PRELOAD_SST_CACHE;
+        let mut request = RegionEditRequest::new(region_id, edit, preload_sst_cache, tx);
         request.kind = kind;
         let request = WorkerRequest::EditRegion(request);
         self.inner
@@ -2103,6 +2132,21 @@ mod tests {
 
     use super::*;
     use crate::sst::file::FileMeta;
+
+    #[test]
+    fn test_ingest_preload_sst_cache_option() {
+        for (value, expected) in [
+            (None, true),
+            (Some("true"), true),
+            (Some("1"), true),
+            (Some("false"), false),
+            (Some("0"), false),
+            (Some(""), true),
+            (Some("invalid"), true),
+        ] {
+            assert_eq!(parse_ingest_preload_sst_cache(value), expected, "{value:?}");
+        }
+    }
 
     #[test]
     fn test_manifest_region_predicates() {
