@@ -238,9 +238,10 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   region is then a writable leader, start a compaction, build missing indexes, re-issue the
   index build retries the wait refused and persist backfilled metadata. A catchup of a waiting
   region catches it up again into an unregistered replacement while the region stays registered,
-  demoted unless it is in a transient leader state. The replacement replaces it only if the replay
-  succeeds and the region took no write and made no commit meanwhile; otherwise the region keeps
-  its memtable for the next Leader lease (`catch_up_again`, `handle_caught_up_again`); the datanode
+  demoted unless it is in a transient leader state. The replacement replaces it only if the
+  replay succeeds, the region took no write and made no commit meanwhile and, for a catchup that
+  makes it writable, the replacement's catchup commit succeeds; otherwise the region keeps its
+  memtable for the next Leader lease (`catch_up_again`, `handle_caught_up_again`); the datanode
   upgrade handler sends that catchup unless `RegionEngine::is_confirmed_leader` is true, so an
   engine wrapping mito must implement that method from mito's answers (the metric engine requires
   both regions of the pair). A Follower lease that carries a `candidate_lease_id` leaves a waiting

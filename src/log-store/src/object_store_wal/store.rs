@@ -10926,9 +10926,10 @@ mod tests {
                 tokio::spawn(async move { store.handoff(&provider(one), entry_id).await })
             };
             wait_for_handoff_waiters(&store, 1).await;
-            store.seal_open_batch().await.unwrap();
+            // The hand-off's own seal created the object of the append.
             let appended = timeout(WAIT, appended).await.unwrap().unwrap().unwrap();
             assert_eq!(id(1, 1), appended.last_entry_ids[&appended_region]);
+            store.seal_open_batch().await.unwrap();
             assert_eq!(
                 bound,
                 timeout(WAIT, handoff).await.unwrap().unwrap().unwrap()

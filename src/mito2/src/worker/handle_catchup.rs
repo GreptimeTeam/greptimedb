@@ -162,8 +162,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     /// [Self::handle_caught_up_again] registers the replacement only if its replay succeeded (on
     /// a remote WAL it must reach the entries the region acknowledged), the region took no
     /// write and made no commit meanwhile and, for a catchup that makes the region writable, the
-    /// replacement committed its catchup edit. Otherwise the region keeps its memtable, so a later
-    /// Leader lease can promote it; one that waits for a reload is reloaded instead.
+    /// replacement's catchup commit succeeded (under conditional manifest publication it commits
+    /// an empty edit). Otherwise the region keeps its memtable, so a later Leader lease can promote
+    /// it; one that waits for a reload is reloaded instead.
     async fn catch_up_again(
         &mut self,
         region: MitoRegionRef,
@@ -290,7 +291,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         self.reject_region_requests_as_not_found(region_id);
         // No Leader lease promotes the registered replacement while its hook runs; the
         // promotion below ends this catchup.
-        if catchup_hook.is_some() {
+        if set_writable {
             let begun = replacement.manifest_ctx.begin_catchup(region_id);
             debug_assert_eq!(begun, Some(false));
         }

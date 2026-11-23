@@ -1001,7 +1001,7 @@ async fn test_moving_the_wal_keeps_the_history_only_with_its_objects() {
 /// one that does not make the region writable, also after a restart. A writable catchup of a
 /// region that skips the WAL hands nothing over either.
 #[tokio::test]
-async fn test_catchup_that_cannot_reach_the_reported_entry_id_hands_nothing_over() {
+async fn test_catchups_that_hand_nothing_over() {
     let mut env = TestEnv::with_prefix("object-store-wal-no-handoff").await;
     let config = ObjectStoreWalConfig {
         flush_interval: Duration::from_millis(10),

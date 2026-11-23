@@ -359,9 +359,8 @@ pub trait RegionHook: Send + Sync + Debug {
     /// Fires for: flush, compaction, region edit, copy region, alter, truncate,
     /// async index build, apply-staging promote, and a catchup that makes the
     /// region writable under conditional manifest publication (an empty
-    /// `RegionEdit`, committed while the region is still a Follower). Does
-    /// **not** fire for actions
-    /// staged in memory (enter staging, operations during staging,
+    /// `RegionEdit`, committed while the region is still a Follower). Does **not**
+    /// fire for actions staged in memory (enter staging, operations during staging,
     /// the intermediate apply-staging edit) — those are suppressed because their
     /// effects are accumulated and delivered in a single promote notification.
     ///
