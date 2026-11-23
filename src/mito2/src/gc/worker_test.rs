@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::Duration;
 
 use api::v1::Rows;
 use async_trait::async_trait;
@@ -25,15 +26,16 @@ use common_telemetry::init_default_ut_logging;
 use common_time::Timestamp;
 use futures::TryStreamExt;
 use object_store::layers::mock::{
-    Error as MockError, ErrorKind, MockLayerBuilder, Result as MockResult, oio,
+    Error as MockError, ErrorKind, MockLayer, MockLayerBuilder, OpDelete, Result as MockResult, oio,
 };
 use object_store::{Entry, ObjectStore, services};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{RegionEngine as _, RegionRole};
 use store_api::region_request::{RegionCompactRequest, RegionRequest};
-use store_api::storage::{FileId, FileRef, FileRefsManifest, IndexVersion, RegionId};
+use store_api::storage::{FileId, FileRef, FileRefsManifest, GcReport, IndexVersion, RegionId};
 
-use crate::access_layer::AccessLayerRef;
+use crate::access_layer::{AccessLayer, AccessLayerRef};
+use crate::cache::file_cache::FileType;
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::engine::compaction_test::{delete_and_flush, put_and_flush};
@@ -49,7 +51,7 @@ use crate::manifest::storage::{delta_file, gen_path};
 use crate::metrics::{GC_ERRORS_TOTAL, GC_SKIPPED_UNPARSABLE_FILES};
 use crate::region::{MitoRegionRef, RegionLeaderState};
 use crate::sst::file::{
-    ColumnIndexMetadata, FileHandle, FileMeta, FileMetaRef, IndexType, RegionIndexId,
+    ColumnIndexMetadata, FileHandle, FileMeta, FileMetaRef, IndexType, RegionFileId, RegionIndexId,
 };
 use crate::sst::location;
 use crate::test_util::{
@@ -2053,4 +2055,1932 @@ async fn test_narthex_artifact_gc_requires_age_for_every_object() {
     );
     assert!(delete.is_empty());
     assert!(deferred);
+}
+
+// ===========================================================================
+// Physical-delete oracle
+//
+// `GcReport` only says what a pass *believes* it deleted, and a
+// `RemovedFile::File(id, v)` expands into the Parquet object plus every index
+// object `0..=v` at the real delete site. These tests therefore observe the
+// real delete site: `recording_layer` wraps the object store's deleter and
+// records every path and listing a pass hands to storage, changing nothing that
+// the production filters decide. Each recorded path is then checked against an
+// expectation model written from the safety contract (in manifest / in a
+// temporary reader reference / past the lingering period / not hook protected /
+// old enough to be unknown), never from `should_delete_file` itself.
+//
+// The check is two-sided: nothing outside the expected set may be deleted, and
+// everything in it must really be gone (a pass that never deletes would
+// otherwise satisfy every safety assertion). Deletes of absent objects are
+// no-ops that the `0..=v` index fan-out produces legitimately, so they are
+// compared separately, and the model refuses to guess an age or a linger state
+// it cannot prove from the pass window.
+// ===========================================================================
+
+/// A data object GC can physically delete.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum GcObject {
+    /// Parquet SST object of one file id.
+    Sst(FileId),
+    /// Puffin index object of one file id at one metadata version.
+    Index(FileId, IndexVersion),
+}
+
+impl GcObject {
+    fn file_id(self) -> FileId {
+        match self {
+            GcObject::Sst(id) | GcObject::Index(id, _) => id,
+        }
+    }
+
+    fn describe(self) -> String {
+        match self {
+            GcObject::Sst(id) => format!("sst({id})"),
+            GcObject::Index(id, version) => format!("index({id}, v{version})"),
+        }
+    }
+}
+
+fn normalize_object_path(path: &str) -> String {
+    path.trim_start_matches('/').to_string()
+}
+
+/// Path of `object` in the region directory, as the object store reports it.
+fn object_path(object: GcObject, region_id: RegionId, layer: &AccessLayer) -> String {
+    let path = match object {
+        GcObject::Sst(id) => location::sst_file_path(
+            layer.table_dir(),
+            RegionFileId::new(region_id, id),
+            layer.path_type(),
+        ),
+        GcObject::Index(id, version) => location::index_file_path(
+            layer.table_dir(),
+            RegionIndexId::new(RegionFileId::new(region_id, id), version),
+            layer.path_type(),
+        ),
+    };
+    normalize_object_path(&path)
+}
+
+/// Classifies a path below the region directory.
+fn object_of_path(path: &str) -> Option<GcObject> {
+    let (file_id, file_type) = location::parse_file_id_type_from_path(path).ok()?;
+    Some(match file_type {
+        FileType::Parquet => GcObject::Sst(file_id),
+        FileType::Puffin(version) => GcObject::Index(file_id, version),
+    })
+}
+
+/// One `delete` call forwarded to the underlying store.
+#[derive(Clone, Debug)]
+struct DeleteRecord {
+    /// Oracle round the call happened in, or [`NO_ROUND`] outside a pass.
+    round: usize,
+    /// Deleter instance (`deleter()` call, i.e. deletion batch) the call belongs to.
+    batch: usize,
+    path: String,
+    /// `Some` when the underlying delete reported an error.
+    error: Option<String>,
+}
+
+/// One `lister()` the store handed out, with its prefix.
+#[derive(Clone, Debug)]
+struct ListRecord {
+    round: usize,
+    path: String,
+}
+
+/// Marks work that happens outside a GC pass.
+const NO_ROUND: usize = usize::MAX;
+
+/// Side-channel observation of what GC does to the object store.
+#[derive(Debug, Default)]
+struct GcDeleteLog {
+    records: Mutex<Vec<DeleteRecord>>,
+    lists: Mutex<Vec<ListRecord>>,
+    batches: AtomicUsize,
+    next_round: AtomicUsize,
+    current_round: AtomicUsize,
+}
+
+impl GcDeleteLog {
+    fn new() -> Arc<GcDeleteLog> {
+        Arc::new(GcDeleteLog {
+            current_round: AtomicUsize::new(NO_ROUND),
+            ..Default::default()
+        })
+    }
+
+    /// Opens a pass window; every delete and list until [`Self::end_round`] is
+    /// attributed to it.
+    fn begin_round(&self) -> usize {
+        let round = self.next_round.fetch_add(1, Ordering::SeqCst);
+        self.current_round.store(round, Ordering::SeqCst);
+        round
+    }
+
+    fn end_round(&self) {
+        self.current_round.store(NO_ROUND, Ordering::SeqCst);
+    }
+
+    fn batch(&self) -> usize {
+        self.batches.fetch_add(1, Ordering::SeqCst)
+    }
+
+    fn deletes(&self) -> Vec<DeleteRecord> {
+        self.records.lock().unwrap().clone()
+    }
+
+    fn lists(&self) -> Vec<ListRecord> {
+        self.lists.lock().unwrap().clone()
+    }
+}
+
+/// Forwards every delete to the wrapped deleter and records the attempt first,
+/// so a failing delete is observed too.
+struct RecordingDeleter {
+    inner: oio::Deleter,
+    batch: usize,
+    log: Arc<GcDeleteLog>,
+}
+
+impl oio::Delete for RecordingDeleter {
+    async fn delete(&mut self, path: &str, args: OpDelete) -> MockResult<()> {
+        let result = self.inner.delete(path, args).await;
+        self.log.records.lock().unwrap().push(DeleteRecord {
+            round: self.log.current_round.load(Ordering::SeqCst),
+            batch: self.batch,
+            path: normalize_object_path(path),
+            error: result.as_ref().err().map(|err| err.to_string()),
+        });
+        result
+    }
+
+    async fn close(&mut self) -> MockResult<()> {
+        self.inner.close().await
+    }
+}
+
+/// Faults the oracle can arm on [`recording_layer`].
+#[derive(Debug, Default)]
+struct LayerFaults {
+    /// Fails every list of the manifest directory, so `has_update()` errors.
+    fail_manifest_lists: AtomicBool,
+}
+
+/// Object store layer that records deletes and listings and forwards everything.
+fn recording_layer(log: Arc<GcDeleteLog>, faults: Arc<LayerFaults>) -> MockLayer {
+    let list_log = log.clone();
+    MockLayerBuilder::default()
+        .deleter_factory(Arc::new(move |inner| {
+            Box::new(RecordingDeleter {
+                inner,
+                batch: log.batch(),
+                log: log.clone(),
+            }) as oio::Deleter
+        }))
+        .lister_factory(Arc::new(move |path, _args, inner| {
+            list_log.lists.lock().unwrap().push(ListRecord {
+                round: list_log.current_round.load(Ordering::SeqCst),
+                path: normalize_object_path(path),
+            });
+            if faults.fail_manifest_lists.load(Ordering::SeqCst) && path.contains("/manifest/") {
+                Box::new(FailingLister)
+            } else {
+                inner
+            }
+        }))
+        .build()
+        .unwrap()
+}
+
+/// Region hook used by the oracle. It reports a fixed protection set (so the
+/// model knows what "hook protected" means in each pass) and can block inside
+/// the protection lookup, which lets a publication race the pass.
+#[derive(Debug, Default)]
+struct OracleHook {
+    protected: RwLock<HashSet<FileId>>,
+    /// When set, the next protection lookup blocks until `resume`.
+    block_next: AtomicBool,
+    entered: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+}
+
+impl OracleHook {
+    fn protect(&self, ids: impl IntoIterator<Item = FileId>) {
+        *self.protected.write().unwrap() = ids.into_iter().collect();
+    }
+
+    fn protected_ids(&self) -> HashSet<FileId> {
+        self.protected.read().unwrap().clone()
+    }
+
+    fn block_next_lookup(&self) {
+        self.block_next.store(true, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl RegionHook for OracleHook {
+    async fn protected_sst_files(
+        &self,
+        _access: &AccessLayer,
+        files: &[RegionFileId],
+    ) -> crate::error::Result<HashSet<RegionFileId>> {
+        if self.block_next.swap(false, Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.resume.notified().await;
+        }
+        let protected = self.protected.read().unwrap();
+        Ok(files
+            .iter()
+            .copied()
+            .filter(|file| protected.contains(&file.file_id()))
+            .collect())
+    }
+}
+
+/// "Long enough that nothing the test just wrote can be old": every record and
+/// every object written by the test is young under this setting.
+const YOUNG_LINGER: Option<Duration> = Some(Duration::from_secs(3600));
+/// `lingering_time = None`: no known record waits.
+const NO_KNOWN_WAIT: Option<Duration> = None;
+/// Every object written by the test is younger than this.
+const YOUNG_UNKNOWN_LINGER: Duration = Duration::from_secs(3600);
+/// No grace for unknown objects; the oracle waits until each object is strictly
+/// older than the pass start, so "old enough" is a fact rather than a guess.
+const MATURE_UNKNOWN_LINGER: Duration = Duration::ZERO;
+
+/// Knobs of one GC pass.
+#[derive(Clone, Copy, Debug)]
+struct RoundKnobs {
+    full_listing: bool,
+    linger: Option<Duration>,
+    unknown_linger: Duration,
+}
+
+impl RoundKnobs {
+    const fn fast(linger: Option<Duration>, unknown_linger: Duration) -> Self {
+        Self {
+            full_listing: false,
+            linger,
+            unknown_linger,
+        }
+    }
+
+    const fn full(linger: Option<Duration>, unknown_linger: Duration) -> Self {
+        Self {
+            full_listing: true,
+            linger,
+            unknown_linger,
+        }
+    }
+
+    fn gc_config(self) -> GcConfig {
+        GcConfig {
+            enable: true,
+            lingering_time: self.linger,
+            unknown_file_lingering_time: self.unknown_linger,
+            ..Default::default()
+        }
+    }
+}
+
+/// Wiring of one pass beyond the GC knobs.
+#[derive(Clone, Copy, Debug, Default)]
+struct PassWiring {
+    /// Hand the worker no manifest version for the region: the entry check must
+    /// skip the region.
+    omit_manifest_version: bool,
+}
+
+impl PassWiring {
+    const fn mismatched_version() -> Self {
+        Self {
+            omit_manifest_version: true,
+        }
+    }
+}
+
+/// What one pass must do.
+#[derive(Clone, Copy, Debug)]
+struct PassExpectation {
+    /// The pass runs to completion and deletes exactly the oracle's candidates.
+    complete: bool,
+    /// The region is routed to a retry.
+    needs_retry: bool,
+    /// The pass must really delete something. Only valid together with
+    /// `complete`: it is the positive control that keeps a completed pass from
+    /// passing the exactness check with an empty expectation by doing nothing.
+    must_delete: bool,
+}
+
+impl PassExpectation {
+    const fn complete() -> Self {
+        Self {
+            complete: true,
+            needs_retry: false,
+            must_delete: false,
+        }
+    }
+
+    /// A pass that runs to completion and is required to physically delete the
+    /// objects the oracle expects.
+    const fn complete_deleting() -> Self {
+        Self {
+            complete: true,
+            needs_retry: false,
+            must_delete: true,
+        }
+    }
+
+    const fn skipped() -> Self {
+        Self {
+            complete: false,
+            needs_retry: false,
+            must_delete: false,
+        }
+    }
+
+    const fn retracted() -> Self {
+        Self {
+            complete: false,
+            needs_retry: true,
+            must_delete: false,
+        }
+    }
+}
+
+/// What one pass did to the region's data objects, as observed at the delete
+/// site and in the `GcReport` it returned.
+#[derive(Clone, Debug, Default)]
+struct PassFacts {
+    /// Existing objects the oracle expected the pass to delete.
+    expected: BTreeSet<GcObject>,
+    /// Objects the pass really deleted (all of them existed).
+    actual: BTreeSet<GcObject>,
+    /// Objects the pass asked storage to delete although no such object existed.
+    /// These are legitimate no-ops of the `0..=v` index fan-out: never a safety
+    /// violation, and never a deletion either.
+    phantom: BTreeSet<GcObject>,
+    /// `GcReport::deleted_files` for the region.
+    reported_files: BTreeSet<FileId>,
+    /// `GcReport::deleted_indexes` for the region. Lossy by design, see
+    /// `test_gc_physical_delete_oracle_index_fanout`.
+    reported_indexes: BTreeSet<(FileId, IndexVersion)>,
+}
+
+/// The oracle's verdict for one object in one pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Verdict {
+    /// The pass may physically delete the object.
+    Delete,
+    /// The pass must keep the object, for the quoted reason.
+    Keep(&'static str),
+}
+
+/// Every protection surface one pass may consult, observed right before it.
+struct PassInput {
+    knobs: RoundKnobs,
+    /// Wall clock captured before the pass.
+    started_at_ms: i64,
+    /// Wall clock captured after the pass.
+    finished_at_ms: i64,
+    /// Manifest SST id -> index version its metadata records.
+    manifest_index: BTreeMap<FileId, Option<IndexVersion>>,
+    /// `removed_files` records as `(removed_at, members)`.
+    removed: Vec<(i64, HashSet<RemovedFile>)>,
+    /// Temporary reader references handed to the pass.
+    tmp_refs: HashSet<(FileId, Option<IndexVersion>)>,
+    /// File ids the hook reported as protected.
+    hook_protected: HashSet<FileId>,
+    /// Objects present in the region directory, with their modification time.
+    listed: BTreeMap<GcObject, Option<i64>>,
+}
+
+impl PassInput {
+    /// Whether a record at `removed_at` has certainly passed the lingering
+    /// period, or certainly not. A record that could go either way would make
+    /// the expectation a guess, so the oracle refuses to run instead.
+    fn record_expired(&self, removed_at: i64) -> bool {
+        let Some(linger) = self.knobs.linger else {
+            // `lingering_time = None` waits for no known record.
+            return true;
+        };
+        let linger = linger.as_millis() as i64;
+        let expired = removed_at < self.started_at_ms - linger;
+        let young = removed_at >= self.finished_at_ms - linger;
+        assert!(
+            expired || young,
+            "ambiguous linger: record removed_at={removed_at} linger={linger}ms, pass window [{}, {}]",
+            self.started_at_ms,
+            self.finished_at_ms
+        );
+        expired
+    }
+
+    /// Whether an unknown object is certainly older than the unknown-file
+    /// cutoff. Same rule as [`Self::record_expired`]: no guessing.
+    fn object_expired(&self, mtime: Option<i64>) -> bool {
+        let linger = self.knobs.unknown_linger.as_millis() as i64;
+        // A missing modification time can never be proven old.
+        let Some(mtime) = mtime else {
+            return false;
+        };
+        let expired = mtime < self.started_at_ms - linger;
+        let young = mtime >= self.finished_at_ms - linger;
+        assert!(
+            expired || young,
+            "ambiguous object age: mtime={mtime} linger={linger}ms, pass window [{}, {}]",
+            self.started_at_ms,
+            self.finished_at_ms
+        );
+        expired
+    }
+
+    /// Whether any record covers the object, and whether one of those records
+    /// has passed its lingering period. Parquet objects are tracked per file id
+    /// (an outdated index record also makes the id tracked), Puffin objects per
+    /// exact `(file id, version)`; this mirrors the `is_linger`/`is_eligible`
+    /// lookups of `filter_deletable_files` and of the fast-mode `in_use` check.
+    fn known_and_expired(&self, object: GcObject) -> (bool, bool) {
+        let mut known = false;
+        let mut expired = false;
+        for (removed_at, files) in &self.removed {
+            let hit = match object {
+                GcObject::Sst(id) => files.iter().any(|file| file.file_id() == id),
+                GcObject::Index(id, version) => files.contains(&RemovedFile::Index(id, version)),
+            };
+            if hit {
+                known = true;
+                expired |= self.record_expired(*removed_at);
+            }
+        }
+        (known, expired)
+    }
+
+    /// The safety contract: may this pass delete `object`?
+    fn verdict(&self, object: GcObject) -> Verdict {
+        if let Some(recorded) = self.manifest_index.get(&object.file_id()) {
+            let protected = match object {
+                GcObject::Sst(_) => true,
+                GcObject::Index(_, version) => *recorded == Some(version),
+            };
+            if protected {
+                return Verdict::Keep("in manifest");
+            }
+        }
+        let referenced = match object {
+            GcObject::Sst(id) => self.tmp_refs.iter().any(|(tmp_id, _)| *tmp_id == id),
+            GcObject::Index(id, version) => self.tmp_refs.contains(&(id, Some(version))),
+        };
+        if referenced {
+            return Verdict::Keep("temporary reader reference");
+        }
+        if self.hook_protected.contains(&object.file_id()) {
+            return Verdict::Keep("hook protection");
+        }
+        let (known, expired) = self.known_and_expired(object);
+        if known {
+            return if expired {
+                Verdict::Delete
+            } else {
+                Verdict::Keep("still lingering")
+            };
+        }
+        if !self.knobs.full_listing {
+            return Verdict::Keep("a fast pass only deletes tracked files");
+        }
+        let mtime = *self.listed.get(&object).unwrap_or_else(|| {
+            panic!(
+                "object {} is not listed, the oracle cannot judge its age",
+                object.describe()
+            )
+        });
+        if self.object_expired(mtime) {
+            Verdict::Delete
+        } else {
+            Verdict::Keep("young unknown object")
+        }
+    }
+
+    /// The `RemovedFile`s the pass is expected to hand to the physical deleter.
+    fn candidates(&self) -> Vec<RemovedFile> {
+        let mut candidates = Vec::new();
+        if self.knobs.full_listing {
+            for object in self.listed.keys() {
+                if self.verdict(*object) == Verdict::Delete {
+                    candidates.push(match *object {
+                        GcObject::Sst(id) => RemovedFile::File(id, None),
+                        GcObject::Index(id, version) => RemovedFile::Index(id, version),
+                    });
+                }
+            }
+        } else {
+            for (removed_at, files) in &self.removed {
+                if !self.record_expired(*removed_at) {
+                    continue;
+                }
+                for file in files {
+                    let object = match file {
+                        RemovedFile::Narthex(id) | RemovedFile::File(id, _) => GcObject::Sst(*id),
+                        RemovedFile::Index(id, version) => GcObject::Index(*id, *version),
+                    };
+                    if self.verdict(object) == Verdict::Delete {
+                        candidates.push(file.clone());
+                    }
+                }
+            }
+        }
+        candidates
+    }
+}
+
+/// Model of the physical deletion expansion: deleting an SST also deletes every
+/// index object up to the version recorded with the removal (`None` = version 0).
+fn expand_candidates(
+    candidates: &[RemovedFile],
+    region_id: RegionId,
+    layer: &AccessLayer,
+) -> BTreeSet<String> {
+    let mut paths = BTreeSet::new();
+    for candidate in candidates {
+        match candidate {
+            RemovedFile::Narthex(id) => {
+                paths.insert(normalize_object_path(&location::narthex_file_dir(
+                    &layer.build_region_dir(region_id),
+                    *id,
+                )));
+            }
+            RemovedFile::File(id, version) => {
+                paths.insert(object_path(GcObject::Sst(*id), region_id, layer));
+                for index_version in 0..=version.unwrap_or(0) {
+                    paths.insert(object_path(
+                        GcObject::Index(*id, index_version),
+                        region_id,
+                        layer,
+                    ));
+                }
+            }
+            RemovedFile::Index(id, version) => {
+                paths.insert(object_path(
+                    GcObject::Index(*id, *version),
+                    region_id,
+                    layer,
+                ));
+            }
+        }
+    }
+    paths
+}
+
+/// Model of what a pass reports through `GcReport`, derived from the candidates
+/// rather than from the report itself.
+fn report_view(candidates: &[RemovedFile]) -> (BTreeSet<FileId>, BTreeSet<(FileId, IndexVersion)>) {
+    let mut files = BTreeSet::new();
+    let mut indexes = BTreeSet::new();
+    for candidate in candidates {
+        if let RemovedFile::Narthex(id) | RemovedFile::File(id, _) = candidate {
+            files.insert(*id);
+        }
+        if let Some(version) = candidate.index_version() {
+            indexes.insert((candidate.file_id(), version));
+        }
+    }
+    (files, indexes)
+}
+
+/// One scenario's region, its model inventory and the recorder of what GC
+/// physically did to it.
+struct GcOracle {
+    _env: TestEnv,
+    engine: MitoEngine,
+    region: MitoRegionRef,
+    region_id: RegionId,
+    hook: Arc<OracleHook>,
+    faults: Arc<LayerFaults>,
+    log: Arc<GcDeleteLog>,
+    /// Objects the oracle believes exist in the region directory.
+    inventory: BTreeSet<GcObject>,
+    /// Temporary reader references the next pass is handed.
+    tmp_refs: HashSet<(FileId, Option<IndexVersion>)>,
+    /// Objects deleted by any pass so far.
+    deleted_ever: BTreeSet<GcObject>,
+    /// Facts of the pass that ran last, for tests that pin one pass closely.
+    last_pass: Option<PassFacts>,
+    /// Scenario name and seed, so a failure is replayable.
+    scenario: String,
+    seed: u64,
+    /// Operations applied so far, for failure messages.
+    history: Vec<String>,
+}
+
+impl GcOracle {
+    async fn new(scenario: &str, seed: u64) -> Self {
+        let log = GcDeleteLog::new();
+        let faults = Arc::new(LayerFaults::default());
+        let hook = Arc::new(OracleHook::default());
+        let mut env = TestEnv::new()
+            .await
+            .with_mock_layer(recording_layer(log.clone(), faults.clone()));
+        let engine = env
+            .create_engine_with_plugins(
+                MitoConfig {
+                    // No background compaction: this oracle only observes GC.
+                    schedule_compaction_after_edit: false,
+                    // `enable` keeps `removed_files` records in the manifest.
+                    gc: GcConfig {
+                        enable: true,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                Plugins::new(),
+            )
+            .await;
+        let region_id = RegionId::new(1, 1);
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Create(CreateRequestBuilder::new().build()),
+            )
+            .await
+            .unwrap();
+        let region = engine.get_region(region_id).unwrap();
+        engine
+            .set_region_role(region_id, RegionRole::Leader)
+            .unwrap();
+        let oracle = GcOracle {
+            _env: env,
+            engine,
+            region,
+            region_id,
+            hook,
+            faults,
+            log,
+            inventory: BTreeSet::new(),
+            tmp_refs: HashSet::new(),
+            deleted_ever: BTreeSet::new(),
+            last_pass: None,
+            scenario: scenario.to_string(),
+            seed,
+            history: Vec::new(),
+        };
+        oracle.verify_step("after create").await;
+        oracle
+    }
+
+    fn access_layer(&self) -> &AccessLayer {
+        &self.region.access_layer
+    }
+
+    fn context(&self) -> String {
+        format!(
+            "[{} seed=0x{:X}] operations: {}",
+            self.scenario,
+            self.seed,
+            self.history.join(" -> ")
+        )
+    }
+
+    /// Prefix of this region's data directory.
+    fn data_prefix(&self) -> String {
+        normalize_object_path(&self.access_layer().build_region_dir(self.region_id))
+    }
+
+    /// Whether the path is one of the region's data objects (the region manifest
+    /// lives inside the region directory, so it is excluded).
+    fn is_data_path(&self, path: &str) -> bool {
+        let path = normalize_object_path(path);
+        let region_dir = self.data_prefix().trim_end_matches('/').to_string();
+        if path.contains("/manifest") {
+            return false;
+        }
+        path == region_dir || path.starts_with(&format!("{region_dir}/"))
+    }
+
+    /// Objects present in the region directory, with their modification time.
+    async fn list_objects(&self) -> BTreeMap<GcObject, Option<i64>> {
+        let entries: Vec<Entry> = self
+            .access_layer()
+            .object_store()
+            .lister_with(&self.data_prefix())
+            .recursive(true)
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        let mut objects = BTreeMap::new();
+        for entry in entries {
+            // The listing also yields directories and the region manifest.
+            if entry.metadata().is_dir() || !self.is_data_path(entry.path()) {
+                continue;
+            }
+            let Some(object) = object_of_path(entry.path()) else {
+                continue;
+            };
+            objects.insert(
+                object,
+                entry
+                    .metadata()
+                    .last_modified()
+                    .map(|ts| ts.into_inner().as_millisecond()),
+            );
+        }
+        objects
+    }
+
+    fn inventory(&self) -> &BTreeSet<GcObject> {
+        &self.inventory
+    }
+
+    fn deleted_ever(&self) -> &BTreeSet<GcObject> {
+        &self.deleted_ever
+    }
+
+    /// What the pass that ran last did, as observed at the delete site.
+    fn last_pass(&self) -> &PassFacts {
+        self.last_pass
+            .as_ref()
+            .expect("no pass ran before its facts were inspected")
+    }
+
+    /// Checks the whole inventory after every operation: the object set the
+    /// oracle believes in must be exactly the object set storage holds, and no
+    /// pass may have deleted anything outside a GC pass.
+    async fn verify_step(&self, context: &str) {
+        let outside: Vec<String> = self
+            .log
+            .deletes()
+            .into_iter()
+            .filter(|record| record.round == NO_ROUND && self.is_data_path(&record.path))
+            .map(|record| record.path)
+            .collect();
+        assert!(
+            outside.is_empty(),
+            "{}: data objects were deleted outside a GC pass {context}: {outside:?}",
+            self.context()
+        );
+        let listed: BTreeSet<GcObject> = self.list_objects().await.into_keys().collect();
+        assert_eq!(
+            self.inventory,
+            listed,
+            "{}: model inventory differs from storage {context}",
+            self.context()
+        );
+    }
+
+    async fn write_object(&mut self, object: GcObject) {
+        let path = object_path(object, self.region_id, self.access_layer());
+        self.access_layer()
+            .object_store()
+            .write(&path, b"oracle object".as_slice())
+            .await
+            .unwrap();
+        self.history.push(format!("write {}", object.describe()));
+        assert!(
+            self.inventory.insert(object),
+            "{}: duplicate write of {}",
+            self.context(),
+            object.describe()
+        );
+        self.verify_step("after write").await;
+    }
+
+    fn file_meta(&self, id: FileId, index_version: Option<IndexVersion>) -> FileMeta {
+        let mut meta = FileMeta {
+            region_id: self.region_id,
+            file_id: id,
+            ..Default::default()
+        };
+        if let Some(version) = index_version {
+            meta.available_indexes = smallvec::smallvec![IndexType::InvertedIndex];
+            meta.index_version = version;
+        }
+        meta
+    }
+
+    async fn publish_edit(&mut self, edit: RegionEdit, label: String) {
+        self.engine.edit_region(self.region_id, edit).await.unwrap();
+        self.history.push(label);
+        self.verify_step("after manifest edit").await;
+    }
+
+    /// Adds `id` to the manifest with an optional index version (which also
+    /// exercises index-version replacement when the file was already there).
+    async fn publish_add(&mut self, id: FileId, index_version: Option<IndexVersion>) {
+        let meta = self.file_meta(id, index_version);
+        self.publish_edit(
+            RegionEdit {
+                files_to_add: vec![meta],
+                ..Default::default()
+            },
+            format!("publish-add({id}, {index_version:?})"),
+        )
+        .await;
+    }
+
+    /// Removes `id` from the manifest, recording an expel time. `None` uses the
+    /// wall clock (a young record); `Some(0)` is long past any linger period.
+    async fn publish_remove(
+        &mut self,
+        id: FileId,
+        index_version: Option<IndexVersion>,
+        removed_at: Option<i64>,
+    ) {
+        let meta = self.file_meta(id, index_version);
+        self.publish_edit(
+            RegionEdit {
+                files_to_remove: vec![meta],
+                timestamp_ms: removed_at,
+                ..Default::default()
+            },
+            format!("publish-remove({id}, {index_version:?}, at={removed_at:?})"),
+        )
+        .await;
+    }
+
+    fn set_tmp_refs(&mut self, refs: impl IntoIterator<Item = (FileId, Option<IndexVersion>)>) {
+        self.tmp_refs = refs.into_iter().collect();
+        let mut refs = self.tmp_refs.iter().copied().collect::<Vec<_>>();
+        refs.sort_unstable();
+        self.history.push(format!("tmp-refs {refs:?}"));
+    }
+
+    fn set_hook_protected(&mut self, ids: impl IntoIterator<Item = FileId>) {
+        let ids = ids.into_iter().collect::<BTreeSet<_>>();
+        self.hook.protect(ids.iter().copied());
+        self.history.push(format!("hook-protects {ids:?}"));
+    }
+
+    async fn arm_pending_tails(&mut self) {
+        set_pending_tails(&self.engine, self.region_id, vec![tail(1, 0, 1)]).await;
+        self.history.push("arm pending tails".to_string());
+    }
+
+    async fn clear_pending_tails(&mut self) {
+        set_pending_tails(&self.engine, self.region_id, vec![]).await;
+        self.history.push("clear pending tails".to_string());
+    }
+
+    /// Writes a delta of a version the worker does not know about, which the
+    /// entry check must see as a newer manifest.
+    async fn arm_newer_manifest(&mut self) -> String {
+        let store = {
+            let manager = self.region.manifest_ctx.manifest_manager.read().await;
+            manager.store()
+        };
+        let version = self.region.manifest_ctx.manifest_version().await;
+        let path = gen_path(
+            store.manifest_dir(),
+            &delta_file(version + 1),
+            CompressionType::Uncompressed,
+        );
+        self.access_layer()
+            .object_store()
+            .write(&path, b"".as_slice())
+            .await
+            .unwrap();
+        self.history
+            .push(format!("arm newer manifest v{}", version + 1));
+        normalize_object_path(&path)
+    }
+
+    async fn clear_newer_manifest(&mut self, path: &str) {
+        self.access_layer()
+            .object_store()
+            .delete(path)
+            .await
+            .unwrap();
+        self.history.push("clear newer manifest".to_string());
+    }
+
+    fn arm_manifest_list_failure(&mut self) {
+        self.faults
+            .fail_manifest_lists
+            .store(true, Ordering::SeqCst);
+        self.history.push("arm manifest list failure".to_string());
+    }
+
+    fn clear_manifest_list_failure(&mut self) {
+        self.faults
+            .fail_manifest_lists
+            .store(false, Ordering::SeqCst);
+        self.history.push("clear manifest list failure".to_string());
+    }
+
+    /// Waits until every object in the region is strictly older than the wall
+    /// clock, so a pass with no unknown-file grace period provably sees them as
+    /// mature instead of relying on timing luck.
+    async fn wait_until_mature(&self) {
+        loop {
+            let newest = self
+                .list_objects()
+                .await
+                .values()
+                .filter_map(|mtime| *mtime)
+                .max();
+            match newest {
+                Some(newest) if newest < chrono::Utc::now().timestamp_millis() => return,
+                Some(_) => tokio::time::sleep(Duration::from_millis(1)).await,
+                None => return,
+            }
+        }
+    }
+
+    async fn build_worker(
+        &self,
+        knobs: RoundKnobs,
+        wiring: PassWiring,
+        manifest_version: u64,
+    ) -> LocalGcWorker {
+        let mut file_ref_manifest = FileRefsManifest {
+            file_refs: HashMap::new(),
+            manifest_version: HashMap::new(),
+            cross_region_refs: HashMap::new(),
+        };
+        if !self.tmp_refs.is_empty() {
+            file_ref_manifest.file_refs.insert(
+                self.region_id,
+                self.tmp_refs
+                    .iter()
+                    .map(|(id, version)| FileRef::new(self.region_id, *id, *version))
+                    .collect(),
+            );
+        }
+        if !wiring.omit_manifest_version {
+            file_ref_manifest
+                .manifest_version
+                .insert(self.region_id, manifest_version);
+        }
+        LocalGcWorker::try_new(
+            self.region.access_layer.clone(),
+            Some(self.engine.cache_manager()),
+            BTreeMap::from([(self.region_id, Some(self.region.clone()))]),
+            knobs.gc_config(),
+            file_ref_manifest,
+            &self.engine.gc_limiter(),
+            knobs.full_listing,
+            Some(self.hook.clone() as RegionHookRef),
+        )
+        .await
+        .unwrap()
+    }
+
+    /// Runs one pass and checks it against the oracle at the real delete site.
+    async fn run_pass(
+        &mut self,
+        knobs: RoundKnobs,
+        wiring: PassWiring,
+        expectation: PassExpectation,
+        what: &str,
+    ) -> GcReport {
+        if knobs.unknown_linger == MATURE_UNKNOWN_LINGER {
+            self.wait_until_mature().await;
+        }
+        // Observe every input the pass will consult, before it runs.
+        let manifest = self.region.manifest_ctx.manifest().await;
+        let manifest_index: BTreeMap<FileId, Option<IndexVersion>> = manifest
+            .files
+            .iter()
+            .map(|(id, meta)| (*id, meta.index_version()))
+            .collect();
+        let removed: Vec<(i64, HashSet<RemovedFile>)> = manifest
+            .removed_files
+            .removed_files
+            .iter()
+            .map(|record| (record.removed_at, record.files.clone()))
+            .collect();
+        let manifest_version = manifest.manifest_version;
+        let hook_protected = self.hook.protected_ids();
+        let tmp_refs = self.tmp_refs.clone();
+        let listed = self.list_objects().await;
+
+        let started_at_ms = chrono::Utc::now().timestamp_millis();
+        let round = self.log.begin_round();
+        let result = {
+            let worker = self.build_worker(knobs, wiring, manifest_version).await;
+            worker.run().await
+        };
+        let finished_at_ms = chrono::Utc::now().timestamp_millis();
+        self.log.end_round();
+        let report =
+            result.unwrap_or_else(|err| panic!("{}: pass `{what}` failed: {err}", self.context()));
+        let input = PassInput {
+            knobs,
+            started_at_ms,
+            finished_at_ms,
+            manifest_index,
+            removed,
+            tmp_refs,
+            hook_protected,
+            listed,
+        };
+        let candidates = input.candidates();
+        let raw_expected = expand_candidates(&candidates, self.region_id, self.access_layer());
+        // `RemovedFile::File(id, v)` fans out into every index version `0..=v`,
+        // so a pass may hand the store a path for an object that never existed
+        // (a delete of an absent key is a no-op). The oracle compares only
+        // objects that really exist and checks the no-op attempts separately.
+        let existing_paths: BTreeSet<String> = input
+            .listed
+            .keys()
+            .map(|object| object_path(*object, self.region_id, self.access_layer()))
+            .collect();
+        let expected_paths: BTreeSet<String> = if expectation.complete {
+            raw_expected
+                .intersection(&existing_paths)
+                .cloned()
+                .collect()
+        } else {
+            BTreeSet::new()
+        };
+        let records = self.log.deletes();
+        let in_round = |record: &DeleteRecord| record.round == round;
+        let deleted_paths: BTreeSet<String> = records
+            .iter()
+            .filter(|record| in_round(record) && self.is_data_path(&record.path))
+            .map(|record| record.path.clone())
+            .collect();
+        let actual_paths: BTreeSet<String> = deleted_paths
+            .intersection(&existing_paths)
+            .cloned()
+            .collect();
+        let phantom_deletes: BTreeSet<String> =
+            deleted_paths.difference(&existing_paths).cloned().collect();
+        let failed_deletes: Vec<(String, Option<String>)> = records
+            .iter()
+            .filter(|record| in_round(record) && self.is_data_path(&record.path))
+            .filter(|record| record.error.is_some())
+            .map(|record| (record.path.clone(), record.error.clone()))
+            .collect();
+        let listed_round: Vec<String> = self
+            .log
+            .lists()
+            .into_iter()
+            .filter(|list| list.round == round && self.is_data_path(&list.path))
+            .map(|list| list.path)
+            .collect();
+
+        // S1: everything that was physically deleted in this pass must be free of
+        // every protection at the moment of the pass.
+        let mut unsafe_deletes = Vec::new();
+        for path in &actual_paths {
+            if expected_paths.contains(path) {
+                // The model itself approved this object; the two-sided set check
+                // below still holds it to exactly the expected deletion.
+                continue;
+            }
+            let object = object_of_path(path).unwrap_or_else(|| {
+                panic!(
+                    "{}: pass `{what}` deleted an object the oracle cannot identify: {path}",
+                    self.context()
+                )
+            });
+            if let Verdict::Keep(reason) = input.verdict(object) {
+                unsafe_deletes.push(format!(
+                    "{} ({path}) was physically deleted but must be kept: {reason}",
+                    object.describe()
+                ));
+            }
+        }
+        assert!(
+            unsafe_deletes.is_empty(),
+            "{}: pass `{what}` violated the delete safety contract:\n  {}\n",
+            self.context(),
+            unsafe_deletes.join("\n  ")
+        );
+        assert!(
+            failed_deletes.is_empty(),
+            "{}: pass `{what}` failed to delete data objects: {failed_deletes:?}",
+            self.context(),
+        );
+        // A pass hands the store at most three deleters for the region's data
+        // objects: the SSTs of the removed files, the index versions of their
+        // `0..=v` fan-out, and the explicitly recorded index removals. A batch
+        // per object would grow this count with the inventory.
+        let batches: BTreeSet<usize> = records
+            .iter()
+            .filter(|record| in_round(record) && self.is_data_path(&record.path))
+            .map(|record| record.batch)
+            .collect();
+        assert!(
+            batches.len() <= 3,
+            "{}: pass `{what}` used {} delete batches ({batches:?}) for the region's data objects",
+            self.context(),
+            batches.len()
+        );
+        // Two-sided check: no object may be deleted unexpectedly, and every
+        // candidate the oracle expects must really be gone. Without the second
+        // half a "never delete anything" implementation would pass every safety
+        // assertion above.
+        assert_eq!(
+            actual_paths,
+            expected_paths,
+            "{}: pass `{what}` physical delete set mismatch\n  deleted but not expected: {:?}\n  expected but not deleted: {:?}\n",
+            self.context(),
+            actual_paths.difference(&expected_paths).collect::<Vec<_>>(),
+            expected_paths.difference(&actual_paths).collect::<Vec<_>>(),
+        );
+        // Deletes of absent objects are no-ops, but a pass that withholds work
+        // must not issue any of them either.
+        assert!(
+            expectation.complete || phantom_deletes.is_empty(),
+            "{}: pass `{what}` issued deletes for absent objects although it must withhold work: {phantom_deletes:?}",
+            self.context(),
+        );
+        // A complete pass may only issue a no-op delete for an object that its
+        // own `0..=v` expansion names: deleting an absent key outside the
+        // expectation is as unmodelled as deleting a real one.
+        let absent_expected: BTreeSet<String> =
+            raw_expected.difference(&existing_paths).cloned().collect();
+        if expectation.complete {
+            assert!(
+                phantom_deletes.is_subset(&absent_expected),
+                "{}: pass `{what}` deleted objects that neither exist nor appear in the expected `0..=v` expansion: {:?}",
+                self.context(),
+                phantom_deletes
+                    .difference(&absent_expected)
+                    .collect::<Vec<_>>(),
+            );
+        }
+        // Positive control for the exactness check above: a completed pass that
+        // is required to delete must have something to delete and must really
+        // delete it, otherwise an expectation that came out empty would let a
+        // pass that does nothing at all through.
+        if expectation.must_delete {
+            assert!(
+                expectation.complete && !expectation.needs_retry,
+                "{}: pass `{what}` is marked must-delete but does not run to completion",
+                self.context(),
+            );
+            assert!(
+                !expected_paths.is_empty(),
+                "{}: pass `{what}` is marked must-delete but the oracle expects no existing object to be deleted, so the exactness check would be vacuous",
+                self.context(),
+            );
+            assert!(
+                !actual_paths.is_empty(),
+                "{}: pass `{what}` is marked must-delete but physically deleted nothing",
+                self.context(),
+            );
+        }
+        // The report must describe the same deletion, not a different one.
+        let (expected_files, expected_indexes) = if expectation.complete {
+            report_view(&candidates)
+        } else {
+            (BTreeSet::new(), BTreeSet::new())
+        };
+        let reported_files: BTreeSet<FileId> = report
+            .deleted_files
+            .get(&self.region_id)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        let reported_indexes: BTreeSet<(FileId, IndexVersion)> = report
+            .deleted_indexes
+            .get(&self.region_id)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        assert_eq!(
+            reported_files,
+            expected_files,
+            "{}: pass `{what}` GcReport::deleted_files does not match the physical deletion",
+            self.context()
+        );
+        assert_eq!(
+            reported_indexes,
+            expected_indexes,
+            "{}: pass `{what}` GcReport::deleted_indexes does not match the physical deletion",
+            self.context()
+        );
+        // Entry checks and the post-lookup recheck must never touch the data
+        // directory: no listing, no delete.
+        if expectation.complete {
+            assert_eq!(
+                !listed_round.is_empty(),
+                knobs.full_listing,
+                "{}: pass `{what}` listed the region directory in the wrong mode: {listed_round:?}",
+                self.context()
+            );
+        } else {
+            assert!(
+                listed_round.is_empty(),
+                "{}: pass `{what}` listed the region directory although it must skip the region: {listed_round:?}",
+                self.context()
+            );
+            assert!(
+                !candidates.is_empty(),
+                "{}: pass `{what}` was expected to withhold work, but the oracle sees no candidate at all",
+                self.context(),
+            );
+        }
+        assert_eq!(
+            report.need_retry_regions.contains(&self.region_id),
+            expectation.needs_retry,
+            "{}: pass `{what}` needs_retry mismatch: {:?}",
+            self.context(),
+            report.need_retry_regions
+        );
+        assert_eq!(
+            report.processed_regions.contains(&self.region_id),
+            expectation.complete && !expectation.needs_retry,
+            "{}: pass `{what}` processed_regions mismatch: {:?}",
+            self.context(),
+            report.processed_regions
+        );
+
+        self.last_pass = Some(PassFacts {
+            expected: expected_paths
+                .iter()
+                .filter_map(|path| object_of_path(path))
+                .collect(),
+            actual: actual_paths
+                .iter()
+                .filter_map(|path| object_of_path(path))
+                .collect(),
+            phantom: phantom_deletes
+                .iter()
+                .filter_map(|path| object_of_path(path))
+                .collect(),
+            reported_files: reported_files.clone(),
+            reported_indexes: reported_indexes.clone(),
+        });
+        for path in &actual_paths {
+            if let Some(object) = object_of_path(path) {
+                self.deleted_ever.insert(object);
+                self.inventory.remove(&object);
+            }
+        }
+        self.history.push(format!(
+            "pass({what}: {}, linger={:?}, unknown={:?})",
+            if knobs.full_listing { "full" } else { "fast" },
+            knobs.linger,
+            knobs.unknown_linger
+        ));
+        self.verify_step(&format!("after pass {what}")).await;
+        report
+    }
+}
+
+/// Deterministic generator so a failing scenario can be replayed from its seed
+/// alone (SplitMix64, no extra dependency).
+struct SeedRng(u64);
+
+impl SeedRng {
+    fn new(seed: u64) -> Self {
+        SeedRng(seed ^ 0x9E37_79B9_7F4A_7C15)
+    }
+
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    fn below(&mut self, bound: u64) -> u64 {
+        self.next() % bound
+    }
+
+    fn chance(&mut self, percent: u64) -> bool {
+        self.below(100) < percent
+    }
+
+    /// Deterministic file id, so a replayed seed lists the same objects.
+    fn file_id(&mut self) -> FileId {
+        let mut bytes = [0u8; 16];
+        bytes[..8].copy_from_slice(&self.next().to_le_bytes());
+        bytes[8..].copy_from_slice(&self.next().to_le_bytes());
+        FileId::from_bytes(bytes)
+    }
+}
+
+/// The four trajectories the oracle must contain, on one inventory: a fast pass
+/// that keeps a mature orphan and a stable full pass that reclaims it, a file
+/// that is only referenced by an old index version, a publication that races the
+/// protection lookup, and the entry checks (see
+/// `test_gc_physical_delete_oracle_entry_skip`).
+#[tokio::test]
+async fn test_gc_physical_delete_oracle_trajectories() {
+    let mut oracle = GcOracle::new("trajectories", 0xA11CE).await;
+    let orphan = FileId::from_bytes([0x11; 16]);
+    let referenced = FileId::from_bytes([0x22; 16]);
+    let retired = FileId::from_bytes([0x33; 16]);
+    let hooked = FileId::from_bytes([0x44; 16]);
+    let racing = FileId::from_bytes([0x55; 16]);
+
+    for object in [
+        GcObject::Sst(orphan),
+        GcObject::Index(orphan, 0),
+        GcObject::Sst(referenced),
+        GcObject::Index(referenced, 0),
+        GcObject::Index(referenced, 2),
+        GcObject::Sst(retired),
+        GcObject::Index(retired, 0),
+        GcObject::Sst(hooked),
+    ] {
+        oracle.write_object(object).await;
+    }
+    // Nothing references `orphan`: it is an unknown object that only a full
+    // listing can find.
+    // `referenced` is out of the manifest; only a reader that still holds index
+    // version 0 keeps it. Index version 2 of the same file id is referenced by
+    // nobody, so the exact-version rule lets the oracle reclaim it.
+    oracle.set_tmp_refs([(referenced, Some(0))]);
+    oracle.publish_add(retired, Some(0)).await;
+    oracle.publish_remove(retired, Some(0), Some(0)).await;
+    oracle.publish_add(hooked, None).await;
+    oracle.publish_remove(hooked, None, Some(0)).await;
+    oracle.set_hook_protected([hooked]);
+
+    // A fast pass reclaims the expired removal but must not touch the unknown
+    // orphan, the referenced SST, or the hook-protected file.
+    oracle
+        .run_pass(
+            RoundKnobs::fast(NO_KNOWN_WAIT, YOUNG_UNKNOWN_LINGER),
+            PassWiring::default(),
+            PassExpectation::complete_deleting(),
+            "fast/expired-record",
+        )
+        .await;
+    assert_eq!(
+        *oracle.deleted_ever(),
+        BTreeSet::from([GcObject::Sst(retired), GcObject::Index(retired, 0)]),
+        "{}: a fast pass must delete exactly the expired removal",
+        oracle.context()
+    );
+    assert!(
+        oracle.inventory().contains(&GcObject::Sst(orphan)),
+        "{}: trajectory 1: a fast pass kept the unknown orphan for the wrong reason",
+        oracle.context()
+    );
+
+    // A full listing that sees the orphan but has no unknown-file grace elapsed
+    // must still keep it.
+    oracle
+        .run_pass(
+            RoundKnobs::full(YOUNG_LINGER, YOUNG_UNKNOWN_LINGER),
+            PassWiring::default(),
+            PassExpectation::complete(),
+            "full/young-unknown",
+        )
+        .await;
+    assert_eq!(
+        *oracle.deleted_ever(),
+        BTreeSet::from([GcObject::Sst(retired), GcObject::Index(retired, 0)]),
+        "{}: a full pass must keep young unknown objects",
+        oracle.context()
+    );
+
+    // Trajectory 1, positive control: the same stable full pass, now with the
+    // unknown-file grace elapsed, really reclaims the mature orphan.
+    oracle
+        .run_pass(
+            RoundKnobs::full(NO_KNOWN_WAIT, MATURE_UNKNOWN_LINGER),
+            PassWiring::default(),
+            PassExpectation::complete_deleting(),
+            "full/mature-orphan",
+        )
+        .await;
+    assert!(
+        !oracle.inventory().contains(&GcObject::Sst(orphan)),
+        "{}: trajectory 1: the mature orphan must disappear",
+        oracle.context()
+    );
+    // Trajectory 2, negative control: a reader's index version still protects the
+    // SST, although index version 2 of the same id is unreferenced.
+    assert!(
+        oracle.inventory().contains(&GcObject::Sst(referenced)),
+        "{}: trajectory 2: an SST referenced by an old index version must survive a full pass",
+        oracle.context()
+    );
+    assert!(
+        oracle.inventory().contains(&GcObject::Index(referenced, 0)),
+        "{}: trajectory 2: the referenced index version must survive",
+        oracle.context()
+    );
+    assert!(
+        !oracle.deleted_ever().contains(&GcObject::Sst(referenced)),
+        "{}: trajectory 2: the referenced SST was deleted",
+        oracle.context()
+    );
+    assert!(
+        oracle.inventory().contains(&GcObject::Sst(hooked)),
+        "{}: a hook-protected file must survive a full pass",
+        oracle.context()
+    );
+
+    // Releasing the reference makes the same object reclaimable: the reference,
+    // not luck, was what kept it.
+    oracle.set_tmp_refs([]);
+    oracle
+        .run_pass(
+            RoundKnobs::full(NO_KNOWN_WAIT, MATURE_UNKNOWN_LINGER),
+            PassWiring::default(),
+            PassExpectation::complete_deleting(),
+            "full/released-ref",
+        )
+        .await;
+    assert!(
+        !oracle.inventory().contains(&GcObject::Sst(referenced)),
+        "{}: the released reference must let the SST go",
+        oracle.context()
+    );
+
+    // Trajectory 3: a publication that lands while the protection lookup runs
+    // withdraws the whole batch.
+    oracle.write_object(GcObject::Sst(racing)).await;
+    oracle.publish_add(racing, None).await;
+    oracle.publish_remove(racing, None, Some(0)).await;
+    let engine = oracle.engine.clone();
+    let hook = oracle.hook.clone();
+    let republish = oracle.file_meta(racing, None);
+    let region_id = oracle.region_id;
+    hook.block_next_lookup();
+    let (report, ()) = tokio::join!(
+        oracle.run_pass(
+            RoundKnobs::fast(NO_KNOWN_WAIT, YOUNG_UNKNOWN_LINGER),
+            PassWiring::default(),
+            PassExpectation::retracted(),
+            "raced-publication",
+        ),
+        async move {
+            hook.entered.notified().await;
+            engine
+                .edit_region(
+                    region_id,
+                    RegionEdit {
+                        files_to_add: vec![republish],
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            hook.resume.notify_one();
+        }
+    );
+    assert!(
+        report.need_retry_regions.contains(&region_id),
+        "{}: trajectory 3: a raced publication must route the region to a retry",
+        oracle.context()
+    );
+    assert!(
+        !report.deleted_files.contains_key(&region_id),
+        "{}: trajectory 3: a retracted batch must not report deletions",
+        oracle.context()
+    );
+    assert!(
+        oracle.inventory().contains(&GcObject::Sst(racing)),
+        "{}: trajectory 3: the retracted batch must leave the object in place",
+        oracle.context()
+    );
+
+    // Releasing the hook makes the hook-protected file reclaimable.
+    oracle.set_hook_protected([]);
+    oracle
+        .run_pass(
+            RoundKnobs::fast(NO_KNOWN_WAIT, YOUNG_UNKNOWN_LINGER),
+            PassWiring::default(),
+            PassExpectation::complete_deleting(),
+            "fast/released-hook",
+        )
+        .await;
+    // `racing` is back in the manifest, so it is the only object left.
+    assert_eq!(
+        *oracle.inventory(),
+        BTreeSet::from([GcObject::Sst(racing)]),
+        "{}: every unreachable object must be gone",
+        oracle.context()
+    );
+}
+
+/// Trajectory 4: every entry-level skip must leave the data directory untouched.
+/// Each case proves the skip has teeth by running the same inventory again after
+/// the cause is cleared.
+#[rstest::rstest]
+#[case::pending_tails("pending_tails")]
+#[case::newer_manifest("newer_manifest")]
+#[case::manifest_version_mismatch("manifest_version_mismatch")]
+#[case::manifest_probe_failed("manifest_probe_failed")]
+#[tokio::test]
+async fn test_gc_physical_delete_oracle_entry_skip(#[case] cause: &str) {
+    let mut oracle = GcOracle::new(cause, 0x5349_5000).await;
+    let orphan = FileId::from_bytes([0x77; 16]);
+    let retired = FileId::from_bytes([0x88; 16]);
+    for object in [
+        GcObject::Sst(orphan),
+        GcObject::Index(orphan, 0),
+        GcObject::Sst(retired),
+        GcObject::Index(retired, 0),
+    ] {
+        oracle.write_object(object).await;
+    }
+    oracle.publish_add(retired, None).await;
+    oracle.publish_remove(retired, None, Some(0)).await;
+
+    // A mature orphan and an expired removal: a pass that proceeds reclaims both.
+    let knobs = RoundKnobs::full(NO_KNOWN_WAIT, MATURE_UNKNOWN_LINGER);
+    let mut wiring = PassWiring::default();
+    let mut newer_manifest = None;
+    match cause {
+        "pending_tails" => {
+            oracle.arm_pending_tails().await;
+            assert!(
+                !oracle
+                    .region
+                    .manifest_ctx
+                    .manifest()
+                    .await
+                    .pending_tails
+                    .is_empty(),
+                "{}: pending tails vanished before the pass",
+                oracle.context()
+            );
+        }
+        "newer_manifest" => newer_manifest = Some(oracle.arm_newer_manifest().await),
+        "manifest_version_mismatch" => wiring = PassWiring::mismatched_version(),
+        "manifest_probe_failed" => oracle.arm_manifest_list_failure(),
+        _ => unreachable!("unknown cause {cause}"),
+    }
+    oracle
+        .run_pass(knobs, wiring, PassExpectation::skipped(), "skipped")
+        .await;
+    assert!(
+        oracle.deleted_ever().is_empty(),
+        "{}: trajectory 4: a skipped region must not delete anything",
+        oracle.context()
+    );
+
+    // Clear the cause and run the very same pass: the preserved inventory is
+    // reclaimed, so the skipped pass above was skipped for the armed reason.
+    match cause {
+        "pending_tails" => oracle.clear_pending_tails().await,
+        "newer_manifest" => {
+            let path = newer_manifest.unwrap();
+            oracle.clear_newer_manifest(&path).await
+        }
+        "manifest_probe_failed" => oracle.clear_manifest_list_failure(),
+        _ => {}
+    }
+    oracle
+        .run_pass(
+            knobs,
+            PassWiring::default(),
+            PassExpectation::complete_deleting(),
+            "resumed",
+        )
+        .await;
+    assert_eq!(
+        *oracle.deleted_ever(),
+        BTreeSet::from([
+            GcObject::Sst(orphan),
+            GcObject::Index(orphan, 0),
+            GcObject::Sst(retired),
+            GcObject::Index(retired, 0),
+        ]),
+        "{}: the resumed pass must reclaim the preserved inventory",
+        oracle.context()
+    );
+}
+
+/// `RemovedFile::File(id, Some(v))` is not "remove one index object": the
+/// deletion site expands it into the SST plus every index version `0..=v`. That
+/// fan-out is the reason this oracle exists, so it is pinned here at the real
+/// delete site, including the two things a report-based test cannot see:
+///
+/// * index versions inside `0..=v` that never existed are deleted as no-ops -
+///   neither a safety violation nor a deletion;
+/// * `GcReport::deleted_indexes` is lossy: it records only the `(id, v)` of the
+///   removal record, not the versions `0..=v` that the fan-out really removed,
+///   and it names `v` even when that object never existed. Losing this
+///   information is known and accepted behaviour, so every judgement below is
+///   made on the physical deletion set; the report is only checked for the
+///   facts it must still contain.
+#[tokio::test]
+async fn test_gc_physical_delete_oracle_index_fanout() {
+    let mut oracle = GcOracle::new("index-fanout", 0xFA_1407).await;
+    // Every index version `0..=v` exists.
+    let whole = FileId::from_bytes([0x99; 16]);
+    let whole_version: IndexVersion = 2;
+    // Index versions 1 and 3 never existed, so the fan-out deletes absent keys.
+    let partial = FileId::from_bytes([0xAA; 16]);
+    let partial_version: IndexVersion = 3;
+
+    for object in [
+        GcObject::Sst(whole),
+        GcObject::Index(whole, 0),
+        GcObject::Index(whole, 1),
+        GcObject::Index(whole, 2),
+        GcObject::Sst(partial),
+        GcObject::Index(partial, 0),
+        GcObject::Index(partial, 2),
+    ] {
+        oracle.write_object(object).await;
+    }
+    oracle.publish_add(whole, Some(whole_version)).await;
+    oracle
+        .publish_remove(whole, Some(whole_version), Some(0))
+        .await;
+    oracle.publish_add(partial, Some(partial_version)).await;
+    oracle
+        .publish_remove(partial, Some(partial_version), Some(0))
+        .await;
+
+    oracle
+        .run_pass(
+            RoundKnobs::fast(NO_KNOWN_WAIT, YOUNG_UNKNOWN_LINGER),
+            PassWiring::default(),
+            PassExpectation::complete_deleting(),
+            "fast/index-fanout",
+        )
+        .await;
+
+    // Physical facts, not the report: both SSTs and, for the file whose versions
+    // all exist, every index version `0..=v` are gone; for the other file the
+    // versions that existed inside `0..=v` are gone too.
+    assert_eq!(
+        *oracle.deleted_ever(),
+        BTreeSet::from([
+            GcObject::Sst(whole),
+            GcObject::Index(whole, 0),
+            GcObject::Index(whole, 1),
+            GcObject::Index(whole, 2),
+            GcObject::Sst(partial),
+            GcObject::Index(partial, 0),
+            GcObject::Index(partial, 2),
+        ]),
+        "{}: `File(id, Some(v))` must delete the SST and every existing index version 0..=v",
+        oracle.context()
+    );
+    assert!(
+        oracle.inventory().is_empty(),
+        "{}: the fan-out must leave nothing behind: {:?}",
+        oracle.context(),
+        oracle.inventory()
+    );
+
+    let facts = oracle.last_pass();
+    // Positive control for the exactness check: the expectation is non-empty, so
+    // "deleted exactly what was expected" cannot be satisfied by doing nothing.
+    assert!(
+        !facts.expected.is_empty(),
+        "{}: the fan-out pass must really expect deletions",
+        oracle.context()
+    );
+    // Deleting the keys `0..=v` names but that never existed is a legitimate
+    // no-op: it is not counted as a deletion (the physical set above excludes
+    // them) and it is not a violation (the pass is not reported as unsafe).
+    assert_eq!(
+        facts.phantom,
+        BTreeSet::from([GcObject::Index(partial, 1), GcObject::Index(partial, 3),]),
+        "{}: the absent keys of the 0..=v fan-out must be attempted and must stay out of the deletion set",
+        oracle.context()
+    );
+    assert!(
+        facts.actual.is_disjoint(&facts.phantom),
+        "{}: an absent key can never count as a deleted object",
+        oracle.context()
+    );
+
+    // Known lossiness: `(whole, 0)` and `(whole, 1)` were physically removed but
+    // are not reported, while `(partial, 3)` is reported although no such object
+    // ever existed. This is accepted `GcReport` behaviour, which is exactly why
+    // the safety checks above use the physical set.
+    assert_eq!(
+        facts.reported_indexes,
+        BTreeSet::from([(whole, whole_version), (partial, partial_version)]),
+        "{}: the report is lossy by design and must be read as a projection of the physical set",
+        oracle.context()
+    );
+    assert_eq!(
+        facts.reported_files,
+        BTreeSet::from([whole, partial]),
+        "{}: every file whose SST the fan-out removed must be reported",
+        oracle.context()
+    );
+    // The one direction the report must still satisfy: every physically deleted
+    // object is named by a reported entry, either exactly or through a reported
+    // version that covers it. A report that omits a deletion is a lie even when
+    // the details are lossy.
+    for object in &facts.actual {
+        let covered = match *object {
+            GcObject::Sst(id) => facts.reported_files.contains(&id),
+            GcObject::Index(id, version) => {
+                facts
+                    .reported_indexes
+                    .iter()
+                    .any(|(reported_id, reported_version)| {
+                        *reported_id == id && *reported_version >= version
+                    })
+            }
+        };
+        assert!(
+            covered,
+            "{}: physically deleted {} is not covered by the report {:?}",
+            oracle.context(),
+            object.describe(),
+            facts.reported_indexes
+        );
+    }
+}
+
+/// Seeded, deterministic operation sequences over one inventory. The seed only
+/// picks parameters (index versions, the order of the passes, the entry-skip
+/// cause, whether the hook protects a file), so a failure is replayable from
+/// `seed` plus the printed operation prefix.
+#[rstest::rstest]
+#[case::seed_a(0x5EED_0001)]
+#[case::seed_b(0x5EED_0002)]
+#[case::seed_c(0x5EED_0003)]
+#[tokio::test]
+async fn test_gc_physical_delete_oracle_scenario(#[case] seed: u64) {
+    let mut rng = SeedRng::new(seed);
+    let mut oracle = GcOracle::new("scenario", seed).await;
+
+    let live = rng.file_id();
+    let live_version = rng.below(3);
+    let reader = rng.file_id();
+    let reader_version = rng.below(3);
+    let old_removed = rng.file_id();
+    let young_removed = rng.file_id();
+    let guarded = rng.file_id();
+    let orphan = rng.file_id();
+    let protect_guarded = rng.chance(50);
+    let fast_first = rng.chance(50);
+    let skip_is_pending_tails = rng.chance(50);
+
+    let mut objects = BTreeSet::new();
+    for id in [live, reader, old_removed, young_removed, guarded, orphan] {
+        objects.insert(GcObject::Sst(id));
+        objects.insert(GcObject::Index(id, 0));
+    }
+    objects.insert(GcObject::Index(live, live_version));
+    objects.insert(GcObject::Index(reader, reader_version));
+    for object in objects {
+        oracle.write_object(object).await;
+    }
+
+    // Index-version replacement: `live` is published at version 0 and then at
+    // `live_version`, so the outdated index version becomes reclaimable while the
+    // current one stays in the manifest.
+    oracle.publish_add(live, Some(0)).await;
+    oracle.publish_add(live, Some(live_version)).await;
+    // `reader` left the manifest, but a reader still holds `reader_version`.
+    oracle.publish_add(reader, None).await;
+    oracle.publish_remove(reader, None, Some(0)).await;
+    oracle.set_tmp_refs([(reader, Some(reader_version))]);
+    // One expired removal and one that still lingers.
+    oracle.publish_add(old_removed, Some(0)).await;
+    oracle.publish_remove(old_removed, Some(0), Some(0)).await;
+    oracle.publish_add(young_removed, None).await;
+    oracle.publish_remove(young_removed, None, None).await;
+    // Only the hook keeps this one alive.
+    oracle.publish_add(guarded, None).await;
+    oracle.publish_remove(guarded, None, Some(0)).await;
+    if protect_guarded {
+        oracle.set_hook_protected([guarded]);
+    }
+
+    // Entry skip first: candidates exist (the expired removal and the mature
+    // orphan), so a skipped pass really has something to withhold.
+    if skip_is_pending_tails {
+        oracle.arm_pending_tails().await;
+        oracle
+            .run_pass(
+                RoundKnobs::full(NO_KNOWN_WAIT, MATURE_UNKNOWN_LINGER),
+                PassWiring::default(),
+                PassExpectation::skipped(),
+                "skip/pending-tails",
+            )
+            .await;
+        oracle.clear_pending_tails().await;
+    } else {
+        oracle
+            .run_pass(
+                RoundKnobs::full(NO_KNOWN_WAIT, MATURE_UNKNOWN_LINGER),
+                PassWiring::mismatched_version(),
+                PassExpectation::skipped(),
+                "skip/manifest-version",
+            )
+            .await;
+    }
+
+    let first = if fast_first {
+        RoundKnobs::fast(YOUNG_LINGER, MATURE_UNKNOWN_LINGER)
+    } else {
+        RoundKnobs::full(YOUNG_LINGER, MATURE_UNKNOWN_LINGER)
+    };
+    oracle
+        .run_pass(
+            first,
+            PassWiring::default(),
+            PassExpectation::complete_deleting(),
+            "first",
+        )
+        .await;
+    if fast_first {
+        assert!(
+            !oracle.deleted_ever().contains(&GcObject::Sst(orphan)),
+            "{}: a fast pass kept the mature orphan for the wrong reason",
+            oracle.context()
+        );
+    }
+    assert!(
+        !oracle
+            .deleted_ever()
+            .contains(&GcObject::Sst(young_removed)),
+        "{}: a still lingering removal must keep its file",
+        oracle.context()
+    );
+
+    // The other mode, with every remaining unknown object still young.
+    let second = if fast_first {
+        RoundKnobs::full(YOUNG_LINGER, YOUNG_UNKNOWN_LINGER)
+    } else {
+        RoundKnobs::fast(YOUNG_LINGER, YOUNG_UNKNOWN_LINGER)
+    };
+    oracle
+        .run_pass(
+            second,
+            PassWiring::default(),
+            PassExpectation::complete(),
+            "young",
+        )
+        .await;
+    assert!(
+        !oracle
+            .deleted_ever()
+            .contains(&GcObject::Sst(young_removed)),
+        "{}: a young removal must keep its file",
+        oracle.context()
+    );
+
+    // Advance the age of that removal: republishing it with an old expel time
+    // makes it eligible without waiting.
+    oracle.publish_remove(young_removed, None, Some(0)).await;
+    oracle
+        .run_pass(
+            RoundKnobs::full(NO_KNOWN_WAIT, MATURE_UNKNOWN_LINGER),
+            PassWiring::default(),
+            PassExpectation::complete_deleting(),
+            "aged",
+        )
+        .await;
+    if protect_guarded {
+        oracle.set_hook_protected([]);
+        oracle
+            .run_pass(
+                RoundKnobs::full(NO_KNOWN_WAIT, MATURE_UNKNOWN_LINGER),
+                PassWiring::default(),
+                PassExpectation::complete_deleting(),
+                "hook-released",
+            )
+            .await;
+    }
+
+    // Trajectory 1: the mature orphan was really reclaimed by a full pass.
+    assert!(
+        oracle.deleted_ever().contains(&GcObject::Sst(orphan)),
+        "{}: the mature orphan was never reclaimed",
+        oracle.context()
+    );
+    // Trajectory 2: the reader-referenced SST and the live file were never deleted.
+    for object in [
+        GcObject::Sst(reader),
+        GcObject::Sst(live),
+        GcObject::Index(live, live_version),
+    ] {
+        assert!(
+            !oracle.deleted_ever().contains(&object),
+            "{}: {} must never be deleted",
+            oracle.context(),
+            object.describe()
+        );
+        assert!(
+            oracle.inventory().contains(&object),
+            "{}: {} must still exist",
+            oracle.context(),
+            object.describe()
+        );
+    }
+    // Everything the model considers unreachable is reclaimed.
+    for object in [
+        GcObject::Sst(old_removed),
+        GcObject::Sst(young_removed),
+        GcObject::Sst(guarded),
+    ] {
+        assert!(
+            oracle.deleted_ever().contains(&object),
+            "{}: {} must be reclaimed",
+            oracle.context(),
+            object.describe()
+        );
+    }
 }
