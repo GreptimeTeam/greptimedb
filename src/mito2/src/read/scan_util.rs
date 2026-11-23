@@ -195,7 +195,7 @@ pub(crate) struct ScanMetricsSet {
     pruner_cache_miss: usize,
     /// Duration spent waiting for pruner to build file ranges.
     pruner_prune_cost: Duration,
-    /// Number of files filtered by manifest time-range pruning.
+    /// Number of files pruned by their manifest time range or primary key range.
     files_time_range_pruned: usize,
     /// Number of record batches read from SST.
     num_sst_record_batches: usize,
