@@ -2834,6 +2834,10 @@ struct GcOracle {
     deleted_ever: BTreeSet<GcObject>,
     /// Facts of the pass that ran last, for tests that pin one pass closely.
     last_pass: Option<PassFacts>,
+    /// Branch labels folded from every pass so far. The seeded scenario's
+    /// coverage table is reconciled with this, so a seed that drifts onto another
+    /// branch fails instead of quietly covering the same one again.
+    branches: ScenarioBranches,
     /// Scenario name and seed, so a failure is replayable.
     scenario: String,
     seed: u64,
@@ -2888,6 +2892,7 @@ impl GcOracle {
             tmp_refs: HashSet::new(),
             deleted_ever: BTreeSet::new(),
             last_pass: None,
+            branches: ScenarioBranches::default(),
             scenario: scenario.to_string(),
             seed,
             history: Vec::new(),
@@ -2974,6 +2979,12 @@ impl GcOracle {
         self.last_pass
             .as_ref()
             .expect("no pass ran before its facts were inspected")
+    }
+
+    /// The branch labels the passes so far have taken, folded from what each pass
+    /// really did rather than from what the test asked for.
+    fn branches(&self) -> ScenarioBranches {
+        self.branches
     }
 
     /// Checks the whole inventory after every operation: the object set the
@@ -3647,6 +3658,34 @@ impl GcOracle {
                 self.inventory.remove(&object);
             }
         }
+        // Branch labels, folded from what this pass really did: the report it
+        // returned, the objects it handed to the store, and the manifest snapshot
+        // it ran against. Nothing here reads the test's intention, so the seeded
+        // scenario's coverage table can be reconciled with it.
+        let superseded_index = actual_paths
+            .iter()
+            .filter_map(|path| object_of_path(path))
+            .any(|object| match object {
+                GcObject::Index(id, version) => input
+                    .manifest_index
+                    .get(&id)
+                    .and_then(|recorded| *recorded)
+                    .is_some_and(|recorded| recorded > version),
+                GcObject::Sst(_) | GcObject::Narthex(_, _) => false,
+            });
+        let skipped = !report.processed_regions.contains(&self.region_id)
+            && !report.need_retry_regions.contains(&self.region_id);
+        // A batch the oracle had candidates for, withdrawn wholesale because the
+        // region changed during the protection lookup.
+        let retracted = report.need_retry_regions.contains(&self.region_id)
+            && actual_paths.is_empty()
+            && !candidates.is_empty();
+        self.branches = ScenarioBranches {
+            deletes: self.branches.deletes || !actual_paths.is_empty(),
+            entry_skip: self.branches.entry_skip || skipped,
+            retraction: self.branches.retraction || retracted,
+            index_replacement: self.branches.index_replacement || superseded_index,
+        };
         self.history.push(format!(
             "pass({what}: {}, linger={:?}, unknown={:?})",
             if knobs.full_listing { "full" } else { "fast" },
@@ -4123,171 +4162,379 @@ async fn test_gc_physical_delete_oracle_index_fanout() {
     }
 }
 
-/// Seeded, deterministic operation sequences over one inventory. The seed only
-/// picks parameters (index versions, the order of the passes, the entry-skip
-/// cause, whether the hook protects a file), so a failure is replayable from
-/// `seed` plus the printed operation prefix.
+/// The branch labels of a seeded scenario.
+///
+/// Every label is a behaviour of the GC implementation read at the delete site
+/// or from the returned `GcReport` (see `GcOracle::run_pass`), never an intention
+/// of the test, so the coverage table below describes what really ran.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ScenarioBranches {
+    /// `d`: some pass physically deleted a data object, so `deleted_ever` ends up
+    /// non-empty.
+    deletes: bool,
+    /// `s`: some pass was withheld by an entry safety check - it neither processed
+    /// the region nor routed it to a retry.
+    entry_skip: bool,
+    /// `r`: some publication during the protection lookup withdrew the whole
+    /// batch - the region was routed to a retry and nothing was deleted although
+    /// the oracle saw candidates.
+    retraction: bool,
+    /// `i`: some superseded index version was reclaimed while the manifest
+    /// recorded a newer version of the same file id, that is `index_version`
+    /// really changed under a reader that may still hold the old version.
+    index_replacement: bool,
+}
+
+impl ScenarioBranches {
+    const fn new(
+        deletes: bool,
+        entry_skip: bool,
+        retraction: bool,
+        index_replacement: bool,
+    ) -> Self {
+        Self {
+            deletes,
+            entry_skip,
+            retraction,
+            index_replacement,
+        }
+    }
+
+    /// `d/s/r/i` as four `0`/`1` digits, for the coverage table and failures.
+    fn key(self) -> String {
+        format!(
+            "{}{}{}{}",
+            self.deletes as u8,
+            self.entry_skip as u8,
+            self.retraction as u8,
+            self.index_replacement as u8
+        )
+    }
+}
+
+/// The entry safety check that withholds a pass before it lists the region.
+#[derive(Clone, Copy, Debug)]
+enum EntrySkip {
+    /// An uncommitted tail SST is not in the snapshot, so a full listing would
+    /// take it for an orphan.
+    PendingTails,
+    /// The manifest version handed to the worker does not match the region's.
+    ManifestVersion,
+}
+
+impl EntrySkip {
+    const fn name(self) -> &'static str {
+        match self {
+            EntrySkip::PendingTails => "pending-tails",
+            EntrySkip::ManifestVersion => "manifest-version",
+        }
+    }
+}
+
+/// What one seed plans to cover, plus the operation choices that put the seed on
+/// that row of the coverage table.
+///
+/// `expected` is spelled out by hand per seed instead of being derived from the
+/// choices: the collapse guard is only worth anything if the plan and the
+/// observed behaviour can disagree, which a table derived from the same fields
+/// could never catch.
+#[derive(Clone, Copy, Debug)]
+struct ScenarioPlan {
+    /// Entry-check cause of a withholding pass; `None` plans no skip at all.
+    entry_skip: Option<EntrySkip>,
+    /// Publish a file while the protection lookup blocks, to withdraw the batch.
+    retraction: bool,
+    /// Index version `live` is republished at, and the version the reader holds.
+    /// `0` plans no replacement at all: `live` is only ever published at version
+    /// 0, so no index version of a live file is ever superseded.
+    index_version: IndexVersion,
+    /// Run the passes that run to completion, so eligible objects are reclaimed.
+    completing_passes: bool,
+    /// The [`ScenarioBranches`] row this seed must reach.
+    expected: ScenarioBranches,
+}
+
+/// The three seeded cases. A new case needs a row in the coverage table and a
+/// plan in [`scenario_plan`];
+/// `test_gc_physical_delete_oracle_scenario_plans_are_distinct` then checks that
+/// the table did not collapse two seeds onto one row.
+const SEED_A: u64 = 0x5EED_0001;
+const SEED_B: u64 = 0x5EED_0002;
+const SEED_C: u64 = 0x5EED_0003;
+
+/// The plan of one seed: the seed selects a row of the coverage table, so what a
+/// case covers is a decision written here instead of a draw that happens to land
+/// somewhere.
+fn scenario_plan(seed: u64) -> ScenarioPlan {
+    match seed {
+        // The withheld pass is armed with uncommitted tails; every other pass is
+        // a stable full pass, and `live` is republished at index version 1, so a
+        // superseded index version is reclaimed. Nothing races the hook.
+        SEED_A => ScenarioPlan {
+            entry_skip: Some(EntrySkip::PendingTails),
+            retraction: false,
+            index_version: 1,
+            completing_passes: true,
+            expected: ScenarioBranches::new(true, true, false, true),
+        },
+        // The withheld pass is stopped by a manifest-version mismatch, and the
+        // only other pass is the raced one: the batch it gathered is withdrawn
+        // and no pass ever runs to completion, so nothing is deleted. Every file
+        // is published at index version 0 (or not at all), so no version is
+        // superseded.
+        SEED_B => ScenarioPlan {
+            entry_skip: Some(EntrySkip::ManifestVersion),
+            retraction: true,
+            index_version: 0,
+            completing_passes: false,
+            expected: ScenarioBranches::new(false, true, true, false),
+        },
+        // No entry skip: the raced pass is the first pass of the scenario, and
+        // the full passes after it reclaim everything eligible. Versions never
+        // change, so no superseded index version is reclaimed.
+        SEED_C => ScenarioPlan {
+            entry_skip: None,
+            retraction: true,
+            index_version: 0,
+            completing_passes: true,
+            expected: ScenarioBranches::new(true, false, true, false),
+        },
+        _ => panic!(
+            "seed {seed:#X} has no scenario plan: the coverage table in this file is the source of truth"
+        ),
+    }
+}
+
+/// Seeded, deterministic operation sequences over one inventory.
+///
+/// The seed does not pick parameters at random: it selects a row of the branch
+/// coverage table below and the operations are generated from that row. A
+/// failure is replayable from `seed` plus the printed operation prefix, and the
+/// file ids still come from the seed, so the cases list different objects.
+///
+/// The four branch labels (see [`ScenarioBranches`]) are:
+///
+/// * `d` - a pass physically deleted a data object (`deleted_ever` non-empty);
+/// * `s` - a pass was withheld by an entry safety check, i.e. one of the four
+///   entry causes, so it neither completed nor asked for a retry;
+/// * `r` - a publication during the protection lookup withdrew the whole batch;
+/// * `i` - a superseded index version was reclaimed while the manifest recorded a
+///   newer one, that is `Index(live, 0)` went away and `Index(live, 1)` stayed.
+///
+/// | seed         | d | s | r | i | what the seed runs |
+/// | ------------ | - | - | - | - | ------------------ |
+/// | `0x5EED_0001` | 1 | 1 | 0 | 1 | a pending-tails skip, then three full passes that reclaim an expired removal, a mature orphan, a young-then-aged removal, a hook-released file and the superseded `Index(live, 0)` |
+/// | `0x5EED_0002` | 0 | 1 | 1 | 0 | a manifest-version skip, then a publication during the protection lookup: the batch is withdrawn and no pass runs to completion, so nothing is deleted |
+/// | `0x5EED_0003` | 1 | 0 | 1 | 0 | no skip at all: the raced pass withdraws the first batch, then three full passes reclaim everything eligible |
+///
+/// The three rows differ pairwise and every label is exercised in both states, so
+/// the cases cover the four dimensions instead of one combination three times.
+/// The end of the test reconciles the row a seed planned with the row its passes
+/// really took, so a change that makes a skip or a retraction stop happening
+/// fails here instead of quietly shrinking coverage.
 #[rstest::rstest]
-#[case::seed_a(0x5EED_0001)]
-#[case::seed_b(0x5EED_0002)]
-#[case::seed_c(0x5EED_0003)]
+#[case::seed_a(SEED_A)]
+#[case::seed_b(SEED_B)]
+#[case::seed_c(SEED_C)]
 #[tokio::test]
 async fn test_gc_physical_delete_oracle_scenario(#[case] seed: u64) {
-    let mut rng = SeedRng::new(seed);
+    let plan = scenario_plan(seed);
     let mut oracle = GcOracle::new("scenario", seed).await;
+    let mut rng = SeedRng::new(seed);
 
     let live = rng.file_id();
-    let live_version = rng.below(3);
     let reader = rng.file_id();
-    let reader_version = rng.below(3);
     let old_removed = rng.file_id();
     let young_removed = rng.file_id();
     let guarded = rng.file_id();
     let orphan = rng.file_id();
-    let protect_guarded = rng.chance(50);
-    let fast_first = rng.chance(50);
-    let skip_is_pending_tails = rng.chance(50);
+    let racing = rng.file_id();
+    let version = plan.index_version;
 
-    let mut objects = BTreeSet::new();
-    for id in [live, reader, old_removed, young_removed, guarded, orphan] {
-        objects.insert(GcObject::Sst(id));
-        objects.insert(GcObject::Index(id, 0));
+    // Inventory: only the ids are seed-dependent, every file's fate follows from
+    // the plan and from the manifest records written below.
+    for id in [live, reader, old_removed, young_removed, guarded] {
+        oracle.write_object(GcObject::Sst(id)).await;
+        oracle.write_object(GcObject::Index(id, 0)).await;
     }
-    objects.insert(GcObject::Index(live, live_version));
-    objects.insert(GcObject::Index(reader, reader_version));
-    for object in objects {
-        oracle.write_object(object).await;
+    if version != 0 {
+        oracle.write_object(GcObject::Index(live, version)).await;
+        oracle.write_object(GcObject::Index(reader, version)).await;
     }
+    // Never published: only a full listing sees it, and only once it is older
+    // than the unknown-file grace.
+    oracle.write_object(GcObject::Sst(orphan)).await;
 
-    // Index-version replacement: `live` is published at version 0 and then at
-    // `live_version`, so the outdated index version becomes reclaimable while the
-    // current one stays in the manifest.
+    // `live` is published at version 0 and republished at `version`, which
+    // records `Index(live, 0)` as a superseded index version (label `i`).
     oracle.publish_add(live, Some(0)).await;
-    oracle.publish_add(live, Some(live_version)).await;
-    // `reader` left the manifest, but a reader still holds `reader_version`.
+    if version != 0 {
+        oracle.publish_add(live, Some(version)).await;
+    }
+    // `reader` left the manifest while a reader still holds `version`: the SST
+    // and that exact version stay, other versions of it need not.
     oracle.publish_add(reader, None).await;
     oracle.publish_remove(reader, None, Some(0)).await;
-    oracle.set_tmp_refs([(reader, Some(reader_version))]);
-    // One expired removal and one that still lingers.
+    oracle.set_tmp_refs([(reader, Some(version))]);
+    // An expired removal, a removal whose record is still young, one only the
+    // hook keeps alive, and one object nobody references.
     oracle.publish_add(old_removed, Some(0)).await;
     oracle.publish_remove(old_removed, Some(0), Some(0)).await;
     oracle.publish_add(young_removed, None).await;
     oracle.publish_remove(young_removed, None, None).await;
-    // Only the hook keeps this one alive.
     oracle.publish_add(guarded, None).await;
     oracle.publish_remove(guarded, None, Some(0)).await;
-    if protect_guarded {
-        oracle.set_hook_protected([guarded]);
+    oracle.set_hook_protected([guarded]);
+
+    // Label `s`: one pass withheld at an entry safety check. Both causes stop the
+    // pass before the region is listed, although the expired removal and the
+    // mature orphan are already candidates (`PassExpectation::skipped` checks
+    // that the oracle sees work the pass refuses to do).
+    if let Some(cause) = plan.entry_skip {
+        match cause {
+            EntrySkip::PendingTails => oracle.arm_pending_tails().await,
+            EntrySkip::ManifestVersion => {}
+        }
+        let wiring = match cause {
+            EntrySkip::PendingTails => PassWiring::default(),
+            EntrySkip::ManifestVersion => PassWiring::mismatched_version(),
+        };
+        oracle
+            .run_pass(
+                RoundKnobs::full(NO_KNOWN_WAIT, MATURE_UNKNOWN_LINGER),
+                wiring,
+                PassExpectation::skipped(),
+                &format!("skip/{}", cause.name()),
+            )
+            .await;
+        if matches!(cause, EntrySkip::PendingTails) {
+            oracle.clear_pending_tails().await;
+        }
     }
 
-    // Entry skip first: candidates exist (the expired removal and the mature
-    // orphan), so a skipped pass really has something to withhold.
-    if skip_is_pending_tails {
-        oracle.arm_pending_tails().await;
+    // Label `r`: a publication lands while the protection lookup runs, so the
+    // whole batch must be withdrawn. `racing` carries an expired removal, which is
+    // what gives that pass a non-empty batch to withdraw; the re-publication puts
+    // it back into the manifest, so no later pass may reclaim it.
+    if plan.retraction {
+        oracle.write_object(GcObject::Sst(racing)).await;
+        oracle.publish_add(racing, None).await;
+        oracle.publish_remove(racing, None, Some(0)).await;
+
+        let engine = oracle.engine.clone();
+        let hook = oracle.hook.clone();
+        let region_id = oracle.region_id;
+        let republish = oracle.file_meta(racing, None);
+        hook.block_next_lookup();
+        let (_, ()) = tokio::join!(
+            oracle.run_pass(
+                RoundKnobs::fast(NO_KNOWN_WAIT, YOUNG_UNKNOWN_LINGER),
+                PassWiring::default(),
+                PassExpectation::retracted(),
+                "raced-publication",
+            ),
+            async move {
+                hook.entered.notified().await;
+                engine
+                    .edit_region(
+                        region_id,
+                        RegionEdit {
+                            files_to_add: vec![republish],
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+                hook.resume.notify_one();
+            }
+        );
+    }
+
+    // Label `d`, plus the reclamations the tests above pin one at a time: the age
+    // rules, the reader reference and the hook.
+    if plan.completing_passes {
+        // A full pass whose linger is over reclaims the expired removal and the
+        // mature orphan, and keeps the young removal and the hook-protected file.
+        oracle
+            .run_pass(
+                RoundKnobs::full(YOUNG_LINGER, MATURE_UNKNOWN_LINGER),
+                PassWiring::default(),
+                PassExpectation::complete_deleting(),
+                "full/expired-removal",
+            )
+            .await;
+        assert!(
+            oracle.deleted_ever().contains(&GcObject::Sst(orphan)),
+            "{}: the mature orphan was never reclaimed",
+            oracle.context()
+        );
+        assert!(
+            !oracle
+                .deleted_ever()
+                .contains(&GcObject::Sst(young_removed)),
+            "{}: a still lingering removal must keep its file",
+            oracle.context()
+        );
+
+        // Age the young removal without waiting: republishing it with an expel
+        // time far in the past makes it eligible.
+        oracle.publish_remove(young_removed, None, Some(0)).await;
         oracle
             .run_pass(
                 RoundKnobs::full(NO_KNOWN_WAIT, MATURE_UNKNOWN_LINGER),
                 PassWiring::default(),
-                PassExpectation::skipped(),
-                "skip/pending-tails",
+                PassExpectation::complete_deleting(),
+                "full/aged-removal",
             )
             .await;
-        oracle.clear_pending_tails().await;
-    } else {
-        oracle
-            .run_pass(
-                RoundKnobs::full(NO_KNOWN_WAIT, MATURE_UNKNOWN_LINGER),
-                PassWiring::mismatched_version(),
-                PassExpectation::skipped(),
-                "skip/manifest-version",
-            )
-            .await;
-    }
-
-    let first = if fast_first {
-        RoundKnobs::fast(YOUNG_LINGER, MATURE_UNKNOWN_LINGER)
-    } else {
-        RoundKnobs::full(YOUNG_LINGER, MATURE_UNKNOWN_LINGER)
-    };
-    oracle
-        .run_pass(
-            first,
-            PassWiring::default(),
-            PassExpectation::complete_deleting(),
-            "first",
-        )
-        .await;
-    if fast_first {
         assert!(
-            !oracle.deleted_ever().contains(&GcObject::Sst(orphan)),
-            "{}: a fast pass kept the mature orphan for the wrong reason",
+            oracle
+                .deleted_ever()
+                .contains(&GcObject::Sst(young_removed)),
+            "{}: the aged removal must let its file go",
             oracle.context()
         );
-    }
-    assert!(
-        !oracle
-            .deleted_ever()
-            .contains(&GcObject::Sst(young_removed)),
-        "{}: a still lingering removal must keep its file",
-        oracle.context()
-    );
 
-    // The other mode, with every remaining unknown object still young.
-    let second = if fast_first {
-        RoundKnobs::full(YOUNG_LINGER, YOUNG_UNKNOWN_LINGER)
-    } else {
-        RoundKnobs::fast(YOUNG_LINGER, YOUNG_UNKNOWN_LINGER)
-    };
-    oracle
-        .run_pass(
-            second,
-            PassWiring::default(),
-            PassExpectation::complete(),
-            "young",
-        )
-        .await;
-    assert!(
-        !oracle
-            .deleted_ever()
-            .contains(&GcObject::Sst(young_removed)),
-        "{}: a young removal must keep its file",
-        oracle.context()
-    );
-
-    // Advance the age of that removal: republishing it with an old expel time
-    // makes it eligible without waiting.
-    oracle.publish_remove(young_removed, None, Some(0)).await;
-    oracle
-        .run_pass(
-            RoundKnobs::full(NO_KNOWN_WAIT, MATURE_UNKNOWN_LINGER),
-            PassWiring::default(),
-            PassExpectation::complete_deleting(),
-            "aged",
-        )
-        .await;
-    if protect_guarded {
+        // Release the hook: the file it alone kept alive is reclaimable now.
         oracle.set_hook_protected([]);
         oracle
             .run_pass(
                 RoundKnobs::full(NO_KNOWN_WAIT, MATURE_UNKNOWN_LINGER),
                 PassWiring::default(),
                 PassExpectation::complete_deleting(),
-                "hook-released",
+                "full/hook-released",
             )
             .await;
+        assert!(
+            oracle.deleted_ever().contains(&GcObject::Sst(guarded)),
+            "{}: the released hook must let its file go",
+            oracle.context()
+        );
     }
 
-    // Trajectory 1: the mature orphan was really reclaimed by a full pass.
-    assert!(
-        oracle.deleted_ever().contains(&GcObject::Sst(orphan)),
-        "{}: the mature orphan was never reclaimed",
-        oracle.context()
+    // Collapse guard: reconcile the row this seed's row of the coverage table
+    // promises with the row its passes really took. Without it a seed could drift
+    // onto another row, or onto the same row as its neighbours, and the suite
+    // would silently cover one combination three times.
+    let observed = oracle.branches();
+    assert_eq!(
+        observed,
+        plan.expected,
+        "{}: branch collapse: the coverage table plans d/s/r/i = {} ({:?}) but the passes took d/s/r/i = {} ({:?}); if a change moved this seed onto another row, update the table and the plan together instead of weakening this check",
+        oracle.context(),
+        plan.expected.key(),
+        plan.expected,
+        observed.key(),
+        observed,
     );
-    // Trajectory 2: the reader-referenced SST and the live file were never deleted.
+
+    // No branch may reclaim a live file, nor the SST and the exact index version
+    // a reader still holds.
     for object in [
-        GcObject::Sst(reader),
         GcObject::Sst(live),
-        GcObject::Index(live, live_version),
+        GcObject::Index(live, version),
+        GcObject::Sst(reader),
+        GcObject::Index(reader, version),
     ] {
         assert!(
             !oracle.deleted_ever().contains(&object),
@@ -4302,17 +4549,99 @@ async fn test_gc_physical_delete_oracle_scenario(#[case] seed: u64) {
             object.describe()
         );
     }
-    // Everything the model considers unreachable is reclaimed.
-    for object in [
-        GcObject::Sst(old_removed),
-        GcObject::Sst(young_removed),
-        GcObject::Sst(guarded),
+    // A withdrawn batch leaves the file it raced with in place.
+    if plan.retraction {
+        assert!(
+            oracle.inventory().contains(&GcObject::Sst(racing))
+                && !oracle.deleted_ever().contains(&GcObject::Sst(racing)),
+            "{}: the retracted batch must leave the file it raced with in place",
+            oracle.context()
+        );
+    }
+    // Label `d`, stated on `deleted_ever` itself.
+    if !plan.expected.deletes {
+        assert!(
+            oracle.deleted_ever().is_empty(),
+            "{}: this seed plans no physical deletion, but reclaimed {:?}",
+            oracle.context(),
+            oracle.deleted_ever()
+        );
+    }
+    // Every seed that plans deletions reclaims each object the model considers
+    // unreachable.
+    if plan.expected.deletes {
+        for object in [
+            GcObject::Sst(old_removed),
+            GcObject::Sst(young_removed),
+            GcObject::Sst(guarded),
+        ] {
+            assert!(
+                oracle.deleted_ever().contains(&object),
+                "{}: {} must be reclaimed",
+                oracle.context(),
+                object.describe()
+            );
+        }
+    }
+    // Label `i`, stated on the final inventory instead of on a single pass: a
+    // superseded index version went away while a newer version of the same file
+    // id stayed.
+    let superseded_gone = oracle.deleted_ever().iter().any(|deleted| match *deleted {
+        GcObject::Index(id, deleted_version) => oracle.inventory().iter().any(|left| {
+            matches!(
+                left,
+                GcObject::Index(left_id, left_version)
+                    if *left_id == id && *left_version > deleted_version
+            )
+        }),
+        GcObject::Sst(_) | GcObject::Narthex(_, _) => false,
+    });
+    assert_eq!(
+        superseded_gone,
+        plan.expected.index_replacement,
+        "{}: label `i` must be {} on this seed, deleted_ever = {:?}, inventory = {:?}",
+        oracle.context(),
+        plan.expected.index_replacement,
+        oracle.deleted_ever(),
+        oracle.inventory(),
+    );
+}
+
+/// The coverage table is the only reason the three seeded cases exist: three
+/// seeds that all take one branch combination prove no more than one seed, so the
+/// table is checked without running any GC. Every row must differ from every
+/// other row and every label must appear in both states.
+#[test]
+fn test_gc_physical_delete_oracle_scenario_plans_are_distinct() {
+    let plans = [SEED_A, SEED_B, SEED_C].map(|seed| (seed, scenario_plan(seed)));
+    for (index, (seed, plan)) in plans.iter().enumerate() {
+        for (other_seed, other) in &plans[index + 1..] {
+            assert_ne!(
+                plan.expected,
+                other.expected,
+                "seeds {seed:#X} and {other_seed:#X} plan the same branch row d/s/r/i = {}: one of them is redundant coverage, change its plan and its row in the table",
+                plan.expected.key(),
+            );
+        }
+    }
+    for (label, picked) in [
+        ("deletes", plans.map(|(_, plan)| plan.expected.deletes)),
+        (
+            "entry_skip",
+            plans.map(|(_, plan)| plan.expected.entry_skip),
+        ),
+        (
+            "retraction",
+            plans.map(|(_, plan)| plan.expected.retraction),
+        ),
+        (
+            "index_replacement",
+            plans.map(|(_, plan)| plan.expected.index_replacement),
+        ),
     ] {
         assert!(
-            oracle.deleted_ever().contains(&object),
-            "{}: {} must be reclaimed",
-            oracle.context(),
-            object.describe()
+            picked.iter().any(|on| *on) && picked.iter().any(|on| !*on),
+            "the coverage table must exercise both states of `{label}`, it only plans {picked:?}",
         );
     }
 }
