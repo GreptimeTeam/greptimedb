@@ -16179,13 +16179,24 @@ async fn native_promql_root_canonical_merge_keeps_the_scan_width() {
     let pair_sum_display = datafusion::physical_plan::displayable(pair_sum_plan.as_ref())
         .indent(true)
         .to_string();
+    // The metadata drop this statement performs is judged by its labels alone now, so the pass puts
+    // no `Merge` above the fold and the cut below it is accepted: the fold is planned as
+    // partition-local `partial` state with a `final` above the state router instead of one
+    // `complete` aggregate over the assembled frames. What it must still be is a fold over the
+    // *assembled* series rather than over one partition's share of them, and that is the merge
+    // sitting below the cut's partial half: every partition's partial folds pieces the merge
+    // already routed to it as one label set, and the final half folds their state. The rows below
+    // are what pin the answer, against both the expectation and the existing plan.
     assert!(
-        pair_sum_display.contains("Aggregate: sum by [] complete"),
-        "the fold is a complete aggregate over the assembled series: {pair_sum_display}"
+        pair_sum_display.contains("Aggregate: sum by [] complete")
+            || holds_split_merge(&pair_sum_plan),
+        "the fold is over the assembled series, complete or as a collected split: {pair_sum_display}"
     );
     assert!(
-        !holds_split_merge(&pair_sum_plan),
-        "the fold is not planned as partition-local partial state: {pair_sum_display}"
+        pair_sum_display.contains("Aggregate: sum by [] complete")
+            || pair_sum_display.contains("Merge: canonical label-set merge"),
+        "the split's partial half reads the assembled boundary rather than raw pieces: \
+         {pair_sum_display}"
     );
     let (_, pair_sum_rows) = native_labelled_rows(pair_sum).await;
     assert_eq!(
@@ -16246,26 +16257,22 @@ async fn native_promql_root_canonical_merge_keeps_the_scan_width() {
         let display = datafusion::physical_plan::displayable(plan.as_ref())
             .indent(true)
             .to_string();
-        // The boundary sits below the consumer either way, but what reads it follows the consumer:
-        // a ranking above the rewrite assembles its input in the frontend, so the router is part of
-        // that plan, while a fold is planned as the existing complete aggregate over the assembled
-        // frames - it gathers them into one execution and folds every label set there, which is
-        // where the overlap is refused. What both shapes have in common - and what this asserts -
-        // is a canonical router over a fused producer instead of a gather, and no split partial
-        // state standing in for the collection.
-        if shape == "a fold" {
-            assert!(
-                display.contains("Aggregate: sum by [] complete"),
-                "{shape}: the fold is a complete aggregate over the assembled frames: {display}"
-            );
-            assert!(
-                !holds_split_merge(&plan),
-                "{shape}: the aggregate runs over the boundary itself, not as partial state: {display}"
-            );
-        }
+        // The boundary sits below the consumer either way, and the merge that collects the rewritten
+        // series is what refuses the overlap. What reads it follows the consumer: a ranking above
+        // the rewrite assembles its input in the frontend, so the merge is a canonical producer
+        // under its own router; a fold drops the metadata labels, and since that drop is judged by
+        // its labels alone no merge is put above it - the cut is accepted and the merge sits below
+        // the split's partial half, where every partition's partial still folds one label set.
+        // What both shapes have in common, and what this asserts, is that merge, and a router over
+        // its producer rather than a gather of the series.
         assert!(
-            canonical_router(&observer).is_some(),
-            "{shape}: the boundary is still the canonical router, not a gather: {} regions {:?}",
+            display.contains("Merge: canonical label-set merge"),
+            "{shape}: the merge that collects the rewritten series is gone, so nothing can refuse \
+             the overlap: {display}"
+        );
+        assert!(
+            canonical_router(&observer).is_some() || holds_split_merge(&plan),
+            "{shape}: the boundary is a router over its producer, not a gather: {} regions {:?}",
             display_plan_tree(&plan),
             observer
                 .region_plans()
@@ -16327,9 +16334,11 @@ async fn native_promql_root_canonical_merge_keeps_the_scan_width() {
     );
 
     // An aggregate after a colliding rewrite cannot hide the same-point conflict: the merge must
-    // validate its canonical input before the aggregate consumes it. The fold is the existing
-    // complete aggregate, placed above the boundary because it reads every assembled label set;
-    // there is no partition-local partial state to fall back to.
+    // validate its canonical input before the aggregate consumes it. The fold drops the metadata
+    // labels and that drop is judged by its labels alone now, so no merge is put above the fold and
+    // the cut below it is accepted: the fold is partition-local `partial` state with a `final`
+    // above the state router, and the merge that validates the overlap sits below the partial half.
+    // The error asserted here is what says it validated before anything folded.
     let rewritten_sum = r#"sum(label_replace(root_fold, "host", "same", "host", ".*"))"#;
     observer.clear();
     let sum_output = instance
@@ -16350,16 +16359,18 @@ async fn native_promql_root_canonical_merge_keeps_the_scan_width() {
         .indent(true)
         .to_string();
     assert!(
-        sum_display.contains("Aggregate: sum by [] complete"),
-        "the fold runs natively as a complete aggregate over the boundary: {sum_display}"
+        sum_display.contains("Aggregate: sum by [] complete") || holds_split_merge(&sum_plan),
+        "the fold runs natively over the boundary, complete or as a collected split: {sum_display}"
     );
     assert!(
-        !holds_split_merge(&sum_plan),
-        "the fold's state is not the substitute for the canonical merge: {sum_display}"
+        sum_display.contains("Aggregate: sum by [] complete")
+            || sum_display.contains("Merge: canonical label-set merge"),
+        "the split's partial half still reads the canonical merge, so the overlap is validated \
+         before anything folds it: {sum_display}"
     );
     assert!(
-        canonical_router(&observer).is_some(),
-        "the fold's prefix keeps the canonical router: {sum_display}"
+        canonical_router(&observer).is_some() || holds_split_merge(&sum_plan),
+        "the fold's prefix keeps its router over the producer: {sum_display}"
     );
 
     // A rewrite above the aggregate is pointwise on its single globally computed output, and must
