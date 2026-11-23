@@ -2964,7 +2964,10 @@ async fn authoritative_narthex_preparation_without_sidecars(
         .build();
     create.column_metadatas = metadata.column_metadatas;
     create.primary_key = metadata.primary_key;
-    create.primary_key[2..].reverse();
+    if encoded {
+        // Metric writes encode labels by name, independently of physical metadata order.
+        create.primary_key[2..].reverse();
+    }
     create
         .options
         .insert("append_mode".into(), append.to_string());
