@@ -419,13 +419,15 @@ impl SeqScan {
             input.mapper.output_schema(),
             Box::pin(record_batch_stream),
         ));
-        // The rows this scan hid and the slices it read (a physical-sequence read only)
-        // travel with the result, so the caller learns which windows it has to recompute
-        // and which cursor slices it consumed.
+        // The rows this scan hid, the slices it read (both a physical-sequence read only) and
+        // the other regions' files it delivered rows from travel with the result, so the
+        // caller learns which windows it has to recompute, which cursor slices it consumed
+        // and which adopted files reached its output.
         Ok(SubstitutedRowRangesStream::wrap(
             stream,
             input.substituted_row_ranges_ref(),
             input.observed_slices_ref(),
+            input.foreign_file_row_creators_ref(),
             input.region_metadata().region_id.as_u64(),
         ))
     }

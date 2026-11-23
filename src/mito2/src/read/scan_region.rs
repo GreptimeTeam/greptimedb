@@ -76,8 +76,8 @@ use crate::read::seq_scan::SeqScan;
 use crate::read::series_scan::SeriesScan;
 use crate::read::stream::ScanBatchStream;
 use crate::read::substituted_rows::{
-    ObservedPartitionExprs, ObservedPartitionExprsRef, SubstitutedRowsAccumulator,
-    SubstitutedRowsAccumulatorRef,
+    ForeignFileRowCreators, ForeignFileRowCreatorsRef, ObservedPartitionExprs,
+    ObservedPartitionExprsRef, SubstitutedRowsAccumulator, SubstitutedRowsAccumulatorRef,
 };
 use crate::read::unordered_scan::UnorderedScan;
 use crate::read::{BoxedRecordBatchStream, RecordBatch};
@@ -1094,6 +1094,10 @@ pub struct ScanInput {
     /// Collects the `(region, partition expression)` pairs this scan read; `None` turns it off,
     /// like [`Self::substituted_row_ranges`].
     pub(crate) observed_slices: Option<ObservedPartitionExprsRef>,
+    /// Collects the creator regions of the files this scan delivered rows from; `None` turns
+    /// it off. Created for every query scan, not just a physical-sequence read: a full read
+    /// (`read_row_sequence` off) is exactly the read that has to report it.
+    pub(crate) foreign_file_row_creators: Option<ForeignFileRowCreatorsRef>,
     /// Whether this scan is for compaction.
     pub(crate) compaction: bool,
     /// Max number of compaction inputs decoded concurrently ahead of the merge.
@@ -1169,6 +1173,7 @@ impl ScanInput {
                 creator_cursor_shards: None,
                 substituted_row_ranges: None,
                 observed_slices: None,
+                foreign_file_row_creators: None,
                 compaction: false,
                 compaction_read_parallelism: 1,
                 json2_rewrite_targets: Arc::default(),
@@ -1252,6 +1257,12 @@ impl ScanInputBuilder {
     pub(crate) fn build(mut self) -> ScanInput {
         if self.input.compaction {
             self.input.scan_memory_tracker = None;
+        }
+        // A compaction read has no caller to report to. Every other scan states which other
+        // regions' files it delivered rows from — including a full read, which is the read
+        // that has no creator cursor to filter with.
+        if !self.input.compaction {
+            self.input.foreign_file_row_creators = Some(Arc::new(ForeignFileRowCreators::new()));
         }
         let input = &self.input;
         let eligible = !input.compaction
@@ -2019,6 +2030,14 @@ impl ScanInput {
 
     pub(crate) fn observed_slices_ref(&self) -> Option<ObservedPartitionExprsRef> {
         self.observed_slices.clone()
+    }
+
+    pub(crate) fn foreign_file_row_creators(&self) -> Option<&ForeignFileRowCreators> {
+        self.foreign_file_row_creators.as_deref()
+    }
+
+    pub(crate) fn foreign_file_row_creators_ref(&self) -> Option<ForeignFileRowCreatorsRef> {
+        self.foreign_file_row_creators.clone()
     }
 
     /// Returns the substituted cut `file` states for its own bytes, when this scan reads

@@ -1671,6 +1671,18 @@ pub fn build_flat_file_range_scan_stream(
                     continue;
                 };
 
+                // Evidence for the caller: rows of a file another region created are reaching
+                // this read's output. Recorded after this region's own row filters, so a file
+                // opened, pruned or filtered down to nothing is not reported; a later stage of
+                // the same query may still drop these rows, which makes the answer an
+                // over-approximation rather than a claim about the final result.
+                if let Some(creators) = stream_ctx.input.foreign_file_row_creators()
+                    && record_batch.num_rows() > 0
+                    && stream_ctx.input.is_foreign_file(range.file_handle())
+                {
+                    creators.record(range.file_handle().meta_ref().region_id.as_u64());
+                }
+
                 if let Some(flat_compat) = may_compat {
                     let batch = flat_compat.compat(record_batch)?;
                     yield batch;

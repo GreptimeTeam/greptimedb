@@ -715,6 +715,28 @@ pub struct RecordBatchMetrics {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub observed_slices: Vec<ObservedPartitionExpr>,
+    /// The creator regions of the files this round's scans **delivered rows** from, where the
+    /// file was created by a region other than the one that read it (an adopted file).
+    ///
+    /// A region that reads such a file compares the file's own row numbers against the
+    /// creator's cursor, so a row above the creator's proved watermark can reach the result
+    /// while the caller cannot tell it apart from a row of the holder. This field is that
+    /// evidence.
+    ///
+    /// `Some(creators)` — possibly empty — is an affirmative answer, sorted and
+    /// deduplicated: the scans this answer covers delivered rows of files created by exactly
+    /// these regions. `Some(vec![])` therefore says "delivered none". `None` (also: the
+    /// field's absence in a payload an earlier build wrote) states **nothing**, and is not
+    /// the same as `Some(vec![])`: a consumer that must not count a row above its creator's
+    /// proved watermark has to read an unknown answer as "could have delivered adopted rows".
+    ///
+    /// Delivered means the rows survived the reading region's own row filters and entered
+    /// its output. A later stage of the same query (merge, dedup, projection, an outer
+    /// predicate) may still drop them, so the claim is a deliberate over-approximation: it
+    /// never answers "none" for rows that were handed on, and it may name a creator whose
+    /// rows the query finally discarded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreign_file_row_creators: Option<Vec<u64>>,
 }
 
 /// The partition expression of one region that a scan read rows of, i.e. one
@@ -1895,6 +1917,50 @@ mod test {
         assert!(metrics.region_watermarks.is_empty());
         assert_eq!(metrics.elapsed_compute, 12);
         assert_eq!(metrics.memory_usage, 34);
+    }
+
+    /// The field an earlier build's payload does not carry decodes to `None` — the absence of
+    /// an answer — and never to "delivered none". The two must not be confusable: one is a
+    /// claim about what the read delivered, the other says nothing.
+    #[test]
+    fn test_recordbatch_metrics_deserializes_without_foreign_file_row_creators() {
+        let metrics: RecordBatchMetrics = serde_json::from_value(json!({
+            "elapsed_compute": 12,
+            "memory_usage": 34,
+            "plan_metrics": [],
+            "region_watermarks": [{"region_id": 1, "watermark": 7}]
+        }))
+        .unwrap();
+
+        assert_eq!(None, metrics.foreign_file_row_creators);
+    }
+
+    /// An affirmative answer of "delivered none" is written as an empty array and read back as
+    /// exactly that, distinct from an omitted field.
+    #[test]
+    fn test_recordbatch_metrics_foreign_file_row_creators_serde_roundtrip() {
+        let none_delivered = RecordBatchMetrics {
+            foreign_file_row_creators: Some(Vec::new()),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&none_delivered).unwrap();
+        assert_eq!(Some(&json!([])), value.get("foreign_file_row_creators"));
+        let decoded: RecordBatchMetrics = serde_json::from_value(value).unwrap();
+        assert_eq!(Some(Vec::new()), decoded.foreign_file_row_creators);
+
+        let delivered = RecordBatchMetrics {
+            foreign_file_row_creators: Some(vec![7, 9]),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&delivered).unwrap();
+        assert_eq!(Some(&json!([7, 9])), value.get("foreign_file_row_creators"));
+        let decoded: RecordBatchMetrics = serde_json::from_value(value).unwrap();
+        assert_eq!(Some(vec![7, 9]), decoded.foreign_file_row_creators);
+
+        // Unknown is not serialized at all: an answer is either stated or absent.
+        let unknown = RecordBatchMetrics::default();
+        let value = serde_json::to_value(&unknown).unwrap();
+        assert!(value.get("foreign_file_row_creators").is_none());
     }
 
     #[test]

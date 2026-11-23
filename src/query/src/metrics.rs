@@ -234,6 +234,11 @@ impl RecordBatchStream for RegionWatermarkMetricsStream {
         // the same result: the owner of a `(region, slice)` cursor splits and advances its
         // entries by exactly what this round observed.
         metrics.observed_slices = collect_observed_slices(self.plan.clone(), &metrics);
+        // Which other regions' files the regions delivered rows from. A caller that must not
+        // count a row above its creator's proved watermark cannot recover this from the
+        // watermarks: they say what was proved, not what was read.
+        metrics.foreign_file_row_creators =
+            collect_foreign_file_row_creators(self.plan.clone(), &metrics);
         Some(metrics)
     }
 }
@@ -277,10 +282,12 @@ pub fn terminal_recordbatch_metrics_from_plan(
     let region_watermarks = collect_region_watermarks(plan.clone());
     let own = RecordBatchMetrics::default();
     let substituted_row_ranges = collect_substituted_row_ranges(plan.clone(), &own);
-    let observed_slices = collect_observed_slices(plan, &own);
+    let observed_slices = collect_observed_slices(plan.clone(), &own);
+    let foreign_file_row_creators = collect_foreign_file_row_creators(plan.clone(), &own);
     if region_watermarks.is_empty()
         && substituted_row_ranges.is_empty()
         && observed_slices.is_empty()
+        && foreign_file_row_creators.is_none()
     {
         None
     } else {
@@ -288,6 +295,7 @@ pub fn terminal_recordbatch_metrics_from_plan(
             region_watermarks,
             substituted_row_ranges,
             observed_slices,
+            foreign_file_row_creators,
             ..Default::default()
         })
     }
@@ -407,6 +415,81 @@ fn collect_observed_slices(
     }
 
     merged.into_iter().collect()
+}
+
+/// Collects the creator regions of the adopted files the plan's region scans delivered rows
+/// from (`RecordBatchMetrics::foreign_file_row_creators`).
+///
+/// The answer is `Some` only when **every** region scan that could have read a file stated
+/// what it delivered, and the region set is then the union of their answers. A scan that
+/// reported nothing — a build that predates the field, or a region whose metrics never
+/// arrived — latches the whole answer to `None`, because an answer covering part of the read
+/// must not claim that nothing came from another region. `Some(vec![])` is an affirmative
+/// "delivered none" and survives the merge as the empty set.
+fn collect_foreign_file_row_creators(
+    plan: Arc<dyn ExecutionPlan>,
+    own: &RecordBatchMetrics,
+) -> Option<Vec<u64>> {
+    // `own` contributes when it states an answer, and is otherwise the absence of one this
+    // function cannot interpret: the stream of a distributed plan reports plan-level metrics
+    // and never a region's read, so its silence is not a scan that failed to report. A stream
+    // that *is* a region scan has a merge scan in the plan only when the plan reads a table,
+    // and then that region answers through the merge scan's sub-stage metrics.
+    let mut merged = BTreeSet::new();
+    let mut conclusive = false;
+    let mut unknown = false;
+    if let Some(creators) = own.foreign_file_row_creators.as_deref() {
+        conclusive = true;
+        merged.extend(creators.iter().copied());
+    }
+
+    let mut stack = vec![plan];
+    while let Some(plan) = stack.pop() {
+        if let Some(merge_scan) = plan.downcast_ref::<MergeScanExec>()
+            && !merge_scan.is_flow_sink_scan()
+        {
+            let sub_stage_metrics = merge_scan.sub_stage_metrics();
+            // A region without sub-stage metrics never reported, so the read over it is
+            // unknown even when every other region stated its answer.
+            if sub_stage_metrics.len() != merge_scan.regions().len() {
+                unknown = true;
+            }
+            for metrics in sub_stage_metrics {
+                merge_foreign_file_row_creators(
+                    metrics.foreign_file_row_creators.as_deref(),
+                    &mut merged,
+                    &mut conclusive,
+                    &mut unknown,
+                );
+            }
+        }
+        stack.extend(plan.children().into_iter().cloned());
+    }
+
+    if unknown || !conclusive {
+        None
+    } else {
+        Some(merged.into_iter().collect())
+    }
+}
+
+/// Merges one scan's answer into the plan-wide one.
+///
+/// `Some` is an answer (it accumulates and makes the merged result conclusive); `None` is the
+/// absence of one and latches the merged result to unknown.
+fn merge_foreign_file_row_creators(
+    creators: Option<&[u64]>,
+    merged: &mut BTreeSet<u64>,
+    conclusive: &mut bool,
+    unknown: &mut bool,
+) {
+    match creators {
+        Some(creators) => {
+            *conclusive = true;
+            merged.extend(creators.iter().copied());
+        }
+        None => *unknown = true,
+    }
 }
 
 /// Merge a batch of watermark entries into the global merged state.
@@ -683,6 +766,85 @@ mod tests {
                 partition_expr: None,
                 watermark: None,
             }]
+        );
+    }
+
+    /// The union of what the branches stated: a creator named by two branches is one entry,
+    /// and an answer of "delivered none" survives as the empty set instead of disappearing.
+    #[test]
+    fn merge_foreign_file_row_creators_unions_the_branches() {
+        let mut merged = BTreeSet::new();
+        let mut conclusive = false;
+        let mut unknown = false;
+
+        merge_foreign_file_row_creators(Some(&[7, 9]), &mut merged, &mut conclusive, &mut unknown);
+        merge_foreign_file_row_creators(Some(&[9]), &mut merged, &mut conclusive, &mut unknown);
+        merge_foreign_file_row_creators(Some(&[]), &mut merged, &mut conclusive, &mut unknown);
+
+        assert!(conclusive);
+        assert!(!unknown);
+        assert_eq!(
+            BTreeSet::from([7, 9]),
+            merged,
+            "the delivered creators are the union of what the branches reported"
+        );
+    }
+
+    /// A branch that states nothing latches the answer to unknown: the other branches' answers
+    /// cover only part of the read, and "these are the creators" would claim the rest
+    /// delivered nothing.
+    #[test]
+    fn merge_foreign_file_row_creators_keeps_a_silent_branch_unknown() {
+        let mut merged = BTreeSet::new();
+        let mut conclusive = false;
+        let mut unknown = false;
+
+        merge_foreign_file_row_creators(Some(&[]), &mut merged, &mut conclusive, &mut unknown);
+        merge_foreign_file_row_creators(None, &mut merged, &mut conclusive, &mut unknown);
+
+        assert!(conclusive);
+        assert!(
+            unknown,
+            "one silent branch is enough to make the answer unknown"
+        );
+    }
+
+    /// A plan whose stream states the answer reports it; one whose stream states nothing
+    /// reports unknown rather than "none".
+    #[test]
+    fn collect_foreign_file_row_creators_reads_the_stream_that_reports_it() {
+        let plan: Arc<dyn ExecutionPlan> = Arc::new(EmptyExec::new(Arc::new(ArrowSchema::empty())));
+
+        let own = RecordBatchMetrics {
+            foreign_file_row_creators: Some(vec![7]),
+            ..Default::default()
+        };
+        assert_eq!(
+            Some(vec![7]),
+            collect_foreign_file_row_creators(plan.clone(), &own)
+        );
+
+        assert_eq!(
+            None,
+            collect_foreign_file_row_creators(plan, &RecordBatchMetrics::default())
+        );
+    }
+
+    /// A merge scan lists its regions, so a region that never reported its metrics makes the
+    /// whole answer unknown: the read over that region is uncovered, not empty.
+    #[test]
+    fn collect_foreign_file_row_creators_stays_unknown_when_a_region_never_reported() {
+        let query_ctx = flow_query_ctx_with_sink_table_id(42);
+        let plan = test_merge_scan_exec(43, query_ctx);
+        let own = RecordBatchMetrics {
+            foreign_file_row_creators: Some(vec![]),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            None,
+            collect_foreign_file_row_creators(plan, &own),
+            "the merge scan's one region reported no metrics, so nothing about it is proved"
         );
     }
 

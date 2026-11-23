@@ -19,7 +19,8 @@
 //! ([`FileMeta::substituted_up_to`](crate::sst::file::FileMeta::substituted_up_to)) and records
 //! the timestamps of the dropped rows here, so the caller recomputes those windows. The same
 //! read records which `(region, partition expression)` pairs it read
-//! ([`ObservedPartitionExprs`]).
+//! ([`ObservedPartitionExprs`]). Every read — physical-sequence or full — records which other
+//! regions' files it delivered rows from ([`ForeignFileRowCreators`]).
 
 use std::collections::BTreeSet;
 use std::pin::Pin;
@@ -154,6 +155,48 @@ impl ObservedPartitionExprs {
     }
 }
 
+/// Accumulates the creator regions of the adopted files this scan delivered rows from, i.e.
+/// the regions that created a file whose rows reached this scan's output.
+///
+/// Shared by every reader of one scan and deduplicated on insert.
+#[derive(Debug, Default)]
+pub(crate) struct ForeignFileRowCreators {
+    creators: Mutex<BTreeSet<u64>>,
+}
+
+pub(crate) type ForeignFileRowCreatorsRef = Arc<ForeignFileRowCreators>;
+
+impl ForeignFileRowCreators {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records that at least one row of a file `creator_region_id` created survived this
+    /// region's own row filters and entered the scan's output.
+    ///
+    /// The evidence is reported per creator region rather than per file because a caller can
+    /// only act on the creator: the numbers in the row are the creator's, and it is the
+    /// creator's watermark that has to cover them.
+    pub(crate) fn record(&self, creator_region_id: u64) {
+        // A poisoned lock cannot leave the set inconsistent (an insert is the only
+        // mutation), so it is recovered instead of failing the scan.
+        self.creators
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(creator_region_id);
+    }
+
+    /// Returns the recorded creator regions, sorted and deduplicated.
+    pub(crate) fn entries(&self) -> Vec<u64> {
+        self.creators
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .copied()
+            .collect()
+    }
+}
+
 /// Drops the rows of `record_batch` whose physical sequence is at or below `cut`.
 ///
 /// The batch must still carry the flat format's internal columns, i.e. this runs before
@@ -262,35 +305,39 @@ fn to_time_unit(unit: datatypes::arrow::datatypes::TimeUnit) -> TimeUnit {
     }
 }
 
-/// Wraps a scan stream so its terminal metrics carry what the scan substituted and read.
+/// Wraps a scan stream so its terminal metrics carry what the scan substituted and read, and
+/// which adopted files it delivered rows from.
 ///
 /// Mirrors how a region reports its snapshot watermark: the proof travels with the
 /// result instead of a side channel, so a caller that stops reading early never
 /// observes a range set that belongs to rows it did not receive.
 pub(crate) struct SubstitutedRowRangesStream {
     stream: SendableRecordBatchStream,
-    ranges: SubstitutedRowsAccumulatorRef,
+    ranges: Option<SubstitutedRowsAccumulatorRef>,
     observed_slices: Option<ObservedPartitionExprsRef>,
+    foreign_file_row_creators: Option<ForeignFileRowCreatorsRef>,
     region_id: u64,
 }
 
 impl SubstitutedRowRangesStream {
-    /// Wraps `stream`, or returns it unchanged when the scan reads no physical sequences.
+    /// Wraps `stream`, or returns it unchanged when the scan reports none of the three.
     pub(crate) fn wrap(
         stream: SendableRecordBatchStream,
         ranges: Option<SubstitutedRowsAccumulatorRef>,
         observed_slices: Option<ObservedPartitionExprsRef>,
+        foreign_file_row_creators: Option<ForeignFileRowCreatorsRef>,
         region_id: u64,
     ) -> SendableRecordBatchStream {
-        match ranges {
-            Some(ranges) => Box::pin(Self {
-                stream,
-                ranges,
-                observed_slices,
-                region_id,
-            }),
-            None => stream,
+        if ranges.is_none() && observed_slices.is_none() && foreign_file_row_creators.is_none() {
+            return stream;
         }
+        Box::pin(Self {
+            stream,
+            ranges,
+            observed_slices,
+            foreign_file_row_creators,
+            region_id,
+        })
     }
 }
 
@@ -309,15 +356,23 @@ impl RecordBatchStream for SubstitutedRowRangesStream {
 
     fn metrics(&self) -> Option<RecordBatchMetrics> {
         let mut metrics = self.stream.metrics().unwrap_or_default();
-        let substituted = self.ranges.entries(self.region_id);
-        if !substituted.is_empty() {
-            metrics.substituted_row_ranges = substituted;
+        if let Some(ranges) = &self.ranges {
+            let substituted = ranges.entries(self.region_id);
+            if !substituted.is_empty() {
+                metrics.substituted_row_ranges = substituted;
+            }
         }
         if let Some(observed) = &self.observed_slices {
             let slices = observed.entries();
             if !slices.is_empty() {
                 metrics.observed_slices = slices;
             }
+        }
+        // An answer, not an absence: this read states which adopted files it delivered rows
+        // from even when that is none, so the caller can tell "delivered none" from the
+        // unknown an earlier build's payload states.
+        if let Some(creators) = &self.foreign_file_row_creators {
+            metrics.foreign_file_row_creators = Some(creators.entries());
         }
         Some(metrics)
     }

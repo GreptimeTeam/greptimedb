@@ -7430,6 +7430,121 @@ async fn test_read_row_sequence_reports_observed_slices() {
     );
 }
 
+/// Scans one partition the way a datanode does and returns the timestamps it delivered together
+/// with the adopted files' creators its terminal metrics report.
+async fn scan_partition_rows_and_foreign_creators(
+    engine: &crate::engine::MitoEngine,
+    region_id: RegionId,
+    request: ScanRequest,
+) -> (Vec<i64>, Option<Vec<u64>>) {
+    use store_api::region_engine::QueryScanContext;
+
+    let scanner = engine.handle_query(region_id, request).await.unwrap();
+    let mut stream = scanner
+        .scan_partition(
+            &QueryScanContext::default(),
+            &ExecutionPlanMetricsSet::new(),
+            0,
+        )
+        .unwrap();
+    let mut timestamps = Vec::new();
+    while let Some(batch) = stream.try_next().await.unwrap() {
+        let column = batch
+            .column_by_name("ts")
+            .expect("time index column")
+            .clone();
+        timestamps.extend_from_slice(crate::read::timestamp_array_to_i64_slice(&column));
+    }
+    let creators = stream
+        .metrics()
+        .and_then(|metrics| metrics.foreign_file_row_creators);
+    (timestamps, creators)
+}
+
+/// A read of an adopted file names the region that created it, so a caller that must not count
+/// a row above its creator's proved watermark learns that this read could have delivered one.
+#[tokio::test]
+async fn test_read_row_sequence_reports_foreign_file_row_creators() {
+    let mut env = TestEnv::with_prefix("test_read_row_sequence_foreign_row_creators").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let source = RegionId::new(1, 2);
+    let target = RegionId::new(1, 1);
+
+    let (_, source_file) = build_foreign_source_file(&engine, source, 5, true).await;
+    create_foreign_target(&engine, target).await;
+    adopt_foreign_file(&engine, target, source_file, 6, true, None);
+
+    let (timestamps, creators) = scan_partition_rows_and_foreign_creators(
+        &engine,
+        target,
+        creator_cursor_scan(source, vec![CursorShard::whole_domain(1)], 0, 10),
+    )
+    .await;
+
+    assert_eq!(vec![1000, 2000, 3000, 4000], timestamps);
+    assert_eq!(
+        Some(vec![source.as_u64()]),
+        creators,
+        "the rows of the adopted file reached the output, so its creator is named"
+    );
+}
+
+/// The base read of a repair is a **full** read: it carries no creator cursor and reads every
+/// row of the adopted file. It still has to report that it did.
+#[tokio::test]
+async fn test_read_row_sequence_reports_foreign_file_row_creators_on_a_full_read() {
+    let mut env = TestEnv::with_prefix("test_read_row_sequence_foreign_rows_full_read").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let source = RegionId::new(1, 2);
+    let target = RegionId::new(1, 1);
+
+    let (_, source_file) = build_foreign_source_file(&engine, source, 5, true).await;
+    create_foreign_target(&engine, target).await;
+    adopt_foreign_file(&engine, target, source_file, 6, true, None);
+
+    // No `read_row_sequence`, no creator cursors: nothing filters the adopted file.
+    let (timestamps, creators) =
+        scan_partition_rows_and_foreign_creators(&engine, target, ScanRequest::default()).await;
+
+    assert_eq!(vec![0, 1000, 2000, 3000, 4000], timestamps);
+    assert_eq!(
+        Some(vec![source.as_u64()]),
+        creators,
+        "a full read reads every row of the adopted file and says so"
+    );
+}
+
+/// A read that delivers no adopted row answers "none" instead of saying nothing: a caller can
+/// tell the two apart only because the empty answer is stated, never defaulted.
+#[tokio::test]
+async fn test_read_row_sequence_reports_no_foreign_file_row_creators_for_a_local_read() {
+    let mut env = TestEnv::with_prefix("test_read_row_sequence_no_foreign_row_creators").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let source = RegionId::new(1, 2);
+    let target = RegionId::new(1, 1);
+
+    let (_, source_file) = build_foreign_source_file(&engine, source, 5, true).await;
+    create_foreign_target(&engine, target).await;
+    adopt_foreign_file(&engine, target, source_file, 6, true, None);
+
+    // A cursor of the creator's domain that has consumed every row the file states: the read
+    // opens the file and delivers nothing.
+    let (timestamps, creators) = scan_partition_rows_and_foreign_creators(
+        &engine,
+        target,
+        creator_cursor_scan(source, vec![CursorShard::whole_domain(5)], 0, 10),
+    )
+    .await;
+
+    assert!(timestamps.is_empty(), "{timestamps:?}");
+    assert_eq!(
+        Some(Vec::new()),
+        creators,
+        "an opened file that delivered no row is not evidence of a delivered row, and the \
+         answer is still stated"
+    );
+}
+
 /// Raw Mito output contains candidates after projection, filtering, and MVCC read processing.
 #[tokio::test]
 async fn test_mito_handle_query_raw_series_candidate_projection_and_mvcc() {
