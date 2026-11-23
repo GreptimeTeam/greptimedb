@@ -1524,8 +1524,8 @@ impl ScanInput {
         }
     }
 
-    /// Tries to build file-level pruning statistics from the [FileHandle]'s manifest-level
-    /// time range and primary key range, without reading any parquet metadata.
+    /// Tries to build file-level pruning statistics from the [FileHandle]'s time range and
+    /// primary key range, without reading any parquet metadata.
     ///
     /// Returns `None` if timestamp unit conversion overflows (conservative: keep the file).
     fn try_file_level_pruning_stats<'a>(
@@ -1549,13 +1549,12 @@ impl ScanInput {
         })
     }
 
-    /// Returns the first primary key column of `file` when the file records its primary key
-    /// range. The range is decoded only when pruning asks for the column.
+    /// Returns the first primary key column of `file`. Its range is decoded only when pruning
+    /// asks for the column.
     fn first_primary_key_stats<'a>(
         &'a self,
         file: &'a FileHandle,
     ) -> Option<FirstPrimaryKeyStats<'a>> {
-        file.meta_ref().primary_key_min.as_ref()?;
         let metadata = self.mapper.metadata();
         let column = metadata.column_by_id(*metadata.primary_key.first()?)?;
         Some(FirstPrimaryKeyStats {
@@ -1920,9 +1919,9 @@ impl ScanInput {
     }
 }
 
-/// Lightweight [PruningStatistics] that only uses the file-level time range and first primary
-/// key range from manifest metadata, avoiding any parquet metadata reads. Used for early
-/// file-level pruning before accessing row-group-level statistics.
+/// Lightweight [PruningStatistics] that only uses the time range and first primary key range
+/// known by the file handle, avoiding any parquet metadata reads. Used for early file-level
+/// pruning before accessing row-group-level statistics.
 pub(crate) struct FileLevelPruningStats<'a> {
     /// Scalar value for the file's minimum timestamp in the time index column's unit.
     pub(crate) min_scalar: ScalarValue,
@@ -1930,7 +1929,7 @@ pub(crate) struct FileLevelPruningStats<'a> {
     pub(crate) max_scalar: ScalarValue,
     /// Name of the time index column.
     pub(crate) time_index_col_name: String,
-    /// First primary key column, when the file's key range is known.
+    /// First primary key column; `None` when the region has no primary key.
     pub(crate) first_primary_key: Option<FirstPrimaryKeyStats<'a>>,
 }
 
@@ -3464,6 +3463,10 @@ mod tests {
         assert!(!input.can_manifest_prune_file(&file(Some(("b", "b")))));
         // Files without a recorded range are kept.
         assert!(!input.can_manifest_prune_file(&file(None)));
+        // A range hydrated from the footer when the region opens also prunes the file.
+        let hydrated = file(None);
+        hydrated.set_primary_key_range((key("c"), key("d")));
+        assert!(input.can_manifest_prune_file(&hydrated));
     }
 
     #[tokio::test]
