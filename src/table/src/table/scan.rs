@@ -24,7 +24,8 @@ use common_query::series_frame::{
     PendingBatching, pack_raw_series_with, raw_series_frame_schema_with_ordering,
 };
 use common_recordbatch::adapter::{
-    RecordBatchStreamAdapter, RegionQueryStatCounters, SERIES_SCAN_EXEC_NAME,
+    ForeignFileRowCreatorReports, RecordBatchStreamAdapter, RegionQueryStatCounters,
+    SERIES_SCAN_EXEC_NAME,
 };
 use common_recordbatch::{
     DfRecordBatch, DfSendableRecordBatchStream, MemoryTrackedStream, QueryMemoryTracker,
@@ -90,6 +91,14 @@ pub struct RegionScanExec {
     /// Dynamic filters accepted by the scanner and applied to decoded output batches.
     /// The wrappers themselves remain live and are updated by their producers.
     pushed_dyn_filters: Arc<Mutex<Vec<Arc<dyn PhysicalExpr>>>>,
+    /// What the partition streams reported about the adopted files they delivered rows from,
+    /// each stream reporting when it ends.
+    ///
+    /// The scanner's stream states it, and this node is what a plan-level collector can ask
+    /// after the read: DataFusion's metrics carry figures, not an answer about what was read,
+    /// and a rebuilt [`RecordBatchMetrics`] cannot recover one. Shared with the clones that
+    /// re-assign partition ranges, so an answer stated before a re-assignment is not lost.
+    foreign_file_row_creators: Arc<ForeignFileRowCreatorReports>,
 }
 
 impl std::fmt::Debug for RegionScanExec {
@@ -328,6 +337,7 @@ impl RegionScanExec {
             explain_verbose: false,
             query_memory_tracker,
             pushed_dyn_filters: Arc::new(Mutex::new(Vec::new())),
+            foreign_file_row_creators: Arc::new(ForeignFileRowCreatorReports::new()),
         })
     }
 
@@ -402,11 +412,22 @@ impl RegionScanExec {
             explain_verbose: self.explain_verbose,
             query_memory_tracker: self.query_memory_tracker.clone(),
             pushed_dyn_filters: self.pushed_dyn_filters.clone(),
+            foreign_file_row_creators: self.foreign_file_row_creators.clone(),
         })
     }
 
     pub fn distribution(&self) -> Option<TimeSeriesDistribution> {
         self.distribution
+    }
+
+    /// The creator regions this node's partition streams reported delivering rows from, or
+    /// `None` when they do not state an answer.
+    ///
+    /// A partition states its answer when its stream ends, so a caller asks after the read
+    /// finished; a partition that is still running, that never ran or that ended without an
+    /// answer leaves this unknown instead of answering "delivered none".
+    pub fn foreign_file_row_creators(&self) -> Option<Vec<u64>> {
+        self.foreign_file_row_creators.answer()
     }
 
     pub fn with_distinguish_partition_range(&self, distinguish_partition_range: bool) {
@@ -890,6 +911,7 @@ impl ExecutionPlan for SeriesScanExec {
             span,
             await_timer: None,
             dyn_filter: None,
+            creator_report: None,
         }))
     }
 }
@@ -983,6 +1005,11 @@ impl ExecutionPlan for RegionScanExec {
             span,
             await_timer: None,
             dyn_filter,
+            creator_report: Some(CreatorReport {
+                reports: self.foreign_file_row_creators.clone(),
+                partition,
+                partitions: self.properties.output_partitioning().partition_count(),
+            }),
         }))
     }
 
@@ -1113,12 +1140,21 @@ impl DisplayAs for RegionScanExec {
     }
 }
 
+/// Where a partition stream of [`RegionScanExec`] reports what it delivered when it ends.
+struct CreatorReport {
+    reports: Arc<ForeignFileRowCreatorReports>,
+    partition: usize,
+    partitions: usize,
+}
+
 pub struct StreamWithMetricWrapper {
     stream: SendableRecordBatchStream,
     metric: StreamMetrics,
     span: Span,
     await_timer: Option<Instant>,
     dyn_filter: Option<Arc<dyn PhysicalExpr>>,
+    /// Where this stream states its terminal creator answer, taken once the stream ended.
+    creator_report: Option<CreatorReport>,
 }
 
 impl Stream for StreamWithMetricWrapper {
@@ -1162,7 +1198,21 @@ impl Stream for StreamWithMetricWrapper {
                     Err(e) => Poll::Ready(Some(Err(DataFusionError::External(Box::new(e))))),
                 }
             }
-            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Ready(None) => {
+                // The stream is over, so what its metrics state now is the terminal answer.
+                // It is an answer about the rows it delivered, which is what the plan's
+                // collector must see: DataFusion's own metrics carry figures only.
+                if let Some(report) = this.creator_report.take() {
+                    let answer = this
+                        .stream
+                        .metrics()
+                        .and_then(|metrics| metrics.foreign_file_row_creators);
+                    report
+                        .reports
+                        .record(report.partition, report.partitions, answer);
+                }
+                Poll::Ready(None)
+            }
             Poll::Pending => Poll::Pending,
         }
     }
@@ -1377,6 +1427,106 @@ mod test {
             schema,
             RegionScanExec::new(scanner, ScanRequest::default(), None).unwrap(),
         )
+    }
+
+    /// A stream that states, when it ends, which other regions' files it delivered rows from,
+    /// the way a Mito region's stream does.
+    struct ReportedStream {
+        inner: SendableRecordBatchStream,
+        creators: Option<Vec<u64>>,
+    }
+
+    impl Stream for ReportedStream {
+        type Item = common_recordbatch::error::Result<RecordBatch>;
+
+        fn poll_next(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            std::pin::Pin::new(&mut self.inner).poll_next(cx)
+        }
+    }
+
+    impl common_recordbatch::RecordBatchStream for ReportedStream {
+        fn schema(&self) -> SchemaRef {
+            self.inner.schema()
+        }
+
+        fn output_ordering(&self) -> Option<&[common_recordbatch::OrderOption]> {
+            self.inner.output_ordering()
+        }
+
+        fn metrics(&self) -> Option<common_recordbatch::adapter::RecordBatchMetrics> {
+            Some(common_recordbatch::adapter::RecordBatchMetrics {
+                foreign_file_row_creators: self.creators.clone(),
+                ..Default::default()
+            })
+        }
+    }
+
+    fn reporting_region_scan(creators: Option<Vec<u64>>) -> RegionScanExec {
+        let (schema, _, metadata) = dynamic_filter_test_data(5688, false);
+        let batches = RecordBatches::try_new(schema, vec![]).unwrap();
+        let stream = ReportedStream {
+            inner: batches.as_stream(),
+            creators,
+        };
+        let scanner = Box::new(SinglePartitionScanner::new(
+            Box::pin(stream),
+            false,
+            metadata,
+            None,
+        ));
+        RegionScanExec::new(scanner, ScanRequest::default(), None).unwrap()
+    }
+
+    async fn drain_plan(plan: Arc<dyn ExecutionPlan>, context: Arc<TaskContext>) {
+        let partitions = plan.properties().output_partitioning().partition_count();
+        for partition in 0..partitions {
+            let mut stream = plan.execute(partition, context.clone()).unwrap();
+            while stream.try_next().await.unwrap().is_some() {}
+        }
+    }
+
+    /// What a region scan delivered is stated by its stream when the stream ends, so the node
+    /// keeps that answer: DataFusion's own metrics carry figures, and a rebuilt
+    /// `RecordBatchMetrics` cannot recover the answer from them.
+    #[tokio::test]
+    async fn test_region_scan_keeps_the_terminal_creator_answer_of_its_stream() {
+        let ctx = SessionContext::new();
+
+        let plan = Arc::new(reporting_region_scan(Some(vec![7])));
+        assert_eq!(
+            None,
+            plan.foreign_file_row_creators(),
+            "a scan that has not read anything states nothing, not \"delivered none\""
+        );
+        drain_plan(plan.clone(), ctx.task_ctx()).await;
+        assert_eq!(
+            Some(vec![7]),
+            plan.foreign_file_row_creators(),
+            "the answer the stream stated when it ended is the node's answer"
+        );
+
+        // A stream that states nothing leaves the node's answer unknown: silence is not
+        // "delivered none".
+        let plan = Arc::new(reporting_region_scan(None));
+        drain_plan(plan.clone(), ctx.task_ctx()).await;
+        assert_eq!(None, plan.foreign_file_row_creators());
+
+        // One partition answers and another has nothing to say, so the answer covers only
+        // part of the read.
+        let plan = Arc::new(
+            reporting_region_scan(Some(vec![7]))
+                .with_new_partitions(vec![vec![], vec![]], 2)
+                .unwrap(),
+        );
+        drain_plan(plan.clone(), ctx.task_ctx()).await;
+        assert_eq!(
+            None,
+            plan.foreign_file_row_creators(),
+            "a silent partition makes the read uncovered, not empty"
+        );
     }
 
     #[test]

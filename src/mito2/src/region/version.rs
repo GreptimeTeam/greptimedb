@@ -156,8 +156,30 @@ impl VersionControl {
         memtables_to_remove: &[MemtableId],
         purger: FilePurgerRef,
     ) {
+        self.apply_edit_with_metadata(None, edit, memtables_to_remove, purger);
+    }
+
+    /// Applies an optional metadata update and an optional edit as **one**
+    /// [Version] publish.
+    ///
+    /// Publishing both together keeps a concurrent reader from observing the
+    /// new metadata (e.g. a changed partition expression) together with the
+    /// previous file set or sequence boundary, which would break the invariant
+    /// that one scan sees one consistent file set and partition rule.
+    pub(crate) fn apply_edit_with_metadata(
+        &self,
+        metadata: Option<RegionMetadataRef>,
+        edit: Option<RegionEdit>,
+        memtables_to_remove: &[MemtableId],
+        purger: FilePurgerRef,
+    ) {
         let version = self.current().version;
         let builder = VersionBuilder::from_version(version);
+        let builder = if let Some(metadata) = metadata {
+            builder.metadata(metadata)
+        } else {
+            builder
+        };
         let committed_sequence = edit.as_ref().and_then(|e| e.committed_sequence);
         let builder = if let Some(edit) = edit {
             builder.apply_edit(edit, purger)
@@ -217,6 +239,11 @@ impl VersionControl {
     }
 
     /// Alter metadata of the region without rebuilding memtables.
+    ///
+    /// Production paths that must keep metadata and files consistent publish both
+    /// through [Self::apply_edit_with_metadata]; this metadata-only helper is kept
+    /// for tests that need an isolated metadata publish.
+    #[cfg(test)]
     pub(crate) fn alter_metadata(&self, metadata: RegionMetadataRef) {
         let version = self.current().version;
         let new_version = Arc::new(
@@ -258,9 +285,14 @@ impl VersionControl {
     }
 
     /// Truncate current version.
+    ///
+    /// Truncation drops rows from the region. The rows it keeps keep their own
+    /// numbers, so the truncation publishes no sequence boundary: what a reader can
+    /// no longer explain is stated per file by `FileMeta` and by the absence of the
+    /// removed files.
     pub(crate) fn truncate(&self, truncate_kind: TruncateKind) {
-        let version = self.current().version;
-
+        let current = self.current();
+        let version = current.version;
         match truncate_kind {
             TruncateKind::All {
                 truncated_entry_id,
@@ -301,12 +333,16 @@ impl VersionControl {
     }
 
     /// Discards all memtables while preserving persisted SST files.
+    ///
+    /// Like [Self::truncate] this drops rows; the rows that stay keep their own
+    /// numbers, so it publishes no sequence boundary.
     pub(crate) fn discard_unflushed(
         &self,
         discarded_entry_id: EntryId,
         discarded_sequence: SequenceNumber,
     ) {
-        let version = self.current().version;
+        let current = self.current();
+        let version = current.version;
         let memtable_builder = version.memtables.mutable.memtable_builder().clone();
         let new_mutable =
             Self::new_mutable_from_version(&version, version.metadata.clone(), memtable_builder);

@@ -315,6 +315,8 @@ fn file_meta_from_sst_info(
         primary_key_min: None,
         primary_key_max: None,
         preserve_row_sequence: false,
+        // The fixture's rows carry the numbers its own writer allocated.
+        substituted_up_to: None,
         format: Default::default(),
     }
 }

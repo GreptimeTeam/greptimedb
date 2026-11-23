@@ -358,6 +358,8 @@ impl ParquetbenchCommand {
                 primary_key_min: None,
                 primary_key_max: None,
                 preserve_row_sequence: false,
+                // The benchmark reads the file's physical column as it is written.
+                substituted_up_to: None,
                 format: Default::default(),
             },
             Arc::new(NoopFilePurger),

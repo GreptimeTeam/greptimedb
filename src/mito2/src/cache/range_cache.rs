@@ -39,6 +39,7 @@ use crate::error::{ComputeArrowSnafu, Result};
 use crate::metrics::{CACHE_BYTES, CACHE_EVICTION, RANGE_CACHE_WORKER_EVENTS};
 use crate::read::BoxedRecordBatchStream;
 use crate::read::range_cache::RangeScanCacheKey;
+use crate::read::substituted_rows::ForeignFileRowCreators;
 use crate::sst::file::FileHandle;
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 
@@ -140,6 +141,10 @@ impl RangeResultCache {
     }
 
     /// Replays a cached result or subscribes to one reader-owned streaming scan.
+    ///
+    /// `replay_evidence` is the reading scan's `ForeignFileRowCreators`, which is told when the
+    /// result this call returns did not decode the files of the caller's own scan: the creators
+    /// of the rows such a result delivers are then not recoverable from this call.
     #[tracing::instrument(name = "range_result_lookup", skip_all)]
     pub(crate) async fn read<F, Fut>(
         self: &Arc<Self>,
@@ -147,6 +152,7 @@ impl RangeResultCache {
         part_metrics: Arc<dyn RangeCacheMetricsReport>,
         files: Vec<FileHandle>,
         scope: RangeCacheScope,
+        replay_evidence: Option<&ForeignFileRowCreators>,
         build: F,
     ) -> Result<(BoxedRecordBatchStream, usize)>
     where
@@ -157,6 +163,12 @@ impl RangeResultCache {
         let load = match cache.get_or_register(key, files, scope) {
             RangeCacheLookup::Hit(value) => {
                 part_metrics.inc_range_cache_hit();
+                // The rows of a completed range were decoded by whichever scan built it: the
+                // files they came from are not read again, so their creators cannot be named
+                // from this call.
+                if let Some(creators) = replay_evidence {
+                    creators.record_replay_unknown();
+                }
                 let batch_size = value.value().estimated_batch_size;
                 return Ok((cached_flat_range_stream(value), batch_size));
             }
@@ -190,7 +202,19 @@ impl RangeResultCache {
         let batch_size = *batch_size;
         let cursor = match owner_cursor {
             Some(cursor) => Some(cursor),
-            None => shared.subscribe().await,
+            None => {
+                let cursor = shared.subscribe().await;
+                // Another caller built this range, so the rows come from its source. Its files
+                // were decoded there, and whether that source recorded them into this scan's
+                // `ForeignFileRowCreators` is not knowable here, so this call cannot state an
+                // answer for the rows it delivers.
+                if cursor.is_some()
+                    && let Some(creators) = replay_evidence
+                {
+                    creators.record_replay_unknown();
+                }
+                cursor
+            }
         };
         let Some(mut cursor) = cursor else {
             // An oversized range has closed admission. This caller has not emitted

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeSet;
 use std::fmt::{self, Display};
 use std::future::Future;
 use std::marker::PhantomData;
@@ -698,11 +699,170 @@ pub struct RecordBatchMetrics {
     /// Omitted when empty for backward compatibility.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub region_watermarks: Vec<RegionWatermarkEntry>,
+    /// Per-region time ranges of the rows a scan deliberately substituted, so the caller
+    /// recomputes those windows. An empty list means "substituted nothing", never "unknown".
+    /// Entries are ordered by region id, each region's ranges sorted and non-overlapping,
+    /// omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub substituted_row_ranges: Vec<SubstitutedRowRanges>,
+    /// The `(region, partition expression)` pairs this round's scans actually read, so the
+    /// owner of a `(region, slice)` cursor advances only the slices that were read.
+    /// Deduplicated and sorted, omitted when empty. Old bytes carried a numeric projection
+    /// under the previous key, so the new key (`observed_partition_exprs`) is not read back as
+    /// expressions.
+    #[serde(
+        default,
+        rename = "observed_partition_exprs",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub observed_slices: Vec<ObservedPartitionExpr>,
+    /// The creator regions of the files this round's scans **delivered rows** from, where the
+    /// file was created by a region other than the one that read it (an adopted file).
+    ///
+    /// A region that reads such a file compares the file's own row numbers against the
+    /// creator's cursor, so a row above the creator's proved watermark can reach the result
+    /// while the caller cannot tell it apart from a row of the holder. This field is that
+    /// evidence.
+    ///
+    /// `Some(creators)` — possibly empty — is an affirmative answer, sorted and
+    /// deduplicated: the scans this answer covers delivered rows of files created by exactly
+    /// these regions. `Some(vec![])` therefore says "delivered none". `None` (also: the
+    /// field's absence in a payload an earlier build wrote) states **nothing**, and is not
+    /// the same as `Some(vec![])`: a consumer that must not count a row above its creator's
+    /// proved watermark has to read an unknown answer as "could have delivered adopted rows".
+    ///
+    /// Delivered means the rows survived the reading region's own row filters and entered
+    /// its output. A later stage of the same query (merge, dedup, projection, an outer
+    /// predicate) may still drop them, so the claim is a deliberate over-approximation: it
+    /// never answers "none" for rows that were handed on, and it may name a creator whose
+    /// rows the query finally discarded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreign_file_row_creators: Option<Vec<u64>>,
+}
+
+/// The terminal creator answers of one region scan's partition streams, i.e. of a plan node
+/// that reads a region on several partitions of DataFusion parallelism.
+///
+/// Each partition's stream states, when it ends, which other regions' files it delivered rows
+/// from ([`RecordBatchMetrics::foreign_file_row_creators`]). The node as a whole states an
+/// answer only when every partition it planned to run ended and stated one: a partition that
+/// is still running, that never ran, or that ended without an answer leaves the node's answer
+/// unknown, because the partitions that did answer cover only part of the read.
+#[derive(Debug, Default)]
+pub struct ForeignFileRowCreatorReports {
+    state: Mutex<ForeignFileRowCreatorReportsState>,
+}
+
+#[derive(Debug, Default)]
+struct ForeignFileRowCreatorReportsState {
+    /// The partitions whose stream ended and stated an answer.
+    reported: BTreeSet<usize>,
+    /// The creator regions those partitions named.
+    creators: BTreeSet<u64>,
+    /// A partition ended without stating an answer, so no set of partitions can answer for
+    /// the node.
+    unknown: bool,
+    /// How many partitions the reporting node has, as last reported.
+    partitions: usize,
+}
+
+impl ForeignFileRowCreatorReports {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records the answer the stream of `partition` stated when it ended, `partitions` being
+    /// how many partitions the node runs.
+    ///
+    /// The count travels with the answer rather than with the node: a node whose partition
+    /// ranges are re-assigned before it runs reports the count it actually ran with, and a
+    /// report left by an earlier assignment only ever widens the answer, never narrows it.
+    pub fn record(&self, partition: usize, partitions: usize, answer: Option<Vec<u64>>) {
+        let mut state = self.lock();
+        state.partitions = partitions;
+        match answer {
+            Some(creators) => {
+                state.reported.insert(partition);
+                state.creators.extend(creators);
+            }
+            None => state.unknown = true,
+        }
+    }
+
+    /// The creators every partition reported together, or `None` when the partitions do not
+    /// state such an answer (yet).
+    pub fn answer(&self) -> Option<Vec<u64>> {
+        let state = self.lock();
+        // A node with no partition to report from answers nothing: nothing was read, so
+        // "delivered none" would be a claim about a read that never happened.
+        if state.unknown || state.partitions == 0 || state.reported.len() != state.partitions {
+            return None;
+        }
+        Some(state.creators.iter().copied().collect())
+    }
+
+    /// A panic while the state is held cannot leave it inconsistent (an insert is the only
+    /// mutation), so a poisoned lock is recovered instead of failing the caller.
+    fn lock(&self) -> std::sync::MutexGuard<'_, ForeignFileRowCreatorReportsState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// The partition expression of one region that a scan read rows of, i.e. one
+/// `(region, partition expression)` pair.
+///
+/// `region_id` is the region that allocated the rows' sequences — the creator of the file they
+/// were read from, this region itself for a file it wrote. `partition_expr` is the identity of
+/// the expression that file states for its own rows (`PartitionExpr::as_json_str()`); `None`
+/// means the file states none and covers its region's complete value domain.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ObservedPartitionExpr {
+    pub region_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition_expr: Option<String>,
+}
+
+impl ObservedPartitionExpr {
+    pub fn new(region_id: u64, partition_expr: Option<String>) -> Self {
+        Self {
+            region_id,
+            partition_expr,
+        }
+    }
+
+    /// The pair covering `region_id`'s complete value domain, which is what a read of a
+    /// file that states no expression observed.
+    pub fn whole_domain(region_id: u64) -> Self {
+        Self::new(region_id, None)
+    }
+}
+
+/// The time ranges a scan substituted for one region.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SubstitutedRowRanges {
+    pub region_id: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ranges: Vec<SubstitutedRange>,
+}
+
+/// One `[start, end]` range of row timestamps, in milliseconds since the Unix epoch, both ends
+/// inclusive: a caller that owns time windows must recompute every window that intersects it.
+#[derive(
+    serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord,
+)]
+pub struct SubstitutedRange {
+    pub start_millis: i64,
+    pub end_millis: i64,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RegionWatermarkEntry {
     pub region_id: u64,
+    /// Identity (`PartitionExpr::as_json_str()`) of the partition expression this entry speaks
+    /// about, or `None` when it speaks about the region's complete value domain. A slice is
+    /// merged under its own key, never with the region's whole-domain entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition_expr: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watermark: Option<u64>,
 }
@@ -1828,6 +1988,84 @@ mod test {
         assert_eq!(metrics.memory_usage, 34);
     }
 
+    /// The field an earlier build's payload does not carry decodes to `None` — the absence of
+    /// an answer — and never to "delivered none". The two must not be confusable: one is a
+    /// claim about what the read delivered, the other says nothing.
+    #[test]
+    fn test_recordbatch_metrics_deserializes_without_foreign_file_row_creators() {
+        let metrics: RecordBatchMetrics = serde_json::from_value(json!({
+            "elapsed_compute": 12,
+            "memory_usage": 34,
+            "plan_metrics": [],
+            "region_watermarks": [{"region_id": 1, "watermark": 7}]
+        }))
+        .unwrap();
+
+        assert_eq!(None, metrics.foreign_file_row_creators);
+    }
+
+    /// The partitions of a region scan answer together: their reports union, and a partition
+    /// that did not state an answer keeps the node's answer unknown.
+    #[test]
+    fn test_foreign_file_row_creator_reports_answer_for_all_partitions() {
+        let reports = ForeignFileRowCreatorReports::new();
+        assert_eq!(None, reports.answer(), "no partition reported yet");
+
+        reports.record(0, 2, Some(vec![7, 9]));
+        assert_eq!(
+            None,
+            reports.answer(),
+            "one partition answered and another has not"
+        );
+
+        reports.record(1, 2, Some(vec![9]));
+        assert_eq!(
+            Some(vec![7, 9]),
+            reports.answer(),
+            "the delivered creators are the union of what the partitions reported"
+        );
+
+        // A partition that ended without an answer covers part of the read, so no set of
+        // reported partitions can answer for the node.
+        let reports = ForeignFileRowCreatorReports::new();
+        reports.record(0, 2, Some(vec![7]));
+        reports.record(1, 2, None);
+        assert_eq!(None, reports.answer());
+
+        // An answer of "delivered none" from every partition is still an answer.
+        let reports = ForeignFileRowCreatorReports::new();
+        reports.record(0, 1, Some(vec![]));
+        assert_eq!(Some(vec![]), reports.answer());
+    }
+
+    /// An affirmative answer of "delivered none" is written as an empty array and read back as
+    /// exactly that, distinct from an omitted field.
+    #[test]
+    fn test_recordbatch_metrics_foreign_file_row_creators_serde_roundtrip() {
+        let none_delivered = RecordBatchMetrics {
+            foreign_file_row_creators: Some(Vec::new()),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&none_delivered).unwrap();
+        assert_eq!(Some(&json!([])), value.get("foreign_file_row_creators"));
+        let decoded: RecordBatchMetrics = serde_json::from_value(value).unwrap();
+        assert_eq!(Some(Vec::new()), decoded.foreign_file_row_creators);
+
+        let delivered = RecordBatchMetrics {
+            foreign_file_row_creators: Some(vec![7, 9]),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&delivered).unwrap();
+        assert_eq!(Some(&json!([7, 9])), value.get("foreign_file_row_creators"));
+        let decoded: RecordBatchMetrics = serde_json::from_value(value).unwrap();
+        assert_eq!(Some(vec![7, 9]), decoded.foreign_file_row_creators);
+
+        // Unknown is not serialized at all: an answer is either stated or absent.
+        let unknown = RecordBatchMetrics::default();
+        let value = serde_json::to_value(&unknown).unwrap();
+        assert!(value.get("foreign_file_row_creators").is_none());
+    }
+
     #[test]
     fn test_plan_metrics_deserializes_without_plan_name() {
         let metrics: RecordBatchMetrics = serde_json::from_value(json!({
@@ -1850,10 +2088,12 @@ mod test {
             region_watermarks: vec![
                 RegionWatermarkEntry {
                     region_id: 1,
+                    partition_expr: None,
                     watermark: Some(100),
                 },
                 RegionWatermarkEntry {
                     region_id: 2,
+                    partition_expr: None,
                     watermark: None,
                 },
             ],
@@ -1979,5 +2219,74 @@ mod test {
     fn test_recordbatch_metrics_skips_empty_region_watermarks_on_serialize() {
         let value = serde_json::to_value(RecordBatchMetrics::default()).unwrap();
         assert!(value.get("region_watermarks").is_none());
+    }
+
+    #[test]
+    fn test_region_watermark_entry_states_its_partition_expression() {
+        let metrics = RecordBatchMetrics {
+            region_watermarks: vec![RegionWatermarkEntry {
+                region_id: 1,
+                partition_expr: Some(r#"{"lhs":...}"#.to_string()),
+                watermark: Some(100),
+            }],
+            ..Default::default()
+        };
+
+        let value = serde_json::to_value(&metrics).unwrap();
+        assert_eq!(
+            value.get("region_watermarks").unwrap(),
+            &json!([
+                {
+                    "region_id": 1,
+                    "partition_expr": r#"{"lhs":...}"#,
+                    "watermark": 100
+                }
+            ])
+        );
+
+        // A statement written before the expression field existed is a region-keyed
+        // statement, i.e. one about the region's complete value domain.
+        let mut legacy = serde_json::to_value(RecordBatchMetrics::default()).unwrap();
+        legacy["region_watermarks"] = json!([{ "region_id": 3 }]);
+        let decoded: RecordBatchMetrics = serde_json::from_value(legacy).unwrap();
+        assert_eq!(
+            decoded.region_watermarks,
+            vec![RegionWatermarkEntry {
+                region_id: 3,
+                partition_expr: None,
+                watermark: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_observed_slices_keep_their_wire_key_and_carry_expressions() {
+        let metrics = RecordBatchMetrics {
+            observed_slices: vec![
+                ObservedPartitionExpr::new(7, Some(r#"{"op":"Eq"}"#.to_string())),
+                ObservedPartitionExpr::whole_domain(8),
+            ],
+            ..Default::default()
+        };
+
+        let value = serde_json::to_value(&metrics).unwrap();
+        // The old key carried a numeric projection, so the identity travels under its own key.
+        assert!(value.get("observed_slices").is_none());
+        assert_eq!(
+            value.get("observed_partition_exprs").unwrap(),
+            &json!([
+                { "region_id": 7, "partition_expr": r#"{"op":"Eq"}"# },
+                { "region_id": 8 }
+            ])
+        );
+
+        let decoded: RecordBatchMetrics = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.observed_slices, metrics.observed_slices);
+
+        // Old bytes are not reinterpreted: a reader of the new key sees no observation.
+        let mut legacy = serde_json::to_value(RecordBatchMetrics::default()).unwrap();
+        legacy["observed_slices"] = json!([{ "region_id": 7, "lo": 50, "hi": 100 }]);
+        let old: RecordBatchMetrics = serde_json::from_value(legacy).unwrap();
+        assert!(old.observed_slices.is_empty());
     }
 }

@@ -45,7 +45,7 @@ pub use batching_mode::frontend_client::{
 };
 pub use batching_mode::task::{
     BatchingExecutionGuard, BatchingTask, DirtyRestore, ExecuteOnceOutcome, PlanInfo,
-    QueryCoverage, TaskArgs,
+    QueryCoverage, RegionWatermarkSample, TaskArgs,
 };
 pub use batching_mode::time_window::{TimeWindowExpr, find_time_window_expr};
 pub use batching_mode::utils::{
