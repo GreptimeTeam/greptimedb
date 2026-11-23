@@ -21,7 +21,7 @@ use api::v1::{OpType, SemanticType};
 use arrow_schema::Schema;
 use common_time::Timestamp;
 use datatypes::arrow::array::{
-    ArrayRef, BinaryDictionaryBuilder, RecordBatch, StringDictionaryBuilder,
+    ArrayRef, BinaryArray, BinaryDictionaryBuilder, RecordBatch, StringDictionaryBuilder,
     TimestampMillisecondArray, UInt8Array, UInt64Array,
 };
 use datatypes::arrow::array::{Int64Array, StructArray};
@@ -441,6 +441,34 @@ pub(crate) fn new_flat_source_from_record_batches(batches: Vec<RecordBatch>) -> 
             .unwrap_or_else(|| Arc::new(Schema::empty())),
         Box::new(batches.into_iter().map(Ok)),
     )
+}
+
+/// Creates a flat SST batch for [build_test_binary_test_region_metadata] with one series and
+/// the given `field_0` values.
+pub fn new_record_batch_with_binary_values(tag: &str, values: &[Vec<u8>]) -> RecordBatch {
+    let metadata = build_test_binary_test_region_metadata();
+    let flat_schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
+    let num_rows = values.len();
+    let mut tag_0_builder = StringDictionaryBuilder::<UInt32Type>::new();
+    let mut pk_builder = BinaryDictionaryBuilder::<UInt32Type>::new();
+    let pk = new_primary_key(&[tag]);
+    for _ in 0..num_rows {
+        tag_0_builder.append_value(tag);
+        pk_builder.append(&pk).unwrap();
+    }
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(tag_0_builder.finish()),
+        Arc::new(BinaryArray::from_iter_values(
+            values.iter().map(|v| v.as_slice()),
+        )),
+        Arc::new(TimestampMillisecondArray::from_iter_values(
+            0..num_rows as i64,
+        )),
+        Arc::new(pk_builder.finish()),
+        Arc::new(UInt64Array::from_value(1000, num_rows)),
+        Arc::new(UInt8Array::from_value(OpType::Put as u8, num_rows)),
+    ];
+    RecordBatch::try_new(flat_schema, columns).unwrap()
 }
 
 /// Creates a new region metadata for testing SSTs with binary datatype.

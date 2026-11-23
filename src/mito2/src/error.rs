@@ -101,6 +101,15 @@ pub enum Error {
         error: object_store::Error,
     },
 
+    #[snafu(display("Source metadata file disappeared while copying {path}"))]
+    MetadataCopyFileNotFound {
+        path: String,
+        #[snafu(source)]
+        error: object_store::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display(
         "Manifest delta {} disappeared after it was listed, path: {}",
         version,
@@ -1681,6 +1690,7 @@ impl ErrorExt for Error {
             SstWriteMemoryExceeded { .. } => StatusCode::RuntimeResourcesExhausted,
             DataTypeMismatch { source, .. } => source.status_code(),
             OpenDal { .. }
+            | MetadataCopyFileNotFound { .. }
             | ManifestDeltaNotFound { .. }
             | ManifestVersionConflict { .. }
             | ManifestCheckpointVanished { .. }
@@ -1920,6 +1930,7 @@ impl ErrorExt for Error {
             | EndStagingPending { .. }
             | ManualCompactionAlreadyRunning { .. }
             | FlushableRegionState { .. }
+            | MetadataCopyFileNotFound { .. }
             | ManifestDeltaNotFound { .. }
             | ManifestVersionConflict { .. }
             | ManifestCheckpointVanished { .. } => RetryHint::Retryable,

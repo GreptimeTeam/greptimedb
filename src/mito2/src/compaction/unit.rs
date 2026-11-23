@@ -134,9 +134,17 @@ impl CompactionUnit {
     }
 }
 
+/// Returns the bytes of the largest row group of a file once decoded. Dictionary encoding hides
+/// decoded values from the uncompressed size; files written before the decoded size was recorded
+/// report 0 for it.
+fn max_row_group_bytes(meta: &FileMeta) -> u64 {
+    meta.max_row_group_uncompressed_size
+        .max(meta.max_row_group_decoded_size)
+}
+
 /// Row group size of a file, approximated from its file metadata.
 struct RowGroupShape {
-    /// Uncompressed bytes of the largest row group.
+    /// Decoded bytes of the largest row group.
     bytes: u64,
     /// Average rows of a row group; the metadata keeps no per-row-group row counts.
     rows: u64,
@@ -145,14 +153,12 @@ struct RowGroupShape {
 
 impl RowGroupShape {
     fn of(meta: &FileMeta) -> Option<Self> {
-        if meta.max_row_group_uncompressed_size == 0
-            || meta.num_rows == 0
-            || meta.num_row_groups == 0
-        {
+        let bytes = max_row_group_bytes(meta);
+        if bytes == 0 || meta.num_rows == 0 || meta.num_row_groups == 0 {
             return None;
         }
         Some(Self {
-            bytes: meta.max_row_group_uncompressed_size,
+            bytes,
             rows: (meta.num_rows / meta.num_row_groups).max(1),
             num_row_groups: meta.num_row_groups,
         })
@@ -167,8 +173,8 @@ impl RowGroupShape {
 ///
 /// - Every input reader holds its current row group.
 /// - With a read parallelism above 1, every input is read in its own task and also holds
-///   batches ahead of the merge: a full channel, one batch being sent and one in the merge. A batch never spans row groups, and the batches of an
-///   input never exceed the whole file.
+///   batches ahead of the merge: a full channel, one batch being sent and one in the merge. A
+///   batch never spans row groups, and the batches of an input never exceed the whole file.
 /// - Inputs read serially hold the batch the merge is consuming.
 /// - The merge retains consumed input batches until it emits an output batch.
 /// - Merged batches pass a channel to the writer, with one more batch on each side of it.
@@ -180,7 +186,7 @@ fn output_memory_bytes(inputs: &[FileHandle], read_parallelism: usize) -> u64 {
         .filter_map(|file| RowGroupShape::of(file.meta_ref()))
         .collect();
     let row_group_bytes = inputs.iter().fold(0u64, |total, file| {
-        total.saturating_add(file.meta_ref().max_row_group_uncompressed_size)
+        total.saturating_add(max_row_group_bytes(file.meta_ref()))
     });
     if shapes.is_empty() {
         return row_group_bytes;
@@ -252,6 +258,29 @@ mod tests {
     use super::*;
     use crate::compaction::test_util::{new_file_handle, new_file_handle_with_size_and_sequence};
     use crate::test_util::new_noop_file_purger;
+
+    #[test]
+    fn test_estimated_memory_counts_decoded_row_groups() {
+        let file = |uncompressed, decoded| {
+            FileHandle::new(
+                crate::sst::file::FileMeta {
+                    file_id: FileId::random(),
+                    max_row_group_uncompressed_size: uncompressed,
+                    max_row_group_decoded_size: decoded,
+                    ..Default::default()
+                },
+                crate::test_util::new_noop_file_purger(),
+            )
+        };
+        // A dictionary-encoded file decodes to more than its uncompressed size; a file written
+        // before the decoded size was recorded reports 0 for it.
+        let units = CompactionUnit::from_picker(PickerOutput {
+            outputs: vec![output(vec![file(1 << 20, 128 << 20), file(4 << 20, 0)])],
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!((128 << 20) + (4 << 20), units[0].estimated_memory_bytes(1));
+    }
 
     /// Builds an L1 output that preserves deletion markers for grouping tests.
     fn output(inputs: Vec<FileHandle>) -> CompactionOutput {

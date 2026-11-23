@@ -23,6 +23,7 @@ use parquet::arrow::async_reader::MetadataFetch;
 use parquet::errors::{ParquetError, Result as ParquetResult};
 use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData, ParquetMetaDataReader};
 use parquet::file::statistics::Statistics;
+use parquet::schema::types::SchemaDescriptor;
 use snafu::{IntoError as _, ResultExt};
 use store_api::metadata::RegionMetadata;
 use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
@@ -121,6 +122,14 @@ fn unbox_external_error(e: ParquetError) -> StdResult<object_store::Error, Parqu
     }
 }
 
+/// Returns the leaf index of the top-level `__primary_key` column. A leaf name alone also
+/// matches nested fields, such as a JSON child named `__primary_key`.
+pub(crate) fn primary_key_leaf_index(schema: &SchemaDescriptor) -> Option<usize> {
+    schema.columns().iter().position(
+        |column| matches!(column.path().parts(), [name] if name == PRIMARY_KEY_COLUMN_NAME),
+    )
+}
+
 pub(crate) fn extract_primary_key_range(
     parquet_meta: &ParquetMetaData,
     region_metadata: &RegionMetadata,
@@ -129,12 +138,7 @@ pub(crate) fn extract_primary_key_range(
         return None;
     }
 
-    let pk_column_idx = parquet_meta
-        .file_metadata()
-        .schema_descr()
-        .columns()
-        .iter()
-        .position(|column| column.name() == PRIMARY_KEY_COLUMN_NAME)?;
+    let pk_column_idx = primary_key_leaf_index(parquet_meta.file_metadata().schema_descr())?;
 
     let mut min: Option<Bytes> = None;
     let mut max: Option<Bytes> = None;
@@ -194,7 +198,7 @@ mod tests {
     use std::sync::Arc;
 
     use datatypes::arrow::array::{
-        ArrayRef, BinaryArray, DictionaryArray, Int64Array, UInt32Array,
+        ArrayRef, BinaryArray, DictionaryArray, Int64Array, StructArray, UInt32Array,
     };
     use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
     use datatypes::arrow::record_batch::RecordBatch;
@@ -323,6 +327,40 @@ mod tests {
         assert_eq!(
             Some((Bytes::from_static(b"aaa"), Bytes::from_static(b"zzz"))),
             extract_primary_key_range(&metadata, &region_metadata)
+        );
+    }
+
+    #[test]
+    fn test_extract_primary_key_range_ignores_nested_primary_key_name() {
+        let nested = Field::new("__primary_key", ArrowDataType::Binary, false);
+        let json = StructArray::from(vec![(
+            Arc::new(nested.clone()),
+            Arc::new(BinaryArray::from_iter_values([b"jjj", b"kkk"])) as ArrayRef,
+        )]);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("json", ArrowDataType::Struct(vec![nested].into()), false),
+            Field::new("__primary_key", ArrowDataType::Binary, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(json),
+                Arc::new(BinaryArray::from_iter_values([b"aaa", b"zzz"])),
+            ],
+        )
+        .unwrap();
+        let mut parquet_bytes = Vec::new();
+        let mut writer = ArrowWriter::try_new(&mut parquet_bytes, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        let metadata = ParquetRecordBatchReaderBuilder::try_new(Bytes::from(parquet_bytes))
+            .unwrap()
+            .metadata()
+            .clone();
+
+        assert_eq!(
+            Some((Bytes::from_static(b"aaa"), Bytes::from_static(b"zzz"))),
+            extract_primary_key_range(&metadata, &sst_region_metadata())
         );
     }
 

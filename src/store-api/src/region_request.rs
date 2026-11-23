@@ -2028,7 +2028,8 @@ pub enum RegionTruncateRequest {
 /// Catchup region request.
 ///
 /// Makes a readonly region to catch up to leader region changes.
-/// There is no effect if it operating on a leader region.
+/// There is no effect if it operating on a leader region, unless the engine reports that the
+/// region is not a [confirmed leader](crate::region_engine::RegionEngine::is_confirmed_leader).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RegionCatchupRequest {
     /// Sets it to writable if it's available after it has caught up with all changes.

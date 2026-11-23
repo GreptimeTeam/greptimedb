@@ -478,6 +478,14 @@ impl RegionServer {
         })
     }
 
+    /// See [`RegionEngine::is_confirmed_leader`](store_api::region_engine::RegionEngine::is_confirmed_leader).
+    pub fn is_confirmed_leader(&self, region_id: RegionId) -> Option<bool> {
+        self.inner
+            .region_map
+            .get(&region_id)
+            .and_then(|engine| engine.is_confirmed_leader(region_id))
+    }
+
     pub fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<()> {
         let engine = self
             .inner
@@ -491,7 +499,8 @@ impl RegionServer {
 
     /// Sets the role of a region from a lease the metasrv grants until `deadline`, in reply to a
     /// heartbeat sent at `sent_at`. Returns false if the engine ignores a Leader lease because the
-    /// region was downgraded or (re)opened after `sent_at`.
+    /// region was downgraded or (re)opened after `sent_at`, a catchup runs on it, or it waits for a
+    /// reload.
     pub fn set_region_role_with_lease(
         &self,
         region_id: RegionId,

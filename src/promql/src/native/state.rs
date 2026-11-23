@@ -38,7 +38,7 @@ use crate::native::plan::{AggregateStateSchema, BoundAggregate, aggregate_state_
 
 /// One partition's aggregate state, either in producer series form or as a decoded consumer row.
 #[derive(Debug)]
-pub(crate) enum StateChunk {
+pub enum StateChunk {
     Series {
         series: Vec<StateSeries>,
         state_schema: Arc<AggregateStateSchema>,
@@ -98,6 +98,24 @@ pub(crate) fn state_chunk_from_partial(
         series: partial.groups,
         state_schema,
         reservation: None,
+    })
+}
+
+/// Builds the executor's state row for one exported row, as its producer declared it.
+///
+/// A producer hands a row over without knowing which binding will fold it: the kind and the columns
+/// it was written with travel in the row, and the consumer checks them against its own binding. So
+/// this converts the row's columns and keeps the layout they were validated against.
+pub(crate) fn state_row_of(row: StateFrameRow) -> Result<crate::aggregate::state::StateRow> {
+    let fields = row
+        .fields()
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+    let kind = fields.kind();
+    Ok(crate::aggregate::state::StateRow {
+        metric: row.metric().clone(),
+        time: row.time().clone(),
+        fields,
+        kind,
     })
 }
 
