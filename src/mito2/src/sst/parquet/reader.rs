@@ -76,6 +76,9 @@ use crate::sst::index::fulltext_index::applier::{
 use crate::sst::index::inverted_index::applier::{
     InvertedIndexApplierRef, InvertedIndexApplyMetrics,
 };
+use crate::sst::parquet::blob::{
+    BlobResolver, KeptRefs, PendingBatch, blob_columns, blob_file_size,
+};
 use crate::sst::parquet::file_range::{
     FileRangeContext, FileRangeContextRef, PartitionFilterContext, PreFilterMode, RangeBase,
 };
@@ -215,6 +218,8 @@ pub struct ParquetReaderBuilder {
     expected_metadata: Option<RegionMetadataRef>,
     /// Whether this reader is for compaction.
     compaction: bool,
+    /// References compaction keeps instead of resolving.
+    kept_blob_refs: Option<Arc<KeptRefs>>,
     /// Mode to pre-filter columns.
     pre_filter_mode: PreFilterMode,
     /// Whether to run the reduced-column predicate prefilter pass.
@@ -261,6 +266,7 @@ impl ParquetReaderBuilder {
             fulltext_index_appliers: [None, None],
             expected_metadata: None,
             compaction: false,
+            kept_blob_refs: None,
             pre_filter_mode: PreFilterMode::All,
             enable_predicate_prefilter: true,
             postpone_time_index_filter: false,
@@ -356,6 +362,13 @@ impl ParquetReaderBuilder {
     #[must_use]
     pub fn compaction(mut self, compaction: bool) -> Self {
         self.compaction = compaction;
+        self
+    }
+
+    /// Leaves the references that `kept` keeps unresolved.
+    #[must_use]
+    pub(crate) fn kept_blob_refs(mut self, kept: Option<Arc<KeptRefs>>) -> Self {
+        self.kept_blob_refs = kept;
         self
     }
 
@@ -565,6 +578,7 @@ impl ParquetReaderBuilder {
             &read_format,
             &codec,
             &parquet_meta,
+            !self.file_handle.meta_ref().blob_refs.is_empty(),
         );
 
         if self.defer_optional_page_index
@@ -661,6 +675,7 @@ impl ParquetReaderBuilder {
             cache_strategy: self.cache_strategy.clone(),
             prefilter_builder: filter_plan.prefilter_builder,
             batch_size: self.batch_size,
+            kept_blob_refs: self.kept_blob_refs.clone(),
         };
 
         let partition_filter = self.build_partition_filter(&read_format, &prune_schema)?;
@@ -1794,6 +1809,8 @@ pub(crate) struct RowGroupReaderBuilder {
     batch_size: usize,
     /// Optional shared quota for projected row-group decoding.
     memory_tracker: Option<QueryMemoryTracker>,
+    /// References compaction keeps instead of resolving.
+    kept_blob_refs: Option<Arc<KeptRefs>>,
 }
 
 /// Context passed to [RowGroupReaderBuilder::build()] carrying all information
@@ -1809,6 +1826,10 @@ pub(crate) struct RowGroupBuildContext<'a> {
 
 impl RowGroupReaderBuilder {
     /// Path of the file to read.
+    pub(crate) fn object_store(&self) -> &ObjectStore {
+        &self.object_store
+    }
+
     pub(crate) fn file_path(&self) -> &str {
         &self.file_path
     }
@@ -1824,6 +1845,10 @@ impl RowGroupReaderBuilder {
 
     pub(crate) fn parquet_metadata_size(&self) -> usize {
         self.parquet_metadata_size
+    }
+
+    pub(crate) fn kept_blob_refs(&self) -> Option<&Arc<KeptRefs>> {
+        self.kept_blob_refs.as_ref()
     }
 
     pub(crate) fn cache_strategy(&self) -> &CacheStrategy {
@@ -2593,6 +2618,10 @@ pub(crate) struct FlatRowGroupReader {
     stream: ProjectedRecordBatchStream,
     /// Cached sequence array to override sequences.
     override_sequence: Option<ArrayRef>,
+    /// Resolves out-of-line values when the file stores some columns in a blob sidecar.
+    blob_resolver: Option<BlobResolver>,
+    /// Decoded batch whose remaining rows still hold references.
+    pending: Option<PendingBatch>,
 }
 
 impl FlatRowGroupReader {
@@ -2602,16 +2631,58 @@ impl FlatRowGroupReader {
         let override_sequence = context
             .read_format()
             .new_override_sequence_array(DEFAULT_READ_BATCH_SIZE);
+        let builder = context.reader_builder();
+        // Only an SST with a sidecar or with references to other SSTs' sidecars has references
+        // to resolve.
+        let has_refs = blob_file_size(builder.parquet_metadata()).is_some()
+            || !builder.file_handle().meta_ref().blob_refs.is_empty();
+        let blob_columns = if has_refs {
+            blob_columns(builder.parquet_metadata())
+        } else {
+            Vec::new()
+        };
+        let blob_resolver = (!blob_columns.is_empty()).then(|| {
+            let file = builder.file_handle();
+            let meta = file.meta_ref();
+            let mut resolver = BlobResolver::new(
+                meta.file_id,
+                builder.object_store().clone(),
+                builder.file_path(),
+                blob_columns,
+            )
+            .with_blobs(builder.file_path(), meta.blob_files());
+            let cache_strategy = builder.cache_strategy();
+            if cache_strategy
+                .write_cache()
+                .is_some_and(|cache| cache.cache_blobs())
+            {
+                resolver = resolver.with_cache(cache_strategy.clone(), meta.region_id);
+            }
+            match builder.kept_blob_refs() {
+                Some(kept) if kept.region_id == meta.region_id => {
+                    resolver.with_kept_refs(kept.clone())
+                }
+                _ => resolver,
+            }
+        });
 
         Self {
             context,
             stream,
             override_sequence,
+            blob_resolver,
+            pending: None,
         }
     }
 
     /// Returns the next RecordBatch.
     pub(crate) async fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
+        if let (Some(resolver), Some(pending)) = (&self.blob_resolver, &mut self.pending) {
+            if let Some(batch) = resolver.next_chunk(pending).await? {
+                return Ok(Some(batch));
+            }
+            self.pending = None;
+        }
         match self.stream.next().await {
             Some(batch_result) => {
                 let record_batch = batch_result?;
@@ -2620,7 +2691,18 @@ impl FlatRowGroupReader {
                     .context
                     .read_format()
                     .convert_batch(record_batch, self.override_sequence.as_ref())?;
-                Ok(Some(record_batch))
+                let Some(resolver) = &self.blob_resolver else {
+                    return Ok(Some(record_batch));
+                };
+                if record_batch.num_rows() == 0 {
+                    return Ok(Some(record_batch));
+                }
+                let Some(mut pending) = resolver.prepare(record_batch.clone())? else {
+                    return Ok(Some(record_batch));
+                };
+                let first = resolver.next_chunk(&mut pending).await?;
+                self.pending = Some(pending);
+                Ok(first)
             }
             None => Ok(None),
         }
@@ -3173,6 +3255,7 @@ mod tests {
             &read_format,
             &codec,
             &parquet_meta,
+            false,
         );
         assert!(filter_plan.prefilter_builder.is_some());
 
@@ -3207,6 +3290,7 @@ mod tests {
                 cache_strategy,
                 prefilter_builder: filter_plan.prefilter_builder,
                 batch_size: DEFAULT_READ_BATCH_SIZE,
+                kept_blob_refs: None,
             },
             metadata,
         )

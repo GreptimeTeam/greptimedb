@@ -258,6 +258,8 @@ Expected output in sqlness format. If this file is missing, the runner generates
 
 If output differs from expected, the run fails and `verify.result` is updated with actual output.
 
+A statement error fails the case. Add `-- SQLNESS ARG expect_error=true` before a verify statement to record its error as the output instead, for example to check that an older binary rejects data it cannot read.
+
 ## PR1 Limitations
 
 - **Sqlness interceptors**: `-- SQLNESS ...` comments are applied per statement using the same interceptor registry as the ordinary sqlness runner, including the GreptimeDB `PROTOCOL` interceptor. For `PROTOCOL POSTGRES`, the namespace prelude uses `SET search_path` instead of `USE`. Avoid unqualified PostgreSQL-protocol table names starting with `pg_`: GreptimeDB's current PostgreSQL compatibility parser rewrites them to `pg_catalog.<table>`.

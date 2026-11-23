@@ -38,6 +38,7 @@ use crate::compaction::scheduler::state::{
     CompactingFiles, CompactionExecution, CompactionPhase, CompactionTaskState, CompactionTrigger,
 };
 use crate::compaction::scheduler::{CompactionScheduler, CompactionTransition};
+use crate::compaction::twcs::blob_gc_outputs;
 use crate::compaction::unit::CompactionUnit;
 use crate::compaction::{CompactionOutput, find_dynamic_options, format_panic_reason};
 use crate::config::MitoConfig;
@@ -145,11 +146,22 @@ async fn pick_automatic(
         .rev()
         .map(PickKey::from)
         .collect();
-    let output = candidates.finish().await?;
+    let mut output = candidates.finish().await?;
+    // Like `TwcsPicker::pick_with_output_limit`; LastNonNull closes the rewrites over
+    // overlapping files as it does for regular seeds.
+    let blob_gc = output.outputs.is_empty();
+    if blob_gc {
+        // LastNonNull applies `max_outputs` after the closure.
+        let limit = if last_non_null { None } else { max_outputs };
+        output.outputs = blob_gc_outputs(region, limit);
+    }
     if last_non_null {
         let (output, attempted_seeds) =
             last_non_null::close_outputs(region, output, max_outputs).await?;
-        history.acknowledge(attempted_seeds.into_iter().map(|index| keys[index]), now);
+        // The attempted seeds index `keys` only when they come from the candidates.
+        if !blob_gc {
+            history.acknowledge(attempted_seeds.into_iter().map(|index| keys[index]), now);
+        }
         Ok(output)
     } else {
         history.acknowledge(keys.into_iter(), now);

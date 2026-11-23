@@ -27,7 +27,7 @@ use futures::TryStreamExt;
 use object_store::layers::mock::{
     Error as MockError, ErrorKind, MockLayerBuilder, Result as MockResult, oio,
 };
-use object_store::{Entry, ObjectStore, services};
+use object_store::{Entry, ObjectStore, services, util};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{RegionEngine as _, RegionRole};
 use store_api::region_request::{RegionCompactRequest, RegionRequest};
@@ -1932,7 +1932,10 @@ async fn test_narthex_artifact_gc_inventory_and_references() {
         threshold,
     );
     assert_eq!(delete, vec![removed]);
-    env.worker.delete_files(region_id, &delete).await.unwrap();
+    env.worker
+        .delete_files(region_id, &delete, &HashSet::new())
+        .await
+        .unwrap();
     assert!(!layer.object_store().exists(&prefix).await.unwrap());
     for path in paths {
         assert!(!layer.object_store().exists(&path).await.unwrap());
@@ -1965,4 +1968,90 @@ async fn test_narthex_artifact_gc_requires_age_for_every_object() {
     );
     assert!(delete.is_empty());
     assert!(deferred);
+}
+
+#[tokio::test]
+async fn test_orphan_blob_sidecars_are_collected_with_their_ssts() {
+    let env = IndexGcTestEnv::new(true).await;
+    let region_id = env.meta.region_id;
+    let layer = &env.region.access_layer;
+    let store = layer.object_store();
+    let region_dir = layer.build_region_dir(region_id);
+    let with_sst = FileId::random();
+    // A sidecar left behind when its SST was never written.
+    let blob_only = FileId::random();
+    let paths = [
+        util::join_path(&region_dir, &format!("{with_sst}.parquet")),
+        util::join_path(&region_dir, &format!("{with_sst}.blob")),
+        util::join_path(&region_dir, &format!("{blob_only}.blob")),
+    ];
+    for path in &paths {
+        store.write(path, "data".as_bytes()).await.unwrap();
+    }
+    let entries = env
+        .worker
+        .list_from_object_store(region_id, 3)
+        .await
+        .unwrap();
+
+    let threshold = chrono::Utc::now() + chrono::Duration::days(1);
+    let (mut delete, _) = env.worker.filter_deletable_files(
+        entries,
+        &HashMap::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        threshold,
+    );
+    delete.retain(|file| [with_sst, blob_only].contains(&file.file_id()));
+    delete.sort_by_key(|file| file.file_id());
+    let mut expected = vec![
+        RemovedFile::File(with_sst, None),
+        RemovedFile::File(blob_only, None),
+    ];
+    expected.sort_by_key(|file| file.file_id());
+    assert_eq!(delete, expected);
+
+    env.worker
+        .delete_files(region_id, &delete, &HashSet::new())
+        .await
+        .unwrap();
+    for path in paths {
+        assert!(!store.exists(&path).await.unwrap(), "{path} survives GC");
+    }
+}
+
+#[tokio::test]
+async fn test_gc_keeps_sidecars_that_other_files_reference() {
+    let env = IndexGcTestEnv::new(true).await;
+    let layer = &env.region.access_layer;
+    let region_id = env.meta.region_id;
+    let id = FileId::random();
+    let sst = location::sst_file_path(
+        layer.table_dir(),
+        crate::sst::file::RegionFileId::new(region_id, id),
+        layer.path_type(),
+    );
+    let sidecar = crate::sst::parquet::blob::blob_path(&sst);
+    for path in [&sst, &sidecar] {
+        layer
+            .object_store()
+            .write(path, "x".as_bytes())
+            .await
+            .unwrap();
+    }
+    let removed = [RemovedFile::File(id, None)];
+
+    env.worker
+        .delete_files(region_id, &removed, &HashSet::from([id]))
+        .await
+        .unwrap();
+    assert!(!layer.object_store().exists(&sst).await.unwrap());
+    assert!(layer.object_store().exists(&sidecar).await.unwrap());
+
+    env.worker
+        .delete_files(region_id, &removed, &HashSet::new())
+        .await
+        .unwrap();
+    assert!(!layer.object_store().exists(&sidecar).await.unwrap());
 }

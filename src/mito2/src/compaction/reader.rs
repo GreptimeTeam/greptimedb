@@ -27,6 +27,7 @@ use snafu::OptionExt;
 use store_api::metadata::RegionMetadataRef;
 
 use crate::access_layer::AccessLayerRef;
+use crate::batch_size::{estimate_batch_size, row_group_statistics};
 use crate::cache::{CacheManagerRef, CacheStrategy};
 use crate::compaction::json2::{
     Json2RewritePlans, collect_json2_rewrite_plans_from_parquet, rewrite_json2_schema,
@@ -40,8 +41,10 @@ use crate::read::seq_scan::SeqScan;
 use crate::read::stream::spawn_compact_stream;
 use crate::region::options::MergeMode;
 use crate::sst::file::FileHandle;
+use crate::sst::parquet::blob::{KeptRefs, blob_columns};
 use crate::sst::parquet::reader::MetadataCacheMetrics;
 use crate::sst::parquet::{Json2RewriteTargets, Json2TargetLayout};
+use crate::sst::parquet::{decoded_input_size, row_group_size_for};
 
 /// Builders to create [BoxedRecordBatchStream] for compaction.
 pub(crate) struct CompactionSstReaderBuilder<'a> {
@@ -55,13 +58,43 @@ pub(crate) struct CompactionSstReaderBuilder<'a> {
     pub(crate) merge_mode: MergeMode,
     /// Max number of inputs decoded concurrently ahead of the merge.
     pub(crate) read_parallelism: usize,
+    /// References to other sidecars that the reader leaves unresolved.
+    pub(crate) kept_blob_refs: Option<Arc<KeptRefs>>,
 }
 
 impl CompactionSstReaderBuilder<'_> {
     /// Build a [FlatSource] that yields Arrow `RecordBatch`s from reading all the input SST files,
     /// for compaction. The schema of the [FlatSource] is unified.
+    #[cfg(test)]
     pub(crate) async fn build_flat_sst_reader(self) -> Result<FlatSource> {
         let parquet_metadata = self.collect_parquet_metadata().await?;
+        let (source, _) = self.build_flat_sst_reader_from(parquet_metadata).await?;
+        Ok(source)
+    }
+
+    /// Like [Self::build_flat_sst_reader], and also returns the output row group size for
+    /// `configured` from the decoded value bytes that the input footers record, and the
+    /// references the reader keeps, which the output writer must keep as well.
+    pub(crate) async fn build_flat_sst_reader_and_row_group_size(
+        self,
+        configured: usize,
+    ) -> Result<(FlatSource, usize, Option<Arc<KeptRefs>>)> {
+        let parquet_metadata = self.collect_parquet_metadata().await?;
+        let (rows, bytes) = decoded_input_size(parquet_metadata.iter().map(Arc::as_ref));
+        let (source, kept_blob_refs) = self.build_flat_sst_reader_from(parquet_metadata).await?;
+        Ok((
+            source,
+            row_group_size_for(rows, bytes, configured),
+            kept_blob_refs,
+        ))
+    }
+
+    async fn build_flat_sst_reader_from(
+        mut self,
+        parquet_metadata: Vec<Arc<ParquetMetaData>>,
+    ) -> Result<(FlatSource, Option<Arc<KeptRefs>>)> {
+        self.kept_blob_refs = kept_by_all_inputs(self.kept_blob_refs.take(), &parquet_metadata);
+        let kept_blob_refs = self.kept_blob_refs.clone();
         let plans = collect_json2_rewrite_plans_from_parquet(&self.metadata, &parquet_metadata)?;
         let scan_input = self.build_scan_input(&parquet_metadata, &plans)?;
 
@@ -73,7 +106,7 @@ impl CompactionSstReaderBuilder<'_> {
             .build_flat_reader_for_compaction()
             .boxed()
             .await?;
-        Ok(FlatSource::new_stream(schema, stream))
+        Ok((FlatSource::new_stream(schema, stream), kept_blob_refs))
     }
 
     fn build_scan_input(
@@ -81,18 +114,10 @@ impl CompactionSstReaderBuilder<'_> {
         parquet_metadata: &[Arc<ParquetMetaData>],
         plans: &Json2RewritePlans,
     ) -> Result<ScanInput> {
-        let batch_size = crate::batch_size::estimate_batch_size(
+        let batch_size = estimate_batch_size(
             parquet_metadata
                 .iter()
-                .flat_map(|metadata| metadata.row_groups())
-                .map(|row_group| {
-                    let uncompressed_bytes = row_group
-                        .columns()
-                        .iter()
-                        .map(|column| column.uncompressed_size() as u64)
-                        .sum();
-                    (row_group.num_rows() as u64, uncompressed_bytes)
-                }),
+                .flat_map(|metadata| row_group_statistics(metadata)),
         );
 
         let projection = (0..self.metadata.column_metadatas.len()).collect();
@@ -137,6 +162,7 @@ impl CompactionSstReaderBuilder<'_> {
             .with_json2_rewrite_targets(targets)
             .with_files(self.inputs.to_vec())
             .with_compaction(true)
+            .with_kept_blob_refs(self.kept_blob_refs)
             .with_compaction_read_parallelism(self.read_parallelism)
             .with_batch_size(batch_size)
             .with_append_mode(self.append_mode)
@@ -195,6 +221,32 @@ impl CompactionSstReaderBuilder<'_> {
             Err(e) if e.is_object_not_found() => Ok(None),
             Err(e) => Err(e),
         }
+    }
+}
+
+/// Narrows `kept` to the columns that every input footer declares external. In a column an
+/// input does not declare, such as one written before the column became external, a value
+/// that starts with the reference prefix is a literal, which the output would otherwise
+/// take for a reference.
+fn kept_by_all_inputs(
+    kept: Option<Arc<KeptRefs>>,
+    parquet_metadata: &[Arc<ParquetMetaData>],
+) -> Option<Arc<KeptRefs>> {
+    let kept = kept?;
+    let mut columns = kept.columns.clone();
+    for metadata in parquet_metadata {
+        let declared = blob_columns(metadata);
+        columns.retain(|column| declared.contains(column));
+    }
+    if columns.is_empty() {
+        None
+    } else if columns.len() == kept.columns.len() {
+        Some(kept)
+    } else {
+        Some(Arc::new(KeptRefs {
+            region_id: kept.region_id,
+            columns,
+        }))
     }
 }
 
@@ -337,6 +389,7 @@ mod tests {
             time_range: None,
             merge_mode: MergeMode::LastRow,
             read_parallelism: 1,
+            kept_blob_refs: None,
         }
         .build_flat_sst_reader()
         .await
@@ -351,5 +404,117 @@ mod tests {
         // Splitting by series would yield a batch per series and file, 200 in total.
         assert_eq!(2000, num_rows);
         assert!(num_batches < 20, "got {num_batches} batches");
+    }
+
+    #[tokio::test]
+    async fn test_compaction_counts_decoded_values() {
+        use api::v1::SemanticType;
+        use api::v1::helper::row;
+        use api::v1::value::ValueData;
+        use datatypes::prelude::ConcreteDataType;
+
+        let mut env = TestEnv::new().await;
+        let engine = env.create_engine(Default::default()).await;
+        let region_id = RegionId::new(1, 1);
+        let mut request = CreateRequestBuilder::new().tag_num(1).field_num(1).build();
+        request
+            .column_metadatas
+            .iter_mut()
+            .find(|c| c.semantic_type == SemanticType::Field)
+            .unwrap()
+            .column_schema
+            .data_type = ConcreteDataType::string_datatype();
+        let schema = rows_schema(&request);
+        engine
+            .handle_request(region_id, RegionRequest::Create(request))
+            .await
+            .unwrap();
+        // One 64 KiB value repeated: tiny once dictionary-encoded, 64 KiB per row decoded.
+        let value = "v".repeat(64 * 1024);
+        for file in 0..2i64 {
+            let rows = (0..256)
+                .map(|i| {
+                    row(vec![
+                        ValueData::StringValue("a".to_string()),
+                        ValueData::StringValue(value.clone()),
+                        ValueData::TimestampMillisecondValue(file * 1_000_000 + i * 1000),
+                    ])
+                })
+                .collect();
+            put_rows(
+                &engine,
+                region_id,
+                Rows {
+                    schema: schema.clone(),
+                    rows,
+                },
+            )
+            .await;
+            engine
+                .handle_request(
+                    region_id,
+                    RegionRequest::Flush(RegionFlushRequest::default()),
+                )
+                .await
+                .unwrap();
+        }
+        let region = engine.get_region(region_id).unwrap();
+        let version = region.version();
+        let inputs: Vec<_> = version.ssts.levels()[0].files().cloned().collect();
+        assert_eq!(2, inputs.len());
+        // File metadata holds the dictionary-encoded size, which would allow full row groups.
+        let encoded = inputs
+            .iter()
+            .map(|f| f.meta_ref().max_row_group_uncompressed_size)
+            .max()
+            .unwrap();
+        assert!(encoded < 1024 * 1024, "{encoded}");
+
+        let (_, row_group_size, _) = CompactionSstReaderBuilder {
+            metadata: version.metadata.clone(),
+            sst_layer: region.access_layer.clone(),
+            cache: engine.cache_manager(),
+            inputs: &inputs,
+            append_mode: false,
+            filter_deleted: true,
+            time_range: None,
+            merge_mode: MergeMode::LastRow,
+            read_parallelism: 1,
+            kept_blob_refs: None,
+        }
+        .build_flat_sst_reader_and_row_group_size(102_400)
+        .await
+        .unwrap();
+        // 128 MiB of 64 KiB rows.
+        assert_eq!(2048, row_group_size);
+
+        // The output records its decoded size for compaction memory admission.
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Compact(store_api::region_request::RegionCompactRequest {
+                    options: api::v1::region::compact_request::Options::StrictWindow(
+                        api::v1::region::StrictWindow {
+                            window_seconds: 3600,
+                        },
+                    ),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        let version = region.version();
+        assert!(version.ssts.levels()[0].files.is_empty());
+        let outputs: Vec<_> = version.ssts.levels()[1].files().collect();
+        assert_eq!(1, outputs.len());
+        let output = outputs[0].meta_ref();
+        assert!(
+            output.max_row_group_uncompressed_size < 1024 * 1024,
+            "{output:?}"
+        );
+        assert!(
+            output.max_row_group_decoded_size >= 512 * 64 * 1024,
+            "{output:?}"
+        );
     }
 }

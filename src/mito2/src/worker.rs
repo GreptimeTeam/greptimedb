@@ -741,7 +741,8 @@ pub async fn write_cache_from_config(
         config.manifest_cache_size,
     )
     .await?
-    .with_upload_store_wrapper(upload_store_wrapper);
+    .with_upload_store_wrapper(upload_store_wrapper)
+    .with_cache_blobs(config.write_cache_blobs);
     Ok(Some(Arc::new(cache)))
 }
 

@@ -74,9 +74,9 @@ use crate::read::Batch;
 use crate::read::range_cache::RangeScanCacheKey;
 use crate::read::read_columns::JsonTargetTypes;
 use crate::sst::file::{RegionFileId, RegionIndexId};
-use crate::sst::parquet::PARQUET_METADATA_KEY;
 use crate::sst::parquet::read_columns::ParquetReadColumns;
 use crate::sst::parquet::reader::MetadataCacheMetrics;
+use crate::sst::parquet::{PARQUET_METADATA_KEY, is_region_metadata_key};
 
 /// Finds a typed shared error through the range-reader I/O wrappers.
 pub(crate) fn find_shared_page_source<E: std::error::Error + Send + Sync + 'static>(
@@ -486,7 +486,7 @@ impl CachedSstMeta {
             })?;
         let meta_value = key_values
             .iter()
-            .find(|kv| kv.key == PARQUET_METADATA_KEY)
+            .find(|kv| is_region_metadata_key(&kv.key))
             .with_context(|| InvalidParquetSnafu {
                 file: file_path,
                 reason: format!("key {} not found", PARQUET_METADATA_KEY),
@@ -496,7 +496,7 @@ impl CachedSstMeta {
             .as_ref()
             .with_context(|| InvalidParquetSnafu {
                 file: file_path,
-                reason: format!("No value for key {}", PARQUET_METADATA_KEY),
+                reason: format!("No value for key {}", meta_value.key),
             })?;
         let region_metadata = match region_metadata {
             Some(region_metadata) => region_metadata,
@@ -558,7 +558,7 @@ fn strip_region_metadata_from_parquet(parquet_metadata: ParquetMetaData) -> Parq
     let filtered_key_values = file_metadata.key_value_metadata().and_then(|key_values| {
         let filtered = key_values
             .iter()
-            .filter(|kv| kv.key != PARQUET_METADATA_KEY)
+            .filter(|kv| !is_region_metadata_key(&kv.key))
             .cloned()
             .collect::<Vec<_>>();
         (!filtered.is_empty()).then_some(filtered)

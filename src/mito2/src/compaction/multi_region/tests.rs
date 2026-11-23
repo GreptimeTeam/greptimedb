@@ -60,7 +60,8 @@ use crate::sst::parquet::flat_format::{
 use crate::sst::{FlatSchemaOptions, FormatType, to_flat_sst_arrow_schema};
 use crate::test_util::scheduler_util::SchedulerEnv;
 use crate::test_util::sst_util::{
-    new_flat_source_from_record_batches, new_record_batch_with_custom_sequence,
+    build_test_binary_test_region_metadata, new_flat_source_from_record_batches,
+    new_record_batch_with_binary_values, new_record_batch_with_custom_sequence,
     new_sparse_primary_key, sst_region_metadata_with_encoding,
 };
 
@@ -539,6 +540,11 @@ async fn test_single_scan_routes_all_versions_without_folding(
                 assert_eq!(file.file_id, footer.file_id);
                 assert_eq!(file.file_size, footer.file_size);
                 assert_eq!(file.num_rows, footer.num_rows as u64);
+                assert!(file.max_row_group_decoded_size > 0);
+                assert_eq!(
+                    file.max_row_group_decoded_size,
+                    footer.max_row_group_decoded_size
+                );
             }
             let target = &targets[&id];
             let mut actual_rows = Vec::new();
@@ -2311,6 +2317,48 @@ async fn test_oversized_equal_key_group_fails_without_partial_outputs_or_spill()
     assert_spill_cleaned(&fixture.env.path.path().join("spill")).await;
 }
 
+#[tokio::test]
+async fn test_target_writer_sizes_row_groups_from_source_size() {
+    let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
+    let plan = fixture.plan(1);
+    let (context, _protection) = fixture.context(None);
+    let source = new_flat_source_from_record_batches(vec![source_batch(&fixture.metadata, 0, 100)]);
+    let limits = memory::MemoryLimits::new(&plan, source.schema()).unwrap();
+    // 64 decoded rows of 4 MiB: 32 rows fill the 128 MiB target. The target's `FileMeta` inputs
+    // describe the narrow fixture rows, which would allow the full cap.
+    let writer = writer::TargetWriter::new(
+        &plan.targets[&RegionId::new(1, 0)],
+        &context,
+        &limits,
+        plan.max_output_file_size,
+        (64, 256 << 20),
+        Arc::default(),
+    );
+    assert_eq!(32, writer.options().row_group_size);
+}
+
+#[tokio::test]
+async fn test_reader_admission_counts_decoded_values() {
+    let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
+    // 2048 copies of one 64 KiB value: tiny once dictionary-encoded, 128 MiB decoded.
+    let batch = new_record_batch_with_binary_values("a", &vec![vec![7u8; 64 * 1024]; 2048]);
+    let info = fixture
+        .write_source(
+            build_test_binary_test_region_metadata(),
+            vec![batch],
+            FormatType::Flat,
+        )
+        .await;
+    let footer = info.file_metadata.unwrap();
+    assert!(
+        footer
+            .row_groups()
+            .iter()
+            .all(|group| group.total_byte_size() < 1 << 20)
+    );
+    assert!(memory::reader_bytes(&footer, false) >= 128 << 20);
+}
+
 #[rstest::rstest]
 #[case::encoder("encoder")]
 #[case::metadata("metadata")]
@@ -2331,6 +2379,7 @@ async fn test_limited_writer_fails_instead_of_publishing_over_budget(#[case] kin
         &context,
         &limits,
         plan.max_output_file_size,
+        (0, 0),
         Arc::default(),
     )
     .write(source)

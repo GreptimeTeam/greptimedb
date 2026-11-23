@@ -52,6 +52,7 @@ use crate::error::{
     ComputeArrowSnafu, DecodeSnafu, EvalPartitionFilterSnafu, NewRecordBatchSnafu,
     RecordBatchSnafu, Result, UnexpectedSnafu,
 };
+use crate::sst::parquet::blob::blob_file_size;
 use crate::sst::parquet::file_range::PreFilterMode;
 use crate::sst::parquet::flat_format::FlatReadFormat;
 use crate::sst::parquet::format::{PrimaryKeyArray, StatValues};
@@ -420,6 +421,7 @@ pub(crate) fn build_reader_filter_plan(
     read_format: &FlatReadFormat,
     codec: &Arc<dyn PrimaryKeyCodec>,
     parquet_metadata: &ParquetMetaData,
+    references_other_sidecars: bool,
 ) -> ReaderFilterPlan {
     let Some(predicate) = predicate else {
         return ReaderFilterPlan {
@@ -438,7 +440,11 @@ pub(crate) fn build_reader_filter_plan(
     // `SkipFields` keeps field predicates in the normal read path to avoid a
     // second read of projected field columns, while tags/timestamp can still
     // participate in prefiltering.
-    let field_prefilter_enabled = pre_filter_mode == PreFilterMode::All;
+    // Out-of-line columns hold references until the row group reader resolves them, so
+    // field predicates must wait for the normal read path.
+    let field_prefilter_enabled = pre_filter_mode == PreFilterMode::All
+        && blob_file_size(parquet_metadata).is_none()
+        && !references_other_sidecars;
     // When true, tag columns are encoded in the primary key column and are NOT
     // stored as separate parquet columns. Tag predicates must go through PK
     // decoding rather than direct column reads.
@@ -2448,6 +2454,7 @@ mod tests {
             &full_read_format,
             &codec,
             &stats_metadata(&[vec![1]], None),
+            false,
         );
         assert!(skip_fields_plan.prefilter_builder.is_some());
         assert_eq!(
@@ -2468,6 +2475,7 @@ mod tests {
             &full_read_format,
             &codec,
             &stats_metadata(&[vec![1]], None),
+            false,
         );
         assert!(postponed_time_plan.prefilter_builder.is_some());
         assert_eq!(
@@ -2486,6 +2494,7 @@ mod tests {
             &full_read_format,
             &codec,
             &stats_metadata(&[vec![1]], None),
+            false,
         );
         assert!(postponed_time_only_plan.prefilter_builder.is_none());
         assert_eq!(
@@ -2516,6 +2525,7 @@ mod tests {
             &projected_read_format,
             &metric_codec,
             &stats_metadata(&[vec![1]], None),
+            false,
         );
         assert!(pk_prefilter_plan.prefilter_builder.is_some());
         assert!(
@@ -2541,6 +2551,7 @@ mod tests {
             &projected_read_format,
             &metric_codec,
             &stats_metadata(&[vec![1]], None),
+            false,
         );
         assert!(disabled_plan.prefilter_builder.is_none());
         assert_eq!(
@@ -2607,6 +2618,7 @@ mod tests {
             &read_format,
             &codec,
             &parquet_metadata,
+            false,
         );
         assert_eq!(
             1,
@@ -2623,6 +2635,7 @@ mod tests {
             &read_format,
             &codec,
             &parquet_metadata,
+            false,
         );
         assert!(skip_fields_plan.prefilter_builder.is_none());
 
@@ -2639,6 +2652,7 @@ mod tests {
             &read_format,
             &codec,
             &parquet_metadata,
+            false,
         );
         assert_eq!(
             0,
@@ -2655,6 +2669,7 @@ mod tests {
             &read_format,
             &codec,
             &parquet_metadata,
+            false,
         );
         assert!(disabled_plan.prefilter_builder.is_none());
     }
@@ -2685,6 +2700,7 @@ mod tests {
             &read_format,
             &codec,
             &stats_metadata(&[vec![1]], None),
+            false,
         );
         let plan_b_a = build_reader_filter_plan(
             Some(&Predicate::new(vec![expr_b, expr_a])),
@@ -2695,6 +2711,7 @@ mod tests {
             &read_format,
             &codec,
             &stats_metadata(&[vec![1]], None),
+            false,
         );
 
         let exprs_ab = plan_ab.prefilter_builder.unwrap().pk_filter_expr_strs;

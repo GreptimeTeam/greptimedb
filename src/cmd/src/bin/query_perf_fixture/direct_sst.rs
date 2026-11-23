@@ -302,6 +302,9 @@ fn file_meta_from_sst_info(
         level: 0,
         file_size: info.file_size,
         max_row_group_uncompressed_size: info.max_row_group_uncompressed_size,
+        blob_file_size: info.blob_file_size(),
+        max_row_group_decoded_size: info.max_row_group_decoded_size,
+        blob_refs: Vec::new(),
         available_indexes: Default::default(),
         indexes: Default::default(),
         index_file_size: 0,
@@ -466,13 +469,11 @@ pub(super) async fn run_direct_sst(args: DirectArgs) {
             &mut metrics,
         )
         .await;
-        let opts = WriteOptions {
-            write_buffer_size: DEFAULT_WRITE_BUFFER_SIZE,
-            row_group_size: scenario.layout.row_group_size,
-            max_file_size: None,
-            float_field_encoding: Default::default(),
-            ..Default::default()
-        };
+        let mut opts = WriteOptions::default();
+        opts.write_buffer_size = DEFAULT_WRITE_BUFFER_SIZE;
+        opts.row_group_size = scenario.layout.row_group_size;
+        opts.max_file_size = None;
+        opts.float_field_encoding = Default::default();
         let infos = match format {
             FormatType::Flat => writer.write_all_flat(source, Some(sequence), &opts).await,
             FormatType::PrimaryKey => {

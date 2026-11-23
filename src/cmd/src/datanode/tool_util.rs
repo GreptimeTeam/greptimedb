@@ -94,7 +94,7 @@ pub(crate) fn extract_region_metadata(
     };
     let json = key_values
         .iter()
-        .find(|key_value| key_value.key == mito2::sst::parquet::PARQUET_METADATA_KEY)
+        .find(|key_value| mito2::sst::parquet::is_region_metadata_key(&key_value.key))
         .and_then(|key_value| key_value.value.as_ref())
         .ok_or_else(|| {
             error::IllegalConfigSnafu {

@@ -197,6 +197,10 @@ fn create_column(column_schema: &ColumnSchema, quote_style: char) -> Result<Colu
         extensions.compression_options = Some(opt.to_options_map().into());
     }
 
+    if let Some(opt) = column_schema.storage_options()? {
+        extensions.storage_options = Some(opt.to_options_map().into());
+    }
+
     let mut data_type = concrete_data_type_to_sql_data_type(&column_schema.data_type)
         .with_context(|_| ConvertSqlTypeSnafu {
             datatype: column_schema.data_type.clone(),

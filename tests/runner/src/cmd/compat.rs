@@ -1249,7 +1249,17 @@ impl ParsedStatement {
             } else {
                 format!("{sql};")
             };
-            let mut result = db.compat_query(&sql, &context).await?;
+            // `-- SQLNESS ARG expect_error=true` records the error as the statement output, for
+            // cases that check an old binary rejects data it cannot read.
+            let expect_error = context
+                .context
+                .get(EXPECT_ERROR_KEY)
+                .is_some_and(|v| v == "true");
+            let mut result = match db.compat_query(&sql, &context).await {
+                Ok(result) => result,
+                Err(error) if expect_error => error,
+                Err(error) => return Err(error),
+            };
             self.after_execute_intercept(&mut result).await;
             results.push(result);
         }
@@ -1257,6 +1267,9 @@ impl ParsedStatement {
         Ok((display, results))
     }
 }
+
+/// Query context key that makes a statement error part of the verify output.
+const EXPECT_ERROR_KEY: &str = "expect_error";
 
 /// Parse a SQL file into statements using the same sqlness comment/interceptor
 /// conventions as the ordinary runner.
