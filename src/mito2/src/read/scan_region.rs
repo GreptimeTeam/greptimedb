@@ -1639,7 +1639,7 @@ impl ScanInput {
 
         // Early file-level pruning using manifest ranges before any parquet metadata access.
         if self.manifest_prunes_file(file, predicate.as_ref()) {
-            reader_metrics.filter_metrics.files_time_range_pruned += 1;
+            reader_metrics.filter_metrics.files_manifest_pruned += 1;
             return Ok(FileRangeBuilder::default());
         }
 
@@ -3407,7 +3407,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(1, reader_metrics.filter_metrics.files_time_range_pruned);
+        assert_eq!(1, reader_metrics.filter_metrics.files_manifest_pruned);
         let mut ranges = SmallVec::new();
         builder.build_ranges(-1, &mut ranges);
         assert!(ranges.is_empty());
@@ -3619,7 +3619,7 @@ mod tests {
         let mut ranges = SmallVec::new();
         builder.build_ranges(-1, &mut ranges);
         assert!(ranges.is_empty());
-        assert_eq!(metrics.filter_metrics.files_time_range_pruned, 1);
+        assert_eq!(metrics.filter_metrics.files_manifest_pruned, 1);
         assert!(
             !input.can_manifest_prune_file(&files[1]),
             "same-prefix SST must be kept for better suffixes"

@@ -77,7 +77,7 @@ INSERT INTO pk_range_prune VALUES (1, 3, 'c', 'idc1'), (2, 4, 'd', 'idc2');
 
 ADMIN flush_table('pk_range_prune');
 
--- SQLNESS REPLACE (?s)^.*("files_time_range_pruned":\d+).*$ $1
+-- SQLNESS REPLACE (?s)^.*("files_manifest_pruned":\d+).*$ $1
 EXPLAIN ANALYZE VERBOSE SELECT * FROM pk_range_prune WHERE host = 'c';
 
 SELECT * FROM pk_range_prune WHERE host = 'c';
@@ -102,7 +102,7 @@ INSERT INTO pk_range_t2 VALUES ('job1', 0, 3), ('job2', 1, 4);
 
 ADMIN flush_table('pk_range_phy');
 
--- SQLNESS REPLACE (?s)^.*("files_time_range_pruned":\d+).*$ $1
+-- SQLNESS REPLACE (?s)^.*("files_manifest_pruned":\d+).*$ $1
 EXPLAIN ANALYZE VERBOSE SELECT * FROM pk_range_t1;
 
 SELECT * FROM pk_range_t1 ORDER BY host;
