@@ -1330,13 +1330,13 @@ impl LogStore for ObjectStoreLogStore {
 
     /// Raises the sequence of the next object above the object that holds
     /// the bound, the larger of `entry_id` and the largest id of the region in
-    /// the store's objects or issued since it opened, sealing the open batch
-    /// first if it holds ids under the current sequence. Returns the bound
-    /// once a release record of the region's current watermark is durable and
-    /// indexed in an object at or above that sequence. A store opened later
-    /// takes its next sequence from that object, and the watermark does not
-    /// move. The record joins the next sealed batch, so hand-offs within one
-    /// flush interval share an object.
+    /// the objects the store opened with or issued since it opened, sealing
+    /// the open batch first if it holds ids under the current sequence.
+    /// Returns the bound once a release record of the region's current
+    /// watermark is durable and indexed in an object at or above that
+    /// sequence. A store opened later takes its next sequence from that
+    /// object, and the watermark does not move. The record joins the next
+    /// sealed batch, so hand-offs within one flush interval share an object.
     ///
     /// In the `enqueued` mode a bound at or below an id the store already
     /// assigned the region needs no raised sequence, as that mode never

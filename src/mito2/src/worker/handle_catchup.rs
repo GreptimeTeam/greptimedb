@@ -289,8 +289,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Requests waiting for the old instance are rejected as a close rejects them.
         self.fail_region_stalled_requests_as_not_found(&region_id);
         self.reject_region_requests_as_not_found(region_id);
-        // No Leader lease promotes the registered replacement while its hook runs; the
-        // promotion below ends this catchup.
+        // Leases apply through the shared region map, so a writable catchup keeps them from
+        // promoting the registered replacement before the promotion below (including while its
+        // hook runs); that promotion ends this catchup.
         if set_writable {
             let begun = replacement.manifest_ctx.begin_catchup(region_id);
             debug_assert_eq!(begun, Some(false));
