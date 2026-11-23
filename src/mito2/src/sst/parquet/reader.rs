@@ -49,7 +49,6 @@ use partition::expr::PartitionExpr;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::region_request::PathType;
-use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 use store_api::storage::{ColumnId, FileId};
 use table::predicate::Predicate;
 
@@ -82,7 +81,7 @@ use crate::sst::parquet::file_range::{
 use crate::sst::parquet::flat_format::{FlatReadFormat, primary_key_column_index};
 use crate::sst::parquet::format::{INTERNAL_COLUMN_NUM, need_override_sequence};
 use crate::sst::parquet::json_align::{AlignMode, JsonSchemaAligner, ProjectedRecordBatchStream};
-use crate::sst::parquet::metadata::MetadataLoader;
+use crate::sst::parquet::metadata::{MetadataLoader, primary_key_leaf_index};
 use crate::sst::parquet::prefilter::{
     PrefilterContextBuilder, build_reader_filter_plan, execute_prefilter,
 };
@@ -1924,11 +1923,8 @@ impl RowGroupReaderBuilder {
         build_ctx: RowGroupBuildContext<'_>,
     ) -> Result<ProjectedRecordBatchStream> {
         let parquet_schema = self.parquet_meta.file_metadata().schema_descr();
-        let primary_key_index = parquet_schema
-            .columns()
-            .iter()
-            .position(|column| column.name() == PRIMARY_KEY_COLUMN_NAME)
-            .context(UnexpectedSnafu {
+        let primary_key_index =
+            primary_key_leaf_index(parquet_schema).context(UnexpectedSnafu {
                 reason: "SST does not contain __primary_key",
             })?;
         let projection = ProjectionMask::leaves(parquet_schema, [primary_key_index]);
