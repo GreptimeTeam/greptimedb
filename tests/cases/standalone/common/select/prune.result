@@ -226,6 +226,11 @@ ADMIN flush_table('pk_range_prune');
 | 0                                   |
 +-------------------------------------+
 
+-- SQLNESS REPLACE (?s)^.*("files_time_range_pruned":\d+).*$ $1
+EXPLAIN ANALYZE VERBOSE SELECT * FROM pk_range_prune WHERE host = 'c';
+
+"files_time_range_pruned":1
+
 SELECT * FROM pk_range_prune WHERE host = 'c';
 
 +-------------------------+-----+------+------+
@@ -291,6 +296,11 @@ ADMIN flush_table('pk_range_phy');
 +-----------------------------------+
 | 0                                 |
 +-----------------------------------+
+
+-- SQLNESS REPLACE (?s)^.*("files_time_range_pruned":\d+).*$ $1
+EXPLAIN ANALYZE VERBOSE SELECT * FROM pk_range_t1;
+
+"files_time_range_pruned":1
 
 SELECT * FROM pk_range_t1 ORDER BY host;
 
