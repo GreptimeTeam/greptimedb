@@ -356,7 +356,7 @@ pub struct AllocTracker {
     bytes_allocated: AtomicUsize,
     /// Whether allocating is done.
     is_done_allocating: AtomicBool,
-    /// Serializes [Self::done_allocating] and [Self::on_replacement], which both decide how
+    /// Serializes [Self::done_allocating] with charging and releasing, which all decide how
     /// much of the allocated memory counts as mutable memory of the write buffer.
     release: std::sync::Mutex<()>,
 }
@@ -406,35 +406,37 @@ impl AllocTracker {
         }
     }
 
-    /// Tracks that data accounted as `removed` bytes is replaced by data of `installed` bytes,
-    /// for example after the memtable merges or encodes its parts.
-    pub(crate) fn on_replacement(&self, removed: usize, installed: usize) {
+    /// Charges `bytes` to this tracker until the returned charge drops.
+    ///
+    /// Memtables that replace their data, or hand it to readers, keep a charge with the data so
+    /// the write buffer stays charged until the last holder releases it.
+    pub(crate) fn charge(self: &Arc<Self>, bytes: usize) -> MemoryCharge {
         let _release = self.release.lock().unwrap();
-        // Frozen bytes were already removed from the mutable memory of the write buffer.
-        let frozen = self.is_done_allocating.load(Ordering::Relaxed);
-        if installed >= removed {
-            let bytes = installed - removed;
-            self.bytes_allocated.fetch_add(bytes, Ordering::Relaxed);
-            WRITE_BUFFER_BYTES.add(bytes as i64);
-            if let Some(write_buffer_manager) = &self.write_buffer_manager {
-                write_buffer_manager.reserve_mem(bytes);
-                if frozen {
-                    write_buffer_manager.schedule_free_mem(bytes);
-                }
+        self.bytes_allocated.fetch_add(bytes, Ordering::Relaxed);
+        WRITE_BUFFER_BYTES.add(bytes as i64);
+        if let Some(write_buffer_manager) = &self.write_buffer_manager {
+            write_buffer_manager.reserve_mem(bytes);
+            // Frozen memory no longer counts as mutable memory.
+            if self.is_done_allocating.load(Ordering::Relaxed) {
+                write_buffer_manager.schedule_free_mem(bytes);
             }
-        } else {
-            let bytes = removed - installed;
-            let allocated = self.bytes_allocated.load(Ordering::Relaxed);
-            debug_assert!(bytes <= allocated, "release {bytes} of {allocated} bytes");
-            let bytes = bytes.min(allocated);
-            self.bytes_allocated.fetch_sub(bytes, Ordering::Relaxed);
-            WRITE_BUFFER_BYTES.sub(bytes as i64);
-            if let Some(write_buffer_manager) = &self.write_buffer_manager {
-                if !frozen {
-                    write_buffer_manager.schedule_free_mem(bytes);
-                }
-                write_buffer_manager.free_mem(bytes);
+        }
+        MemoryCharge {
+            tracker: self.clone(),
+            bytes,
+        }
+    }
+
+    fn release(&self, bytes: usize) {
+        let _release = self.release.lock().unwrap();
+        self.bytes_allocated.fetch_sub(bytes, Ordering::Relaxed);
+        WRITE_BUFFER_BYTES.sub(bytes as i64);
+        if let Some(write_buffer_manager) = &self.write_buffer_manager {
+            // Freezing already removed the frozen bytes from the mutable memory.
+            if !self.is_done_allocating.load(Ordering::Relaxed) {
+                write_buffer_manager.schedule_free_mem(bytes);
             }
+            write_buffer_manager.free_mem(bytes);
         }
     }
 
@@ -462,6 +464,36 @@ impl Drop for AllocTracker {
         if let Some(write_buffer_manager) = &self.write_buffer_manager {
             write_buffer_manager.free_mem(bytes_allocated);
         }
+    }
+}
+
+/// Memory charged to an [AllocTracker] until this charge drops.
+///
+/// The charge keeps its tracker alive, so data still held by readers stays charged after its
+/// memtable is dropped. Batches that a reader passes on without copying are no longer covered
+/// once the reader drops.
+pub(crate) struct MemoryCharge {
+    tracker: Arc<AllocTracker>,
+    bytes: usize,
+}
+
+impl MemoryCharge {
+    pub(crate) fn bytes(&self) -> usize {
+        self.bytes
+    }
+}
+
+impl fmt::Debug for MemoryCharge {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("MemoryCharge")
+            .field("bytes", &self.bytes)
+            .finish()
+    }
+}
+
+impl Drop for MemoryCharge {
+    fn drop(&mut self) {
+        self.tracker.release(self.bytes);
     }
 }
 
@@ -935,32 +967,32 @@ mod tests {
     }
 
     #[test]
-    fn test_alloc_tracker_replaces_before_and_after_freezing() {
+    fn test_memory_charge_before_and_after_freezing() {
         let manager = Arc::new(WriteBufferManagerImpl::new(1000));
-        {
-            let tracker = AllocTracker::new(Some(manager.clone() as WriteBufferManagerRef));
-            tracker.on_allocation(100);
-            // A mutable memtable changes both its total and its mutable usage.
-            tracker.on_replacement(100, 130);
-            assert_eq!(130, tracker.bytes_allocated());
-            assert_eq!(130, manager.memory_usage());
-            assert_eq!(130, manager.mutable_usage());
-            tracker.on_replacement(130, 60);
-            assert_eq!(60, tracker.bytes_allocated());
-            assert_eq!(60, manager.memory_usage());
-            assert_eq!(60, manager.mutable_usage());
+        let tracker = Arc::new(AllocTracker::new(Some(
+            manager.clone() as WriteBufferManagerRef
+        )));
+        let mutable = tracker.charge(100);
+        let released_after_freeze = tracker.charge(60);
+        assert_eq!(160, manager.memory_usage());
+        assert_eq!(160, manager.mutable_usage());
+        // Releasing a mutable charge frees both its total and its mutable usage.
+        drop(mutable);
+        assert_eq!(60, manager.mutable_usage());
 
-            // Freezing already removed the allocated bytes from the mutable usage.
-            tracker.done_allocating();
-            tracker.on_replacement(60, 80);
-            assert_eq!(80, tracker.bytes_allocated());
-            assert_eq!(80, manager.memory_usage());
-            assert_eq!(0, manager.mutable_usage());
-            tracker.on_replacement(80, 50);
-            assert_eq!(50, tracker.bytes_allocated());
-            assert_eq!(50, manager.memory_usage());
-            assert_eq!(0, manager.mutable_usage());
-        }
+        tracker.done_allocating();
+        assert_eq!(0, manager.mutable_usage());
+        // Charges taken or released after freezing only change the total usage.
+        let frozen = tracker.charge(30);
+        drop(released_after_freeze);
+        assert_eq!(30, tracker.bytes_allocated());
+        assert_eq!(30, manager.memory_usage());
+        assert_eq!(0, manager.mutable_usage());
+
+        // A charge outlives the tracker's owner and keeps the memory charged.
+        drop(tracker);
+        assert_eq!(30, manager.memory_usage());
+        drop(frozen);
         assert_eq!(0, manager.memory_usage());
         assert_eq!(0, manager.mutable_usage());
     }
