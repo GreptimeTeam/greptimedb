@@ -195,7 +195,9 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
 
     /// Hands the provider's region over to this log store before the region
     /// becomes writable on it, and returns the bound: an id at or above
-    /// `entry_id` and every id the log store assigned to the region before.
+    /// `entry_id` and every id of the region the log store still holds or
+    /// assigned since it opened. Ids it assigned before and no longer holds
+    /// need not be covered; they stay below every id it assigns later.
     ///
     /// Once it returns:
     /// - every id the log store assigns to the region is above the bound,
