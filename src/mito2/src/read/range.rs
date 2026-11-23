@@ -102,9 +102,9 @@ impl RangeMeta {
         Self::push_extension_ranges(input, &mut ranges);
 
         let per_series = input.distribution == Some(TimeSeriesDistribution::PerSeries);
-        // Scans with a distribution keep grouping ranges by time only. `TimeWindowed` scans
-        // advertise `(ts, primary key)` ordering, which key-disjoint ranges assigned to one
-        // partition in any order would not keep.
+        // Scans with a distribution keep grouping ranges by time only. `RegionScanExec`
+        // declares `(ts, primary key)` ordering for `TimeWindowed`; SeqScan already breaks it
+        // for files that overlap in keys, and splitting by key would break it for disjoint ones.
         let split_by_key = input.distribution.is_none();
         let num_memtables = input.memtables.len();
         let mapper = input.primary_key_mapper();
