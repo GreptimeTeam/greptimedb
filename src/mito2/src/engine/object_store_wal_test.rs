@@ -35,7 +35,7 @@ use datatypes::value::Value;
 use futures::TryStreamExt;
 use log_store::ObjectStoreLogStore;
 use object_store::ObjectStore;
-use object_store::layers::mock::MockLayerBuilder;
+use object_store::layers::mock::{self, BytesRange, MockLayerBuilder, RpRead, oio};
 use object_store::services::Memory;
 use partition::expr::col;
 use rstest::rstest;
@@ -799,9 +799,9 @@ impl EventListener for ReloadSwapBlocker {
 
 /// Holds a catchup before it reopens the region until released.
 #[derive(Default)]
-pub(crate) struct CatchupReopenBlocker {
-    pub(crate) entered: Notify,
-    pub(crate) release: Notify,
+struct CatchupReopenBlocker {
+    entered: Notify,
+    release: Notify,
 }
 
 #[async_trait]
@@ -1154,8 +1154,14 @@ async fn test_fenced_region_refuses_upgrade() {
     assert!(region.is_follower());
 }
 
+/// While a catchup is about to reopen the region, a commit that fences the region makes the
+/// catchup refuse the reopen with a retryable error, and a Leader lease does not promote the
+/// region, which the catchup promotes when it ends.
+#[rstest]
+#[case::fence(false)]
+#[case::lease(true)]
 #[tokio::test]
-async fn test_fence_during_catchup_refuses_reopen() {
+async fn test_fence_or_lease_during_catchup_reopen(#[case] lease: bool) {
     let mut env = TestEnv::with_prefix("fence-during-catchup").await;
     let listener = Arc::new(CatchupReopenBlocker::default());
     let engine = env
@@ -1183,54 +1189,126 @@ async fn test_fence_during_catchup_refuses_reopen() {
         tokio::spawn(async move { engine.handle_request(region_id, request).await })
     };
 
-    // The catchup passed its entry check; a commit fences the region before the reopen.
+    // The catchup passed its entry check.
     listener.entered.notified().await;
-    fence(&region).await;
+    if lease {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let promoted = engine
+            .set_region_role_with_lease(
+                region_id,
+                RegionRole::Leader,
+                Instant::now(),
+                deadline,
+                None,
+            )
+            .unwrap();
+        assert!(!promoted);
+        assert!(region.is_follower());
+    } else {
+        // A commit fences the region before the reopen.
+        fence(&region).await;
+    }
     listener.release.notify_one();
 
-    let error = catchup.await.unwrap().unwrap_err();
-    assert!(error.retry_hint().is_retryable(), "{error:?}");
-    assert!(Arc::ptr_eq(&region, &engine.get_region(region_id).unwrap()));
+    let result = catchup.await.unwrap();
+    if lease {
+        result.unwrap();
+        assert!(engine.get_region(region_id).unwrap().is_writable());
+    } else {
+        let error = result.unwrap_err();
+        assert!(error.retry_hint().is_retryable(), "{error:?}");
+        assert!(Arc::ptr_eq(&region, &engine.get_region(region_id).unwrap()));
+    }
 }
 
-/// A catchup that ends without promoting the region, because it failed or does not make the
-/// region writable, lets the next Leader lease promote it.
+/// Fails every read of a manifest file.
+struct FailedManifestReader;
+
+impl oio::StreamRead for FailedManifestReader {
+    async fn open(&self, _: BytesRange) -> mock::Result<(RpRead, Box<dyn oio::ReadStreamDyn>)> {
+        Err(mock::Error::new(
+            mock::ErrorKind::Unexpected,
+            "mock manifest read failure",
+        ))
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum CatchupEnd {
+    Failed,
+    NotSetWritable,
+    ReopenFails,
+}
+
+/// A catchup that ends without promoting the region, because it failed, its reopen failed or it
+/// does not make the region writable, lets the next Leader lease promote it.
 #[rstest]
-#[case::failed(true)]
-#[case::not_set_writable(false)]
+#[case::failed(CatchupEnd::Failed)]
+#[case::not_set_writable(CatchupEnd::NotSetWritable)]
+#[case::reopen_fails(CatchupEnd::ReopenFails)]
 #[tokio::test]
-async fn test_leader_lease_after_catchup_without_promotion_promotes(#[case] failed: bool) {
-    let mut env = TestEnv::with_prefix("lease-after-catchup").await;
+async fn test_leader_lease_after_catchup_without_promotion_promotes(#[case] end: CatchupEnd) {
+    let fail_manifest_reads = Arc::new(AtomicBool::new(false));
+    let armed = fail_manifest_reads.clone();
+    let layer = MockLayerBuilder::default()
+        .reader_factory(Arc::new(move |path, _args, inner| {
+            if armed.load(Ordering::Relaxed) && path.contains("/manifest/") {
+                Box::new(oio::StreamReader::new(FailedManifestReader))
+            } else {
+                inner
+            }
+        }))
+        .build()
+        .unwrap();
+    let mut env = TestEnv::with_prefix("lease-after-catchup")
+        .await
+        .with_mock_layer(layer);
     let region_id = RegionId::new(1, 1);
     let (engine, _log_store, _, schema, deadline) = create_leased_region(&mut env, region_id).await;
     put_range(&engine, region_id, &schema, 0, 3).await;
-    flush_region(&engine, region_id, None).await;
+    // Only `ReopenFails` leaves rows in the memtable, which makes the catchup reopen the region.
+    if end != CatchupEnd::ReopenFails {
+        flush_region(&engine, region_id, None).await;
+    }
     engine
         .set_region_role(region_id, RegionRole::Follower)
         .unwrap();
     let region = engine.get_region(region_id).unwrap();
-    // A source that reported an entry the replay cannot reach fails the catchup.
     let request = RegionCatchupRequest {
-        set_writable: failed,
-        entry_id: failed.then(|| region.version().flushed_entry_id + 1),
+        set_writable: end != CatchupEnd::NotSetWritable,
+        // With `Failed`, a source that reported an entry the replay cannot reach fails the catchup.
+        entry_id: (end == CatchupEnd::Failed).then(|| region.version().flushed_entry_id + 1),
         ..Default::default()
     };
+    fail_manifest_reads.store(end == CatchupEnd::ReopenFails, Ordering::Relaxed);
     let caught_up = engine
         .handle_request(region_id, RegionRequest::Catchup(request))
         .await;
-    if failed {
-        let error = caught_up.unwrap_err();
-        assert!(
-            matches!(
-                error.as_any().downcast_ref::<crate::error::Error>(),
-                Some(crate::error::Error::Unexpected { reason, .. })
-                    if reason.contains("expected to replay to")
-            ),
-            "{error:?}"
-        );
-    } else {
-        caught_up.unwrap();
+    fail_manifest_reads.store(false, Ordering::Relaxed);
+    match end {
+        CatchupEnd::Failed => {
+            let error = caught_up.unwrap_err();
+            assert!(
+                matches!(
+                    error.as_any().downcast_ref::<crate::error::Error>(),
+                    Some(crate::error::Error::Unexpected { reason, .. })
+                        if reason.contains("expected to replay to")
+                ),
+                "{error:?}"
+            );
+        }
+        CatchupEnd::ReopenFails => {
+            let error = caught_up.unwrap_err();
+            assert!(
+                format!("{error:?}").contains("mock manifest read failure"),
+                "{error:?}"
+            );
+        }
+        CatchupEnd::NotSetWritable => {
+            caught_up.unwrap();
+        }
     }
+    assert!(Arc::ptr_eq(&region, &engine.get_region(region_id).unwrap()));
     assert!(region.is_follower());
 
     let promoted = engine

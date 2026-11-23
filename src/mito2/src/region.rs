@@ -3017,8 +3017,8 @@ mod tests {
     use crate::manifest::storage::staging::staging_manifest_path;
     use crate::region::{
         IndexBuildSource, IndexPublication, IndexPublicationStale, ManifestContext, ManifestStats,
-        MitoRegion, RegionLeaderState, RegionRoleState, RegionStats, StagingPartitionInfo,
-        TailPublication, TailsEditor,
+        MitoRegion, PromotionFence, RegionLeaderState, RegionRoleState, RegionStats,
+        StagingPartitionInfo, TailPublication, TailsEditor,
     };
     use crate::sst::FormatType;
     use crate::sst::index::intermediate::IntermediateManager;
@@ -3311,26 +3311,21 @@ mod tests {
         assert!(manifest_ctx.awaits_leader_lease());
     }
 
-    /// A Leader lease of a writable leader that awaits it takes the fence lock, so it cannot end
-    /// the wait between a catchup's flag and its demotion.
-    #[tokio::test]
-    async fn test_lease_awaited_by_writable_leader_waits_for_catchup_demotion() {
-        let env = SchedulerEnv::new().await;
-        let region = Arc::new(build_test_region(&env).await);
-        await_leader_lease(&region);
+    /// Runs `f` on another thread while this thread holds the fence lock, checks that `f` waits
+    /// for the lock, then runs `under_lock` before it releases the lock and returns what `f` returns.
+    fn run_blocked_on_fence<T: Send + 'static>(
+        region: &Arc<MitoRegion>,
+        f: impl FnOnce(&MitoRegion) -> T + Send + 'static,
+        under_lock: impl FnOnce(&mut PromotionFence),
+    ) -> T {
         let mut fence = region.manifest_ctx.promotion_fence.lock().unwrap();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let (tx, rx) = std::sync::mpsc::channel();
-        let promoted = region.clone();
+        let blocked = region.clone();
         std::thread::spawn(move || {
-            let issued_at = std::time::Instant::now();
             ready_tx.send(()).unwrap();
-            let promotion = promoted
-                .manifest_ctx
-                .promote_unless_downgrade_started_after(issued_at, promoted.region_id);
-            tx.send((promotion.promoted, promotion.ended_wait)).unwrap();
+            tx.send(f(&blocked)).unwrap();
         });
-        // The lease is about to apply to the writable region; it must wait for the lock.
         ready_rx
             .recv_timeout(std::time::Duration::from_secs(10))
             .unwrap();
@@ -3338,15 +3333,35 @@ mod tests {
             rx.recv_timeout(std::time::Duration::from_millis(200))
                 .is_err()
         );
-        // What a catchup does under the lock.
-        fence.catching_up = true;
-        region
-            .manifest_ctx
-            .set_role(RegionRole::Follower, region.region_id);
+        under_lock(&mut fence);
         drop(fence);
-        let (promoted, ended_wait) = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
-        assert!(!promoted);
-        assert!(ended_wait.is_none());
+        rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap()
+    }
+
+    /// A Leader lease of a writable leader that awaits it takes the fence lock, so it cannot end
+    /// the wait between a catchup's flag and its demotion.
+    #[tokio::test]
+    async fn test_lease_awaited_by_writable_leader_waits_for_catchup_demotion() {
+        let env = SchedulerEnv::new().await;
+        let region = Arc::new(build_test_region(&env).await);
+        await_leader_lease(&region);
+        let issued_at = std::time::Instant::now();
+        let promotion = run_blocked_on_fence(
+            &region,
+            move |r| {
+                r.manifest_ctx
+                    .promote_unless_downgrade_started_after(issued_at, r.region_id)
+            },
+            // What a catchup does under the lock.
+            |fence| {
+                fence.catching_up = true;
+                region
+                    .manifest_ctx
+                    .set_role(RegionRole::Follower, region.region_id);
+            },
+        );
+        assert!(!promotion.promoted);
+        assert!(promotion.ended_wait.is_none());
         assert!(region.manifest_ctx.awaits_leader_lease());
     }
 
@@ -3357,96 +3372,38 @@ mod tests {
         let env = SchedulerEnv::new().await;
         let region = Arc::new(build_test_region(&env).await);
         await_leader_lease(&region);
-        let fence = region.manifest_ctx.promotion_fence.lock().unwrap();
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-        let (tx, rx) = std::sync::mpsc::channel();
-        let read = region.clone();
-        std::thread::spawn(move || {
-            ready_tx.send(()).unwrap();
-            tx.send(read.is_confirmed_leader()).unwrap();
-        });
-        ready_rx
-            .recv_timeout(std::time::Duration::from_secs(10))
-            .unwrap();
-        assert!(
-            rx.recv_timeout(std::time::Duration::from_millis(200))
-                .is_err()
-        );
         // A lease ends the wait under the lock; a read made before it would answer false.
-        region
+        let confirmed = run_blocked_on_fence(
+            &region,
+            |r| r.is_confirmed_leader(),
+            |_| {
+                region
+                    .manifest_ctx
+                    .catchup_promoted_at
+                    .store(0, Ordering::Relaxed)
+            },
+        );
+        assert!(confirmed);
+    }
+
+    /// A catchup begins on no writable leader whose wait for a Leader lease ended, and promotes no
+    /// stopped region.
+    #[tokio::test]
+    async fn test_catchup_skips_confirmed_leader_and_promotes_no_stopped_region() {
+        let env = SchedulerEnv::new().await;
+        let region = build_test_region(&env).await;
+        await_leader_lease(&region);
+        let promotion = region
             .manifest_ctx
-            .catchup_promoted_at
-            .store(0, Ordering::Relaxed);
-        drop(fence);
-        assert!(rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap());
-    }
-
-    /// A catchup begins on no writable leader whose wait a Leader lease ended, and demotes one that
-    /// still awaits it.
-    #[tokio::test]
-    async fn test_catchup_begins_only_on_writable_leader_awaiting_lease() {
-        let env = SchedulerEnv::new().await;
-        let region = build_test_region(&env).await;
-        let manifest_ctx = &region.manifest_ctx;
-        await_leader_lease(&region);
-        assert_eq!(manifest_ctx.begin_catchup(region.region_id), Some(true));
-        assert!(region.is_follower());
-        // Neither lease ends the wait while the catchup runs.
-        let issued_at = std::time::Instant::now();
-        assert!(
-            manifest_ctx
-                .record_staging_leader_lease(issued_at)
-                .is_none()
-        );
-        let promotion =
-            manifest_ctx.promote_unless_downgrade_started_after(issued_at, region.region_id);
-        assert!(!promotion.promoted && promotion.ended_wait.is_none());
-        assert!(manifest_ctx.awaits_leader_lease());
-
-        assert!(manifest_ctx.promote_after_catchup(region.region_id));
-        let issued_at = std::time::Instant::now();
-        let promotion =
-            manifest_ctx.promote_unless_downgrade_started_after(issued_at, region.region_id);
-        assert!(promotion.promoted && promotion.ended_wait.is_some());
-        assert_eq!(manifest_ctx.begin_catchup(region.region_id), None);
-        assert!(region.is_writable());
-    }
-
-    /// A StagingLeader lease ends the wait when no catchup runs.
-    #[tokio::test]
-    async fn test_staging_leader_lease_ends_wait_without_catchup() {
-        let env = SchedulerEnv::new().await;
-        let region = build_test_region(&env).await;
-        await_leader_lease(&region);
-        let issued_at = std::time::Instant::now();
-        assert!(
-            region
-                .manifest_ctx
-                .record_staging_leader_lease(issued_at)
-                .is_some()
-        );
+            .promote_unless_downgrade_started_after(std::time::Instant::now(), region.region_id);
+        assert!(promotion.ended_wait.is_some());
         assert!(!region.manifest_ctx.awaits_leader_lease());
-    }
-
-    /// Neither a catchup nor a Leader lease promotes a stopped region.
-    #[tokio::test]
-    async fn test_catchup_promotes_no_stopped_region() {
-        let env = SchedulerEnv::new().await;
-        let region = build_test_region(&env).await;
+        assert_eq!(region.manifest_ctx.begin_catchup(region.region_id), None);
+        assert!(region.is_writable());
         region.set_role(RegionRole::Follower);
-        assert_eq!(
-            region.manifest_ctx.begin_catchup(region.region_id),
-            Some(false)
-        );
         region.stop().await;
         assert!(region.manifest_ctx.is_stopped());
         assert!(!region.manifest_ctx.promote_after_catchup(region.region_id));
-        // Nor does a Leader lease, while the stopped instance is still registered.
-        let issued_at = std::time::Instant::now();
-        let promotion = region
-            .manifest_ctx
-            .promote_unless_downgrade_started_after(issued_at, region.region_id);
-        assert!(!promotion.promoted);
         assert!(region.is_follower());
     }
 

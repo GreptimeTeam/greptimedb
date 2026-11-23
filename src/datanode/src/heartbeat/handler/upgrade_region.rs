@@ -393,7 +393,6 @@ mod tests {
         let reply = &reply.unwrap().expect_upgrade_regions_reply()[0];
         assert!(reply.ready);
         assert!(reply.error.is_none());
-        // The region goes through the engine's catchup instead of being reported ready as it is.
         let (caught_up, request) = requests.try_recv().unwrap();
         assert_eq!(caught_up, region_id);
         assert!(matches!(request, RegionRequest::Catchup(_)));

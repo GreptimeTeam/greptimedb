@@ -135,8 +135,6 @@ pub struct MockRegionEngine {
     pub(crate) handle_sync_region_mock_fn: Option<MockSyncRegionHandler>,
     pub(crate) handle_stop_mock_fn: Option<MockStopHandler>,
     pub(crate) mock_role: Option<Option<RegionRole>>,
-    /// What [RegionEngine::is_confirmed_leader] returns for a region with a role; by default,
-    /// whether the role is not Follower.
     pub(crate) mock_confirmed_leader: Option<bool>,
     /// The candidate lease ids of the leases the engine received.
     pub(crate) candidate_lease_ids: Mutex<Vec<Option<u64>>>,
