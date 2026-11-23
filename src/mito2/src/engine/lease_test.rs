@@ -46,7 +46,8 @@ use crate::engine::MitoEngine;
 use crate::engine::basic_test::build_bulk_insert_request;
 use crate::engine::index_build_test::async_build_mode_config;
 use crate::engine::listener::{
-    CountingStallListener, EventListener, EventListenerRef, WriteWalListener,
+    CountingStallListener, EventListener, EventListenerRef, FlushCancellationListener,
+    WriteWalListener,
 };
 use crate::engine::object_store_wal_test::wait_until;
 use crate::engine::open_test::open_region_with_backfilled_partition_expr;
@@ -838,6 +839,59 @@ async fn test_downgrade_flushes_region_awaiting_leader_lease() {
     flush(&engine).await.unwrap();
 
     assert_eq!(manifest_files(&engine).await, vec![3]);
+}
+
+/// A catchup again keeps a region whose flush is in flight, as the flush of a downgrade of a
+/// region that awaits its Leader lease can be, and answers busy.
+#[tokio::test]
+async fn test_catchup_again_keeps_region_with_flush_in_flight() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("catchup-again-flush-in-flight").await;
+    let listener = Arc::new(FlushCancellationListener::default());
+    let (engine, schema) =
+        create_region_with_config(&mut env, None, MitoConfig::default(), listener.clone()).await;
+    promote_to_await_leader_lease(&engine, REGION_ID).await;
+    engine
+        .handle_request(REGION_ID, put_request(&schema, 0))
+        .await
+        .unwrap();
+    engine
+        .set_region_role_state_gracefully(REGION_ID, SettableRegionRoleState::DowngradingLeader)
+        .await
+        .unwrap();
+    let region = engine.get_region(REGION_ID).unwrap();
+    let flush = {
+        let engine = engine.clone();
+        tokio::spawn(async move { flush(&engine).await })
+    };
+    listener.wait_flush_started().await;
+
+    let error = catchup(&engine).await.unwrap_err();
+    assert_eq!(StatusCode::RegionBusy, error.status_code(), "{error:?}");
+    assert!(Arc::ptr_eq(&region, &engine.get_region(REGION_ID).unwrap()));
+    listener.resume_flush();
+    flush.await.unwrap().unwrap();
+    assert_eq!(count_rows(&engine).await, 3);
+}
+
+/// Under a local WAL, which replays nothing, a successful catchup again drops the region's
+/// unflushed rows.
+#[tokio::test]
+async fn test_catchup_again_drops_unflushed_rows_under_local_wal() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("catchup-again-local-wal").await;
+    let (_listener, engine, schema) = create_region(&mut env, None).await;
+    promote_to_await_leader_lease(&engine, REGION_ID).await;
+    put(&engine, REGION_ID, &schema, 0).await.unwrap().unwrap();
+    let region = engine.get_region(REGION_ID).unwrap();
+    assert_eq!(count_rows(&engine).await, 3);
+
+    catchup(&engine).await.unwrap();
+    assert!(!Arc::ptr_eq(
+        &region,
+        &engine.get_region(REGION_ID).unwrap()
+    ));
+    assert_eq!(count_rows(&engine).await, 0);
 }
 
 /// Opens a region whose opener filled in the partition expression its manifest lacks and makes

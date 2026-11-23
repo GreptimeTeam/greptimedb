@@ -1529,7 +1529,8 @@ pub trait RegionEngine: Send + Sync {
 
     /// Sets [RegionRole] for a region from a lease the metasrv grants until `deadline`, in reply
     /// to a heartbeat sent at `sent_at`. Returns false if the engine ignores a Leader lease because
-    /// the region was downgraded or (re)opened after `sent_at`.
+    /// the region was downgraded or (re)opened after `sent_at`, a catchup runs on it, or it waits
+    /// for a reload.
     ///
     /// The region must not acknowledge a write whose WAL append completes at or after the
     /// deadline of its latest Leader or StagingLeader lease. Leases of other roles do not extend
@@ -1571,6 +1572,21 @@ pub trait RegionEngine: Send + Sync {
     ///
     /// Returns the `None` if the region is not found.
     fn role(&self, region_id: RegionId) -> Option<RegionRole>;
+
+    /// Returns whether the region is a leader that needs no catchup: `None` if the region is not
+    /// found, `Some(false)` if it is a follower or, on a node that requires leases to confirm its
+    /// leaders, a catchup made it a leader and no Leader or StagingLeader lease sent after that
+    /// catchup, nor a direct promotion to Leader, has applied since, and `Some(true)` otherwise.
+    /// The default answers from [`role`](Self::role) alone, which suits an engine that does not tie
+    /// its commits to leases.
+    ///
+    /// An upgrade reports a region that answers `Some(true)` ready without a catchup, sends one
+    /// that answers `Some(false)` a catchup with `set_writable`, and reports one that answers
+    /// `None` missing.
+    fn is_confirmed_leader(&self, region_id: RegionId) -> Option<bool> {
+        self.role(region_id)
+            .map(|role| role != RegionRole::Follower)
+    }
 
     fn as_any(&self) -> &dyn Any;
 }

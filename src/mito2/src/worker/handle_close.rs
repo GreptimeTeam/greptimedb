@@ -130,14 +130,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
     /// Remove a region and stop all related tasks.
     pub(crate) async fn remove_region(&mut self, region_id: RegionId) {
-        let Some(region) = self.regions.remove_region(region_id) else {
+        let Some(region) = self.regions.get_region(region_id) else {
             return;
         };
+        // Before the removal, so no catchup promotes an unregistered instance.
+        region.stop().await;
+        self.regions.remove_region(region_id);
         self.granted_leases.remove(region_id);
         self.lease_deferred_index_retries.remove(&region_id);
         region.deactivate_region_manifest_size_metric();
         self.cancel_tail_replay(region_id);
-        region.stop().await;
         self.fail_region_stalled_requests_as_not_found(&region_id);
         self.reject_region_requests_as_not_found(region_id);
         // Clean flush status.

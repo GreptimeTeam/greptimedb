@@ -1191,6 +1191,8 @@ pub(crate) enum BackgroundNotify {
         /// The reloaded instance.
         result: Result<MitoRegionRef>,
     },
+    /// The catchup again of a region that awaited its Leader lease has finished.
+    CaughtUpAgain(CaughtUpAgain),
     /// The region became writable and may have pending tails to replay.
     RegionBecameWritable,
     /// A lease ended the region's wait for its Leader lease, so the work the wait deferred may
@@ -1260,6 +1262,7 @@ impl BackgroundNotify {
             | Self::CopyRegionFromFinished(_)
             | Self::RegionFenced
             | Self::RegionReloaded { .. }
+            | Self::CaughtUpAgain(_)
             | Self::RegionBecameWritable
             | Self::LeaderLeaseWaitEnded
             | Self::RegionCannotReplay { .. }
@@ -1576,6 +1579,24 @@ pub(crate) struct BuildIndexRequest {
     pub(crate) file_metas: Vec<FileMeta>,
     /// Waiters carried over from a previous build of the same files.
     pub(crate) result_senders: Vec<ResultMpscSender>,
+}
+
+/// The result of a catchup again, see `RegionWorkerLoop::catch_up_again`.
+#[derive(Debug)]
+pub(crate) struct CaughtUpAgain {
+    /// The instance registered when the catchup began, which the catchup demoted unless it was
+    /// in a transient leader state.
+    pub(crate) old: MitoRegionRef,
+    /// The manifest version of the old instance when the catchup began.
+    pub(crate) manifest_version: ManifestVersion,
+    /// The last sequence of the old instance when the catchup began, which every write moves.
+    pub(crate) last_sequence: SequenceNumber,
+    /// The replacement, caught up, or why the catchup failed.
+    pub(crate) result: Result<MitoRegionRef>,
+    /// Whether the catchup promotes the region.
+    pub(crate) set_writable: bool,
+    /// Receives the result of the catchup.
+    pub(crate) sender: OptionOutputTx,
 }
 
 #[derive(Debug)]
