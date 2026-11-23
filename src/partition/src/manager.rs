@@ -78,6 +78,11 @@ impl PartitionRuleManager {
         }
     }
 
+    /// Returns the registered route cache, sharing loads and invalidation with routing.
+    pub fn table_route_cache(&self) -> &TableRouteCacheRef {
+        &self.table_route_cache
+    }
+
     pub async fn find_physical_table_route(
         &self,
         table_id: TableId,
