@@ -26,7 +26,7 @@ use datatypes::json::JsonSettings;
 use datatypes::schema::ColumnEncoding;
 use parquet::arrow::parquet_to_arrow_schema;
 use parquet::basic::{Compression, Encoding, ZstdLevel};
-use parquet::file::metadata::{ColumnChunkMetaData, KeyValue, ParquetMetaData};
+use parquet::file::metadata::{KeyValue, ParquetMetaData};
 use parquet::file::properties::{
     DEFAULT_DICTIONARY_PAGE_SIZE_LIMIT, EnabledStatistics, WriterPropertiesBuilder,
 };
@@ -331,40 +331,38 @@ fn footer_u64(metadata: &ParquetMetaData, key: &str) -> Option<u64> {
 }
 
 /// Returns `(num_rows, value_bytes)` of each row group, where `value_bytes` sums the
-/// `unencoded_byte_array_data_bytes` size statistic of its byte array column chunks.
+/// `unencoded_byte_array_data_bytes` size statistic of the column chunks that
+/// [var_len_value_bytes] counts: top-level string and binary columns that readers do not decode
+/// as dictionaries.
 ///
-/// This approximates [var_len_value_bytes] for footers written without
-/// [MAX_ROW_GROUP_VALUE_BYTES_KEY]. Parquet writers record the statistic per value, so repeated
-/// dictionary-encoded values count every time. Columns that readers decode as Arrow dictionaries
-/// are skipped like in [var_len_value_bytes]. Column chunks written with statistics disabled
-/// lack the statistic and count as 0.
+/// This stands in for [MAX_ROW_GROUP_VALUE_BYTES_KEY] in footers written without it. Parquet
+/// writers record the statistic per value, so repeated dictionary-encoded values count every
+/// time. Column chunks written with statistics disabled lack the statistic and count as 0.
 fn row_group_value_bytes_from_size_statistics(metadata: &ParquetMetaData) -> Vec<(u64, u64)> {
-    let unencoded = |column: &ColumnChunkMetaData| {
-        column.unencoded_byte_array_data_bytes().unwrap_or(0).max(0) as u64
-    };
-    // Resolving the Arrow schema decodes it from the footer, so skip it for files without
-    // byte array values.
-    if !metadata
-        .row_groups()
-        .iter()
-        .flat_map(|row_group| row_group.columns())
-        .any(|column| unencoded(column) > 0)
-    {
-        return Vec::new();
-    }
     let file = metadata.file_metadata();
     let Ok(arrow_schema) = parquet_to_arrow_schema(file.schema_descr(), file.key_value_metadata())
     else {
         return Vec::new();
     };
-    let decoded_as_dictionary: Vec<bool> = file
+    let counted: Vec<bool> = file
         .schema_descr()
         .columns()
         .iter()
         .map(|column| {
-            arrow_schema
-                .field_with_name(&column.path().parts()[0])
-                .is_ok_and(|field| matches!(field.data_type(), DataType::Dictionary(..)))
+            let [name] = column.path().parts() else {
+                return false;
+            };
+            arrow_schema.field_with_name(name).is_ok_and(|field| {
+                matches!(
+                    field.data_type(),
+                    DataType::Binary
+                        | DataType::LargeBinary
+                        | DataType::Utf8
+                        | DataType::LargeUtf8
+                        | DataType::BinaryView
+                        | DataType::Utf8View
+                )
+            })
         })
         .collect();
 
@@ -375,9 +373,11 @@ fn row_group_value_bytes_from_size_statistics(metadata: &ParquetMetaData) -> Vec
             let bytes = row_group
                 .columns()
                 .iter()
-                .zip(&decoded_as_dictionary)
-                .filter(|(_, dictionary)| !**dictionary)
-                .map(|(column, _)| unencoded(column))
+                .zip(&counted)
+                .filter(|(_, counted)| **counted)
+                .map(|(column, _)| {
+                    column.unencoded_byte_array_data_bytes().unwrap_or(0).max(0) as u64
+                })
                 .sum();
             (row_group.num_rows().max(0) as u64, bytes)
         })
@@ -585,9 +585,9 @@ mod tests {
     use datafusion_expr::{BinaryExpr, Expr, Literal, Operator, col, lit};
     use datatypes::arrow;
     use datatypes::arrow::array::{
-        Array, ArrayRef, AsArray, BinaryDictionaryBuilder, Float32Array, Float64Array, Int32Array,
-        RecordBatch, StringArray, StringDictionaryBuilder, TimestampMillisecondArray, UInt8Array,
-        UInt64Array,
+        Array, ArrayRef, AsArray, BinaryArray, BinaryDictionaryBuilder, DictionaryArray,
+        Float32Array, Float64Array, Int32Array, RecordBatch, StringArray, StringDictionaryBuilder,
+        StructArray, TimestampMillisecondArray, UInt8Array, UInt32Array, UInt64Array,
     };
     use datatypes::arrow::datatypes::{DataType, Field, Schema, TimeUnit, UInt32Type};
     use datatypes::arrow::util::pretty::pretty_format_batches;
@@ -599,7 +599,7 @@ mod tests {
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use parquet::arrow::{ArrowWriter, AsyncArrowWriter};
     use parquet::basic::{Compression, Encoding, ZstdLevel};
-    use parquet::file::metadata::{FileMetaData, KeyValue, PageIndexPolicy};
+    use parquet::file::metadata::{FileMetaData, KeyValue, PageIndexPolicy, ParquetMetaDataReader};
     use parquet::file::properties::WriterProperties;
     use parquet::schema::types::ColumnPath;
     use store_api::codec::PrimaryKeyEncoding;
@@ -1854,6 +1854,46 @@ mod tests {
         assert_eq!(
             2048,
             estimate_batch_size(widest_row_group_statistic(&legacy))
+        );
+    }
+
+    #[test]
+    fn test_size_statistics_fallback_counts_only_top_level_var_len_columns() {
+        // Like the footer keys, the fallback skips dictionary columns, which readers decode as
+        // dictionaries, and leaves nested in a struct, such as JSON2 columns.
+        let rows = 256;
+        let value = vec![7u8; 32 * 1024];
+        let text = "s".repeat(32 * 1024);
+        let binary: ArrayRef = Arc::new(BinaryArray::from_iter_values(
+            (0..rows).map(|_| value.as_slice()),
+        ));
+        let dictionary: ArrayRef = Arc::new(DictionaryArray::<UInt32Type>::new(
+            UInt32Array::from(vec![0; rows]),
+            Arc::new(BinaryArray::from_iter_values([value.as_slice()])),
+        ));
+        let nested: ArrayRef = Arc::new(StructArray::from(vec![(
+            Arc::new(Field::new("s", DataType::Utf8, false)),
+            Arc::new(StringArray::from_iter_values(
+                (0..rows).map(|_| text.as_str()),
+            )) as ArrayRef,
+        )]));
+        let batch = RecordBatch::try_from_iter([
+            ("binary", binary),
+            ("dictionary", dictionary),
+            ("nested", nested),
+        ])
+        .unwrap();
+        let mut writer = ArrowWriter::try_new(Vec::new(), batch.schema(), None).unwrap();
+        writer.write(&batch).unwrap();
+        let footer = ParquetMetaDataReader::new()
+            .parse_and_finish(&Bytes::from(writer.into_inner().unwrap()))
+            .unwrap();
+
+        assert!(max_row_group_uncompressed_size(&footer) < 1024 * 1024);
+        assert_eq!(256 * 32 * 1024, max_row_group_decoded_size(&footer));
+        assert_eq!(
+            2048,
+            estimate_batch_size(widest_row_group_statistic(&footer))
         );
     }
 
