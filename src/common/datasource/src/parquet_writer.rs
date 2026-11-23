@@ -55,7 +55,6 @@ pub struct ParquetFileWriter {
     encoder: Option<ArrowWriter<Vec<u8>>>,
     sink: ParquetSink,
     rows: u64,
-    store: ObjectStore,
     path: String,
     limits: Option<ParquetWriterLimits>,
     creation: ParquetCreationPolicy,
@@ -63,7 +62,7 @@ pub struct ParquetFileWriter {
 }
 
 enum ParquetSink {
-    Object(Writer),
+    Object { writer: Writer, store: ObjectStore },
     Packed(Box<PackedTableWriter>),
 }
 
@@ -107,9 +106,11 @@ impl ParquetFileWriter {
             .context(error::WriteObjectSnafu { path })?;
         Ok(Self {
             encoder: Some(encoder),
-            sink: ParquetSink::Object(sink),
+            sink: ParquetSink::Object {
+                writer: sink,
+                store,
+            },
             rows: 0,
-            store,
             path: path.to_owned(),
             limits,
             creation,
@@ -120,17 +121,15 @@ impl ParquetFileWriter {
     /// Encode into a request-owned pack or standalone destination.
     pub fn open_packed(
         schema: SchemaRef,
-        store: ObjectStore,
-        path: &str,
         limits: Option<ParquetWriterLimits>,
         packed: PackedTableWriter,
     ) -> Result<Self> {
+        let path = packed.path().to_owned();
         Ok(Self {
-            encoder: Some(build_encoder(schema, limits, path)?),
+            encoder: Some(build_encoder(schema, limits, &path)?),
             sink: ParquetSink::Packed(Box::new(packed)),
             rows: 0,
-            store,
-            path: path.into(),
+            path,
             limits,
             creation: ParquetCreationPolicy::IfNotExists,
             close_started: false,
@@ -196,7 +195,7 @@ impl ParquetFileWriter {
         let bytes = Bytes::from(bytes);
         let sink = match &mut self.sink {
             ParquetSink::Packed(packed) => return packed.write(bytes).await,
-            ParquetSink::Object(sink) => sink,
+            ParquetSink::Object { writer, .. } => writer,
         };
         let chunk = DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize;
         // Slices retain the complete encoded allocation until its last submission.
@@ -228,7 +227,7 @@ impl ParquetFileWriter {
         check_cancelled(cancellation)?;
         let sink = match &mut self.sink {
             ParquetSink::Packed(packed) => return packed.finish(self.rows, cancellation).await,
-            ParquetSink::Object(sink) => sink,
+            ParquetSink::Object { writer, .. } => writer,
         };
         self.close_started = true;
         sink.close()
@@ -241,9 +240,9 @@ impl ParquetFileWriter {
     /// Abort after all in-flight operations complete. Preserve ambiguous commits;
     /// conditional callers delegate cleanup exclusively to the backend.
     pub async fn abort(mut self) -> Result<()> {
-        let result = match &mut self.sink {
+        let (result, store) = match &mut self.sink {
             ParquetSink::Packed(packed) => return packed.abort().await,
-            ParquetSink::Object(sink) => sink.abort().await,
+            ParquetSink::Object { writer, store } => (writer.abort().await, store),
         };
         if self.creation == ParquetCreationPolicy::Overwrite
             && result.as_ref().is_err_and(|error| {
@@ -252,7 +251,7 @@ impl ParquetFileWriter {
                         || object_store::secure_fs::is_unsynced_overwrite_abort(error))
             })
         {
-            let store = self.store.clone();
+            let store = store.clone();
             let path = self.path.clone();
             // Secure filesystem writers require dropping the handle before deletion.
             drop(self);
@@ -534,7 +533,10 @@ mod tests {
                 .await
                 .unwrap();
         // No storage-layer chunking: observe the application's actual submissions.
-        writer.sink = ParquetSink::Object(store.writer("large.parquet").await.unwrap());
+        writer.sink = ParquetSink::Object {
+            writer: store.writer("large.parquet").await.unwrap(),
+            store: store.clone(),
+        };
         writer.write(batch.clone(), None).await.unwrap();
         writer.finish(None).await.unwrap();
         let sizes = observations.lock().unwrap().write_sizes.clone();
@@ -737,8 +739,10 @@ mod tests {
                 .await
                 .unwrap();
         // Force footer bytes through the sink before its close operation.
-        writer.sink =
-            ParquetSink::Object(store.writer_with("cancel.parquet").chunk(1).await.unwrap());
+        writer.sink = ParquetSink::Object {
+            writer: store.writer_with("cancel.parquet").chunk(1).await.unwrap(),
+            store: store.clone(),
+        };
         let cancellation = CancellationToken::new();
         let result = {
             let finish = writer.finish(Some(&cancellation));

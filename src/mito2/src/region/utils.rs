@@ -19,7 +19,7 @@ use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, error, info};
 use futures::future::join_all;
 use object_store::manager::ObjectStoreManagerRef;
-use snafu::{ResultExt, ensure};
+use snafu::{IntoError, ensure};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::PathType;
 use store_api::storage::{FileId, IndexVersion, RegionId};
@@ -258,7 +258,18 @@ impl RegionFileCopier {
                         .inspect_err(
                             |e| error!(e; "Failed to copy file {} to {}", source_path, target_path),
                         )
-                        .context(error::OpenDalSnafu)?;
+                        .map_err(|err| {
+                            if path_type == PathType::Metadata
+                                && err.kind() == object_store::ErrorKind::NotFound
+                            {
+                                error::MetadataCopyFileNotFoundSnafu {
+                                    path: source_path.clone(),
+                                }
+                                .into_error(err)
+                            } else {
+                                error::OpenDalSnafu.into_error(err)
+                            }
+                        })?;
                     let file_size = ReadableSize(file_desc.size());
                     info!(
                         "Copied file {} to {}, file size: {}, elapsed: {:?}",
@@ -336,6 +347,40 @@ mod tests {
     use crate::sst::index::intermediate::IntermediateManager;
     #[cfg(feature = "hdfs-object-store")]
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
+
+    #[rstest::rstest]
+    #[case(PathType::Metadata, common_error::ext::RetryHint::Retryable)]
+    #[case(PathType::Bare, common_error::ext::RetryHint::NonRetryable)]
+    #[tokio::test]
+    async fn test_missing_copy_file_retry_hint(
+        #[case] path_type: PathType,
+        #[case] expected: common_error::ext::RetryHint,
+    ) {
+        use crate::test_util::{CreateRequestBuilder, TestEnv};
+        use common_error::ext::ErrorExt;
+        use store_api::region_engine::RegionEngine;
+        use store_api::region_request::RegionRequest;
+
+        let mut env = TestEnv::new().await;
+        let engine = env.create_engine(Default::default()).await;
+        let target = RegionId::new(1, 2);
+        let mut create = CreateRequestBuilder::new().build();
+        create.path_type = path_type;
+        engine
+            .handle_request(target, RegionRequest::Create(create))
+            .await
+            .unwrap();
+        let copier = RegionFileCopier::new(engine.get_region(target).unwrap().access_layer());
+        let missing = FileDescriptor::Data {
+            file_id: FileId::random(),
+            size: 1,
+        };
+        let err = copier
+            .copy_files(RegionId::new(1, 1), target, vec![missing], 1)
+            .await
+            .unwrap_err();
+        assert_eq!(err.retry_hint(), expected);
+    }
 
     #[test]
     fn test_build_copy_file_paths() {

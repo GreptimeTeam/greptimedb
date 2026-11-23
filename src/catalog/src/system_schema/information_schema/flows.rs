@@ -24,7 +24,6 @@ use common_meta::key::flow::flow_state::FlowStat;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{DfSendableRecordBatchStream, RecordBatch, SendableRecordBatchStream};
 use datafusion::execution::TaskContext;
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::PartitionStream as DfPartitionStream;
 use datatypes::prelude::ConcreteDataType as CDT;
 use datatypes::scalars::ScalarVectorBuilder;
@@ -35,7 +34,7 @@ use datatypes::vectors::{
     Int64VectorBuilder, StringVectorBuilder, TimestampMillisecondVectorBuilder,
     UInt32VectorBuilder, UInt64VectorBuilder, VectorRef,
 };
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use snafu::{OptionExt, ResultExt};
 use sql::ast::Ident;
 use sql::dialect::GreptimeDbDialect;
@@ -45,12 +44,15 @@ use sql::statements::statement::Statement;
 use store_api::storage::{ScanRequest, TableId};
 
 use crate::CatalogManager;
+use crate::batch_scan::BatchScanner;
 use crate::error::{
-    CreateRecordBatchSnafu, FlowInfoNotFoundSnafu, InternalSnafu, JsonSnafu, ListFlowsSnafu,
-    Result, UpgradeWeakCatalogManagerRefSnafu,
+    CreateRecordBatchSnafu, InternalSnafu, JsonSnafu, ListFlowsSnafu, Result,
+    UpgradeWeakCatalogManagerRefSnafu,
 };
 use crate::information_schema::{FLOWS, Predicates};
+use crate::kvbackend::KvBackendCatalogManager;
 use crate::system_schema::SystemTable;
+use crate::system_schema::information_schema::loaders::{self, FlowInfoLoader};
 use crate::system_schema::information_schema::{InformationSchemaTableScope, InformationTable};
 use crate::system_schema::utils;
 
@@ -215,18 +217,7 @@ impl SystemTable for InformationSchemaFlows {
     }
 
     fn to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
-        let schema = self.schema.arrow_schema().clone();
-        let mut builder = self.builder();
-        let stream = Box::pin(DfRecordBatchStreamAdapter::new(
-            schema,
-            futures::stream::once(async move {
-                builder
-                    .make_flows(Some(request))
-                    .await
-                    .map(|x| x.into_df_record_batch())
-                    .map_err(|err| datafusion::error::DataFusionError::External(Box::new(err)))
-            }),
-        ));
+        let stream = utils::record_batch_stream(&self.schema, self.builder().scan(Some(request)));
         Ok(Box::pin(
             RecordBatchStreamAdapter::try_new(stream)
                 .map_err(BoxedError::new)
@@ -295,66 +286,83 @@ impl InformationSchemaFlowsBuilder {
     }
 
     /// Construct the `information_schema.flows` virtual table
-    async fn make_flows(&mut self, request: Option<ScanRequest>) -> Result<RecordBatch> {
-        let catalog_name = self.catalog_name.clone();
-        let predicates = Predicates::from_scan_request(&request);
+    fn scan(
+        mut self,
+        request: Option<ScanRequest>,
+    ) -> impl futures::Stream<Item = Result<RecordBatch>> {
+        async_stream::try_stream!({
+            let catalog_name = self.catalog_name.clone();
+            let predicates = Predicates::from_scan_request(&request);
 
-        let flow_info_manager = self.flow_metadata_manager.clone();
+            let flow_info_manager = self.flow_metadata_manager.clone();
 
-        // TODO(discord9): use `AsyncIterator` once it's stable-ish
-        let mut stream = flow_info_manager
-            .flow_name_manager()
-            .flow_names(&catalog_name)
-            .await;
+            // TODO(discord9): use `AsyncIterator` once it's stable-ish
+            let stream = flow_info_manager
+                .flow_name_manager()
+                .flow_names(&catalog_name)
+                .await;
 
-        let flow_stat = {
-            let information_extension = utils::information_extension(&self.catalog_manager)?;
-            information_extension.flow_stats().await?
-        };
+            let flow_stat = {
+                let information_extension = utils::information_extension(&self.catalog_manager)?;
+                information_extension.flow_stats().await?
+            };
 
-        while let Some((flow_name, flow_id)) = stream
-            .try_next()
-            .await
-            .map_err(BoxedError::new)
-            .context(ListFlowsSnafu {
-                catalog: &catalog_name,
-            })?
-        {
-            let flow_info = flow_info_manager
-                .flow_info_manager()
-                .get(flow_id.flow_id())
-                .await
-                .map_err(BoxedError::new)
-                .context(InternalSnafu)?
-                .with_context(|| FlowInfoNotFoundSnafu {
-                    catalog_name: catalog_name.clone(),
-                    flow_name: flow_name.clone(),
-                })?;
-            self.add_flow(&predicates, flow_id.flow_id(), flow_info, &flow_stat)
-                .await?;
-        }
-
-        self.finish()
+            let catalog_manager = self
+                .catalog_manager
+                .upgrade()
+                .context(UpgradeWeakCatalogManagerRefSnafu)?;
+            let cache = catalog_manager
+                .as_any()
+                .downcast_ref::<KvBackendCatalogManager>()
+                .and_then(|manager| manager.flow_info_cache());
+            let names = stream
+                .map_ok(|(name, id)| (name, id.flow_id()))
+                .map(|entry| {
+                    entry.map_err(BoxedError::new).context(ListFlowsSnafu {
+                        catalog: &catalog_name,
+                    })
+                });
+            let loader = FlowInfoLoader::new(
+                cache.as_deref(),
+                flow_info_manager.flow_info_manager(),
+                &catalog_name,
+            );
+            let batches = BatchScanner::METADATA.scan(names, |entries| loader.load(entries));
+            let mut batches = std::pin::pin!(batches);
+            while let Some(batch) = batches.try_next().await? {
+                let flows: Vec<_> = batch
+                    .into_iter()
+                    .filter(|(id, info)| {
+                        predicates.eval(&[
+                            (FLOW_NAME, &Value::from(info.flow_name().clone())),
+                            (FLOW_ID, &Value::from(*id)),
+                            (TABLE_CATALOG, &Value::from(info.catalog_name().clone())),
+                        ])
+                    })
+                    .collect();
+                let names =
+                    loaders::load_source_table_names(catalog_manager.as_ref(), &flows).await?;
+                for (id, info) in flows {
+                    let source_names = info
+                        .source_table_ids()
+                        .iter()
+                        .filter_map(|id| names.get(id).map(String::as_str))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    self.add_flow(id, &info, &flow_stat, &source_names).await?;
+                }
+                yield self.finish()?;
+            }
+        })
     }
 
     async fn add_flow(
         &mut self,
-        predicates: &Predicates,
         flow_id: FlowId,
-        flow_info: FlowInfoValue,
+        flow_info: &FlowInfoValue,
         flow_stat: &Option<FlowStat>,
+        source_names: &str,
     ) -> Result<()> {
-        let row = [
-            (FLOW_NAME, &Value::from(flow_info.flow_name().clone())),
-            (FLOW_ID, &Value::from(flow_id)),
-            (
-                TABLE_CATALOG,
-                &Value::from(flow_info.catalog_name().clone()),
-            ),
-        ];
-        if !predicates.eval(&row) {
-            return Ok(());
-        }
         self.flow_names.push(Some(flow_info.flow_name()));
         self.flow_ids.push(Some(flow_id));
         self.state_sizes.push(
@@ -365,7 +373,7 @@ impl InformationSchemaFlowsBuilder {
         self.table_catalogs.push(Some(flow_info.catalog_name()));
         self.raw_sqls
             .push(Some(&InformationSchemaFlows::generate_show_create_flow(
-                &flow_info,
+                flow_info,
             )?));
         self.comments.push(Some(flow_info.comment()));
         self.expire_afters.push(flow_info.expire_after());
@@ -416,19 +424,7 @@ impl InformationSchemaFlowsBuilder {
             self.flownode_addr_groups.push(Some(&flownode_addrs_json));
         }
 
-        let mut source_table_names = vec![];
-        let catalog_manager = self
-            .catalog_manager
-            .upgrade()
-            .context(UpgradeWeakCatalogManagerRefSnafu)?;
-        for table_id in flow_info.source_table_ids() {
-            if let Some(table_info) = catalog_manager.table_info_by_id(*table_id).await? {
-                source_table_names.push(table_info.full_table_name());
-            }
-        }
-
-        let source_table_names = source_table_names.join(",");
-        self.source_table_names.push(Some(&source_table_names));
+        self.source_table_names.push(Some(source_names));
 
         Ok(())
     }
@@ -462,18 +458,7 @@ impl DfPartitionStream for InformationSchemaFlows {
     }
 
     fn execute(&self, _: Arc<TaskContext>) -> DfSendableRecordBatchStream {
-        let schema: Arc<arrow_schema::Schema> = self.schema.arrow_schema().clone();
-        let mut builder = self.builder();
-        Box::pin(DfRecordBatchStreamAdapter::new(
-            schema,
-            futures::stream::once(async move {
-                builder
-                    .make_flows(None)
-                    .await
-                    .map(|x| x.into_df_record_batch())
-                    .map_err(Into::into)
-            }),
-        ))
+        utils::record_batch_stream(&self.schema, self.builder().scan(None))
     }
 }
 
@@ -519,6 +504,77 @@ mod tests {
                 catchup_max_lag_secs: 300,
             }),
         }
+    }
+
+    #[tokio::test]
+    async fn test_flow_scan_preserves_source_order_and_duplicates() {
+        use crate::information_schema::NoopInformationExtension;
+        use crate::kvbackend::KvBackendCatalogManagerBuilder;
+        use common_meta::cache::LayeredCacheRegistryBuilder;
+        use common_meta::ddl::test_util::create_table::test_create_table_task;
+        use common_meta::key::table_route::TableRouteValue;
+        use common_meta::kv_backend::memory::MemoryKvBackend;
+
+        let backend = Arc::new(MemoryKvBackend::default());
+        let registry = cache::with_default_composite_cache_registry(
+            LayeredCacheRegistryBuilder::default()
+                .add_cache_registry(cache::build_fundamental_cache_registry(backend.clone())),
+        )
+        .unwrap()
+        .build();
+        let catalog = KvBackendCatalogManagerBuilder::new(
+            Arc::new(NoopInformationExtension),
+            backend.clone(),
+            Arc::new(registry),
+        )
+        .build();
+        for (id, name) in [(1024, "first"), (1025, "second")] {
+            let mut info = test_create_table_task(name, id).table_info;
+            info.catalog_name = "greptime".into();
+            info.schema_name = "public".into();
+            catalog
+                .table_metadata_manager_ref()
+                .create_table_metadata(info, TableRouteValue::physical(vec![]), Default::default())
+                .await
+                .unwrap();
+        }
+
+        let flows = FlowMetadataManager::new(backend);
+        let mut info = flow_info_for_show_create("SELECT 1", None, 0, HashMap::new());
+        info.source_table_ids = vec![1025, 9999, 1024, 1025];
+        flows.create_flow_metadata(1, info, vec![]).await.unwrap();
+
+        let loader = FlowInfoLoader::new(None, flows.flow_info_manager(), "greptime");
+        let entries = vec![("my_flow".into(), 1), ("my_flow".into(), 1)];
+        let loaded = loader.load(entries).await.unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert!(Arc::ptr_eq(&loaded[0].1, &loaded[1].1));
+
+        let table = catalog
+            .table("greptime", "information_schema", FLOWS, None)
+            .await
+            .unwrap()
+            .unwrap();
+        let batches: Vec<_> = table
+            .scan_to_stream(ScanRequest::default())
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].num_rows(), 1);
+        let names = batches[0]
+            .column_by_name(SOURCE_TABLE_NAMES)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .unwrap();
+        assert_eq!(
+            names.value(0),
+            "greptime.public.second,greptime.public.first,greptime.public.second"
+        );
+        assert!(catalog.flow_info_cache().unwrap().contains_key(&1));
     }
 
     #[test]

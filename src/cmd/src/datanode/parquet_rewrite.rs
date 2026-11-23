@@ -17,6 +17,9 @@ use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use datatypes::arrow::record_batch::RecordBatchReader;
+use mito2::sst::parquet::{
+    MAX_ROW_GROUP_VALUE_BYTES_KEY, MAX_ROW_VALUE_WIDTH_KEY, RowGroupValueBytes,
+};
 use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::basic::{BrotliLevel, Compression, Encoding, GzipLevel, ZstdLevel};
@@ -151,11 +154,18 @@ impl ParquetRewriteCommand {
         let props = load_rewrite_properties(properties)?;
         let input_reader = SerializedFileReader::new(open_file(&self.input)?)
             .map_err(|e| parquet_error("read source parquet metadata", &self.input, e))?;
-        let key_value_metadata = input_reader
+        let mut key_value_metadata = input_reader
             .metadata()
             .file_metadata()
             .key_value_metadata()
             .cloned();
+        // The decoded value sizes of row groups depend on the row group boundaries, which the
+        // rewrite may change. Recompute them for the output instead of copying them.
+        let had_value_bytes = key_value_metadata.as_mut().is_some_and(|kvs| {
+            let len = kvs.len();
+            kvs.retain(|kv| !is_row_group_value_bytes_key(&kv.key));
+            kvs.len() != len
+        });
 
         let mut reader_builder = ParquetRecordBatchReaderBuilder::try_new(open_file(&self.input)?)
             .map_err(|e| parquet_error("open source parquet", &self.input, e))?;
@@ -171,15 +181,28 @@ impl ParquetRewriteCommand {
         let schema = reader.schema();
 
         let writer_props = build_writer_properties(props, key_value_metadata)?;
+        // The rewrite never sets `max_row_group_bytes`, so row groups are cut by row count only.
+        let mut value_bytes = had_value_bytes.then(|| {
+            RowGroupValueBytes::new(writer_props.max_row_group_row_count().unwrap_or(usize::MAX))
+        });
         let mut writer = ArrowWriter::try_new(create_file(output)?, schema, Some(writer_props))
             .map_err(|e| parquet_error("create parquet writer", output, e))?;
 
         for batch in reader {
             let batch =
                 batch.map_err(|e| parquet_error("read parquet batch", &self.input, e.into()))?;
+            if let Some(value_bytes) = value_bytes.as_mut() {
+                value_bytes.update(&batch);
+            }
             writer
                 .write(&batch)
                 .map_err(|e| parquet_error("write parquet batch", output, e))?;
+        }
+        for kv in value_bytes
+            .map(RowGroupValueBytes::into_key_values)
+            .unwrap_or_default()
+        {
+            writer.append_key_value_metadata(kv);
         }
         writer
             .close()
@@ -188,6 +211,10 @@ impl ParquetRewriteCommand {
         println!("Wrote parquet file to {}", output.display());
         Ok(())
     }
+}
+
+fn is_row_group_value_bytes_key(key: &str) -> bool {
+    key == MAX_ROW_GROUP_VALUE_BYTES_KEY || key == MAX_ROW_VALUE_WIDTH_KEY
 }
 
 fn infer_rewrite_properties(metadata: &ParquetMetaData) -> RewriteProperties {
@@ -549,6 +576,65 @@ mod tests {
                 .iter()
                 .all(|row_group| row_group.column(1).dictionary_page_offset().is_none())
         );
+    }
+
+    #[test]
+    fn test_rewrite_recomputes_row_group_value_bytes() {
+        let dir = tempdir().unwrap();
+        let input = dir.path().join("input.parquet");
+        let output = dir.path().join("output.parquet");
+        // 16 rows of one repeated 1 KiB value, in row groups of 4 rows.
+        let schema = Arc::new(Schema::new(vec![Field::new("body", DataType::Utf8, false)]));
+        let value = "x".repeat(1024);
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(StringArray::from(vec![value.as_str(); 16]))],
+        )
+        .unwrap();
+        let mut value_bytes = RowGroupValueBytes::new(4);
+        value_bytes.update(&batch);
+        let props = WriterProperties::builder()
+            .set_max_row_group_row_count(Some(4))
+            .set_key_value_metadata(Some(value_bytes.into_key_values()))
+            .build();
+        let mut writer =
+            ArrowWriter::try_new(File::create(&input).unwrap(), schema, Some(props)).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+
+        let mut properties =
+            infer_rewrite_properties(&load_local_parquet_metadata(&input).unwrap());
+        properties.writer.max_row_group_row_count = Some(8);
+        let props_path = dir.path().join("props.toml");
+        std::fs::write(&props_path, toml::to_string(&properties).unwrap()).unwrap();
+        let command = ParquetRewriteCommand {
+            input,
+            output: Some(output.clone()),
+            properties: Some(props_path.clone()),
+            dump_properties: None,
+            batch_size: None,
+            overwrite: false,
+        };
+        command.rewrite(&output, &props_path).unwrap();
+
+        let rewritten = load_local_parquet_metadata(&output).unwrap();
+        assert_eq!(2, rewritten.num_row_groups());
+        let key_values = rewritten.file_metadata().key_value_metadata().unwrap();
+        let value_of = |key: &str| {
+            let values: Vec<_> = key_values
+                .iter()
+                .filter(|kv| kv.key == key)
+                .map(|kv| kv.value.clone().unwrap())
+                .collect();
+            assert_eq!(1, values.len());
+            values[0].clone()
+        };
+        // Doubling the row group doubles its decoded value bytes; the width per row is unchanged.
+        assert_eq!(
+            (8 * 1024).to_string(),
+            value_of(MAX_ROW_GROUP_VALUE_BYTES_KEY)
+        );
+        assert_eq!(1024.to_string(), value_of(MAX_ROW_VALUE_WIDTH_KEY));
     }
 
     #[test]

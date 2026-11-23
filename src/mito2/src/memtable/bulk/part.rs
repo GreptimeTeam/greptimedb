@@ -74,8 +74,10 @@ use crate::sst::index::IndexOutput;
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyArrayBuilder};
 use crate::sst::parquet::{
-    COLUMN_INDEX_TRUNCATE_LENGTH, PARQUET_METADATA_KEY, SstInfo, apply_column_compression,
-    apply_float_field_encoding, apply_internal_column_encoding,
+    COLUMN_INDEX_TRUNCATE_LENGTH, PARQUET_METADATA_KEY, RowGroupValueBytes, SstInfo,
+    apply_column_compression, apply_float_field_encoding, apply_internal_column_encoding,
+    large_value_fields, max_row_group_decoded_size, max_row_group_uncompressed_size,
+    skip_statistics, var_len_value_bytes,
 };
 
 const INIT_DICT_VALUE_CAPACITY: usize = 8;
@@ -1344,17 +1346,8 @@ impl EncodedBulkPart {
         // and re-encoding their sample columns.
         let parquet_metadata = self.parquet_metadata()?;
         let unit = self.metadata.region_metadata.time_index_type().unit();
-        let max_row_group_uncompressed_size: u64 = parquet_metadata
-            .row_groups()
-            .iter()
-            .map(|rg| {
-                rg.columns()
-                    .iter()
-                    .map(|c| c.uncompressed_size() as u64)
-                    .sum::<u64>()
-            })
-            .max()
-            .unwrap_or(0);
+        let max_row_group_uncompressed_size = max_row_group_uncompressed_size(parquet_metadata);
+        let max_row_group_decoded_size = max_row_group_decoded_size(parquet_metadata);
         Some(SstInfo {
             file_id,
             time_range: (
@@ -1363,6 +1356,7 @@ impl EncodedBulkPart {
             ),
             file_size: self.size_bytes() as u64,
             max_row_group_uncompressed_size,
+            max_row_group_decoded_size,
             num_rows: self.metadata.num_rows,
             num_row_groups: parquet_metadata.num_row_groups() as u64,
             file_metadata: Some(parquet_metadata.clone()),
@@ -1449,6 +1443,8 @@ pub struct BulkPartMeta {
     pub min_sequence: SequenceNumber,
     /// Maximum sequence number in part.
     pub max_sequence: u64,
+    /// Decoded bytes of string and binary values.
+    pub var_len_bytes: u64,
 }
 
 /// Metrics for encoding a part.
@@ -1513,10 +1509,31 @@ impl BulkPartEncoder {
         self
     }
 
+    /// Returns a tracker cutting row groups like a writer using `props`.
+    fn row_group_value_bytes(props: &Option<WriterProperties>) -> RowGroupValueBytes {
+        RowGroupValueBytes::new(
+            props
+                .as_ref()
+                .and_then(WriterProperties::max_row_group_row_count)
+                .unwrap_or(usize::MAX),
+        )
+    }
+
+    /// Returns writer properties for a part whose first batch is `batch`.
+    fn writer_props_for(&self, batch: &RecordBatch) -> Option<WriterProperties> {
+        let large_value_columns = large_value_fields(&self.metadata, batch);
+        if large_value_columns.is_empty() {
+            return self.writer_props.clone();
+        }
+        self.writer_props
+            .clone()
+            .map(|props| skip_statistics(props.into_builder(), &large_value_columns).build())
+    }
+
     /// Encodes [BoxedRecordBatchIterator] into [EncodedBulkPart] with min/max timestamps.
     pub fn encode_record_batch_iter(
         &self,
-        iter: BoxedRecordBatchIterator,
+        mut iter: BoxedRecordBatchIterator,
         arrow_schema: SchemaRef,
         min_timestamp: i64,
         max_timestamp: i64,
@@ -1526,6 +1543,7 @@ impl BulkPartEncoder {
         if self.narthex_format {
             let mut part = crate::series_index::samples::bulk::NarthexBulkPart::default();
             let mut total_rows = 0;
+            let mut var_len_bytes = 0;
             let mut series_estimator = SeriesEstimator::default();
             for batch in iter {
                 let batch = batch?;
@@ -1533,6 +1551,7 @@ impl BulkPartEncoder {
                     continue;
                 }
                 metrics.raw_size += record_batch_estimated_size(&batch);
+                var_len_bytes += var_len_value_bytes(&batch);
                 series_estimator.update_flat(&batch);
                 total_rows += batch.num_rows();
                 let start = Instant::now();
@@ -1548,6 +1567,7 @@ impl BulkPartEncoder {
                 payload: EncodedBulkPayload::Narthex(part),
                 metadata: BulkPartMeta {
                     num_rows: total_rows,
+                    var_len_bytes,
                     min_timestamp,
                     max_timestamp,
                     region_metadata: self.metadata.clone(),
@@ -1558,16 +1578,29 @@ impl BulkPartEncoder {
                 schema: arrow_schema,
             }));
         }
+        let mut iter_start = Instant::now();
+        // The first non-empty batch decides which columns skip statistics.
+        let first = loop {
+            match iter.next() {
+                None => return Ok(None),
+                Some(batch) => {
+                    let batch = batch?;
+                    if batch.num_rows() > 0 {
+                        break batch;
+                    }
+                }
+            }
+        };
         let mut buf = Vec::with_capacity(4096);
-        let mut writer =
-            ArrowWriter::try_new(&mut buf, arrow_schema.clone(), self.writer_props.clone())
-                .context(EncodeMemtableSnafu)?;
+        let props = self.writer_props_for(&first);
+        let mut row_group_value_bytes = Self::row_group_value_bytes(&props);
+        let mut writer = ArrowWriter::try_new(&mut buf, arrow_schema.clone(), props)
+            .context(EncodeMemtableSnafu)?;
         let mut total_rows = 0;
+        let mut var_len_bytes = 0;
         let mut series_estimator = SeriesEstimator::default();
 
-        // Process each batch from the iterator
-        let mut iter_start = Instant::now();
-        for batch_result in iter {
+        for batch_result in std::iter::once(Ok(first)).chain(iter) {
             metrics.iter_cost += iter_start.elapsed();
             let batch = batch_result?;
             if batch.num_rows() == 0 {
@@ -1575,6 +1608,8 @@ impl BulkPartEncoder {
             }
 
             series_estimator.update_flat(&batch);
+            var_len_bytes += var_len_value_bytes(&batch);
+            row_group_value_bytes.update(&batch);
             metrics.raw_size += record_batch_estimated_size(&batch);
             let write_start = Instant::now();
             writer.write(&batch).context(EncodeMemtableSnafu)?;
@@ -1584,11 +1619,10 @@ impl BulkPartEncoder {
         }
         metrics.iter_cost += iter_start.elapsed();
 
-        if total_rows == 0 {
-            return Ok(None);
-        }
-
         let close_start = Instant::now();
+        for kv in row_group_value_bytes.into_key_values() {
+            writer.append_key_value_metadata(kv);
+        }
         let file_metadata = writer.close().context(EncodeMemtableSnafu)?;
         metrics.write_cost += close_start.elapsed();
         metrics.encoded_size += buf.len();
@@ -1611,6 +1645,7 @@ impl BulkPartEncoder {
                 num_series,
                 min_sequence: *sequence_bounds.start(),
                 max_sequence: *sequence_bounds.end(),
+                var_len_bytes,
             },
             schema: arrow_schema,
         }))
@@ -1636,10 +1671,15 @@ impl BulkPartEncoder {
         let arrow_schema = part.batch.schema();
 
         let file_metadata = {
-            let mut writer =
-                ArrowWriter::try_new(&mut buf, arrow_schema.clone(), self.writer_props.clone())
-                    .context(EncodeMemtableSnafu)?;
+            let props = self.writer_props_for(&part.batch);
+            let mut row_group_value_bytes = Self::row_group_value_bytes(&props);
+            let mut writer = ArrowWriter::try_new(&mut buf, arrow_schema.clone(), props)
+                .context(EncodeMemtableSnafu)?;
             writer.write(&part.batch).context(EncodeMemtableSnafu)?;
+            row_group_value_bytes.update(&part.batch);
+            for kv in row_group_value_bytes.into_key_values() {
+                writer.append_key_value_metadata(kv);
+            }
             writer.finish().context(EncodeMemtableSnafu)?
         };
 
@@ -1659,6 +1699,7 @@ impl BulkPartEncoder {
                 num_series: part.estimated_series_count() as u64,
                 max_sequence: part.sequence,
                 min_sequence: part.min_sequence,
+                var_len_bytes: var_len_value_bytes(&part.batch),
             },
             schema: arrow_schema,
         }))

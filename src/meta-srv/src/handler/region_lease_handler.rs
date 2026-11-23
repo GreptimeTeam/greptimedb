@@ -204,6 +204,7 @@ mod test {
             query_scanned_bytes: 0,
             min_timestamp: None,
             max_timestamp: None,
+            has_pending_tails: false,
         }
     }
 

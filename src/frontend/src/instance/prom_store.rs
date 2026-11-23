@@ -691,14 +691,12 @@ impl PromStoreProtocolHandler for Instance {
                     .context(error::ExecuteQuerySnafu)?;
             }
         }
-        let targets = self
-            .resolve_query_permission_targets(
-                PermissionTableTargets::resolved(query_targets.clone()),
-                &ctx,
-            )
-            .await?;
-        self.check_table_permission(&ctx, PermissionReq::Action(PROM_STORE_READ), targets)
-            .context(AuthSnafu)?;
+        self.check_server_table_permission(
+            &ctx,
+            PermissionReq::Action(PROM_STORE_READ),
+            PermissionTableTargets::resolved(query_targets.clone()),
+        )
+        .await?;
 
         let response_type = negotiate_response_type(&request.accepted_response_types)?;
 

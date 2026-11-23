@@ -32,6 +32,7 @@ base64.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 common-base.workspace = true
+common-cache.workspace = true
 common-catalog.workspace = true
 common-error.workspace = true
 common-event-recorder.workspace = true

@@ -144,6 +144,7 @@ pub(crate) async fn write_samples(
         num_series: series,
         num_row_groups: 0,
         max_row_group_uncompressed_size: 0,
+        max_row_group_decoded_size: 0,
         file_metadata: None,
         index_metadata: Default::default(),
         format: FileFormat::NarthexSamples(Box::new(NarthexSamplesMeta {

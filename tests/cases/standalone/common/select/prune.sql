@@ -65,3 +65,52 @@ SELECT host FROM test_time_filter WHERE greptime_timestamp > '2026-01-07 00:00:0
 SELECT host, greptime_timestamp FROM test_time_filter WHERE greptime_timestamp > '2026-01-07 00:00:00';
 
 DROP TABLE test_time_filter;
+
+-- Files whose primary key range excludes the predicate are pruned before reading them.
+CREATE TABLE pk_range_prune(ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING, idc STRING, PRIMARY KEY(host, idc));
+
+INSERT INTO pk_range_prune VALUES (1, 1, 'a', 'idc1'), (2, 2, 'b', 'idc2');
+
+ADMIN flush_table('pk_range_prune');
+
+INSERT INTO pk_range_prune VALUES (1, 3, 'c', 'idc1'), (2, 4, 'd', 'idc2');
+
+ADMIN flush_table('pk_range_prune');
+
+-- SQLNESS REPLACE (?s)^.*("files_time_range_pruned":\d+).*$ $1
+EXPLAIN ANALYZE VERBOSE SELECT * FROM pk_range_prune WHERE host = 'c';
+
+SELECT * FROM pk_range_prune WHERE host = 'c';
+
+SELECT * FROM pk_range_prune WHERE host >= 'b' ORDER BY host;
+
+SELECT * FROM pk_range_prune WHERE host < 'b';
+
+DROP TABLE pk_range_prune;
+
+CREATE TABLE pk_range_phy (ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE = metric WITH ("physical_metric_table" = "");
+
+CREATE TABLE pk_range_t1 (ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING PRIMARY KEY) ENGINE = metric WITH ("on_physical_table" = "pk_range_phy");
+
+CREATE TABLE pk_range_t2 (ts TIMESTAMP TIME INDEX, val DOUBLE, job STRING PRIMARY KEY) ENGINE = metric WITH ("on_physical_table" = "pk_range_phy");
+
+INSERT INTO pk_range_t1 VALUES ('host1', 0, 1), ('host2', 1, 2);
+
+ADMIN flush_table('pk_range_phy');
+
+INSERT INTO pk_range_t2 VALUES ('job1', 0, 3), ('job2', 1, 4);
+
+ADMIN flush_table('pk_range_phy');
+
+-- SQLNESS REPLACE (?s)^.*("files_time_range_pruned":\d+).*$ $1
+EXPLAIN ANALYZE VERBOSE SELECT * FROM pk_range_t1;
+
+SELECT * FROM pk_range_t1 ORDER BY host;
+
+SELECT * FROM pk_range_t2 ORDER BY job;
+
+DROP TABLE pk_range_t1;
+
+DROP TABLE pk_range_t2;
+
+DROP TABLE pk_range_phy;

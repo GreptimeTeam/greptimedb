@@ -307,6 +307,11 @@ pub struct FileMeta {
     pub file_size: u64,
     /// Maximum uncompressed row group size of the file. 0 means unknown.
     pub max_row_group_uncompressed_size: u64,
+    /// Maximum row group size of the file with string and binary values counted at their decoded
+    /// size, which dictionary encoding hides from `max_row_group_uncompressed_size`. 0 means
+    /// unknown (files written before this field), which is omitted from manifests.
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub max_row_group_decoded_size: u64,
     /// Available indexes of the file.
     pub available_indexes: IndexTypes,
     /// Created indexes of the file for each column.
@@ -394,6 +399,10 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
+}
+
 /// Formats a debug field with a custom closure, as a stable replacement for
 /// the unstable `DebugStruct::field_with`.
 struct DebugFmt<F: Fn(&mut Formatter<'_>) -> fmt::Result>(F);
@@ -435,6 +444,10 @@ impl Debug for FileMeta {
             .field(
                 "max_row_group_uncompressed_size",
                 &ReadableSize(self.max_row_group_uncompressed_size),
+            )
+            .field(
+                "max_row_group_decoded_size",
+                &ReadableSize(self.max_row_group_decoded_size),
             );
         if self.exists_index() {
             debug_struct

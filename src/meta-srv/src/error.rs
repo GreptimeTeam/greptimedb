@@ -1083,6 +1083,16 @@ pub enum Error {
     },
 
     #[snafu(display(
+        "Repartition cannot start while regions {:?} have pending WAL tails; wait for their replay to finish",
+        region_ids
+    ))]
+    RepartitionPendingTails {
+        region_ids: Vec<RegionId>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
         "Repartition group {} source region missing, region id: {}",
         group_id,
         region_id
@@ -1236,6 +1246,7 @@ impl ErrorExt for Error {
             | Error::PeerUnavailable { .. }
             | Error::PusherNotFound { .. } => StatusCode::Unexpected,
             Error::MailboxTimeout { .. } | Error::ExceededDeadline { .. } => StatusCode::Cancelled,
+            Error::RepartitionPendingTails { .. } => StatusCode::RegionNotReady,
             Error::PruneTaskAlreadyRunning { .. }
             | Error::DrainDatanodeRunning { .. }
             | Error::RetryLater { .. }
@@ -1370,6 +1381,7 @@ impl ErrorExt for Error {
         match self {
             Error::RetryLater { .. }
             | Error::RetryLaterWithSource { .. }
+            | Error::RepartitionPendingTails { .. }
             | Error::MailboxTimeout { .. }
             | Error::NoEnoughAvailableNode { .. }
             | Error::NoLeader { .. }

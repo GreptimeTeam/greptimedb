@@ -51,11 +51,11 @@ use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 use store_api::storage::{FileId, RegionId, SequenceNumber};
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
-use crate::compaction::{CompactionExecution, CompactionPickFinished};
+use crate::compaction::{CompactionExecution, CompactionGuard, CompactionPickFinished};
 use crate::error::{
     CompactRegionSnafu, ConvertColumnDataTypeSnafu, CreateDefaultSnafu, Error, FillDefaultSnafu,
     FlushRegionSnafu, InvalidPartitionExprSnafu, InvalidRequestSnafu, MissingPartitionExprSnafu,
-    Result, UnexpectedSnafu,
+    RecvSnafu, Result, UnexpectedSnafu,
 };
 use crate::flush::FlushReason;
 use crate::manifest::action::{PendingTail, RegionEdit, TruncateKind};
@@ -786,6 +786,22 @@ impl WorkerRequestWithTime {
     }
 }
 
+/// The requester owns the guard even while an active compaction is draining.
+#[derive(Debug)]
+pub(crate) struct PauseCompactionResponse {
+    pub(crate) guard: CompactionGuard,
+    pub(crate) idle: Option<Receiver<Result<()>>>,
+}
+
+impl PauseCompactionResponse {
+    pub(crate) async fn wait(self) -> Result<CompactionGuard> {
+        if let Some(idle) = self.idle {
+            idle.await.context(RecvSnafu)??;
+        }
+        Ok(self.guard)
+    }
+}
+
 /// Request sent to a worker
 #[derive(Debug)]
 pub(crate) enum WorkerRequest {
@@ -816,10 +832,23 @@ pub(crate) enum WorkerRequest {
         sender: Sender<SetRegionRoleStateResponse>,
     },
 
+    /// Stops admitting compactions and reports when the active cycle ends.
+    PauseCompaction {
+        region_id: RegionId,
+        sender: Sender<Result<PauseCompactionResponse>>,
+    },
+
     /// Cancels one live compaction on its owning worker.
     CancelCompaction {
         region_id: RegionId,
         task_id: String,
+        sender: OptionOutputTx,
+    },
+
+    /// Discards the region's pending WAL tails that node `node_id` wrote.
+    DiscardPendingTails {
+        region_id: RegionId,
+        node_id: u64,
         sender: OptionOutputTx,
     },
 
@@ -957,6 +986,11 @@ impl WorkerRequest {
             RegionRequest::CancelCompaction(v) => WorkerRequest::CancelCompaction {
                 region_id,
                 task_id: v.task_id,
+                sender: sender.into(),
+            },
+            RegionRequest::DiscardPendingTails(v) => WorkerRequest::DiscardPendingTails {
+                region_id,
+                node_id: v.node_id,
                 sender: sender.into(),
             },
             RegionRequest::BuildIndex(v) => WorkerRequest::Ddl(SenderDdlRequest {
@@ -1180,8 +1214,13 @@ pub(crate) enum BackgroundNotify {
         /// The reloaded instance.
         result: Result<MitoRegionRef>,
     },
+    /// The catchup again of a region that awaited its Leader lease has finished.
+    CaughtUpAgain(CaughtUpAgain),
     /// The region became writable and may have pending tails to replay.
     RegionBecameWritable,
+    /// A lease ended the region's wait for its Leader lease, so the work the wait deferred may
+    /// start.
+    LeaderLeaseWaitEnded,
     /// A role change left the region unable to replay its tails (see
     /// [MitoRegion::can_replay_tails](crate::region::MitoRegion::can_replay_tails)); a running
     /// replay is cancelled.
@@ -1200,6 +1239,19 @@ pub(crate) enum BackgroundNotify {
     },
     /// A tail replay ended.
     TailReplayEnded,
+    /// An edit that discards pending tails was published in the manifest.
+    PendingTailsDiscarded {
+        /// The instance the tails were discarded from.
+        region: MitoRegionRef,
+        /// The published edit.
+        edit: RegionEdit,
+        /// The tails the manifest recorded when the edit was published.
+        tails: Vec<PendingTail>,
+        /// The number of tails the edit removed.
+        discarded: usize,
+        /// Receives `discarded`.
+        sender: OptionOutputTx,
+    },
 }
 
 impl BackgroundNotify {
@@ -1233,10 +1285,13 @@ impl BackgroundNotify {
             | Self::CopyRegionFromFinished(_)
             | Self::RegionFenced
             | Self::RegionReloaded { .. }
+            | Self::CaughtUpAgain(_)
             | Self::RegionBecameWritable
+            | Self::LeaderLeaseWaitEnded
             | Self::RegionCannotReplay { .. }
             | Self::TailReplayCommitted { .. }
-            | Self::TailReplayEnded => false,
+            | Self::TailReplayEnded
+            | Self::PendingTailsDiscarded { .. } => false,
         }
     }
 }
@@ -1549,6 +1604,24 @@ pub(crate) struct BuildIndexRequest {
     pub(crate) result_senders: Vec<ResultMpscSender>,
 }
 
+/// The result of a catchup again, see `RegionWorkerLoop::catch_up_again`.
+#[derive(Debug)]
+pub(crate) struct CaughtUpAgain {
+    /// The instance registered when the catchup began, which the catchup demoted unless it was
+    /// in a transient leader state.
+    pub(crate) old: MitoRegionRef,
+    /// The manifest version of the old instance when the catchup began.
+    pub(crate) manifest_version: ManifestVersion,
+    /// The last sequence of the old instance when the catchup began, which every write moves.
+    pub(crate) last_sequence: SequenceNumber,
+    /// The replacement, caught up, or why the catchup failed.
+    pub(crate) result: Result<MitoRegionRef>,
+    /// Whether the catchup promotes the region.
+    pub(crate) set_writable: bool,
+    /// Receives the result of the catchup.
+    pub(crate) sender: OptionOutputTx,
+}
+
 #[derive(Debug)]
 pub(crate) struct RegionSyncRequest {
     pub(crate) region_id: RegionId,
@@ -1655,6 +1728,31 @@ mod tests {
         assert_eq!(task_id, "task-1");
         sender.send(Ok(1));
         assert_eq!(receiver.await.unwrap().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_discard_pending_tails_is_worker_control_request() {
+        let region_id = RegionId::new(7, 3);
+        let (request, receiver) = WorkerRequest::try_from_region_request(
+            region_id,
+            RegionRequest::DiscardPendingTails(
+                store_api::region_request::RegionDiscardPendingTailsRequest { node_id: 5 },
+            ),
+            None,
+        )
+        .unwrap();
+        let WorkerRequest::DiscardPendingTails {
+            region_id: actual_region_id,
+            node_id,
+            sender,
+        } = request
+        else {
+            panic!("a pending tails discard must bypass the DDL queue");
+        };
+        assert_eq!(actual_region_id, region_id);
+        assert_eq!(node_id, 5);
+        sender.send(Ok(2));
+        assert_eq!(receiver.await.unwrap().unwrap(), 2);
     }
 
     fn new_column_schema(

@@ -24,6 +24,7 @@ use crate::compaction::multi_region::{
 };
 use crate::config::{FulltextIndexConfig, MitoConfig};
 use crate::error::{IndexOptionsSnafu, MultiRegionCompactionResourceSnafu, Result};
+use crate::sst::parquet::max_row_group_value_bytes;
 use crate::sst::parquet::writer::SstWriteLimits;
 
 pub(crate) const BATCH_SIZE: usize = 64;
@@ -215,12 +216,16 @@ fn extra_delta_encoder_bytes(target: &MultiRegionTarget) -> Result<usize> {
     Ok(bytes)
 }
 
-fn reader_bytes(footer: &ParquetMetaData) -> u64 {
+pub(super) fn reader_bytes(footer: &ParquetMetaData) -> u64 {
+    // Dictionary-encoded values decode to more than the uncompressed row group size; the footer
+    // records the largest decoded row group of the file.
+    let decoded = max_row_group_value_bytes(footer);
     let pages = footer
         .row_groups()
         .iter()
         .map(|group| {
             (group.total_byte_size().max(0) as u64)
+                .max(decoded)
                 .saturating_mul(RETAINED_AND_FINISH_SCRATCH_FACTOR)
                 .saturating_add(group.compressed_size().max(0) as u64)
         })

@@ -101,6 +101,15 @@ pub enum Error {
         error: object_store::Error,
     },
 
+    #[snafu(display("Source metadata file disappeared while copying {path}"))]
+    MetadataCopyFileNotFound {
+        path: String,
+        #[snafu(source)]
+        error: object_store::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display(
         "Manifest delta {} disappeared after it was listed, path: {}",
         version,
@@ -796,6 +805,16 @@ pub enum Error {
 
     #[snafu(display("Region {} does not hold a valid leader lease", region_id))]
     RegionLeaseExpired {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Region {} has not received a leader lease since a catchup made it writable",
+        region_id
+    ))]
+    RegionLeaseNotReceived {
         region_id: RegionId,
         #[snafu(implicit)]
         location: Location,
@@ -1636,6 +1655,7 @@ impl Error {
             | Error::RegionTruncated { .. }
             | Error::RegionStopped { .. }
             | Error::RegionLeaseExpired { .. }
+            | Error::RegionLeaseNotReceived { .. }
             | Error::EndStagingPending { .. }
             | Error::SerdeJson { .. }
             | Error::CompressObject { .. } => false,
@@ -1670,6 +1690,7 @@ impl ErrorExt for Error {
             SstWriteMemoryExceeded { .. } => StatusCode::RuntimeResourcesExhausted,
             DataTypeMismatch { source, .. } => source.status_code(),
             OpenDal { .. }
+            | MetadataCopyFileNotFound { .. }
             | ManifestDeltaNotFound { .. }
             | ManifestVersionConflict { .. }
             | ManifestCheckpointVanished { .. }
@@ -1782,7 +1803,9 @@ impl ErrorExt for Error {
             CompatReader { .. } => StatusCode::Unexpected,
             InvalidRegionRequest { source, .. } => source.status_code(),
             RegionState { .. } | UpdateManifest { .. } => StatusCode::RegionNotReady,
-            RegionLeaseExpired { .. } | UnacknowledgedWrite { .. } => StatusCode::RegionNotReady,
+            RegionLeaseExpired { .. }
+            | RegionLeaseNotReceived { .. }
+            | UnacknowledgedWrite { .. } => StatusCode::RegionNotReady,
             RegionPendingTails { .. } => StatusCode::RegionNotReady,
             RemoteWalUnsupported { .. } => StatusCode::Unsupported,
             TailEntryMissing { .. } => StatusCode::StorageUnavailable,
@@ -1887,6 +1910,7 @@ impl ErrorExt for Error {
             | RegionClosed { .. }
             | RejectWriteInStaging { .. }
             | RegionLeaseExpired { .. }
+            | RegionLeaseNotReceived { .. }
             | UnacknowledgedWrite { .. }
             | RegionState {
                 state: RegionRoleState::Follower,
@@ -1906,6 +1930,7 @@ impl ErrorExt for Error {
             | EndStagingPending { .. }
             | ManualCompactionAlreadyRunning { .. }
             | FlushableRegionState { .. }
+            | MetadataCopyFileNotFound { .. }
             | ManifestDeltaNotFound { .. }
             | ManifestVersionConflict { .. }
             | ManifestCheckpointVanished { .. } => RetryHint::Retryable,
@@ -2142,6 +2167,12 @@ mod tests {
         // A commit refused before its PUT because the Leader deadline has passed.
         let error = RegionLeaseExpiredSnafu { region_id }.build();
         assert!(!error.may_have_persisted_manifest_update());
+
+        // A commit refused before its PUT because no Leader lease has confirmed the catchup.
+        let error = RegionLeaseNotReceivedSnafu { region_id }.build();
+        assert!(!error.may_have_persisted_manifest_update());
+        assert_eq!(error.status_code(), StatusCode::RegionNotReady);
+        assert!(error.retry_hint().is_retryable());
 
         // This can be raised while applying an edit after its manifest file was saved.
         let error = RegionMetadataNotFoundSnafu {}.build();

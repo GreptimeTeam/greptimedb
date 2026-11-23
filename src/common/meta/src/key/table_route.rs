@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
-use store_api::storage::{RegionId, RegionNumber};
+use store_api::storage::{MAX_REGION_SEQ, RegionId, RegionNumber};
 use table::metadata::TableId;
 
 use crate::error::{
@@ -60,6 +60,43 @@ impl TableRouteKey {
 pub enum TableRouteValue {
     Physical(PhysicalTableRouteValue),
     Logical(LogicalTableRouteValue),
+}
+
+/// A table route whose payload can be shared by multiple callers.
+#[derive(Clone)]
+pub enum TableRoute {
+    Physical(Arc<PhysicalTableRouteValue>),
+    Logical(Arc<LogicalTableRouteValue>),
+}
+
+impl From<TableRouteValue> for TableRoute {
+    fn from(value: TableRouteValue) -> Self {
+        match value {
+            TableRouteValue::Physical(route) => Self::Physical(Arc::new(route)),
+            TableRouteValue::Logical(route) => Self::Logical(Arc::new(route)),
+        }
+    }
+}
+
+impl From<Arc<TableRoute>> for TableRoute {
+    fn from(route: Arc<TableRoute>) -> Self {
+        Arc::unwrap_or_clone(route)
+    }
+}
+
+impl TableRoute {
+    /// Returns true if it's physical table.
+    pub fn is_physical(&self) -> bool {
+        matches!(self, TableRoute::Physical(_))
+    }
+
+    /// Returns [PhysicalTableRouteValue] reference if it's [TableRoute::Physical]; Otherwise it returns [None].
+    pub fn as_physical_table_route_ref(&self) -> Option<&Arc<PhysicalTableRouteValue>> {
+        match self {
+            TableRoute::Physical(table_route) => Some(table_route),
+            TableRoute::Logical(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Serialize, Clone, Default)]
@@ -426,77 +463,81 @@ impl TableRouteManager {
         &self,
         logical_or_physical_table_ids: &[TableId],
     ) -> Result<HashMap<TableId, PhysicalTableRouteValue>> {
-        let table_routes = self
-            .storage
-            .batch_get(logical_or_physical_table_ids)
+        let routes =
+            Self::resolve_physical_table_routes(logical_or_physical_table_ids, |ids| async move {
+                self.storage.batch_get(&ids).await
+            })
             .await?;
-        // Returns a subset of `logical_or_physical_table_ids`.
-        let table_routes = table_routes
+        Ok(routes
             .into_iter()
-            .zip(logical_or_physical_table_ids)
-            .filter_map(|(route, id)| route.map(|route| (*id, route)))
-            .collect::<HashMap<_, _>>();
+            .map(|(id, route)| (id, Arc::unwrap_or_clone(route)))
+            .collect())
+    }
 
-        let mut physical_table_routes = HashMap::with_capacity(table_routes.len());
-        let mut logical_table_ids = HashMap::with_capacity(table_routes.len());
-
-        for (table_id, table_route) in table_routes {
-            match table_route {
-                TableRouteValue::Physical(x) => {
-                    physical_table_routes.insert(table_id, x);
-                }
-                TableRouteValue::Logical(x) => {
-                    logical_table_ids.insert(table_id, x.physical_table_id());
-                }
-            }
-        }
-
-        if logical_table_ids.is_empty() {
-            return Ok(physical_table_routes);
-        }
-
-        // Finds the logical tables corresponding to the physical tables.
-        let physical_table_ids = logical_table_ids
+    /// Resolves logical references using the caller's ordered route loader.
+    /// Logical tables backed by the same physical table share its route.
+    pub async fn resolve_physical_table_routes<R, Fut>(
+        ids: &[TableId],
+        load: impl Fn(Vec<TableId>) -> Fut,
+    ) -> Result<HashMap<TableId, Arc<PhysicalTableRouteValue>>>
+    where
+        R: Into<TableRoute>,
+        Fut: Future<Output = Result<Vec<Option<R>>>>,
+    {
+        let requested = Self::index_routes(ids, load(ids.to_vec()).await?);
+        let missing_targets = requested
             .values()
-            .cloned()
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        let table_routes = self
-            .table_route_storage()
-            .batch_get(&physical_table_ids)
-            .await?;
-        let table_routes = table_routes
-            .into_iter()
-            .zip(physical_table_ids)
-            .filter_map(|(route, id)| route.map(|route| (id, route)))
-            .collect::<HashMap<_, _>>();
+            .filter_map(|route| match route {
+                TableRoute::Logical(logical)
+                    if !requested.contains_key(&logical.physical_table_id()) =>
+                {
+                    Some(logical.physical_table_id())
+                }
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
 
-        for (logical_table_id, physical_table_id) in logical_table_ids {
-            let table_route =
-                table_routes
-                    .get(&physical_table_id)
-                    .context(TableRouteNotFoundSnafu {
-                        table_id: physical_table_id,
-                    })?;
-            match table_route {
-                TableRouteValue::Physical(x) => {
-                    physical_table_routes.insert(logical_table_id, x.clone());
+        let targets = if missing_targets.is_empty() {
+            HashMap::new()
+        } else {
+            let ids = missing_targets.into_iter().collect::<Vec<_>>();
+            let routes = load(ids.clone()).await?;
+            Self::index_routes(&ids, routes)
+        };
+
+        let mut resolved = HashMap::with_capacity(requested.len());
+        for (&id, route) in &requested {
+            let physical = match route {
+                TableRoute::Physical(physical) => physical,
+                TableRoute::Logical(logical) => {
+                    let table_id = logical.physical_table_id();
+                    let target = requested
+                        .get(&table_id)
+                        .or_else(|| targets.get(&table_id))
+                        .context(TableRouteNotFoundSnafu { table_id })?;
+                    target.as_physical_table_route_ref().with_context(|| {
+                        MetadataCorruptionSnafu {
+                            err_msg: format!(
+                                "logical table {id} points to a logical route {table_id}."
+                            ),
+                        }
+                    })?
                 }
-                TableRouteValue::Logical(x) => {
-                    // Never get here, because we use a physical table id cannot obtain a logical table.
-                    MetadataCorruptionSnafu {
-                        err_msg: format!(
-                            "logical table {} {:?} cannot be resolved to a physical table.",
-                            logical_table_id, x
-                        ),
-                    }
-                    .fail()?;
-                }
-            }
+            };
+            resolved.insert(id, physical.clone());
         }
+        Ok(resolved)
+    }
 
-        Ok(physical_table_routes)
+    fn index_routes<R: Into<TableRoute>>(
+        ids: &[TableId],
+        routes: Vec<Option<R>>,
+    ) -> HashMap<TableId, TableRoute> {
+        ids.iter()
+            .copied()
+            .zip(routes)
+            .filter_map(|(id, route)| route.map(|route| (id, route.into())))
+            .collect()
     }
 
     /// Returns [`RegionDistribution`] of the table(`table_id`).
@@ -509,6 +550,43 @@ impl TableRouteManager {
             .await?
             .map(|table_route| Ok(region_distribution(table_route.region_routes()?)))
             .transpose()
+    }
+
+    /// Reserves a positive number of consecutive region numbers without publishing their routes.
+    /// On success, advances the high-water mark and route version and returns the first reserved number.
+    /// If the table route changed, returns `None`. Reload the route before retrying.
+    pub async fn try_reserve_region_numbers(
+        &self,
+        table_id: TableId,
+        current: &DeserializedValueWithBytes<TableRouteValue>,
+        count: usize,
+    ) -> Result<Option<RegionNumber>> {
+        // The read path remaps peer addresses. Preserve the stored routes verbatim.
+        let TableRouteValue::Physical(mut route) =
+            TableRouteValue::try_from_raw_value(&current.bytes)?
+        else {
+            return UnexpectedLogicalRouteTableSnafu {
+                err_msg: format!("Cannot reserve region numbers for logical table {table_id}"),
+            }
+            .fail();
+        };
+        let previous = route.max_region_number;
+        let last = RegionNumber::try_from(count)
+            .ok()
+            .and_then(|count| previous.checked_add(count))
+            .filter(|last| previous < *last && *last <= MAX_REGION_SEQ)
+            .with_context(|| InvalidMetadataSnafu {
+                err_msg: format!(
+                    "Cannot reserve {count} region numbers after {previous} for table {table_id}"
+                ),
+            })?;
+        route.max_region_number = last;
+        route.version += 1;
+        let (txn, _) =
+            self.storage
+                .build_update_txn(table_id, current, &TableRouteValue::Physical(route))?;
+        let response = self.storage.kv_backend.txn(txn).await?;
+        Ok(response.succeeded.then_some(previous + 1))
     }
 
     /// Sets the staging state for a specific region.
@@ -950,6 +1028,70 @@ mod tests {
         assert_eq!(new_table_route.max_region_number, 3);
     }
 
+    #[tokio::test]
+    async fn test_reserve_region_numbers() {
+        let table_id = 1024;
+        let kv = Arc::new(MemoryKvBackend::default());
+        let manager = TableRouteManager::new(kv.clone());
+        let storage = manager.table_route_storage();
+        let routes = vec![RegionRoute {
+            region: Region {
+                id: RegionId::new(table_id, MAX_REGION_SEQ - 3),
+                ..Default::default()
+            },
+            ..Default::default()
+        }];
+        let initial = TableRouteValue::physical(routes.clone());
+        let (txn, _) = storage.build_create_txn(table_id, &initial).unwrap();
+        assert!(kv.txn(txn).await.unwrap().succeeded);
+        let current = storage.get_with_raw_bytes(table_id).await.unwrap().unwrap();
+        assert!(
+            manager
+                .try_reserve_region_numbers(table_id, &current, 0)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            manager
+                .try_reserve_region_numbers(table_id, &current, 2)
+                .await
+                .unwrap(),
+            Some(MAX_REGION_SEQ - 2)
+        );
+        // Another reservation based on the same snapshot must not claim this range.
+        assert_eq!(
+            manager
+                .try_reserve_region_numbers(table_id, &current, 2)
+                .await
+                .unwrap(),
+            None
+        );
+        let current = storage.get_with_raw_bytes(table_id).await.unwrap().unwrap();
+        assert_eq!(current.region_routes().unwrap(), &routes);
+        assert_eq!(current.max_region_number().unwrap(), MAX_REGION_SEQ - 1);
+        assert_eq!(current.version().unwrap(), 1);
+        assert!(
+            manager
+                .try_reserve_region_numbers(table_id, &current, 2)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            manager
+                .try_reserve_region_numbers(table_id, &current, 1)
+                .await
+                .unwrap(),
+            Some(MAX_REGION_SEQ)
+        );
+        let current = storage.get_with_raw_bytes(table_id).await.unwrap().unwrap();
+        assert!(
+            manager
+                .try_reserve_region_numbers(table_id, &current, 1)
+                .await
+                .is_err()
+        );
+    }
+
     #[test]
     fn test_table_route_compatibility() {
         let old_raw_v = r#"{"region_routes":[{"region":{"id":1,"name":"r1","partition":null,"attrs":{}},"leader_peer":{"id":2,"addr":"a2"},"follower_peers":[]},{"region":{"id":1,"name":"r1","partition":null,"attrs":{}},"leader_peer":{"id":2,"addr":"a2"},"follower_peers":[]}],"version":0}"#;
@@ -1086,6 +1228,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_batch_resolve_logical_routes() {
+        let routes = HashMap::from([
+            (1, TableRouteValue::logical(3)),
+            (2, TableRouteValue::logical(3)),
+            (3, TableRouteValue::physical(vec![])),
+            (4, TableRouteValue::logical(5)),
+        ]);
+        let load = |ids: Vec<TableId>| {
+            std::future::ready(Ok(ids.iter().map(|id| routes.get(id).cloned()).collect()))
+        };
+        let resolved = TableRouteManager::resolve_physical_table_routes(&[1, 2, 3, 9], load)
+            .await
+            .unwrap();
+        assert_eq!(
+            resolved.keys().copied().collect::<HashSet<_>>(),
+            HashSet::from([1, 2, 3])
+        );
+        assert!(Arc::ptr_eq(&resolved[&1], &resolved[&3]));
+        assert!(Arc::ptr_eq(&resolved[&2], &resolved[&3]));
+        let logical_only = TableRouteManager::resolve_physical_table_routes(&[1, 2], load)
+            .await
+            .unwrap();
+        assert_eq!(logical_only.len(), 2);
+        assert!(Arc::ptr_eq(&logical_only[&1], &logical_only[&2]));
+        let missing = TableRouteManager::resolve_physical_table_routes(&[4], load)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            missing,
+            crate::error::Error::TableRouteNotFound { table_id: 5, .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_table_route_cache_batches_backend_reads() {
+        use crate::cache::new_table_route_cache;
+        use crate::cache::test_util::assert_batch_cache_reads;
+
+        assert_batch_cache_reads(new_table_route_cache, |id| {
+            let value = TableRouteValue::logical(id + 100);
+            (
+                TableRouteKey::new(id).to_bytes(),
+                value.try_as_raw_value().unwrap(),
+            )
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn test_table_route_batch_get_remaps_addresses() {
         let kv = Arc::new(MemoryKvBackend::default());
         let table_route_storage = TableRouteStorage::new(kv.clone());
@@ -1111,6 +1302,23 @@ mod tests {
             .unwrap();
         let r = kv.txn(txn).await.unwrap();
         assert!(r.succeeded);
+
+        // Information schema can warm the route cache before a peer changes its address.
+        let cache = crate::cache::new_table_route_cache(
+            "routes".into(),
+            moka::future::Cache::new(8),
+            kv.clone(),
+        );
+        let cached = cache.get_many(&[1024]).await.unwrap();
+        let physical = cached[0]
+            .as_ref()
+            .unwrap()
+            .as_physical_table_route_ref()
+            .unwrap();
+        assert_eq!(
+            physical.region_routes[0].leader_peer.as_ref().unwrap().addr,
+            "old-leader"
+        );
 
         for (node_id, addr) in [(1, "new-leader"), (2, "new-follower")] {
             kv.put(PutRequest {

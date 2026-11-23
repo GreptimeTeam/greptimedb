@@ -2323,3 +2323,60 @@ async fn test_empty_wal_notifications_do_not_defer_auto_flush() {
     assert_eq!(1, scanner.num_files());
     engine.stop().await.unwrap();
 }
+
+#[tokio::test]
+async fn test_flush_bounds_row_group_bytes_of_wide_rows() {
+    use api::v1::SemanticType;
+    use api::v1::helper::row;
+    use api::v1::value::ValueData;
+    use datatypes::prelude::ConcreteDataType;
+
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let mut request = CreateRequestBuilder::new().tag_num(1).field_num(1).build();
+    request
+        .column_metadatas
+        .iter_mut()
+        .find(|c| c.semantic_type == SemanticType::Field)
+        .unwrap()
+        .column_schema
+        .data_type = ConcreteDataType::string_datatype();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // 64 rows of 4 MiB: a 128 MiB row group holds at most 32 of them.
+    let rows = (0..64)
+        .map(|i| {
+            row(vec![
+                ValueData::StringValue("a".to_string()),
+                ValueData::StringValue(format!("{i:08}").repeat(512 * 1024)),
+                ValueData::TimestampMillisecondValue(i * 1000),
+            ])
+        })
+        .collect();
+    put_rows(&engine, region_id, Rows { schema, rows }).await;
+    flush_region(&engine, region_id, None).await;
+
+    let version = engine.get_region(region_id).unwrap().version();
+    let files: Vec<_> = version
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .collect();
+    assert!(!files.is_empty());
+    for file in files {
+        let meta = file.meta_ref();
+        assert!(meta.num_row_groups > 1, "{meta:?}");
+        assert!(
+            meta.num_rows.div_ceil(meta.num_row_groups) <= 32,
+            "{meta:?}"
+        );
+        // A row group holds up to 32 rows of 4 MiB.
+        assert!(meta.max_row_group_decoded_size >= 4 << 20, "{meta:?}");
+    }
+}

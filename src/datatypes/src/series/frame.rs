@@ -1853,6 +1853,167 @@ fn compact_histogram(values: &HistogramSamples) -> Result<(ArrayRef, UInt32Array
     Ok((table, UInt32Array::from(remapped)))
 }
 
+/// The `fields` column of a state frame: one list per row, one item per carried position.
+///
+/// A state frame's per-field list carries one item per grid position the row holds, and an item is
+/// absent exactly where that field has no contribution at that position. The absence lives on the
+/// item - the child struct's validity - not on the list's own validity, which is per row: a row
+/// always has a list, with zero or more items in it.
+///
+/// One encoder builds this column, so a state frame and a state row handed over in process are the
+/// same bytes: [`StateFrameRow::from_state_series`] calls it for a single group, and the frame
+/// encoder calls it for the rows it is about to write.
+fn encode_state_fields(field_types: &Fields, rows: &[FrameRow]) -> Result<StructArray> {
+    // A state frame's per-field list carries one item per grid position the row holds, and an
+    // item is absent exactly where that field has no contribution at that position. The
+    // absence lives on the item — the child struct's validity — not on the list's own
+    // validity, which is per row: a row always has a list, with zero or more items in it.
+    let count = rows.len();
+    let mut field_arrays: Vec<ArrayRef> = Vec::with_capacity(field_types.len());
+    for (index, field) in field_types.iter().enumerate() {
+        let mut lengths = Vec::with_capacity(count);
+        let mut positions = 0usize;
+        for row in rows {
+            let RowPayload::States(fields) = &row.payload else {
+                return invalid_series("state frame row carries sample payload");
+            };
+            let values = fields
+                .get(index)
+                .ok_or_else(|| err("state field count mismatch"))?;
+            if values.len() != row.time.len()? {
+                return invalid_series("state list length mismatch");
+            }
+            lengths.push(values.len());
+            positions = add_checked(positions, values.len())?;
+        }
+
+        let item = match field.data_type() {
+            DataType::List(item) => item,
+            _ => return invalid_series("state field schema mismatch"),
+        };
+        let DataType::Struct(components) = item.data_type() else {
+            return invalid_series("state list item is not a component struct");
+        };
+        // Absence lives on the item, so the child struct's validity is one flag per position.
+        // A row of a state frame always carries states; a caller that hands in the wrong payload
+        // is refused here rather than panicking inside an iterator.
+        let mut present = Vec::with_capacity(positions);
+        for row in rows {
+            let RowPayload::States(fields) = &row.payload else {
+                return invalid_series("state frame row carries sample payload");
+            };
+            present.extend(fields[index].iter().map(Option::is_some));
+        }
+        debug_assert_eq!(present.len(), positions);
+
+        // Every component of a field is absent at exactly the same positions - the field's own -
+        // so they share the one mask, which the child struct already needs.
+        let nulls = present
+            .iter()
+            .any(|present| !present)
+            .then(|| NullBuffer::from(present.clone()));
+        // A column's name is the component it declares, so each array is built by reading that
+        // component off the payload; a payload that does not keep it is refused rather than
+        // written as a zero.
+        let arrays: Vec<ArrayRef> = components
+            .iter()
+            .map(|component| {
+                let declared = StateComponent::parse(component.name())?;
+                let array: ArrayRef = match declared {
+                    StateComponent::HistogramValue | StateComponent::HistogramCompensation => {
+                        // One histogram per position, so one batch carries the whole column. An
+                        // absent position holds an empty placeholder whose value the shared mask
+                        // makes unreadable, exactly as a null float slot holds a zero.
+                        let mut histograms = HistogramBatchBuilder::new();
+                        for row in rows {
+                            for state in state_field(row, index)? {
+                                let Some(state) = state else {
+                                    histograms.push(empty_histogram())?;
+                                    continue;
+                                };
+                                let histogram = state
+                                    .histogram_component(declared)
+                                    .ok_or_else(missing_state_component)?;
+                                if histogram.len() != 1 {
+                                    return invalid_series(
+                                        "a histogram state component carries exactly one histogram",
+                                    );
+                                }
+                                let view = histogram.view(0).ok_or_else(missing_state_component)?;
+                                histograms.push(view)?;
+                            }
+                        }
+                        let batch = histograms.finish()?;
+                        Arc::new(
+                            StructArray::try_new(
+                                histogram_fields(),
+                                batch.as_arrow().columns().to_vec(),
+                                nulls.clone(),
+                            )
+                            .map_err(|error| err(error.to_string()))?,
+                        ) as ArrayRef
+                    }
+                    StateComponent::Value
+                    | StateComponent::Mean
+                    | StateComponent::Compensation
+                    | StateComponent::Count => {
+                        let mut floats = Vec::with_capacity(positions);
+                        for row in rows {
+                            for state in state_field(row, index)? {
+                                // A missing position's value is unreadable, so it holds the same
+                                // zero a null slot has always held here.
+                                floats.push(match state {
+                                    None => 0.0,
+                                    Some(state) => state
+                                        .float_component(declared)
+                                        .ok_or_else(missing_state_component)?,
+                                });
+                            }
+                        }
+                        Arc::new(Float64Array::new(ScalarBuffer::from(floats), nulls.clone()))
+                    }
+                    _ => {
+                        let mut booleans = Vec::with_capacity(positions);
+                        for row in rows {
+                            for state in state_field(row, index)? {
+                                booleans.push(match state {
+                                    None => false,
+                                    Some(state) => state
+                                        .bool_component(declared)
+                                        .ok_or_else(missing_state_component)?,
+                                });
+                            }
+                        }
+                        Arc::new(BooleanArray::new(
+                            BooleanBuffer::from(booleans),
+                            nulls.clone(),
+                        ))
+                    }
+                };
+                Ok(array)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let child = if components.is_empty() {
+            Arc::new(StructArray::new_empty_fields(
+                positions,
+                Some(NullBuffer::from(present)),
+            )) as ArrayRef
+        } else {
+            Arc::new(
+                StructArray::try_new(components.clone(), arrays, Some(NullBuffer::from(present)))
+                    .map_err(|error| err(error.to_string()))?,
+            ) as ArrayRef
+        };
+        // The list itself is valid for every row: absence is an absent item, never an absent
+        // list, so a reader can tell "this field holds nothing here" from "this row has no
+        // list at all".
+        let list = list_array(&lengths, child, item.as_ref().clone(), None)?;
+        field_arrays.push(Arc::new(list) as ArrayRef);
+    }
+    struct_array(field_types.clone(), field_arrays)
+}
+
 /// Encodes buffered rows as one batch with direct N-row Arrow array construction.
 ///
 /// Each histogram segment carries each *distinct* table row it references exactly once, and its
@@ -1938,159 +2099,7 @@ fn encode_rows(schema: &SchemaRef, shape: FrameShape, rows: &[FrameRow]) -> Resu
     };
 
     if shape.content == FrameContent::AggregateState {
-        // A state frame's per-field list carries one item per grid position the row holds, and an
-        // item is absent exactly where that field has no contribution at that position. The
-        // absence lives on the item — the child struct's validity — not on the list's own
-        // validity, which is per row: a row always has a list, with zero or more items in it.
-        let mut field_arrays: Vec<ArrayRef> = Vec::with_capacity(field_types.len());
-        for (index, field) in field_types.iter().enumerate() {
-            let mut lengths = Vec::with_capacity(count);
-            let mut positions = 0usize;
-            for row in rows {
-                let RowPayload::States(fields) = &row.payload else {
-                    return invalid_series("state frame row carries sample payload");
-                };
-                let values = fields
-                    .get(index)
-                    .ok_or_else(|| err("state field count mismatch"))?;
-                if values.len() != row.time.len()? {
-                    return invalid_series("state list length mismatch");
-                }
-                lengths.push(values.len());
-                positions = add_checked(positions, values.len())?;
-            }
-
-            let item = match field.data_type() {
-                DataType::List(item) => item,
-                _ => return invalid_series("state field schema mismatch"),
-            };
-            let DataType::Struct(components) = item.data_type() else {
-                return invalid_series("state list item is not a component struct");
-            };
-            // Absence lives on the item, so the child struct's validity is one flag per position.
-            // A row of a state frame always carries states; a caller that hands in the wrong payload
-            // is refused here rather than panicking inside an iterator.
-            let mut present = Vec::with_capacity(positions);
-            for row in rows {
-                let RowPayload::States(fields) = &row.payload else {
-                    return invalid_series("state frame row carries sample payload");
-                };
-                present.extend(fields[index].iter().map(Option::is_some));
-            }
-            debug_assert_eq!(present.len(), positions);
-
-            // Every component of a field is absent at exactly the same positions - the field's own -
-            // so they share the one mask, which the child struct already needs.
-            let nulls = present
-                .iter()
-                .any(|present| !present)
-                .then(|| NullBuffer::from(present.clone()));
-            // A column's name is the component it declares, so each array is built by reading that
-            // component off the payload; a payload that does not keep it is refused rather than
-            // written as a zero.
-            let arrays: Vec<ArrayRef> = components
-                .iter()
-                .map(|component| {
-                    let declared = StateComponent::parse(component.name())?;
-                    let array: ArrayRef = match declared {
-                        StateComponent::HistogramValue | StateComponent::HistogramCompensation => {
-                            // One histogram per position, so one batch carries the whole column. An
-                            // absent position holds an empty placeholder whose value the shared mask
-                            // makes unreadable, exactly as a null float slot holds a zero.
-                            let mut histograms = HistogramBatchBuilder::new();
-                            for row in rows {
-                                for state in state_field(row, index)? {
-                                    let Some(state) = state else {
-                                        histograms.push(empty_histogram())?;
-                                        continue;
-                                    };
-                                    let histogram = state
-                                        .histogram_component(declared)
-                                        .ok_or_else(missing_state_component)?;
-                                    if histogram.len() != 1 {
-                                        return invalid_series(
-                                            "a histogram state component carries exactly one histogram",
-                                        );
-                                    }
-                                    let view = histogram
-                                        .view(0)
-                                        .ok_or_else(missing_state_component)?;
-                                    histograms.push(view)?;
-                                }
-                            }
-                            let batch = histograms.finish()?;
-                            Arc::new(
-                                StructArray::try_new(
-                                    histogram_fields(),
-                                    batch.as_arrow().columns().to_vec(),
-                                    nulls.clone(),
-                                )
-                                .map_err(|error| err(error.to_string()))?,
-                            ) as ArrayRef
-                        }
-                        StateComponent::Value
-                        | StateComponent::Mean
-                        | StateComponent::Compensation
-                        | StateComponent::Count => {
-                            let mut floats = Vec::with_capacity(positions);
-                            for row in rows {
-                                for state in state_field(row, index)? {
-                                    // A missing position's value is unreadable, so it holds the same
-                                    // zero a null slot has always held here.
-                                    floats.push(match state {
-                                        None => 0.0,
-                                        Some(state) => state
-                                            .float_component(declared)
-                                            .ok_or_else(missing_state_component)?,
-                                    });
-                                }
-                            }
-                            Arc::new(Float64Array::new(ScalarBuffer::from(floats), nulls.clone()))
-                        }
-                        _ => {
-                            let mut booleans = Vec::with_capacity(positions);
-                            for row in rows {
-                                for state in state_field(row, index)? {
-                                    booleans.push(match state {
-                                        None => false,
-                                        Some(state) => state
-                                            .bool_component(declared)
-                                            .ok_or_else(missing_state_component)?,
-                                    });
-                                }
-                            }
-                            Arc::new(BooleanArray::new(
-                                BooleanBuffer::from(booleans),
-                                nulls.clone(),
-                            ))
-                        }
-                    };
-                    Ok(array)
-                })
-                .collect::<Result<Vec<_>>>()?;
-
-            let child = if components.is_empty() {
-                Arc::new(StructArray::new_empty_fields(
-                    positions,
-                    Some(NullBuffer::from(present)),
-                )) as ArrayRef
-            } else {
-                Arc::new(
-                    StructArray::try_new(
-                        components.clone(),
-                        arrays,
-                        Some(NullBuffer::from(present)),
-                    )
-                    .map_err(|error| err(error.to_string()))?,
-                ) as ArrayRef
-            };
-            // The list itself is valid for every row: absence is an absent item, never an absent
-            // list, so a reader can tell "this field holds nothing here" from "this row has no
-            // list at all".
-            let list = list_array(&lengths, child, item.as_ref().clone(), None)?;
-            field_arrays.push(Arc::new(list) as ArrayRef);
-        }
-        let fields = struct_array(field_types.clone(), field_arrays)?;
+        let fields = encode_state_fields(field_types, rows)?;
         return assemble_frame_batch(schema, shape, rows, time, fields);
     }
     let mut empty_table: Option<ArrayRef> = None;
@@ -2440,7 +2449,151 @@ pub struct StateFrameRow {
     state: AggregateStateSchema,
 }
 
+/// The Arrow layout the state rows of one publication are encoded against.
+///
+/// Building a row needs three things that depend on the state layout and the series it is of rather
+/// than on the group: the `fields` column's item struct, the components each item carries, and the
+/// grid the positions are on. Resolving them once makes a group cost its own encoding and nothing
+/// else, which is what a consumer merging the groups of one publication wants.
+///
+/// One constructor builds every row of every group ([`StateRowLayout::row`]), so a producer that
+/// hands a row over in process and a frame a boundary reads cannot disagree about what a row is.
+pub struct StateRowLayout {
+    /// The layout every row is validated against, and the one its fields encode.
+    state: AggregateStateSchema,
+    /// How many series fields a row carries.
+    fields: usize,
+    /// The grid a row's positions are on.
+    grid: Arc<EvalGrid>,
+    /// The `fields` column's item struct, resolved from the frame schema once.
+    field_types: Fields,
+}
+
+impl StateRowLayout {
+    /// The layout `schema`'s export declares, as the rows of its groups are built against it.
+    ///
+    /// `state` is the layout the export declares: it is checked against itself once here, so a
+    /// layout no row could encode is refused before any group is built against it.
+    pub fn try_new(state: &AggregateStateSchema, schema: &SeriesSchema) -> Result<Self> {
+        let grid = schema
+            .eval_grid
+            .clone()
+            .ok_or_else(|| err("an aggregate state chunk needs an evaluation grid"))?;
+        let state = AggregateStateSchema::try_new(state.kind, state.components.to_vec())?;
+        let frame_schema = aggregate_state_frame_schema(&state, schema, FrameLabelMode::Explicit)?;
+        let DataType::Struct(field_types) = frame_schema.field(3).data_type() else {
+            return invalid_series("fields schema mismatch");
+        };
+        Ok(Self {
+            state,
+            fields: schema.fields.len(),
+            grid,
+            field_types: field_types.clone(),
+        })
+    }
+
+    /// One producer group as the state row a consumer merges.
+    ///
+    /// The group already is the row: field-major state on sparse absolute positions, the labels it
+    /// was folded under, and whether it closes its chain. What the group must also be is a row of
+    /// this layout: its positions on this grid, its field count the series', and every position it
+    /// carries a contribution from at least one field. Those are checked here rather than where the
+    /// row is consumed, so a row that exists is a row a merge can read - exactly what the frame
+    /// decoder checks of a decoded frame row.
+    pub fn row(&self, series: StateSeries, is_last: bool) -> Result<StateFrameRow> {
+        if series.states.len() != self.fields
+            || series
+                .states
+                .iter()
+                .any(|field| field.len() != series.time.len())
+        {
+            return invalid_series("aggregate state fields do not match the carried positions");
+        }
+        // A position is addressed on the grid this layout declares: a group folded on another grid
+        // would name positions this node's merge does not have.
+        if !series
+            .time
+            .grid()
+            .is_some_and(|grid| grid.spec() == self.grid.spec())
+        {
+            return invalid_series("aggregate state positions are not on the series grid");
+        }
+        let spans = series
+            .time
+            .runs()
+            .map(|run| GridSpan::new(run.position, run.len))
+            .collect::<Vec<_>>();
+        let axis = TimeAxis::from_grid_spans(Arc::clone(&self.grid), spans)?;
+        let row = FrameRow {
+            key: None,
+            metric: Some(series.metric.clone()),
+            is_last,
+            time: RowTime::Spans(
+                axis.runs()
+                    .map(|run| GridSpan::new(run.position, run.len))
+                    .collect(),
+            ),
+            payload: RowPayload::States(series.states),
+            bytes: 0,
+        };
+        let fields = encode_state_fields(&self.field_types, std::slice::from_ref(&row))?;
+        // The row is checked against the layout it declares, so a consumer that merges it reads the
+        // components this producer wrote and nothing else - the same check the frame decoder makes.
+        let validated = StateFieldsBatch::try_from_arrow(fields.clone(), &self.state)?;
+        if validated.len() != self.fields {
+            return invalid_series("aggregate state field count mismatch");
+        }
+        for field in 0..validated.len() {
+            let items = validated
+                .field(field)
+                .ok_or_else(|| err("null state field list"))?;
+            if items.len() != axis.len() {
+                return invalid_series("state list length does not match carried positions");
+            }
+        }
+        // A carried position exists because a field has a contribution there; one no field carries
+        // is a position the merge would have to invent a state for, so it is refused here.
+        for position in 0..axis.len() {
+            let mut present = false;
+            for field in 0..validated.len() {
+                present |= validated.is_present(field, position)?;
+            }
+            if !present {
+                return invalid_series("aggregate state names a position with no contribution");
+            }
+        }
+        Ok(StateFrameRow {
+            metric: series.metric,
+            time: axis,
+            is_last,
+            fields,
+            state: self.state.clone(),
+        })
+    }
+}
+
 impl StateFrameRow {
+    /// One producer group as the state row a consumer merges.
+    ///
+    /// The group already is the row: field-major state on sparse absolute positions, the labels it
+    /// was folded under, and whether it closes its chain. Building it here is what lets a producer
+    /// hand the row over in process instead of packing a frame and decoding it back, and it is the
+    /// same construction the frame encoder uses ([`encode_state_fields`]), so the two readings of
+    /// one export cannot disagree.
+    ///
+    /// `state` is the layout the export declares and `schema` the series it is of: both are checked
+    /// against the group before anything is built, exactly as the frame decoder checks them against
+    /// the frame it reads. Building many groups of one export is what [`StateRowLayout`] is for; this
+    /// is that layout resolved for one row.
+    pub fn from_state_series(
+        state: &AggregateStateSchema,
+        schema: &SeriesSchema,
+        series: StateSeries,
+        is_last: bool,
+    ) -> Result<Self> {
+        StateRowLayout::try_new(state, schema)?.row(series, is_last)
+    }
+
     /// Complete group identity for this row.
     pub fn metric(&self) -> &SeriesLabels {
         &self.metric

@@ -39,7 +39,7 @@ use crate::memtable::time_partition::TimePartitions;
 use crate::metrics::TAIL_REPLAY_FAILURE_TOTAL;
 use crate::region::opener::replay_entry;
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
-use crate::region::{MitoRegion, MitoRegionRef, TailPublication};
+use crate::region::{MitoRegion, MitoRegionRef, TailPublication, TailsEditor};
 use crate::request::{BackgroundNotify, WorkerRequest, WorkerRequestWithTime};
 use crate::schedule::CancellableTaskState;
 use crate::sst::file::{FileMeta, UncommittedSsts};
@@ -64,6 +64,28 @@ const LEASE_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 /// [can replay them](MitoRegion::can_replay_tails).
 pub(crate) fn should_replay_tails(region: &MitoRegion) -> bool {
     region.can_replay_tails() && region.version().has_pending_tails()
+}
+
+/// Releases the WAL of `region` on node `node_id` up to where the region now replays it on
+/// open, keeping the node's remaining tails, after an edit of its pending tails. A failure is
+/// only logged.
+pub(crate) async fn release_wal_after_tails_edit<S: LogStore>(
+    region: &MitoRegion,
+    wal: &Wal<S>,
+    node_id: Option<u64>,
+) {
+    let manifest = region.manifest_ctx.manifest().await;
+    let entry_id = cap_wal_release(
+        &manifest.pending_tails,
+        node_id,
+        manifest.wal_replay_start(node_id),
+    );
+    if let Err(e) = wal
+        .obsolete(region.region_id, entry_id, &region.provider)
+        .await
+    {
+        error!(e; "Failed to release the WAL of region {} after its pending tails changed", region.region_id);
+    }
 }
 
 /// Replays the pending tails of a region into SSTs and publishes them in one manifest edit.
@@ -333,11 +355,14 @@ impl<S: LogStore> TailReplayTask<S> {
             .await
     }
 
-    /// Waits until the region receives a Leader lease. Returns false if the region stops being
-    /// a writable, altering or editing leader, or the task is cancelled, first.
+    /// Waits until the region receives a Leader lease, or a StagingLeader lease on a node whose
+    /// writes need a lease. Returns false if the region stops being a writable, altering or
+    /// editing leader, or the task is cancelled, first.
     async fn wait_for_leader_lease(&self) -> bool {
         let region_id = self.region.region_id;
-        info!("Region {region_id} waits for a Leader lease to clear its unread listed tails");
+        info!(
+            "Region {region_id} waits for a lease that confirms it as the leader to clear its unread listed tails"
+        );
         while self.region.can_replay_tails() {
             self.listener.on_tail_lease_check(region_id);
             if self.region.manifest_ctx.leader_lease_received() {
@@ -408,7 +433,7 @@ impl<S: LogStore> TailReplayTask<S> {
             match self
                 .region
                 .manifest_ctx
-                .update_manifest_for_tails(tails, action_list.clone())
+                .update_manifest_for_tails(tails, action_list.clone(), TailsEditor::Replay)
                 .await
             {
                 Ok(TailPublication::Committed(manifest_version)) => {
@@ -416,7 +441,8 @@ impl<S: LogStore> TailReplayTask<S> {
                     info!(
                         "Published the replayed WAL tails of region {region_id} in manifest version {manifest_version}"
                     );
-                    self.release_wal().await;
+                    release_wal_after_tails_edit(&self.region, &self.wal, self.node_id).await;
+                    self.listener.on_tail_commit_end(region_id).await;
                     let region = self.region.clone();
                     let tails = tails.to_vec();
                     let notify = BackgroundNotify::TailReplayCommitted {
@@ -465,25 +491,6 @@ impl<S: LogStore> TailReplayTask<S> {
                 return Ok(false);
             }
             backoff = (backoff * 2).min(MAX_BACKOFF);
-        }
-    }
-
-    /// Releases the WAL up to where the region now replays it on open, keeping this node's
-    /// remaining tails. A failure is only logged.
-    async fn release_wal(&self) {
-        let region = &self.region;
-        let manifest = region.manifest_ctx.manifest().await;
-        let entry_id = cap_wal_release(
-            &manifest.pending_tails,
-            self.node_id,
-            manifest.wal_replay_start(self.node_id),
-        );
-        if let Err(e) = self
-            .wal
-            .obsolete(region.region_id, entry_id, &region.provider)
-            .await
-        {
-            error!(e; "Failed to release the WAL of region {} after publishing its tails", region.region_id);
         }
     }
 

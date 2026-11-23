@@ -25,9 +25,9 @@ use api::v1::region::bulk_insert_request::Body;
 use api::v1::region::{
     AlterRequest, AlterRequests, BuildIndexRequest, BulkInsertRequest, CancelCompactionRequest,
     CleanUpRequest as PbCleanUpRequest, CloseRequest, CompactRequest, CreateRequest,
-    CreateRequests, DeleteRequests, DropRequest, DropRequests, FlushRequest, InsertRequests,
-    OpenRequest, TruncateRequest, alter_request, build_index_request, compact_request,
-    region_request, truncate_request,
+    CreateRequests, DeleteRequests, DiscardPendingTailsRequest, DropRequest, DropRequests,
+    FlushRequest, InsertRequests, OpenRequest, TruncateRequest, alter_request, build_index_request,
+    compact_request, region_request, truncate_request,
 };
 use api::v1::{
     self, Analyzer, ArrowIpc, FulltextBackend as PbFulltextBackend, Option as PbOption, Rows,
@@ -162,6 +162,7 @@ pub enum RegionRequest {
     Flush(RegionFlushRequest),
     Compact(RegionCompactRequest),
     CancelCompaction(RegionCancelCompactionRequest),
+    DiscardPendingTails(RegionDiscardPendingTailsRequest),
     BuildIndex(RegionBuildIndexRequest),
     Truncate(RegionTruncateRequest),
     Catchup(RegionCatchupRequest),
@@ -186,6 +187,9 @@ impl RegionRequest {
             region_request::Body::Flush(flush) => make_region_flush(flush),
             region_request::Body::Compact(compact) => make_region_compact(compact),
             region_request::Body::CancelCompaction(cancel) => make_region_cancel_compaction(cancel),
+            region_request::Body::DiscardPendingTails(discard) => {
+                make_region_discard_pending_tails(discard)
+            }
             region_request::Body::BuildIndex(index) => make_region_build_index(index),
             region_request::Body::Truncate(truncate) => make_region_truncate(truncate),
             region_request::Body::Creates(creates) => make_region_creates(creates),
@@ -465,6 +469,17 @@ fn make_region_cancel_compaction(
         region_id,
         RegionRequest::CancelCompaction(RegionCancelCompactionRequest {
             task_id: cancel.task_id,
+        }),
+    )])
+}
+
+fn make_region_discard_pending_tails(
+    discard: DiscardPendingTailsRequest,
+) -> Result<Vec<(RegionId, RegionRequest)>> {
+    Ok(vec![(
+        discard.region_id.into(),
+        RegionRequest::DiscardPendingTails(RegionDiscardPendingTailsRequest {
+            node_id: discard.datanode_id,
         }),
     )])
 }
@@ -1949,6 +1964,15 @@ pub struct RegionCancelCompactionRequest {
     pub task_id: String,
 }
 
+/// Discards the region's pending WAL tails, the WAL ranges it still has to recover, that
+/// datanode `node_id` wrote, without replaying them. Returns the number of discarded tails; a
+/// region without such tails returns 0 and changes nothing.
+#[derive(Debug)]
+pub struct RegionDiscardPendingTailsRequest {
+    /// The datanode that wrote the tails.
+    pub node_id: u64,
+}
+
 #[derive(Debug)]
 pub struct RegionCompactRequest {
     pub options: compact_request::Options,
@@ -2004,7 +2028,8 @@ pub enum RegionTruncateRequest {
 /// Catchup region request.
 ///
 /// Makes a readonly region to catch up to leader region changes.
-/// There is no effect if it operating on a leader region.
+/// There is no effect if it operating on a leader region, unless the engine reports that the
+/// region is not a [confirmed leader](crate::region_engine::RegionEngine::is_confirmed_leader).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RegionCatchupRequest {
     /// Sets it to writable if it's available after it has caught up with all changes.
@@ -2116,6 +2141,7 @@ impl fmt::Display for RegionRequest {
             RegionRequest::Flush(_) => write!(f, "Flush"),
             RegionRequest::Compact(_) => write!(f, "Compact"),
             RegionRequest::CancelCompaction(_) => write!(f, "CancelCompaction"),
+            RegionRequest::DiscardPendingTails(_) => write!(f, "DiscardPendingTails"),
             RegionRequest::BuildIndex(_) => write!(f, "BuildIndex"),
             RegionRequest::Truncate(_) => write!(f, "Truncate"),
             RegionRequest::Catchup(_) => write!(f, "Catchup"),
@@ -2168,6 +2194,25 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    fn test_discard_pending_tails_request_wire() {
+        use api::v1::region::RegionRequest as PbRegionRequest;
+        use prost::Message;
+
+        let bytes = include_bytes!(
+            "../../../tests/compatibility/wire/discard_pending_tails/discard_pending_tails.pb"
+        );
+        let request = PbRegionRequest::decode(bytes.as_slice()).unwrap();
+        assert_eq!(request.encode_to_vec(), bytes);
+        let mut requests = RegionRequest::try_from_request_body(request.body.unwrap()).unwrap();
+        let (region_id, request) = requests.remove(0);
+        assert_eq!(RegionId::new(1024, 1), region_id);
+        let RegionRequest::DiscardPendingTails(request) = request else {
+            panic!("expected a pending tails discard, got {request:?}")
+        };
+        assert_eq!(7, request.node_id);
     }
 
     #[test]

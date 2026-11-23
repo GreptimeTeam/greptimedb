@@ -329,6 +329,11 @@ impl PackedTableWriter {
         }
     }
 
+    /// Parquet stream name, used as the object name when standalone and as an error label when packed.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
     pub(crate) async fn write(&mut self, bytes: Bytes) -> Result<()> {
         if self.standalone.is_none()
             && (self.ordinary || self.buffer.len().saturating_add(bytes.len()) > WRITE_BYTES)
@@ -460,8 +465,6 @@ mod tests {
                 PackedTableWriter::new(shared.clone(), format!("table{id}"), id as u32, false);
             let mut writer = ParquetFileWriter::open_packed(
                 batch.schema(),
-                store.clone(),
-                "unused",
                 Some(ParquetWriterLimits {
                     row_group_rows: 8192,
                     flush_threshold_bytes: WRITE_BYTES,
@@ -623,6 +626,49 @@ mod tests {
         }
         async fn abort(&mut self) -> object_store::Result<()> {
             self.0.abort().await
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_parquet_failure_and_cancellation_abort_shared_destination() {
+        for cancel in [false, true] {
+            let directory = common_test_util::temp_dir::create_temp_dir("packed-ordinary-failure");
+            let store = object_store::secure_fs::SecureFsRoot::open(directory.path())
+                .unwrap()
+                .build_operator();
+            let factory: MockWriterFactory = Arc::new(|_, _, writer| Box::new(FailClose(writer)));
+            let store = store.layer(
+                MockLayerBuilder::default()
+                    .writer_factory(factory)
+                    .build()
+                    .unwrap(),
+            );
+            let shared = PackedWriter::new(store.clone()).unwrap();
+            let packed = PackedTableWriter::new(shared.clone(), "audit".into(), 42, true);
+            let batch = RecordBatch::try_from_iter([(
+                "value",
+                Arc::new(Int64Array::from(vec![1, 2, 3])) as ArrayRef,
+            )])
+            .unwrap();
+            let mut writer = ParquetFileWriter::open_packed(batch.schema(), None, packed).unwrap();
+            writer.write(batch, None).await.unwrap();
+            let token = CancellationToken::new();
+            if cancel {
+                token.cancel();
+            }
+            let error = writer.finish(Some(&token)).await.unwrap_err();
+            if cancel {
+                assert!(matches!(error, error::Error::ParquetWriteCancelled { .. }));
+            } else {
+                assert!(matches!(
+                    error,
+                    error::Error::WriteObject { ref path, .. } if path == "table-42.parquet"
+                ));
+            }
+            writer.abort().await.unwrap();
+            assert!(!store.exists("table-42.parquet").await.unwrap());
+            assert!(shared.lock().await.index.tables.is_empty());
+            assert!(!store.exists(PACK_INDEX_FILE).await.unwrap());
         }
     }
 

@@ -38,8 +38,22 @@ pub trait EventListener: Send + Sync {
     /// Notifies the listener before a catchup reopens the region.
     async fn on_catchup_reopen_begin(&self, _region_id: RegionId) {}
 
+    /// Notifies the listener after the worker handled the end of the region's wait for its
+    /// Leader lease.
+    fn on_leader_lease_wait_ended(&self, _region_id: RegionId) {}
+
+    /// Notifies the listener when the worker spawns the persisting of the region's backfilled
+    /// metadata.
+    fn on_persist_backfilled_metadata_begin(&self, _region_id: RegionId) {}
+
     /// Notifies the listener before a tail replay commits its result.
     async fn on_tail_commit_begin(&self, _region_id: RegionId) {}
+
+    /// Notifies the listener after a tail replay committed its result, before the worker is told.
+    async fn on_tail_commit_end(&self, _region_id: RegionId) {}
+
+    /// Notifies the listener after a discard of pending tails released the region's WAL.
+    fn on_discarded_tails_wal_released(&self, _region_id: RegionId) {}
 
     /// Notifies the listener each time a tail replay checks for a Leader lease while it waits.
     fn on_tail_lease_check(&self, _region_id: RegionId) {}

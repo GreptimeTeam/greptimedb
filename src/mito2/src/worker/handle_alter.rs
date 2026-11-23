@@ -151,6 +151,14 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         // Checks whether we can alter the region directly.
         if !version.memtables.is_empty() {
+            // A region that awaits its Leader lease cannot commit the flush.
+            if let Err(e) = region
+                .manifest_ctx
+                .ensure_leader_lease_or_downgrading(region_id)
+            {
+                sender.send(Err(e));
+                return;
+            }
             // If memtable is not empty, we can't alter it directly and need to flush
             // all memtables first.
             info!("Flush region: {} before alteration", region_id);

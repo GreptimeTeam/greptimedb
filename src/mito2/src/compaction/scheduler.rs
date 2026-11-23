@@ -36,6 +36,7 @@ pub(crate) use planning::CompactionPickFinished;
 pub use planning::CompactionRequest;
 #[cfg(test)]
 pub(crate) use planning::pick_automatic_for_test;
+pub use state::CompactionGuard;
 pub(crate) use state::{CompactionExecution, CompactionState, CompactionStateRef};
 use state::{CompactionStatus, CompactionTrigger, DdlExecution, PendingCompaction};
 #[cfg(test)]
@@ -53,7 +54,9 @@ use crate::error::{
 };
 use crate::region::ManifestContextRef;
 use crate::region::version::VersionControlRef;
-use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest, WorkerRequestWithTime};
+use crate::request::{
+    DdlRequest, OptionOutputTx, PauseCompactionResponse, SenderDdlRequest, WorkerRequestWithTime,
+};
 use crate::schedule::RequestCancelResult;
 use crate::worker::WorkerListener;
 
@@ -226,6 +229,18 @@ impl CompactionScheduler {
             CompactionStatus::new(region_id, version_control.clone(), access_layer.clone());
         status.shared_state = shared_state.clone();
         self.region_status.insert(region_id, status);
+    }
+
+    pub(crate) fn pause_compaction(
+        &mut self,
+        region_id: RegionId,
+        sender: tokio::sync::oneshot::Sender<Result<PauseCompactionResponse>>,
+    ) {
+        if let Some(status) = self.region_status.get_mut(&region_id) {
+            status.pause(sender);
+        } else {
+            let _ = sender.send(crate::error::RegionNotFoundSnafu { region_id }.fail());
+        }
     }
 
     /// Cancels an exact live identity, checking the pending slot before the active cycle.
@@ -575,6 +590,10 @@ impl CompactionScheduler {
         let status = self.region_status.entry(region_id).or_insert_with(|| {
             CompactionStatus::new(region_id, version_control.clone(), access_layer.clone())
         });
+        if status.is_paused() {
+            waiter.send(CompactionCancelledSnafu.fail());
+            return Ok(false);
+        }
         if status.has_ddl() {
             info!(
                 "Region {} has pending DDL requests, ignoring compaction: queued={}, executing={}",
@@ -589,6 +608,14 @@ impl CompactionScheduler {
         if current_state.in_staging_session() {
             info!(
                 "Skipping compaction for region {} in staging mode, options: {:?}",
+                region_id, compact_options
+            );
+            waiter.send(Ok(0));
+            return Ok(false);
+        }
+        if manifest_ctx.awaits_leader_lease() {
+            info!(
+                "Skipping compaction for region {} that awaits its Leader lease, options: {:?}",
                 region_id, compact_options
             );
             waiter.send(Ok(0));
@@ -669,7 +696,13 @@ impl CompactionScheduler {
         let Some(pending_request) = std::mem::take(&mut status.pending_request) else {
             return false;
         };
-        if status.has_pending_tails() {
+        let awaits_leader_lease = manifest_ctx.awaits_leader_lease();
+        if awaits_leader_lease {
+            info!(
+                "Region {region_id} awaits its Leader lease, answering its queued compaction without compacting"
+            );
+        }
+        if status.has_pending_tails() || awaits_leader_lease {
             status.pending_task_state = None;
             status.publish_state();
             pending_request.waiter.send(Ok(0));
@@ -768,7 +801,11 @@ impl CompactionScheduler {
         let Some(status) = self.region_status.get_mut(&region_id) else {
             return false;
         };
-        if status.has_pending_tails() {
+        let awaits_leader_lease = manifest_ctx.awaits_leader_lease();
+        if awaits_leader_lease {
+            info!("Region {region_id} awaits its Leader lease, starting no follow-up compaction");
+        }
+        if status.is_paused() || status.has_pending_tails() || awaits_leader_lease {
             return false;
         }
         // An external automatic trigger requires one unrestricted follow-up pick.

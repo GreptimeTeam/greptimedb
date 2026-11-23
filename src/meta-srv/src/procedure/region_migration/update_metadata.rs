@@ -58,14 +58,17 @@ impl State for UpdateMetadata {
                 ))
             }
             UpdateMetadata::Upgrade => {
-                self.upgrade_candidate_region(ctx, &procedure_ctx.provider)
-                    .await?;
+                let result = self
+                    .upgrade_candidate_region(ctx, &procedure_ctx.provider)
+                    .await;
 
+                // A failed upgrade may have switched the routes of some tables.
                 if let Err(err) = ctx.invalidate_table_cache().await {
                     warn!(
                         "Failed to broadcast the invalidate table cache message during the upgrade candidate, error: {err:?}"
                     );
                 };
+                result?;
                 Ok((Box::new(CloseDowngradedRegion), Status::executing(false)))
             }
             UpdateMetadata::Rollback => {
