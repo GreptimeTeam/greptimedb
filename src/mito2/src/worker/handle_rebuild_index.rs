@@ -631,7 +631,7 @@ async fn published_indexes_are_current(
     snapshot: &IndexBuildSnapshot,
     region: &MitoRegionRef,
     handle: &FileHandle,
-    file: &file::FileMetaRef,
+    file: &FileMeta,
     build_type: &IndexBuildType,
 ) -> Result<bool> {
     if !file.is_index_consistent_with_region(
@@ -648,7 +648,7 @@ async fn published_indexes_are_current(
     }
     let reader = region
         .access_layer
-        .read_sst(handle.with_updated_index(file.clone()))
+        .read_sst(handle.clone())
         .expected_metadata(Some(snapshot.metadata.clone()))
         .build()
         .await?;
@@ -745,6 +745,106 @@ mod tests {
             vec![sketched.file_id, plain.file_id],
             select(IndexBuildType::Manual)
         );
+    }
+
+    #[tokio::test]
+    async fn test_completion_check_preserves_latest_purge_version() {
+        use api::v1::SemanticType;
+        use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
+        use datatypes::json::{JsonSettings, JsonTypeHint};
+        use datatypes::prelude::ConcreteDataType;
+        use datatypes::schema::ColumnSchema;
+        use datatypes::types::json_type::JsonNativeType;
+        use store_api::metadata::ColumnMetadata;
+        use store_api::region_engine::RegionEngine;
+        use store_api::region_request::RegionRequest;
+
+        use crate::engine::compaction_test::put_and_flush;
+        use crate::sst::file_purger::FilePurger;
+        use crate::test_util::{TestEnv, rows_schema};
+
+        #[derive(Debug)]
+        struct Purger(std::sync::mpsc::Sender<u64>);
+
+        impl FilePurger for Purger {
+            fn purge_file(&self, file: FileMeta) {
+                self.0.send(file.index_version).unwrap();
+            }
+        }
+
+        let mut env = TestEnv::new().await;
+        let engine = env.create_engine(Default::default()).await;
+        let region_id = RegionId::new(1, 1);
+        let create = CreateRequestBuilder::new().build_with_index();
+        let schema = rows_schema(&create);
+        engine
+            .handle_request(region_id, RegionRequest::Create(create))
+            .await
+            .unwrap();
+        put_and_flush(&engine, region_id, &schema, 0..2).await;
+        let region = engine.get_region(region_id).unwrap();
+        let mut file = region.all_manifest_files().await.0.pop().unwrap();
+        assert!(file.exists_index());
+
+        // A path added after flush forces completion to check the physical SST schema.
+        let mut target = RegionMetadataBuilder::from_existing((*region.version().metadata).clone());
+        let mut json = ColumnSchema::new(
+            "payload",
+            ConcreteDataType::json2(JsonNativeType::object()),
+            true,
+        );
+        let hint = JsonTypeHint {
+            path: vec!["message".into()],
+            data_type: ConcreteDataType::string_datatype(),
+            inverted_index: true,
+            skipping_index: None,
+            fulltext_index: None,
+        };
+        json.with_extension_type(&Json2ExtensionType::new(Arc::new(JsonMetadata::new(
+            JsonSettings::try_new(vec![hint], Some(0)).unwrap(),
+        ))));
+        target.push_column_metadata(ColumnMetadata {
+            column_schema: json,
+            semantic_type: SemanticType::Field,
+            column_id: 10,
+        });
+        let snapshot = IndexBuildSnapshot {
+            metadata: Arc::new(target.build().unwrap()),
+            index_options: IndexOptions::default(),
+        };
+        let registry =
+            IndexRegistry::new(Default::default(), Default::default(), Default::default());
+
+        // The check captured v1 before a concurrent publication installed v2.
+        file.index_version = 1;
+        let stale = FileMetaRef::from(file.clone());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = FileHandle::new(stale.clone(), Arc::new(Purger(tx)));
+        file.index_version = 2;
+        let current = handle.with_updated_index(file);
+        assert!(index_needs_rebuild(
+            &registry,
+            &snapshot,
+            &stale,
+            IndexBuildType::Manual
+        ));
+        assert!(
+            published_indexes_are_current(
+                &registry,
+                &snapshot,
+                &region,
+                &handle,
+                &stale,
+                &IndexBuildType::Manual
+            )
+            .await
+            .unwrap()
+        );
+
+        current.mark_deleted();
+        drop(current);
+        drop(handle);
+        assert_eq!(rx.try_recv().unwrap(), 2);
     }
 
     #[derive(Debug)]
