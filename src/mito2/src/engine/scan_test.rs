@@ -7545,6 +7545,96 @@ async fn test_read_row_sequence_reports_no_foreign_file_row_creators_for_a_local
     );
 }
 
+/// A read that replays a cached range result does not open the files that produced its rows, so
+/// it cannot say which other regions created them: it must answer "unknown" instead of the
+/// "delivered none" an empty recorded set would say.
+#[tokio::test]
+async fn test_range_cache_replay_reports_unknown_foreign_file_row_creators() {
+    use std::time::Duration;
+
+    let mut env =
+        TestEnv::with_prefix("test_range_cache_replay_unknown_foreign_row_creators").await;
+    let engine = env
+        .create_engine(MitoConfig {
+            // The flat format is the one the range result cache covers.
+            default_flat_format: true,
+            range_result_cache_size: ReadableSize::mb(64),
+            ..Default::default()
+        })
+        .await;
+    let source = RegionId::new(1, 2);
+    let target = RegionId::new(1, 1);
+
+    // A source region that is not in append mode: its reads go through the ordered scan, which
+    // is the one that reads and fills the range cache.
+    let request = CreateRequestBuilder::new().build();
+    let schema = test_util::rows_schema(&request);
+    engine
+        .handle_request(source, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+    test_util::put_rows(
+        &engine,
+        source,
+        Rows {
+            schema,
+            rows: test_util::build_rows_for_key("0", 0, 5, 0),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, source, None).await;
+    let source_file = engine
+        .get_region(source)
+        .unwrap()
+        .manifest_ctx
+        .manifest()
+        .await
+        .files
+        .values()
+        .next()
+        .expect("source file")
+        .as_ref()
+        .clone();
+    engine
+        .handle_request(target, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    adopt_foreign_file(&engine, target, source_file, 6, false, None);
+
+    // A tag filter selects every row of the file and makes the range eligible for the cache.
+    let scan = || ScanRequest {
+        filters: vec![col("tag_0").eq(lit(ScalarValue::Utf8(Some("0".to_string()))))],
+        ..Default::default()
+    };
+
+    // The first read opens the adopted file and names its creator.
+    let (cold_rows, cold_creators) =
+        scan_partition_rows_and_foreign_creators(&engine, target, scan()).await;
+    assert_eq!(vec![0, 1000, 2000, 3000, 4000], cold_rows);
+    assert_eq!(Some(vec![source.as_u64()]), cold_creators);
+
+    // A later read of the same range replays the completed result once the publisher ran. It
+    // delivers the same rows without reading the file, so it states no creator at all.
+    let warm_creators = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let (rows, creators) =
+                scan_partition_rows_and_foreign_creators(&engine, target, scan()).await;
+            assert_eq!(cold_rows, rows, "a replay delivers the rows it replayed");
+            if creators.is_none() {
+                return creators;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the range result cache did not replay the range within the timeout");
+    assert_eq!(
+        None, warm_creators,
+        "a replayed range did not open the files its rows came from, so its creators are \
+         unknown rather than none"
+    );
+}
+
 /// Raw Mito output contains candidates after projection, filtering, and MVCC read processing.
 #[tokio::test]
 async fn test_mito_handle_query_raw_series_candidate_projection_and_mvcc() {

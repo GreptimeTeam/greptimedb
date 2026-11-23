@@ -31,6 +31,8 @@ use lazy_static::lazy_static;
 use prometheus::*;
 use session::context::QueryContextRef;
 
+use table::table::scan::RegionScanExec;
+
 use crate::dist_plan::MergeScanExec;
 use crate::error::Result;
 use crate::options::FlowQueryExtensions;
@@ -422,10 +424,10 @@ fn collect_observed_slices(
 ///
 /// The answer is `Some` only when **every** region scan that could have read a file stated
 /// what it delivered, and the region set is then the union of their answers. A scan that
-/// reported nothing — a build that predates the field, or a region whose metrics never
-/// arrived — latches the whole answer to `None`, because an answer covering part of the read
-/// must not claim that nothing came from another region. `Some(vec![])` is an affirmative
-/// "delivered none" and survives the merge as the empty set.
+/// reported nothing — a build that predates the field, a region whose metrics never arrived,
+/// or a plan node that never ended its stream — latches the whole answer to `None`, because an
+/// answer covering part of the read must not claim that nothing came from another region.
+/// `Some(vec![])` is an affirmative "delivered none" and survives the merge as the empty set.
 fn collect_foreign_file_row_creators(
     plan: Arc<dyn ExecutionPlan>,
     own: &RecordBatchMetrics,
@@ -445,6 +447,19 @@ fn collect_foreign_file_row_creators(
 
     let mut stack = vec![plan];
     while let Some(plan) = stack.pop() {
+        // A region scan keeps the answer its partition streams stated when they ended, which
+        // is the only source of it once the stream of a plan that ran in this process is
+        // rebuilt from the plan's figures. Its silence is a scan that did not report, so it
+        // latches the answer unknown.
+        if let Some(region_scan) = plan.downcast_ref::<RegionScanExec>() {
+            let creators = region_scan.foreign_file_row_creators();
+            merge_foreign_file_row_creators(
+                creators.as_deref(),
+                &mut merged,
+                &mut conclusive,
+                &mut unknown,
+            );
+        }
         if let Some(merge_scan) = plan.downcast_ref::<MergeScanExec>()
             && !merge_scan.is_flow_sink_scan()
         {
@@ -845,6 +860,127 @@ mod tests {
             None,
             collect_foreign_file_row_creators(plan, &own),
             "the merge scan's one region reported no metrics, so nothing about it is proved"
+        );
+    }
+
+    /// A plan that runs in this process states its answer through the region scan that read the
+    /// region, not through a stream that a rebuilt `RecordBatchMetrics` could still describe.
+    #[tokio::test]
+    async fn collect_foreign_file_row_creators_reads_the_local_region_scan() {
+        use common_recordbatch::adapter::RecordBatchMetrics;
+        use common_recordbatch::{RecordBatchStream, RecordBatches};
+        use datafusion::prelude::SessionContext;
+        use futures::TryStreamExt;
+        use store_api::region_engine::SinglePartitionScanner;
+
+        /// A partition stream that states what a Mito region's stream states when it ends.
+        struct ReportedStream {
+            inner: common_recordbatch::SendableRecordBatchStream,
+            creators: Option<Vec<u64>>,
+        }
+
+        impl futures::Stream for ReportedStream {
+            type Item = common_recordbatch::error::Result<common_recordbatch::RecordBatch>;
+
+            fn poll_next(
+                mut self: std::pin::Pin<&mut Self>,
+                cx: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Option<Self::Item>> {
+                std::pin::Pin::new(&mut self.inner).poll_next(cx)
+            }
+        }
+
+        impl RecordBatchStream for ReportedStream {
+            fn schema(&self) -> datatypes::schema::SchemaRef {
+                self.inner.schema()
+            }
+
+            fn output_ordering(&self) -> Option<&[common_recordbatch::OrderOption]> {
+                self.inner.output_ordering()
+            }
+
+            fn metrics(&self) -> Option<RecordBatchMetrics> {
+                Some(RecordBatchMetrics {
+                    foreign_file_row_creators: self.creators.clone(),
+                    ..Default::default()
+                })
+            }
+        }
+
+        fn region_scan(creators: Option<Vec<u64>>) -> Arc<dyn ExecutionPlan> {
+            let mut builder = store_api::metadata::RegionMetadataBuilder::new(RegionId::new(1, 1));
+            builder
+                .push_column_metadata(store_api::metadata::ColumnMetadata {
+                    column_schema: datatypes::schema::ColumnSchema::new(
+                        "field",
+                        datatypes::data_type::ConcreteDataType::float64_datatype(),
+                        true,
+                    ),
+                    semantic_type: api::v1::SemanticType::Field,
+                    column_id: 1,
+                })
+                .push_column_metadata(store_api::metadata::ColumnMetadata {
+                    column_schema: datatypes::schema::ColumnSchema::new(
+                        "ts",
+                        datatypes::data_type::ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    ),
+                    semantic_type: api::v1::SemanticType::Timestamp,
+                    column_id: 2,
+                })
+                .primary_key(vec![]);
+            let metadata = Arc::new(builder.build().unwrap());
+            let batches = RecordBatches::try_new(metadata.schema.clone(), vec![]).unwrap();
+            let stream = ReportedStream {
+                inner: batches.as_stream(),
+                creators,
+            };
+            let scanner = Box::new(SinglePartitionScanner::new(
+                Box::pin(stream),
+                false,
+                metadata,
+                None,
+            ));
+            Arc::new(
+                RegionScanExec::new(scanner, store_api::storage::ScanRequest::default(), None)
+                    .unwrap(),
+            )
+        }
+
+        async fn drain(plan: Arc<dyn ExecutionPlan>) {
+            let ctx = SessionContext::new();
+            let mut stream = plan.execute(0, ctx.task_ctx()).unwrap();
+            while stream.try_next().await.unwrap().is_some() {}
+        }
+
+        // The scan answered what its stream stated.
+        let plan = region_scan(Some(vec![7]));
+        assert_eq!(
+            None,
+            collect_foreign_file_row_creators(plan.clone(), &RecordBatchMetrics::default()),
+            "a scan whose stream has not ended states nothing"
+        );
+        drain(plan.clone()).await;
+        assert_eq!(
+            Some(vec![7]),
+            collect_foreign_file_row_creators(plan.clone(), &RecordBatchMetrics::default()),
+            "the plan states what its region scan delivered"
+        );
+        assert_eq!(
+            Some(vec![7]),
+            terminal_recordbatch_metrics_from_plan(plan)
+                .expect("a conclusive creator answer is terminal metrics")
+                .foreign_file_row_creators
+        );
+
+        // A scan whose stream stated nothing stays unknown: a read that did not report must
+        // not be read as "delivered none".
+        let plan = region_scan(None);
+        drain(plan.clone()).await;
+        assert_eq!(
+            None,
+            collect_foreign_file_row_creators(plan, &RecordBatchMetrics::default()),
+            "a scan that states no answer leaves the plan's answer unknown"
         );
     }
 

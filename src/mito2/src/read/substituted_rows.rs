@@ -24,6 +24,7 @@
 
 use std::collections::BTreeSet;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
@@ -162,6 +163,9 @@ impl ObservedPartitionExprs {
 #[derive(Debug, Default)]
 pub(crate) struct ForeignFileRowCreators {
     creators: Mutex<BTreeSet<u64>>,
+    /// Set when rows reached this scan's output without passing a reader that records them,
+    /// so the recorded set does not describe everything the scan delivered.
+    replay_unknown: AtomicBool,
 }
 
 pub(crate) type ForeignFileRowCreatorsRef = Arc<ForeignFileRowCreators>;
@@ -186,6 +190,17 @@ impl ForeignFileRowCreators {
             .insert(creator_region_id);
     }
 
+    /// Records that this scan delivered rows this accumulator cannot speak for, so its answer
+    /// is unknown instead of "delivered none".
+    ///
+    /// A range result replayed from the range cache, or read from a range another scan's
+    /// source produced, was decoded by a reader of that other scan: no file of this scan's
+    /// read was opened, so nothing here names the creators of the rows it delivered. The rows
+    /// are real, and a consumer must not hear that none of them came from another region.
+    pub(crate) fn record_replay_unknown(&self) {
+        self.replay_unknown.store(true, Ordering::Relaxed);
+    }
+
     /// Returns the recorded creator regions, sorted and deduplicated.
     pub(crate) fn entries(&self) -> Vec<u64> {
         self.creators
@@ -194,6 +209,15 @@ impl ForeignFileRowCreators {
             .iter()
             .copied()
             .collect()
+    }
+
+    /// Returns the answer this scan states: the creator regions whose rows it delivered, or
+    /// `None` when it cannot say which those were.
+    pub(crate) fn answer(&self) -> Option<Vec<u64>> {
+        if self.replay_unknown.load(Ordering::Relaxed) {
+            return None;
+        }
+        Some(self.entries())
     }
 }
 
@@ -370,9 +394,10 @@ impl RecordBatchStream for SubstitutedRowRangesStream {
         }
         // An answer, not an absence: this read states which adopted files it delivered rows
         // from even when that is none, so the caller can tell "delivered none" from the
-        // unknown an earlier build's payload states.
+        // unknown an earlier build's payload states. A read that replayed a range states
+        // nothing, because it did not open the files that produced the rows.
         if let Some(creators) = &self.foreign_file_row_creators {
-            metrics.foreign_file_row_creators = Some(creators.entries());
+            metrics.foreign_file_row_creators = creators.answer();
         }
         Some(metrics)
     }

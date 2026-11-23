@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeSet;
 use std::fmt::{self, Display};
 use std::future::Future;
 use std::marker::PhantomData;
@@ -737,6 +738,74 @@ pub struct RecordBatchMetrics {
     /// rows the query finally discarded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub foreign_file_row_creators: Option<Vec<u64>>,
+}
+
+/// The terminal creator answers of one region scan's partition streams, i.e. of a plan node
+/// that reads a region on several partitions of DataFusion parallelism.
+///
+/// Each partition's stream states, when it ends, which other regions' files it delivered rows
+/// from ([`RecordBatchMetrics::foreign_file_row_creators`]). The node as a whole states an
+/// answer only when every partition it planned to run ended and stated one: a partition that
+/// is still running, that never ran, or that ended without an answer leaves the node's answer
+/// unknown, because the partitions that did answer cover only part of the read.
+#[derive(Debug, Default)]
+pub struct ForeignFileRowCreatorReports {
+    state: Mutex<ForeignFileRowCreatorReportsState>,
+}
+
+#[derive(Debug, Default)]
+struct ForeignFileRowCreatorReportsState {
+    /// The partitions whose stream ended and stated an answer.
+    reported: BTreeSet<usize>,
+    /// The creator regions those partitions named.
+    creators: BTreeSet<u64>,
+    /// A partition ended without stating an answer, so no set of partitions can answer for
+    /// the node.
+    unknown: bool,
+    /// How many partitions the reporting node has, as last reported.
+    partitions: usize,
+}
+
+impl ForeignFileRowCreatorReports {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records the answer the stream of `partition` stated when it ended, `partitions` being
+    /// how many partitions the node runs.
+    ///
+    /// The count travels with the answer rather than with the node: a node whose partition
+    /// ranges are re-assigned before it runs reports the count it actually ran with, and a
+    /// report left by an earlier assignment only ever widens the answer, never narrows it.
+    pub fn record(&self, partition: usize, partitions: usize, answer: Option<Vec<u64>>) {
+        let mut state = self.lock();
+        state.partitions = partitions;
+        match answer {
+            Some(creators) => {
+                state.reported.insert(partition);
+                state.creators.extend(creators);
+            }
+            None => state.unknown = true,
+        }
+    }
+
+    /// The creators every partition reported together, or `None` when the partitions do not
+    /// state such an answer (yet).
+    pub fn answer(&self) -> Option<Vec<u64>> {
+        let state = self.lock();
+        // A node with no partition to report from answers nothing: nothing was read, so
+        // "delivered none" would be a claim about a read that never happened.
+        if state.unknown || state.partitions == 0 || state.reported.len() != state.partitions {
+            return None;
+        }
+        Some(state.creators.iter().copied().collect())
+    }
+
+    /// A panic while the state is held cannot leave it inconsistent (an insert is the only
+    /// mutation), so a poisoned lock is recovered instead of failing the caller.
+    fn lock(&self) -> std::sync::MutexGuard<'_, ForeignFileRowCreatorReportsState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
 }
 
 /// The partition expression of one region that a scan read rows of, i.e. one
@@ -1933,6 +2002,40 @@ mod test {
         .unwrap();
 
         assert_eq!(None, metrics.foreign_file_row_creators);
+    }
+
+    /// The partitions of a region scan answer together: their reports union, and a partition
+    /// that did not state an answer keeps the node's answer unknown.
+    #[test]
+    fn test_foreign_file_row_creator_reports_answer_for_all_partitions() {
+        let reports = ForeignFileRowCreatorReports::new();
+        assert_eq!(None, reports.answer(), "no partition reported yet");
+
+        reports.record(0, 2, Some(vec![7, 9]));
+        assert_eq!(
+            None,
+            reports.answer(),
+            "one partition answered and another has not"
+        );
+
+        reports.record(1, 2, Some(vec![9]));
+        assert_eq!(
+            Some(vec![7, 9]),
+            reports.answer(),
+            "the delivered creators are the union of what the partitions reported"
+        );
+
+        // A partition that ended without an answer covers part of the read, so no set of
+        // reported partitions can answer for the node.
+        let reports = ForeignFileRowCreatorReports::new();
+        reports.record(0, 2, Some(vec![7]));
+        reports.record(1, 2, None);
+        assert_eq!(None, reports.answer());
+
+        // An answer of "delivered none" from every partition is still an answer.
+        let reports = ForeignFileRowCreatorReports::new();
+        reports.record(0, 1, Some(vec![]));
+        assert_eq!(Some(vec![]), reports.answer());
     }
 
     /// An affirmative answer of "delivered none" is written as an empty array and read back as

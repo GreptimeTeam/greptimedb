@@ -47,6 +47,7 @@ use crate::read::read_columns::ReadColumns;
 use crate::read::scan_region::StreamContext;
 use crate::read::scan_util::PartitionMetrics;
 use crate::read::series_reader::SeriesRange;
+use crate::read::substituted_rows::ForeignFileRowCreators;
 use crate::region::options::MergeMode;
 #[cfg(any(test, feature = "test"))]
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
@@ -647,6 +648,7 @@ impl CachedRangeReader<'_> {
             self.metrics,
             files,
             scope,
+            self.stream_ctx.input.foreign_file_row_creators(),
             build,
         )
         .await
@@ -689,7 +691,7 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<(BoxedRecordBatchStream, usize)>>,
 {
-    load_shared_range(strategy, key, part_metrics, Vec::new(), scope, build).await
+    load_shared_range(strategy, key, part_metrics, Vec::new(), scope, None, build).await
 }
 
 async fn load_shared_range<F, Fut>(
@@ -698,6 +700,7 @@ async fn load_shared_range<F, Fut>(
     part_metrics: &PartitionMetrics,
     files: Vec<crate::sst::file::FileHandle>,
     scope: RangeCacheScope,
+    replay_evidence: Option<&ForeignFileRowCreators>,
     build: F,
 ) -> Result<(BoxedRecordBatchStream, usize)>
 where
@@ -713,6 +716,7 @@ where
             part_metrics.range_cache_metrics_reporter(),
             files,
             scope,
+            replay_evidence,
             build,
         )
         .await
