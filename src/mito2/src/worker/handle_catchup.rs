@@ -146,7 +146,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         });
     }
 
-    /// Catches up again a region that a catchup promoted and that no Leader lease followed. The
+    /// Catches a region up again that a catchup promoted and that no Leader lease followed. The
     /// region stays registered, demoted unless it is in a transient leader state, while a
     /// replacement opened from its manifest replays the WAL outside the worker;
     /// [Self::handle_caught_up_again] registers the replacement only if its replay succeeded (on

@@ -1542,6 +1542,20 @@ async fn memtable_rows(engine: &MitoEngine) -> u64 {
     region_recovery_state(engine, REGION_A).await.memtable_rows
 }
 
+/// Writes row 3 to [REGION_A] without the WAL.
+async fn put_row_without_wal(engine: &MitoEngine, schema: &[api::v1::ColumnSchema]) {
+    let request = RegionPutRequest {
+        skip_wal: true,
+        rows: rows(schema, 3, 4),
+        hint: None,
+        partition_expr_version: None,
+    };
+    engine
+        .handle_request(REGION_A, RegionRequest::Put(request))
+        .await
+        .unwrap();
+}
+
 /// Asserts that a catchup failed because its replay ended below the entries it had to reach.
 fn assert_replay_short(error: &BoxedError) {
     assert!(
@@ -1700,16 +1714,7 @@ async fn test_catchup_again_region_changed_during_durability_wait(
             engine
                 .set_region_role(REGION_A, RegionRole::Leader)
                 .unwrap();
-            let request = RegionPutRequest {
-                skip_wal: true,
-                rows: rows(&w.schema, 3, 4),
-                hint: None,
-                partition_expr_version: None,
-            };
-            engine
-                .handle_request(REGION_A, RegionRequest::Put(request))
-                .await
-                .unwrap();
+            put_row_without_wal(engine, &w.schema).await;
         }
         Interference::OwnCommit => {
             let mut manager = waiting.manifest_ctx.manifest_manager.write().await;
@@ -1734,15 +1739,16 @@ async fn test_catchup_again_region_changed_during_durability_wait(
         release_held_batch(&w.store, seal).await;
     }
     let error = catchup_result(catchup).await.unwrap_err();
-    assert!(!engine.is_region_catching_up(REGION_A));
     match interference {
         Interference::SkipWalWrite => {
             assert_eq!(StatusCode::RegionBusy, error.status_code(), "{error:?}");
+            assert!(!engine.is_region_catching_up(REGION_A));
             assert!(Arc::ptr_eq(waiting, &region(engine, REGION_A)));
             assert_eq!(4, memtable_rows(engine).await);
         }
         Interference::OwnCommit => {
             assert_eq!(StatusCode::RegionBusy, error.status_code(), "{error:?}");
+            assert!(!engine.is_region_catching_up(REGION_A));
             assert!(Arc::ptr_eq(waiting, &region(engine, REGION_A)));
             assert_eq!(3, memtable_rows(engine).await);
         }
@@ -1750,14 +1756,32 @@ async fn test_catchup_again_region_changed_during_durability_wait(
             assert_eq!(StatusCode::RegionBusy, error.status_code(), "{error:?}");
             // The worker reloads the kept, fenced instance once the catchup ends.
             wait_until(|| is_replaced(engine, waiting)).await;
+            assert!(!engine.is_region_catching_up(REGION_A));
             assert_eq!(3, memtable_rows(engine).await);
         }
         Interference::Close | Interference::CloseWaitFails => {
             assert_eq!(StatusCode::RegionNotFound, error.status_code(), "{error:?}");
+            assert!(!engine.is_region_catching_up(REGION_A));
             assert!(engine.get_region(REGION_A).is_none());
             assert!(!waiting.is_writable());
         }
     }
+}
+
+/// A successful catchup again replaces the region with an instance that holds only the rows its
+/// WAL replays: an unflushed row written without the WAL is dropped.
+#[tokio::test]
+async fn test_catchup_again_drops_rows_written_without_wal() {
+    let w = waiting_region("object-store-wal-catchup-again-skip-wal", AckMode::Durable).await;
+    let engine = &w.engine;
+    put_row_without_wal(engine, &w.schema).await;
+    assert_eq!(4, memtable_rows(engine).await);
+
+    catchup_result(spawn_catchup(engine, true, None))
+        .await
+        .unwrap();
+    assert!(is_replaced(engine, &w.waiting));
+    assert_eq!(3, memtable_rows(engine).await);
 }
 
 /// A catchup again whose replay falls short keeps the region's instance with its rows, and a

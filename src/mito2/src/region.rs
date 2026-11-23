@@ -322,7 +322,7 @@ impl MitoRegion {
         let _ = REGION_QUERY_SCANNED_BYTES.remove_label_values(labels);
     }
 
-    /// Stop background managers for this region.
+    /// Stops background managers for this region and fences off further promotions.
     pub(crate) async fn stop(&self) {
         self.manifest_ctx.promotion_fence.lock().unwrap().stopped = true;
         self.manifest_ctx
@@ -2218,7 +2218,7 @@ impl ManifestContext {
     ) -> LeaderLeasePromotion {
         // A writable leader that received its Leader lease needs no change and takes no lock. One
         // that awaits it takes the lock, so a catchup either demotes it first or finds the wait
-        // ended, see [Self::begin_catchup]; a staging leader is promoted below.
+        // ended, see `begin_catchup`; a staging leader is promoted below.
         if self.state.load() == RegionRoleState::Leader(RegionLeaderState::Writable)
             && self.leader_lease_received()
         {

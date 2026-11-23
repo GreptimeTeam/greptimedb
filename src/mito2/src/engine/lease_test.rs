@@ -874,6 +874,26 @@ async fn test_catchup_again_keeps_region_with_flush_in_flight() {
     assert_eq!(count_rows(&engine).await, 3);
 }
 
+/// Under a local WAL, which replays nothing, a successful catchup again drops the region's
+/// unflushed rows.
+#[tokio::test]
+async fn test_catchup_again_drops_unflushed_rows_under_local_wal() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("catchup-again-local-wal").await;
+    let (_listener, engine, schema) = create_region(&mut env, None).await;
+    promote_to_await_leader_lease(&engine, REGION_ID).await;
+    put(&engine, REGION_ID, &schema, 0).await.unwrap().unwrap();
+    let region = engine.get_region(REGION_ID).unwrap();
+    assert_eq!(count_rows(&engine).await, 3);
+
+    catchup(&engine).await.unwrap();
+    assert!(!Arc::ptr_eq(
+        &region,
+        &engine.get_region(REGION_ID).unwrap()
+    ));
+    assert_eq!(count_rows(&engine).await, 0);
+}
+
 /// Opens a region whose opener filled in the partition expression its manifest lacks and makes
 /// it writable by a catchup, after which it awaits its Leader lease. Returns the engine and the
 /// expression.
