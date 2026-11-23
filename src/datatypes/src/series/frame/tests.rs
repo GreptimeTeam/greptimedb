@@ -4773,6 +4773,168 @@ mod aggregate_state_acceptance {
         (batch, decoder)
     }
 
+    /// The row a producer builds is the row the frame it would have written carries.
+    ///
+    /// One encoder builds both: `from_state_series` for the single group a consumer merges in
+    /// process, and the frame encoder for the columns a boundary consumer decodes. So the labels,
+    /// the carried positions, the finality and every component value have to be identical - which is
+    /// what makes handing the row over a saving rather than a second semantics.
+    #[test]
+    fn a_state_row_is_the_row_the_frame_carries() {
+        let schema = state_schema(&["v"], 3);
+        let state = AggregateStateSchema::try_new(
+            Kind::Sum,
+            vec![Component::Value, Component::Compensation],
+        )
+        .unwrap();
+        let series = StateSeries {
+            metric: metric(Some("m"), &[("job", "x")]),
+            time: TimeAxis::from_grid_spans(
+                schema.eval_grid.clone().unwrap(),
+                vec![GridSpan::new(0, 2), GridSpan::new(2, 1)],
+            )
+            .unwrap(),
+            states: vec![values(3, 1.0)],
+        };
+        let direct =
+            StateFrameRow::from_state_series(&state, &schema, series.clone(), true).unwrap();
+
+        let (batch, decoder) = state_frame(
+            Kind::Sum,
+            &schema,
+            vec![GridSpan::new(0, 2), GridSpan::new(2, 1)],
+            series.states.clone(),
+            true,
+        );
+        let framed = decoder.decode_aggregate_state(&batch).unwrap();
+        assert_eq!(1, framed.len(), "one group is one row");
+        let framed = &framed[0];
+
+        assert_eq!(direct.metric(), framed.metric());
+        assert_eq!(direct.is_last(), framed.is_last());
+        assert_eq!(
+            direct.time().positions().collect::<Vec<_>>(),
+            framed.time().positions().collect::<Vec<_>>(),
+            "the same positions, in the same order"
+        );
+        let built = direct.fields().unwrap();
+        let decoded = framed.fields().unwrap();
+        assert_eq!(built.kind(), decoded.kind());
+        assert_eq!(built.components(), decoded.components());
+        assert_eq!(built.len(), decoded.len(), "the same fields");
+        for field in 0..built.len() {
+            let items = built.field(field).expect("the field is present");
+            for position in 0..items.len() {
+                assert_eq!(
+                    built.is_present(field, position).unwrap(),
+                    decoded.is_present(field, position).unwrap(),
+                    "field {field} at {position} is present on both"
+                );
+            }
+            assert_eq!(
+                built.field_values(field, Component::Value).unwrap(),
+                decoded.field_values(field, Component::Value).unwrap(),
+                "field {field} carries the same values"
+            );
+            assert_eq!(
+                built.field_values(field, Component::Compensation).unwrap(),
+                decoded
+                    .field_values(field, Component::Compensation)
+                    .unwrap(),
+                "field {field} carries the same compensations"
+            );
+        }
+    }
+
+    /// A group whose positions are on another grid is refused where the row is built.
+    ///
+    /// A row addresses positions on the grid its export declares; one folded on a different grid
+    /// names positions that grid does not have, so a merge reading it would either drop the
+    /// contribution or read another point's. The frame decoder never meets such a row - it builds
+    /// every axis on the grid the frame declares - so the in-process construction is where the
+    /// claim has to be checked, once, instead of at the merge.
+    #[test]
+    fn a_state_row_refuses_positions_on_another_grid() {
+        let schema = state_schema(&["v"], 3);
+        let state = AggregateStateSchema::try_new(
+            Kind::Sum,
+            vec![Component::Value, Component::Compensation],
+        )
+        .unwrap();
+        let other_grid = Arc::new(
+            crate::series::time::EvalGrid::try_new(
+                crate::series::time::GridSpec::try_new(0, 2, 3).unwrap(),
+            )
+            .unwrap(),
+        );
+        let series = StateSeries {
+            metric: metric(Some("m"), &[("job", "x")]),
+            time: TimeAxis::from_grid_spans(other_grid, vec![GridSpan::new(0, 1)]).unwrap(),
+            states: vec![values(1, 1.0)],
+        };
+        let error = match StateFrameRow::from_state_series(&state, &schema, series, true) {
+            Ok(_) => panic!("a group on another grid is not a row of this export"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("aggregate state positions are not on the series grid"),
+            "{error}"
+        );
+    }
+
+    /// A carried position no field contributes to is refused where the row is built.
+    ///
+    /// A position exists because a field has a contribution there: an all-absent one is a position
+    /// the merge would have to invent a state for, which is the same refusal `merge_row` makes of a
+    /// decoded row. Checking it here means both readings of one export refuse it in the same place,
+    /// before any row exists to merge.
+    #[test]
+    fn a_state_row_refuses_a_position_no_field_carries() {
+        let schema = state_schema(&["v"], 2);
+        let state = AggregateStateSchema::try_new(
+            Kind::Sum,
+            vec![Component::Value, Component::Compensation],
+        )
+        .unwrap();
+        let mut states = values(2, 1.0);
+        states[1] = None;
+        let series = StateSeries {
+            metric: metric(Some("m"), &[("job", "x")]),
+            time: TimeAxis::from_grid_spans(
+                schema.eval_grid.clone().unwrap(),
+                vec![GridSpan::new(0, 2)],
+            )
+            .unwrap(),
+            states: vec![states],
+        };
+        let error = match StateFrameRow::from_state_series(&state, &schema, series, true) {
+            Ok(_) => panic!("a position no field carries is not a row of this export"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("aggregate state names a position with no contribution"),
+            "{error}"
+        );
+
+        // The same group with a contribution at that position is a row.
+        let series = StateSeries {
+            metric: metric(Some("m"), &[("job", "x")]),
+            time: TimeAxis::from_grid_spans(
+                schema.eval_grid.clone().unwrap(),
+                vec![GridSpan::new(0, 2)],
+            )
+            .unwrap(),
+            states: vec![values(2, 1.0)],
+        };
+        let row = StateFrameRow::from_state_series(&state, &schema, series, true)
+            .expect("a contribution at every carried position is a row");
+        assert_eq!(2, row.time().len());
+    }
+
     fn floats(n: usize, seed: f64) -> Vec<Option<Values>> {
         (0..n)
             .map(|i| {

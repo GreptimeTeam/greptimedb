@@ -24,6 +24,7 @@ use crate::region::MitoRegionRef;
 use crate::sst::file::FileMeta;
 use crate::sst::location;
 use crate::sst::parquet::metadata::{MetadataLoader, extract_primary_key_range};
+use crate::sst::parquet::{max_row_group_decoded_size, max_row_group_uncompressed_size};
 
 /// Verifies every output, then notifies the region hook once if one is registered.
 ///
@@ -124,24 +125,16 @@ fn verify_statistics(
     metadata: &RegionMetadataRef,
     file: &FileMeta,
 ) -> Result<()> {
-    let max_uncompressed = footer
-        .row_groups()
-        .iter()
-        .map(|group| {
-            group
-                .columns()
-                .iter()
-                .map(|column| column.uncompressed_size() as u64)
-                .sum::<u64>()
-        })
-        .max()
-        .unwrap_or(0);
+    let max_uncompressed = max_row_group_uncompressed_size(footer);
     let pk_range = extract_primary_key_range(footer, metadata);
     ensure!(
         footer.file_metadata().num_rows() > 0
             && footer.file_metadata().num_rows() as u64 == file.num_rows
             && footer.num_row_groups() as u64 == file.num_row_groups
             && max_uncompressed == file.max_row_group_uncompressed_size
+            // Writers of older versions leave the decoded size unknown (0).
+            && (file.max_row_group_decoded_size == 0
+                || file.max_row_group_decoded_size == max_row_group_decoded_size(footer))
             && pk_range.as_ref().map(|range| &range.0) == file.primary_key_min.as_ref()
             && pk_range.as_ref().map(|range| &range.1) == file.primary_key_max.as_ref()
             // `num_series` is the writer's caller-reported estimate derived from

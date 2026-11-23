@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::collections::{HashMap, HashSet, hash_map};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, Weak};
 use std::time::Instant;
 
 use api::v1::region::compact_request;
@@ -24,6 +24,7 @@ use snafu::ResultExt;
 use store_api::compaction_task::{self, CompactionTaskEntry};
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::Sender;
+use tokio::sync::oneshot;
 
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
@@ -36,11 +37,13 @@ use crate::compaction::scheduler::local::{LocalCompaction, LocalCompactionState}
 use crate::compaction::scheduler::planning::CompactionRequest;
 use crate::config::MitoConfig;
 use crate::error::{
-    CompactRegionSnafu, CompactionCancelledSnafu, Error, ManualCompactionOverrideSnafu,
+    CompactRegionSnafu, CompactionCancelledSnafu, Error, ManualCompactionOverrideSnafu, Result,
 };
 use crate::region::ManifestContextRef;
 use crate::region::version::VersionControlRef;
-use crate::request::{OptionOutputTx, OutputTx, SenderDdlRequest, WorkerRequestWithTime};
+use crate::request::{
+    OptionOutputTx, OutputTx, PauseCompactionResponse, SenderDdlRequest, WorkerRequestWithTime,
+};
 #[cfg(test)]
 use crate::schedule::CancellableTaskState;
 use crate::schedule::RequestCancelResult;
@@ -363,6 +366,9 @@ impl DdlExecution {
 pub(super) struct CompactionStatus {
     /// Current cycles shared with queries without entering the region worker.
     pub(crate) shared_state: CompactionStateRef,
+    /// Live guards and callers waiting for in-flight work to finish.
+    pause: Weak<()>,
+    pause_waiters: Vec<oneshot::Sender<Result<()>>>,
     /// Resident automatic-pick history, retained across batches until region unload.
     pub(crate) pick_history: PickHistory,
     /// Id of the region.
@@ -390,7 +396,60 @@ pub(super) struct CompactionStatus {
     pub(crate) executing_ddl: Option<DdlExecution>,
 }
 
+/// Prevents new compactions on one loaded region until its last guard is dropped.
+#[derive(Debug)]
+#[must_use]
+pub struct CompactionGuard {
+    _token: Arc<()>,
+}
+
 impl CompactionStatus {
+    pub(super) fn is_paused(&self) -> bool {
+        self.pause.strong_count() != 0
+    }
+
+    pub(super) fn pause(&mut self, sender: oneshot::Sender<Result<PauseCompactionResponse>>) {
+        let token = self.pause.upgrade().unwrap_or_else(|| {
+            let token = Arc::new(());
+            self.pause = Arc::downgrade(&token);
+            token
+        });
+        let guard = CompactionGuard { _token: token };
+        if !self.is_compacting() {
+            let _ = sender.send(Ok(PauseCompactionResponse { guard, idle: None }));
+            return;
+        }
+
+        let (notify, idle) = oneshot::channel();
+        if sender
+            .send(Ok(PauseCompactionResponse {
+                guard,
+                idle: Some(idle),
+            }))
+            .is_err()
+        {
+            return;
+        }
+
+        self.pause_waiters.retain(|waiter| !waiter.is_closed());
+        self.pause_waiters.push(notify);
+        self.cancel_pending();
+        self.request_cancel();
+    }
+
+    fn cancel_pending(&mut self) {
+        self.pending_task_state = None;
+        if let Some(pending) = self.pending_request.take() {
+            pending.waiter.send(CompactionCancelledSnafu.fail());
+        }
+    }
+
+    fn notify_idle(&mut self) {
+        for sender in self.pause_waiters.drain(..) {
+            let _ = sender.send(Ok(()));
+        }
+    }
+
     /// Cancels an exact identity, checking pending work before the active cycle.
     pub(crate) fn cancel_task(&mut self, task_id: &str) -> CancelCompactionResult {
         if self
@@ -398,10 +457,7 @@ impl CompactionStatus {
             .as_ref()
             .is_some_and(|state| state.entry.task_id.as_ref() == task_id)
         {
-            self.pending_task_state = None;
-            if let Some(pending) = self.pending_request.take() {
-                pending.waiter.send(CompactionCancelledSnafu.fail());
-            }
+            self.cancel_pending();
             self.publish_state();
             return CancelCompactionResult::CancelIssued;
         }
@@ -450,6 +506,8 @@ impl CompactionStatus {
     ) -> CompactionStatus {
         CompactionStatus {
             shared_state: Arc::new(RwLock::new(CompactionState::default())),
+            pause: Default::default(),
+            pause_waiters: Vec::new(),
             pick_history: PickHistory::default(),
             region_id,
             version_control,
@@ -492,6 +550,7 @@ impl CompactionStatus {
     pub(crate) fn become_idle(&mut self) {
         self.active = ActiveCompaction::idle();
         self.publish_state();
+        self.notify_idle();
     }
 
     #[cfg(test)]
@@ -590,6 +649,11 @@ impl CompactionStatus {
     }
 
     pub(super) fn on_failure(&mut self, err: Arc<Error>) {
+        for sender in self.pause_waiters.drain(..) {
+            let _ = sender.send(Err(err.clone()).context(CompactRegionSnafu {
+                region_id: self.region_id,
+            }));
+        }
         let mut active = std::mem::replace(&mut self.active, ActiveCompaction::idle());
         for waiter in active.waiters.drain(..) {
             waiter.send(Err(err.clone()).context(CompactRegionSnafu {
@@ -627,6 +691,7 @@ impl CompactionStatus {
             waiter.send(CompactionCancelledSnafu.fail());
         }
         self.publish_state();
+        self.notify_idle();
         true
     }
 
@@ -647,6 +712,7 @@ impl CompactionStatus {
         }
 
         self.publish_state();
+        self.notify_idle();
         std::mem::take(&mut self.pending_ddl_requests)
     }
 

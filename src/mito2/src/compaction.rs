@@ -41,11 +41,11 @@ use common_time::range::TimestampRange;
 pub(crate) use json2::{
     Json2RewritePlans, collect_json2_rewrite_plans, rewrite_json2_batch, rewrite_json2_schema,
 };
-pub use scheduler::CompactionRequest;
 pub(crate) use scheduler::{
     CancelCompactionResult, CompactionCoordinator, CompactionExecution, CompactionPickFinished,
     CompactionScheduler, CompactionState, CompactionStateRef, CompactionTransition,
 };
+pub use scheduler::{CompactionGuard, CompactionRequest};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use store_api::mito_engine_options::{TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM, TWCS_TRIGGER_FILE_NUM};
