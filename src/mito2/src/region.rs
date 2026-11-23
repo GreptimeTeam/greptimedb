@@ -2299,9 +2299,9 @@ impl ManifestContext {
     }
 
     /// Demotes the region to a follower for a lease the metasrv granted to it as the candidate of
-    /// a migration, unless the region [awaits its Leader lease](Self::awaits_leader_lease): the
-    /// catchup of the migration has made it writable, and the route switch that follows grants
-    /// that lease. Returns the state this call replaced, None if it left the state unchanged.
+    /// a migration, unless the region [awaits its Leader lease](Self::awaits_leader_lease) (a
+    /// catchup of the migration promoted it, and the route switch that follows grants that lease).
+    /// Returns the state this call replaced, None if it left the state unchanged.
     ///
     /// It holds the lock of [Self::promote_after_catchup], so a promotion is either seen or
     /// happens after the demotion.
@@ -3396,6 +3396,7 @@ mod tests {
         let env = SchedulerEnv::new().await;
         let region = Arc::new(build_test_region(&env).await);
         region.manifest_ctx.node_lease.enable();
+        // A writable leader, so a demotion that misses the fence returns Some and fails below.
         assert!(region.is_writable());
         assert!(!region.manifest_ctx.awaits_leader_lease());
         let demoted = run_blocked_on_fence(
