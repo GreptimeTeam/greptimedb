@@ -116,10 +116,9 @@ Compaction keeps references when it can. Readers leave references of external co
 
 - the input comes from another region;
 - an index or the partition rule reads the column;
-- an input does not declare the column external in its footer;
-- an input of the output references a sidecar that is being rewritten. The output then keeps no references at all, including references into healthy sidecars.
+- an input does not declare the column external in its footer.
 
-Garbage is reclaimed by rewriting. The referenced bytes of a sidecar, summed over the current files that reference it, tell how much of it is live. A value becomes garbage when a compaction drops its row, for example because a newer row overwrites it, and the output records fewer referenced bytes. When 50% or more of a sidecar is garbage, the next compaction of each file that references it resolves the values into the output's own sidecar. When no regular compaction is due, the compaction picker selects the files that reference such sidecars, one output per file. Once no file references the old sidecar, it is purged.
+Garbage is reclaimed by rewriting. The referenced bytes of a sidecar, summed over the current files that reference it, tell how much of it is live. A value becomes garbage when a compaction drops its row, for example because a newer row overwrites it, and the output records fewer referenced bytes. When 50% or more of a sidecar is garbage, the next compaction of each file that references it copies the live values of that sidecar into the output's own sidecar and rewrites their references; references into other sidecars are kept. The writer copies the compressed values as they are, without decompressing them. The reader does not resolve these references, because a resolved value can itself start with the prefix, and the writer would take it for a kept reference. When no regular compaction is due, the compaction picker selects the files that reference such sidecars, one output per file. Once no file references the old sidecar, it is purged.
 
 ## Worked example
 
@@ -149,7 +148,12 @@ f7.parquet -> f1.blob (48 of 128 MiB live), f2.blob (48 of 128 MiB live),
 f5, f6 leave the version; their sidecars stay
 ```
 
-`f1.blob` and `f2.blob` are now 62.5% garbage. The next compaction of `f7`, picked by the fallback if nothing else is due, resolves every value of `f7` into the sidecar of its output `f8`: 48 + 48 + 128 + 128 + 160 = 512 MiB. Afterwards only `f8` remains, and the sidecars of `f1`, `f2`, `f3`, `f4`, and `f6` are purged once their last reader finishes. The healthy sidecars are copied too, because they share an output with garbage ones; see Open questions.
+`f1.blob` and `f2.blob` are now 62.5% garbage. The next compaction of `f7`, picked by the fallback if nothing else is due, copies their 96 MiB of live values into the sidecar of its output `f8` and keeps the other references:
+
+```
+f8.parquet -> f8.blob (96 MiB), f3.blob, f4.blob, f6.blob
+f1.blob, f2.blob: no remaining reference -> purged after the last reader finishes
+```
 
 Time-to-live expiration works the same way: dropping expired SSTs removes their references, and a sidecar is purged once nothing references it.
 
@@ -181,7 +185,7 @@ When rows are overwritten in place (1 MiB JSON, the same keys written six times)
 Benefits:
 
 - The SST shrinks to the size of its small columns. Footers, metadata caches, region open, and the write cache work with that size.
-- Compaction cost does not grow with the payload. Live values are written at flush and copied again only when an output references a sidecar that is mostly garbage.
+- Compaction cost does not grow with the payload. Live values are written at flush and copied again only when their sidecar is mostly garbage.
 - Queries that skip the column skip its bytes, on local disks and on object storage.
 - The column type does not change, so the SQL surface, indexes, and query engine are unchanged.
 
@@ -190,7 +194,6 @@ Drawbacks:
 - Persisted format changes: sidecar objects, footer keys, and two `FileMeta` fields. SSTs of regions with external columns store the region metadata under the footer key `greptime:metadata_external` instead of `greptime:metadata`, so versions without the feature refuse to read them instead of returning references as values. The option must be enabled only after every datanode is upgraded, and such a region cannot be downgraded.
 - Sidecars hold about twice the live values in steady state: a sidecar stays until it is 50% garbage, and a value counts as garbage only after a compaction drops its row.
 - Up to twice as many objects, and one more request when a query reads a value that is not in the local cache.
-- A rewrite copies every value of the outputs involved, including values in healthy sidecars.
 - Field prefiltering is disabled for files with sidecars, for predicates on any field column.
 - After many compactions one SST can reference many sidecars, so a scan of the payload reads from many objects. The design does not bound this (see Open questions).
 
@@ -221,14 +224,15 @@ Write large values to object storage before the WAL. Every write request then wa
 
 Delete a sidecar with its SST and let compaction copy live values into its output, as Lance does by default. It needs no reference tracking, but compaction then costs as much as with inline values, which removes most of the benefit.
 
-## Shared blob files with an indirection table
+## Logical blob file ids
 
-Pebble maps a logical blob file id to a physical file, so a rewritten blob file does not require rewriting the SSTs that reference it. Once values are out of line, mito2's SSTs are small, and rewriting the SSTs that reference a sidecar costs little; the indirection would add a mapping to the manifest to save that rewrite.
+Pebble maps a logical blob file id to a physical file and addresses values by their index in the file. A rewrite writes empty placeholders for dead values, so the indexes stay valid and only the blob file changes; the SSTs that reference it do not.
+
+In this design a sidecar is reclaimed by compacting every file that references it. Each such rewrite is cheap, because SSTs are small once values are out of line, but reclamation is tied to compaction: a sidecar referenced by many files stays until each of them has been compacted. Logical ids would decouple the two at the cost of a mapping in the manifest, an offset table per rewritten sidecar, and one more read on a cold lookup. The reference format does not rule them out later: references already name their blob file, and a rewritten file could map old offsets to new ones without changing any reference.
 
 # Open questions
 
 - Reference depth. Pebble limits how many blob files an SST may reference and rewrites values once the limit is exceeded. Whether mito2 needs such a limit depends on how scans of the payload degrade as sidecars accumulate, which has not been measured.
-- Per-sidecar rewrites. An output that references a sidecar being rewritten resolves every value, so healthy sidecars are copied with the garbage ones. Keeping references into healthy sidecars needs the reader and the writer to agree on a per-sidecar choice instead of a per-column one.
 - Whether the 50% garbage threshold should be a table option.
 - Naming. A column option named `STORAGE` is close to the table option `storage`, which selects an object store.
 
