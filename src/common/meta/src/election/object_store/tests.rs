@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use common_error::ext::{ErrorExt, RetryHint};
@@ -24,14 +24,20 @@ use object_store::layers::mock::{
     Result, RpCreateDir, RpPresign, RpRead, RpRename, RpStat, Service, Timestamp, oio,
 };
 use object_store::{ObjectStore, ServiceInfo};
+use tokio::sync::{Notify, oneshot};
+use tokio::time::Instant;
 
 use super::*;
 
 // Explicitly supplies coherent response metadata. This is a protocol simulator,
 // not a claim about memory-service or real-backend semantics.
 #[derive(Debug, Default)]
-struct Data {
-    objects: HashMap<String, (Vec<u8>, Metadata)>,
+pub(crate) struct Data {
+    pub(crate) requests: Vec<Request>,
+    read_actions: VecDeque<ReadAction>,
+    write_actions: VecDeque<WriteAction>,
+    next_write_error: Option<Error>,
+    pub(crate) objects: HashMap<String, (Vec<u8>, Metadata)>,
     seq: u64,
     writes: usize,
     ignore_conditions: bool,
@@ -58,8 +64,8 @@ enum ConflictMutation {
 }
 
 #[derive(Debug, Clone)]
-struct Backend {
-    data: Arc<Mutex<Data>>,
+pub(crate) struct Backend {
+    pub(crate) data: Arc<Mutex<Data>>,
     scheme: &'static str,
     capability: Capability,
 }
@@ -78,6 +84,112 @@ impl Default for Backend {
                 write_with_if_match: true,
                 ..Default::default()
             },
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Request {
+    Get(Instant),
+    Put(AuthorityHead),
+}
+
+#[derive(Debug)]
+enum ReadAction {
+    Pause(DeferredRead),
+    PauseResponse(DeferredRead),
+    Fail,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DeferredRead {
+    pub(crate) arrived: Arc<Notify>,
+    pub(crate) release: Arc<Notify>,
+}
+
+type WriteReceipt = (Result<Metadata>, oneshot::Sender<Result<Metadata>>);
+
+#[derive(Debug)]
+struct WriteAction {
+    arrived: Arc<Notify>,
+    commit: oneshot::Receiver<bool>,
+    committed: oneshot::Sender<WriteReceipt>,
+}
+
+pub(crate) struct DeferredWrite {
+    pub(crate) arrived: Arc<Notify>,
+    commit: Option<oneshot::Sender<bool>>,
+    committed: oneshot::Receiver<WriteReceipt>,
+    receipt: Option<WriteReceipt>,
+}
+
+impl DeferredWrite {
+    pub(crate) async fn commit(&mut self, apply: bool) -> bool {
+        self.commit.take().unwrap().send(apply).unwrap();
+        let receipt = (&mut self.committed).await.unwrap();
+        let applied = receipt.0.is_ok();
+        self.receipt = Some(receipt);
+        applied
+    }
+
+    pub(crate) fn respond(mut self) -> bool {
+        let (result, reply) = self.receipt.take().unwrap();
+        reply.send(result).is_ok()
+    }
+}
+
+impl Backend {
+    pub(crate) fn pause_next_read(&self) -> DeferredRead {
+        self.pause_read(ReadAction::Pause)
+    }
+
+    pub(crate) fn pause_next_read_response(&self) -> DeferredRead {
+        self.pause_read(ReadAction::PauseResponse)
+    }
+
+    fn pause_read(&self, action: impl FnOnce(DeferredRead) -> ReadAction) -> DeferredRead {
+        let gate = DeferredRead {
+            arrived: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+        };
+        self.data
+            .lock()
+            .unwrap()
+            .read_actions
+            .push_back(action(gate.clone()));
+        gate
+    }
+
+    pub(crate) fn fail_next_read(&self) {
+        self.data
+            .lock()
+            .unwrap()
+            .read_actions
+            .push_back(ReadAction::Fail);
+    }
+
+    pub(crate) fn fail_next_write(&self, error: Error) {
+        self.data.lock().unwrap().next_write_error = Some(error);
+    }
+
+    pub(crate) fn defer_next_write(&self) -> DeferredWrite {
+        let arrived = Arc::new(Notify::new());
+        let (commit_tx, commit) = oneshot::channel();
+        let (committed, committed_rx) = oneshot::channel();
+        self.data
+            .lock()
+            .unwrap()
+            .write_actions
+            .push_back(WriteAction {
+                arrived: arrived.clone(),
+                commit,
+                committed,
+            });
+        DeferredWrite {
+            arrived,
+            commit: Some(commit_tx),
+            committed: committed_rx,
+            receipt: None,
         }
     }
 }
@@ -157,7 +269,7 @@ impl Service for Backend {
     }
 }
 
-struct TestLister;
+pub(crate) struct TestLister;
 
 impl oio::List for TestLister {
     async fn next(&mut self) -> Result<Option<oio::Entry>> {
@@ -169,13 +281,28 @@ fn denied() -> Error {
     Error::new(ErrorKind::PermissionDenied, "injected permission failure")
 }
 
-struct TestReader {
+pub(crate) struct TestReader {
     data: Arc<Mutex<Data>>,
     path: String,
 }
 
 impl oio::Read for TestReader {
     async fn open(&self, _: BytesRange) -> Result<(RpRead, Box<dyn oio::ReadStreamDyn>)> {
+        let action = {
+            let mut data = self.data.lock().unwrap();
+            data.requests.push(Request::Get(Instant::now()));
+            data.read_actions.pop_front()
+        };
+        let pause_response = match action {
+            Some(ReadAction::Pause(gate)) => {
+                gate.arrived.notify_one();
+                gate.release.notified().await;
+                None
+            }
+            Some(ReadAction::PauseResponse(gate)) => Some((gate.arrived, gate.release)),
+            Some(ReadAction::Fail) => return Err(denied()),
+            None => None,
+        };
         let data = self.data.lock().unwrap();
         let (body, meta) = data
             .objects
@@ -190,7 +317,7 @@ impl oio::Read for TestReader {
             rp,
             Box::new(TestStream {
                 body: Buffer::from(body.clone()),
-                pause: data.pause.clone(),
+                pause: pause_response.or_else(|| data.pause.clone()),
             }),
         ))
     }
@@ -215,7 +342,8 @@ impl oio::ReadStream for TestStream {
     }
 }
 
-struct TestWriter {
+#[derive(Clone)]
+pub(crate) struct TestWriter {
     data: Arc<Mutex<Data>>,
     path: String,
     args: OpWrite,
@@ -242,11 +370,47 @@ impl oio::Write for TestWriter {
         if let Some(barrier) = barrier {
             barrier.wait().await;
         }
-        let mut data = self.data.lock().unwrap();
-        if data.write_barrier.is_some() {
-            data.writes_in_flight -= 1;
+        let action = {
+            let mut data = self.data.lock().unwrap();
+            if data.write_barrier.is_some() {
+                data.writes_in_flight -= 1;
+            }
+            data.writes += 1;
+            data.requests
+                .push(Request::Put(AuthorityHead::decode(&self.body).unwrap()));
+            data.write_actions.pop_front()
+        };
+        if let Some(action) = action {
+            let writer = self.clone();
+            let (response, client) = oneshot::channel();
+            // The server owns the conditional update even after the client stops waiting.
+            tokio::spawn(async move {
+                action.arrived.notify_one();
+                let result = match action.commit.await {
+                    Ok(true) => writer.commit(),
+                    Ok(false) => Err(denied()),
+                    Err(_) => return,
+                };
+                let _ = action.committed.send((result, response));
+            });
+            return client.await.unwrap_or_else(|_| {
+                Err(Error::new(ErrorKind::Unexpected, "lost response").set_temporary())
+            });
         }
-        data.writes += 1;
+        self.commit()
+    }
+
+    async fn abort(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
+impl TestWriter {
+    fn commit(&self) -> Result<Metadata> {
+        let mut data = self.data.lock().unwrap();
+        if let Some(error) = data.next_write_error.take() {
+            return Err(error);
+        }
         if data.fail == Some("write") {
             return Err(Error::new(ErrorKind::Unexpected, "lost response").set_temporary());
         }
@@ -300,10 +464,6 @@ impl oio::Write for TestWriter {
             .insert(self.path.clone(), (self.body.clone(), meta.clone()));
         Ok(meta)
     }
-
-    async fn abort(&mut self) -> Result<()> {
-        Ok(())
-    }
 }
 
 fn corrupt_conflict(data: &mut Data, path: &str, mutation: Option<ConflictMutation>) {
@@ -326,7 +486,7 @@ fn corrupt_conflict(data: &mut Data, path: &str, mutation: Option<ConflictMutati
     data.corruptions += 1;
 }
 
-struct TestDeleter(Arc<Mutex<Data>>);
+pub(crate) struct TestDeleter(Arc<Mutex<Data>>);
 
 impl oio::Delete for TestDeleter {
     async fn delete(&mut self, path: &str, _: OpDelete) -> Result<()> {
@@ -344,7 +504,7 @@ impl oio::Delete for TestDeleter {
     }
 }
 
-fn store(backend: &Backend) -> HeadStore {
+pub(crate) fn store(backend: &Backend) -> HeadStore {
     HeadStore::new_for_test(
         ObjectStore::from_parts(OperationContext::default(), Arc::new(backend.clone())),
         "cluster",
