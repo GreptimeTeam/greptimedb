@@ -571,23 +571,31 @@ where
         let Some(limits) = self.memory.limits else {
             return Ok(());
         };
-        if let Some(SstArrowWriter::Serial(writer)) = &mut self.writer {
+        if let Some(writer) = &mut self.writer {
+            let (memory_size, row_groups) = match writer {
+                SstArrowWriter::Serial(writer) => {
+                    (writer.memory_size(), writer.flushed_row_groups())
+                }
+                SstArrowWriter::Parallel(writer) => {
+                    (writer.memory_size(), writer.flushed_row_groups())
+                }
+            };
             ensure!(
-                writer.memory_size() <= limits.working_bytes,
+                memory_size <= limits.working_bytes,
                 crate::error::SstWriteMemoryExceededSnafu {
                     kind: "encoder",
-                    bytes: writer.memory_size(),
+                    bytes: memory_size,
                     limit: limits.working_bytes,
                 }
             );
-            for group in &writer.flushed_row_groups()[self.memory.row_groups..] {
+            for group in &row_groups[self.memory.row_groups..] {
                 let file = FileMetaData::new(1, 0, None, None, group.schema_descr_ptr(), None);
                 // Reuse Parquet's heap estimator; counting the schema per group
                 // is conservative, including variable-length min/max statistics.
                 let metadata = ParquetMetaData::new(file, vec![group.clone()]);
                 self.memory.current = self.memory.current.saturating_add(metadata.memory_size());
             }
-            self.memory.row_groups = writer.flushed_row_groups().len();
+            self.memory.row_groups = row_groups.len();
         }
         self.memory
             .check(self.memory.completed.saturating_add(self.memory.current))
@@ -955,8 +963,7 @@ where
                 self.bytes_written.clone(),
             );
             let schema = maybe_wrap_schema(schema)?;
-            let arrow_writer = if self.memory.limits.is_none()
-                && opts.encode_parallelism > 1
+            let arrow_writer = if opts.encode_parallelism > 1
                 && ParallelArrowWriter::<SizeAwareWriter<F::Writer>>::supports(&writer_props)
             {
                 SstArrowWriter::Parallel(
@@ -968,7 +975,9 @@ where
                         opts.encode_runtime,
                     )
                     .map_err(map_write_error)?
-                    .with_cancellation(self.cancellation.clone()),
+                    .with_cancellation(self.cancellation.clone())
+                    .with_write_guard(self.write_guard.clone())
+                    .with_working_limit(self.memory.limits.map(|limits| limits.working_bytes)),
                 )
             } else {
                 SstArrowWriter::Serial(
@@ -1007,6 +1016,17 @@ fn map_write_error(error: ParquetError) -> Error {
     for source in std::iter::successors(Some(&error as &(dyn StdError + 'static)), |source| {
         (*source).source()
     }) {
+        if let Some(Error::SstWriteMemoryExceeded {
+            kind, bytes, limit, ..
+        }) = source.downcast_ref::<Error>()
+        {
+            return crate::error::SstWriteMemoryExceededSnafu {
+                kind: *kind,
+                bytes: *bytes,
+                limit: *limit,
+            }
+            .build();
+        }
         if source.is::<Cancelled>() {
             return crate::error::SstWriteCancelledSnafu.build();
         }
@@ -1674,7 +1694,7 @@ mod tests {
         let queued = runtime.spawn_blocking(move || {
             queued_started_task.store(true, Ordering::SeqCst);
             drop(queued_batch);
-            Ok((Vec::new(), Vec::new()))
+            Ok(crate::sst::parquet::parallel_writer::EncodedFields::default())
         });
         let SstArrowWriter::Parallel(parallel) = writer
             .maybe_init_writer(&encoding_schema, &opts)

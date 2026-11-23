@@ -75,6 +75,7 @@ impl<'a> TargetWriter<'a> {
             !self.context.cancellation.is_cancelled(),
             crate::error::CompactionCancelledSnafu
         );
+        let _stage = crate::compaction::multi_region::metrics::StageGuard::start("write_total");
         let request = self.request(source)?;
         let mut metrics = Metrics::new(WriteType::Compaction);
         let infos = self
@@ -91,6 +92,14 @@ impl<'a> TargetWriter<'a> {
                 },
             )
             .await?;
+        for (stage, elapsed) in [
+            ("encode_write_batch", metrics.write_batch),
+            ("update_index", metrics.update_index),
+            ("upload_parquet", metrics.upload_parquet),
+            ("upload_puffin", metrics.upload_puffin),
+        ] {
+            crate::compaction::multi_region::metrics::observe_stage(stage, elapsed);
+        }
         metrics.observe();
         let expression =
             crate::region::parse_partition_expr(self.target.metadata.partition_expr.as_deref())?;
@@ -156,7 +165,7 @@ impl<'a> TargetWriter<'a> {
             ),
             float_field_encoding: self.target.options.float_field_encoding,
             // Every resident encoder and its finish workspace are admitted together.
-            encode_parallelism: 1,
+            encode_parallelism: crate::compaction::multi_region::tuning().encode_parallelism,
             encode_runtime: EncodeRuntime::Compact,
         }
     }

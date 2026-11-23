@@ -37,7 +37,7 @@ use crate::engine::lease_test::promote_to_await_leader_lease;
 use crate::engine::region_hook::{RegionHook, RegionHookRef, VerifiedSstFileInfo};
 use crate::error::Error;
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
-use crate::region::MitoRegionRef;
+use crate::region::{MitoRegionRef, RegionLeaderState};
 use crate::sst::file::{ColumnIndexMetadata, FileMeta, IndexType, LEVEL_SHARED, SHARED_LEVEL_SLOT};
 use crate::sst::location;
 use crate::test_util::sst_util::new_sparse_primary_key;
@@ -925,6 +925,94 @@ async fn test_empty_target_replacement_preserves_other_shared_reference() {
 }
 
 #[tokio::test]
+async fn test_shared_ingest_snapshot_during_manifest_work() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(config()).await;
+    let region_id = RegionId::new(1, 1);
+    let (snapshot, _) = seed_shared_inputs(&engine, region_id, &[(0, 3), (3, 6)]).await;
+    let region = engine.get_region(region_id).unwrap();
+    let selected = &snapshot.inputs[0];
+    for state in [RegionLeaderState::Editing, RegionLeaderState::Altering] {
+        match state {
+            RegionLeaderState::Editing => region.set_editing(RegionLeaderState::Writable).unwrap(),
+            RegionLeaderState::Altering => region.set_altering().unwrap(),
+            _ => unreachable!(),
+        }
+        let planning = engine.table_compaction_snapshot(region_id).unwrap();
+        assert_eq!(snapshot.metadata, planning.metadata);
+        assert_eq!(snapshot.options, planning.options);
+        assert_eq!(snapshot.inputs, planning.inputs);
+        let options = engine.shared_ingest_snapshot(region_id, &[]).unwrap();
+        assert_eq!(snapshot.options, options.options);
+        assert!(options.inputs.is_empty());
+        let admission = engine
+            .shared_ingest_snapshot(region_id, &[selected.file_id, FileId::random()])
+            .unwrap();
+        assert_eq!(vec![selected.clone()], admission.inputs);
+        region.switch_state_to_writable(state);
+    }
+    region.set_role(RegionRole::Follower);
+    assert!(engine.table_compaction_snapshot(region_id).is_err());
+    assert!(engine.shared_ingest_snapshot(region_id, &[]).is_err());
+    region.set_role(RegionRole::Leader);
+    region.set_entering_staging().unwrap();
+    assert!(engine.table_compaction_snapshot(region_id).is_err());
+    assert!(engine.shared_ingest_snapshot(region_id, &[]).is_err());
+}
+
+#[tokio::test]
+async fn test_shared_ingest_queues_behind_table_publication() {
+    let hook = Arc::new(PublicationBarrier {
+        after_commit: false,
+        armed: AtomicBool::new(false),
+        entered: Default::default(),
+        resume: Default::default(),
+    });
+    let plugins = Plugins::new();
+    plugins.insert(hook.clone() as RegionHookRef);
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine_with_plugins(config(), plugins).await;
+    let region_id = RegionId::new(1, 1);
+    let (snapshot, output) = seed(&engine, region_id).await;
+    let region = engine.get_region(region_id).unwrap();
+    let mut incoming = copy_sst(&region, &output, LEVEL_SHARED).await;
+    incoming.sequence = None;
+    hook.armed.store(true, Ordering::SeqCst);
+    let (publication, admission) =
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::join!(
+                engine.publish_table_compaction(region_id, snapshot, vec![output]),
+                async {
+                    hook.entered.notified().await;
+                    // Admission checks can read committed options while the worker is Editing.
+                    engine.shared_ingest_snapshot(region_id, &[]).unwrap();
+                    let edit = engine.edit_region(
+                        region_id,
+                        RegionEdit {
+                            files_to_add: vec![incoming.clone()],
+                            ..Default::default()
+                        },
+                    );
+                    tokio::pin!(edit);
+                    assert!(futures::poll!(&mut edit).is_pending());
+                    hook.resume.notify_one();
+                    edit.await
+                }
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(PublicationOutcome::Applied, publication.unwrap());
+    admission.unwrap();
+    let installed = engine
+        .shared_ingest_snapshot(region_id, &[incoming.file_id])
+        .unwrap();
+    assert_eq!(1, installed.inputs.len());
+    assert!(installed.inputs[0].sequence.is_some());
+    assert_eq!(3, row_count(&engine, region_id).await);
+}
+
+#[tokio::test]
 async fn test_staging_rejects_publication_without_changing_files() {
     use store_api::region_request::{EnterStagingRequest, StagingPartitionDirective};
     let mut env = TestEnv::new().await;
@@ -949,6 +1037,12 @@ async fn test_staging_rejects_publication_without_changing_files() {
             .is_err()
     );
     assert!(region.is_staging());
+    region.set_editing(RegionLeaderState::Staging).unwrap();
+    assert!(matches!(
+        engine.table_compaction_snapshot(region_id),
+        Err(Error::RegionBusy { .. })
+    ));
+    region.switch_state_to_staging(RegionLeaderState::Editing);
     assert_eq!(version, region.manifest_ctx.manifest_version().await);
     assert_eq!(
         1,

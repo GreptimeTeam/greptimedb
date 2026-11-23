@@ -16,6 +16,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 
 use datatypes::arrow::record_batch::RecordBatch;
 use futures::stream::FuturesUnordered;
@@ -25,6 +26,7 @@ use store_api::storage::RegionId;
 use tokio::sync::mpsc;
 use tokio_util::task::AbortOnDropHandle;
 
+use crate::compaction::multi_region::metrics::{self, StageGuard};
 use crate::compaction::multi_region::source::SharedSource;
 use crate::compaction::multi_region::{
     MultiRegionCompactionContext, MultiRegionCompactionOutput, MultiRegionCompactionPlan,
@@ -46,6 +48,21 @@ pub(crate) async fn execute(
     counters: Arc<SourceCounters>,
 ) -> Result<MultiRegionCompactionOutput> {
     let _cancel_on_drop = source.cancel_on_drop();
+    let table_id = plan
+        .targets
+        .keys()
+        .next()
+        .context(InvalidMultiRegionCompactionSnafu {
+            reason: "Compaction requires at least one target",
+        })?
+        .table_id();
+    let started = Instant::now();
+    let progress_interval = Duration::from_secs(30);
+    let mut progress = tokio::time::interval_at(
+        tokio::time::Instant::now() + progress_interval,
+        progress_interval,
+    );
+    progress.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let plan = Arc::new(plan);
     let context = Arc::new(context);
     let mut senders = BTreeMap::new();
@@ -69,14 +86,17 @@ pub(crate) async fn execute(
         workers.push(AbortOnDropHandle::new(common_runtime::spawn_compact(
             async move {
                 let stream = async_stream::try_stream! {
-                    while let Message::Batch(batch) = receiver
-                        .recv()
-                        .await
-                        .context(InvalidMultiRegionCompactionSnafu {
-                            reason: "Source channel closed without Finish",
-                        })?
-                    {
-                        yield batch;
+                    loop {
+                        let message = {
+                            let _stage = StageGuard::start("target_input_wait");
+                            receiver.recv().await.context(InvalidMultiRegionCompactionSnafu {
+                                reason: "Source channel closed without Finish",
+                            })?
+                        };
+                        match message {
+                            Message::Batch(batch) => yield batch,
+                            Message::Finish => break,
+                        }
                     }
                 };
                 let input = FlatSource::new_stream(schema, Box::pin(stream));
@@ -105,6 +125,21 @@ pub(crate) async fn execute(
     while !scan_finished || !workers.is_empty() {
         tokio::select! {
             biased;
+            _ = progress.tick() => {
+                common_telemetry::info!(
+                    "Table compaction progress: table_id={}, elapsed_secs={}, completed_input_files={}/{}, input_rows={}, store_page_bytes={}, completed_targets={}/{}, completed_target_output_rows={}, completed_target_output_bytes={}",
+                    table_id,
+                    started.elapsed().as_secs(),
+                    counters.files.load(Ordering::Relaxed),
+                    plan.sources.len(),
+                    counters.rows.load(Ordering::Relaxed),
+                    counters.store_page_bytes.load(Ordering::Relaxed),
+                    output.files.len(),
+                    plan.targets.len(),
+                    output.stats.output_rows,
+                    output.stats.output_bytes,
+                );
+            }
             Some(result) = workers.next(), if !workers.is_empty() => {
                 let (id, files, infos) = result.context(crate::error::JoinSnafu)??;
                 output.stats.output_rows += files
@@ -115,6 +150,9 @@ pub(crate) async fn execute(
                     .iter()
                     .map(|file| file.file_size + file.index_file_size)
                     .sum::<u64>();
+                metrics::progress("output_files", files.len() as u64);
+                metrics::progress("output_rows", files.iter().map(|file| file.num_rows).sum());
+                metrics::progress("output_bytes", files.iter().map(|file| file.file_size + file.index_file_size).sum());
                 output.files.insert(id, files);
                 output.sst_infos.insert(id, infos);
             }
@@ -144,7 +182,14 @@ async fn dispatch(
     senders: BTreeMap<RegionId, mpsc::Sender<Message>>,
 ) -> Result<()> {
     let mut batches = source.batches();
-    while let Some(event) = batches.try_next().await? {
+    loop {
+        let event = {
+            let _stage = StageGuard::start("merge_route_next");
+            batches.try_next().await?
+        };
+        let Some(event) = event else {
+            break;
+        };
         let sender = senders
             .get(&event.region_id)
             .context(InvalidMultiRegionCompactionSnafu {
@@ -159,6 +204,7 @@ async fn dispatch(
 }
 
 async fn send(sender: &mpsc::Sender<Message>, message: Message) {
+    let _stage = StageGuard::start("dispatch_wait");
     if sender.send(message).await.is_err() {
         // The supervisor reports the writer's original error, not a racing
         // channel-closed error. It also aborts siblings on failure or drop.

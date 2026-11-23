@@ -18,6 +18,7 @@
 //! caller; see [MultiRegionCompactionOutput::files] for the output level convention.
 
 mod memory;
+mod metrics;
 mod source;
 #[cfg(test)]
 mod tests;
@@ -25,8 +26,8 @@ mod worker;
 mod writer;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, LazyLock};
 
 use common_time::Timestamp;
 use partition::PartitionRuleRef;
@@ -46,6 +47,77 @@ use crate::sst::index::handler::IndexKindProviderRef;
 use crate::sst::index::registry::IndexRegistry;
 use crate::sst::parquet::SstInfo;
 use crate::sst::parquet::writer::SstWriteGuard;
+
+/// Process-local execution tuning shared with the table-compaction picker.
+/// Owners and executors must use the same settings; these are not serialized
+/// into the plan, and execution always rechecks the local memory budget.
+#[derive(Debug, Clone, Copy)]
+pub struct MultiRegionCompactionTuning {
+    /// Rows per source, merge and routed output batch; byte limits still apply.
+    pub batch_rows: usize,
+    /// Maximum concurrently prepared source batches; each source buffers at most one.
+    pub source_parallelism: usize,
+    /// Parallel column encoders per target writer, under its admitted byte budget.
+    pub encode_parallelism: usize,
+}
+
+/// Returns execution tuning captured once per process.
+pub fn tuning() -> &'static MultiRegionCompactionTuning {
+    static TUNING: LazyLock<MultiRegionCompactionTuning> = LazyLock::new(|| {
+        let batch_rows = read_tuning(
+            "GREPTIMEDB_EXPERIMENTAL_TABLE_COMPACTION_BATCH_ROWS",
+            64,
+            64,
+            1024,
+        );
+        let source_parallelism = read_tuning(
+            "GREPTIMEDB_EXPERIMENTAL_TABLE_COMPACTION_SOURCE_PARALLELISM",
+            4,
+            1,
+            32,
+        );
+        let encode_parallelism = read_tuning(
+            "GREPTIMEDB_EXPERIMENTAL_TABLE_COMPACTION_ENCODE_PARALLELISM",
+            2,
+            1,
+            32,
+        );
+        let tuning = MultiRegionCompactionTuning {
+            batch_rows,
+            source_parallelism,
+            encode_parallelism,
+        };
+        common_telemetry::info!("Table compaction execution tuning: {:?}", tuning);
+        tuning
+    });
+    &TUNING
+}
+
+fn read_tuning(name: &str, default: usize, min: usize, max: usize) -> usize {
+    match std::env::var(name) {
+        Ok(value) => match parse_tuning(&value, min, max) {
+            Some(value) => value,
+            None => {
+                common_telemetry::warn!(
+                    "Invalid {name}={value:?}; expected {min}..={max}, using {default}"
+                );
+                default
+            }
+        },
+        Err(std::env::VarError::NotPresent) => default,
+        Err(error) => {
+            common_telemetry::warn!("Cannot read {name}: {error}; using {default}");
+            default
+        }
+    }
+}
+
+fn parse_tuning(value: &str, min: usize, max: usize) -> Option<usize> {
+    value
+        .parse()
+        .ok()
+        .filter(|value| (min..=max).contains(value))
+}
 
 /// A target partition and the source versions currently visible in its sequence domain.
 #[derive(Debug, Clone)]
@@ -87,6 +159,9 @@ pub struct MultiRegionCompactionContext {
     pub cache: CacheManagerRef,
     pub config: Arc<MitoConfig>,
     pub protection: Arc<dyn SstWriteGuard>,
+    /// Retained by blocking preparation until it finishes, even if the caller
+    /// cancels and drops the execution future.
+    pub memory_admission: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
     pub cancellation: CancellationToken,
 }
 

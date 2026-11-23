@@ -28,7 +28,8 @@ use crate::sst::parquet::max_row_group_value_bytes;
 use crate::sst::parquet::writer::SstWriteLimits;
 use crate::sst::upload::buffered::UploadLimits;
 
-pub(crate) const BATCH_SIZE: usize = 64;
+/// Conservative byte-buffer scaling, independent of the configured batch row count.
+const BUFFER_BUDGET_FACTOR: usize = 64;
 /// Cap on the rows of one output row group.
 ///
 /// Every resident target admits an encoder sized by this count, while readers
@@ -43,6 +44,8 @@ pub(crate) const MAX_ROW_GROUP_SIZE: usize = 1024;
 #[derive(Clone)]
 pub(crate) struct MemoryLimits {
     pub(crate) arrow_batch_bytes: usize,
+    pub(crate) batch_rows: usize,
+    pub(crate) source_parallelism: usize,
     pub(crate) group: usize,
     pub(crate) index: usize,
     upload_reserved_bytes: usize,
@@ -64,12 +67,14 @@ impl MemoryLimits {
             .convert(&schema)
             .context(crate::error::WriteParquetSnafu)?
             .num_columns();
+        let tuning = crate::compaction::multi_region::tuning();
+        let batch_rows = tuning.batch_rows;
         let targets = plan.targets.len();
-        let batch_share = 64usize.saturating_mul(
+        let batch_share = BUFFER_BUDGET_FACTOR.saturating_mul(
             plan.sources
                 .len()
                 .saturating_add(targets)
-                .saturating_add(BATCH_SIZE + 4),
+                .saturating_add(batch_rows + 4),
         );
         let arrow_batch_bytes = upload.compute_bytes / batch_share;
         ensure!(
@@ -80,6 +85,8 @@ impl MemoryLimits {
         );
         Ok(Self {
             arrow_batch_bytes,
+            batch_rows,
+            source_parallelism: tuning.source_parallelism,
             group: upload.compute_bytes / 16,
             index: upload.compute_bytes / targets / 64,
             upload_reserved_bytes: upload.reserved_bytes,
@@ -91,7 +98,9 @@ impl MemoryLimits {
                 // also have a nonzero minimum, independent of batch row count.
                 working_bytes: (2usize << 20)
                     .saturating_add(columns.saturating_mul(128 << 10))
-                    .saturating_add(arrow_batch_bytes * (MAX_ROW_GROUP_SIZE / BATCH_SIZE)),
+                    .saturating_add(
+                        arrow_batch_bytes.saturating_mul(MAX_ROW_GROUP_SIZE.div_ceil(batch_rows)),
+                    ),
                 metadata_bytes: upload.compute_bytes / targets / 8,
                 upload_limits: upload.limits,
             },
@@ -153,9 +162,19 @@ impl MemoryLimits {
     ) -> Result<u64> {
         // Merge assembly can retain exhausted batches until an output batch is full.
         let mut bytes = 4_u64
-            .saturating_mul((plan.sources.len() as u64).saturating_add((BATCH_SIZE + 2) as u64))
+            .saturating_mul(
+                (plan.sources.len() as u64).saturating_add((self.batch_rows + 2) as u64),
+            )
             .saturating_mul(self.arrow_batch_bytes as u64)
             .saturating_add(6 * self.group as u64);
+        // A prefetched source retains a queued batch and one being prepared.
+        if self.source_parallelism > 1 {
+            bytes = bytes.saturating_add(
+                2_u64
+                    .saturating_mul(plan.sources.len() as u64)
+                    .saturating_mul(self.arrow_batch_bytes as u64),
+            );
+        }
         for footer in footers {
             bytes = bytes.saturating_add(reader_bytes(footer));
         }

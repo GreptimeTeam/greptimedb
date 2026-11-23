@@ -18,7 +18,7 @@ mod tests;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
-use store_api::storage::RegionId;
+use store_api::storage::{FileId, RegionId};
 use tokio::sync::oneshot;
 
 use crate::engine::MitoEngine;
@@ -28,7 +28,7 @@ use crate::error::{
 };
 use crate::manifest::action::RegionEdit;
 use crate::region::options::RegionOptions;
-use crate::region::{RegionLeaderState, RegionRoleState};
+use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::request::{RegionEditKind, RegionEditRequest, WorkerRequest};
 use crate::sst::file::{FileMeta, SHARED_LEVEL_SLOT};
 
@@ -70,17 +70,12 @@ pub fn is_table_compaction_metadata_compatible(
 }
 
 impl MitoEngine {
+    /// Reads committed inputs while an ordinary edit or ALTER is in progress.
     pub fn table_compaction_snapshot(
         &self,
         region_id: RegionId,
     ) -> Result<TableCompactionSnapshot> {
-        let region = self
-            .find_region(region_id)
-            .context(RegionNotFoundSnafu { region_id })?;
-        ensure!(
-            region.state() == RegionRoleState::Leader(RegionLeaderState::Writable),
-            RegionBusySnafu { region_id }
-        );
+        let region = self.committed_compaction_region(region_id)?;
         let current = region.version_control.current();
         Ok(TableCompactionSnapshot {
             metadata: current.version.metadata.clone(),
@@ -90,6 +85,49 @@ impl MitoEngine {
                 .map(|file| file.meta_ref().clone())
                 .collect(),
         })
+    }
+
+    /// Reads committed shared inputs for admission checks, without requiring an idle worker.
+    ///
+    /// An empty selection reads only metadata and options. Lookups are bounded by the requested
+    /// file ids, not the region's file count. Editing/Altering leave the committed version readable;
+    /// actual admission still goes through the worker queue and its lifecycle checks.
+    /// This is not a compaction planning snapshot or a reservation of the selected inputs.
+    pub fn shared_ingest_snapshot(
+        &self,
+        region_id: RegionId,
+        file_ids: &[FileId],
+    ) -> Result<TableCompactionSnapshot> {
+        let region = self.committed_compaction_region(region_id)?;
+        let current = region.version_control.current();
+        let shared = &current.version.ssts.levels()[SHARED_LEVEL_SLOT];
+        Ok(TableCompactionSnapshot {
+            metadata: current.version.metadata.clone(),
+            options: serde_json::to_value(&current.version.options).context(SerdeJsonSnafu)?,
+            inputs: file_ids
+                .iter()
+                .filter_map(|id| shared.files.get(id))
+                .map(|file| file.meta_ref().clone())
+                .collect(),
+        })
+    }
+
+    fn committed_compaction_region(&self, region_id: RegionId) -> Result<MitoRegionRef> {
+        let region = self
+            .find_region(region_id)
+            .context(RegionNotFoundSnafu { region_id })?;
+        ensure!(
+            match region.state() {
+                RegionRoleState::Leader(
+                    RegionLeaderState::Writable | RegionLeaderState::Altering,
+                ) => true,
+                RegionRoleState::Leader(RegionLeaderState::Editing) =>
+                    region.manifest_ctx.staging_partition_info().is_none(),
+                _ => false,
+            },
+            RegionBusySnafu { region_id }
+        );
+        Ok(region)
     }
 
     /// Publishes one region independently, using compaction rather than import sequences.

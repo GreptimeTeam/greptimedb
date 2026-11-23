@@ -16,6 +16,7 @@
 
 use std::mem;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -29,10 +30,12 @@ use parquet::arrow::arrow_writer::{
 };
 use parquet::arrow::async_writer::AsyncFileWriter;
 use parquet::errors::{ParquetError, Result};
-use parquet::file::metadata::{KeyValue, ParquetMetaData};
+use parquet::file::metadata::{KeyValue, ParquetMetaData, RowGroupMetaData};
 use parquet::file::properties::WriterProperties;
 use parquet::file::writer::SerializedFileWriter;
 use tokio_util::sync::CancellationToken;
+
+use crate::sst::parquet::writer::SstWriteGuard;
 
 /// Runtime whose blocking pool encodes the columns of a writer.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -62,7 +65,14 @@ type FieldWriters = (usize, Vec<(usize, ArrowColumnWriter)>);
 
 /// Output of one encode task: column chunks by leaf index, and the time spent
 /// on each field.
-type EncodedFields = (Vec<(usize, ArrowColumnChunk)>, Vec<(usize, Duration)>);
+#[derive(Default)]
+pub(crate) struct EncodedFields {
+    chunks: Vec<(usize, ArrowColumnChunk)>,
+    costs: Vec<(usize, Duration)>,
+    // Kept after chunks so dropping an unobserved JoinHandle result releases
+    // its encoded buffers before the execution admission.
+    write_guard: Option<Arc<dyn SstWriteGuard>>,
+}
 
 /// Writes Parquet like [`parquet::arrow::AsyncArrowWriter`], but encodes the
 /// columns of each row group on up to `parallelism` blocking tasks.
@@ -93,6 +103,12 @@ pub struct ParallelArrowWriter<W> {
     encoding: Vec<JoinHandle<Result<EncodedFields>>>,
     num_row_groups: usize,
     cancellation: Option<CancellationToken>,
+    /// Bounded writers encode columns concurrently but do not overlap row groups.
+    working_limit: Option<usize>,
+    buffered_bytes: usize,
+    /// Output ownership may also retain execution admission until detached
+    /// blocking encoders finish after their async writer is cancelled.
+    write_guard: Option<Arc<dyn SstWriteGuard>>,
 }
 
 impl<W: AsyncFileWriter> ParallelArrowWriter<W> {
@@ -141,6 +157,9 @@ impl<W: AsyncFileWriter> ParallelArrowWriter<W> {
             encoding: Vec::new(),
             num_row_groups: 0,
             cancellation: None,
+            working_limit: None,
+            buffered_bytes: 0,
+            write_guard: None,
         })
     }
 
@@ -149,17 +168,49 @@ impl<W: AsyncFileWriter> ParallelArrowWriter<W> {
         self
     }
 
+    pub(crate) fn with_write_guard(mut self, guard: Option<Arc<dyn SstWriteGuard>>) -> Self {
+        self.write_guard = guard;
+        self
+    }
+
+    pub(crate) fn with_working_limit(mut self, limit: Option<usize>) -> Self {
+        self.working_limit = limit;
+        self
+    }
+
+    pub(crate) fn memory_size(&self) -> usize {
+        self.buffered_bytes
+    }
+
+    pub(crate) fn flushed_row_groups(&self) -> &[RowGroupMetaData] {
+        self.file_writer.flushed_row_groups()
+    }
+
     /// Buffers `batch`, starting to encode each row group once it is full.
     pub async fn write(&mut self, batch: &RecordBatch) -> Result<()> {
         let mut offset = 0;
         while offset < batch.num_rows() {
             check_cancelled(self.cancellation.as_ref())?;
             let len = (self.max_row_group_rows - self.buffered_rows).min(batch.num_rows() - offset);
-            self.buffered.push(batch.slice(offset, len));
+            let slice = batch.slice(offset, len);
+            if let Some(limit) = self.working_limit {
+                // Count retained buffers, including dictionary values. Shared buffers may
+                // be counted more than once; the bounded path is conservative.
+                self.buffered_bytes = self
+                    .buffered_bytes
+                    .saturating_add(slice.get_array_memory_size());
+                check_working_memory(self.buffered_bytes, limit)?;
+            }
+            self.buffered.push(slice);
             self.buffered_rows += len;
             offset += len;
             if self.buffered_rows == self.max_row_group_rows {
                 self.encode_buffered().await?;
+                if self.working_limit.is_some() {
+                    // The second workspace reserved by the caller covers finalization,
+                    // not another raw row group alongside the column encoders.
+                    self.finish_encoding().await?;
+                }
             }
         }
         Ok(())
@@ -215,7 +266,19 @@ impl<W: AsyncFileWriter> ParallelArrowWriter<W> {
 
         let batches: Arc<[RecordBatch]> = mem::take(&mut self.buffered).into();
         self.buffered_rows = 0;
+        let budget = self.working_limit.map(|limit| {
+            Arc::new(EncodingBudget {
+                bytes: AtomicUsize::new(self.buffered_bytes),
+                limit,
+            })
+        });
+        self.buffered_bytes = 0;
         let writers = self.factory.create_column_writers(self.num_row_groups)?;
+        if let Some(budget) = budget.as_ref() {
+            for writer in &writers {
+                budget.observe(&mut 0, writer.memory_size())?;
+            }
+        }
         self.num_row_groups += 1;
 
         // One array produces all leaves of a field, so a field is never split.
@@ -231,8 +294,24 @@ impl<W: AsyncFileWriter> ParallelArrowWriter<W> {
                 let batches = batches.clone();
                 let schema = self.arrow_schema.clone();
                 let cancellation = self.cancellation.clone();
-                self.runtime
-                    .spawn(move || encode_fields(&schema, &batches, fields, cancellation.as_ref()))
+                let budget = budget.clone();
+                let write_guard = self.write_guard.clone();
+                self.runtime.spawn(move || {
+                    let mut result = encode_fields(
+                        &schema,
+                        &batches,
+                        fields,
+                        cancellation.as_ref(),
+                        budget.as_deref(),
+                    );
+                    // A dropped async receiver does not stop a running blocking task.
+                    // Retain admission with returned chunks as well as the input arrays.
+                    drop(batches);
+                    if let Ok(encoded) = &mut result {
+                        encoded.write_guard = write_guard;
+                    }
+                    result
+                })
             })
             .collect();
         Ok(())
@@ -243,6 +322,7 @@ impl<W: AsyncFileWriter> ParallelArrowWriter<W> {
         if self.encoding.is_empty() {
             return Ok(());
         }
+        let mut guards = Vec::new();
         let mut chunks = Vec::with_capacity(self.leaf_fields.len());
         let mut tasks = mem::take(&mut self.encoding).into_iter();
         while let Some(task) = tasks.next() {
@@ -250,13 +330,18 @@ impl<W: AsyncFileWriter> ParallelArrowWriter<W> {
                 .await
                 .map_err(|e| ParquetError::External(Box::new(e)))
                 .and_then(|encoded| encoded);
-            let (task_chunks, costs) = match encoded {
+            let EncodedFields {
+                chunks: task_chunks,
+                costs,
+                write_guard,
+            } = match encoded {
                 Ok(encoded) => encoded,
                 Err(error) => {
                     abort_encoding_tasks(tasks.as_mut_slice()).await;
                     return Err(error);
                 }
             };
+            guards.push(write_guard);
             chunks.extend(task_chunks);
             for (field, cost) in costs {
                 self.field_costs[field] = cost;
@@ -268,7 +353,12 @@ impl<W: AsyncFileWriter> ParallelArrowWriter<W> {
             chunk.append_to_row_group(&mut row_group)?;
         }
         row_group.close()?;
-        self.write_buffered_bytes().await
+        if let Some(limit) = self.working_limit {
+            check_working_memory(self.file_writer.inner_mut().capacity(), limit)?;
+        }
+        let result = self.write_buffered_bytes().await;
+        drop(guards);
+        result
     }
 
     /// Moves the bytes assembled so far to the async writer.
@@ -330,17 +420,61 @@ fn check_cancelled(cancellation: Option<&CancellationToken>) -> Result<()> {
     Ok(())
 }
 
+/// Tracks the sum of per-column high-water marks until the entire row group is
+/// written. Completed column chunks remain charged while sibling tasks run.
+struct EncodingBudget {
+    bytes: AtomicUsize,
+    limit: usize,
+}
+
+impl EncodingBudget {
+    fn observe(&self, peak: &mut usize, bytes: usize) -> Result<()> {
+        if bytes > *peak {
+            let growth = bytes - *peak;
+            *peak = bytes;
+            let previous = self
+                .bytes
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |old| {
+                    Some(old.saturating_add(growth))
+                })
+                .unwrap();
+            check_working_memory(previous.saturating_add(growth), self.limit)?;
+        }
+        Ok(())
+    }
+}
+
+fn check_working_memory(bytes: usize, limit: usize) -> Result<()> {
+    if bytes > limit {
+        return Err(ParquetError::External(Box::new(
+            crate::error::SstWriteMemoryExceededSnafu {
+                kind: "encoder",
+                bytes,
+                limit,
+            }
+            .build(),
+        )));
+    }
+    Ok(())
+}
+
 /// Encodes `fields` of all `batches` and closes their column writers.
 fn encode_fields(
     schema: &SchemaRef,
     batches: &[RecordBatch],
     fields: Vec<FieldWriters>,
     cancellation: Option<&CancellationToken>,
+    budget: Option<&EncodingBudget>,
 ) -> Result<EncodedFields> {
     let mut chunks = Vec::new();
     let mut costs = Vec::with_capacity(fields.len());
     for (field, mut writers) in fields {
         let start = Instant::now();
+        // Initial writer allocations were charged before any encode task started.
+        let mut peaks = writers
+            .iter()
+            .map(|(_, writer)| writer.memory_size())
+            .collect::<Vec<_>>();
         for batch in batches {
             check_cancelled(cancellation)?;
             let leaves = compute_leaves(schema.field(field), batch.column(field))?;
@@ -352,18 +486,33 @@ fn encode_fields(
                     writers.len()
                 )));
             }
-            for (leaf, (_, writer)) in leaves.iter().zip(writers.iter_mut()) {
+            for ((leaf, (_, writer)), peak) in leaves.iter().zip(writers.iter_mut()).zip(&mut peaks)
+            {
                 check_cancelled(cancellation)?;
                 writer.write(leaf)?;
+                if let Some(budget) = budget {
+                    budget.observe(peak, writer.memory_size())?;
+                }
             }
         }
-        for (leaf, writer) in writers {
+        for ((leaf, writer), mut peak) in writers.into_iter().zip(peaks) {
             check_cancelled(cancellation)?;
-            chunks.push((leaf, writer.close()?));
+            let chunk = writer.close()?;
+            if let Some(budget) = budget {
+                budget.observe(
+                    &mut peak,
+                    usize::try_from(chunk.close().bytes_written).unwrap_or(usize::MAX),
+                )?;
+            }
+            chunks.push((leaf, chunk));
         }
         costs.push((field, start.elapsed()));
     }
-    Ok((chunks, costs))
+    Ok(EncodedFields {
+        chunks,
+        costs,
+        write_guard: None,
+    })
 }
 
 #[cfg(test)]
@@ -501,6 +650,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_bounded_parallel_writer_matches_arrow_writer() {
+        let steps = [
+            Step::Write(13),
+            Step::Write(120),
+            Step::Flush,
+            Step::Write(9),
+        ];
+        let expected = write_serial(&steps, props(64));
+        for parallelism in [1, 2, 4] {
+            let mut output = Vec::new();
+            let mut writer = ParallelArrowWriter::try_new(
+                &mut output,
+                schema(),
+                props(64),
+                parallelism,
+                EncodeRuntime::Global,
+            )
+            .unwrap()
+            .with_working_limit(Some(64 * 1024 * 1024));
+            let mut start = 0;
+            for step in steps {
+                match step {
+                    Step::Write(len) => {
+                        writer.write(&batch(start, len)).await.unwrap();
+                        start += len;
+                        assert!(
+                            writer.encoding.is_empty(),
+                            "bounded writes must join row-group encoders"
+                        );
+                    }
+                    Step::Flush => writer.flush().await.unwrap(),
+                }
+            }
+            writer.close().await.unwrap();
+            assert_eq!(expected, output);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bounded_parallel_writer_checks_buffered_and_encoder_memory() {
+        for limit in [1, batch(0, 64).get_array_memory_size()] {
+            let mut output = Vec::new();
+            let mut writer = ParallelArrowWriter::try_new(
+                &mut output,
+                schema(),
+                props(64),
+                4,
+                EncodeRuntime::Global,
+            )
+            .unwrap()
+            .with_working_limit(Some(limit));
+            let error = writer.write(&batch(0, 64)).await.unwrap_err();
+            let ParquetError::External(source) = error else {
+                panic!("Expected a typed memory budget error, got {error:?}");
+            };
+            assert!(
+                matches!(
+                    source.downcast_ref::<crate::error::Error>(),
+                    Some(crate::error::Error::SstWriteMemoryExceeded { .. })
+                ),
+                "Unexpected budget error: {source:?}"
+            );
+            writer.abort().await;
+        }
+    }
+
+    #[test]
+    fn test_encoding_budget_retains_finished_column_peaks() {
+        let budget = EncodingBudget {
+            bytes: AtomicUsize::new(10),
+            limit: 30,
+        };
+        let mut first = 0;
+        budget.observe(&mut first, 12).unwrap();
+        budget.observe(&mut first, 4).unwrap();
+        assert_eq!(22, budget.bytes.load(Ordering::Relaxed));
+        let mut second = 0;
+        assert!(budget.observe(&mut second, 9).is_err());
+    }
+
+    #[tokio::test]
     async fn test_parallel_writer_matches_arrow_writer() {
         use Step::*;
         let cases: Vec<(&str, Vec<Step>)> = vec![
@@ -572,6 +802,7 @@ mod tests {
                 &running_batches,
                 vec![(0, vec![(0, column)])],
                 None,
+                None,
             )?;
             Err(ParquetError::General("later encoding failure".to_string()))
         });
@@ -585,7 +816,7 @@ mod tests {
         let queued = runtime.spawn_blocking(move || {
             queued_started_task.store(true, Ordering::SeqCst);
             drop(batches);
-            Ok((Vec::new(), Vec::new()))
+            Ok(EncodedFields::default())
         });
         writer.encoding = vec![failed, running, queued];
 

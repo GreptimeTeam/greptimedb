@@ -316,6 +316,7 @@ impl Fixture {
                 cache: Arc::new(CacheManager::default()),
                 config: self.config.clone(),
                 protection: protection.clone(),
+                memory_admission: None,
                 cancellation: CancellationToken::new(),
             },
             protection,
@@ -1215,9 +1216,14 @@ async fn test_unmatched_partition_values_use_the_table_default_region() {
     }
 }
 
+#[rstest::rstest]
+#[case::dense(PrimaryKeyEncoding::Dense)]
+#[case::sparse(PrimaryKeyEncoding::Sparse)]
 #[tokio::test]
-async fn test_nullable_field_partitioning_preserves_delete_records() {
-    let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
+async fn test_nullable_field_partitioning_preserves_delete_records(
+    #[case] encoding: PrimaryKeyEncoding,
+) {
+    let fixture = Fixture::new(encoding, FormatType::Flat, 0).await;
     let mut plan = fixture.plan(2);
     let exprs = vec![
         col("field_0").lt(Value::UInt64(20)),
@@ -1251,6 +1257,176 @@ async fn test_nullable_field_partitioning_preserves_delete_records() {
         }
         assert_eq!(62, counts.0);
         assert_eq!(if id.region_sequence() == 0 { 31 } else { 0 }, counts.1);
+    }
+}
+
+#[tokio::test]
+async fn test_shared_compaction_preserves_dense_to_sparse_compatibility() {
+    let mut fixture = Fixture::new(PrimaryKeyEncoding::Sparse, FormatType::Flat, 7).await;
+    let mut builder = RegionMetadataBuilder::from_existing((*fixture.metadata).clone());
+    builder.primary_key_encoding(PrimaryKeyEncoding::Dense);
+    let dense = Arc::new(builder.build().unwrap());
+    // Construct a real dense input: query projection alone need not rewrite
+    // internal key bytes, even when its exposed metadata uses another encoding.
+    let sparse_codec = mito_codec::row_converter::build_primary_key_codec(&fixture.metadata);
+    let dense_codec = mito_codec::row_converter::build_primary_key_codec(&dense);
+    let batches = fixture
+        .read_output(fixture.source.clone(), fixture.metadata.clone())
+        .await
+        .into_iter()
+        .map(|batch| {
+            let key_index = primary_key_column_index(batch.num_columns());
+            let keys = cast(batch.column(key_index), &DataType::Binary).unwrap();
+            let keys = keys.as_any().downcast_ref::<BinaryArray>().unwrap();
+            let mut encoded = BinaryDictionaryBuilder::<UInt32Type>::new();
+            for key in keys.iter() {
+                let mito_codec::row_converter::CompositeValues::Sparse(values) =
+                    sparse_codec.decode(key.unwrap()).unwrap()
+                else {
+                    unreachable!()
+                };
+                let values: Vec<_> = dense
+                    .primary_key
+                    .iter()
+                    .map(|id| (*id, values.get_or_null(*id).clone()))
+                    .collect();
+                let mut key = Vec::new();
+                dense_codec.encode_values(&values, &mut key).unwrap();
+                let mito_codec::row_converter::CompositeValues::Dense(decoded) =
+                    dense_codec.decode(&key).unwrap()
+                else {
+                    unreachable!()
+                };
+                assert_eq!(values, decoded);
+                encoded.append(key).unwrap();
+            }
+            let mut columns = batch.columns().to_vec();
+            columns[key_index] = Arc::new(encoded.finish());
+            RecordBatch::try_new(
+                to_flat_sst_arrow_schema(
+                    &dense,
+                    &FlatSchemaOptions::from_encoding(PrimaryKeyEncoding::Dense),
+                ),
+                columns,
+            )
+            .unwrap()
+        })
+        .collect();
+    let info = fixture
+        .write_source(dense.clone(), batches, FormatType::Flat)
+        .await;
+    fixture.source = file_meta(info, dense.region_id);
+    let plan = fixture.plan(2);
+    let targets = plan.targets.clone();
+    let output = fixture.compact(plan).await;
+    assert_eq!(124, output.stats.output_rows);
+    for (id, files) in output.files {
+        let mut rows = Vec::new();
+        for file in files {
+            rows.extend(
+                fixture
+                    .read_output_rows(file, targets[&id].metadata.clone())
+                    .await,
+            );
+        }
+        rows.sort();
+        let sequence = if id == fixture.metadata.region_id {
+            7
+        } else {
+            100 + u64::from(id.region_sequence())
+        };
+        let mut expected = expected_source_rows(2, id, sequence);
+        expected.sort();
+        assert_eq!(expected, rows);
+    }
+}
+
+/// Wide sparse schemas must not become wide Arrow batches during routing or merge.
+#[tokio::test]
+async fn test_sparse_shared_compaction_keeps_unrelated_tags_encoded() {
+    let fixture = Fixture::new(PrimaryKeyEncoding::Sparse, FormatType::Flat, 7).await;
+    let mut plan = fixture.plan(2);
+    let expressions: Vec<_> = plan
+        .targets
+        .values_mut()
+        .map(|target| {
+            let expr =
+                crate::region::parse_partition_expr(target.metadata.partition_expr.as_deref())
+                    .unwrap()
+                    .unwrap()
+                    .and(col("tag_1").eq(Value::from("series")));
+            Arc::make_mut(&mut target.metadata)
+                .set_partition_expr(Some(expr.as_json_str().unwrap()));
+            expr
+        })
+        .collect();
+    plan.partition_rule = Arc::new(
+        MultiDimPartitionRule::try_new(
+            vec!["tag_0".into(), "tag_1".into()],
+            vec![0, 1],
+            expressions,
+            false,
+        )
+        .unwrap(),
+    );
+    for target in plan.targets.values_mut() {
+        let mut builder = RegionMetadataBuilder::from_existing((*target.metadata).clone());
+        let mut primary_key = target.metadata.primary_key.clone();
+        for id in 10..3610 {
+            builder.push_column_metadata(ColumnMetadata {
+                column_id: id,
+                semantic_type: SemanticType::Tag,
+                column_schema: ColumnSchema::new(
+                    format!("unused_tag_{id}"),
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+            });
+            primary_key.push(id);
+        }
+        builder.primary_key(primary_key);
+        target.metadata = Arc::new(builder.build().unwrap());
+    }
+    let targets = plan.targets.clone();
+    let (context, _) = fixture.context(None);
+    let source = source::SharedSource::build(
+        &plan,
+        &context,
+        validate_plan(&plan).unwrap(),
+        Arc::new(SourceCounters::default()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(5, source.schema().fields().len());
+    let mut batches = source.batches();
+    let mut rows = 0;
+    while let Some(event) = batches.try_next().await.unwrap() {
+        assert_eq!(5, event.batch.num_columns());
+        assert!(event.batch.column_by_name("tag_0").is_none());
+        rows += event.batch.num_rows();
+    }
+    assert_eq!(124, rows);
+
+    let output = fixture.compact(plan).await;
+    assert_eq!(124, output.stats.output_rows);
+    for (id, files) in output.files {
+        let mut rows = Vec::new();
+        for file in files {
+            rows.extend(
+                fixture
+                    .read_output_rows(file, targets[&id].metadata.clone())
+                    .await,
+            );
+        }
+        rows.sort();
+        let sequence = if id == fixture.metadata.region_id {
+            7
+        } else {
+            100 + u64::from(id.region_sequence())
+        };
+        let mut expected = expected_source_rows(2, id, sequence);
+        expected.sort();
+        assert_eq!(expected, rows);
     }
 }
 
@@ -3335,5 +3511,34 @@ async fn test_sparse_routing_with_wide_target_schema(#[case] target_tag_count: u
         rows.sort();
         expected.sort();
         assert_eq!(expected, rows);
+    }
+}
+
+#[test]
+fn test_batch_rows_configuration_bounds() {
+    for (value, expected) in [
+        ("64", Some(64)),
+        ("256", Some(256)),
+        ("1024", Some(1024)),
+        ("0", None),
+        ("63", None),
+        ("1025", None),
+        ("-1", None),
+        ("x", None),
+    ] {
+        assert_eq!(super::parse_tuning(value, 64, 1024), expected);
+    }
+}
+
+#[test]
+fn test_parallelism_configuration_bounds() {
+    for (value, expected) in [
+        ("0", None),
+        ("1", Some(1)),
+        ("4", Some(4)),
+        ("32", Some(32)),
+        ("33", None),
+    ] {
+        assert_eq!(super::parse_tuning(value, 1, 32), expected);
     }
 }
