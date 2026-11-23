@@ -11053,6 +11053,51 @@ mod tests {
         store.stop().await.unwrap();
     }
 
+    /// A durable hand-off whose record is still in the open batch when stop
+    /// begins is sealed into stop's last object and gets that object's
+    /// outcome: success with its record, or stopped if the create fails.
+    #[tokio::test]
+    async fn test_store_handoff_in_the_open_batch_at_stop_gets_the_last_object() {
+        let _serialized = SERIALIZED.lock().await;
+        for fail in [false, true] {
+            let store = open(memory_store(), &manual()).await;
+            let one = region(1);
+            let handoff = {
+                let store = store.clone();
+                tokio::spawn(async move { store.handoff(&provider(one), 0).await })
+            };
+            wait_for_handoff_waiters(&store, 1).await;
+            store.hold_creates();
+            let stop = {
+                let store = store.clone();
+                tokio::spawn(async move { store.stop().await })
+            };
+            store.wait_for_parked_creates(1).await.unwrap();
+            assert!(!handoff.is_finished());
+            if fail {
+                store.fail_creates();
+            }
+            store.release_creates();
+            let handoff = timeout(WAIT, handoff).await.unwrap().unwrap();
+            let stopped = timeout(WAIT, stop).await.unwrap().unwrap();
+            if fail {
+                assert!(
+                    matches!(handoff, Err(Error::ObjectStoreWalStopped { .. })),
+                    "{handoff:?}"
+                );
+                // Stop reports the record it lost.
+                assert!(stopped.is_err());
+            } else {
+                handoff.unwrap();
+                stopped.unwrap();
+                assert_eq!(
+                    vec![release(one, 0)],
+                    releases_of(store.io.as_ref(), 1).await
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn test_store_handoff_seals_an_issued_id_of_the_region_below_its_record() {
         let _serialized = SERIALIZED.lock().await;
