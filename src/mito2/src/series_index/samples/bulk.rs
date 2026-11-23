@@ -31,7 +31,7 @@ use crate::series_index::samples::{MAX_ROWS, codec, invalid, require};
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct NarthexBulkPart {
-    blocks: Vec<NarthexBulkBlock>,
+    blocks: Arc<Vec<NarthexBulkBlock>>,
 }
 
 #[derive(Debug, Clone)]
@@ -143,7 +143,7 @@ impl NarthexBulkPart {
                     Ok(column)
                 })
                 .collect::<Result<Vec<_>>>()?;
-            self.blocks.push(NarthexBulkBlock {
+            Arc::make_mut(&mut self.blocks).push(NarthexBulkBlock {
                 key: Bytes::copy_from_slice(keys.value(start)),
                 rows: end - start,
                 columns,
@@ -178,23 +178,16 @@ impl NarthexBulkPart {
 
     /// Narthex keys are separate from encoded sample columns.
     pub(crate) fn primary_keys(&self) -> crate::memtable::BoxedPrimaryKeyIterator {
-        Box::new(
-            self.blocks
-                .iter()
-                .map(|block| block.key.clone())
-                .collect::<Vec<_>>()
-                .into_iter(),
-        )
+        let blocks = self.blocks.clone();
+        Box::new((0..blocks.len()).map(move |i| blocks[i].key.clone()))
     }
 
     pub(crate) fn read(
         &self,
         schema: SchemaRef,
     ) -> impl Iterator<Item = Result<RecordBatch>> + Send + use<> {
-        self.blocks
-            .clone()
-            .into_iter()
-            .map(move |block| block.decode(schema.clone()))
+        let blocks = self.blocks.clone();
+        (0..blocks.len()).map(move |i| blocks[i].decode(schema.clone()))
     }
 }
 
@@ -297,8 +290,15 @@ mod tests {
             vec![Bytes::from_static(b"a"), Bytes::from_static(b"b")],
             encoded.primary_keys().collect::<Vec<_>>()
         );
+        let mut keys = encoded.primary_keys();
+        let mut batches = encoded.read(schema.clone());
+        assert_eq!(Arc::strong_count(&encoded.blocks), 3);
+        assert_eq!(keys.next().unwrap().as_ref(), b"a");
+        assert_eq!(batches.next().unwrap().unwrap(), decoded[0]);
+        assert_eq!(keys.next().unwrap().as_ref(), b"b");
+        assert_eq!(batches.next().unwrap().unwrap(), decoded[1]);
         let mut corrupt = encoded.clone();
-        corrupt.blocks[0].columns[0] = NarthexBulkColumn::Float {
+        Arc::make_mut(&mut corrupt.blocks)[0].columns[0] = NarthexBulkColumn::Float {
             nulls: 0,
             bytes: Bytes::new(),
         };

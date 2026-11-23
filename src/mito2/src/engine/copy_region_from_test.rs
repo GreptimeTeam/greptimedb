@@ -693,8 +693,6 @@ async fn test_narthex_copy_and_remap(
     use crate::sst::file::FileFormat;
     use crate::test_util::sst_util::sst_region_metadata_with_encoding;
     use crate::test_util::{flush_region, reopen_region};
-    use api::v1::helper::row;
-    use api::v1::value::ValueData;
     use datatypes::value::Value;
     use partition::expr::col;
     use std::collections::HashMap;
@@ -742,22 +740,16 @@ async fn test_narthex_copy_and_remap(
             .await
             .unwrap();
     }
+    let metadata = engine.get_region(source).unwrap().metadata();
+    let put = |label: &str, tsid, value| {
+        let key = crate::test_util::sst_util::new_sparse_primary_key(&[label], &metadata, 42, tsid);
+        crate::test_util::sparse_metric_put(key, 1000, Some(value))
+    };
     for (label, tsid) in [("api", 7), ("worker", 8)] {
-        put_rows(
-            &engine,
-            source,
-            Rows {
-                schema: rows_schema(&request),
-                rows: vec![row(vec![
-                    ValueData::StringValue(label.into()),
-                    ValueData::F64Value(1.0),
-                    ValueData::TimestampMillisecondValue(1000),
-                    ValueData::U32Value(42),
-                    ValueData::U64Value(tsid),
-                ])],
-            },
-        )
-        .await;
+        engine
+            .handle_request(source, put(label, tsid, 1.0))
+            .await
+            .unwrap();
         flush_region(&engine, source, None).await;
     }
     let owner = engine.get_region(source).unwrap();
@@ -1118,21 +1110,10 @@ async fn test_narthex_copy_and_remap(
         // over imported rows even though the source had larger sequences.
         use futures::TryStreamExt;
         use store_api::region_engine::{BoundTag, QueryScanContext, RawLabelSource};
-        put_rows(
-            &engine,
-            target,
-            Rows {
-                schema: rows_schema(&request),
-                rows: vec![row(vec![
-                    ValueData::StringValue("api".into()),
-                    ValueData::F64Value(99.0),
-                    ValueData::TimestampMillisecondValue(1000),
-                    ValueData::U32Value(42),
-                    ValueData::U64Value(7),
-                ])],
-            },
-        )
-        .await;
+        engine
+            .handle_request(target, put("api", 7, 99.0))
+            .await
+            .unwrap();
         assert_eq!(
             engine
                 .get_region(target)

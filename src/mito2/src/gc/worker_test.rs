@@ -1971,8 +1971,6 @@ async fn test_narthex_artifact_gc_requires_age_for_every_object() {
 async fn test_narthex_shared_samples_and_series_gc_after_owner_drop() {
     use crate::series_index::format::{FormatReader, SamplesFormatReader};
     use crate::test_util::sst_util::sst_region_metadata_with_encoding;
-    use api::v1::helper::row;
-    use api::v1::value::ValueData;
     use common_recordbatch::RecordBatches;
     use store_api::codec::PrimaryKeyEncoding;
     use store_api::region_request::RegionDropRequest;
@@ -2010,7 +2008,6 @@ async fn test_narthex_shared_samples_and_series_gc_after_owner_drop() {
     request
         .primary_key
         .splice(0..0, reserved.primary_key.into_iter().take(2));
-    let schema = rows_schema(&request);
     for region in [owner, destination] {
         engine
             .handle_request(region, RegionRequest::Create(request.clone()))
@@ -2018,21 +2015,19 @@ async fn test_narthex_shared_samples_and_series_gc_after_owner_drop() {
             .unwrap();
     }
     for (label, tsid, time) in [("api", 7, 1000), ("worker", 8, 2000)] {
-        put_rows(
-            &engine,
-            owner,
-            Rows {
-                schema: schema.clone(),
-                rows: vec![row(vec![
-                    ValueData::StringValue(label.into()),
-                    ValueData::F64Value(1.0),
-                    ValueData::TimestampMillisecondValue(time),
-                    ValueData::U32Value(42),
-                    ValueData::U64Value(tsid),
-                ])],
-            },
-        )
-        .await;
+        let key = crate::test_util::sst_util::new_sparse_primary_key(
+            &[label],
+            &engine.get_region(owner).unwrap().metadata(),
+            42,
+            tsid,
+        );
+        engine
+            .handle_request(
+                owner,
+                crate::test_util::sparse_metric_put(key, time, Some(1.0)),
+            )
+            .await
+            .unwrap();
         flush_region(&engine, owner, None).await;
     }
     let region = engine.get_region(owner).unwrap();

@@ -115,23 +115,15 @@ async fn check_sparse_upsert_after_adding_nullable_tag(format: &str) -> Whatever
         .primary_key
         .splice(0..0, reserved.primary_key.into_iter().take(2));
     let table_dir = request.table_dir.clone();
-    let schema = test_util::rows_schema(&request);
     engine
         .handle_request(region_id, RegionRequest::Create(request))
         .await?;
-    let mut rows = Rows {
-        schema,
-        rows: vec![row(vec![
-            ValueData::StringValue("api".into()),
-            ValueData::F64Value(1.0),
-            ValueData::TimestampMillisecondValue(1000),
-            ValueData::U32Value(42),
-            ValueData::U64Value(7),
-        ])],
-    };
-    test_util::put_rows(&engine, region_id, rows.clone()).await;
+    let metadata = engine.get_region(region_id).unwrap().metadata();
+    let key = new_sparse_primary_key(&["api"], &metadata, 42, 7);
+    let put = |value| test_util::sparse_metric_put(key.clone(), 1000, Some(value));
+    engine.handle_request(region_id, put(1.0)).await?;
     if format == "narthex" {
-        test_util::put_rows(&engine, region_id, rows.clone()).await;
+        engine.handle_request(region_id, put(1.0)).await?;
         for memtable in engine
             .find_region(region_id)
             .unwrap()
@@ -186,8 +178,7 @@ async fn check_sparse_upsert_after_adding_nullable_tag(format: &str) -> Whatever
         .await?;
 
     // The old SST and the new write must still identify the same series before compaction.
-    rows.rows[0].values[1].value_data = Some(ValueData::F64Value(2.0));
-    test_util::put_rows(&engine, region_id, rows).await;
+    engine.handle_request(region_id, put(2.0)).await?;
     for flush in [false, true] {
         if flush {
             test_util::flush_region(&engine, region_id, None).await;
@@ -430,33 +421,45 @@ async fn test_exemplar_sparse_storage_lifecycle() -> WhateverResult<()> {
         engine
             .handle_request(region_id, RegionRequest::Create(request))
             .await?;
-        let mut rows = Rows {
-            schema: schema.clone(),
-            rows: vec![row(vec![
-                ValueData::StringValue("metric".into()),
-                ValueData::StringValue("api".into()),
+        let metadata = engine.get_region(region_id).unwrap().metadata();
+        let make_row = |table_id, tags: &[&str]| {
+            row(vec![
+                ValueData::BinaryValue(new_sparse_primary_key(tags, &metadata, table_id, 7)),
+                ValueData::TimestampMillisecondValue(1),
                 ValueData::F64Value(1.5),
                 ValueData::JsonValue(encode_json_value(JsonValue::from(
                     json!({"trace_id":"abc"}),
                 ))),
-                ValueData::TimestampMillisecondValue(1),
-            ])],
+            ])
         };
-        rows.rows[0].values.extend([
-            ValueData::U32Value(42).into(),
-            ValueData::U64Value(7).into(),
-        ]);
-        // Equal series/timestamp observations are preserved in append mode.
-        rows.rows.push(rows.rows[0].clone());
-        let mut null_row = rows.rows[0].clone();
-        null_row.values[0].value_data = None;
-        null_row.values[1].value_data = None;
-        // Different source metrics can have the same TSID.
-        null_row.values[5] = ValueData::U32Value(43).into();
-        rows.rows.push(null_row);
-        test_util::put_rows(&engine, region_id, rows.clone()).await;
+        let metric = make_row(42, &["metric", "api"]);
+        let rows = Rows {
+            schema: vec![
+                api::v1::ColumnSchema {
+                    column_name: "__primary_key".into(),
+                    datatype: ColumnDataType::Binary as i32,
+                    semantic_type: SemanticType::Tag as i32,
+                    ..Default::default()
+                },
+                schema[4].clone(),
+                schema[2].clone(),
+                schema[3].clone(),
+            ],
+            rows: vec![metric.clone(), metric, make_row(43, &[])],
+        };
+        let put = || {
+            RegionRequest::Put(RegionPutRequest {
+                rows: rows.clone(),
+                hint: Some(WriteHint {
+                    primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse as i32,
+                }),
+                skip_wal: false,
+                partition_expr_version: None,
+            })
+        };
+        engine.handle_request(region_id, put()).await?;
 
-        // Reopen without encoding options, replaying raw rows from WAL.
+        // Reopen without encoding options and replay the writes from WAL.
         reopen_region(&engine, region_id, table_dir.clone(), true, HashMap::new()).await;
         assert_eq!(
             engine.get_primary_key_encoding(region_id).unwrap(),
@@ -485,7 +488,7 @@ async fn test_exemplar_sparse_storage_lifecycle() -> WhateverResult<()> {
             )
             .await?;
         // A stale writer omits the newly added nullable tag.
-        test_util::put_rows(&engine, region_id, rows).await;
+        engine.handle_request(region_id, put()).await?;
         test_util::flush_region(&engine, region_id, None).await;
         engine
             .handle_request(

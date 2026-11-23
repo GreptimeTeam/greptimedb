@@ -172,44 +172,27 @@ async fn write_primary_key(
     timestamp: i64,
     value: Option<f64>,
 ) {
-    let mut schema = vec![
-        ColumnSchema {
-            column_name: "__primary_key".into(),
-            datatype: ColumnDataType::Binary as i32,
-            semantic_type: SemanticType::Tag as i32,
-            ..Default::default()
-        },
-        ColumnSchema {
-            column_name: "ts".into(),
-            datatype: ColumnDataType::TimestampMillisecond as i32,
-            semantic_type: SemanticType::Timestamp as i32,
-            ..Default::default()
-        },
-    ];
-    let mut values = vec![
-        ValueData::BinaryValue(primary_key),
-        ValueData::TimestampMillisecondValue(timestamp),
-    ];
     let request = if let Some(value) = value {
-        schema.push(ColumnSchema {
-            column_name: "field_0".into(),
-            datatype: ColumnDataType::Float64 as i32,
-            semantic_type: SemanticType::Field as i32,
-            ..Default::default()
-        });
-        values.push(ValueData::F64Value(value));
-        RegionRequest::Put(RegionPutRequest {
-            rows: Rows {
-                schema,
-                rows: vec![row(values)],
-            },
-            skip_wal: false,
-            hint: Some(api::v1::WriteHint {
-                primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse as i32,
-            }),
-            partition_expr_version: None,
-        })
+        crate::test_util::sparse_metric_put(primary_key, timestamp, Some(value))
     } else {
+        let schema = vec![
+            ColumnSchema {
+                column_name: "__primary_key".into(),
+                datatype: ColumnDataType::Binary as i32,
+                semantic_type: SemanticType::Tag as i32,
+                ..Default::default()
+            },
+            ColumnSchema {
+                column_name: "ts".into(),
+                datatype: ColumnDataType::TimestampMillisecond as i32,
+                semantic_type: SemanticType::Timestamp as i32,
+                ..Default::default()
+            },
+        ];
+        let values = vec![
+            ValueData::BinaryValue(primary_key),
+            ValueData::TimestampMillisecondValue(timestamp),
+        ];
         RegionRequest::Delete(RegionDeleteRequest {
             rows: Rows {
                 schema,
@@ -3160,6 +3143,47 @@ async fn authoritative_strict_windows_preserve_rows() {
         write(&engine, &region, 7, timestamp, Some(7.0)).await;
     }
     flush_region(&engine, region.region_id, None).await;
+    use store_api::region_request::{AlterKind, ModifyColumnType, RegionAlterRequest};
+    engine
+        .handle_request(
+            region.region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::ModifyColumnTypes {
+                    columns: vec![ModifyColumnType {
+                        column_name: "ts".into(),
+                        target_type: ConcreteDataType::timestamp_microsecond_datatype(),
+                    }],
+                },
+            }),
+        )
+        .await
+        .unwrap();
+
+    let ts = |value| {
+        lit(datafusion_common::ScalarValue::TimestampMicrosecond(
+            Some(value),
+            None,
+        ))
+    };
+    for (start, expected) in [(1_000_000, 1), (1_000_001, 0)] {
+        let stream = engine
+            .scan_to_stream(
+                region.region_id,
+                ScanRequest {
+                    filters: vec![col("ts").gt_eq(ts(start)), col("ts").lt(ts(start + 1))],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let batches = common_recordbatch::RecordBatches::try_collect(stream)
+            .await
+            .unwrap();
+        assert_eq!(
+            batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+            expected
+        );
+    }
     engine
         .handle_request(
             region.region_id,
@@ -3188,13 +3212,30 @@ async fn authoritative_strict_windows_preserve_rows() {
             .sum::<u64>(),
         4
     );
-    for file in files {
-        let (start, end) = file.meta_ref().time_range;
-        assert_eq!(
-            start.value().div_euclid(60_000),
-            end.value().div_euclid(60_000)
-        );
-    }
+    let mut windows = files
+        .iter()
+        .map(|file| {
+            let (start, end) = file.meta_ref().time_range;
+            (start, end, file.meta_ref().num_rows)
+        })
+        .collect::<Vec<_>>();
+    windows.sort_unstable();
+    use common_time::Timestamp;
+    assert_eq!(
+        windows,
+        vec![
+            (
+                Timestamp::new_millisecond(1000),
+                Timestamp::new_millisecond(59_999),
+                2
+            ),
+            (
+                Timestamp::new_millisecond(60_000),
+                Timestamp::new_millisecond(61_000),
+                2
+            ),
+        ]
+    );
     engine.stop().await.unwrap();
 }
 
@@ -3217,48 +3258,15 @@ async fn authoritative_compaction_and_raw_reads_use_last_non_null() {
             &mut key,
         )
         .unwrap();
-    write_primary_key(&engine, &region, key, 1000, Some(7.0)).await;
+    write_primary_key(&engine, &region, key.clone(), 1000, Some(7.0)).await;
     flush_region(&engine, region.region_id, None).await;
-    let metadata = region.metadata();
-    let schema: Vec<_> = metadata
-        .column_metadatas
-        .iter()
-        .map(|column| api::v1::ColumnSchema {
-            column_name: column.column_schema.name.clone(),
-            datatype: match column.column_schema.name.as_str() {
-                "__table_id" => ColumnDataType::Uint32,
-                "__tsid" => ColumnDataType::Uint64,
-                "ts" => ColumnDataType::TimestampMillisecond,
-                "field_0" => ColumnDataType::Float64,
-                _ => ColumnDataType::String,
-            } as i32,
-            semantic_type: column.semantic_type as i32,
-            ..Default::default()
-        })
-        .collect();
-    let values = schema
-        .iter()
-        .map(|column| api::v1::Value {
-            value_data: match column.column_name.as_str() {
-                "__table_id" => Some(ValueData::U32Value(10)),
-                "__tsid" => Some(ValueData::U64Value(7)),
-                "ts" => Some(ValueData::TimestampMillisecondValue(1000)),
-                "tag_0" => Some(ValueData::StringValue("a".into())),
-                "tag_1" => None,
-                "field_0" => None,
-                other => panic!("unexpected {other}"),
-            },
-        })
-        .collect();
-    crate::test_util::put_rows(
-        &engine,
-        region.region_id,
-        Rows {
-            schema,
-            rows: vec![api::v1::Row { values }],
-        },
-    )
-    .await;
+    engine
+        .handle_request(
+            region.region_id,
+            crate::test_util::sparse_metric_put(key, 1000, None),
+        )
+        .await
+        .unwrap();
     flush_region(&engine, region.region_id, None).await;
     let scan = engine
         .handle_query(

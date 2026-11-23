@@ -863,10 +863,6 @@ impl ColumnarPreparedSource {
         let stream = async_stream::try_stream! {
             let _reservation = reservation;
             if range.is_empty() { return; }
-            let unit = context.input.region_metadata().time_index_type().unit();
-            let bounds = context.input.time_range.as_ref();
-            let start = bounds.and_then(|r| *r.start()).and_then(|t| t.convert_to_ceil(unit)).map(|t| t.value());
-            let end = bounds.and_then(|r| *r.end()).and_then(|t| t.convert_to_ceil(unit)).map(|t| t.value());
             let mut sources = Vec::<BoxedRecordBatchStream>::new();
             for reader in samples.iter() {
                 let candidates = candidates.clone();
@@ -903,8 +899,19 @@ impl ColumnarPreparedSource {
                         .map(|c| ExactSeriesKey::from_sparse_key(c.merge_key.as_slice(), &mut offsets))
                         .collect::<Result<BTreeSet<_>>>()?;
                     let mut stage_metrics = crate::metrics::ColumnarReadMetrics::default();
+                    let schema = reader.schema();
+                    let metadata = context.input.region_metadata();
+                    let name = &metadata.time_index_column().column_schema.name;
+                    let field = schema.field_with_name(name).map_err(|err| invalid(err.to_string()))?;
+                    let unit = match field.data_type() {
+                        datatypes::arrow::datatypes::DataType::Timestamp(unit, _) => Ok(common_time::timestamp::TimeUnit::from(unit)),
+                        _ => Err(invalid(format!("sample time index {name} must be a timestamp"))),
+                    }?;
+                    let bounds = context.input.time_range.as_ref();
+                    let start = bounds.and_then(|r| *r.start()).and_then(|t| t.convert_to_ceil(unit)).map(|t| t.value());
+                    let end = bounds.and_then(|r| *r.end()).and_then(|t| t.convert_to_ceil(unit)).map(|t| t.value());
                     let mut batches = reader.read(SamplesReadRequest {
-                        projection: sample_projection(&reader.schema(), &context),
+                        projection: sample_projection(&schema, &context),
                         memory_pool: Some(scan_pool.clone()),
                         keys: Some(keys),
                         start,
