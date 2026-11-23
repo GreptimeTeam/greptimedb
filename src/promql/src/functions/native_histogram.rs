@@ -2575,7 +2575,17 @@ impl DfAccumulator for NativeHistogramAggregateAccumulator {
                 continue;
             }
             let combined_count = self.combined_count(count)?;
-            let sample = float_histogram(&histogram)?;
+            // The same disagreement `push_histogram` drops a position for, met through a state
+            // frame: the legacy path reached `legacy_bridge::add`, whose `None` it recorded as
+            // incompatible. A partition whose state cannot be read is dropped rather than failing
+            // the statement.
+            let sample = match float_histogram(&histogram) {
+                Ok(sample) => sample,
+                Err(_) => {
+                    self.record_incompatible();
+                    continue;
+                }
+            };
             // The incoming side carries what its frame could: its answer, its count and its
             // evidence. It has no compensation component, so the compensation it brings is the
             // layout-carrying zero -- the residual it exported is already inside its answer.
