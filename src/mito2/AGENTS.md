@@ -125,6 +125,10 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
 - Parquet row groups have uniform row counts except for the final group
   (`sst/parquet/row_selection.rs`). Memory-pressure flushing must not create
   arbitrary partial groups: readers and index row IDs rely on this layout.
+- Narthex raw-tag keys are canonicalized at bulk memtable admission, including WAL
+  replay (`series_index/samples/bulk.rs`). Raw-series reads apply LastRow dedup after
+  merging; batch reads retain region options. Physical COPY follows Parquet's
+  untrusted source-sequence semantics; repartition still assigns admission sequences.
 - Sequence numbers are strictly increasing per region; dedup and snapshot reads
   depend on this. Do not change assignment lightly.
 - Manifest version is monotonic — never reset or skip it. Staging takes no version:

@@ -29,6 +29,90 @@ use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 use crate::error::{ComputeArrowSnafu, NewRecordBatchSnafu, Result};
 use crate::series_index::samples::{MAX_ROWS, codec, invalid, require};
 
+/// Normalize incoming sparse keys before the memtable compares or merges them.
+/// Replaying raw-tag WAL entries follows this same path. Persisted SSTs are untouched.
+pub(crate) fn canonicalize_keys(
+    part: &mut crate::memtable::bulk::part::BulkPart,
+    metadata: &store_api::metadata::RegionMetadata,
+) -> Result<()> {
+    use crate::sst::parquet::format::PrimaryKeyArrayBuilder;
+    use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec, SparsePrimaryKeyCodec};
+    use store_api::storage::consts::ReservedColumnId;
+
+    let mut columns: Vec<_> = metadata.primary_key_columns().collect();
+    columns.sort_by_key(|column| {
+        let rank = if column.column_id == ReservedColumnId::table_id() {
+            0
+        } else if column.column_id == ReservedColumnId::tsid() {
+            1
+        } else {
+            2
+        };
+        (rank, column.column_schema.name.as_str())
+    });
+    let index = part
+        .batch
+        .schema()
+        .index_of(PRIMARY_KEY_COLUMN_NAME)
+        .map_err(|error| invalid(error.to_string()))?;
+    let keys = part
+        .batch
+        .column(index)
+        .as_any()
+        .downcast_ref::<crate::sst::parquet::format::PrimaryKeyArray>()
+        .ok_or_else(|| invalid("expected dictionary sparse keys"))?;
+    let values = keys
+        .values()
+        .as_any()
+        .downcast_ref::<BinaryArray>()
+        .ok_or_else(|| invalid("expected binary sparse keys"))?;
+    let codec = SparsePrimaryKeyCodec::schemaless();
+    let mut canonical = Vec::with_capacity(values.len());
+    let mut changed = false;
+    for key in values.iter() {
+        let key = key.ok_or_else(|| invalid("null sparse key"))?;
+        let CompositeValues::Sparse(values) =
+            codec.decode(key).context(crate::error::DecodeSnafu)?
+        else {
+            return Err(invalid("expected sparse key"));
+        };
+        let mut encoded = Vec::with_capacity(key.len());
+        codec
+            .encode_to_vec(
+                columns.iter().map(|column| {
+                    (
+                        column.column_id,
+                        values.get_or_null(column.column_id).as_value_ref(),
+                    )
+                }),
+                &mut encoded,
+            )
+            .context(crate::error::EncodeSnafu)?;
+        require(
+            encoded.len() == key.len(),
+            "Narthex key contains columns absent from region metadata",
+        )?;
+        changed |= encoded != key;
+        canonical.push(encoded);
+    }
+    if changed {
+        let mut builder = PrimaryKeyArrayBuilder::new();
+        for key in keys.keys().iter() {
+            let key = key.ok_or_else(|| invalid("null sparse key"))?;
+            builder
+                .append(&canonical[key as usize])
+                .context(ComputeArrowSnafu)?;
+        }
+        let mut arrays = part.batch.columns().to_vec();
+        arrays[index] = Arc::new(builder.finish());
+        let batch =
+            RecordBatch::try_new(part.batch.schema(), arrays).context(NewRecordBatchSnafu)?;
+        part.batch = crate::memtable::bulk::part::sort_primary_key_record_batch(&batch)?;
+        part.raw_data = None;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct NarthexBulkPart {
     blocks: Vec<NarthexBulkBlock>,

@@ -561,10 +561,17 @@ impl ScanRegion {
         let memtables = self.version.memtables.list_memtables();
         // Skip empty memtables and memtables out of time range.
         let mut mem_range_builders = Vec::new();
-        let filter_mode = pre_filter_mode(
-            self.version.options.append_mode,
-            self.version.options.merge_mode(),
-        );
+        // Narthex may serve raw-series output, which deduplicates append rows.
+        // Keep field predicates residual so they cannot hide the newest row.
+        let filter_mode =
+            if self.version.options.sst_format == Some(crate::sst::FormatType::Narthex) {
+                PreFilterMode::SkipFields
+            } else {
+                pre_filter_mode(
+                    self.version.options.append_mode,
+                    self.version.options.merge_mode(),
+                )
+            };
 
         for m in memtables {
             // check if memtable is empty by reading stats.

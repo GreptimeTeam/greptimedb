@@ -480,7 +480,10 @@ impl Memtable for BulkMemtable {
         .fail()
     }
 
-    fn write_bulk(&self, fragment: BulkPart) -> Result<()> {
+    fn write_bulk(&self, mut fragment: BulkPart) -> Result<()> {
+        if self.compactor.lock().unwrap().narthex_format {
+            crate::series_index::samples::bulk::canonicalize_keys(&mut fragment, &self.metadata)?;
+        }
         let local_metrics = WriteMetrics {
             key_bytes: 0,
             value_bytes: fragment.estimated_size(),

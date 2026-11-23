@@ -17,6 +17,21 @@ With `sst_format = 'narthex'`, samples are authoritative SSTs. Each artifact own
 Each part record contains its encoded `file_size` in bytes. Series indexes reference region-qualified sample file IDs without owning those
 samples. Both artifact types use ordinary SST lifetimes and reclamation.
 
+Incoming raw-tag and encoded writes use name-sorted sparse label keys before
+memtable comparison and merging. Null labels are omitted. This does not rewrite
+previously persisted experimental artifacts with noncanonical keys.
+
+Ordinary physical COPY retains source row sequences, clears destination sequence
+trust, and does not advance the destination committed sequence, matching Parquet
+COPY. Exact destination sequence-range scans reject these copied files. Repartition
+manifest application and foreign/shared imports instead assign destination admission
+sequences; subsequent local writes receive higher sequences.
+
+PromQL raw-series reads merge and apply `LastRow` deduplication before value filtering,
+including for append-mode regions. Ordinary batch reads and compaction retain the
+region's configured append and merge behavior. Strict-window compaction applies
+half-open output time bounds to sample rows.
+
 The same codecs also support rebuildable sidecars over Parquet SSTs. The catalog
 paths, source-SST coverage, daily consolidation, and local-cache rollout described
 below apply to that sidecar mode. They do not make authoritative Narthex samples

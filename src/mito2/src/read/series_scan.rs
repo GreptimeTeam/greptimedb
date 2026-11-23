@@ -516,7 +516,7 @@ impl SeriesScan {
         }
         let time_is_millis = matches!(metadata.time_index_type(), TimestampType::Millisecond(_));
         if fields.is_empty()
-            || input.append_mode
+            || (input.append_mode && !input.requires_narthex_preparation())
             || input.series_row_selector.is_some()
             || !time_is_millis
         {

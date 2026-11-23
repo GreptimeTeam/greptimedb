@@ -378,6 +378,7 @@ pub(crate) struct ColumnarPreparedSource {
     raw: Arc<RawScanPreparation>,
     sample_schema: Option<SchemaRef>,
     merge_field_start: usize,
+    raw_last_row: bool,
     candidates: Arc<Vec<Candidate>>,
     samples: Arc<Vec<Arc<dyn SamplesFormatReader>>>,
     metrics: PartitionMetrics,
@@ -495,16 +496,28 @@ impl ColumnarPreparedSource {
         let started = Instant::now();
         let mut raw = raw;
         let batch_output = matches!(labels, RawLabelSource::Explicit);
+        let raw_last_row = input.requires_narthex_preparation() && !batch_output;
         let sample_schema = if batch_output {
             Some(input.mapper.input_arrow_schema(input.compaction))
         } else {
             sample_merge_schema(&context, &mut raw)?
         };
-        let merge_field_start = if batch_output {
-            input.mapper.field_column_start()
-        } else {
-            0
-        };
+        // Sparse compaction omits tag columns, unlike the mapper's query batch.
+        // Derive the offset from the schema that actually reaches the dedup reader.
+        let merge_field_start = sample_schema.as_ref().map_or_else(
+            || input.mapper.field_column_start(),
+            |schema| {
+                schema
+                    .fields()
+                    .iter()
+                    .position(|field| {
+                        metadata
+                            .column_by_name(field.name())
+                            .is_some_and(|column| column.semantic_type == SemanticType::Field)
+                    })
+                    .unwrap_or(0)
+            },
+        );
         preparation_metrics.add_elapsed("columnar_prepare_schema", started.elapsed());
         preparation_metrics.bytes.insert("prepare_encoded_keys", 0);
         preparation_metrics.counts.insert("prepare_batch_series", 0);
@@ -806,6 +819,7 @@ impl ColumnarPreparedSource {
             raw: Arc::new(raw),
             sample_schema,
             merge_field_start,
+            raw_last_row,
             candidates: Arc::new(candidates),
             samples: Arc::new(samples),
             metrics,
@@ -828,6 +842,7 @@ impl ColumnarPreparedSource {
         let reservation = self.reservation.clone();
         let scan_pool = self.scan_pool.clone();
         let field_column_start = self.merge_field_start;
+        let raw_last_row = self.raw_last_row;
         let filters =
             if matches!(self.labels, RawLabelSource::Explicit) && !context.input.compaction {
                 predicate_conjuncts(context.input.predicate_group().predicate())
@@ -917,10 +932,17 @@ impl ColumnarPreparedSource {
                 }));
             }
             let mut merged = if let Some(schema) = sample_schema {
-                SeqScan::merge_flat_sources(&context, sources, Some(&metrics), false, schema, field_column_start).await?
+                SeqScan::merge_flat_sources(&context, sources, Some(&metrics), raw_last_row, schema, field_column_start).await?
             } else {
-                SeqScan::build_flat_reader_from_sources(&context, sources, None, Some(&metrics), false, 1).await?
+                SeqScan::build_flat_reader_from_sources(&context, sources, None, Some(&metrics), raw_last_row, 1).await?
             };
+            if raw_last_row {
+                merged = Box::pin(crate::read::flat_dedup::FlatDedupReader::new(
+                    merged,
+                    crate::read::flat_dedup::FlatLastRow::new(context.input.filter_deleted),
+                    Some(metrics.dedup_metrics_reporter()),
+                ).into_stream());
+            }
             while let Some(mut batch) = merged.try_next().await? {
                 for filter in &filters {
                     batch = common_recordbatch::filter::batch_filter(&batch, filter)

@@ -318,6 +318,8 @@ impl CompactionRegionOpener {
         };
 
         let manifest = manifest_manager.manifest();
+        let mut region_options = req.region_options.clone();
+        crate::region::opener::sanitize_region_options(&manifest, &mut region_options);
         let region_metadata = manifest.metadata.clone();
         let hook: Option<RegionHookRef> = req.plugins.get();
         let manifest_ctx = Arc::new(ManifestContext::new(
@@ -341,7 +343,7 @@ impl CompactionRegionOpener {
             ssts.add_files(file_purger.clone(), manifest.files.values().cloned());
             CompactionVersion {
                 metadata: region_metadata.clone(),
-                options: req.region_options.clone(),
+                options: region_options.clone(),
                 ssts: Arc::new(ssts),
                 // Remote execution uses an already picked output. A manifest-only
                 // opener cannot prove that a new LastNonNull pick is memtable-safe.
@@ -355,26 +357,23 @@ impl CompactionRegionOpener {
             Either::Left(ttl) => ttl,
             // Get the ttl from the schema metadata manager.
             Either::Right(schema_metadata_manager) => {
-                let (_, ttl) = find_dynamic_options(
-                    req.region_id,
-                    &req.region_options,
-                    &schema_metadata_manager,
-                )
-                .await
-                .unwrap_or_else(|e| {
-                    warn!(e; "Failed to get ttl for region: {}", region_metadata.region_id);
-                    (
-                        crate::region::options::CompactionOptions::default(),
-                        TimeToLive::default(),
-                    )
-                });
+                let (_, ttl) =
+                    find_dynamic_options(req.region_id, &region_options, &schema_metadata_manager)
+                        .await
+                        .unwrap_or_else(|e| {
+                            warn!(e; "Failed to get ttl for region: {}", region_metadata.region_id);
+                            (
+                                crate::region::options::CompactionOptions::default(),
+                                TimeToLive::default(),
+                            )
+                        });
                 ttl
             }
         };
 
         Ok(CompactionRegion {
             region_id: req.region_id,
-            region_options: req.region_options.clone(),
+            region_options: region_options.clone(),
             engine_config: self.mito_config.clone(),
             region_metadata: region_metadata.clone(),
             // Lets the scan reuse the input footers read while planning the merge.

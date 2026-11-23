@@ -896,23 +896,36 @@ async fn test_narthex_copy_and_remap(
             .await
             .unwrap();
     } else {
-        for _ in 0..2 {
-            let response = engine
-                .copy_region_from(
-                    target,
-                    MitoCopyRegionFromRequest {
-                        source_region_id: source,
-                        parallelism: 2,
-                    },
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.copied_file_ids.len(), 2);
+        let results = futures::future::join_all((0..2).map(|_| {
+            engine.copy_region_from(
+                target,
+                MitoCopyRegionFromRequest {
+                    source_region_id: source,
+                    parallelism: 2,
+                },
+            )
+        }))
+        .await;
+        for result in results {
+            assert_eq!(result.unwrap().copied_file_ids.len(), 2);
         }
     }
     let destination = engine.get_region(target).unwrap();
     let after = destination.manifest_ctx.manifest().await;
     assert_eq!(after.files.len(), 2);
+    assert_eq!(after.committed_sequence, if remap { Some(1) } else { None });
+    for file in after.files.values() {
+        assert_eq!(
+            file.sequence.map(|s| s.get()),
+            if remap { Some(1) } else { None }
+        );
+        assert!(!file.preserve_row_sequence);
+        let FileFormat::NarthexSamples(samples) = &file.format else {
+            panic!("expected samples")
+        };
+        assert_eq!(samples.use_file_sequence, remap);
+    }
+
     assert_eq!(after.series_indexes.len(), usize::from(with_index));
     let physical_owner = if remap { source } else { target };
     for meta in after.all_files() {
@@ -1001,7 +1014,7 @@ async fn test_narthex_copy_and_remap(
         request.options.clone(),
     )
     .await;
-    let stream = engine
+    let exact = engine
         .scan_to_stream(
             target,
             ScanRequest {
@@ -1011,8 +1024,16 @@ async fn test_narthex_copy_and_remap(
                 ..Default::default()
             },
         )
-        .await
-        .unwrap();
+        .await;
+    let stream = if remap {
+        exact.unwrap()
+    } else {
+        assert!(exact.is_err());
+        engine
+            .scan_to_stream(target, ScanRequest::default())
+            .await
+            .unwrap()
+    };
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     assert_eq!(
         batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
@@ -1052,9 +1073,9 @@ async fn test_narthex_copy_and_remap(
             .scan_to_stream(
                 target,
                 ScanRequest {
-                    memtable_min_sequence: Some(0),
-                    memtable_max_sequence: Some(1),
-                    exact_sequence_range: true,
+                    memtable_min_sequence: remap.then_some(0),
+                    memtable_max_sequence: remap.then_some(1),
+                    exact_sequence_range: remap,
                     ..Default::default()
                 },
             )
@@ -1093,6 +1114,89 @@ async fn test_narthex_copy_and_remap(
                 .unwrap(),
             text
         );
+    }
+    if remap {
+        // Repartition admission remains target-local: a subsequent write wins
+        // over imported rows even though the source had larger sequences.
+        use futures::TryStreamExt;
+        use store_api::region_engine::{BoundTag, QueryScanContext, RawLabelSource};
+        put_rows(
+            &engine,
+            target,
+            Rows {
+                schema: rows_schema(&request),
+                rows: vec![row(vec![
+                    ValueData::StringValue("api".into()),
+                    ValueData::F64Value(99.0),
+                    ValueData::TimestampMillisecondValue(1000),
+                    ValueData::U32Value(42),
+                    ValueData::U64Value(7),
+                ])],
+            },
+        )
+        .await;
+        assert_eq!(
+            engine
+                .get_region(target)
+                .unwrap()
+                .version_control
+                .committed_sequence(),
+            2
+        );
+        for compact in [false, true] {
+            if compact {
+                flush_region(&engine, target, None).await;
+                crate::engine::compaction_test::compact(&engine, target).await;
+            }
+            let scan = engine
+                .handle_query(
+                    target,
+                    ScanRequest {
+                        distribution: Some(store_api::storage::TimeSeriesDistribution::PerSeries),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            let binding = RawLabelSource::PrimaryKey {
+                metric_name: Arc::from("copy"),
+                physical_metadata: scan.metadata(),
+                logical_tags: vec![BoundTag {
+                    column_id: 0,
+                    name: Arc::from("tag_0"),
+                }]
+                .into(),
+            };
+            let source = scan
+                .prepare_series(
+                    &QueryScanContext::default(),
+                    &datafusion::physical_plan::metrics::ExecutionPlanMetricsSet::new(),
+                    &binding,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            let chunks = source
+                .read_series(0..source.num_series())
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap();
+            let values: Vec<_> = chunks
+                .iter()
+                .flat_map(|chunk| {
+                    (0..chunk.time.len()).map(|i| {
+                        let datatypes::series::samples::SampleRef::Float(value) =
+                            chunk.fields.get(0).unwrap().sample(i)
+                        else {
+                            panic!("expected float")
+                        };
+                        value
+                    })
+                })
+                .collect();
+            assert_eq!(values, vec![99.0]);
+        }
     }
     engine.stop().await.unwrap();
 }

@@ -151,6 +151,9 @@ impl CompactionSstReaderBuilder<'_> {
 
         // This serves as a workaround of https://github.com/GreptimeTeam/greptimedb/issues/3944
         // by converting time ranges into predicate.
+        if self.narthex_format {
+            scan_input = scan_input.with_time_range(self.time_range);
+        }
         if let Some(time_range) = self.time_range {
             scan_input =
                 scan_input.with_predicate(time_range_to_predicate(time_range, &self.metadata)?);

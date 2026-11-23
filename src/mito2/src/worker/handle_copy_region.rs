@@ -30,6 +30,24 @@ use crate::sst::file::{self, FileMeta};
 use crate::sst::location::region_dir_from_table_dir;
 use crate::worker::{RegionWorkerLoop, WorkerRequestWithTime};
 
+// COPY writes deterministic object names before publishing its manifest edit.
+// Keep the lock outside region instances so a reopened instance shares the fence.
+fn copy_lock(region: &MitoRegionRef) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    type Locks =
+        std::collections::HashMap<(String, RegionId), std::sync::Weak<tokio::sync::Mutex<()>>>;
+    static LOCKS: std::sync::LazyLock<std::sync::Mutex<Locks>> =
+        std::sync::LazyLock::new(Default::default);
+    let mut locks = LOCKS.lock().unwrap();
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    let key = (region.table_dir().to_string(), region.region_id);
+    if let Some(lock) = locks.get(&key).and_then(std::sync::Weak::upgrade) {
+        return lock;
+    }
+    let lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(key, std::sync::Arc::downgrade(&lock));
+    lock
+}
+
 impl<S> RegionWorkerLoop<S> {
     pub(crate) fn handle_copy_region_from_request(&mut self, request: CopyRegionFromRequest) {
         let region_id = request.region_id;
@@ -73,7 +91,9 @@ impl<S> RegionWorkerLoop<S> {
         );
         let worker_sender = self.sender.clone();
 
+        let copy_lock = copy_lock(&region);
         common_runtime::spawn_global(async move {
+            let _copy_guard = copy_lock.lock().await;
             let (region_edit, source_file_ids) = match Self::copy_region_from(
                 &region,
                 region_metadata_loader,
@@ -92,14 +112,12 @@ impl<S> RegionWorkerLoop<S> {
 
             match region_edit {
                 Some(region_edit)
-                    if region.version().options.sst_format
-                        == Some(crate::sst::FormatType::Narthex)
-                        || region_edit
-                            .files_to_add
-                            .iter()
-                            .any(|file| file.level == file::LEVEL_SHARED) =>
+                    if region_edit
+                        .files_to_add
+                        .iter()
+                        .any(|file| file.level == file::LEVEL_SHARED) =>
                 {
-                    // Shared references and narthex artifacts enter the serialized
+                    // Shared references enter the serialized
                     // edit lane for destination admission sequences.
                     // The response lists installed references, including shared SSTs
                     // whose objects stay in place; it is not a physical COPY count.
@@ -133,6 +151,7 @@ impl<S> RegionWorkerLoop<S> {
                     let _ = sender.send(result);
                 }
                 Some(region_edit) => {
+                    let (tx, rx) = tokio::sync::oneshot::channel();
                     if let Err(e) = worker_sender
                         .send(WorkerRequestWithTime::new(WorkerRequest::Background {
                             region_id,
@@ -140,14 +159,22 @@ impl<S> RegionWorkerLoop<S> {
                                 CopyRegionFromFinished {
                                     region_id,
                                     edit: region_edit,
-                                    sender,
+                                    sender: tx,
                                 },
                             ),
                         }))
                         .await
                     {
-                        error!(e; "Failed to send copy region from finished notification to worker, region_id: {}", region_id);
+                        error!(e; "Failed to send copy region from finished notification, region_id: {}", region_id);
+                        let _ = sender.send(crate::error::RegionNotFoundSnafu { region_id }.fail());
+                        return;
                     }
+                    // Keep ownership until the worker installs the published version.
+                    let result = match rx.await {
+                        Ok(result) => result,
+                        Err(error) => Err(error).context(crate::error::RecvSnafu),
+                    };
+                    let _ = sender.send(result);
                 }
                 None => {
                     let _ = sender.send(Ok(MitoCopyRegionFromResponse {
@@ -314,11 +341,10 @@ impl<S> RegionWorkerLoop<S> {
             committed_sequence: None,
             ..Default::default()
         };
-        if narthex_format
-            || edit
-                .files_to_add
-                .iter()
-                .any(|file| file.level == file::LEVEL_SHARED)
+        if edit
+            .files_to_add
+            .iter()
+            .any(|file| file.level == file::LEVEL_SHARED)
         {
             return Ok((Some(edit), source_file_ids));
         }
@@ -353,6 +379,9 @@ fn remap_copied_file_meta(file_meta: &FileMeta, target_region_id: RegionId) -> F
     // "proven disjoint".
     new_file_meta.preserve_row_sequence = false;
     new_file_meta.sequence = None;
+    if let file::FileFormat::NarthexSamples(samples) = &mut new_file_meta.format {
+        samples.use_file_sequence = false;
+    }
     new_file_meta
 }
 
