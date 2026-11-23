@@ -1568,6 +1568,28 @@ pub(crate) fn filter_flat_batch_by_sequence(
     Ok(Some(filtered_batch))
 }
 
+/// Read one schema-aligned batch from a file range, before merge or deduplication.
+/// Both ordinary scans and lossless compaction use this boundary.
+pub(crate) async fn next_aligned_file_batch(
+    range: &FileRange,
+    reader: &mut crate::read::prune::FlatPruneReader,
+    sequence_range: Option<SequenceRange>,
+    file_sequence_trusted: bool,
+) -> Result<Option<RecordBatch>> {
+    while let Some(batch) = reader.next_batch().await? {
+        let Some(batch) =
+            filter_flat_batch_by_sequence(batch, sequence_range, file_sequence_trusted)?
+        else {
+            continue;
+        };
+        return match range.compat_batch() {
+            Some(compat) => compat.compat(batch).map(Some),
+            None => Ok(Some(batch)),
+        };
+    }
+    Ok(None)
+}
+
 /// Build the stream of scanning the input [`FileRange`]s using flat reader that returns RecordBatch.
 #[tracing::instrument(
     skip_all,
@@ -1611,26 +1633,14 @@ pub fn build_flat_file_range_scan_stream(
             let build_cost = build_reader_start.elapsed();
             part_metrics.inc_build_reader_cost(build_cost);
 
-            let may_compat = range.compat_batch();
             let file_sequence_trusted = range
                 .file_handle()
                 .is_effective_target_sequence_trusted(stream_ctx.input.region_metadata().region_id);
 
-            while let Some(record_batch) = reader.next_batch().await? {
-                let Some(record_batch) = filter_flat_batch_by_sequence(
-                    record_batch,
-                    stream_ctx.input.sequence_range,
-                    file_sequence_trusted,
-                )? else {
-                    continue;
-                };
-
-                if let Some(flat_compat) = may_compat {
-                    let batch = flat_compat.compat(record_batch)?;
-                    yield batch;
-                } else {
-                    yield record_batch;
-                }
+            while let Some(batch) = next_aligned_file_batch(
+                &range, &mut reader, stream_ctx.input.sequence_range, file_sequence_trusted,
+            ).await? {
+                yield batch;
             }
 
             let prune_metrics = reader.metrics();

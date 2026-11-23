@@ -117,29 +117,8 @@ impl CompactionSstReaderBuilder<'_> {
             .map(|x| x.column_id)
             .collect::<Vec<_>>();
 
-        let mut json2_target_layouts = BTreeMap::new();
-        for (name, plan) in plans {
-            let Some(column) = self.metadata.column_by_name(name) else {
-                continue;
-            };
-            let extension_metadata = column
-                .column_schema
-                .metadata()
-                .get(EXTENSION_TYPE_METADATA_KEY)
-                .cloned()
-                .with_context(|| InvalidRecordBatchSnafu {
-                    reason: format!("JSON2 target column '{name}' has no extension metadata"),
-                })?;
-            json2_target_layouts.insert(
-                column.column_id,
-                Json2TargetLayout {
-                    extension_metadata,
-                    target_layout: plan.target_layout.clone(),
-                },
-            );
-        }
         let read_columns = ReadColumns::new(read_column_ids);
-        let targets: Json2RewriteTargets = Arc::new(json2_target_layouts);
+        let targets = json2_rewrite_targets(&self.metadata, plans)?;
         let mapper = FlatProjectionMapper::new_with_json2_rewrite_targets(
             &self.metadata,
             projection,
@@ -210,6 +189,35 @@ impl CompactionSstReaderBuilder<'_> {
             Err(e) => Err(e),
         }
     }
+}
+
+/// Resolve shared physical layouts before constructing any per-file readers.
+pub(crate) fn json2_rewrite_targets(
+    metadata: &RegionMetadataRef,
+    plans: &Json2RewritePlans,
+) -> Result<Json2RewriteTargets> {
+    let mut json2_target_layouts = BTreeMap::new();
+    for (name, plan) in plans {
+        let Some(column) = metadata.column_by_name(name) else {
+            continue;
+        };
+        let extension_metadata = column
+            .column_schema
+            .metadata()
+            .get(EXTENSION_TYPE_METADATA_KEY)
+            .cloned()
+            .with_context(|| InvalidRecordBatchSnafu {
+                reason: format!("JSON2 target column '{name}' has no extension metadata"),
+            })?;
+        json2_target_layouts.insert(
+            column.column_id,
+            Json2TargetLayout {
+                extension_metadata,
+                target_layout: plan.target_layout.clone(),
+            },
+        );
+    }
+    Ok(Arc::new(json2_target_layouts))
 }
 
 /// Max number of input footers read at the same time.

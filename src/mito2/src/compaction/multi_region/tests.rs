@@ -2672,3 +2672,74 @@ async fn test_missing_index_handler_does_not_block_routed_compaction() {
         }
     }
 }
+
+// Exercise persisted sparse inputs, schema alignment, routing and output readback
+// together: unrelated nullable tags must never become merge columns.
+#[rstest::rstest]
+#[case(2)]
+#[case(40)]
+#[case(3600)]
+#[tokio::test]
+async fn test_sparse_routing_with_wide_target_schema(#[case] tag_count: u32) {
+    let fixture = Fixture::new(PrimaryKeyEncoding::Sparse, FormatType::Flat, 7).await;
+    let mut plan = fixture.plan(8);
+    for target in plan.targets.values_mut() {
+        let mut keys = target.metadata.primary_key.clone();
+        let mut builder = RegionMetadataBuilder::from_existing((*target.metadata).clone());
+        for id in 4..tag_count + 2 {
+            builder.push_column_metadata(ColumnMetadata {
+                column_schema: datatypes::schema::ColumnSchema::new(
+                    format!("tag_{id}"),
+                    datatypes::data_type::ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                semantic_type: api::v1::SemanticType::Tag,
+                column_id: id,
+            });
+            keys.push(id);
+        }
+        builder.primary_key(keys);
+        target.metadata = Arc::new(builder.build().unwrap());
+    }
+    let targets = plan.targets.clone();
+    let (context, _) = fixture.context(None);
+    let metadata = targets.values().next().unwrap().metadata.clone();
+    let source = super::source::SharedSource::build(
+        &plan,
+        &context,
+        metadata,
+        Arc::new(super::SourceCounters::default()),
+    )
+    .await
+    .unwrap();
+    assert!(
+        source
+            .schema()
+            .fields()
+            .iter()
+            .all(|field| !field.name().starts_with("tag_"))
+    );
+    drop(source);
+    let output = compact_regions(plan, context).await.unwrap();
+    assert_eq!(124, output.stats.source_rows);
+    assert_eq!(124, output.stats.output_rows);
+    for (id, files) in output.files {
+        let mut rows = Vec::new();
+        for file in files {
+            rows.extend(
+                fixture
+                    .read_output_rows(file, targets[&id].metadata.clone())
+                    .await,
+            );
+        }
+        let sequence = if id == fixture.metadata.region_id {
+            7
+        } else {
+            100 + id.region_sequence() as u64
+        };
+        let mut expected = expected_source_rows(8, id, sequence);
+        rows.sort();
+        expected.sort();
+        assert_eq!(expected, rows);
+    }
+}

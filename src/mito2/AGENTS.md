@@ -236,3 +236,5 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
 
 Update this file when you add/rename a top-level module, change the write/read
 path entry points, or alter a persisted format (manifest, SST, WAL).
+
+Compaction SST scans share `ScanInput` range preparation and `scan_util::next_aligned_file_batch`. Multi-region compaction retains raw versions and annotates routing before merging; sparse routing materializes only partition dependencies temporarily.
