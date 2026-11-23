@@ -2936,10 +2936,23 @@ fn a_window_unifies_its_own_contributions() {
     );
     let mut typed = named.clone();
     typed[0].push("__type__".to_string());
+    // A metadata tag of the source is one the drop removes, and two series that differed only in it
+    // end under one label set - so a window reading the tagged scan directly is not proved.
     assert_eq!(
         Some(false),
-        unifies_its_own_contributions(&window_of(dropped, RangeFunction::Rate), &typed, &single),
+        unifies_its_own_contributions(
+            &window_of(input_on(Arc::clone(&out)), RangeFunction::Rate),
+            &typed,
+            &single
+        ),
         "a metadata tag the window drops is not proved constant"
+    );
+    // A map below the window drops that tag first, and its own drop is what the pass collects: what
+    // the window reads has already lost it, so the window above the map is proved.
+    assert_eq!(
+        Some(true),
+        unifies_its_own_contributions(&window_of(dropped, RangeFunction::Rate), &typed, &single),
+        "the tag left with the map's own collected drop"
     );
 }
 

@@ -102,21 +102,22 @@ pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Opti
         NativeExpr::Instant { input, op } => {
             let tags = fused_output_tags(input, source_tags)?;
             Some(match op.value {
-                InstantValue::Timestamp => without_metric_name(tags),
+                InstantValue::Timestamp => without_metadata_labels(tags),
                 InstantValue::Sample | InstantValue::InfoTimestamp => tags,
             })
         }
         NativeExpr::Window { input, op } => {
             let tags = fused_output_tags(input, source_tags)?;
             Some(if op.function.drops_metric_name() {
-                without_metric_name(tags)
+                without_metadata_labels(tags)
             } else {
                 tags
             })
         }
-        NativeExpr::Timestamp { input } => {
-            Some(without_metric_name(fused_output_tags(input, source_tags)?))
-        }
+        NativeExpr::Timestamp { input } => Some(without_metadata_labels(fused_output_tags(
+            input,
+            source_tags,
+        )?)),
         // A label rewrite changes the label set itself: `label_replace` adds its destination label
         // and an empty replacement removes it, so the input's labels are not the output's. A math or
         // histogram kernel drops the metric name where it runs, and the ops apply in written order,
@@ -139,16 +140,16 @@ pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Opti
                             tags.push(destination.to_string());
                         }
                     }
-                    MapOp::Math(_) | MapOp::Histogram(_) => tags = without_metric_name(tags),
+                    MapOp::Math(_) | MapOp::Histogram(_) => tags = without_metadata_labels(tags),
                 }
             }
             Some(tags)
         }
         // Its parameters are scalars, which carry no labels; the map computes a value of its own
         // with the input, and its kernel drops the metric name.
-        NativeExpr::ParameterizedMap { input, .. } => {
-            Some(without_metric_name(fused_output_tags(input, source_tags)?))
-        }
+        NativeExpr::ParameterizedMap { input, .. } => Some(without_metadata_labels(
+            fused_output_tags(input, source_tags)?,
+        )),
         // `scalar()` reports one value and no labels, like the scalar it produces.
         NativeExpr::ScalarOf { .. } => Some(Vec::new()),
         // Its parameter is a scalar, which carries no labels, and ranking keeps each selected
@@ -376,7 +377,7 @@ pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Opti
                 }
             };
             Some(if scalar_side && !keeps_name {
-                without_metric_name(tags)
+                without_metadata_labels(tags)
             } else {
                 tags
             })
@@ -429,10 +430,18 @@ fn keeps_metric_name(matching: &BinaryMatching) -> bool {
     matching.op.is_comparison() && !matching.return_bool
 }
 
-/// The labels a node reports after the metric name is dropped, which is what a kernel that computes
-/// a value of its own does to the samples it reports.
-fn without_metric_name(tags: Vec<String>) -> Vec<String> {
-    tags.into_iter().filter(|tag| tag != METRIC_NAME).collect()
+/// The labels a node reports after the metadata labels are dropped, which is what a kernel that
+/// computes a value of its own does to the samples it reports.
+///
+/// The runtime drops all of [`PROMQL_METADATA_LABELS`] here, not the name alone: a name-dropping
+/// window and `timestamp` both go through `drop_metric_name`, and both end with
+/// `remove_all(&METADATA_LABELS)` - an empty value leaves with them too. Deriving only the name
+/// would leave `__type__` and `__unit__` in a label set the runtime no longer reports them in, and
+/// a drop above such a node would then be collected for labels that are already gone.
+fn without_metadata_labels(tags: Vec<String>) -> Vec<String> {
+    tags.into_iter()
+        .filter(|tag| !PROMQL_METADATA_LABELS.contains(&tag.as_str()))
+        .collect()
 }
 
 /// What one node produces.
