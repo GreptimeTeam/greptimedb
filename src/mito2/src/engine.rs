@@ -1826,7 +1826,11 @@ impl RegionEngine for MitoEngine {
             self.inner
                 .notify_if_leader_lease_wait_ended(&region, ended_wait);
         }
-        let previous = region.set_role(role);
+        let previous = if role == RegionRole::Follower && candidate_lease_id.is_some() {
+            region.manifest_ctx.demote_candidate(region_id)
+        } else {
+            region.set_role(role)
+        };
         self.inner.notify_if_can_no_longer_replay(&region, previous);
         Ok(true)
     }
