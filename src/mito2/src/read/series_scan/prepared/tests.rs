@@ -2932,14 +2932,17 @@ async fn added_dynamic_filters_drop_the_preflight_cache() {
 }
 
 #[rstest::rstest]
-#[case::raw_bulk(false, false)]
-#[case::encoded_bulk(true, false)]
-#[case::append_bulk(false, true)]
-#[case::append_encoded_bulk(true, true)]
+#[case::raw_bulk(false, false, "narthex")]
+#[case::raw_parquet(false, false, "flat")]
+#[case::encoded_bulk(true, false, "narthex")]
+#[case::append_bulk(false, true, "narthex")]
+#[case::append_raw_parquet(false, true, "flat")]
+#[case::append_encoded_bulk(true, true, "narthex")]
 #[tokio::test]
 async fn authoritative_narthex_preparation_without_sidecars(
     #[case] encoded: bool,
     #[case] append: bool,
+    #[case] format: &str,
 ) {
     let mut env = TestEnv::with_prefix("narthex-prepared-authoritative").await;
     let engine = env
@@ -2959,15 +2962,13 @@ async fn authoritative_narthex_preparation_without_sidecars(
         .data_type = ConcreteDataType::float64_datatype();
     let mut create = crate::test_util::CreateRequestBuilder::new()
         .insert_option("primary_key_encoding", "sparse")
-        .insert_option("sst_format", "narthex")
+        .insert_option("sst_format", format)
         .insert_option("memtable.type", "bulk")
         .build();
     create.column_metadatas = metadata.column_metadatas;
     create.primary_key = metadata.primary_key;
-    if encoded {
-        // Metric writes encode labels by name, independently of physical metadata order.
-        create.primary_key[2..].reverse();
-    }
+    // Encoded writes must work and raw writes must be rejected regardless of metadata order.
+    create.primary_key[2..].reverse();
     create
         .options
         .insert("append_mode".into(), append.to_string());
@@ -2989,7 +2990,7 @@ async fn authoritative_narthex_preparation_without_sidecars(
         .unwrap();
     let region = engine.get_region(id).unwrap();
     assert!(region.series_index_store.is_none());
-    let raw_count = if append && !encoded { 2049 } else { 1 };
+    let raw_count = 1;
     if encoded {
         write(&engine, &region, 7, 1000, Some(10.0)).await;
     } else {
@@ -3005,27 +3006,29 @@ async fn authoritative_narthex_preparation_without_sidecars(
                 other => panic!("unexpected column {other}"),
             })
             .collect::<Vec<_>>();
-        crate::test_util::put_rows(
-            &engine,
-            id,
-            Rows {
-                schema: raw_schema.clone(),
-                rows: (0..raw_count)
-                    .map(|index| {
-                        let mut values = values.clone();
-                        if index + 1 < raw_count {
-                            let field = raw_schema
-                                .iter()
-                                .position(|column| column.column_name == "field_0")
-                                .unwrap();
-                            values[field] = ValueData::F64Value(8.0);
-                        }
-                        row(values)
-                    })
-                    .collect(),
-            },
-        )
-        .await;
+        let error = engine
+            .handle_request(
+                id,
+                RegionRequest::Put(store_api::region_request::RegionPutRequest {
+                    rows: Rows {
+                        schema: raw_schema.clone(),
+                        rows: vec![row(values)],
+                    },
+                    hint: None,
+                    partition_expr_version: None,
+                    skip_wal: false,
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("sparse regions require pre-encoded primary keys"),
+            "{error}"
+        );
+        engine.stop().await.unwrap();
+        return;
     }
     write_with_tags(&engine, &region, 7, 1000, Some(20.0), &["b", "x"]).await;
     use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};

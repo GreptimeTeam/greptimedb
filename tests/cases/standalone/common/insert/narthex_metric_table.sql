@@ -20,6 +20,10 @@ INSERT INTO narthex_cpu (ts, host, cpu) VALUES (3000, 'a', 3.0);
 
 SELECT host, SUM(cpu) FROM narthex_cpu GROUP BY host ORDER BY host;
 
+SELECT ts, host, cpu FROM narthex_cpu ORDER BY ts;
+
+SELECT ts, host, cpu FROM narthex_cpu ORDER BY ts DESC;
+
 DROP TABLE narthex_cpu;
 
 DROP TABLE narthex_physical;

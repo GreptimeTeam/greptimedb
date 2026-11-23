@@ -173,6 +173,19 @@ impl WriteRequest {
         infer_primary_key_encoding_from_hint(self.hint.as_ref())
     }
 
+    /// Rejects raw row keys for sparse destinations before WAL admission.
+    pub(crate) fn check_primary_key_encoding(&self, metadata: &RegionMetadata) -> Result<()> {
+        ensure!(
+            metadata.primary_key_encoding != PrimaryKeyEncoding::Sparse
+                || self.primary_key_encoding() == PrimaryKeyEncoding::Sparse,
+            InvalidRequestSnafu {
+                region_id: self.region_id,
+                reason: "sparse regions require pre-encoded primary keys",
+            }
+        );
+        Ok(())
+    }
+
     /// Returns estimated size of the request.
     pub(crate) fn estimated_size(&self) -> usize {
         let row_size = self
@@ -196,6 +209,7 @@ impl WriteRequest {
     pub(crate) fn check_schema(&self, metadata: &RegionMetadata) -> Result<()> {
         debug_assert_eq!(self.region_id, metadata.region_id);
 
+        self.check_primary_key_encoding(metadata)?;
         let region_id = self.region_id;
         // Index all columns in rows.
         let rows_columns = self
@@ -565,7 +579,7 @@ impl RequestColumn for BulkColumn<'_> {
 /// [WriteRequest::check_schema] applies to rows: column names are unique, every
 /// column is a column of the region with its Arrow type and contains nulls only
 /// if the region column is nullable, and a missing column is nullable or has a
-/// default value. Tags may use any string encoding. Sparse batches may carry the
+/// default value. Tags may use any string encoding. Sparse batches must carry the
 /// tags in one encoded primary key column instead. Returns whether the batch
 /// misses columns that the writer fills.
 pub fn check_bulk_insert_batch(metadata: &RegionMetadata, batch: &RecordBatch) -> Result<bool> {
@@ -589,6 +603,23 @@ pub fn check_bulk_insert_batch(metadata: &RegionMetadata, batch: &RecordBatch) -
             }
         );
     }
+    ensure!(
+        !sparse || primary_key.is_some(),
+        InvalidRequestSnafu {
+            region_id,
+            reason: "sparse regions require a pre-encoded __primary_key column",
+        }
+    );
+    ensure!(
+        !sparse
+            || !metadata
+                .primary_key_columns()
+                .any(|column| columns.contains_key(column.column_schema.name.as_str())),
+        InvalidRequestSnafu {
+            region_id,
+            reason: "sparse regions do not accept raw tag columns alongside __primary_key",
+        }
+    );
     if let Some(primary_key) = primary_key {
         // The writer casts the encoded primary key to a dictionary of binary.
         let type_matches = match primary_key.data_type() {
@@ -1575,6 +1606,37 @@ mod tests {
     use super::*;
     use crate::error::Error;
     use crate::test_util::ts_ms_value;
+
+    #[test]
+    fn test_sparse_write_requires_encoded_keys() {
+        let metadata = crate::test_util::sst_util::sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        );
+        for op in [OpType::Put, OpType::Delete] {
+            for cached in [false, true] {
+                let mut request = WriteRequest::new(
+                    metadata.region_id,
+                    op,
+                    Rows::default(),
+                    cached.then(|| Arc::new(metadata.clone())),
+                )
+                .unwrap();
+                assert!(matches!(
+                    request.check_primary_key_encoding(&metadata),
+                    Err(Error::InvalidRequest { .. })
+                ));
+                request.hint = Some(WriteHint {
+                    primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse.into(),
+                });
+                request.check_primary_key_encoding(&metadata).unwrap();
+            }
+        }
+        let empty = RecordBatch::new_empty(Arc::new(datatypes::arrow::datatypes::Schema::empty()));
+        assert!(matches!(
+            check_bulk_insert_batch(&metadata, &empty),
+            Err(Error::InvalidRequest { .. })
+        ));
+    }
 
     #[tokio::test]
     async fn test_cancel_compaction_is_worker_control_request() {
