@@ -11,9 +11,15 @@ workspace = true
 api.workspace = true
 async-trait.workspace = true
 common-catalog.workspace = true
+common-decimal.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
+common-recordbatch.workspace = true
 common-telemetry.workspace = true
+common-time.workspace = true
+datatypes.workspace = true
+jsonb.workspace = true
+mysql_async.workspace = true
 object-store.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -21,8 +27,7 @@ snafu.workspace = true
 store-api.workspace = true
 table.workspace = true
 tokio.workspace = true
+tokio-stream.workspace = true
 
 [dev-dependencies]
 common-test-util.workspace = true
-common-time.workspace = true
-datatypes.workspace = true

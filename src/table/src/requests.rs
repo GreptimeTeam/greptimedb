@@ -74,6 +74,16 @@ pub struct RelationalOptions {
     /// Full DSN, e.g. `mysql://user:password@host:3306/db`.
     pub connection: String,
     pub remote_table: String,
+    /// Frozen remote column names, in `INFORMATION_SCHEMA.COLUMNS` order, captured
+    /// at `CREATE EXTERNAL TABLE` time. This is the single source of truth that
+    /// distinguishes a real remote column from a synthetic one (e.g. the inferred
+    /// `greptime_timestamp` time index) at scan time.
+    ///
+    /// `#[serde(default)]` keeps manifests written before this field existed
+    /// readable; such manifests decode to an empty list and the scan fails fast
+    /// rather than guessing.
+    #[serde(default)]
+    pub columns: Vec<String>,
 }
 
 impl RelationalOptions {
@@ -85,6 +95,7 @@ impl RelationalOptions {
         Self {
             connection: redact_connection(&self.connection),
             remote_table: self.remote_table.clone(),
+            columns: self.columns.clone(),
         }
     }
 }
@@ -1010,6 +1021,7 @@ mod tests {
         let options = RelationalOptions {
             connection: "mysql://user:secret@127.0.0.1:3306/db".to_string(),
             remote_table: "sample".to_string(),
+            columns: vec!["id".to_string(), "ts".to_string()],
         };
         let redacted = options.redacted();
         assert_eq!(redacted.connection, "mysql://user:******@127.0.0.1:3306/db");
@@ -1021,6 +1033,7 @@ mod tests {
         let options = RelationalOptions {
             connection: "mysql://user:secret@127.0.0.1:3306/db".to_string(),
             remote_table: "sample".to_string(),
+            columns: vec![],
         };
         let debug = format!("{options:?}");
         assert!(!debug.contains("secret"));

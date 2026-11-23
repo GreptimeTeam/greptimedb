@@ -61,6 +61,7 @@ pub(crate) fn new_test_options() -> HashMap<String, String> {
         serde_json::to_string(&RelationalOptions {
             connection: "mysql://user:***@127.0.0.1:3306/db".to_string(),
             remote_table: "remote_table".to_string(),
+            columns: vec!["a".to_string(), "b".to_string()],
         })
         .unwrap(),
     )])

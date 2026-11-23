@@ -206,6 +206,13 @@ async fn create_relational_expr(
         RelationalOptions {
             connection,
             remote_table,
+            // Freeze the remote column list (in INFORMATION_SCHEMA order) into the
+            // manifest, so the scan can tell a real remote column from a synthetic
+            // one without re-querying the remote schema.
+            columns: remote_columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect(),
         },
         &remote_columns,
     )
@@ -2506,6 +2513,7 @@ WITH(
             RelationalOptions {
                 connection: "mysql://root:secret@127.0.0.1:3306/testdb".to_string(),
                 remote_table: "testdb.sample".to_string(),
+                columns: vec![],
             },
             remote_columns,
         )

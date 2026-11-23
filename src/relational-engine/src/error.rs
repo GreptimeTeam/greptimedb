@@ -14,7 +14,7 @@
 
 use std::any::Any;
 
-use common_error::ext::{ErrorExt, RetryHint};
+use common_error::ext::{BoxedError, ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use object_store::error::retry_hint_from_opendal_error;
@@ -131,6 +131,65 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to decode row for column `{column}`: {reason}"))]
+    DecodeRow {
+        column: String,
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to connect to remote database, connection: {}", connection))]
+    ConnectRemote {
+        connection: String,
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to fetch rows from remote table `{}`", remote_table))]
+    FetchRows {
+        remote_table: String,
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display(
+        "Remote column list is missing from the region manifest; the table must be re-created"
+    ))]
+    MissingRemoteColumns {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Invalid `remote_table` value `{}`: the table name must not be empty",
+        remote_table
+    ))]
+    InvalidRemoteTable {
+        remote_table: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Cannot determine the schema for remote table `{}`: specify a schema-qualified table name or set a default database in the connection",
+        remote_table
+    ))]
+    MissingRemoteSchema {
+        remote_table: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to project the scan schema"))]
+    ProjectSchema {
+        #[snafu(implicit)]
+        location: Location,
+        source: datatypes::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -150,6 +209,15 @@ impl ErrorExt for Error {
             RegionNotFound { .. } => StatusCode::RegionNotFound,
 
             RegionExists { .. } => StatusCode::Unexpected,
+
+            DecodeRow { .. }
+            | InvalidRemoteTable { .. }
+            | MissingRemoteSchema { .. }
+            | ProjectSchema { .. } => StatusCode::InvalidArguments,
+
+            ConnectRemote { .. } | FetchRows { .. } | MissingRemoteColumns { .. } => {
+                StatusCode::Internal
+            }
 
             CheckObject { .. }
             | StoreRegionManifest { .. }

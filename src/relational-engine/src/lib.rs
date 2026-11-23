@@ -14,7 +14,11 @@
 
 pub mod engine;
 pub mod error;
+pub(crate) mod connection;
+pub(crate) mod convert;
 pub(crate) mod manifest;
+pub(crate) mod mysql_stream;
+pub(crate) mod query;
 pub(crate) mod region;
 
 #[cfg(test)]
