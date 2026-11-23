@@ -47,21 +47,37 @@ pub enum TimeSeriesDistribution {
 }
 
 /// One slice of an incremental cursor: the partition expression selecting a region's value
-/// domain together with the last sequence consumed inside it.
+/// domain together with the last sequence consumed inside it, and — when the producer can
+/// state it — the last sequence that delta covers.
+///
+/// The pair bounds the rows one round owes on the slice: `seq < number <= until`. The upper
+/// end matters to a read of a file **another** region created, because such a read compares a
+/// row's number against the creator's domain: without the bound, every row the creator
+/// numbered above the delta is delivered as if it were part of it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CursorShard {
     /// Identity (`PartitionExpr::as_json_str()`) of the expression selecting this slice's
     /// value domain, or `None` for the creator region's complete value domain.
     pub partition_expr: Option<String>,
-    /// Last sequence consumed in the domain `partition_expr` selects.
+    /// Last sequence consumed in the domain `partition_expr` selects (exclusive lower bound).
     pub seq: SequenceNumber,
+    /// Last sequence the delta of this slice covers (inclusive upper bound), when the
+    /// producer states one.
+    ///
+    /// `None` — also what a payload that states no bound means — leaves the slice unbounded
+    /// above: a row above `seq` is live until proven otherwise. `Some(until)` says a row
+    /// numbered above `until` belongs to a later delta and must not be delivered by a read of
+    /// this one.
+    pub until: Option<SequenceNumber>,
 }
 
 impl CursorShard {
+    /// Creates a slice whose delta is unbounded above.
     pub fn new(partition_expr: Option<String>, seq: SequenceNumber) -> Self {
         Self {
             partition_expr,
             seq,
+            until: None,
         }
     }
 
@@ -69,6 +85,13 @@ impl CursorShard {
     /// region-keyed cursor states.
     pub fn whole_domain(seq: SequenceNumber) -> Self {
         Self::new(None, seq)
+    }
+
+    /// Returns this slice with `until` as its inclusive upper bound
+    /// ([`Self::until`]).
+    pub fn with_until(mut self, until: SequenceNumber) -> Self {
+        self.until = Some(until);
+        self
     }
 }
 
@@ -124,8 +147,9 @@ pub struct ScanRequest {
     pub read_row_sequence: bool,
     /// Per-creator-region cursor slices a physical-sequence read filters with
     /// ([`Self::read_row_sequence`]), keyed by the region that allocated the numbers. The least
-    /// advanced slice is the file-level bound; each row is compared against the slice that
-    /// selects it.
+    /// advanced slice is the file-level lower bound, the least upper bound any slice states is
+    /// its file-level upper bound ([`CursorShard::until`]); each row is compared against the
+    /// slice that selects it.
     ///
     /// Empty or absent means no cursor of the creator's domain is known, and an adopted file
     /// then **fails closed** with `SequenceRangeUnsupported`.

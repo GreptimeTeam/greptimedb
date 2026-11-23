@@ -2037,13 +2037,19 @@ impl ScanInput {
         file.meta_ref().substituted_up_to
     }
 
-    /// The row filter of a physical-sequence read of `file`: `(candidate creator cursor,
-    /// +inf)`.
+    /// The row filter of a physical-sequence read of `file`:
+    /// `(candidate creator cursor, candidate creator bound]`, or `(.., +inf)` when no
+    /// candidate slice states an upper bound.
     ///
     /// This is the candidate selection of [`cursor_slice_may_hold_file_rows`] followed by one
     /// sequence range for the whole file, so a file whose expressions advanced differently is
-    /// read from the least advanced of them. The upper end is unbounded because no upper bound
-    /// of the creator's domain survives adoption.
+    /// read from the least advanced of them: the lower end is the *minimum* of the candidates'
+    /// cursors, and the upper end the *minimum* of the upper bounds they state
+    /// ([`CursorShard::until`]). The file-level filter cannot tell which slice a row belongs
+    /// to, so it may only prove what the least bound proves: a row above it may belong to the
+    /// slice whose delta ends exactly there, and delivering it would report progress this read
+    /// does not stand for. No candidate stating a bound leaves the file unbounded above, which
+    /// is what a creator whose domain states no bound allows.
     ///
     /// `None` means this scan has no cursor for the file's creator, or the file is not foreign
     /// at all.
@@ -2074,15 +2080,21 @@ impl ScanInput {
         else {
             return Ok(None);
         };
-        let mut cursor = None;
+        let mut cursor: Option<SequenceNumber> = None;
+        let mut until: Option<SequenceNumber> = None;
         for shard in shards {
             if cursor_slice_may_hold_file_rows(shard, meta)? {
-                cursor = Some(
-                    cursor.map_or(shard.seq, |current: SequenceNumber| current.min(shard.seq)),
-                );
+                cursor = Some(cursor.map_or(shard.seq, |current| current.min(shard.seq)));
+                if let Some(shard_until) = shard.until {
+                    until = Some(until.map_or(shard_until, |current| current.min(shard_until)));
+                }
             }
         }
-        Ok(cursor.map(|min| SequenceRange::Gt { min }))
+        Ok(cursor.map(|min| match until {
+            // `min < number <= max`: the rows of the delta, neither re-read nor read ahead.
+            Some(max) => SequenceRange::GtLtEq { min, max },
+            None => SequenceRange::Gt { min },
+        }))
     }
 
     /// The candidate creator cursor slices of `file`, as the reader compiles them:
@@ -2132,7 +2144,8 @@ impl ScanInput {
     /// `Ok(None)` means the file carries this region's own numbers (or this scan is not a
     /// physical-sequence read at all), so the scan's own `(C, H]` bounds it.
     ///
-    /// A foreign file is filtered by `(creator cursor, +inf)`
+    /// A foreign file is filtered by the cursor of its creator's slices — `(cursor, until]`,
+    /// or `(cursor, +inf)` when the creator states no bound
     /// ([`Self::creator_domain_sequence_range`]), with or without a substituted cut. A file
     /// whose creator this scan has no cursor slice for fails closed instead of falling back to
     /// the holder's `(C, H]`. [`exact_sequence_range`] never prunes such a file by this

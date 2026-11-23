@@ -468,15 +468,20 @@ const CURSOR_SHARD_VERSION: u64 = 2;
 const CURSOR_SHARD_SHARDS_KEY: &str = "shards";
 const CURSOR_SHARD_EXPR_KEY: &str = "expr";
 const CURSOR_SHARD_SEQ_KEY: &str = "seq";
+/// Inclusive upper bound of a slice's delta. Optional, and absent from a version 2 payload
+/// written before the bound existed, which states the unbounded slice it always stated.
+const CURSOR_SHARD_UNTIL_KEY: &str = "until";
 
 /// Parses [`FLOW_INCREMENTAL_AFTER_SEQS`] in every shape it has taken.
 ///
 /// * expression-keyed (current, version 2):
 ///   `{"<region_id>": {"version": 2, "shards": [{"expr": "<partition expr json>", "seq":
-///   seq}, {"expr": null, "seq": seq}, ...]}}` — one cursor per partition expression of
-///   that region, `null` selecting the region's complete value domain. `expr` is the JSON
-///   form `PartitionExpr::as_json_str()` writes and is validated here, so an expression
-///   identity that does not decode never reaches a scan;
+///   seq, "until": seq?}, {"expr": null, "seq": seq}, ...]}}` — one cursor per partition
+///   expression of that region, `null` selecting the region's complete value domain. `expr`
+///   is the JSON form `PartitionExpr::as_json_str()` writes and is validated here, so an
+///   expression identity that does not decode never reaches a scan. `until` is optional: a
+///   slice that states it covers `seq < number <= until`, one that omits it is unbounded
+///   above, exactly like a payload written before the bound existed;
 /// * region-keyed: `{"<region_id>": seq}` — one cursor for the region's complete value
 ///   domain, i.e. the single whole-domain slice. A reader that only knows the holder's
 ///   cursor keeps working, and it states exactly what it always stated.
@@ -566,7 +571,7 @@ fn parse_expression_keyed_shards(
         .collect()
 }
 
-/// Parses one `{"expr": <partition expr json> | null, "seq": N}` slice.
+/// Parses one `{"expr": <partition expr json> | null, "seq": N, "until": N?}` slice.
 fn parse_cursor_shard(region_id: u64, shard: &serde_json::Value) -> Result<CursorShard> {
     let serde_json::Value::Object(fields) = shard else {
         return Err(invalid_query_context_extension(format!(
@@ -602,7 +607,17 @@ fn parse_cursor_shard(region_id: u64, shard: &serde_json::Value) -> Result<Curso
     };
     let seq = parse_cursor_seq(region_id, seq)?;
 
-    Ok(CursorShard::new(partition_expr, seq))
+    // A payload written before the bound existed states no `until`, and a slice that states
+    // no bound is the unbounded slice it always was; an explicit `null` states the same.
+    let until = match fields.get(CURSOR_SHARD_UNTIL_KEY) {
+        None | Some(serde_json::Value::Null) => None,
+        Some(raw) => Some(parse_cursor_seq(region_id, raw)?),
+    };
+
+    Ok(match until {
+        Some(until) => CursorShard::new(partition_expr, seq).with_until(until),
+        None => CursorShard::new(partition_expr, seq),
+    })
 }
 
 /// Checks that `expr` is a partition expression this build can read back, and returns the
@@ -651,7 +666,9 @@ fn parse_cursor_seq(region_id: u64, raw: &serde_json::Value) -> Result<u64> {
 
 /// Encodes slice cursors as the expression-keyed (version [`CURSOR_SHARD_VERSION`]) form
 /// of [`FLOW_INCREMENTAL_AFTER_SEQS`], which [`parse_incremental_after_seqs`] reads back.
-/// A whole-domain slice is written as an explicit `"expr": null`.
+/// A whole-domain slice is written as an explicit `"expr": null`; an upper bound
+/// ([`CursorShard::until`]) is written only when the slice states one, so a cursor of
+/// unbounded slices encodes to exactly the payload the earlier builds wrote.
 pub fn encode_incremental_after_seqs(cursors: &BTreeMap<u64, Vec<CursorShard>>) -> Result<String> {
     let encoded = cursors
         .iter()
@@ -659,10 +676,17 @@ pub fn encode_incremental_after_seqs(cursors: &BTreeMap<u64, Vec<CursorShard>>) 
             let shards = shards
                 .iter()
                 .map(|shard| {
-                    serde_json::json!({
+                    let mut encoded = serde_json::json!({
                         CURSOR_SHARD_EXPR_KEY: shard.partition_expr,
                         CURSOR_SHARD_SEQ_KEY: shard.seq,
-                    })
+                    });
+                    // A slice with no upper bound writes no `until`: the field states a
+                    // bound, and its absence is exactly the unbounded slice an older reader
+                    // already understands.
+                    if let Some(until) = shard.until {
+                        encoded[CURSOR_SHARD_UNTIL_KEY] = serde_json::json!(until);
+                    }
+                    encoded
                 })
                 .collect::<Vec<_>>();
             let value = serde_json::json!({
@@ -1200,6 +1224,58 @@ mod flow_extension_tests {
         assert_eq!(None, parsed.region_cursor(8));
     }
 
+    /// A slice may state the last sequence its delta covers. A payload written before the
+    /// bound existed must keep decoding — as the unbounded slice it stated — and the bound
+    /// must survive a round trip, because a reader of an adopted file relies on it to leave
+    /// the creator's later rows alone.
+    #[test]
+    fn test_parse_flow_extensions_after_seqs_slice_upper_bound() {
+        // Version 2 payload without `until`, i.e. exactly what earlier builds wrote.
+        let exts = HashMap::from([(
+            FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+            r#"{"7":{"version":2,"shards":[{"expr":null,"seq":10}]}}"#.to_string(),
+        )]);
+        let parsed = FlowQueryExtensions::parse_flow_extensions(&exts)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            parsed.incremental_after_seqs,
+            Some(HashMap::from([(7, vec![CursorShard::whole_domain(10)])])),
+            "a slice that states no upper bound is the unbounded slice it always was"
+        );
+        assert_eq!(
+            None,
+            parsed.incremental_after_seqs.as_ref().unwrap()[&7][0].until
+        );
+
+        // The same payload with the bound stated.
+        let exts = HashMap::from([(
+            FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+            r#"{"7":{"version":2,"shards":[{"expr":null,"seq":10,"until":20}]}}"#.to_string(),
+        )]);
+        let parsed = FlowQueryExtensions::parse_flow_extensions(&exts)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            parsed.incremental_after_seqs,
+            Some(HashMap::from([(
+                7,
+                vec![CursorShard::whole_domain(10).with_until(20)]
+            )]))
+        );
+
+        // An upper bound that is not a sequence is refused at the boundary, like `seq`.
+        let exts = HashMap::from([(
+            FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+            r#"{"7":{"version":2,"shards":[{"expr":null,"seq":10,"until":"nope"}]}}"#.to_string(),
+        )]);
+        let err = FlowQueryExtensions::parse_flow_extensions(&exts).unwrap_err();
+        assert!(
+            format!("{err}").contains(FLOW_INCREMENTAL_AFTER_SEQS),
+            "{err}"
+        );
+    }
+
     /// An expression this build cannot read back is rejected at the boundary rather than
     /// silently widened to the whole domain by the scan that receives it.
     #[test]
@@ -1302,7 +1378,7 @@ mod flow_extension_tests {
             (
                 2,
                 vec![
-                    CursorShard::new(Some(low.clone()), 10),
+                    CursorShard::new(Some(low.clone()), 10).with_until(15),
                     CursorShard::new(Some(high.clone()), 3),
                 ],
             ),
@@ -1310,14 +1386,14 @@ mod flow_extension_tests {
 
         let json = encode_incremental_after_seqs(&cursors).unwrap();
         // Compared as JSON: the order of the object keys is serde_json's business, the
-        // identity and the sequence are what the wire states.
+        // identity, the sequence and the optional bound are what the wire states.
         assert_eq!(
             serde_json::json!({
                 "1": {"version": 2, "shards": [{"expr": null, "seq": 10}]},
                 "2": {
                     "version": 2,
                     "shards": [
-                        {"expr": low, "seq": 10},
+                        {"expr": low, "seq": 10, "until": 15},
                         {"expr": high, "seq": 3},
                     ]
                 },

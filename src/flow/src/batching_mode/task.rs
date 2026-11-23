@@ -232,6 +232,18 @@ impl RegionWatermarkSample {
         &self.watermarks
     }
 
+    /// The regions this round read, i.e. the sample plan's own participating set.
+    ///
+    /// A caller that must tell "read without a proved terminal watermark" from "never read"
+    /// (the plan pruned it) needs this beside [`Self::watermarks`]: the proved map alone
+    /// cannot distinguish them, and a baseline frozen from it alone would silently omit a
+    /// region the plan read and could not prove. Such a region's history would then be
+    /// aggregated from `0` by the first later read naming it, so freezing has to compare the
+    /// two sets instead of projecting the sample onto its proved watermarks.
+    pub fn read_regions(&self) -> &BTreeSet<u64> {
+        &self.read_regions
+    }
+
     /// Keeps only the proved watermarks, dropping the read/unproved distinction.
     pub fn into_watermarks(self) -> BTreeMap<u64, u64> {
         self.watermarks

@@ -732,6 +732,7 @@ mod tests {
                     vec![CursorShard {
                         partition_expr: None,
                         seq: 10,
+                        until: None,
                     }],
                 ),
                 (
@@ -739,6 +740,7 @@ mod tests {
                     vec![CursorShard {
                         partition_expr: None,
                         seq: 20,
+                        until: None,
                     }],
                 ),
             ]))
@@ -809,10 +811,12 @@ mod tests {
                         CursorShard {
                             partition_expr: Some(expr),
                             seq: 10,
+                            until: None,
                         },
                         CursorShard {
                             partition_expr: None,
                             seq: 15,
+                            until: None,
                         },
                     ],
                 ),
@@ -821,6 +825,7 @@ mod tests {
                     vec![CursorShard {
                         partition_expr: None,
                         seq: 20,
+                        until: None,
                     }],
                 ),
             ]))
