@@ -98,7 +98,7 @@ cargo run -p sqlness-runner -- compat --from-version v0.9.5
 cargo run -p sqlness-runner -- compat --from-bins-dir ./bins/old --to-bins-dir ./bins/new
 
 # Test a downgrade from the current build to a released binary:
-cargo run -p sqlness-runner -- compat --from-bins-dir ./bins/current --to-version v1.1.4
+cargo run -p sqlness-runner -- compat --from-bins-dir ./bins/current --to-version v1.2.1
 
 # Run a compatibility case in standalone mode:
 cargo run -p sqlness-runner -- compat --topology standalone --test-filter "downgrade_compatibility"
