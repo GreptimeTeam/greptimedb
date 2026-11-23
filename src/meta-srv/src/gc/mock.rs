@@ -65,6 +65,20 @@ pub fn new_empty_report_with(region_ids: impl IntoIterator<Item = RegionId>) -> 
     }
 }
 
+/// One `gc_regions` dispatch as observed by [`MockSchedulerCtx`].
+///
+/// Recorded before the mock builds (or fails) its report, so tests can observe
+/// exactly which regions the scheduler handed to a datanode in a given tick.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatchRecord {
+    /// Round tag the test stamped with [`MockSchedulerCtx::begin_dispatch_round`].
+    pub round: usize,
+    /// Region ids carried by this dispatch, sorted.
+    pub region_ids: Vec<RegionId>,
+    /// Whether the dispatch asked the datanode for a full file listing.
+    pub full: bool,
+}
+
 #[allow(clippy::type_complexity)]
 #[derive(Debug, Default)]
 pub struct MockSchedulerCtx {
@@ -77,6 +91,10 @@ pub struct MockSchedulerCtx {
     pub get_table_to_region_stats_calls: Arc<Mutex<usize>>,
     pub gc_regions_calls: Arc<Mutex<usize>>,
     pub gc_event_contexts: Arc<Mutex<Vec<PersistentEventContext>>>,
+    /// Log of every `gc_regions` dispatch, in call order.
+    pub dispatch_log: Arc<Mutex<Vec<DispatchRecord>>>,
+    /// Round tag stamped on new [`DispatchRecord`]s.
+    pub dispatch_round: Arc<Mutex<usize>>,
     // Error injection fields for testing
     pub get_table_to_region_stats_error: Arc<Mutex<Option<crate::error::Error>>>,
     pub get_table_route_error: Arc<Mutex<Option<crate::error::Error>>>,
@@ -142,6 +160,33 @@ impl MockSchedulerCtx {
     #[allow(unused)]
     pub fn clear_gc_regions_per_region_errors(&self) {
         self.gc_regions_per_region_errors.lock().unwrap().clear();
+    }
+
+    /// Tag subsequent dispatches with `round` so a test can group `gc_regions`
+    /// calls per logical tick.
+    pub fn begin_dispatch_round(&self, round: usize) {
+        *self.dispatch_round.lock().unwrap() = round;
+    }
+
+    /// Dispatches recorded while `round` was the current round tag.
+    pub fn dispatches_in_round(&self, round: usize) -> Vec<DispatchRecord> {
+        self.dispatch_log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|record| record.round == round)
+            .cloned()
+            .collect()
+    }
+
+    /// Every region id that was ever handed to `gc_regions`, across all rounds.
+    pub fn dispatched_region_ids(&self) -> HashSet<RegionId> {
+        self.dispatch_log
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|record| record.region_ids.iter().copied())
+            .collect()
     }
 }
 
@@ -212,7 +257,7 @@ impl SchedulerCtx for MockSchedulerCtx {
     async fn gc_regions(
         &self,
         region_ids: &[RegionId],
-        _full_file_listing: bool,
+        full_file_listing: bool,
         _timeout: Duration,
         _region_routes_override: Region2Peers,
         procedure_context: ProcedureContext,
@@ -222,6 +267,19 @@ impl SchedulerCtx for MockSchedulerCtx {
             .lock()
             .unwrap()
             .push(procedure_context.event_context.unwrap_or_default());
+
+        // Record the dispatch before any report building or error injection, so the
+        // log reflects what the scheduler actually asked for even when the mock fails.
+        {
+            let mut dispatched = region_ids.to_vec();
+            dispatched.sort_unstable();
+            let round = *self.dispatch_round.lock().unwrap();
+            self.dispatch_log.lock().unwrap().push(DispatchRecord {
+                round,
+                region_ids: dispatched,
+                full: full_file_listing,
+            });
+        }
 
         // Check per-region error injection first (for any region)
         for &region_id in region_ids {
