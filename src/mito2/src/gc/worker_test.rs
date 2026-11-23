@@ -47,11 +47,12 @@ use crate::manifest::action::{
     RegionEdit, RegionManifest, RegionMetaAction, RegionMetaActionList, RemovedFile,
     RemovedFilesRecord,
 };
-use crate::manifest::storage::{delta_file, gen_path};
+use crate::manifest::storage::{delta_file, gen_path, manifest_dir};
 use crate::metrics::{GC_ERRORS_TOTAL, GC_SKIPPED_UNPARSABLE_FILES};
 use crate::region::{MitoRegionRef, RegionLeaderState};
 use crate::sst::file::{
-    ColumnIndexMetadata, FileHandle, FileMeta, FileMetaRef, IndexType, RegionFileId, RegionIndexId,
+    ColumnIndexMetadata, FileFormat, FileHandle, FileMeta, FileMetaRef, IndexType, NarthexPartMeta,
+    NarthexSamplesMeta, RegionFileId, RegionIndexId,
 };
 use crate::sst::location;
 use crate::test_util::{
@@ -2085,12 +2086,39 @@ enum GcObject {
     Sst(FileId),
     /// Puffin index object of one file id at one metadata version.
     Index(FileId, IndexVersion),
+    /// One object of the narthex artifact directory of a file id.
+    Narthex(FileId, NarthexObject),
+}
+
+/// One object inside a narthex artifact directory `<region>/<file id>/`.
+///
+/// A narthex artifact is one immutable file of *parts*, so it is never deleted
+/// object by object: the removal of the whole directory is one unit at the
+/// delete site (`AccessLayer::delete_narthex_artifact`), while the safety
+/// contract has to be judged part by part. The oracle therefore tracks the
+/// parts as objects (inventory, age, `deleted_ever`) and the artifact as the
+/// unit the pass really hands to the store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum NarthexObject {
+    /// The artifact's own attribute file, `manifest.json`.
+    Manifest,
+    /// One immutable part; parts are numbered from zero, `part-<n>.samples`.
+    Part(u32),
+}
+
+impl NarthexObject {
+    fn name(self) -> String {
+        match self {
+            NarthexObject::Manifest => "manifest.json".to_string(),
+            NarthexObject::Part(part) => format!("part-{part}.samples"),
+        }
+    }
 }
 
 impl GcObject {
     fn file_id(self) -> FileId {
         match self {
-            GcObject::Sst(id) | GcObject::Index(id, _) => id,
+            GcObject::Sst(id) | GcObject::Index(id, _) | GcObject::Narthex(id, _) => id,
         }
     }
 
@@ -2098,6 +2126,7 @@ impl GcObject {
         match self {
             GcObject::Sst(id) => format!("sst({id})"),
             GcObject::Index(id, version) => format!("index({id}, v{version})"),
+            GcObject::Narthex(id, object) => format!("narthex({id}, {})", object.name()),
         }
     }
 }
@@ -2119,17 +2148,47 @@ fn object_path(object: GcObject, region_id: RegionId, layer: &AccessLayer) -> St
             RegionIndexId::new(RegionFileId::new(region_id, id), version),
             layer.path_type(),
         ),
+        GcObject::Narthex(id, object) => format!(
+            "{}{}",
+            location::narthex_file_dir(&layer.build_region_dir(region_id), id),
+            object.name()
+        ),
     };
     normalize_object_path(&path)
 }
 
+/// The artifact directory a delete path names, if that delete covered the whole
+/// artifact (`delete_with(dir).recursive(true)`) instead of a single object.
+///
+/// The recursive removal is one delete call naming the directory, so a pass that
+/// reclaims an artifact never names its parts. Part paths are not directories:
+/// their last component is `manifest.json` or `part-<n>.samples`.
+fn narthex_artifact_dir(path: &str) -> Option<FileId> {
+    let trimmed = path.trim_end_matches('/');
+    if !location::is_narthex_file_dir(trimmed) {
+        return None;
+    }
+    trimmed.rsplit('/').next()?.parse().ok()
+}
+
 /// Classifies a path below the region directory.
 fn object_of_path(path: &str) -> Option<GcObject> {
-    let (file_id, file_type) = location::parse_file_id_type_from_path(path).ok()?;
-    Some(match file_type {
-        FileType::Parquet => GcObject::Sst(file_id),
-        FileType::Puffin(version) => GcObject::Index(file_id, version),
-    })
+    if let Ok((file_id, file_type)) = location::parse_file_id_type_from_path(path) {
+        return Some(match file_type {
+            FileType::Parquet => GcObject::Sst(file_id),
+            FileType::Puffin(version) => GcObject::Index(file_id, version),
+        });
+    }
+    let file_id = location::parse_narthex_file_id(path)?;
+    let name = path.trim_end_matches('/').rsplit('/').next()?;
+    let object = match name {
+        "manifest.json" => NarthexObject::Manifest,
+        _ => {
+            let item = name.strip_prefix("part-")?;
+            NarthexObject::Part(item.split('.').next()?.parse().ok()?)
+        }
+    };
+    Some(GcObject::Narthex(file_id, object))
 }
 
 /// One `delete` call forwarded to the underlying store.
@@ -2429,6 +2488,11 @@ struct PassFacts {
     /// `GcReport::deleted_indexes` for the region. Lossy by design, see
     /// `test_gc_physical_delete_oracle_index_fanout`.
     reported_indexes: BTreeSet<(FileId, IndexVersion)>,
+    /// Narthex artifact directories the oracle expected the pass to remove.
+    expected_narthex: BTreeSet<FileId>,
+    /// Narthex artifact directories the pass really handed to a recursive
+    /// delete. This is the unit the store sees, so it is checked on its own.
+    deleted_narthex: BTreeSet<FileId>,
 }
 
 /// The oracle's verdict for one object in one pass.
@@ -2504,12 +2568,16 @@ impl PassInput {
     /// (an outdated index record also makes the id tracked), Puffin objects per
     /// exact `(file id, version)`; this mirrors the `is_linger`/`is_eligible`
     /// lookups of `filter_deletable_files` and of the fast-mode `in_use` check.
+    /// A narthex part is tracked per file id as well: the manifest records the
+    /// artifact, never one part.
     fn known_and_expired(&self, object: GcObject) -> (bool, bool) {
         let mut known = false;
         let mut expired = false;
         for (removed_at, files) in &self.removed {
             let hit = match object {
-                GcObject::Sst(id) => files.iter().any(|file| file.file_id() == id),
+                GcObject::Sst(id) | GcObject::Narthex(id, _) => {
+                    files.iter().any(|file| file.file_id() == id)
+                }
                 GcObject::Index(id, version) => files.contains(&RemovedFile::Index(id, version)),
             };
             if hit {
@@ -2524,7 +2592,9 @@ impl PassInput {
     fn verdict(&self, object: GcObject) -> Verdict {
         if let Some(recorded) = self.manifest_index.get(&object.file_id()) {
             let protected = match object {
-                GcObject::Sst(_) => true,
+                // A narthex artifact is in the manifest as a whole, so any entry
+                // for the id protects every part of it.
+                GcObject::Sst(_) | GcObject::Narthex(_, _) => true,
                 GcObject::Index(_, version) => *recorded == Some(version),
             };
             if protected {
@@ -2532,7 +2602,9 @@ impl PassInput {
             }
         }
         let referenced = match object {
-            GcObject::Sst(id) => self.tmp_refs.iter().any(|(tmp_id, _)| *tmp_id == id),
+            GcObject::Sst(id) | GcObject::Narthex(id, _) => {
+                self.tmp_refs.iter().any(|(tmp_id, _)| *tmp_id == id)
+            }
             GcObject::Index(id, version) => self.tmp_refs.contains(&(id, Some(version))),
         };
         if referenced {
@@ -2565,16 +2637,65 @@ impl PassInput {
         }
     }
 
+    /// The artifact-level verdict for the narthex artifact of `id`.
+    ///
+    /// Unlike an SST, an artifact is judged per part: `filter_deletable_files`
+    /// ANDs the per-object decision of every listed part into one eligibility
+    /// flag, so a single part that is in use, in the manifest, still lingering,
+    /// hook protected, or younger than the unknown-file grace keeps the whole
+    /// artifact. Deleting a subset of the parts is not an option: the removal
+    /// site drops the artifact directory.
+    fn narthex_verdict(&self, id: FileId) -> Verdict {
+        let parts: Vec<GcObject> = self
+            .listed
+            .keys()
+            .copied()
+            .filter(|object| matches!(object, GcObject::Narthex(part_id, _) if *part_id == id))
+            .collect();
+        if parts.is_empty() {
+            // No object of the artifact is listed, so there is nothing to judge
+            // part by part: only the id-level protections apply.
+            if self.manifest_index.contains_key(&id) {
+                return Verdict::Keep("in manifest");
+            }
+            if self.tmp_refs.iter().any(|(tmp_id, _)| *tmp_id == id) {
+                return Verdict::Keep("temporary reader reference");
+            }
+            if self.hook_protected.contains(&id) {
+                return Verdict::Keep("hook protection");
+            }
+            return Verdict::Delete;
+        }
+        for part in parts {
+            if let Verdict::Keep(reason) = self.verdict(part) {
+                return Verdict::Keep(reason);
+            }
+        }
+        Verdict::Delete
+    }
+
     /// The `RemovedFile`s the pass is expected to hand to the physical deleter.
     fn candidates(&self) -> Vec<RemovedFile> {
         let mut candidates = Vec::new();
         if self.knobs.full_listing {
+            let mut narthex_ids = BTreeSet::new();
             for object in self.listed.keys() {
+                if let GcObject::Narthex(id, _) = *object {
+                    narthex_ids.insert(id);
+                    continue;
+                }
                 if self.verdict(*object) == Verdict::Delete {
                     candidates.push(match *object {
                         GcObject::Sst(id) => RemovedFile::File(id, None),
                         GcObject::Index(id, version) => RemovedFile::Index(id, version),
+                        GcObject::Narthex(_, _) => unreachable!("handled above"),
                     });
+                }
+            }
+            // One `RemovedFile::Narthex` per artifact, not per part.
+            for id in narthex_ids {
+                if self.narthex_verdict(id) == Verdict::Delete {
+                    candidates.push(RemovedFile::Narthex(id));
                 }
             }
         } else {
@@ -2583,11 +2704,16 @@ impl PassInput {
                     continue;
                 }
                 for file in files {
-                    let object = match file {
-                        RemovedFile::Narthex(id) | RemovedFile::File(id, _) => GcObject::Sst(*id),
-                        RemovedFile::Index(id, version) => GcObject::Index(*id, *version),
+                    let deletable = match file {
+                        RemovedFile::Narthex(id) => self.narthex_verdict(*id) == Verdict::Delete,
+                        RemovedFile::File(id, _) => {
+                            self.verdict(GcObject::Sst(*id)) == Verdict::Delete
+                        }
+                        RemovedFile::Index(id, version) => {
+                            self.verdict(GcObject::Index(*id, *version)) == Verdict::Delete
+                        }
                     };
-                    if self.verdict(object) == Verdict::Delete {
+                    if deletable {
                         candidates.push(file.clone());
                     }
                 }
@@ -2599,8 +2725,12 @@ impl PassInput {
 
 /// Model of the physical deletion expansion: deleting an SST also deletes every
 /// index object up to the version recorded with the removal (`None` = version 0).
+/// A narthex artifact is the opposite case: the delete site removes the whole
+/// directory at once, so the expectation is every part object it holds, not the
+/// directory path the store sees.
 fn expand_candidates(
     candidates: &[RemovedFile],
+    listed: &BTreeMap<GcObject, Option<i64>>,
     region_id: RegionId,
     layer: &AccessLayer,
 ) -> BTreeSet<String> {
@@ -2608,10 +2738,14 @@ fn expand_candidates(
     for candidate in candidates {
         match candidate {
             RemovedFile::Narthex(id) => {
-                paths.insert(normalize_object_path(&location::narthex_file_dir(
-                    &layer.build_region_dir(region_id),
-                    *id,
-                )));
+                paths.extend(
+                    listed
+                        .keys()
+                        .filter(|object| {
+                            matches!(object, GcObject::Narthex(part_id, _) if part_id == id)
+                        })
+                        .map(|object| object_path(*object, region_id, layer)),
+                );
             }
             RemovedFile::File(id, version) => {
                 paths.insert(object_path(GcObject::Sst(*id), region_id, layer));
@@ -2633,6 +2767,37 @@ fn expand_candidates(
         }
     }
     paths
+}
+
+/// The artifact directories (not their parts) the candidates name.
+fn narthex_artifacts(candidates: &[RemovedFile]) -> BTreeSet<FileId> {
+    candidates
+        .iter()
+        .filter_map(|candidate| match candidate {
+            RemovedFile::Narthex(id) => Some(*id),
+            RemovedFile::File(_, _) | RemovedFile::Index(_, _) => None,
+        })
+        .collect()
+}
+
+/// Ids a raw delete path asks the store to remove: an SST object, one index
+/// object (which `GcReport` never reports as a file), or an artifact directory.
+fn attempted_file_id(path: &str) -> Option<FileId> {
+    if let Some(id) = narthex_artifact_dir(path) {
+        return Some(id);
+    }
+    match location::parse_file_id_type_from_path(path).ok()? {
+        (file_id, FileType::Parquet) => Some(file_id),
+        (_, FileType::Puffin(_)) => None,
+    }
+}
+
+/// Index objects a raw delete path asks the store to remove.
+fn attempted_index(path: &str) -> Option<(FileId, IndexVersion)> {
+    match location::parse_file_id_type_from_path(path).ok()? {
+        (file_id, FileType::Puffin(version)) => Some((file_id, version)),
+        (_, FileType::Parquet) => None,
+    }
 }
 
 /// Model of what a pass reports through `GcReport`, derived from the candidates
@@ -2749,12 +2914,16 @@ impl GcOracle {
         normalize_object_path(&self.access_layer().build_region_dir(self.region_id))
     }
 
-    /// Whether the path is one of the region's data objects (the region manifest
-    /// lives inside the region directory, so it is excluded).
+    /// Whether the path is one of the region's data objects. The region's
+    /// manifest directory (`<region>/manifest/`) is bookkeeping and is excluded,
+    /// but an artifact directory is data, including its own `manifest.json`: only
+    /// the manifest *directory* is filtered out, not every path that happens to
+    /// contain `manifest`.
     fn is_data_path(&self, path: &str) -> bool {
         let path = normalize_object_path(path);
         let region_dir = self.data_prefix().trim_end_matches('/').to_string();
-        if path.contains("/manifest") {
+        let manifest_dir = normalize_object_path(&manifest_dir(&format!("{region_dir}/")));
+        if path.starts_with(&manifest_dir) {
             return false;
         }
         path == region_dir || path.starts_with(&format!("{region_dir}/"))
@@ -2898,6 +3067,67 @@ impl GcOracle {
                 ..Default::default()
             },
             format!("publish-remove({id}, {index_version:?}, at={removed_at:?})"),
+        )
+        .await;
+    }
+
+    /// Writes the whole artifact directory of `id`: `manifest.json` plus `parts`
+    /// parts (`part-0.samples`, ...). The parts are written in order, so the
+    /// caller can make one part younger than the rest.
+    async fn write_narthex_artifact(&mut self, id: FileId, parts: u32) {
+        for object in std::iter::once(GcObject::Narthex(id, NarthexObject::Manifest))
+            .chain((0..parts).map(|part| GcObject::Narthex(id, NarthexObject::Part(part))))
+        {
+            self.write_object(object).await;
+        }
+    }
+
+    /// Manifest metadata of a narthex artifact with `parts` parts. A non-Parquet
+    /// entry is what makes [`RegionManifestBuilder`] record a
+    /// `RemovedFile::Narthex` when the artifact is removed.
+    fn narthex_meta(&self, id: FileId, parts: u32) -> FileMeta {
+        FileMeta {
+            region_id: self.region_id,
+            file_id: id,
+            format: FileFormat::NarthexSamples(Box::new(NarthexSamplesMeta {
+                use_file_sequence: false,
+                manifest_size: b"narthex".len() as u64,
+                parts: (0..parts)
+                    .map(|_| NarthexPartMeta {
+                        file_size: b"oracle object".len() as u64,
+                    })
+                    .collect(),
+            })),
+            ..Default::default()
+        }
+    }
+
+    /// Publishes a narthex artifact, so the manifest lists the id (and therefore
+    /// protects every part of it).
+    async fn publish_add_narthex(&mut self, id: FileId, parts: u32) {
+        let meta = self.narthex_meta(id, parts);
+        self.publish_edit(
+            RegionEdit {
+                files_to_add: vec![meta],
+                ..Default::default()
+            },
+            format!("publish-add-narthex({id}, {parts} parts)"),
+        )
+        .await;
+    }
+
+    /// Removes a narthex artifact. Because the manifest entry is not Parquet,
+    /// the removal is recorded as `RemovedFile::Narthex`, i.e. as the whole
+    /// artifact and never as an SST object of the same id.
+    async fn publish_remove_narthex(&mut self, id: FileId, removed_at: Option<i64>) {
+        let meta = self.narthex_meta(id, 1);
+        self.publish_edit(
+            RegionEdit {
+                files_to_remove: vec![meta],
+                timestamp_ms: removed_at,
+                ..Default::default()
+            },
+            format!("publish-remove-narthex({id}, at={removed_at:?})"),
         )
         .await;
     }
@@ -3079,7 +3309,25 @@ impl GcOracle {
             listed,
         };
         let candidates = input.candidates();
-        let raw_expected = expand_candidates(&candidates, self.region_id, self.access_layer());
+        let raw_expected = expand_candidates(
+            &candidates,
+            &input.listed,
+            self.region_id,
+            self.access_layer(),
+        );
+        let expected_narthex = narthex_artifacts(&candidates);
+        // The artifact directories the listing holds, so a recursive delete of an
+        // artifact can be expanded into the part objects it removed.
+        let mut narthex_parts: BTreeMap<FileId, Vec<String>> = BTreeMap::new();
+        for object in input.listed.keys() {
+            if let GcObject::Narthex(id, _) = *object {
+                narthex_parts.entry(id).or_default().push(object_path(
+                    *object,
+                    self.region_id,
+                    self.access_layer(),
+                ));
+            }
+        }
         // `RemovedFile::File(id, v)` fans out into every index version `0..=v`,
         // so a pass may hand the store a path for an object that never existed
         // (a delete of an absent key is a no-op). The oracle compares only
@@ -3099,11 +3347,30 @@ impl GcOracle {
         };
         let records = self.log.deletes();
         let in_round = |record: &DeleteRecord| record.round == round;
-        let deleted_paths: BTreeSet<String> = records
+        let mut deleted_paths: BTreeSet<String> = BTreeSet::new();
+        let mut attempted_paths: BTreeSet<String> = BTreeSet::new();
+        let mut deleted_narthex: BTreeSet<FileId> = BTreeSet::new();
+        for record in records
             .iter()
             .filter(|record| in_round(record) && self.is_data_path(&record.path))
-            .map(|record| record.path.clone())
-            .collect();
+        {
+            // Every path the pass handed to the store, before it is mapped to the
+            // objects it covers. The over-report check below compares the report
+            // against this set, because that is what "tried to delete" means: an
+            // artifact directory delete attempts the artifact, not one part.
+            attempted_paths.insert(record.path.clone());
+            match narthex_artifact_dir(&record.path) {
+                // The artifact removal is one recursive delete naming the
+                // directory: it covers every part object the directory held.
+                Some(id) => {
+                    deleted_narthex.insert(id);
+                    deleted_paths.extend(narthex_parts.get(&id).cloned().unwrap_or_default());
+                }
+                None => {
+                    deleted_paths.insert(record.path.clone());
+                }
+            }
+        }
         let actual_paths: BTreeSet<String> = deleted_paths
             .intersection(&existing_paths)
             .cloned()
@@ -3160,17 +3427,36 @@ impl GcOracle {
         // A pass hands the store at most three deleters for the region's data
         // objects: the SSTs of the removed files, the index versions of their
         // `0..=v` fan-out, and the explicitly recorded index removals. A batch
-        // per object would grow this count with the inventory.
+        // per object would grow this count with the inventory. Each narthex
+        // artifact is removed by its own recursive directory delete, so it adds
+        // exactly one batch per artifact.
         let batches: BTreeSet<usize> = records
             .iter()
             .filter(|record| in_round(record) && self.is_data_path(&record.path))
             .map(|record| record.batch)
             .collect();
+        let allowed_batches = 3 + deleted_narthex.len();
         assert!(
-            batches.len() <= 3,
-            "{}: pass `{what}` used {} delete batches ({batches:?}) for the region's data objects",
+            batches.len() <= allowed_batches,
+            "{}: pass `{what}` used {} delete batches ({batches:?}) for the region's data objects, at most {allowed_batches} are expected",
             self.context(),
             batches.len()
+        );
+        // Artifact directories are the unit the store sees, so they are compared
+        // on their own: a pass may neither remove an artifact the oracle keeps
+        // (even when only one of its parts is still protected) nor leave one the
+        // oracle expects to be gone.
+        assert_eq!(
+            deleted_narthex,
+            expected_narthex,
+            "{}: pass `{what}` narthex artifact delete set mismatch\n  removed but not expected: {:?}\n  expected but not removed: {:?}\n",
+            self.context(),
+            deleted_narthex
+                .difference(&expected_narthex)
+                .collect::<Vec<_>>(),
+            expected_narthex
+                .difference(&deleted_narthex)
+                .collect::<Vec<_>>(),
         );
         // Two-sided check: no object may be deleted unexpectedly, and every
         // candidate the oracle expects must really be gone. Without the second
@@ -3259,6 +3545,48 @@ impl GcOracle {
             "{}: pass `{what}` GcReport::deleted_indexes does not match the physical deletion",
             self.context()
         );
+        // Reverse direction of the report check, against the delete site instead
+        // of the model: whatever a pass reports must be something it really tried
+        // to delete in this very pass. A report entry for an object the pass never
+        // handed to the store is an over-report, and would make a consumer (for
+        // example the dropping procedure counting reclaimed objects) believe work
+        // happened that did not.
+        //
+        // The relation is `report ⊆ physical attempts`, not equality, because
+        // `GcReport` is allowed to describe less than the delete site does:
+        // * `RemovedFile::File(id, None)` (listing mode) reports the file id and
+        //   physically also tries index version 0;
+        // * `RemovedFile::File(id, Some(v))` reports `(id, v)` while the delete
+        //   site fans out over `0..=v`, so it reports one of several attempted
+        //   versions and never the whole fan-out;
+        // * `RemovedFile::Narthex(id)` reports the file id although the delete
+        //   site removes an artifact directory and never an SST object of that
+        //   id. That is why a narthex directory delete counts as an attempt for
+        //   the id, and an index-only delete does not.
+        let attempted_files: BTreeSet<FileId> = attempted_paths
+            .iter()
+            .filter_map(|path| attempted_file_id(path))
+            .collect();
+        let attempted_indexes: BTreeSet<(FileId, IndexVersion)> = attempted_paths
+            .iter()
+            .filter_map(|path| attempted_index(path))
+            .collect();
+        assert!(
+            reported_files.is_subset(&attempted_files),
+            "{}: pass `{what}` reported files it never tried to delete\n  reported but not attempted: {:?}\n  attempted: {attempted_files:?}",
+            self.context(),
+            reported_files
+                .difference(&attempted_files)
+                .collect::<Vec<_>>(),
+        );
+        assert!(
+            reported_indexes.is_subset(&attempted_indexes),
+            "{}: pass `{what}` reported index versions it never tried to delete\n  reported but not attempted: {:?}\n  attempted: {attempted_indexes:?}",
+            self.context(),
+            reported_indexes
+                .difference(&attempted_indexes)
+                .collect::<Vec<_>>(),
+        );
         // Entry checks and the post-lookup recheck must never touch the data
         // directory: no listing, no delete.
         if expectation.complete {
@@ -3310,6 +3638,8 @@ impl GcOracle {
                 .collect(),
             reported_files: reported_files.clone(),
             reported_indexes: reported_indexes.clone(),
+            expected_narthex,
+            deleted_narthex,
         });
         for path in &actual_paths {
             if let Some(object) = object_of_path(path) {
@@ -3780,6 +4110,8 @@ async fn test_gc_physical_delete_oracle_index_fanout() {
                         *reported_id == id && *reported_version >= version
                     })
             }
+            // An artifact removal is reported by its file id, never per part.
+            GcObject::Narthex(id, _) => facts.reported_files.contains(&id),
         };
         assert!(
             covered,
@@ -3983,4 +4315,223 @@ async fn test_gc_physical_delete_oracle_scenario(#[case] seed: u64) {
             object.describe()
         );
     }
+}
+
+/// Narthex artifacts at the real delete site.
+///
+/// A narthex artifact is one file made of parts under `<region>/<file id>/`,
+/// and it is reclaimed as a whole: `delete_narthex_artifact` hands the object
+/// store one recursive directory delete. The safety contract is therefore
+/// judged per part but executed per artifact, which is why the oracle models
+/// both levels: the parts are inventory objects with their own age, and the
+/// artifact directory is the unit a pass may or may not remove.
+///
+/// Three properties are covered here, none of which a report-based test can
+/// see:
+/// * every part is past the grace period and the artifact is not in the
+///   manifest - the whole directory is reclaimed, including its own
+///   `manifest.json`;
+/// * one part is younger than the grace period - the whole artifact survives,
+///   although its other parts are as old as the ones of a reclaimed artifact in
+///   the very same pass;
+/// * one artifact is listed in the manifest - no age makes it reclaimable.
+///
+/// A second pass then removes an artifact through the manifest record
+/// (`RemovedFile::Narthex`), and leaves one alone while its record still
+/// lingers. `deleted_ever` and the inventory are checked for the parts, so a
+/// pass that removes the directory without accounting for its objects fails.
+#[tokio::test]
+async fn test_gc_physical_delete_oracle_narthex() {
+    // Long enough to separate "written before the pass" from "written during
+    // it", short enough to keep the test fast. The oracle refuses any object
+    // whose age is not proven, so an unlucky machine reports an ambiguity
+    // instead of a wrong verdict.
+    const GRACE: Duration = Duration::from_millis(500);
+    const AGING: Duration = Duration::from_millis(600);
+
+    let mut oracle = GcOracle::new("narthex", 0x4E41_2748).await;
+    // Every part is older than `GRACE`: the artifact is reclaimed as a whole.
+    let mature = FileId::from_bytes([0x0A; 16]);
+    // One part is written after the aging step, so the artifact must survive
+    // even though its other parts are exactly as old as `mature`'s.
+    let young_part = FileId::from_bytes([0x0B; 16]);
+    // In the manifest: protected regardless of age.
+    let published = FileId::from_bytes([0x0C; 16]);
+    // Removed through the manifest, which records `RemovedFile::Narthex`.
+    let recorded = FileId::from_bytes([0x0D; 16]);
+    // Removed through the manifest, but its record still lingers.
+    let lingering = FileId::from_bytes([0x0E; 16]);
+
+    oracle.write_narthex_artifact(mature, 2).await;
+    oracle.write_narthex_artifact(published, 2).await;
+    oracle.publish_add_narthex(published, 2).await;
+    oracle.write_narthex_artifact(young_part, 1).await;
+    tokio::time::sleep(AGING).await;
+    // The fresh part lands after every other object, so only it is young.
+    oracle
+        .write_object(GcObject::Narthex(young_part, NarthexObject::Part(1)))
+        .await;
+
+    // A full listing sees every part. `mature` and `young_part` are not in the
+    // manifest, so only their age decides; the artifact of `young_part` is kept
+    // whole because one of its parts is younger than the grace period.
+    oracle
+        .run_pass(
+            RoundKnobs::full(NO_KNOWN_WAIT, GRACE),
+            PassWiring::default(),
+            PassExpectation::complete_deleting(),
+            "full/aged-artifacts",
+        )
+        .await;
+
+    let facts = oracle.last_pass();
+    // Physical deletion set, not the report: every object of the mature artifact
+    // is gone, and no object of the artifact with a young part is.
+    assert_eq!(
+        facts.deleted_narthex,
+        BTreeSet::from([mature]),
+        "{}: only the fully aged, unpublished artifact may be removed",
+        oracle.context()
+    );
+    assert_eq!(
+        facts.actual,
+        BTreeSet::from([
+            GcObject::Narthex(mature, NarthexObject::Manifest),
+            GcObject::Narthex(mature, NarthexObject::Part(0)),
+            GcObject::Narthex(mature, NarthexObject::Part(1)),
+        ]),
+        "{}: the artifact removal must remove every part it holds",
+        oracle.context()
+    );
+    // The one-part-young artifact is the key safety property: not even its old
+    // parts are reclaimed, because the removal drops the whole directory.
+    for object in [
+        GcObject::Narthex(young_part, NarthexObject::Manifest),
+        GcObject::Narthex(young_part, NarthexObject::Part(0)),
+        GcObject::Narthex(young_part, NarthexObject::Part(1)),
+    ] {
+        assert!(
+            oracle.inventory().contains(&object),
+            "{}: {} must survive while one part of its artifact is young",
+            oracle.context(),
+            object.describe()
+        );
+    }
+    for object in [
+        GcObject::Narthex(published, NarthexObject::Manifest),
+        GcObject::Narthex(published, NarthexObject::Part(0)),
+    ] {
+        assert!(
+            oracle.inventory().contains(&object),
+            "{}: {} is listed in the manifest and must survive any age",
+            oracle.context(),
+            object.describe()
+        );
+    }
+    // Inventory accounting really covers the parts, not just the directory: the
+    // model's view of storage and the storage itself are compared after every
+    // step, and the removed parts are recorded as deleted.
+    for part in [NarthexObject::Manifest, NarthexObject::Part(0)] {
+        assert!(
+            oracle
+                .deleted_ever()
+                .contains(&GcObject::Narthex(mature, part)),
+            "{}: {} was physically removed and must be accounted as deleted",
+            oracle.context(),
+            GcObject::Narthex(mature, part).describe()
+        );
+    }
+
+    // The manifest route: `RegionManifestBuilder` records a non-Parquet removal
+    // as `RemovedFile::Narthex`, so a fast pass must reclaim that artifact
+    // directory, and must leave the one whose record still lingers.
+    oracle.write_narthex_artifact(recorded, 2).await;
+    oracle.publish_add_narthex(recorded, 2).await;
+    oracle.publish_remove_narthex(recorded, Some(0)).await;
+    oracle.write_narthex_artifact(lingering, 1).await;
+    oracle.publish_add_narthex(lingering, 1).await;
+    oracle.publish_remove_narthex(lingering, None).await;
+
+    oracle
+        .run_pass(
+            RoundKnobs::fast(Some(GRACE), YOUNG_UNKNOWN_LINGER),
+            PassWiring::default(),
+            PassExpectation::complete_deleting(),
+            "fast/recorded-artifact",
+        )
+        .await;
+
+    let facts = oracle.last_pass();
+    assert_eq!(
+        facts.expected_narthex,
+        BTreeSet::from([recorded]),
+        "{}: only the recorded, expired artifact is a candidate",
+        oracle.context()
+    );
+    assert_eq!(
+        facts.deleted_narthex,
+        BTreeSet::from([recorded]),
+        "{}: a fast pass must remove the recorded artifact directory",
+        oracle.context()
+    );
+    assert_eq!(
+        facts.reported_files,
+        BTreeSet::from([recorded]),
+        "{}: an artifact removal is reported by its file id",
+        oracle.context()
+    );
+    for part in [
+        NarthexObject::Manifest,
+        NarthexObject::Part(0),
+        NarthexObject::Part(1),
+    ] {
+        let object = GcObject::Narthex(recorded, part);
+        assert!(
+            oracle.deleted_ever().contains(&object),
+            "{}: {} must be accounted as deleted",
+            oracle.context(),
+            object.describe()
+        );
+        assert!(
+            !oracle.inventory().contains(&object),
+            "{}: {} must be gone from the model inventory",
+            oracle.context(),
+            object.describe()
+        );
+    }
+    for part in [NarthexObject::Manifest, NarthexObject::Part(0)] {
+        let object = GcObject::Narthex(lingering, part);
+        assert!(
+            oracle.inventory().contains(&object),
+            "{}: {} belongs to a still lingering removal and must survive",
+            oracle.context(),
+            object.describe()
+        );
+        assert!(
+            !oracle.deleted_ever().contains(&object),
+            "{}: {} was deleted although its record still lingers",
+            oracle.context(),
+            object.describe()
+        );
+    }
+    // Nothing else was touched: the artifacts of the first pass are all still
+    // there, and the directory of the reclaimed one is really gone.
+    for id in [young_part, published, lingering] {
+        assert!(
+            oracle
+                .inventory()
+                .iter()
+                .any(|object| object.file_id() == id && matches!(object, GcObject::Narthex(_, _))),
+            "{}: the artifact {id} must still hold objects",
+            oracle.context()
+        );
+    }
+    assert!(
+        !oracle
+            .inventory()
+            .iter()
+            .any(|object| object.file_id() == recorded),
+        "{}: the reclaimed artifact {recorded} must hold no object any more",
+        oracle.context()
+    );
 }
