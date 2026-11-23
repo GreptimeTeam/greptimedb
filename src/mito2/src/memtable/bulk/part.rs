@@ -3302,11 +3302,24 @@ mod tests {
                 ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
                 false,
             ),
+            Field::new("__table_id", ArrowDataType::UInt32, false),
         ]));
 
-        let input_batch =
-            RecordBatch::try_new(input_schema, vec![pk_array, v0_array, v1_array, ts_array])
-                .unwrap();
+        let input_batch = RecordBatch::try_new(
+            input_schema,
+            vec![
+                pk_array,
+                v0_array,
+                v1_array,
+                ts_array,
+                Arc::new(UInt32Array::from(vec![123, 123])),
+            ],
+        )
+        .unwrap();
+
+        // Partition expressions may need a materialized table ID alongside the key.
+        // Sparse conversion must keep using the encoded key and omit companion tags.
+        assert!(!crate::request::check_bulk_insert_batch(&metadata, &input_batch).unwrap());
 
         let part = BulkPart {
             batch: input_batch,

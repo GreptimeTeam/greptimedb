@@ -580,8 +580,10 @@ impl RequestColumn for BulkColumn<'_> {
 /// column is a column of the region with its Arrow type and contains nulls only
 /// if the region column is nullable, and a missing column is nullable or has a
 /// default value. Tags may use any string encoding. Sparse batches must carry the
-/// tags in one encoded primary key column instead. Returns whether the batch
-/// misses columns that the writer fills.
+/// tags in one encoded primary key column. Companion tag columns (for example,
+/// `__table_id` for partition expressions) are allowed and checked against the
+/// region schema; the encoded key remains authoritative for storage. Returns
+/// whether the batch misses columns that the writer fills.
 pub fn check_bulk_insert_batch(metadata: &RegionMetadata, batch: &RecordBatch) -> Result<bool> {
     let region_id = metadata.region_id;
     let sparse = metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse;
@@ -608,16 +610,6 @@ pub fn check_bulk_insert_batch(metadata: &RegionMetadata, batch: &RecordBatch) -
         InvalidRequestSnafu {
             region_id,
             reason: "sparse regions require a pre-encoded __primary_key column",
-        }
-    );
-    ensure!(
-        !sparse
-            || !metadata
-                .primary_key_columns()
-                .any(|column| columns.contains_key(column.column_schema.name.as_str())),
-        InvalidRequestSnafu {
-            region_id,
-            reason: "sparse regions do not accept raw tag columns alongside __primary_key",
         }
     );
     if let Some(primary_key) = primary_key {

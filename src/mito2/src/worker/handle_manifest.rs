@@ -1077,40 +1077,6 @@ async fn edit_region(
                 }
             );
         }
-        for samples in &edit.files_to_add {
-            use crate::series_index::format::SamplesFormatReader;
-            let handle = file::FileHandle::new(samples.clone(), region.file_purger.clone());
-            let handle = crate::series_index::artifact::SamplesFileHandle::from_narthex(
-                handle,
-                &region.access_layer.build_region_dir(samples.region_id),
-            )?;
-            let reader = crate::series_index::samples::reader::SamplesReader::open(
-                region.access_layer.object_store().clone(),
-                handle,
-            )
-            .await?;
-            crate::series_index::format::validate_sample_schema(
-                &reader.schema(),
-                &region.metadata(),
-            )?;
-        }
-        for index in &edit.series_indexes_to_add {
-            let handle = file::FileHandle::new(index.clone(), region.file_purger.clone());
-            let handle = crate::series_index::SeriesIndexFileHandle::from_narthex(
-                handle,
-                &region.access_layer.build_region_dir(index.region_id),
-            )?;
-            use crate::series_index::format::FormatReader;
-            let reader = crate::series_index::columnar::reader::ColumnarReader::open(
-                region.access_layer.object_store().clone(),
-                handle,
-            )
-            .await?;
-            crate::series_index::format::validate_series_schema(
-                &reader.schema(),
-                &region.metadata(),
-            )?;
-        }
     }
     if let Some(write_cache) = cache_manager.write_cache()
         && preload_sst_cache
