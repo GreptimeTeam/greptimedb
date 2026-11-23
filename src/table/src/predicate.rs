@@ -35,7 +35,7 @@ use datafusion_expr::physical_planning_context::PhysicalPlanningContext;
 use datafusion_expr::{Between, BinaryExpr, Operator};
 use datafusion_physical_expr::execution_props::ExecutionProps;
 use datafusion_physical_expr::expressions::{
-    BinaryExpr as PhysicalBinaryExpr, DynamicFilterPhysicalExpr, is_null,
+    BinaryExpr as PhysicalBinaryExpr, DynamicFilterPhysicalExpr,
 };
 use datafusion_physical_expr::{PhysicalExpr, create_physical_expr};
 use datatypes::arrow;
@@ -145,27 +145,15 @@ impl Predicate {
         self.dyn_filters.load_full()
     }
 
-    /// Returns the dynamic filter as physical exprs. Notice this return a "snapshot" of
-    /// dynamic filters at the time of calling this method.
+    /// Returns snapshots of the dynamic filters as physical expressions.
     ///
     /// Pruning only: see [`Self::dyn_filters`] for why these expressions must not filter
-    /// rows.
+    /// rows. Producers must conservatively encode which NULL inputs can contribute.
     pub fn dyn_filter_phy_exprs(&self) -> error::Result<Vec<Arc<dyn PhysicalExpr>>> {
         self.dyn_filters
             .load()
             .iter()
-            .map(|e| {
-                // Pruning must preserve NULL inputs just like decoded dynamic filtering.
-                e.children()
-                    .into_iter()
-                    .try_fold(e.current()?, |expr, child| {
-                        Ok(Arc::new(PhysicalBinaryExpr::new(
-                            expr,
-                            Operator::Or,
-                            is_null(child.clone())?,
-                        )) as Arc<dyn PhysicalExpr>)
-                    })
-            })
+            .map(|e| e.current())
             .collect::<Result<Vec<_>, _>>()
             .context(error::DatafusionSnafu)
     }
@@ -1502,22 +1490,288 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_dynamic_pruning_keeps_null_row_group() {
-        use datafusion_physical_expr::expressions::{
-            Column as PhysicalColumn, lit as physical_lit,
-        };
+    async fn test_dynamic_topk_pruning_nullable_lexicographic_keys() {
+        use std::cmp::Ordering;
 
-        let dir = create_temp_dir("dynamic_pruning_nulls");
+        use datafusion::datasource::memory::MemorySourceConfig;
+        use datafusion::execution::context::TaskContext;
+        use datafusion::physical_plan::sorts::sort::SortExec;
+        use datafusion::physical_plan::{ExecutionPlan, collect};
+        use datafusion_physical_expr::PhysicalSortExpr;
+        use datafusion_physical_expr::expressions::Column as PhysicalColumn;
+        use datatypes::arrow::compute::SortOptions;
+
+        type Row = (Option<i32>, Option<i32>);
+
+        fn compare(left: Option<i32>, right: Option<i32>, options: SortOptions) -> Ordering {
+            match (left, right) {
+                (None, None) => Ordering::Equal,
+                (None, Some(_)) => {
+                    if options.nulls_first {
+                        Ordering::Less
+                    } else {
+                        Ordering::Greater
+                    }
+                }
+                (Some(_), None) => {
+                    if options.nulls_first {
+                        Ordering::Greater
+                    } else {
+                        Ordering::Less
+                    }
+                }
+                (Some(left), Some(right)) => {
+                    let ordering = left.cmp(&right);
+                    if options.descending {
+                        ordering.reverse()
+                    } else {
+                        ordering
+                    }
+                }
+            }
+        }
+
+        let groups: [[Row; 2]; 6] = [
+            [(Some(11), None), (Some(12), Some(1))],
+            [(Some(10), Some(4)), (Some(10), Some(5))],
+            [(Some(9), None), (Some(10), Some(6))],
+            [(None, Some(1)), (None, Some(2))],
+            [(Some(10), None), (Some(10), Some(1))],
+            [(Some(10), Some(5)), (Some(10), Some(5))],
+        ];
+        let dir = create_temp_dir("dynamic_topk_pruning");
         let path = dir.path().join("nullable.parquet");
-        let arrow_schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, true)]));
-        let file = std::fs::File::create(&path).unwrap();
-        let mut writer = ArrowWriter::try_new(file, arrow_schema.clone(), None).unwrap();
-        for values in [[None, Some(1)], [Some(1), Some(1)], [None, None]] {
-            let batch = RecordBatch::try_new(
+        let arrow_schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Int32, true),
+            Field::new("b", DataType::Int32, true),
+        ]));
+        let batch = |rows: &[Row]| {
+            RecordBatch::try_new(
                 arrow_schema.clone(),
-                vec![Arc::new(Int32Array::from(values.to_vec()))],
+                vec![
+                    Arc::new(Int32Array::from(
+                        rows.iter().map(|r| r.0).collect::<Vec<_>>(),
+                    )),
+                    Arc::new(Int32Array::from(
+                        rows.iter().map(|r| r.1).collect::<Vec<_>>(),
+                    )),
+                ],
             )
-            .unwrap();
+            .unwrap()
+        };
+        let mut writer = ArrowWriter::try_new(
+            std::fs::File::create(&path).unwrap(),
+            arrow_schema.clone(),
+            None,
+        )
+        .unwrap();
+        for group in &groups {
+            writer.write(&batch(group)).unwrap();
+            writer.flush().unwrap();
+        }
+        writer.close().unwrap();
+        let builder =
+            ParquetRecordBatchStreamBuilder::new(tokio::fs::File::open(path).await.unwrap())
+                .await
+                .unwrap();
+        let schema = Arc::new(datatypes::schema::Schema::try_from(arrow_schema.clone()).unwrap());
+        let stats = RowGroupPruningStatistics::new(builder.metadata().row_groups(), &schema);
+
+        for (options, boundary, expected, must_prune_first) in [
+            (
+                SortOptions {
+                    descending: false,
+                    nulls_first: false,
+                },
+                (Some(10), Some(5)),
+                [(Some(9), None), (Some(10), Some(1))],
+                true,
+            ),
+            (
+                SortOptions {
+                    descending: false,
+                    nulls_first: true,
+                },
+                (Some(10), Some(5)),
+                [(None, Some(1)), (None, Some(2))],
+                false,
+            ),
+            (
+                SortOptions {
+                    descending: true,
+                    nulls_first: false,
+                },
+                (Some(10), Some(5)),
+                [(Some(12), Some(1)), (Some(11), None)],
+                false,
+            ),
+            (
+                SortOptions {
+                    descending: false,
+                    nulls_first: true,
+                },
+                (None, Some(5)),
+                [(None, Some(1)), (None, Some(2))],
+                false,
+            ),
+            (
+                SortOptions {
+                    descending: false,
+                    nulls_first: false,
+                },
+                (None, Some(5)),
+                [(Some(9), None), (Some(10), Some(1))],
+                false,
+            ),
+            (
+                SortOptions {
+                    descending: false,
+                    nulls_first: false,
+                },
+                (Some(10), None),
+                [(Some(9), None), (Some(10), Some(1))],
+                true,
+            ),
+        ] {
+            // Let the real SortExec/TopK producer publish its boundary predicate.
+            // Two boundary rows also make dropping later full-key ties safe.
+            let seed = [boundary, boundary];
+            let input =
+                MemorySourceConfig::try_new_exec(&[vec![batch(&seed)]], arrow_schema.clone(), None)
+                    .unwrap();
+            let ordering = [
+                PhysicalSortExpr {
+                    expr: Arc::new(PhysicalColumn::new("a", 0)),
+                    options,
+                },
+                PhysicalSortExpr {
+                    expr: Arc::new(PhysicalColumn::new("b", 1)),
+                    options,
+                },
+            ];
+            let sort = SortExec::new(ordering.into(), input).with_fetch(Some(2));
+            let filter = sort
+                .dynamic_expressions_produced()
+                .into_iter()
+                .next()
+                .unwrap();
+            let filter = (filter as Arc<dyn std::any::Any + Send + Sync>)
+                .downcast::<DynamicFilterPhysicalExpr>()
+                .unwrap();
+            collect(Arc::new(sort), Arc::new(TaskContext::default()))
+                .await
+                .unwrap();
+            let predicate = Predicate::with_dyn_filters(vec![], vec![filter]);
+            let keep = predicate.prune_with_stats(&stats, &arrow_schema);
+            if must_prune_first {
+                assert!(
+                    !keep[0],
+                    "disjoint first row group must be pruned: {options:?}, {boundary:?}"
+                );
+            }
+            if boundary == (Some(10), Some(5)) && !options.nulls_first && !options.descending {
+                assert!(
+                    !keep[5],
+                    "duplicate full-key ties may be pruned after the heap is full"
+                );
+            }
+
+            let top_two = |mut rows: Vec<Row>| {
+                rows.sort_by(|left, right| {
+                    compare(left.0, right.0, options)
+                        .then_with(|| compare(left.1, right.1, options))
+                });
+                rows.truncate(2);
+                rows
+            };
+            let all = seed
+                .into_iter()
+                .chain(groups.into_iter().flatten())
+                .collect();
+            let retained = seed
+                .into_iter()
+                .chain(
+                    groups
+                        .into_iter()
+                        .zip(keep)
+                        .filter(|(_, keep)| *keep)
+                        .flat_map(|(rows, _)| rows),
+                )
+                .collect();
+            assert_eq!(
+                top_two(all),
+                expected,
+                "explicit sort oracle: {options:?}, {boundary:?}"
+            );
+            assert_eq!(
+                top_two(retained),
+                expected,
+                "pruned result: {options:?}, {boundary:?}"
+            );
+            // Seed duplicates must remain available when every candidate ties
+            // the full boundary, even if all tied SST rows are pruned.
+            assert_eq!(top_two(seed.to_vec()), vec![boundary, boundary]);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dynamic_aggregate_unknown_to_known_pruning() {
+        use std::sync::Mutex;
+
+        use datafusion::execution::context::TaskContext;
+        use datafusion::functions_aggregate::min_max::min_udaf;
+        use datafusion::physical_expr::aggregate::AggregateExprBuilder;
+        use datafusion::physical_plan::aggregates::{
+            AggregateExec, AggregateMode, PhysicalGroupBy,
+        };
+        use datafusion::physical_plan::common::collect;
+        use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+        use datafusion::physical_plan::streaming::{PartitionStream, StreamingTableExec};
+        use datafusion::physical_plan::{ExecutionPlan, SendableRecordBatchStream};
+        use datafusion_physical_expr::expressions::col as physical_col;
+        use datatypes::arrow::array::Int64Array;
+        use futures::{StreamExt, channel::mpsc};
+
+        #[derive(Debug)]
+        struct TestInput {
+            schema: Arc<Schema>,
+            receiver:
+                Mutex<Option<mpsc::UnboundedReceiver<datafusion_common::Result<RecordBatch>>>>,
+        }
+        impl PartitionStream for TestInput {
+            fn schema(&self) -> &Arc<Schema> {
+                &self.schema
+            }
+
+            fn execute(&self, _: Arc<TaskContext>) -> SendableRecordBatchStream {
+                let stream = self.receiver.lock().unwrap().take().unwrap();
+                Box::pin(RecordBatchStreamAdapter::new(self.schema.clone(), stream))
+            }
+        }
+
+        let arrow_schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Int64, true),
+            Field::new("b", DataType::Int64, true),
+        ]));
+        let dir = create_temp_dir("dynamic_aggregate_pruning");
+        let path = dir.path().join("nullable.parquet");
+        let make_batch = |a: Vec<Option<i64>>, b: Vec<Option<i64>>| {
+            RecordBatch::try_new(
+                arrow_schema.clone(),
+                vec![Arc::new(Int64Array::from(a)), Arc::new(Int64Array::from(b))],
+            )
+            .unwrap()
+        };
+        let mut writer = ArrowWriter::try_new(
+            std::fs::File::create(&path).unwrap(),
+            arrow_schema.clone(),
+            None,
+        )
+        .unwrap();
+        for batch in [
+            make_batch(vec![Some(101)], vec![Some(5)]),
+            make_batch(vec![Some(101)], vec![Some(1)]),
+        ] {
             writer.write(&batch).unwrap();
             writer.flush().unwrap();
         }
@@ -1528,28 +1782,88 @@ mod tests {
                 .unwrap();
         let schema = Arc::new(datatypes::schema::Schema::try_from(arrow_schema.clone()).unwrap());
         let stats = RowGroupPruningStatistics::new(builder.metadata().row_groups(), &schema);
-        let filter = Arc::new(DynamicFilterPhysicalExpr::new(
-            vec![Arc::new(PhysicalColumn::new("a", 0))],
-            physical_lit(true),
-        ));
-        let predicate = Predicate::with_dyn_filters(vec![], vec![filter.clone()]);
-        assert_eq!(
-            predicate.prune_with_stats(&stats, &arrow_schema),
-            vec![true; 3]
-        );
-        filter
-            .update(
-                Predicate::to_physical_expr(
-                    &col("a").gt_eq(lit(10_i32)).and(col("a").lt_eq(lit(10_i32))),
-                    &arrow_schema,
-                )
-                .unwrap(),
+        let (sender, receiver) = mpsc::unbounded();
+        let input = Arc::new(
+            StreamingTableExec::try_new(
+                arrow_schema.clone(),
+                vec![Arc::new(TestInput {
+                    schema: arrow_schema.clone(),
+                    receiver: Mutex::new(Some(receiver)),
+                })],
+                None,
+                [],
+                false,
+                None,
             )
+            .unwrap(),
+        );
+        let aggregates = ["a", "b"]
+            .into_iter()
+            .map(|name| {
+                Arc::new(
+                    AggregateExprBuilder::new(
+                        min_udaf(),
+                        vec![physical_col(name, &arrow_schema).unwrap()],
+                    )
+                    .schema(arrow_schema.clone())
+                    .alias(name)
+                    .build()
+                    .unwrap(),
+                )
+            })
+            .collect();
+        let aggregate = Arc::new(
+            AggregateExec::try_new(
+                AggregateMode::Partial,
+                PhysicalGroupBy::default(),
+                aggregates,
+                vec![None; 2],
+                input,
+                arrow_schema.clone(),
+            )
+            .unwrap(),
+        );
+        let expr = aggregate.dynamic_expressions_produced().pop().unwrap();
+        let dynamic_filter = (expr as Arc<dyn std::any::Any + Send + Sync>)
+            .downcast::<DynamicFilterPhysicalExpr>()
             .unwrap();
-        // NULL inputs must reach decoded filtering; non-NULL misses can still be pruned.
+        let predicate = Predicate::with_dyn_filters(vec![], vec![dynamic_filter]);
+        let mut stream = aggregate
+            .execute(0, Arc::new(TaskContext::default()))
+            .unwrap();
+
+        sender
+            .unbounded_send(Ok(make_batch(vec![Some(100)], vec![None])))
+            .unwrap();
+        // Poll until the input channel becomes pending, after processing this batch.
+        assert!(futures::poll!(stream.next()).is_pending());
         assert_eq!(
             predicate.prune_with_stats(&stats, &arrow_schema),
-            vec![true, false, true],
+            vec![true, true],
+            "unknown min(b) must keep a possible first non-NULL value"
+        );
+        sender
+            .unbounded_send(Ok(make_batch(vec![Some(99)], vec![Some(2)])))
+            .unwrap();
+        assert!(futures::poll!(stream.next()).is_pending());
+        assert_eq!(
+            predicate.prune_with_stats(&stats, &arrow_schema),
+            vec![false, true],
+            "known bounds prune only the non-improving group"
+        );
+        sender
+            .unbounded_send(Ok(make_batch(vec![Some(101)], vec![Some(1)])))
+            .unwrap();
+        drop(sender);
+        let results = collect(stream).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            ScalarValue::try_from_array(results[0].column(0), 0).unwrap(),
+            ScalarValue::Int64(Some(99))
+        );
+        assert_eq!(
+            ScalarValue::try_from_array(results[0].column(1), 0).unwrap(),
+            ScalarValue::Int64(Some(1))
         );
     }
 
