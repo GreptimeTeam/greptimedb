@@ -141,6 +141,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 | logical_plan after merge_scan_projection_| SAME TEXT AS ABOVE_|
 | logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
 | logical_plan after JsonTypeConcretizeRule_| SAME TEXT AS ABOVE_|
+| logical_plan after factorized_join_agg_rewrite_| SAME TEXT AS ABOVE_|
 | logical_plan after rewrite_set_comparison_| SAME TEXT AS ABOVE_|
 | logical_plan after optimize_unions_| SAME TEXT AS ABOVE_|
 | logical_plan after unions_to_filter_| SAME TEXT AS ABOVE_|
@@ -170,6 +171,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 | logical_plan after merge_scan_projection_| SAME TEXT AS ABOVE_|
 | logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
 | logical_plan after JsonTypeConcretizeRule_| SAME TEXT AS ABOVE_|
+| logical_plan after factorized_join_agg_rewrite_| SAME TEXT AS ABOVE_|
 | logical_plan_| MergeScan [is_placeholder=false, remote_input=[_|
 |_| PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
 |_|_PromSeriesDivide: tags=["k"]_|
@@ -305,6 +307,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test AS series;
 | logical_plan after merge_scan_projection_| SAME TEXT AS ABOVE_|
 | logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
 | logical_plan after JsonTypeConcretizeRule_| SAME TEXT AS ABOVE_|
+| logical_plan after factorized_join_agg_rewrite_| SAME TEXT AS ABOVE_|
 | logical_plan after rewrite_set_comparison_| SAME TEXT AS ABOVE_|
 | logical_plan after optimize_unions_| SAME TEXT AS ABOVE_|
 | logical_plan after unions_to_filter_| SAME TEXT AS ABOVE_|
@@ -334,6 +337,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test AS series;
 | logical_plan after merge_scan_projection_| SAME TEXT AS ABOVE_|
 | logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
 | logical_plan after JsonTypeConcretizeRule_| SAME TEXT AS ABOVE_|
+| logical_plan after factorized_join_agg_rewrite_| SAME TEXT AS ABOVE_|
 | logical_plan_| MergeScan [is_placeholder=false, remote_input=[_|
 |_| Projection: test.i AS series, test.k, test.j_|
 |_|_PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
@@ -500,6 +504,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test_nano;
 | logical_plan after merge_scan_projection_| SAME TEXT AS ABOVE_|
 | logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
 | logical_plan after JsonTypeConcretizeRule_| SAME TEXT AS ABOVE_|
+| logical_plan after factorized_join_agg_rewrite_| SAME TEXT AS ABOVE_|
 | logical_plan after rewrite_set_comparison_| SAME TEXT AS ABOVE_|
 | logical_plan after optimize_unions_| SAME TEXT AS ABOVE_|
 | logical_plan after unions_to_filter_| SAME TEXT AS ABOVE_|
@@ -529,6 +534,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test_nano;
 | logical_plan after merge_scan_projection_| SAME TEXT AS ABOVE_|
 | logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
 | logical_plan after JsonTypeConcretizeRule_| SAME TEXT AS ABOVE_|
+| logical_plan after factorized_join_agg_rewrite_| SAME TEXT AS ABOVE_|
 | logical_plan_| MergeScan [is_placeholder=false, remote_input=[_|
 |_| PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
 |_|_PromSeriesDivide: tags=["k"]_|
