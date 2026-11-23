@@ -40,7 +40,7 @@ use crate::access_layer::{
 use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::picker::PickerOutput;
 use crate::compaction::reader::{CompactionSstReaderBuilder, spawn_merge};
-use crate::compaction::unit::CompactionUnit;
+use crate::compaction::unit::{CompactionUnit, reads_inputs_concurrently};
 use crate::compaction::{CompactionOutput, find_dynamic_options};
 use crate::config::MitoConfig;
 use crate::engine::region_hook::{RegionHookRef, SstFileInfo};
@@ -803,9 +803,13 @@ impl DefaultSstMerger {
             filter_deleted: output.filter_deleted,
             time_range: output.output_time_range,
             merge_mode,
-            read_parallelism: write_opts
-                .encode_parallelism
-                .max(COMPACTION_READ_PARALLELISM),
+            read_parallelism: if reads_inputs_concurrently(&output.inputs) {
+                write_opts
+                    .encode_parallelism
+                    .max(COMPACTION_READ_PARALLELISM)
+            } else {
+                1
+            },
         };
         // Matching file scopes need no additional region filtering. Rollover and
         // time slicing still require output-scoped accumulation.
@@ -1002,6 +1006,8 @@ impl<M: SstMerger> DefaultCompactor<M> {
             compaction_time_window: Some(unit.time_window_size),
             ..Default::default()
         };
+        // Outputs are merged one at a time; `CompactionUnit::estimated_memory_bytes` reserves
+        // only the largest output.
         for output in &unit.outputs {
             if self.cancel_token.is_cancelled() {
                 return error::CompactionCancelledSnafu.fail();

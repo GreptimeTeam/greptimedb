@@ -17,9 +17,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::batch_size::estimate_batch_size;
 use crate::compaction::CompactionOutput;
 use crate::compaction::picker::PickerOutput;
-use crate::read::scan_util::compute_parallel_channel_size;
+use crate::compaction::reader::MERGED_BATCH_CHANNEL_SIZE;
+use crate::read::seq_scan::compaction_input_channel_size;
 use crate::sst::file::{FileHandle, FileMeta};
-use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 
 /// A complete input dependency group, merged and published atomically.
 ///
@@ -123,51 +123,118 @@ impl CompactionUnit {
             .fold(0u64, |total, file| total.saturating_add(file.size()))
     }
 
-    /// Estimates merge memory once per input, even when several outputs read it.
+    /// Estimates the memory budget of merging this unit. Outputs are merged one after another,
+    /// so the unit needs the budget of its largest output.
     pub(crate) fn estimated_memory_bytes(&self) -> u64 {
-        if self.outputs.is_empty() {
-            return 0;
-        }
-        // Only an output that merges several inputs reads them through read-ahead channels.
-        let merged_inputs: HashSet<_> = self
-            .outputs
+        self.outputs
             .iter()
-            .filter(|output| output.inputs.len() > 1)
-            .flat_map(|output| output.inputs.iter().map(|file| file.file_id()))
-            .collect();
-        self.inputs.iter().fold(0u64, |total, file| {
-            let read_ahead = merged_inputs.contains(&file.file_id());
-            total.saturating_add(input_memory_bytes(file.meta_ref(), read_ahead))
-        })
+            .map(|output| output_memory_bytes(&output.inputs))
+            .max()
+            .unwrap_or(0)
     }
 }
 
-/// Estimates the memory compaction needs to read `meta`: its largest row group, or the batches
-/// its reader holds ahead of the merge when those are larger.
+/// Returns whether compaction reads `inputs` of one output concurrently, each in its own task
+/// with a read-ahead channel. Admission can only size the read-ahead of inputs with row group
+/// statistics; files written before those statistics existed are read serially.
+pub(crate) fn reads_inputs_concurrently(inputs: &[FileHandle]) -> bool {
+    inputs.len() > 1
+        && inputs
+            .iter()
+            .all(|file| RowGroupShape::of(file.meta_ref()).is_some())
+}
+
+/// Row group size of a file, approximated from its file metadata.
+struct RowGroupShape {
+    /// Uncompressed bytes of the largest row group.
+    bytes: u64,
+    /// Average rows of a row group; the metadata keeps no per-row-group row counts.
+    rows: u64,
+    num_row_groups: u64,
+}
+
+impl RowGroupShape {
+    fn of(meta: &FileMeta) -> Option<Self> {
+        if meta.max_row_group_uncompressed_size == 0
+            || meta.num_rows == 0
+            || meta.num_row_groups == 0
+        {
+            return None;
+        }
+        Some(Self {
+            bytes: meta.max_row_group_uncompressed_size,
+            rows: (meta.num_rows / meta.num_row_groups).max(1),
+            num_row_groups: meta.num_row_groups,
+        })
+    }
+
+    fn row_width(&self) -> u64 {
+        self.bytes.div_ceil(self.rows)
+    }
+}
+
+/// Estimates the peak memory of merging `inputs` into one output, following the read path:
 ///
-/// When `read_ahead` is set, the input is read in its own task, which buffers a channel of
-/// batches and one more batch it is sending, while the merge holds one batch of every input.
-/// A batch never spans row groups, so inputs with row groups smaller than a few batches can
-/// buffer more than one row group, up to the whole file.
-fn input_memory_bytes(meta: &FileMeta, read_ahead: bool) -> u64 {
-    let row_group_bytes = meta.max_row_group_uncompressed_size;
-    if !read_ahead || meta.num_rows == 0 || meta.num_row_groups == 0 {
+/// - Every input reader holds its current row group.
+/// - Inputs read concurrently also hold batches ahead of the merge: a full channel, one batch
+///   being sent and one in the merge. A batch never spans row groups, and the batches of an
+///   input never exceed the whole file.
+/// - Inputs read serially hold the batch the merge is consuming.
+/// - The merge retains consumed input batches until it emits an output batch.
+/// - Merged batches pass a channel to the writer, with one more batch on each side of it.
+///
+/// The writer's row group buffer and index builders are not covered.
+fn output_memory_bytes(inputs: &[FileHandle]) -> u64 {
+    let shapes: Vec<_> = inputs
+        .iter()
+        .filter_map(|file| RowGroupShape::of(file.meta_ref()))
+        .collect();
+    let row_group_bytes = inputs.iter().fold(0u64, |total, file| {
+        total.saturating_add(file.meta_ref().max_row_group_uncompressed_size)
+    });
+    if shapes.is_empty() {
         return row_group_bytes;
     }
-    // File metadata keeps no per-row-group row counts, so the row width is approximated from
-    // the largest row group and the average row count.
-    let rows_per_row_group = (meta.num_rows / meta.num_row_groups).max(1);
-    let row_width = row_group_bytes.div_ceil(rows_per_row_group);
-    // Compaction picks one batch size for all inputs from the widest row, so batches of this
-    // input are at most this many rows.
-    let batch_rows = (estimate_batch_size([(rows_per_row_group, row_group_bytes)]) as u64)
-        .min(rows_per_row_group);
-    let read_ahead_batches = compute_parallel_channel_size(DEFAULT_READ_BATCH_SIZE) as u64 + 2;
-    let read_ahead_bytes = read_ahead_batches
-        .saturating_mul(batch_rows)
-        .saturating_mul(row_width)
-        .min(row_group_bytes.saturating_mul(meta.num_row_groups));
-    row_group_bytes.max(read_ahead_bytes)
+    // Compaction reads every input of an output with one batch size, picked from the widest row.
+    let batch_rows =
+        estimate_batch_size(shapes.iter().map(|shape| (shape.rows, shape.bytes))) as u64;
+    let merges = inputs.len() > 1;
+    // The merge emits batches of `batch_rows`; a single input passes its batches through, and
+    // those never span row groups.
+    let output_batch_bytes = shapes
+        .iter()
+        .map(|shape| {
+            let rows = if merges {
+                batch_rows
+            } else {
+                batch_rows.min(shape.rows)
+            };
+            rows.saturating_mul(shape.row_width())
+        })
+        .max()
+        .unwrap_or(0);
+
+    let batches_per_input = if reads_inputs_concurrently(inputs) {
+        compaction_input_channel_size() as u64 + 2
+    } else {
+        1
+    };
+    let input_batch_bytes = shapes.iter().fold(0u64, |total, shape| {
+        let batch_bytes = batch_rows.min(shape.rows).saturating_mul(shape.row_width());
+        let file_bytes = shape.bytes.saturating_mul(shape.num_row_groups);
+        total.saturating_add(
+            batches_per_input
+                .saturating_mul(batch_bytes)
+                .min(file_bytes),
+        )
+    });
+    let merge_bytes = if merges { output_batch_bytes } else { 0 };
+    let output_bytes = (MERGED_BATCH_CHANNEL_SIZE as u64 + 2).saturating_mul(output_batch_bytes);
+
+    row_group_bytes
+        .saturating_add(input_batch_bytes)
+        .saturating_add(merge_bytes)
+        .saturating_add(output_bytes)
 }
 
 /// Finds a dependency group's representative while shortening the parent chain.
@@ -278,7 +345,7 @@ mod tests {
     }
 
     #[test]
-    fn test_memory_covers_read_ahead_of_merged_inputs() {
+    fn test_memory_follows_the_merge_of_each_output() {
         const MIB: u64 = 1024 * 1024;
         let file = |row_group_bytes: u64, rows_per_row_group: u64, num_row_groups: u64| {
             FileHandle::new(
@@ -301,34 +368,51 @@ mod tests {
             assert_eq!(1, units.len());
             units.pop().unwrap()
         };
-
-        // 8192-row batches of 512-byte rows are 4 MiB, far below a 50 MiB row group.
-        let (a, b) = (
-            file(50 * MIB, 100 * 1024, 10),
-            file(50 * MIB, 100 * 1024, 10),
-        );
+        // Rows of 512 bytes are read in 8192-row batches of 4 MiB. Each input holds a 50 MiB row
+        // group and 4 batches ahead; the merge retains one 4 MiB output batch and 4 more sit
+        // between the merge and the writer.
+        let wide_groups = || file(50 * MIB, 100 * 1024, 10);
+        let (a, b, c) = (wide_groups(), wide_groups(), wide_groups());
+        let two_inputs = 2 * 50 * MIB + 2 * 16 * MIB + 4 * MIB + 16 * MIB;
         assert_eq!(
-            100 * MIB,
-            unit(vec![output(vec![a, b])]).estimated_memory_bytes()
+            two_inputs,
+            unit(vec![output(vec![a.clone(), b.clone()])]).estimated_memory_bytes()
         );
-
-        // Batches of 1 MiB rows stop at the 4-row row group, so each input buffers 4 row groups.
-        let (a, b) = (file(4 * MIB, 4, 1000), file(4 * MIB, 4, 1000));
+        // Outputs sharing an input run one after another, so the unit needs one output's budget.
         assert_eq!(
-            32 * MIB,
-            unit(vec![output(vec![a.clone(), b])]).estimated_memory_bytes()
-        );
-        // A single input is read without read-ahead.
-        assert_eq!(
-            4 * MIB,
-            unit(vec![output(vec![a])]).estimated_memory_bytes()
+            two_inputs,
+            unit(vec![output(vec![a.clone(), b]), output(vec![a, c])]).estimated_memory_bytes()
         );
 
-        // Read-ahead never exceeds the whole file.
-        let (a, b) = (file(4 * MIB, 4, 2), file(4 * MIB, 4, 2));
+        // Rows of 1 MiB make 64-row batches, but an input batch stops at its 4-row row group.
+        // The merge output still holds 64 rows.
+        let narrow_groups = || file(4 * MIB, 4, 1000);
+        let (d, e) = (narrow_groups(), narrow_groups());
         assert_eq!(
-            16 * MIB,
-            unit(vec![output(vec![a, b])]).estimated_memory_bytes()
+            2 * 4 * MIB + 2 * 16 * MIB + 64 * MIB + 4 * 64 * MIB,
+            unit(vec![output(vec![d.clone(), e])]).estimated_memory_bytes()
+        );
+        // A single input is read without read-ahead or merge, so its batches stay row groups.
+        assert_eq!(
+            4 * MIB + 4 * MIB + 4 * 4 * MIB,
+            unit(vec![output(vec![d.clone()])]).estimated_memory_bytes()
+        );
+
+        // An input without row group statistics turns off concurrent reads of the output.
+        let legacy = FileHandle::new(
+            FileMeta {
+                file_id: FileId::random(),
+                ..Default::default()
+            },
+            new_noop_file_purger(),
+        );
+        let inputs = vec![d.clone(), legacy];
+        assert!(!reads_inputs_concurrently(&inputs));
+        assert!(reads_inputs_concurrently(&[d.clone(), narrow_groups()]));
+        assert!(!reads_inputs_concurrently(&[d]));
+        assert_eq!(
+            4 * MIB + 4 * MIB + 64 * MIB + 4 * 64 * MIB,
+            unit(vec![output(inputs)]).estimated_memory_bytes()
         );
     }
 
