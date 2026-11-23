@@ -1894,7 +1894,8 @@ async fn test_catchup_commit_fires_the_hook_after_unlocking(#[case] close: bool)
 }
 
 /// A catchup again fires the hook of its commit once it holds no manifest lock, so a hook that
-/// reads the manifest is not queued behind a writer that waits for the old instance's lock.
+/// reads the manifest is not queued behind a writer that waits for the old instance's lock, and
+/// no Leader lease promotes the replacement while the hook runs.
 #[tokio::test]
 async fn test_catchup_again_fires_the_hook_without_manifest_locks() {
     let mut env = TestEnv::with_prefix("catchup-again-commit-hook").await;
@@ -1909,7 +1910,7 @@ async fn test_catchup_again_fires_the_hook_without_manifest_locks() {
         )
         .await;
     let region_id = RegionId::new(1, 1);
-    create_leased_region_on(&engine, region_id).await;
+    let (_, _, deadline) = create_leased_region_on(&engine, region_id).await;
     promote_to_await_leader_lease(&engine, region_id).await;
     let old = engine.get_region(region_id).unwrap();
     hook.armed.store(true, Ordering::Relaxed);
@@ -1939,9 +1940,22 @@ async fn test_catchup_again_fires_the_hook_without_manifest_locks() {
             .await
             .unwrap(),
     );
+    // Nor does a Leader lease promote the registered replacement before its catchup ends.
+    let promoted = engine
+        .set_region_role_with_lease(
+            region_id,
+            RegionRole::Leader,
+            Instant::now(),
+            deadline,
+            None,
+        )
+        .unwrap();
+    assert!(!promoted);
+    assert!(registered.is_follower());
     hook.release.notify_one();
     catchup.await.unwrap().unwrap();
     assert!(!Arc::ptr_eq(&old, &registered));
+    assert!(registered.is_writable());
 }
 
 fn edit_files(files_to_add: Vec<FileMeta>, files_to_remove: Vec<FileMeta>) -> RegionEdit {

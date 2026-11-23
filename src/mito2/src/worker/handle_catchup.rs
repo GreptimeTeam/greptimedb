@@ -288,6 +288,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Requests waiting for the old instance are rejected as a close rejects them.
         self.fail_region_stalled_requests_as_not_found(&region_id);
         self.reject_region_requests_as_not_found(region_id);
+        // No Leader lease promotes the registered replacement while its hook runs; the
+        // promotion below ends this catchup.
+        if catchup_hook.is_some() {
+            let begun = replacement.manifest_ctx.begin_catchup(region_id);
+            debug_assert_eq!(begun, Some(false));
+        }
         self.register_region(replacement.clone());
         drop(manager);
         // A hook may read the manifest of the region, so it fires once no manifest lock is held.
