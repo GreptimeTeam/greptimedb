@@ -150,9 +150,12 @@ pub struct FusedSeriesBinding {
     pub grid: Arc<EvalGrid>,
     /// The metric name every input series is bound to, when the input reads one named metric.
     ///
-    /// The logical node requires it when [`tags`](Self::tags) declares [`METRIC_NAME`]: a reader of
-    /// the output has to be able to tell that a range function dropped the name, which needs a name
-    /// to drop. The physical node takes the names from the frames, which carry each series' own.
+    /// The requirement that a binding naming [`METRIC_NAME`] among [`tags`](Self::tags) also declares
+    /// this name belongs to the bare-scan arm of `plan_fused_series`, not to this node: a child that
+    /// is a region scan is asked for the series of this one metric, while a child that already
+    /// produces raw frames - a discovered selector's `RawSeriesSource`, or the union of them - names
+    /// each series in its own labels and is accepted with `None` here. A reader of the output still
+    /// sees which range functions dropped the name, which needs no binding.
     pub metric_name: Option<Arc<str>>,
     /// The output column holding the grid timestamps.
     pub time_index: String,
