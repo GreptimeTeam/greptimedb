@@ -40,7 +40,7 @@ use crate::access_layer::{
 use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::picker::PickerOutput;
 use crate::compaction::reader::{CompactionSstReaderBuilder, spawn_merge};
-use crate::compaction::unit::{CompactionUnit, reads_inputs_concurrently};
+use crate::compaction::unit::CompactionUnit;
 use crate::compaction::{CompactionOutput, find_dynamic_options};
 use crate::config::MitoConfig;
 use crate::engine::region_hook::{RegionHookRef, SstFileInfo};
@@ -397,6 +397,14 @@ impl CompactionRegionOpener {
 }
 
 impl CompactionRegion {
+    /// Parallelism of encoding an output, which is also the parallelism of reading its inputs.
+    pub(crate) fn compaction_output_parallelism(&self) -> usize {
+        self.region_options.compaction_output_parallelism_or(
+            self.engine_config
+                .experimental_compaction_output_parallelism,
+        )
+    }
+
     /// Get the file purger of the compaction region.
     pub fn file_purger(&self) -> Option<Arc<LocalFilePurger>> {
         self.file_purger.clone()
@@ -593,11 +601,6 @@ fn sst_info_from_file_meta(meta: &FileMeta) -> SstInfo {
         ..Default::default()
     }
 }
-
-/// Minimum number of input files a compaction reads concurrently, each in its own task so
-/// that fetching and decoding inputs overlap the merge. This is independent of the output
-/// encoding parallelism. Each concurrent input buffers two batches.
-const COMPACTION_READ_PARALLELISM: usize = 8;
 
 /// `[MergeOutput]` represents the output of merging SST files.
 #[derive(Default, Debug, Serialize, Deserialize)]
@@ -803,13 +806,7 @@ impl DefaultSstMerger {
             filter_deleted: output.filter_deleted,
             time_range: output.output_time_range,
             merge_mode,
-            read_parallelism: if reads_inputs_concurrently(&output.inputs) {
-                write_opts
-                    .encode_parallelism
-                    .max(COMPACTION_READ_PARALLELISM)
-            } else {
-                1
-            },
+            read_parallelism: write_opts.encode_parallelism,
         };
         // Matching file scopes need no additional region filtering. Rollover and
         // time slicing still require output-scoped accumulation.
@@ -1104,13 +1101,7 @@ where
                 max_file_size: picker_output.max_file_size,
                 row_group_size: compaction_region.region_options.row_group_size(),
                 float_field_encoding: compaction_region.region_options.float_field_encoding,
-                encode_parallelism: compaction_region
-                    .region_options
-                    .compaction_output_parallelism_or(
-                        compaction_region
-                            .engine_config
-                            .experimental_compaction_output_parallelism,
-                    ),
+                encode_parallelism: compaction_region.compaction_output_parallelism(),
                 encode_runtime: EncodeRuntime::Compact,
             };
             let merger = self.merger.clone();

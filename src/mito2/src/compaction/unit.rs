@@ -125,23 +125,13 @@ impl CompactionUnit {
 
     /// Estimates the memory budget of merging this unit. Outputs are merged one after another,
     /// so the unit needs the budget of its largest output.
-    pub(crate) fn estimated_memory_bytes(&self) -> u64 {
+    pub(crate) fn estimated_memory_bytes(&self, read_parallelism: usize) -> u64 {
         self.outputs
             .iter()
-            .map(|output| output_memory_bytes(&output.inputs))
+            .map(|output| output_memory_bytes(&output.inputs, read_parallelism))
             .max()
             .unwrap_or(0)
     }
-}
-
-/// Returns whether compaction reads `inputs` of one output concurrently, each in its own task
-/// with a read-ahead channel. Admission can only size the read-ahead of inputs with row group
-/// statistics; files written before those statistics existed are read serially.
-pub(crate) fn reads_inputs_concurrently(inputs: &[FileHandle]) -> bool {
-    inputs.len() > 1
-        && inputs
-            .iter()
-            .all(|file| RowGroupShape::of(file.meta_ref()).is_some())
 }
 
 /// Row group size of a file, approximated from its file metadata.
@@ -176,15 +166,15 @@ impl RowGroupShape {
 /// Estimates the peak memory of merging `inputs` into one output, following the read path:
 ///
 /// - Every input reader holds its current row group.
-/// - Inputs read concurrently also hold batches ahead of the merge: a full channel, one batch
-///   being sent and one in the merge. A batch never spans row groups, and the batches of an
+/// - With a read parallelism above 1, every input is read in its own task and also holds
+///   batches ahead of the merge: a full channel, one batch being sent and one in the merge. A batch never spans row groups, and the batches of an
 ///   input never exceed the whole file.
 /// - Inputs read serially hold the batch the merge is consuming.
 /// - The merge retains consumed input batches until it emits an output batch.
 /// - Merged batches pass a channel to the writer, with one more batch on each side of it.
 ///
 /// The writer's row group buffer and index builders are not covered.
-fn output_memory_bytes(inputs: &[FileHandle]) -> u64 {
+fn output_memory_bytes(inputs: &[FileHandle], read_parallelism: usize) -> u64 {
     let shapes: Vec<_> = inputs
         .iter()
         .filter_map(|file| RowGroupShape::of(file.meta_ref()))
@@ -220,7 +210,8 @@ fn output_memory_bytes(inputs: &[FileHandle]) -> u64 {
         .max()
         .unwrap_or(0);
 
-    let batches_per_input = if reads_inputs_concurrently(inputs) {
+    // Matches the condition under which `SeqScan` spawns a task per input.
+    let batches_per_input = if read_parallelism > 1 && merges {
         compaction_input_channel_size() as u64 + 2
     } else {
         1
@@ -377,19 +368,25 @@ mod tests {
             units.pop().unwrap()
         };
         // Rows of 512 bytes are read in 8192-row batches of 4 MiB. Each input holds a 50 MiB row
-        // group and 4 batches ahead; the merge retains one 4 MiB output batch and 4 more sit
-        // between the merge and the writer.
+        // group and the batch the merge consumes; the merge retains one 4 MiB output batch and 4
+        // more sit between the merge and the writer.
         let wide_groups = || file(50 * MIB, 100 * 1024, 10);
         let (a, b, c) = (wide_groups(), wide_groups(), wide_groups());
-        let two_inputs = 2 * 50 * MIB + 2 * 16 * MIB + 4 * MIB + 16 * MIB;
+        let serial = 2 * 50 * MIB + 2 * 4 * MIB + 4 * MIB + 16 * MIB;
         assert_eq!(
-            two_inputs,
-            unit(vec![output(vec![a.clone(), b.clone()])]).estimated_memory_bytes()
+            serial,
+            unit(vec![output(vec![a.clone(), b.clone()])]).estimated_memory_bytes(1)
+        );
+        // Read in parallel, each input also holds the batches read ahead of the merge.
+        let parallel = 2 * 50 * MIB + 2 * 16 * MIB + 4 * MIB + 16 * MIB;
+        assert_eq!(
+            parallel,
+            unit(vec![output(vec![a.clone(), b.clone()])]).estimated_memory_bytes(4)
         );
         // Outputs sharing an input run one after another, so the unit needs one output's budget.
         assert_eq!(
-            two_inputs,
-            unit(vec![output(vec![a.clone(), b]), output(vec![a, c])]).estimated_memory_bytes()
+            parallel,
+            unit(vec![output(vec![a.clone(), b]), output(vec![a, c])]).estimated_memory_bytes(4)
         );
 
         // Rows of 1 MiB make 64-row batches, but an input batch stops at its 4-row row group.
@@ -398,12 +395,12 @@ mod tests {
         let (d, e) = (narrow_groups(), narrow_groups());
         assert_eq!(
             2 * 4 * MIB + 2 * 16 * MIB + 64 * MIB + 4 * 64 * MIB,
-            unit(vec![output(vec![d.clone(), e])]).estimated_memory_bytes()
+            unit(vec![output(vec![d.clone(), e])]).estimated_memory_bytes(4)
         );
         // A single input is read without read-ahead or merge, so its batches stay row groups.
         assert_eq!(
             4 * MIB + 4 * MIB + 4 * 4 * MIB,
-            unit(vec![output(vec![d.clone()])]).estimated_memory_bytes()
+            unit(vec![output(vec![d])]).estimated_memory_bytes(4)
         );
 
         // Two one-row files of 8 KiB: a batch holds both rows at most, and the batches past
@@ -411,24 +408,7 @@ mod tests {
         let (f, g) = (file(8 * 1024, 1, 1), file(8 * 1024, 1, 1));
         assert_eq!(
             2 * 8 * 1024 + 2 * 8 * 1024 + 2 * 8 * 1024,
-            unit(vec![output(vec![f, g])]).estimated_memory_bytes()
-        );
-
-        // An input without row group statistics turns off concurrent reads of the output.
-        let legacy = FileHandle::new(
-            FileMeta {
-                file_id: FileId::random(),
-                ..Default::default()
-            },
-            new_noop_file_purger(),
-        );
-        let inputs = vec![d.clone(), legacy];
-        assert!(!reads_inputs_concurrently(&inputs));
-        assert!(reads_inputs_concurrently(&[d.clone(), narrow_groups()]));
-        assert!(!reads_inputs_concurrently(&[d]));
-        assert_eq!(
-            4 * MIB + 4 * MIB + 64 * MIB + 4 * 64 * MIB,
-            unit(vec![output(inputs)]).estimated_memory_bytes()
+            unit(vec![output(vec![f, g])]).estimated_memory_bytes(4)
         );
     }
 
@@ -451,7 +431,7 @@ mod tests {
         assert_eq!(1, units.len());
         assert_eq!(1, units[0].inputs.len());
         assert!(units[0].outputs.is_empty());
-        assert_eq!(0, units[0].estimated_memory_bytes());
+        assert_eq!(0, units[0].estimated_memory_bytes(1));
         assert!(
             CompactionUnit::from_picker(PickerOutput::default())
                 .unwrap()

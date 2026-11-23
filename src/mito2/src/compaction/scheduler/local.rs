@@ -287,6 +287,7 @@ impl CompactionScheduler {
             cancellation_requested: false,
         };
         let context = CompactionContext::try_from(&region)?;
+        let read_parallelism = region.compaction_output_parallelism();
         // Planning is complete; unit tasks must not pin the other units' inputs.
         drop(region);
         for unit in units {
@@ -308,7 +309,7 @@ impl CompactionScheduler {
                 compaction_context: context.clone(),
                 request_sender: self.request_sender.clone(),
                 listener: self.listener.clone(),
-                estimated_memory_bytes: unit.estimated_memory_bytes(),
+                estimated_memory_bytes: unit.estimated_memory_bytes(read_parallelism),
                 unit,
                 memory_manager: self.memory_manager.clone(),
                 memory_policy: self.memory_policy,

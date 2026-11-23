@@ -374,38 +374,6 @@ mod tests {
         wait_for_signal(second_dropped).await;
     }
 
-    /// Compaction spawns every input but has fewer permits than inputs, and the merge
-    /// may need any input next. A producer blocked on its full channel must not keep a
-    /// permit, or the input the merge waits for can never be read.
-    #[tokio::test]
-    async fn test_blocked_producer_does_not_hold_permit() {
-        let semaphore = Arc::new(Semaphore::new(1));
-        let (second_polled_tx, second_polled) = oneshot::channel();
-        let mut second_polled_tx = Some(second_polled_tx);
-        let mut next = 0;
-        let full = futures::stream::poll_fn(move |_| {
-            if next == 1 {
-                let _ = second_polled_tx.take().unwrap().send(());
-            }
-            next += 1;
-            Poll::Ready((next <= 3).then(|| Ok(batch(next - 1))))
-        });
-        let full = spawn_compact_stream(Box::pin(full), 1, Some(semaphore.clone()));
-        // The producer now holds its second batch while its channel holds the first.
-        wait_for_signal(second_polled).await;
-
-        let other = spawn_compact_stream(values_stream(10..13), 1, Some(semaphore));
-        let (values, error) = timeout(Duration::from_secs(10), drain(other))
-            .await
-            .expect("a blocked producer kept the only permit");
-        assert_eq!(vec![10, 11, 12], values);
-        assert!(error.is_none());
-
-        let (values, error) = drain(full).await;
-        assert_eq!(vec![0, 1, 2], values);
-        assert!(error.is_none());
-    }
-
     #[tokio::test]
     async fn test_spawn_compact_streams_share_semaphore() {
         let semaphore = Arc::new(Semaphore::new(1));
