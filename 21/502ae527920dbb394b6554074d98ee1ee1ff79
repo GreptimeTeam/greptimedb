@@ -1,0 +1,29 @@
+src/catalog/src/system_schema/information_schema/partitions.rs
+  s_c311425adc0214::t_bfbf3063da0208 478,502,551,632-671,675-678,684-699,704-706,713-716
+  s_c311425adc0214::t_dfc8b992719cc3 314
+  s_c311425adc0214::t_9b35de3e185a7a 35,504-505,672-674,679-683,700-703,707-712
+  s_c311425adc0214::t_769308fc3d5193 258,262,312-313,315-323,717-718
+src/catalog/src/kvbackend/manager.rs
+  s_c311425adc0214::t_358e06fa8bdba5 38,580-581,596,601-608,610-611,613-634,636-648
+  s_c311425adc0214::t_9b35de3e185a7a 39,650
+  s_c311425adc0214::t_72872273450ccf 576-578,590-591
+  s_c311425adc0214::t_dfc8b992719cc3 609,612,635
+  s_c311425adc0214::t_6b045bafad4aee 592-595,597-600
+  s_c311425adc0214::t_1c7c9cddbf9a76 649
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "21502ae527920dbb394b6554074d98ee1ee1ff79",
+  "prompts": {},
+  "sessions": {
+    "s_c311425adc0214": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1f2e1-9b9d-7ba2-a9ef-a23895482316",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

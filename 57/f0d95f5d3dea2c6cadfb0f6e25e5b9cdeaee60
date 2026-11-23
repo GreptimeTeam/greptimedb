@@ -1,0 +1,36 @@
+src/common/meta/src/cache.rs
+  s_c311425adc0214::t_60c2f939f03f2e 20-23,39-45
+src/common/meta/src/cache/table/schema.rs
+  s_c311425adc0214::t_60c2f939f03f2e 38
+src/partition/src/manager.rs
+  s_c311425adc0214::t_60c2f939f03f2e 151,161-162,164-171
+  s_c311425adc0214::t_62734762bfe884 150
+  s_c311425adc0214::t_72c6114155e0ed 152-154
+  s_c311425adc0214::t_5f610aaadf5afb 163
+src/common/meta/src/cache/table/table_route.rs
+  s_c311425adc0214::t_60c2f939f03f2e 46-54
+src/common/meta/src/cache/flow.rs
+  s_c311425adc0214::t_60c2f939f03f2e 47,52,54-55
+src/common/meta/src/cache/table/view_info.rs
+  s_c311425adc0214::t_60c2f939f03f2e 45,47-48
+src/common/meta/src/instruction.rs
+  s_c311425adc0214::t_60c2f939f03f2e 430-432,434-439,441-443
+  s_c311425adc0214::t_4e8b50ed9ef4d5 433
+  s_c311425adc0214::t_9f465b68c6de9c 440
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "57f0d95f5d3dea2c6cadfb0f6e25e5b9cdeaee60",
+  "prompts": {},
+  "sessions": {
+    "s_c311425adc0214": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1f2e1-9b9d-7ba2-a9ef-a23895482316",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

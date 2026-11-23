@@ -1,0 +1,54 @@
+src/catalog/src/kvbackend/manager.rs
+  s_c311425adc0214::t_ee5b69ee125f0a 101-114
+  s_c311425adc0214::t_8cba5bf273f30a 588-598,600-605,611-613,887-966
+  s_c311425adc0214::t_1aa26220efcdc7 993-1002
+  s_c311425adc0214::t_ad7831f4388cb2 51,609-610
+  s_c311425adc0214::t_0c1969a8149281 207,215-216
+  s_c311425adc0214::t_9d5b93c2a9ea20 1006-1007
+  s_c311425adc0214::t_ded2a156e97c47 221-225,227-230
+  s_c311425adc0214::t_fd889cdd38e8ac 16,115,119,186-206,208-214,217-220,226,231,233-236,607-608,967,1037
+  s_c311425adc0214::t_b555bbd2ed3e4f 969-992,1003-1005,1008-1036
+  s_c311425adc0214::t_1b52e005f69552 178-184,238-239,241,243-279
+  s_c311425adc0214::t_17f9777aa83827 116-118,120,968,1038
+src/catalog/src/system_schema/information_schema/views.rs
+  s_c311425adc0214::t_ad7831f4388cb2 201-204,217
+  s_c311425adc0214::t_fd889cdd38e8ac 35,207
+  s_c311425adc0214::t_04cdc91274450e 127-130,183-198,200,205-206,208-216,218-231,234,290
+src/catalog/src/system_schema/information_schema/flows.rs
+  s_c311425adc0214::t_8cba5bf273f30a 289-292,294-315,317-324,326-333,335,337-366,369-371,373-391
+  s_c311425adc0214::t_94da82acd98e71 546-608
+  s_c311425adc0214::t_fd889cdd38e8ac 15,38,48,54,316,325,334,336,367,372
+  s_c311425adc0214::t_86af364e638030 220,293,393,399,401,413,464,498
+  s_c311425adc0214::t_2f4f8f4502b6d1 368,392,609-610
+src/catalog/src/system_schema/information_schema/tables.rs
+  s_c311425adc0214::t_1b52e005f69552 312
+  s_c311425adc0214::t_af7f9f8365bd12 366,368,370,380-393
+  s_c311425adc0214::t_6822703554aed9 163-166,247-269,276-311,313-345,348-349,351-356,359,363,365,394,483
+src/catalog/src/lib.rs
+  s_c311425adc0214::t_ad7831f4388cb2 30
+src/catalog/src/system_schema/information_schema/schemata.rs
+  s_c311425adc0214::t_ee5b69ee125f0a 36,180-190
+  s_c311425adc0214::t_41287ca8c28f81 17
+src/catalog/src/system_schema/utils.rs
+  s_c311425adc0214::t_de7194520139d7 39-61
+  s_c311425adc0214::t_f481d5e6654ccd 62-63
+src/catalog/src/batch_scan.rs
+  s_c311425adc0214::t_8cba5bf273f30a 52-99
+  s_c311425adc0214::t_ad7831f4388cb2 1-51
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6b5cc4cc40d1cf5fdde2489ba0581e518866402d",
+  "prompts": {},
+  "sessions": {
+    "s_c311425adc0214": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1f2e1-9b9d-7ba2-a9ef-a23895482316",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

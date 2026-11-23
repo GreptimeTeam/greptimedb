@@ -1,0 +1,23 @@
+src/common/meta/src/cache/flow/table_flownode.rs
+  s_c311425adc0214::t_1b4028fc2602b7 24,66-71,334,345
+src/common/meta/src/cache/registry.rs
+  s_c311425adc0214::t_1b4028fc2602b7 164,175,179
+src/common/meta/src/cache/container.rs
+  s_c311425adc0214::t_1b4028fc2602b7 42-44,83,105,108,112,117,184-192
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ac43abf9870f4776092594a1257538a7a6eaeed3",
+  "prompts": {},
+  "sessions": {
+    "s_c311425adc0214": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1f2e1-9b9d-7ba2-a9ef-a23895482316",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

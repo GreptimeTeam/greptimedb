@@ -1,0 +1,54 @@
+src/common/meta/src/cache/table/table_name.rs
+  s_c311425adc0214::t_330ec18049daad 42-43,59-60
+src/catalog/src/kvbackend/table_cache.rs
+  s_c311425adc0214::t_b0e2681e3d8f4e 40
+src/common/meta/src/cache/container.rs
+  s_c311425adc0214::t_330ec18049daad 39-40,48-54,186-188,204-205,227-229,327,627,634,636,640,647,654-655,657,660,667,670-671,677,684-685,687,690,694,800-809
+  s_c311425adc0214::t_b0e2681e3d8f4e 42-47,58,63,92-93,96,101-103,109,115,118,122,126-127,130,174,185,190-194,208,240-256,258-260,262-264,275,301,362,411,423,430,444,464,492-493,513,700-701,763,810
+  s_c311425adc0214::t_7b448ef50fc2b4 811
+src/common/meta/src/cache/table/schema.rs
+  s_c311425adc0214::t_b0e2681e3d8f4e 38
+src/common/meta/src/cache/table/table_info.rs
+  s_c311425adc0214::t_330ec18049daad 42-43,53-54
+src/common/meta/src/cache.rs
+  s_c311425adc0214::t_b0e2681e3d8f4e 24
+src/common/meta/src/cache/table/table_route.rs
+  s_c311425adc0214::t_330ec18049daad 42-43,55-56
+src/common/meta/src/cache/table/view_info.rs
+  s_c311425adc0214::t_330ec18049daad 41-42,50-51
+src/operator/src/insert.rs
+  s_c311425adc0214::t_b0e2681e3d8f4e 4926
+src/partition/src/cache.rs
+  s_c311425adc0214::t_b0e2681e3d8f4e 121
+src/common/meta/src/cache/flow/table_flownode.rs
+  s_c311425adc0214::t_b0e2681e3d8f4e 24,106,133,162,329,340
+  s_c311425adc0214::t_330ec18049daad 66
+src/common/meta/src/cache/flow.rs
+  s_c311425adc0214::t_330ec18049daad 35
+  s_c311425adc0214::t_b0e2681e3d8f4e 43
+src/common/meta/src/cache/table/table_schema.rs
+  s_c311425adc0214::t_b0e2681e3d8f4e 43
+src/catalog/src/kvbackend/manager.rs
+  s_c311425adc0214::t_330ec18049daad 800,1164,1183
+src/catalog/src/system_schema/information_schema/partitions.rs
+  s_c311425adc0214::t_b0e2681e3d8f4e 648
+src/common/meta/src/cache/registry.rs
+  s_c311425adc0214::t_b0e2681e3d8f4e 162,164,171,173-175,177-179,187,189,209,216,221,227,250,252,292,303
+  s_c311425adc0214::t_330ec18049daad 186,188,232-236,249,251,291,302
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "40f88b8ab9461442b9976b780034ad782be561bb",
+  "prompts": {},
+  "sessions": {
+    "s_c311425adc0214": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1f2e1-9b9d-7ba2-a9ef-a23895482316",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
