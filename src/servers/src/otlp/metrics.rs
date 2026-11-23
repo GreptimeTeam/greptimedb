@@ -1209,12 +1209,7 @@ fn encode_histogram(
                 .chain(std::iter::once(f64::INFINITY))
                 .zip(&data_point.bucket_counts)
             {
-                accumulated_count = accumulated_count.checked_add(*count).ok_or_else(|| {
-                    error::InvalidParameterSnafu {
-                        reason: format!("metric `{name}`: bucket prefix overflows u64"),
-                    }
-                    .build()
-                })?;
+                accumulated_count += *count;
                 values.push((bound, accumulated_count as f64));
             }
             values
@@ -2961,6 +2956,7 @@ mod tests {
                     AggregationTemporality::Delta
                 } as i32,
             };
+            // This sibling omits the +Inf bucket to exercise partial rejection in every mode.
             histogram.data_points.push(HistogramDataPoint {
                 explicit_bounds: vec![1.0],
                 bucket_counts: vec![4],
