@@ -263,10 +263,7 @@ impl<S> RegionWorkerLoop<S> {
             // A retry has no caller to try again, so the end of the wait re-issues it.
             if is_retry {
                 info!("Region {region_id} awaits its Leader lease, keeping an index build retry");
-                self.lease_deferred_index_retries
-                    .entry(region_id)
-                    .or_default()
-                    .push(request);
+                self.defer_lease_work(&region).push(request);
                 return;
             }
             info!("Region {region_id} awaits its Leader lease, building no index");

@@ -46,6 +46,14 @@ pub trait EventListener: Send + Sync {
     /// metadata.
     fn on_persist_backfilled_metadata_begin(&self, _region_id: RegionId) {}
 
+    /// Notifies the listener in the spawned save of the region's backfilled metadata, before it
+    /// takes the manifest lock.
+    async fn on_persist_backfilled_metadata_lock_begin(&self, _region_id: RegionId) {}
+
+    /// Notifies the listener after the worker handled a notification that the region became
+    /// writable.
+    fn on_region_became_writable(&self, _region_id: RegionId) {}
+
     /// Notifies the listener before a tail replay commits its result.
     async fn on_tail_commit_begin(&self, _region_id: RegionId) {}
 

@@ -44,9 +44,10 @@ use store_api::region_engine::{
     RegionEngine, RegionManifestInfo, RegionRole, SettableRegionRoleState,
 };
 use store_api::region_request::{
-    PathType, RegionAlterRequest, RegionBuildIndexRequest, RegionCatchupRequest,
-    RegionCloseRequest, RegionDiscardPendingTailsRequest, RegionDropRequest, RegionFlushRequest,
-    RegionOpenRequest, RegionRequest, RegionTruncateRequest,
+    EnterStagingRequest, PathType, RegionAlterRequest, RegionBuildIndexRequest,
+    RegionCatchupRequest, RegionCloseRequest, RegionDiscardPendingTailsRequest, RegionDropRequest,
+    RegionFlushRequest, RegionOpenRequest, RegionRequest, RegionTruncateRequest,
+    StagingPartitionDirective,
 };
 use store_api::storage::{RegionId, ScanRequest};
 
@@ -70,7 +71,7 @@ use crate::manifest::action::{
 };
 use crate::manifest::storage::delta_file;
 use crate::region::version::VersionRef;
-use crate::region::{MitoRegion, RegionLeaderState};
+use crate::region::{MitoRegion, RegionLeaderState, RegionRoleState};
 use crate::request::{BackgroundNotify, WorkerRequest};
 use crate::sst::file::RegionFileId;
 use crate::sst::location::region_dir_from_table_dir;
@@ -103,6 +104,7 @@ struct TailReplayListener {
     /// Index builds the worker learned stopped.
     index_builds_stopped: AtomicUsize,
     compactions_scheduled: AtomicUsize,
+    leader_lease_wait_ends: AtomicUsize,
 }
 
 #[async_trait]
@@ -127,6 +129,11 @@ impl EventListener for TailReplayListener {
 
     fn on_tail_lease_check(&self, _region_id: RegionId) {
         self.lease_checks.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn on_leader_lease_wait_ended(&self, _region_id: RegionId) {
+        // Releases the index build counts recorded before it.
+        self.leader_lease_wait_ends.fetch_add(1, Ordering::Release);
     }
 
     fn on_tail_fence_begin(&self, _region_id: RegionId) {
@@ -1715,7 +1722,7 @@ async fn test_promotion_replays_tails_of_region_busy_meanwhile(#[case] busy: Reg
     region
         .engine
         .inner
-        .notify_if_became_writable(&mito_region, false);
+        .notify_if_became_writable(&mito_region, RegionRoleState::Follower);
 
     wait_until(|| region.listener.commits() > 0).await;
     mito_region.switch_state_to_writable(busy);
@@ -1841,15 +1848,18 @@ async fn test_failed_replay_reloads_region_from_newer_manifest() {
 }
 
 /// With write leases the replay commits while the region awaits its Leader lease, and the lease
-/// that ends the wait builds the index the replay could not publish.
+/// that ends the wait builds the index the replay could not publish. If the region is staging
+/// then, the end of staging builds it.
 #[rstest]
-#[case::create_on_flush(true, false)]
-#[case::no_create_on_flush(false, false)]
-#[case::awaiting_leader_lease(true, true)]
+#[case::create_on_flush(true, false, false)]
+#[case::no_create_on_flush(false, false, false)]
+#[case::awaiting_leader_lease(true, true, false)]
+#[case::leader_lease_in_staging(true, true, true)]
 #[tokio::test]
 async fn test_replayed_ssts_build_index_as_flushed(
     #[case] create_on_flush: bool,
     #[case] leased: bool,
+    #[case] staging: bool,
 ) {
     let region = TestRegion::build(
         "tail-replay-index",
@@ -1909,17 +1919,41 @@ async fn test_replayed_ssts_build_index_as_flushed(
             "{err:?}"
         );
         assert_eq!(region.listener.index_builds_stopped(), 0);
+        let role = if staging {
+            let request = RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_directive: StagingPartitionDirective::RejectAllWrites,
+            });
+            region
+                .engine
+                .handle_request(region_id, request)
+                .await
+                .unwrap();
+            RegionRole::StagingLeader
+        } else {
+            RegionRole::Leader
+        };
         let now = Instant::now();
         region
             .engine
-            .set_region_role_with_lease(
-                region_id,
-                RegionRole::Leader,
-                now,
-                now + Duration::from_secs(10),
-                None,
-            )
+            .set_region_role_with_lease(region_id, role, now, now + Duration::from_secs(10), None)
             .unwrap();
+        if staging {
+            // The end of the wait finds the region staging and builds nothing.
+            wait_until(|| {
+                region
+                    .listener
+                    .leader_lease_wait_ends
+                    .load(Ordering::Acquire)
+                    == 1
+            })
+            .await;
+            assert_eq!(region.listener.index_builds_stopped(), 0);
+            region
+                .engine
+                .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Leader)
+                .await
+                .unwrap();
+        }
     }
 
     wait_until(|| region.listener.index_builds_stopped() == 1).await;

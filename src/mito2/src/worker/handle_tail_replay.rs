@@ -273,12 +273,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     }
 }
 
-/// Asks the worker to replay the pending tails of a region that became writable, if it has
-/// any, without waiting.
+/// Tells the worker that a region became writable, so it replays the pending tails and runs the
+/// work the region's wait for its Leader lease held back, without waiting.
 pub(crate) fn notify_writable(sender: &Sender<WorkerRequestWithTime>, region: &MitoRegionRef) {
-    if !region.version().has_pending_tails() {
-        return;
-    }
     let sender = sender.clone();
     let region_id = region.region_id;
     common_runtime::spawn_global(async move {

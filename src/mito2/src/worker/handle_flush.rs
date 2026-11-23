@@ -103,6 +103,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             );
             self.handle_ddl_requests(&mut pending_ddls).await;
         }
+        // A close that left staging (`handle_close`) fails with its flush and leaves the region a
+        // writable leader.
+        self.finish_deferred_lease_work(region_id).await;
         // Maybe flush worker again.
         self.maybe_flush_worker();
 

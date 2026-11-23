@@ -288,6 +288,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             region.switch_state_to_staging(RegionLeaderState::EnteringStaging);
         } else {
             region.switch_state_to_writable(RegionLeaderState::EnteringStaging);
+            self.finish_deferred_lease_work(region.region_id).await;
         }
         enter_staging_result
             .sender

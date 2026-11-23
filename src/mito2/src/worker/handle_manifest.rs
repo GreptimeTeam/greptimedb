@@ -231,6 +231,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             )
             .await;
         }
+        self.finish_deferred_lease_work(change_result.region_id)
+            .await;
         // Handles the stalled requests.
         self.handle_region_stalled_requests(&change_result.region_id, true)
             .await;
@@ -605,6 +607,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             });
 
         if edit_result.update_region_state {
+            self.finish_deferred_lease_work(edit_result.region_id).await;
             // Writes stalled specifically by this edit are handled before the next queued edit.
             // Otherwise the next edit could reserve a committed sequence before those writes.
             self.handle_region_stalled_requests(&edit_result.region_id, false)

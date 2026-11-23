@@ -908,7 +908,7 @@ impl<S: LogStore> WorkerStarter<S> {
             granted_leases: self.granted_leases,
             staging_regions: self.staging_regions,
             tail_replays: HashMap::new(),
-            lease_deferred_index_retries: HashMap::new(),
+            deferred_lease_work: HashMap::new(),
         };
         let handle = common_runtime::spawn_global(async move {
             worker_thread.run().await;
@@ -1378,9 +1378,12 @@ struct RegionWorkerLoop<S> {
     staging_regions: StagingRegionsRef,
     /// Running tail replays, which stay here until they report their end.
     tail_replays: HashMap<RegionId, CancellableTaskState>,
-    /// Index build retries refused while their region awaited its Leader lease, which the end of
-    /// the wait re-issues.
-    lease_deferred_index_retries: HashMap<RegionId, Vec<BuildIndexRequest>>,
+    /// Work held back by a region's wait for its Leader lease: the missing-index pass, the index
+    /// build retries listed here and the save of the backfilled metadata. An entry means the work
+    /// is due; it runs once the region is a writable leader with its Leader lease (see
+    /// `finish_deferred_lease_work`) and is removed then, or when the region is closed or
+    /// dropped. A catchup that reopens or replaces the region keeps it.
+    deferred_lease_work: HashMap<RegionId, Vec<BuildIndexRequest>>,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -1870,6 +1873,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 self.stalled_requests.remove_staging_drain(&region_id);
                 self.handle_region_stalled_requests(&region_id, true).await;
                 let _ = drained.send(());
+                self.finish_deferred_lease_work(region_id).await;
             }
             BackgroundNotify::RegionEdit(req) => self.handle_region_edit_result(req).await,
             BackgroundNotify::CopyRegionFromFinished(req) => {
@@ -1882,10 +1886,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             BackgroundNotify::CaughtUpAgain(caught_up) => {
                 self.handle_caught_up_again(region_id, caught_up).await
             }
-            BackgroundNotify::RegionBecameWritable => self.maybe_replay_tails(region_id),
+            BackgroundNotify::RegionBecameWritable => {
+                self.maybe_replay_tails(region_id);
+                self.finish_deferred_lease_work(region_id).await;
+                self.listener.on_region_became_writable(region_id);
+            }
             BackgroundNotify::LeaderLeaseWaitEnded => {
                 self.handle_leader_lease_wait_ended(region_id).await
             }
+            BackgroundNotify::BackfillDeferred => self.handle_backfill_deferred(region_id).await,
             BackgroundNotify::RegionCannotReplay { region } => {
                 self.handle_region_cannot_replay(region_id, region)
             }
@@ -2012,7 +2021,7 @@ impl<S> RegionWorkerLoop<S> {
         self.regions.clear();
         for region in regions {
             self.granted_leases.remove(region.region_id);
-            self.lease_deferred_index_retries.remove(&region.region_id);
+            self.deferred_lease_work.remove(&region.region_id);
         }
     }
 
@@ -2102,6 +2111,24 @@ impl WorkerListener {
         #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {
             listener.on_persist_backfilled_metadata_begin(_region_id);
+        }
+    }
+
+    /// The spawned save of the region's backfilled metadata is about to take the manifest lock.
+    pub(crate) async fn on_persist_backfilled_metadata_lock_begin(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener
+                .on_persist_backfilled_metadata_lock_begin(_region_id)
+                .await;
+        }
+    }
+
+    /// The worker handled a notification that the region became writable.
+    pub(crate) fn on_region_became_writable(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_region_became_writable(_region_id);
         }
     }
 

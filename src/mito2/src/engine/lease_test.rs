@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use api::region::RegionResponse;
@@ -28,6 +28,7 @@ use common_base::readable_size::ReadableSize;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
+use common_time::Timestamp;
 use rstest::rstest;
 use rstest_reuse::apply;
 use store_api::region_engine::{
@@ -38,7 +39,8 @@ use store_api::region_request::{
     RegionCloseRequest, RegionCompactRequest, RegionDropRequest, RegionFlushRequest,
     RegionPutRequest, RegionRequest, RegionTruncateRequest, StagingPartitionDirective,
 };
-use store_api::storage::{RegionId, ScanRequest};
+use store_api::storage::{FileId, RegionId, ScanRequest};
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 use crate::config::MitoConfig;
@@ -62,13 +64,15 @@ use crate::manifest::action::RegionEdit;
 use crate::metrics::{FLUSH_FAILURE_TOTAL, FLUSH_REQUESTS_TOTAL};
 use crate::region::{RegionLeaderState, RegionRoleState};
 use crate::request::{BackgroundNotify, BuildIndexRequest, WorkerRequest};
-use crate::sst::file::IndexType;
+use crate::sst::file::{FileMeta, IndexType};
 use crate::sst::index::IndexBuildType;
 use crate::test_util::{
-    CreateRequestBuilder, LogStoreFactory, TestEnv, build_rows, flush_region,
-    kafka_log_store_factory, multiple_log_store_factories, prepare_test_for_kafka_log_store,
-    put_rows, raft_engine_log_store_factory, reopen_region, rows_schema,
+    CreateRequestBuilder, DeltaFaults, LogStoreFactory, TestEnv, build_rows, fail_next_write_to,
+    flush_region, kafka_log_store_factory, multiple_log_store_factories,
+    prepare_test_for_kafka_log_store, put_rows, raft_engine_log_store_factory, reopen_region,
+    rows_schema,
 };
+use crate::worker::DROPPING_MARKER_FILE;
 
 const LEASE: Duration = Duration::from_secs(10);
 const REGION_ID: RegionId = RegionId::new(1, 1);
@@ -997,12 +1001,17 @@ async fn test_leader_lease_after_catchup_persists_backfilled_partition_expr(
     assert_eq!(wait_persisted_partition_expr(&engine).await, expr_json);
 }
 
-/// Counts the ends of a region's wait for its Leader lease, once the worker handled them, and
-/// the persisting of backfilled metadata the worker spawned.
+/// Counts the ends of a region's wait for its Leader lease, once the worker handled them, the
+/// persisting of backfilled metadata the worker spawned and the notifications that the region
+/// became writable the worker handled. It can park the spawned persisting before its manifest
+/// lock and the result of an EnterStaging.
 #[derive(Default)]
 struct LeaseWaitEndedListener {
     wait_ends: AtomicUsize,
     backfill_persists: AtomicUsize,
+    became_writable: AtomicUsize,
+    park_backfill: Gate,
+    park_enter_staging_result: Gate,
 }
 
 #[async_trait::async_trait]
@@ -1015,11 +1024,67 @@ impl EventListener for LeaseWaitEndedListener {
     fn on_persist_backfilled_metadata_begin(&self, _region_id: RegionId) {
         self.backfill_persists.fetch_add(1, Ordering::Relaxed);
     }
+
+    async fn on_persist_backfilled_metadata_lock_begin(&self, _region_id: RegionId) {
+        self.park_backfill.pass().await;
+    }
+
+    fn on_region_became_writable(&self, _region_id: RegionId) {
+        self.became_writable.fetch_add(1, Ordering::Release);
+    }
+
+    async fn on_enter_staging_result_begin(&self, _region_id: RegionId) {
+        self.park_enter_staging_result.pass().await;
+    }
 }
 
 impl LeaseWaitEndedListener {
     async fn wait_for_end(&self) {
-        wait_until(|| self.wait_ends.load(Ordering::Acquire) != 0).await;
+        self.wait_for_ends(1).await;
+    }
+
+    async fn wait_for_ends(&self, ends: usize) {
+        wait_until(|| self.wait_ends.load(Ordering::Acquire) >= ends).await;
+    }
+
+    fn backfill_persists(&self) -> usize {
+        self.backfill_persists.load(Ordering::Relaxed)
+    }
+
+    async fn wait_for_backfill_persists(&self, persists: usize) {
+        wait_until(|| self.backfill_persists() >= persists).await;
+        assert_eq!(self.backfill_persists(), persists);
+    }
+}
+
+/// Parks the first task that passes it once armed, until released.
+#[derive(Default)]
+struct Gate {
+    armed: AtomicBool,
+    entered: Notify,
+    release: Notify,
+}
+
+impl Gate {
+    fn arm(&self) {
+        self.armed.store(true, Ordering::Relaxed);
+    }
+
+    async fn pass(&self) {
+        if self.armed.swap(false, Ordering::Relaxed) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+    }
+
+    async fn wait_entered(&self) {
+        tokio::time::timeout(Duration::from_secs(10), self.entered.notified())
+            .await
+            .unwrap();
+    }
+
+    fn release(&self) {
+        self.release.notify_one();
     }
 }
 
@@ -1048,23 +1113,401 @@ async fn test_leader_lease_after_demotion_ends_wait(#[case] role: RegionRole) {
     assert_eq!(wait_persisted_partition_expr(&engine).await, expr_json);
 }
 
-/// A lease that finds the region in the middle of a change persists no backfilled metadata.
+/// A change of a region that awaits its Leader lease, held at the manifest lock.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum HeldChange {
+    Alter,
+    Edit,
+    FailedEnterStaging,
+    Truncate,
+    FailedTruncate,
+    /// Truncates the rows of `build_rows(100, 103)`.
+    TruncateRange,
+    Discard,
+    FailedDiscard,
+}
+
+impl HeldChange {
+    fn fails(self) -> bool {
+        matches!(
+            self,
+            Self::FailedEnterStaging | Self::FailedTruncate | Self::FailedDiscard
+        )
+    }
+
+    fn state(self) -> RegionLeaderState {
+        match self {
+            Self::Alter => RegionLeaderState::Altering,
+            Self::Edit => RegionLeaderState::Editing,
+            Self::FailedEnterStaging => RegionLeaderState::EnteringStaging,
+            _ => RegionLeaderState::Truncating,
+        }
+    }
+
+    /// Sends the change to [REGION_ID] of `engine`.
+    async fn send(self, engine: &MitoEngine) -> std::result::Result<(), BoxedError> {
+        let request = match self {
+            Self::Alter => add_field_request(),
+            Self::Edit => {
+                // Removes a file the region does not have.
+                let edit = RegionEdit {
+                    files_to_remove: vec![FileMeta {
+                        region_id: REGION_ID,
+                        file_id: FileId::random(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                };
+                return engine
+                    .edit_region(REGION_ID, edit)
+                    .await
+                    .map_err(BoxedError::new);
+            }
+            Self::FailedEnterStaging => RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                    float_range_expr("field_0", 0., 100.).as_json_str().unwrap(),
+                ),
+            }),
+            Self::Truncate | Self::FailedTruncate => {
+                RegionRequest::Truncate(RegionTruncateRequest::All)
+            }
+            Self::TruncateRange => RegionRequest::Truncate(RegionTruncateRequest::ByTimeRanges {
+                time_ranges: vec![(
+                    Timestamp::new_millisecond(100_000),
+                    Timestamp::new_millisecond(102_000),
+                )],
+            }),
+            Self::Discard | Self::FailedDiscard => {
+                RegionRequest::Truncate(RegionTruncateRequest::Unflushed)
+            }
+        };
+        engine.handle_request(REGION_ID, request).await.map(|_| ())
+    }
+}
+
+/// A lease that ends the wait in the middle of a change defers the index builds and the save of
+/// the backfilled metadata, which the end of the change runs, whether it succeeds or fails.
+#[rstest]
+#[case::alter(HeldChange::Alter)]
+#[case::edit(HeldChange::Edit)]
+#[case::failed_enter_staging(HeldChange::FailedEnterStaging)]
+#[case::truncate(HeldChange::Truncate)]
+#[case::failed_truncate(HeldChange::FailedTruncate)]
+#[case::discard(HeldChange::Discard)]
+#[case::failed_discard(HeldChange::FailedDiscard)]
 #[tokio::test]
-async fn test_leader_lease_during_change_persists_no_backfill() {
+async fn test_lease_during_change_defers_work_to_its_end(#[case] change: HeldChange) {
     common_telemetry::init_default_ut_logging();
-    let mut env = TestEnv::with_prefix("lease-during-change-backfill").await;
+    let faults = DeltaFaults::default();
+    let mut env = TestEnv::with_prefix("lease-during-change")
+        .await
+        .with_mock_layer(faults.layer());
     let listener = Arc::new(LeaseWaitEndedListener::default());
-    let (engine, _) = catchup_region_with_backfill(&mut env, Some(listener.clone())).await;
+    let (engine, expr_json) = catchup_region_with_backfill(&mut env, Some(listener.clone())).await;
     let region = engine.get_region(REGION_ID).unwrap();
-    region.set_editing(RegionLeaderState::Writable).unwrap();
+    if matches!(change, HeldChange::Discard | HeldChange::FailedDiscard) {
+        let schema = rows_schema(&CreateRequestBuilder::new().build());
+        put(&engine, REGION_ID, &schema, 0).await.unwrap().unwrap();
+    }
+    // The change takes the lock after the lease, so it commits as the region's Leader.
+    let manager = region.manifest_ctx.manifest_manager.write().await;
+    let request = {
+        let engine = engine.clone();
+        tokio::spawn(async move { change.send(&engine).await })
+    };
+    wait_until(|| region.state() == RegionRoleState::Leader(change.state())).await;
 
     grant_at(&engine, RegionRole::Leader, Instant::now(), None);
     listener.wait_for_end().await;
+    assert_eq!(listener.backfill_persists(), 0);
 
-    // The worker reports the persisting as it spawns it, and the end of the wait after.
-    assert_eq!(listener.backfill_persists.load(Ordering::Relaxed), 0);
-    region.switch_state_to_writable(RegionLeaderState::Editing);
+    match change {
+        HeldChange::FailedEnterStaging => faults.fail_next_staging_delete(),
+        _ if change.fails() => faults.fail_next_write(),
+        _ => {}
+    }
+    drop(manager);
+    assert_eq!(
+        request.await.unwrap().is_err(),
+        change.fails(),
+        "{change:?}"
+    );
+    listener.wait_for_backfill_persists(1).await;
+    assert_eq!(wait_persisted_partition_expr(&engine).await, expr_json);
+}
+
+/// A lease that ends the wait of a staging or downgrading region defers the work until the
+/// region is a writable leader again, however it becomes one.
+#[derive(Clone, Copy, Debug)]
+enum LeaderAgain {
+    /// Staging ends gracefully, in the worker.
+    EndStaging,
+    /// A Leader lease leaves staging, outside the worker.
+    LeaderLeaseInStaging,
+    /// A direct conversion to Leader leaves staging, outside the worker.
+    SetRoleInStaging,
+    /// A drop of the staging region fails to write its marker.
+    FailedDrop,
+    /// A Leader lease promotes a downgrading region, outside the worker.
+    LeaderLeaseDowngraded,
+}
+
+#[rstest]
+#[case::end_staging(LeaderAgain::EndStaging)]
+#[case::leader_lease_in_staging(LeaderAgain::LeaderLeaseInStaging)]
+#[case::set_role_in_staging(LeaderAgain::SetRoleInStaging)]
+#[case::failed_drop(LeaderAgain::FailedDrop)]
+#[case::leader_lease_downgraded(LeaderAgain::LeaderLeaseDowngraded)]
+#[tokio::test]
+async fn test_lease_outside_writable_leader_defers_work(#[case] again: LeaderAgain) {
+    common_telemetry::init_default_ut_logging();
+    let (fail_marker, layer) = fail_next_write_to(DROPPING_MARKER_FILE);
+    let mut env = TestEnv::with_prefix("lease-outside-writable")
+        .await
+        .with_mock_layer(layer);
+    let listener = Arc::new(LeaseWaitEndedListener::default());
+    let (engine, expr_json) = catchup_region_with_backfill(&mut env, Some(listener.clone())).await;
+    let region = engine.get_region(REGION_ID).unwrap();
+    if matches!(again, LeaderAgain::LeaderLeaseDowngraded) {
+        grant_at(&engine, RegionRole::DowngradingLeader, Instant::now(), None);
+    } else {
+        // Staging with nothing staged, so it ends without a commit.
+        let request = RegionRequest::EnterStaging(EnterStagingRequest {
+            partition_directive: StagingPartitionDirective::RejectAllWrites,
+        });
+        engine.handle_request(REGION_ID, request).await.unwrap();
+    }
+
+    grant_at(&engine, RegionRole::StagingLeader, Instant::now(), None);
+    listener.wait_for_end().await;
+    assert!(!region.manifest_ctx.awaits_leader_lease());
+    assert_eq!(listener.backfill_persists(), 0);
+
+    match again {
+        LeaderAgain::EndStaging => {
+            let response = engine
+                .set_region_role_state_gracefully(REGION_ID, SettableRegionRoleState::Leader)
+                .await
+                .unwrap();
+            assert!(matches!(response, SetRegionRoleStateResponse::Success(_)));
+        }
+        LeaderAgain::LeaderLeaseInStaging | LeaderAgain::LeaderLeaseDowngraded => {
+            grant_at(&engine, RegionRole::Leader, Instant::now(), None);
+        }
+        LeaderAgain::SetRoleInStaging => {
+            engine
+                .set_region_role(REGION_ID, RegionRole::Leader)
+                .unwrap();
+        }
+        LeaderAgain::FailedDrop => {
+            fail_marker.store(true, Ordering::Relaxed);
+            let drop = RegionRequest::Drop(drop_request());
+            engine.handle_request(REGION_ID, drop).await.unwrap_err();
+        }
+    }
+    assert_eq!(
+        region.state(),
+        RegionRoleState::Leader(RegionLeaderState::Writable)
+    );
+    listener.wait_for_backfill_persists(1).await;
+    assert_eq!(wait_persisted_partition_expr(&engine).await, expr_json);
+}
+
+/// Only a change that makes the region a writable leader tells the worker, not the Leader lease
+/// that every heartbeat grants a writable leader.
+#[tokio::test]
+async fn test_leader_leases_of_writable_leader_notify_no_worker() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("steady-leader-leases").await;
+    let listener = Arc::new(LeaseWaitEndedListener::default());
+    let (engine, _schema) =
+        create_region_with_config(&mut env, None, MitoConfig::default(), listener.clone()).await;
+    for _ in 0..20 {
+        grant_at(&engine, RegionRole::Leader, Instant::now(), None);
+    }
+
+    grant_at(&engine, RegionRole::Follower, Instant::now(), None);
+    grant_at(&engine, RegionRole::Leader, Instant::now(), None);
+    wait_until(|| listener.became_writable.load(Ordering::Acquire) != 0).await;
+    // Notifications of the earlier leases would have been sent before.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(listener.became_writable.load(Ordering::Acquire), 1);
+}
+
+/// A save of the backfilled metadata the end of the wait spawned may find the region in a change
+/// the worker started after it. It saves nothing then, and the end of the change saves it.
+#[tokio::test]
+async fn test_backfill_save_finding_change_runs_at_its_end() {
+    common_telemetry::init_default_ut_logging();
+    let faults = DeltaFaults::default();
+    let mut env = TestEnv::with_prefix("backfill-save-finds-change")
+        .await
+        .with_mock_layer(faults.layer());
+    let listener = Arc::new(LeaseWaitEndedListener::default());
+    let (engine, expr_json) = catchup_region_with_backfill(&mut env, Some(listener.clone())).await;
+    let region = engine.get_region(REGION_ID).unwrap();
+    listener.park_backfill.arm();
+    grant_at(&engine, RegionRole::Leader, Instant::now(), None);
+    listener.park_backfill.wait_entered().await;
+    assert_eq!(listener.backfill_persists(), 1);
+
+    // An EnterStaging that fails holds the region in EnteringStaging until the worker learns it.
+    listener.park_enter_staging_result.arm();
+    faults.fail_next_staging_delete();
+    let request = {
+        let engine = engine.clone();
+        tokio::spawn(async move { HeldChange::FailedEnterStaging.send(&engine).await })
+    };
+    listener.park_enter_staging_result.wait_entered().await;
+    listener.park_backfill.release();
+    // Gives the save time to find the region entering staging.
+    tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(persisted_partition_expr(&engine).await, None);
+
+    listener.park_enter_staging_result.release();
+    request.await.unwrap().unwrap_err();
+    assert_eq!(
+        region.state(),
+        RegionRoleState::Leader(RegionLeaderState::Writable)
+    );
+    listener.wait_for_backfill_persists(2).await;
+    assert_eq!(wait_persisted_partition_expr(&engine).await, expr_json);
+}
+
+/// Duplicate notifications that a save found the region in a change run the deferred work once.
+#[tokio::test]
+async fn test_duplicate_backfill_deferrals_run_work_once() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("duplicate-backfill-deferrals").await;
+    let listener = Arc::new(LeaseWaitEndedListener::default());
+    let (engine, _) = catchup_region_with_backfill(&mut env, Some(listener.clone())).await;
+    let region = engine.get_region(REGION_ID).unwrap();
+    let manager = region.manifest_ctx.manifest_manager.write().await;
+    let alter = {
+        let engine = engine.clone();
+        tokio::spawn(async move { HeldChange::Alter.send(&engine).await })
+    };
+    wait_until(|| region.state() == RegionRoleState::Leader(RegionLeaderState::Altering)).await;
+    grant_at(&engine, RegionRole::Leader, Instant::now(), None);
+    listener.wait_for_end().await;
+    for _ in 0..2 {
+        let request = WorkerRequest::Background {
+            region_id: REGION_ID,
+            notify: BackgroundNotify::BackfillDeferred,
+        };
+        engine
+            .inner
+            .workers
+            .submit_to_worker(REGION_ID, request)
+            .await
+            .unwrap();
+    }
+
+    drop(manager);
+    alter.await.unwrap().unwrap();
+    listener.wait_for_backfill_persists(1).await;
+    // A later change finds no work due; the flush after it orders the check.
+    HeldChange::Truncate.send(&engine).await.unwrap();
+    flush(&engine).await.unwrap();
+    assert_eq!(listener.backfill_persists(), 1);
+
+    // A notification that arrives after the change ended runs the save at once.
+    let request = WorkerRequest::Background {
+        region_id: REGION_ID,
+        notify: BackgroundNotify::BackfillDeferred,
+    };
+    let workers = &engine.inner.workers;
+    workers.submit_to_worker(REGION_ID, request).await.unwrap();
+    listener.wait_for_backfill_persists(2).await;
+}
+
+fn drop_request() -> RegionDropRequest {
+    RegionDropRequest {
+        fast_path: false,
+        force: false,
+        partial_drop: false,
+    }
+}
+
+/// A close or a drop removes the work a region had due, so a later instance does not run it.
+#[rstest]
+#[case::close(true)]
+#[case::drop(false)]
+#[tokio::test]
+async fn test_deferred_work_removed_with_region(#[case] close: bool) {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("deferred-work-removed").await;
+    let listener = Arc::new(LeaseWaitEndedListener::default());
+    let (engine, _) = catchup_region_with_backfill(&mut env, Some(listener.clone())).await;
+    enter_staging(&engine, REGION_ID).await;
+    grant_at(&engine, RegionRole::StagingLeader, Instant::now(), None);
+    listener.wait_for_end().await;
+
+    if close {
+        let request = RegionRequest::Close(RegionCloseRequest::default());
+        engine.handle_request(REGION_ID, request).await.unwrap();
+        let table_dir = CreateRequestBuilder::new().table_dir("t").build().table_dir;
+        reopen_region(&engine, REGION_ID, table_dir, false, HashMap::new()).await;
+        let notified = listener.became_writable.load(Ordering::Acquire);
+        engine
+            .set_region_role(REGION_ID, RegionRole::Leader)
+            .unwrap();
+        wait_until(|| listener.became_writable.load(Ordering::Acquire) > notified).await;
+    } else {
+        let request = RegionRequest::Drop(drop_request());
+        engine.handle_request(REGION_ID, request).await.unwrap();
+        let request = CreateRequestBuilder::new().table_dir("t2").build();
+        engine
+            .handle_request(REGION_ID, RegionRequest::Create(request))
+            .await
+            .unwrap();
+        engine
+            .handle_request(REGION_ID, add_field_request())
+            .await
+            .unwrap();
+        flush(&engine).await.unwrap();
+    }
+    assert_eq!(listener.backfill_persists(), 0);
+}
+
+/// Work deferred past the end of one wait stays due across a catchup that reopens the region and
+/// through its next wait, which no change ends, and runs when that wait ends.
+#[tokio::test]
+async fn test_deferred_work_waits_for_next_leader_lease() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("deferred-work-next-wait").await;
+    let listener = Arc::new(LeaseWaitEndedListener::default());
+    let (engine, _) = catchup_region_with_backfill(&mut env, Some(listener.clone())).await;
+    let old = engine.get_region(REGION_ID).unwrap();
+    enter_staging(&engine, REGION_ID).await;
+    grant_at(&engine, RegionRole::StagingLeader, Instant::now(), None);
+    listener.wait_for_end().await;
+    // Rows in the memtable make the next catchup reopen the region.
+    let schema = rows_schema(&CreateRequestBuilder::new().build());
+    put(&engine, REGION_ID, &schema, 0).await.unwrap().unwrap();
+    grant_at(&engine, RegionRole::Follower, Instant::now(), None);
+
+    catchup(&engine).await.unwrap();
+    let region = engine.get_region(REGION_ID).unwrap();
+    assert!(!Arc::ptr_eq(&old, &region));
+    assert!(region.manifest_ctx.awaits_leader_lease());
+    // The end of a refused change finds the region awaiting its lease.
+    assert_retryable(
+        engine.handle_request(REGION_ID, add_field_request()).await,
+        lease_not_received,
+    );
+    engine
+        .handle_request(
+            REGION_ID,
+            RegionRequest::BuildIndex(RegionBuildIndexRequest::default()),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(listener.backfill_persists(), 0);
+
+    grant_at(&engine, RegionRole::Leader, Instant::now(), None);
+    listener.wait_for_ends(2).await;
+    listener.wait_for_backfill_persists(1).await;
 }
 
 /// The replayed and new rows of a region that awaits its Leader lease stay in its memtable until
@@ -1182,13 +1625,27 @@ async fn test_compaction_skipped_awaiting_leader_lease() {
 }
 
 /// An index build retry that the wait refuses is built when the lease ends the wait, also for a
-/// file that the lease-end pass leaves since its writer built an extension index.
+/// file that the lease-end pass leaves since its writer built an extension index. A lease that
+/// ends the wait while the region truncates some files or discards its unflushed rows keeps the
+/// retry until that ends, after it retired the builds queued before it: with one build at a
+/// time, the retry queues the build of its second file.
+#[rstest]
+#[case::writable(None)]
+#[case::truncating(Some(HeldChange::TruncateRange))]
+#[case::discarding(Some(HeldChange::Discard))]
 #[tokio::test]
-async fn test_index_build_retry_refused_awaiting_leader_lease_runs_after_it() {
+async fn test_index_build_retry_refused_awaiting_leader_lease_runs_after_it(
+    #[case] change: Option<HeldChange>,
+) {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::with_prefix("index-retry-awaiting-lease").await;
+    let listener = Arc::new(LeaseWaitEndedListener::default());
+    let mut config = async_build_mode_config(false);
+    if change.is_some() {
+        config.max_background_index_builds = 1;
+    }
     let engine = env
-        .create_engine_with(async_build_mode_config(false), None, None, None)
+        .create_engine_with(config, None, Some(listener.clone()), None)
         .await;
     engine.require_write_lease();
     engine.freeze_lease_clock(Instant::now());
@@ -1200,18 +1657,32 @@ async fn test_index_build_retry_refused_awaiting_leader_lease_runs_after_it() {
         .unwrap();
     grant(&engine, RegionRole::Leader, Instant::now() + LEASE);
     let rows = Rows {
-        schema,
+        schema: schema.clone(),
         rows: build_rows(0, 3),
     };
     put_rows(&engine, REGION_ID, rows).await;
     flush_region(&engine, REGION_ID, None).await;
+    if change.is_some() {
+        // A second file to retry, and a third one for the truncate to remove.
+        for start in [10, 100] {
+            let rows = Rows {
+                schema: schema.clone(),
+                rows: build_rows(start, start + 3),
+            };
+            put_rows(&engine, REGION_ID, rows).await;
+            flush_region(&engine, REGION_ID, None).await;
+        }
+    }
     let region = engine.get_region(REGION_ID).unwrap();
     let mut files = region.all_manifest_files().await.0;
+    files.sort_by_key(|file| file.time_range.0);
     files[0].available_indexes.push(IndexType::HllIndex);
     let edit = RegionEdit {
         files_to_add: files.clone(),
         ..Default::default()
     };
+    files.truncate(2);
+    let retried: Vec<_> = files.iter().map(|file| file.file_id).collect();
     engine.edit_region(REGION_ID, edit).await.unwrap();
     promote_to_await_leader_lease(&engine, REGION_ID).await;
 
@@ -1236,14 +1707,39 @@ async fn test_index_build_retry_refused_awaiting_leader_lease_runs_after_it() {
     );
     let has_inverted_index = || {
         let version = engine.get_region(REGION_ID).unwrap().version();
-        version.ssts.levels()[0].files.values().any(|file| {
-            file.meta_ref()
+        let files = &version.ssts.levels()[0].files;
+        retried.iter().all(|file_id| {
+            files[file_id]
+                .meta_ref()
                 .available_indexes
                 .contains(&IndexType::InvertedIndex)
         })
     };
     assert!(!has_inverted_index());
 
-    grant_at(&engine, RegionRole::Leader, Instant::now(), None);
+    if let Some(change) = change {
+        if change == HeldChange::Discard {
+            let rows = Rows {
+                schema,
+                rows: build_rows(3, 6),
+            };
+            put_rows(&engine, REGION_ID, rows).await;
+        }
+        let region = engine.get_region(REGION_ID).unwrap();
+        let manager = region.manifest_ctx.manifest_manager.write().await;
+        let request = {
+            let engine = engine.clone();
+            tokio::spawn(async move { change.send(&engine).await })
+        };
+        wait_until(|| region.state() == RegionRoleState::Leader(RegionLeaderState::Truncating))
+            .await;
+        grant_at(&engine, RegionRole::Leader, Instant::now(), None);
+        listener.wait_for_end().await;
+        assert!(!has_inverted_index());
+        drop(manager);
+        request.await.unwrap().unwrap();
+    } else {
+        grant_at(&engine, RegionRole::Leader, Instant::now(), None);
+    }
     wait_until(has_inverted_index).await;
 }

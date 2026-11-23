@@ -205,6 +205,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     .truncate(truncate_result.kind.clone());
             }
             Err(e) => {
+                self.finish_deferred_lease_work(region_id).await;
                 // Unable to truncate the region.
                 truncate_result.sender.send(Err(e));
                 return;
@@ -219,6 +220,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         self.index_build_scheduler
             .on_region_truncated(region_id)
             .await;
+        // After the index build scheduler retires the builds queued before the truncate.
+        self.finish_deferred_lease_work(region_id).await;
 
         if let TruncateKind::All {
             truncated_entry_id,
@@ -255,6 +258,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         region.switch_state_to_writable(RegionLeaderState::Truncating);
 
         if let Err(e) = result.result {
+            self.finish_deferred_lease_work(region_id).await;
             result.sender.send(Err(e));
             return;
         }
@@ -273,6 +277,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         self.index_build_scheduler
             .on_region_truncated(region_id)
             .await;
+        // After the index build scheduler retires the builds queued before the discard.
+        self.finish_deferred_lease_work(region_id).await;
         self.update_topic_latest_entry_id(&region);
 
         // Discarding memtables releases write buffer memory. Notify other workers and

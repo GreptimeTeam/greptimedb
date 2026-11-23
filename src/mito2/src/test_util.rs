@@ -260,6 +260,8 @@ pub struct DeltaFaults {
     lose_response: Arc<AtomicBool>,
     /// Whether the next delta write fails without landing.
     fail_write: Arc<AtomicBool>,
+    /// Whether the next deletion of a staging path fails.
+    fail_staging_delete: Arc<AtomicBool>,
 }
 
 impl DeltaFaults {
@@ -272,9 +274,16 @@ impl DeltaFaults {
         self.fail_write.store(true, Ordering::Relaxed);
     }
 
+    /// Fails the next deletion of a staging path, such as the clearing of the staging manifest
+    /// that entering staging begins with.
+    pub(crate) fn fail_next_staging_delete(&self) {
+        self.fail_staging_delete.store(true, Ordering::Relaxed);
+    }
+
     /// Builds the object-store layer controlled by these faults.
     pub fn layer(&self) -> MockLayer {
         let faults = self.clone();
+        let fail_staging_delete = self.fail_staging_delete.clone();
         MockLayerBuilder::default()
             .writer_factory(Arc::new(move |path, _args, inner| {
                 if !is_delta_file(path.rsplit('/').next().unwrap_or_default()) {
@@ -288,8 +297,33 @@ impl DeltaFaults {
                     })
                 }
             }))
+            .deleter_factory(Arc::new(move |inner| {
+                Box::new(StagingDeleter {
+                    inner,
+                    fail: fail_staging_delete.clone(),
+                })
+            }))
             .build()
             .unwrap()
+    }
+}
+
+/// A deleter whose next deletion of a staging path fails once `fail` is set.
+struct StagingDeleter {
+    inner: Deleter,
+    fail: Arc<AtomicBool>,
+}
+
+impl object_store::layers::mock::Delete for StagingDeleter {
+    async fn delete(&mut self, path: &str, args: OpDelete) -> MockResult<()> {
+        if path.contains("staging") && self.fail.swap(false, Ordering::Relaxed) {
+            return Err(MockError::new(ErrorKind::Unexpected, "mock failed delete"));
+        }
+        self.inner.delete(path, args).await
+    }
+
+    async fn close(&mut self) -> MockResult<()> {
+        self.inner.close().await
     }
 }
 
@@ -314,6 +348,24 @@ impl object_store::layers::mock::Write for LostResponseWriter {
     async fn abort(&mut self) -> MockResult<()> {
         self.inner.abort().await
     }
+}
+
+/// Builds an object-store layer that fails the next write to a path ending with `suffix` once
+/// the returned flag is set.
+pub(crate) fn fail_next_write_to(suffix: &'static str) -> (Arc<AtomicBool>, MockLayer) {
+    let armed = Arc::new(AtomicBool::new(false));
+    let layer_armed = armed.clone();
+    let layer = MockLayerBuilder::default()
+        .writer_factory(Arc::new(move |path, _args, inner| {
+            if path.ends_with(suffix) && layer_armed.swap(false, Ordering::Relaxed) {
+                Box::new(FailedWriter)
+            } else {
+                inner
+            }
+        }))
+        .build()
+        .unwrap();
+    (armed, layer)
 }
 
 /// A write that fails without touching the store.
