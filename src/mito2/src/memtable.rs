@@ -356,8 +356,8 @@ pub struct AllocTracker {
     bytes_allocated: AtomicUsize,
     /// Whether allocating is done.
     is_done_allocating: AtomicBool,
-    /// Serializes [Self::done_allocating] and [Self::on_deallocation], which both decide how
-    /// much to remove from the mutable memory of the write buffer.
+    /// Serializes [Self::done_allocating] and [Self::on_replacement], which both decide how
+    /// much of the allocated memory counts as mutable memory of the write buffer.
     release: std::sync::Mutex<()>,
 }
 
@@ -406,23 +406,35 @@ impl AllocTracker {
         }
     }
 
-    /// Tracks that `bytes` of the allocated memory is released, for example after the memtable
-    /// encodes its data into a smaller form.
-    pub(crate) fn on_deallocation(&self, bytes: usize) {
+    /// Tracks that data accounted as `removed` bytes is replaced by data of `installed` bytes,
+    /// for example after the memtable merges or encodes its parts.
+    pub(crate) fn on_replacement(&self, removed: usize, installed: usize) {
         let _release = self.release.lock().unwrap();
-        let bytes = bytes.min(self.bytes_allocated.load(Ordering::Relaxed));
-        if bytes == 0 {
-            return;
-        }
-        self.bytes_allocated.fetch_sub(bytes, Ordering::Relaxed);
-        WRITE_BUFFER_BYTES.sub(bytes as i64);
-        if let Some(write_buffer_manager) = &self.write_buffer_manager {
-            // Before freezing, the bytes still count as mutable memory; freezing removes
-            // whatever remains allocated at that time.
-            if !self.is_done_allocating.load(Ordering::Relaxed) {
-                write_buffer_manager.schedule_free_mem(bytes);
+        // Frozen bytes were already removed from the mutable memory of the write buffer.
+        let frozen = self.is_done_allocating.load(Ordering::Relaxed);
+        if installed >= removed {
+            let bytes = installed - removed;
+            self.bytes_allocated.fetch_add(bytes, Ordering::Relaxed);
+            WRITE_BUFFER_BYTES.add(bytes as i64);
+            if let Some(write_buffer_manager) = &self.write_buffer_manager {
+                write_buffer_manager.reserve_mem(bytes);
+                if frozen {
+                    write_buffer_manager.schedule_free_mem(bytes);
+                }
             }
-            write_buffer_manager.free_mem(bytes);
+        } else {
+            let bytes = removed - installed;
+            let allocated = self.bytes_allocated.load(Ordering::Relaxed);
+            debug_assert!(bytes <= allocated, "release {bytes} of {allocated} bytes");
+            let bytes = bytes.min(allocated);
+            self.bytes_allocated.fetch_sub(bytes, Ordering::Relaxed);
+            WRITE_BUFFER_BYTES.sub(bytes as i64);
+            if let Some(write_buffer_manager) = &self.write_buffer_manager {
+                if !frozen {
+                    write_buffer_manager.schedule_free_mem(bytes);
+                }
+                write_buffer_manager.free_mem(bytes);
+            }
         }
     }
 
@@ -923,28 +935,31 @@ mod tests {
     }
 
     #[test]
-    fn test_alloc_tracker_releases_before_and_after_freezing() {
+    fn test_alloc_tracker_replaces_before_and_after_freezing() {
         let manager = Arc::new(WriteBufferManagerImpl::new(1000));
         {
             let tracker = AllocTracker::new(Some(manager.clone() as WriteBufferManagerRef));
             tracker.on_allocation(100);
-            // A mutable memtable releases both its total and its mutable usage.
-            tracker.on_deallocation(30);
-            assert_eq!(70, tracker.bytes_allocated());
-            assert_eq!(70, manager.memory_usage());
-            assert_eq!(70, manager.mutable_usage());
+            // A mutable memtable changes both its total and its mutable usage.
+            tracker.on_replacement(100, 130);
+            assert_eq!(130, tracker.bytes_allocated());
+            assert_eq!(130, manager.memory_usage());
+            assert_eq!(130, manager.mutable_usage());
+            tracker.on_replacement(130, 60);
+            assert_eq!(60, tracker.bytes_allocated());
+            assert_eq!(60, manager.memory_usage());
+            assert_eq!(60, manager.mutable_usage());
 
-            // Freezing already removed the remaining bytes from the mutable usage.
+            // Freezing already removed the allocated bytes from the mutable usage.
             tracker.done_allocating();
-            tracker.on_deallocation(20);
+            tracker.on_replacement(60, 80);
+            assert_eq!(80, tracker.bytes_allocated());
+            assert_eq!(80, manager.memory_usage());
+            assert_eq!(0, manager.mutable_usage());
+            tracker.on_replacement(80, 50);
             assert_eq!(50, tracker.bytes_allocated());
             assert_eq!(50, manager.memory_usage());
             assert_eq!(0, manager.mutable_usage());
-
-            // Releasing more than allocated stops at zero.
-            tracker.on_deallocation(1000);
-            assert_eq!(0, tracker.bytes_allocated());
-            assert_eq!(0, manager.memory_usage());
         }
         assert_eq!(0, manager.memory_usage());
         assert_eq!(0, manager.mutable_usage());
