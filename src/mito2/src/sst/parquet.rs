@@ -348,11 +348,13 @@ fn row_group_value_bytes_from_size_statistics(metadata: &ParquetMetaData) -> Vec
         .schema_descr()
         .columns()
         .iter()
-        .map(|column| {
-            let [name] = column.path().parts() else {
+        .enumerate()
+        .map(|(leaf, column)| {
+            if column.path().parts().len() != 1 {
                 return false;
-            };
-            arrow_schema.field_with_name(name).is_ok_and(|field| {
+            }
+            let root = file.schema_descr().get_column_root_idx(leaf);
+            arrow_schema.fields().get(root).is_some_and(|field| {
                 matches!(
                     field.data_type(),
                     DataType::Binary
