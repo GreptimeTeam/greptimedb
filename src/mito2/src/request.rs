@@ -51,11 +51,11 @@ use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 use store_api::storage::{FileId, RegionId, SequenceNumber};
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
-use crate::compaction::{CompactionExecution, CompactionPickFinished};
+use crate::compaction::{CompactionExecution, CompactionGuard, CompactionPickFinished};
 use crate::error::{
     CompactRegionSnafu, ConvertColumnDataTypeSnafu, CreateDefaultSnafu, Error, FillDefaultSnafu,
     FlushRegionSnafu, InvalidPartitionExprSnafu, InvalidRequestSnafu, MissingPartitionExprSnafu,
-    Result, UnexpectedSnafu,
+    RecvSnafu, Result, UnexpectedSnafu,
 };
 use crate::flush::FlushReason;
 use crate::manifest::action::{PendingTail, RegionEdit, TruncateKind};
@@ -763,6 +763,22 @@ impl WorkerRequestWithTime {
     }
 }
 
+/// The requester owns the guard even while an active compaction is draining.
+#[derive(Debug)]
+pub(crate) struct PauseCompactionResponse {
+    pub(crate) guard: CompactionGuard,
+    pub(crate) idle: Option<Receiver<Result<()>>>,
+}
+
+impl PauseCompactionResponse {
+    pub(crate) async fn wait(self) -> Result<CompactionGuard> {
+        if let Some(idle) = self.idle {
+            idle.await.context(RecvSnafu)??;
+        }
+        Ok(self.guard)
+    }
+}
+
 /// Request sent to a worker
 #[derive(Debug)]
 pub(crate) enum WorkerRequest {
@@ -791,6 +807,12 @@ pub(crate) enum WorkerRequest {
         region_role_state: SettableRegionRoleState,
         /// The sender of [SetReadonlyResponse].
         sender: Sender<SetRegionRoleStateResponse>,
+    },
+
+    /// Stops admitting compactions and reports when the active cycle ends.
+    PauseCompaction {
+        region_id: RegionId,
+        sender: Sender<Result<PauseCompactionResponse>>,
     },
 
     /// Cancels one live compaction on its owning worker.

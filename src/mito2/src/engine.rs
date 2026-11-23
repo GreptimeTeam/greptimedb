@@ -556,6 +556,25 @@ impl MitoEngine {
         rx.await.context(RecvSnafu)?
     }
 
+    /// Pauses compaction on a loaded region and waits for any active cycle to finish.
+    /// Writes and flushes continue while the caller holds the guard.
+    /// The scheduler discards automatic follow-ups skipped during the pause. After the
+    /// last guard is dropped, a fresh trigger can start another compaction cycle.
+    pub async fn pause_compaction(
+        &self,
+        region_id: RegionId,
+    ) -> Result<crate::compaction::CompactionGuard> {
+        let (sender, receiver) = oneshot::channel();
+        self.inner
+            .workers
+            .submit_to_worker(
+                region_id,
+                WorkerRequest::PauseCompaction { region_id, sender },
+            )
+            .await?;
+        receiver.await.context(RecvSnafu)??.wait().await
+    }
+
     /// Handles copy region from request.
     ///
     /// This method is only supported for internal use and is not exposed in the trait implementation.

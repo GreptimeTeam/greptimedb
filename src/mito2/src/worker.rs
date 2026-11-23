@@ -1633,6 +1633,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 WorkerRequest::EditRegion(request) => {
                     self.handle_incoming_region_edit(request);
                 }
+                WorkerRequest::PauseCompaction { region_id, sender } => {
+                    self.compaction_scheduler
+                        .pause_compaction(region_id, sender);
+                }
                 WorkerRequest::CancelCompaction {
                     region_id,
                     task_id,
