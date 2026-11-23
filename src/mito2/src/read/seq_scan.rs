@@ -71,7 +71,7 @@ pub(crate) enum FlatReadMode {
 /// [`PartitionRange`]. Each "partition" may contains many [`PartitionRange`]s.
 pub struct SeqScan {
     /// Shares narthex candidate discovery across batch-output partitions.
-    narthex_preparation: Arc<crate::read::series_scan::prepared::Preparation>,
+    narthex_preparation: Option<Arc<crate::read::series_scan::prepared::Preparation>>,
     /// Properties of the scanner.
     properties: ScannerProperties,
     /// Context of streams.
@@ -102,9 +102,10 @@ impl SeqScan {
         let pruner = Arc::new(Pruner::new(stream_ctx.clone(), num_workers));
 
         Self {
-            narthex_preparation: Arc::new(
-                crate::read::series_scan::prepared::Preparation::default(),
-            ),
+            narthex_preparation: stream_ctx
+                .input
+                .requires_narthex_preparation()
+                .then(|| Arc::new(crate::read::series_scan::prepared::Preparation::default())),
             properties,
             stream_ctx,
             pruner,
@@ -163,9 +164,8 @@ impl SeqScan {
         debug_assert_eq!(1, self.properties.partitions.len());
         let partition_ranges = &self.properties.partitions[0];
 
-        if self.stream_ctx.input.requires_narthex_preparation() {
-            let source = self
-                .narthex_preparation
+        if let Some(preparation) = &self.narthex_preparation {
+            let source = preparation
                 .prepare_batches(
                     self.stream_ctx.clone(),
                     partition_ranges.clone(),
@@ -462,9 +462,9 @@ impl SeqScan {
             }
         );
 
-        if self.stream_ctx.input.requires_narthex_preparation() {
+        if let Some(preparation) = &self.narthex_preparation {
             return Ok(crate::read::series_scan::prepared::scan_batches(
-                self.narthex_preparation.clone(),
+                preparation.clone(),
                 self.stream_ctx.clone(),
                 self.properties
                     .partitions
@@ -664,8 +664,9 @@ impl RegionScanner for SeqScan {
     }
 
     fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError> {
-        self.narthex_preparation =
-            Arc::new(crate::read::series_scan::prepared::Preparation::default());
+        if let Some(preparation) = &mut self.narthex_preparation {
+            *preparation = Arc::new(crate::read::series_scan::prepared::Preparation::default());
+        }
         self.properties.prepare(request);
 
         self.check_scan_limit().map_err(BoxedError::new)?;
