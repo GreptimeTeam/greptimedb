@@ -106,7 +106,7 @@ pub(crate) fn nop_action() -> RegionMetaActionList {
         flushed_entry_id: None,
         flushed_sequence: None,
         committed_sequence: None,
-        wal_recovery: Default::default(),
+        ..Default::default()
     })])
 }
 
@@ -527,6 +527,12 @@ impl TestEnv {
     /// Overwrites the original `log_store_factory`.
     pub fn with_log_store_factory(mut self, log_store_factory: LogStoreFactory) -> TestEnv {
         self.log_store_factory = log_store_factory;
+        self
+    }
+
+    /// Uses `fetcher` for the partition expressions of regions whose manifest lacks one.
+    pub(crate) fn with_partition_expr_fetcher(mut self, fetcher: PartitionExprFetcherRef) -> Self {
+        self.partition_expr_fetcher = fetcher;
         self
     }
 

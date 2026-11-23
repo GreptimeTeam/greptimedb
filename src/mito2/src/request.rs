@@ -800,6 +800,13 @@ pub(crate) enum WorkerRequest {
         sender: OptionOutputTx,
     },
 
+    /// Discards the region's pending WAL tails that node `node_id` wrote.
+    DiscardPendingTails {
+        region_id: RegionId,
+        node_id: u64,
+        sender: OptionOutputTx,
+    },
+
     /// Notify a worker to stop.
     Stop,
 
@@ -934,6 +941,11 @@ impl WorkerRequest {
             RegionRequest::CancelCompaction(v) => WorkerRequest::CancelCompaction {
                 region_id,
                 task_id: v.task_id,
+                sender: sender.into(),
+            },
+            RegionRequest::DiscardPendingTails(v) => WorkerRequest::DiscardPendingTails {
+                region_id,
+                node_id: v.node_id,
                 sender: sender.into(),
             },
             RegionRequest::BuildIndex(v) => WorkerRequest::Ddl(SenderDdlRequest {
@@ -1159,6 +1171,9 @@ pub(crate) enum BackgroundNotify {
     },
     /// The region became writable and may have pending tails to replay.
     RegionBecameWritable,
+    /// A lease ended the region's wait for its Leader lease, so the work the wait deferred may
+    /// start.
+    LeaderLeaseWaitEnded,
     /// A role change left the region unable to replay its tails (see
     /// [MitoRegion::can_replay_tails](crate::region::MitoRegion::can_replay_tails)); a running
     /// replay is cancelled.
@@ -1177,6 +1192,19 @@ pub(crate) enum BackgroundNotify {
     },
     /// A tail replay ended.
     TailReplayEnded,
+    /// An edit that discards pending tails was published in the manifest.
+    PendingTailsDiscarded {
+        /// The instance the tails were discarded from.
+        region: MitoRegionRef,
+        /// The published edit.
+        edit: RegionEdit,
+        /// The tails the manifest recorded when the edit was published.
+        tails: Vec<PendingTail>,
+        /// The number of tails the edit removed.
+        discarded: usize,
+        /// Receives `discarded`.
+        sender: OptionOutputTx,
+    },
 }
 
 impl BackgroundNotify {
@@ -1211,9 +1239,11 @@ impl BackgroundNotify {
             | Self::RegionFenced
             | Self::RegionReloaded { .. }
             | Self::RegionBecameWritable
+            | Self::LeaderLeaseWaitEnded
             | Self::RegionCannotReplay { .. }
             | Self::TailReplayCommitted { .. }
-            | Self::TailReplayEnded => false,
+            | Self::TailReplayEnded
+            | Self::PendingTailsDiscarded { .. } => false,
         }
     }
 }
@@ -1601,6 +1631,31 @@ mod tests {
         assert_eq!(task_id, "task-1");
         sender.send(Ok(1));
         assert_eq!(receiver.await.unwrap().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_discard_pending_tails_is_worker_control_request() {
+        let region_id = RegionId::new(7, 3);
+        let (request, receiver) = WorkerRequest::try_from_region_request(
+            region_id,
+            RegionRequest::DiscardPendingTails(
+                store_api::region_request::RegionDiscardPendingTailsRequest { node_id: 5 },
+            ),
+            None,
+        )
+        .unwrap();
+        let WorkerRequest::DiscardPendingTails {
+            region_id: actual_region_id,
+            node_id,
+            sender,
+        } = request
+        else {
+            panic!("a pending tails discard must bypass the DDL queue");
+        };
+        assert_eq!(actual_region_id, region_id);
+        assert_eq!(node_id, 5);
+        sender.send(Ok(2));
+        assert_eq!(receiver.await.unwrap().unwrap(), 2);
     }
 
     fn new_column_schema(

@@ -42,7 +42,7 @@ use datafusion_expr::{Expr, ExprFunctionExt, SortExpr, col, lit, lit_timestamp_n
 use query::QueryEngineRef;
 use serde_json::Value as JsonValue;
 use servers::error::{
-    AuthSnafu, CollectRecordbatchSnafu, DataFusionSnafu, Result as ServerResult, TableNotFoundSnafu,
+    CollectRecordbatchSnafu, DataFusionSnafu, Result as ServerResult, TableNotFoundSnafu,
 };
 use servers::http::jaeger::{JAEGER_QUERY_TABLE_NAME_KEY, QueryTraceParams, TraceUserAgent};
 use servers::otlp::trace::{
@@ -72,9 +72,8 @@ impl Instance {
             ctx.current_schema(),
             table,
         )]);
-        let targets = self.resolve_query_permission_targets(targets, ctx).await?;
-        self.check_table_permission(ctx, PermissionReq::Action(JAEGER_QUERY), targets)
-            .context(AuthSnafu)?;
+        self.check_server_table_permission(ctx, PermissionReq::Action(JAEGER_QUERY), targets)
+            .await?;
         Ok(())
     }
 }

@@ -164,7 +164,7 @@ fs2 = "0.4"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "c46f7ee9c82ff90f5762ae192fcf8bb2b0d6046f" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "8aa45418597636516410c0c892dbd0269754a02c" }
 hdfs-native = "0.14.6"
 hex = "0.4"
 hostname = "0.4.0"
@@ -188,6 +188,7 @@ lz4_flex = { version = "=0.14.0", default-features = false, features = ["frame",
 meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "f743c3a5fe8c1f57363eac5866c356b7d91f9b39" }
 mockall = "0.13"
 moka = "0.12"
+mysql_async = { version = "0.37", default-features = false, features = ["default-rustls"] }
 nalgebra = "0.33"
 nix = { version = "0.30.1", default-features = false, features = ["event", "fs", "process"] }
 notify = "8.0"

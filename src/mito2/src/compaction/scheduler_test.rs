@@ -1194,7 +1194,7 @@ async fn test_pick_result_refreshes_replaced_selected_file() {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
-            wal_recovery: Default::default(),
+            ..Default::default()
         }),
         &[],
         stale.file_purger(),
@@ -3366,7 +3366,7 @@ async fn test_compaction_tasks_partial_memory_admission() {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
-            wal_recovery: Default::default(),
+            ..Default::default()
         }),
         &[],
         builder.file_purger(),
@@ -3671,8 +3671,15 @@ async fn test_compaction_tasks_linear_local_publication(#[case] reject_after_fir
     assert!(!scheduler.is_compacting(region_id));
 }
 
+/// A queued manual compaction or an automatic follow-up starts nothing while the region has
+/// pending tails or awaits its Leader lease.
+#[rstest::rstest]
+#[case::pending_tails(false)]
+#[case::awaiting_leader_lease(true)]
 #[tokio::test]
-async fn test_finishing_compaction_with_pending_tails_starts_nothing() {
+async fn test_finishing_compaction_of_blocked_region_starts_nothing(
+    #[case] awaiting_leader_lease: bool,
+) {
     let env = SchedulerEnv::new().await;
     let (tx, _rx) = mpsc::channel(4);
     let mut scheduler = env.mock_compaction_scheduler(tx);
@@ -3697,11 +3704,15 @@ async fn test_finishing_compaction_with_pending_tails_starts_nothing() {
     let pending_id = scheduler.inspect_tasks(&MetadataFilter::default(), None)[0]
         .task_id
         .clone();
-    version_control.apply_edit(
-        Some(pending_tails_edit(vec![tail(1, 0, 1)])),
-        &[],
-        builder.file_purger(),
-    );
+    if awaiting_leader_lease {
+        manifest_ctx.start_leader_lease_wait_for_test(region_id);
+    } else {
+        version_control.apply_edit(
+            Some(pending_tails_edit(vec![tail(1, 0, 1)])),
+            &[],
+            builder.file_purger(),
+        );
+    }
 
     scheduler
         .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager, true)

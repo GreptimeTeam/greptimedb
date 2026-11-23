@@ -22,15 +22,19 @@ use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_expr::{ColumnarValue, Expr};
 use datafusion_physical_expr::PhysicalExpr;
 use datatypes::arrow;
-use datatypes::arrow::array::{Array, BooleanArray, BooleanBufferBuilder, RecordBatch};
+use datatypes::arrow::array::{
+    Array, BooleanArray, BooleanBufferBuilder, NullArray, RecordBatch, UInt32Array,
+};
 use datatypes::arrow::buffer::BooleanBuffer;
 use datatypes::arrow::compute::prep_null_mask_filter;
-use datatypes::arrow::datatypes::{Field, Schema};
+use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
+use datatypes::arrow::record_batch::RecordBatchOptions;
 use datatypes::data_type::DataType as _;
 use datatypes::prelude::Value;
 use datatypes::vectors::{Helper, VectorRef};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
+use store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME;
 use store_api::storage::RegionNumber;
 
 use crate::PartitionRule;
@@ -38,7 +42,7 @@ use crate::checker::PartitionChecker;
 use crate::error::{self, Result, UndefinedColumnSnafu};
 use crate::expr::{Operand, PartitionExpr, RestrictedOp, plan_physical_expr};
 use crate::function::IcebergHash;
-use crate::partition::RegionMask;
+use crate::partition::{PartitionEvalContext, RegionMask};
 
 /// The default region number when no partition exprs are matched.
 const DEFAULT_REGION: RegionNumber = 0;
@@ -76,6 +80,10 @@ pub struct MultiDimPartitionRule {
     /// Cache of physical expressions.
     #[serde(skip)]
     physical_expr_cache: RwLock<PhysicalExprCache>,
+    /// Write-local routing context; not persisted. Deserialization defaults to
+    /// [`PartitionEvalContext::FromPayload`].
+    #[serde(skip)]
+    eval_context: PartitionEvalContext,
 }
 
 impl MultiDimPartitionRule {
@@ -101,6 +109,7 @@ impl MultiDimPartitionRule {
             regions,
             exprs,
             physical_expr_cache: RwLock::new(None),
+            eval_context: PartitionEvalContext::FromPayload,
         };
 
         if check_exprs {
@@ -109,6 +118,12 @@ impl MultiDimPartitionRule {
         }
 
         Ok(rule)
+    }
+
+    /// Attaches write-local table identity without changing persisted partition expressions.
+    pub(crate) fn with_eval_context(mut self, context: PartitionEvalContext) -> Self {
+        self.eval_context = context;
+        self
     }
 
     pub fn exprs(&self) -> &[PartitionExpr] {
@@ -124,14 +139,10 @@ impl MultiDimPartitionRule {
             }
         );
 
-        for (region_index, expr) in self.exprs.iter().enumerate() {
-            if self.evaluate_expr(expr, values)? {
-                return Ok(self.regions[region_index]);
-            }
+        match self.eval_context {
+            PartitionEvalContext::FromPayload => self.find_region_from_payload(values),
+            PartitionEvalContext::WithTableId { .. } => self.find_region_with_context(values),
         }
-
-        // return the default region number
-        Ok(DEFAULT_REGION)
     }
 
     fn evaluate_expr(&self, expr: &PartitionExpr, values: &[Value]) -> Result<bool> {
@@ -260,6 +271,8 @@ impl MultiDimPartitionRule {
         &self,
         record_batch: &RecordBatch,
     ) -> Result<HashMap<RegionNumber, RegionMask>> {
+        let routing_batch = self.build_routing_batch(record_batch)?;
+        let record_batch = routing_batch.as_ref().unwrap_or(record_batch);
         let num_rows = record_batch.num_rows();
         if self.regions.len() == 1 {
             return Ok([(
@@ -367,6 +380,96 @@ impl MultiDimPartitionRule {
             }
         }
         Ok(result)
+    }
+
+    /// Finds a region using the supplied scalar partition values.
+    fn find_region_from_payload(&self, values: &[Value]) -> Result<RegionNumber> {
+        for (region_index, expr) in self.exprs.iter().enumerate() {
+            if self.evaluate_expr(expr, values)? {
+                return Ok(self.regions[region_index]);
+            }
+        }
+
+        // return the default region number
+        Ok(DEFAULT_REGION)
+    }
+
+    /// Evaluates one row through the same context-aware batch path as bulk writes.
+    fn find_region_with_context(&self, values: &[Value]) -> Result<RegionNumber> {
+        let mut fields = Vec::new();
+        let mut arrays = Vec::new();
+        for (name, value) in self.partition_columns.iter().zip(values) {
+            if name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME {
+                continue;
+            }
+            let vector =
+                Helper::try_from_row_into_vector(std::slice::from_ref(value), &value.data_type())
+                    .context(error::ConvertToVectorSnafu)?;
+            let array = vector.to_arrow_array();
+            fields.push(Field::new(name, array.data_type().clone(), true));
+            arrays.push(array);
+        }
+        let batch = RecordBatch::try_new_with_options(
+            Arc::new(Schema::new(fields)),
+            arrays,
+            &RecordBatchOptions::new().with_row_count(Some(1)),
+        )
+        .context(error::ComputeArrowKernelSnafu)?;
+        let masks = self.split_record_batch(&batch)?;
+        masks
+            .into_iter()
+            .find(|(_, mask)| !mask.select_none())
+            .map(|(region, _)| region)
+            .context(error::UnexpectedSnafu {
+                err_msg: "No partition selected the row",
+            })
+    }
+
+    /// Supplies contextual identity and missing payload inputs for complete expressions.
+    /// Other partition columns remain in the batch, so mixed-column predicates use
+    /// the same evaluator as predicates over table id alone.
+    fn build_routing_batch(&self, record_batch: &RecordBatch) -> Result<Option<RecordBatch>> {
+        let PartitionEvalContext::WithTableId { table_id } = self.eval_context else {
+            return Ok(None);
+        };
+        let needs_inputs = self.partition_columns.iter().any(|name| {
+            name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME || record_batch.column_by_name(name).is_none()
+        });
+        if !needs_inputs {
+            return Ok(None);
+        }
+
+        // Materialize only the routing input. The original write payload stays logical.
+        let mut fields = Vec::with_capacity(record_batch.num_columns() + 1);
+        let mut columns = Vec::with_capacity(record_batch.num_columns() + 1);
+        for (field, column) in record_batch
+            .schema()
+            .fields()
+            .iter()
+            .zip(record_batch.columns())
+        {
+            if field.name() != DATA_SCHEMA_TABLE_ID_COLUMN_NAME {
+                fields.push(field.clone());
+                columns.push(column.clone());
+            }
+        }
+        for name in &self.partition_columns {
+            if name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME {
+                fields.push(Arc::new(Field::new(name, ArrowDataType::UInt32, false)));
+                columns.push(Arc::new(UInt32Array::from(vec![
+                    table_id;
+                    record_batch.num_rows()
+                ])));
+            } else if record_batch.column_by_name(name).is_none() {
+                // The manager validates these columns against the logical schema.
+                // Omitted payload columns retain row routing's NULL semantics.
+                fields.push(Arc::new(Field::new(name, ArrowDataType::Null, true)));
+                columns.push(Arc::new(NullArray::new(record_batch.num_rows())));
+            }
+        }
+        RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
+            .map(Some)
+            .context(error::ComputeArrowKernelSnafu)
     }
 
     fn plan_physical_exprs(&self, input_schema: Arc<Schema>) -> Result<PhysicalPartitionExprs> {
@@ -478,6 +581,10 @@ fn columnar_value_to_boolean_array(
 }
 
 impl PartitionRule for MultiDimPartitionRule {
+    fn eval_context(&self) -> PartitionEvalContext {
+        self.eval_context
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -505,6 +612,122 @@ mod tests {
     use super::*;
     use crate::error::{self, Error};
     use crate::expr::col;
+
+    #[test]
+    fn test_partition_eval_context() {
+        use datatypes::arrow::array::Int32Array;
+
+        use crate::splitter::RowSplitter;
+
+        let column = || col(DATA_SCHEMA_TABLE_ID_COLUMN_NAME);
+        let hash = || Operand::IcebergHash(IcebergHash::new(DATA_SCHEMA_TABLE_ID_COLUMN_NAME));
+        let hash_boundary = IcebergHash::evaluate_value(&Value::UInt32(1029)).unwrap();
+        for exprs in [
+            vec![
+                column().lt(Value::Int64(1029)),
+                column()
+                    .gt_eq(Value::UInt64(1029))
+                    .and(col("a").lt(Value::Int32(10))),
+                column()
+                    .gt_eq(Value::Int64(1029))
+                    .and(col("a").gt_eq(Value::Int32(10))),
+            ],
+            vec![
+                hash().lt(hash_boundary.clone()),
+                hash()
+                    .gt_eq(hash_boundary.clone())
+                    .and(col("a").lt(Value::Int32(10))),
+                hash()
+                    .gt_eq(hash_boundary)
+                    .and(col("a").gt_eq(Value::Int32(10))),
+            ],
+        ] {
+            let rule = MultiDimPartitionRule::try_new(
+                vec![DATA_SCHEMA_TABLE_ID_COLUMN_NAME.into(), "a".into()],
+                vec![0, 1, 2],
+                exprs,
+                false,
+            )
+            .unwrap();
+            let batch = RecordBatch::try_from_iter([
+                (
+                    DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                    Arc::new(UInt32Array::from(vec![1029, 1029])) as arrow::array::ArrayRef,
+                ),
+                (
+                    "a",
+                    Arc::new(Int32Array::from(vec![1, 20])) as arrow::array::ArrayRef,
+                ),
+            ])
+            .unwrap();
+            let ordinary = rule.split_record_batch(&batch).unwrap();
+            let serialized = serde_json::to_string(&rule).unwrap();
+            let rule = rule.with_eval_context(PartitionEvalContext::WithTableId { table_id: 1029 });
+            assert_eq!(serde_json::to_string(&rule).unwrap(), serialized);
+            let logical = rule
+                .split_record_batch(&batch.project(&[1]).unwrap())
+                .unwrap();
+            for region in [1, 2] {
+                assert_eq!(logical[&region].array(), ordinary[&region].array());
+                assert_eq!(logical[&region].selected_rows(), 1);
+            }
+            assert_eq!(
+                rule.find_region(&[Value::Null, Value::Int32(1)]).unwrap(),
+                1
+            );
+            assert_eq!(
+                rule.find_region(&[Value::UInt32(0), Value::Int32(20)])
+                    .unwrap(),
+                2
+            );
+            let spoofed = RecordBatch::try_from_iter([
+                (
+                    DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                    Arc::new(UInt32Array::from(vec![0, 0])) as arrow::array::ArrayRef,
+                ),
+                ("a", batch.column(1).clone()),
+            ])
+            .unwrap();
+            let masks = rule.split_record_batch(&spoofed).unwrap();
+            assert_eq!(masks[&1].array(), logical[&1].array());
+            assert_eq!(masks[&2].array(), logical[&2].array());
+            assert!(
+                rule.split_record_batch(&batch.slice(0, 0))
+                    .unwrap()
+                    .values()
+                    .all(|mask| mask.select_none())
+            );
+            let rows = api::v1::Rows {
+                schema: vec![api::v1::helper::tag_column_schema(
+                    "a",
+                    api::v1::ColumnDataType::Int32,
+                )],
+                rows: vec![
+                    api::v1::Row {
+                        values: vec![api::v1::value::ValueData::I32Value(1).into()],
+                    },
+                    api::v1::Row {
+                        values: vec![api::v1::value::ValueData::I32Value(20).into()],
+                    },
+                ],
+            };
+            let expected = rows.clone();
+            let rule = Arc::new(rule);
+            let missing = api::v1::Rows {
+                schema: vec![],
+                rows: vec![api::v1::Row { values: vec![] }],
+            };
+            let splits = RowSplitter::new(rule.clone())
+                .split(missing.clone())
+                .unwrap();
+            // Partition comparisons order NULL before non-NULL values.
+            assert_eq!(splits[&1], missing);
+            let splits = RowSplitter::new(rule).split(rows).unwrap();
+            assert_eq!(splits[&1].rows, vec![expected.rows[0].clone()]);
+            assert_eq!(splits[&2].rows, vec![expected.rows[1].clone()]);
+            assert_eq!(splits[&1].schema, expected.schema);
+        }
+    }
 
     #[test]
     fn test_find_region() {

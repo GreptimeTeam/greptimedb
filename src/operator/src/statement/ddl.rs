@@ -62,7 +62,7 @@ use common_query::Output;
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_sql::convert::sql_value_to_value;
 use common_telemetry::{debug, info, tracing, warn};
-use common_time::{Timestamp, Timezone};
+use common_time::{TimeToLive, Timestamp, Timezone};
 use datafusion_common::tree_node::TreeNodeVisitor;
 use datafusion_expr::LogicalPlan;
 use datafusion_expr::logical_plan::Distinct;
@@ -101,6 +101,7 @@ use sqlparser::ast::{
 use store_api::metric_engine_consts::{
     LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
 };
+use store_api::mito_engine_options::TTL_KEY;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::TableRef;
 use table::dist_table::DistTable;
@@ -118,10 +119,10 @@ use crate::error::{
     DeserializePartitionExprSnafu, EmptyDdlExprSnafu, ExternalSnafu, ExtractTableNamesSnafu,
     FlowNotFoundSnafu, InvalidPartitionRuleSnafu, InvalidPartitionSnafu, InvalidSqlSnafu,
     InvalidTableNameSnafu, InvalidViewNameSnafu, InvalidViewStmtSnafu, NotSupportedSnafu,
-    PartitionExprToPbSnafu, Result, SchemaInUseSnafu, SchemaNotFoundSnafu, SchemaReadOnlySnafu,
-    SerializePartitionExprSnafu, SubstraitCodecSnafu, TableAlreadyExistsSnafu,
-    TableDdlReservedSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu, TableReadOnlySnafu,
-    UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
+    PartitionExprToPbSnafu, Result, RetentionTtlOnLogicalTableSnafu, SchemaInUseSnafu,
+    SchemaNotFoundSnafu, SchemaReadOnlySnafu, SerializePartitionExprSnafu, SubstraitCodecSnafu,
+    TableAlreadyExistsSnafu, TableDdlReservedSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
+    TableReadOnlySnafu, UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
 };
 use crate::expr_helper::{self, RepartitionRequest, RepartitionSource};
 use crate::statement::StatementExecutor;
@@ -533,6 +534,21 @@ impl StatementExecutor {
         create_expr: CreateExternalTable,
         ctx: QueryContextRef,
     ) -> Result<TableRef> {
+        if create_expr.if_not_exists {
+            let (catalog_name, schema_name, table_name) =
+                table_idents_to_full_name(&create_expr.name, &ctx)
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)?;
+            if let Some(table) = self
+                .catalog_manager
+                .table(&catalog_name, &schema_name, &table_name, Some(&ctx))
+                .await
+                .context(CatalogSnafu)?
+            {
+                return Ok(table);
+            }
+        }
+
         let create_expr =
             &mut expr_helper::create_external_expr(create_expr, &ctx, &self.local_file_access)
                 .await?;
@@ -702,8 +718,27 @@ impl StatementExecutor {
             }
         );
 
+        // Retention is enforced on the physical table only. Drop it from logical
+        // creates (ingest hints, DDL exported by older versions), but keep
+        // `ttl=instant`: the inserter reads it from the logical table to forward
+        // rows to flows without persisting them.
+        let create_table_exprs = create_table_exprs
+            .iter()
+            .cloned()
+            .map(|mut create| {
+                if create
+                    .table_options
+                    .get(TTL_KEY)
+                    .is_some_and(|ttl| is_retention_ttl(ttl))
+                {
+                    create.table_options.remove(TTL_KEY);
+                }
+                create
+            })
+            .collect::<Vec<_>>();
+
         // Check table names
-        for create_table in create_table_exprs {
+        for create_table in &create_table_exprs {
             ensure!(
                 NAME_PATTERN_REG.is_match(&create_table.table_name),
                 InvalidTableNameSnafu {
@@ -2186,8 +2221,20 @@ impl StatementExecutor {
 
             (req, invalidate_keys)
         } else {
-            // This is logical table. Annotation alters only rewrite its own
-            // metadata; `AlterLogicalTablesProcedure` only handles column adds.
+            // This is logical table. Retention lives on the physical table;
+            // reject it here with an error that says so, instead of the
+            // procedure's generic "only add columns" error.
+            if let Some(Kind::SetTableOptions(options)) = &expr.kind {
+                ensure!(
+                    !options
+                        .table_options
+                        .iter()
+                        .any(|option| option.key == TTL_KEY && is_retention_ttl(&option.value)),
+                    RetentionTtlOnLogicalTableSnafu
+                );
+            }
+            // Annotation alters only rewrite the logical table's own metadata;
+            // `AlterLogicalTablesProcedure` only handles column adds.
             let annotation_alter = match expr.kind.as_ref() {
                 Some(kind) => common_grpc_expr::annotation_alter_family(kind)
                     .context(AlterExprToRequestSnafu)?
@@ -2697,6 +2744,12 @@ pub fn verify_alter(
     validate_json2_primary_keys(&new_meta.schema, &new_meta.primary_key_indices)?;
 
     Ok(true)
+}
+
+/// Returns whether `ttl` is a retention period, i.e. a valid TTL other than
+/// `instant`. Invalid values return false so they fail normal option validation.
+pub(crate) fn is_retention_ttl(ttl: &str) -> bool {
+    TimeToLive::from_humantime_or_str(ttl).is_ok_and(|ttl| !ttl.is_instant())
 }
 
 pub fn create_table_info(

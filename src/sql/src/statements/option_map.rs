@@ -301,4 +301,25 @@ mod tests {
         assert_eq!(map.get("visible"), Some("1"));
         assert_eq!(map.get("hidden"), None);
     }
+
+    #[test]
+    fn test_connection_option_is_redacted() {
+        let mut map = OptionMap::default();
+        map.insert(
+            "connection".to_string(),
+            "mysql://user:secret@127.0.0.1:3306/db".to_string(),
+        );
+        map.insert("remote_table".to_string(), "sample".to_string());
+
+        let pairs = map.kv_pairs();
+        // The connection DSN is masked in SQL formatting.
+        assert!(pairs.contains(&"connection = '******'".to_string()));
+        // The non-secret key is shown verbatim.
+        assert!(pairs.contains(&"remote_table = 'sample'".to_string()));
+        // The plaintext is still reachable programmatically (the operator reads it back).
+        assert_eq!(
+            map.get("connection"),
+            Some("mysql://user:secret@127.0.0.1:3306/db")
+        );
+    }
 }

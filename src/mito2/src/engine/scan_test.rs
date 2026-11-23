@@ -3179,7 +3179,7 @@ async fn test_exact_sequence_range_unsupported_when_legacy_file() {
         flushed_entry_id: None,
         flushed_sequence: None,
         committed_sequence: None,
-        wal_recovery: Default::default(),
+        ..Default::default()
     };
     engine.edit_region(region_id, edit).await.unwrap();
 
@@ -3267,7 +3267,7 @@ async fn test_exact_sequence_range_accepts_foreign_file_with_target_barrier() {
                 flushed_entry_id: None,
                 flushed_sequence: None,
                 committed_sequence: None,
-                wal_recovery: Default::default(),
+                ..Default::default()
             },
         )
         .await
@@ -4368,7 +4368,7 @@ async fn test_compaction_output_non_preserve_not_laundered_from_legacy_input(
                 flushed_entry_id: None,
                 flushed_sequence: None,
                 committed_sequence: None,
-                wal_recovery: Default::default(),
+                ..Default::default()
             },
         )
         .await

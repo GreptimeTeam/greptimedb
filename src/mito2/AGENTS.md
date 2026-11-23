@@ -89,7 +89,8 @@ pending. DDL cancellation retains its existing scheduling fence and priority.
 - **SST/Parquet layout** (`sst/`): readers must stay compatible with existing files.
 - **Index extensions**: shared contracts and provider validation live in `sst/index/registry.rs`;
   typed sketch options are enterprise-gated. Lifecycle and failure tests live in
-  `engine/index_build_test.rs` and `compaction/`.
+  `engine/index_build_test.rs` and `compaction/`. A background rebuild must not replace a file
+  that carries extension indexes (`worker/handle_rebuild_index.rs::needs_background_indexes`).
 - **Series-index disk limit**: tasks estimate usage from entry sizes in open-region snapshots
   and defer new builds when the shared estimate is full. Cleanup still prunes obsolete
   range entries and expires series indexes to reclaim published usage. Concurrent builds may
@@ -161,7 +162,10 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   flushed entry id skips them. A node bounds its replays' concurrency and SST writes apart
   from flushes, and their chunk memory within the global write buffer (`TailReplayLimits`).
   Replayed SSTs build indexes as flushed ones (`IndexBuildType::Flush`), under
-  `create_on_flush`.
+  `create_on_flush`. `RegionRequest::DiscardPendingTails` discards one node's tails
+  without replaying them; it commits through `update_manifest_for_tails` too
+  (`worker/handle_tail_replay.rs`) and raises the flushed entry id to the largest
+  discarded `upto`, so the same entry id rule applies.
 - Lock ordering: take the manifest lock before updating `version_control`; the
   reverse deadlocks against concurrent flush/compaction.
 - All region I/O runs on tokio workers; never `block_on` inside a worker.
@@ -199,17 +203,27 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
 - Staging regions, ending staging included, never flush: a flush would stage its SST and
   release the rows' WAL, losing them if staging does not end successfully. Every flush
   trigger in `worker/handle_flush.rs` must skip them: background triggers test `is_writable()`
-  and `is_staging()`, a flush request `is_flushable()` and `is_staging()` (`is_writable()` and
+  and `defers_background_flush()`, a flush request `is_flushable()` and `is_staging()` (`is_writable()` and
   `is_flushable()` are false while ending staging). `handle_close` leaves staging first.
   Tail replays never run for them: entering staging fails while tails are pending.
 - Direct SST imports without a staging binding cannot publish into staging.
   `worker/handle_manifest.rs` seals edit admission while EnterStaging drains accepted
   edits. Scheduler-owned DDLs resume through execution, bypassing initial admission.
+- On a node whose writes need a lease, a region that a catchup made writable waits for a
+  Leader or StagingLeader lease sent after the catchup (`awaits_leader_lease`). Until then
+  `ManifestContext::update_locked` refuses its commits unless they are staged or the region is
+  downgrading (a close that must flush downgrades first); only a replay of tails
+  (`TailsEditor::Replay`) skips the check, a discard does not, and ending staging checks it
+  before `commit_staged_locked`. No flush or compaction trigger starts work for a waiting region except
+  a downgrade's flush. The lease that ends the wait wakes the worker
+  (`handle_leader_lease_wait_ended`) to schedule the flushes the wait deferred and, only if the
+  region is then a writable leader, start a compaction, build missing indexes, re-issue the
+  index build retries the wait refused and persist backfilled metadata.
 - The latest lease each region received (`GrantedLeases` in `lease.rs`) lives outside the
   region instance, so a reopen during catchup keeps it. Every path that removes a region from
-  a worker's region map must also remove its record: `RegionWorkerLoop::remove_region`
-  (`worker/handle_close.rs`, also used after a close-time flush), `drop_region`
-  (`worker/handle_drop.rs`) and `RegionWorkerLoop::clean` (`worker.rs`).
+  a worker's region map must also remove its record and its kept index build retries:
+  `RegionWorkerLoop::remove_region` (`worker/handle_close.rs`, also used after a close-time
+  flush), `drop_region` (`worker/handle_drop.rs`) and `RegionWorkerLoop::clean` (`worker.rs`).
 
 ## Maintenance contract
 

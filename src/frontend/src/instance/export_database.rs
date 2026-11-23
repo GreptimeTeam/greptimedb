@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use auth::{
-    PermissionAction, PermissionChecker, PermissionCheckerRef, PermissionReq,
-    PermissionTableTarget, PermissionTableTargets,
+    COPY_TO, PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionTableTarget,
+    PermissionTableTargets,
 };
 use common_query::Output;
 use common_telemetry::error;
@@ -136,12 +136,8 @@ impl Instance {
         self.check_table_permission(ctx, PermissionReq::SqlStatement(&stmt), targets.clone())
             .context(PermissionSnafu)?;
         // COPY is classified as a write by existing permission checkers.
-        self.check_table_permission(
-            ctx,
-            PermissionReq::Action(PermissionAction::read("database.export")),
-            targets,
-        )
-        .context(PermissionSnafu)?;
+        self.check_table_permission(ctx, PermissionReq::Action(COPY_TO), targets)
+            .context(PermissionSnafu)?;
         Ok(self
             .statement_executor
             .prepare_database_export(req, tables)

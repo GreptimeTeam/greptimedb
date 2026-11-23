@@ -25,6 +25,7 @@ use store_api::metadata::ColumnMetadata;
 use store_api::storage::RegionId;
 
 use crate::engine::options::PhysicalRegionOptions;
+use crate::engine::region_metadata::LogicalColumns;
 use crate::error::{PhysicalRegionNotFoundSnafu, Result};
 use crate::metrics::LOGICAL_REGION_COUNT;
 use crate::utils::to_data_region_id;
@@ -128,7 +129,7 @@ pub(crate) struct MetricEngineState {
     /// Cache for the column metadata of logical regions.
     /// The column order is the same with the order in the metadata, which is
     /// alphabetically ordered on column name.
-    logical_columns: HashMap<RegionId, Vec<ColumnMetadata>>,
+    logical_columns: HashMap<RegionId, LogicalColumns>,
 }
 
 impl MetricEngineState {
@@ -216,11 +217,7 @@ impl MetricEngineState {
     }
 
     /// Replace the logical columns of the logical region with given columns.
-    pub fn set_logical_columns(
-        &mut self,
-        logical_region_id: RegionId,
-        columns: Vec<ColumnMetadata>,
-    ) {
+    pub fn set_logical_columns(&mut self, logical_region_id: RegionId, columns: LogicalColumns) {
         self.logical_columns.insert(logical_region_id, columns);
     }
 
@@ -228,7 +225,7 @@ impl MetricEngineState {
         self.logical_regions.get(&logical_region_id).copied()
     }
 
-    pub fn logical_columns(&self) -> &HashMap<RegionId, Vec<ColumnMetadata>> {
+    pub fn logical_columns(&self) -> &HashMap<RegionId, LogicalColumns> {
         &self.logical_columns
     }
 

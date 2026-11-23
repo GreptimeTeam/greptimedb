@@ -21,7 +21,6 @@ use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use datafusion::execution::TaskContext;
 use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::PartitionStream as DfPartitionStream;
 use datatypes::prelude::{ConcreteDataType, ScalarVectorBuilder, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
@@ -33,12 +32,14 @@ use store_api::storage::{ScanRequest, TableId};
 use table::metadata::TableType;
 
 use crate::CatalogManager;
+use crate::batch_scan::BatchScanner;
 use crate::error::{
-    CastManagerSnafu, CreateRecordBatchSnafu, GetViewCacheSnafu, InternalSnafu, Result,
+    CastManagerSnafu, CreateRecordBatchSnafu, InternalSnafu, Result,
     UpgradeWeakCatalogManagerRefSnafu, ViewInfoNotFoundSnafu,
 };
 use crate::kvbackend::KvBackendCatalogManager;
 use crate::system_schema::SystemTable;
+use crate::system_schema::information_schema::loaders;
 use crate::system_schema::information_schema::{
     InformationSchemaTableScope, InformationTable, Predicates, VIEWS,
 };
@@ -124,18 +125,10 @@ impl SystemTable for InformationSchemaViews {
     }
 
     fn to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
-        let schema = self.schema.arrow_schema().clone();
-        let mut builder = self.builder();
-        let stream = Box::pin(DfRecordBatchStreamAdapter::new(
-            schema,
-            futures::stream::once(async move {
-                builder
-                    .make_views(Some(request))
-                    .await
-                    .map(|x| x.into_df_record_batch())
-                    .map_err(|err| datafusion::error::DataFusionError::External(Box::new(err)))
-            }),
-        ));
+        let stream = crate::system_schema::utils::record_batch_stream(
+            &self.schema,
+            self.builder().scan(Some(request)),
+        );
         Ok(Box::pin(
             RecordBatchStreamAdapter::try_new(stream)
                 .map_err(BoxedError::new)
@@ -188,44 +181,50 @@ impl InformationSchemaViewsBuilder {
     }
 
     /// Construct the `information_schema.views` virtual table
-    async fn make_views(&mut self, request: Option<ScanRequest>) -> Result<RecordBatch> {
-        let catalog_name = self.catalog_name.clone();
-        let catalog_manager = self
-            .catalog_manager
-            .upgrade()
-            .context(UpgradeWeakCatalogManagerRefSnafu)?;
-        let predicates = Predicates::from_scan_request(&request);
-        let view_info_cache = catalog_manager
-            .as_any()
-            .downcast_ref::<KvBackendCatalogManager>()
-            .context(CastManagerSnafu)?
-            .view_info_cache()?;
+    fn scan(
+        mut self,
+        request: Option<ScanRequest>,
+    ) -> impl futures::Stream<Item = Result<RecordBatch>> {
+        async_stream::try_stream!({
+            let catalog_name = self.catalog_name.clone();
+            let catalog_manager = self
+                .catalog_manager
+                .upgrade()
+                .context(UpgradeWeakCatalogManagerRefSnafu)?;
+            let predicates = Predicates::from_scan_request(&request);
+            let view_info_cache = catalog_manager
+                .as_any()
+                .downcast_ref::<KvBackendCatalogManager>()
+                .context(CastManagerSnafu)?
+                .view_info_cache()?;
 
-        for schema_name in catalog_manager.schema_names(&catalog_name, None).await? {
-            let mut stream = catalog_manager.tables(&catalog_name, &schema_name, None);
-
-            while let Some(table) = stream.try_next().await? {
-                let table_info = table.table_info();
-                if table_info.table_type == TableType::View {
-                    let view_info = view_info_cache
-                        .get(table_info.ident.table_id)
-                        .await
-                        .context(GetViewCacheSnafu)?
-                        .context(ViewInfoNotFoundSnafu {
-                            name: &table_info.name,
-                        })?;
-                    self.add_view(
-                        &predicates,
-                        &catalog_name,
-                        &schema_name,
-                        &table_info.name,
-                        &view_info.definition,
-                    )
+            for schema_name in catalog_manager.schema_names(&catalog_name, None).await? {
+                let views = catalog_manager
+                    .tables(&catalog_name, &schema_name, None)
+                    .try_filter_map(|table| async move {
+                        let info = table.table_info();
+                        Ok((info.table_type == TableType::View).then_some(info))
+                    });
+                let batches = BatchScanner::METADATA.scan(views, |tables| {
+                    loaders::load_view_definitions(&view_info_cache, tables)
+                });
+                let mut batches = std::pin::pin!(batches);
+                while let Some(batch) = batches.try_next().await? {
+                    for (table, definition) in batch {
+                        let view =
+                            definition.context(ViewInfoNotFoundSnafu { name: &table.name })?;
+                        self.add_view(
+                            &predicates,
+                            &catalog_name,
+                            &schema_name,
+                            &table.name,
+                            &view.definition,
+                        );
+                    }
+                    yield self.finish()?;
                 }
             }
-        }
-
-        self.finish()
+        })
     }
 
     fn add_view(
@@ -281,17 +280,6 @@ impl DfPartitionStream for InformationSchemaViews {
     }
 
     fn execute(&self, _: Arc<TaskContext>) -> DfSendableRecordBatchStream {
-        let schema = self.schema.arrow_schema().clone();
-        let mut builder = self.builder();
-        Box::pin(DfRecordBatchStreamAdapter::new(
-            schema,
-            futures::stream::once(async move {
-                builder
-                    .make_views(None)
-                    .await
-                    .map(|x| x.into_df_record_batch())
-                    .map_err(Into::into)
-            }),
-        ))
+        crate::system_schema::utils::record_batch_stream(&self.schema, self.builder().scan(None))
     }
 }

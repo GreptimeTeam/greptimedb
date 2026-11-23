@@ -1,0 +1,84 @@
+CREATE TABLE discard_pending_tails_test (
+    host STRING PRIMARY KEY,
+    val DOUBLE,
+    ts TIMESTAMP TIME INDEX
+) PARTITION ON COLUMNS (host) (
+    host < 'm',
+    host >= 'm'
+) ENGINE = mito;
+
+Affected Rows: 0
+
+INSERT INTO discard_pending_tails_test VALUES ('kept', 1, 1), ('remains', 2, 2);
+
+Affected Rows: 2
+
+-- No region of the table has pending tails from the node, so nothing is discarded.
+ADMIN discard_pending_tails('discard_pending_tails_test', 1);
+
++--------------------------------------------------------------+
+| ADMIN discard_pending_tails('discard_pending_tails_test', 1) |
++--------------------------------------------------------------+
+| 0                                                            |
++--------------------------------------------------------------+
+
+SELECT host, val FROM discard_pending_tails_test ORDER BY host;
+
++---------+-----+
+| host    | val |
++---------+-----+
+| kept    | 1.0 |
+| remains | 2.0 |
++---------+-----+
+
+-- The function must only be available through ADMIN.
+-- SQLNESS REPLACE \nDid\syou\smean.*
+SELECT discard_pending_tails('discard_pending_tails_test', 1);
+
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Invalid function 'discard_pending_tails'.
+
+DROP TABLE discard_pending_tails_test;
+
+Affected Rows: 0
+
+CREATE TABLE discard_pending_tails_physical (
+    ts TIMESTAMP TIME INDEX,
+    val DOUBLE
+) ENGINE = metric WITH ("physical_metric_table" = "");
+
+Affected Rows: 0
+
+CREATE TABLE discard_pending_tails_logical (
+    host STRING PRIMARY KEY,
+    val DOUBLE,
+    ts TIMESTAMP TIME INDEX
+) ENGINE = metric WITH ("on_physical_table" = "discard_pending_tails_physical");
+
+Affected Rows: 0
+
+ADMIN discard_pending_tails('discard_pending_tails_physical', 1);
+
++------------------------------------------------------------------+
+| ADMIN discard_pending_tails('discard_pending_tails_physical', 1) |
++------------------------------------------------------------------+
+| 0                                                                |
++------------------------------------------------------------------+
+
+-- Logical Metric Engine tables share their physical regions with other logical tables.
+ADMIN discard_pending_tails('discard_pending_tails_logical', 1);
+
+Error: 1002(Unexpected), Failed to execute admin function discard_pending_tails: Execution error: Not supported: discarding pending WAL tails from a Metric Engine logical table
+
+DROP TABLE discard_pending_tails_logical;
+
+Affected Rows: 0
+
+DROP TABLE discard_pending_tails_physical;
+
+Affected Rows: 0
+
+-- A region id reaches the region path; this one belongs to no table.
+ADMIN discard_pending_tails(4398046511104, 1);
+
+Error: 1002(Unexpected), Failed to execute admin function discard_pending_tails: Execution error: Failed to find table route: 1024
+

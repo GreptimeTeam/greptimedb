@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use datafusion::error::DataFusionError;
@@ -24,10 +24,11 @@ use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
 
 use super::float_histogram::{AddOutcome, FloatHistogram};
 use super::{
-    HistogramAggregate, HistogramFunction, HistogramParameters, NativeHistogramFunction,
-    aggregate_histograms, evaluate_histograms, evaluate_histograms_with_annotations,
-    histogram_quantiles, histogram_string, map_native_histogram,
+    HistogramFunction, HistogramParameters, NativeHistogramFunction, evaluate_histograms,
+    evaluate_histograms_with_annotations, histogram_quantiles, histogram_string,
+    map_native_histogram,
 };
+use crate::aggregate::{AggregateOp, Grouping, aggregate_float};
 use crate::grid_series::merge_same_labelset;
 use crate::grid_series::reference::{
     GoldenCase, Labels, OwnedHistogram, Points, canonical_bits, close, golden_cases, labels_of,
@@ -263,6 +264,7 @@ fn histogram_quantiles_match_prometheus() {
 fn native_histograms_match_prometheus() {
     let cases = golden_cases(include_str!("native_cases.txt"));
     assert_eq!(cases.len(), 661);
+    let mut tally = FoldTally::default();
     for case in &cases {
         let schema = schema(case);
         let input: Vec<_> = case
@@ -301,18 +303,25 @@ fn native_histograms_match_prometheus() {
             ),
             aggregate => {
                 let (op, by_job) = match aggregate {
-                    "sum" => (HistogramAggregate::Sum, false),
-                    "avg" => (HistogramAggregate::Avg, false),
-                    "sum_by_job" => (HistogramAggregate::Sum, true),
-                    "avg_by_job" => (HistogramAggregate::Avg, true),
+                    "sum" => (AggregateOp::Sum, false),
+                    "avg" => (AggregateOp::Avg, false),
+                    "sum_by_job" => (AggregateOp::Sum, true),
+                    "avg_by_job" => (AggregateOp::Avg, true),
                     other => panic!("unknown case {other}"),
                 };
-                assert_aggregates(case, &schema, &input, op, by_job);
+                assert_aggregates(case, &schema, op, by_job, &mut tally);
                 continue;
             }
         };
         assert_outcome(case, actual, &case.outcome);
     }
+    // The aggregate cases are the 241 the fixture's spec names, and these are what the verdicts
+    // above saw of them: every group that mixes the two kinds refused, every answer of a group that
+    // does not compared, and the three single-sample zero sums that keep no sign compared against a
+    // pinned `+0` (see [`pin_negative_zero_sum`]).
+    assert_eq!(tally.refused, 138, "mixed groups refused");
+    assert_eq!(tally.compared, 275, "histogram answers compared");
+    assert_eq!(tally.negative_zero_sums, 3, "single-sample zero sums");
 }
 
 fn canonical(value: f64) -> u64 {
@@ -447,14 +456,51 @@ fn histogram_arithmetic_matches_prometheus() {
     assert_eq!(checked, 723);
 }
 
-/// Groups the input in its order as `sum`/`avg` with or without `by (job)` do, and compares the
-/// aggregated histograms; float-only points belong to the float aggregation.
+/// The message both halves of the kernel use when one field, or one group, holds both kinds.
+const MIXED_KINDS: &str = "cannot mix float and histogram samples in one field";
+
+/// What the aggregate cases asserted, tallied so the test can pin how much of the fixture the fold
+/// covered.
+#[derive(Default)]
+struct FoldTally {
+    /// Groups whose raw input had to be refused, one per group.
+    refused: usize,
+    /// Histogram answers compared with a fixture answer, one per answered (group, position).
+    compared: usize,
+    /// Answers where a single sample's `-0.0` came back as `+0.0` ([`pin_negative_zero_sum`]).
+    negative_zero_sums: usize,
+}
+
+/// Folds the input of a `sum`/`avg` case, with or without `by (job)`, through the native aggregate
+/// and compares the histograms with the fixture; what a group that mixes the two kinds gets is
+/// asserted apart from that comparison, on the group's raw input.
+///
+/// The kernel folds one kind per field, so a group that saw a float sample and a histogram sample is
+/// refused whole -- `Group::accumulate` refuses a column holding both, and `finish_histogram_group`
+/// refuses a group that folded a float anywhere -- rather than answered step by step. A group is
+/// therefore one of two things here:
+///
+/// * A group whose samples are all histograms is folded with every histogram point it carries, no
+///   point taken out first, and its answer is compared with the fixture's bit for bit.
+/// * A group that carries a float sample is handed to the kernel as it arrived, floats and
+///   histograms together, and the fold must refuse it.
+///
+/// The fixtures are silent exactly where those two rules stop agreeing: 179 (group, step) pairs in
+/// `native_cases.txt` hold both a float and a histogram, and neither a float nor a histogram answer
+/// sits on any of them. A fixture does answer a mixed group's other steps, the ones one kind holds
+/// alone, and the kernel refuses those along with the group, so 140 of the file's 415 histogram
+/// answers belong to a mixed group and are not compared -- 138 mixed groups are refused instead.
+///
+/// The retired `aggregate_histograms` stopped folding the current (group, step, field) at a mixed
+/// bucket layout, drained the remaining iterator and propagated later conversion errors, then
+/// discarded that point if it had a float. Other steps continued. The kernel does not exercise
+/// that drain and error ordering here, so this coverage has not migrated it.
 fn assert_aggregates(
     case: &GoldenCase,
     schema: &Arc<SeriesSchema>,
-    input: &[Series],
-    op: HistogramAggregate,
+    op: AggregateOp,
     by_job: bool,
+    tally: &mut FoldTally,
 ) {
     assert!(
         case.outcome.is_ok(),
@@ -462,36 +508,189 @@ fn assert_aggregates(
         case.spec,
         case.outcome
     );
-    let mut groups: BTreeMap<Labels, Vec<Series>> = BTreeMap::new();
-    for series in input {
-        let mut labels = Labels::new();
+    let group_of = |labels: &Labels| -> Labels {
+        let mut group = Labels::new();
         if by_job {
-            labels.insert(
-                "job".to_string(),
-                series.metric.get("job").unwrap().to_string(),
+            group.insert("job".to_string(), labels["job"].clone());
+        }
+        group
+    };
+    // Every group's members as they arrived, the kinds those members carry, and how many samples sit
+    // at each of the group's steps: one step's answer is one fold over the samples the group has
+    // there.
+    let mut members: BTreeMap<Labels, Vec<Series>> = BTreeMap::new();
+    let mut kinds: BTreeMap<Labels, (bool, bool)> = BTreeMap::new();
+    let mut samples: BTreeMap<Labels, BTreeMap<usize, usize>> = BTreeMap::new();
+    for ((labels, floats), histograms) in case.inputs.iter().zip(&case.histograms) {
+        let group = group_of(labels);
+        let kind = kinds.entry(group.clone()).or_default();
+        kind.0 |= !floats.is_empty();
+        kind.1 |= !histograms.is_empty();
+        for position in histograms.keys() {
+            *samples
+                .entry(group.clone())
+                .or_default()
+                .entry(*position)
+                .or_default() += 1;
+        }
+        if let Some(series) = mixed_series(schema, labels, floats, histograms) {
+            members.entry(group).or_default().push(series);
+        }
+    }
+    let by: Vec<&str> = if by_job { vec!["job"] } else { Vec::new() };
+    let mut folded: Vec<Series> = Vec::new();
+    for (group, group_members) in &members {
+        let (has_float, has_histogram) = kinds[group];
+        if has_float && has_histogram {
+            // Its raw input, floats and histograms both: the refusal is per group, so it may not see
+            // a group whose mixed steps were taken out for it.
+            let error = match aggregate_float(schema, group_members, op, Grouping::By(&by)) {
+                Ok(_) => panic!(
+                    "case {:?}: group {group:?} carries both kinds and was answered",
+                    case.spec
+                ),
+                Err(error) => error,
+            };
+            assert!(
+                error.to_string().contains(MIXED_KINDS),
+                "case {:?}: group {group:?}: {error}",
+                case.spec
             );
+            tally.refused += 1;
+            continue;
         }
-        groups.entry(labels).or_default().push(series.clone());
-    }
-    let mut actual = BTreeMap::new();
-    for (labels, group) in groups {
-        if let Some(series) = aggregate_histograms(op, schema, &group, metric_of(&labels)).unwrap()
-        {
-            actual.insert(labels, histogram_points(&series));
+        // Select histogram-only groups by input kind. A future float-only group is outside this
+        // histogram comparison; it must not be ignored based on the kind of its output.
+        if has_histogram {
+            folded.extend(group_members.iter().cloned());
         }
     }
-    let expected: BTreeMap<_, _> = case
+    let compare_group =
+        |labels: &Labels| !kinds.get(labels).is_some_and(|&(has_float, _)| has_float);
+    let expected: BTreeMap<Labels, BTreeMap<usize, FloatHistogram>> = case
         .result_histograms
         .iter()
+        .filter(|(labels, _)| compare_group(labels))
         .map(|(labels, points)| {
-            let points: BTreeMap<_, _> = points
+            let points = points
                 .iter()
-                .map(|(&index, text)| (index, fingerprint(&histogram(text))))
+                .map(|(&position, text)| (position, histogram(text)))
                 .collect();
             (labels.clone(), points)
         })
         .collect();
-    assert_eq!(actual, expected, "case {:?}", case.spec);
+    // Even an empty input is evaluated and checked against this case's expected groups. In
+    // particular, all-mixed and genuinely empty cases cannot borrow a previous case's verdict.
+    let answers = aggregate_float(schema, &folded, op, Grouping::By(&by)).unwrap();
+    let mut actual: BTreeMap<Labels, &Series> = BTreeMap::new();
+    for series in &answers {
+        let labels = labels_of(&series.metric);
+        assert!(
+            actual.insert(labels.clone(), series).is_none(),
+            "case {:?}: duplicate output group {labels:?}",
+            case.spec
+        );
+    }
+    let actual_groups: BTreeSet<&Labels> = actual.keys().collect();
+    let expected_groups: BTreeSet<&Labels> = expected.keys().collect();
+    assert_eq!(actual_groups, expected_groups, "case {:?}", case.spec);
+    for (labels, expected_points) in &expected {
+        let series = actual[labels];
+        assert!(series.time.grid().is_some(), "expected a grid series");
+        let mut cursor = series.fields.as_slice()[0].cursor();
+        let mut positions = BTreeSet::new();
+        for (position, row) in series.time.positions() {
+            assert!(
+                positions.insert(position),
+                "case {:?}: group {labels:?} repeats position {position}",
+                case.spec
+            );
+            let want = expected_points.get(&position).unwrap_or_else(|| {
+                panic!(
+                    "case {:?}: group {labels:?} returned unexpected position {position}",
+                    case.spec
+                )
+            });
+            let got = match cursor.at(row).expect("the axis and the fields are aligned") {
+                SampleRef::Histogram(view) => FloatHistogram::try_from_view(&view).unwrap(),
+                SampleRef::Float(_) => panic!(
+                    "case {:?}: group {labels:?} at position {position}: expected histogram, got float",
+                    case.spec
+                ),
+                SampleRef::Missing => panic!(
+                    "case {:?}: group {labels:?} at position {position}: expected histogram, got missing",
+                    case.spec
+                ),
+            };
+            let wanted = pin_negative_zero_sum(case, labels, position, want, &got, &samples, tally);
+            // `fingerprint` normalises NaN but preserves zero signs on the actual side.
+            assert_eq!(
+                fingerprint(&got),
+                fingerprint(&wanted),
+                "case {:?}: group {labels:?} at position {position}",
+                case.spec
+            );
+            tally.compared += 1;
+        }
+        assert_eq!(
+            positions,
+            expected_points.keys().copied().collect(),
+            "case {:?}: group {labels:?} positions",
+            case.spec
+        );
+    }
+}
+
+/// The fixture's answer at one position, with its one known difference from this kernel set aside.
+///
+/// Prometheus v3.15.0 starts a group's fold from `h.Copy()` of the first sample and holds a
+/// compensation only once an add produced one (`engine.go:3694-3708`), and it adds that compensation
+/// in only when it is there (`:4013-4019`). A fold of one sample therefore hands that sample's own
+/// `-0.0` back. This kernel always holds a compensation beside the value and always adds it, and
+/// `-0.0 + +0.0` is `+0.0`: the zero keeps no sign. That is a deviation, not an equivalence, and it
+/// is pinned rather than smoothed -- the position folded exactly one sample, the fixture holds
+/// `-0.0` in its sum, and this kernel must answer `+0.0` there. Only then is the expected sum
+/// rewritten, and only for the comparison: that field of that answer, every other field and every
+/// other position stays bit-identical. Five fixtures hold such a sum
+/// (`native_cases.txt:4305,4410,4464,4513,4569`); the two that sit in a mixed group's answer are
+/// refused with the group, so three reach the comparison.
+/// Pins the one place this kernel's answer differs from Prometheus' by a zero's sign.
+///
+/// A fold of exactly one sample answers `+0.0` where Prometheus hands the sample's own `-0.0` back:
+/// this accumulator always seeds a compensation and always adds it, while Prometheus only adds one
+/// that exists. Recorded in <https://github.com/GreptimeTeam/greptimedb/issues/10530>, together with
+/// why closing it is not a mechanical change. The actual side still compares raw bits; only the
+/// expected side rewrites this field, and only after checking the fold had one sample and the
+/// kernel answered `+0.0`.
+fn pin_negative_zero_sum(
+    case: &GoldenCase,
+    labels: &Labels,
+    position: usize,
+    want: &FloatHistogram,
+    got: &FloatHistogram,
+    samples: &BTreeMap<Labels, BTreeMap<usize, usize>>,
+    tally: &mut FoldTally,
+) -> FloatHistogram {
+    if !(want.sum == 0.0 && want.sum.is_sign_negative()) {
+        return want.clone();
+    }
+    assert_eq!(
+        samples[labels][&position], 1,
+        "case {:?}: group {labels:?} at position {position}: only a fold of one sample hands the \
+         sample's own zero back",
+        case.spec
+    );
+    assert!(
+        got.sum == 0.0 && !got.sum.is_sign_negative(),
+        "case {:?}: group {labels:?} at position {position}: the kernel answers {:x} where the \
+         fixture keeps the sample's -0",
+        case.spec,
+        got.sum.to_bits()
+    );
+    tally.negative_zero_sums += 1;
+    let mut expected = want.clone();
+    expected.sum = 0.0;
+    expected
 }
 
 fn histogram_points(series: &Series) -> BTreeMap<usize, String> {
@@ -503,14 +702,16 @@ fn histogram_points(series: &Series) -> BTreeMap<usize, String> {
     series
         .time
         .positions()
-        .filter_map(|(position, row)| {
-            match cursor.at(row).expect("the axis and the fields are aligned") {
-                SampleRef::Histogram(view) => Some((
-                    position,
-                    fingerprint(&FloatHistogram::try_from_view(&view).unwrap()),
-                )),
-                _ => None,
-            }
+        .map(|(position, row)| {
+            let SampleRef::Histogram(view) =
+                cursor.at(row).expect("the axis and the fields are aligned")
+            else {
+                panic!("expected a histogram at position {position}");
+            };
+            (
+                position,
+                fingerprint(&FloatHistogram::try_from_view(&view).unwrap()),
+            )
         })
         .collect()
 }
@@ -791,20 +992,16 @@ fn aggregation_propagates_errors_other_than_mixed_schemas() {
         "-53/0/0/3ff0000000000000/3ff0000000000000/0/0_1/3ff0000000000000///3ff0000000000000";
     let invalid =
         "9/3ff0000000000000/0/3ff0000000000000/3ff0000000000000/0/1_1/3ff0000000000000///";
-    for op in [HistogramAggregate::Sum, HistogramAggregate::Avg] {
-        let mixed = aggregate_histograms(
-            op,
+    for op in [AggregateOp::Sum, AggregateOp::Avg] {
+        // A poisoned point answers nothing, so the group has no result to report at all.
+        let mixed = aggregate_float(
             &schema,
             &group([exponential, custom]),
-            metric_of(&Labels::new()),
-        );
-        assert!(mixed.unwrap().is_none());
-        let invalid = aggregate_histograms(
             op,
-            &schema,
-            &group([invalid, invalid]),
-            metric_of(&Labels::new()),
+            Grouping::By(&[]),
         );
+        assert!(mixed.unwrap().is_empty());
+        let invalid = aggregate_float(&schema, &group([invalid, invalid]), op, Grouping::By(&[]));
         assert!(invalid.is_err());
     }
 }
@@ -832,14 +1029,19 @@ fn histogram_aggregation_names_the_runs_of_its_results() {
     assert_eq!((input_axis.start(), input_axis.len()), (0, 3));
     assert_eq!(input.time.len(), 3);
 
-    let output = aggregate_histograms(
-        HistogramAggregate::Sum,
+    let output = aggregate_float(
         &schema,
         std::slice::from_ref(&input),
-        metric_of(&labels),
+        AggregateOp::Sum,
+        Grouping::By(&[]),
     )
-    .unwrap()
-    .expect("positions 0 and 2 hold a histogram");
+    .unwrap();
+    let [output] = &output[..] else {
+        panic!(
+            "positions 0 and 2 hold a histogram, so the one group answers one series, not {}",
+            output.len()
+        );
+    };
     let runs: Vec<(usize, usize)> = output
         .time
         .runs()
@@ -856,7 +1058,7 @@ fn histogram_aggregation_names_the_runs_of_its_results() {
     }
     let wanted = fingerprint(&histogram(text));
     assert_eq!(
-        histogram_points(&output),
+        histogram_points(output),
         BTreeMap::from([(0, wanted.clone()), (2, wanted)])
     );
 

@@ -19,7 +19,7 @@ use common_telemetry::{debug, error, tracing};
 use datafusion::common::ScalarValue;
 use datafusion::logical_expr::{self, Expr, Operator};
 use snafu::{OptionExt, ResultExt};
-use store_api::metadata::{RegionMetadataBuilder, RegionMetadataRef};
+use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
 use store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME;
 use store_api::region_engine::{RegionEngine, RegionScannerRef};
 use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
@@ -206,14 +206,14 @@ impl MetricEngineInner {
     ) -> Result<Vec<usize>> {
         // project on logical columns
         let all_logical_columns = self
-            .load_logical_column_names(physical_region_id, logical_region_id)
+            .load_logical_columns(physical_region_id, logical_region_id)
             .await?;
         let projected_logical_names = origin_projection
             .iter()
             .map(|&index| {
                 all_logical_columns
                     .get(index)
-                    .map(String::as_str)
+                    .map(|column| column.column_schema.name.as_str())
                     .with_context(|| InvalidRequestSnafu {
                         region_id: logical_region_id,
                         reason: format!("projection index {index} is out of bounds"),
@@ -223,12 +223,10 @@ impl MetricEngineInner {
 
         // generate physical projection
         let mut physical_projection = Vec::with_capacity(origin_projection.len());
-        let data_region_id = utils::to_data_region_id(physical_region_id);
         let physical_metadata = self
-            .mito
-            .get_metadata(data_region_id)
-            .await
-            .context(MitoReadOperationSnafu)?;
+            .data_region
+            .physical_metadata(physical_region_id)
+            .await?;
 
         for name in projected_logical_names {
             // Safety: logical columns is a strict subset of physical columns
@@ -245,18 +243,20 @@ impl MetricEngineInner {
         logical_region_id: RegionId,
     ) -> Result<Vec<usize>> {
         let logical_columns = self
-            .load_logical_column_names(physical_region_id, logical_region_id)
+            .load_logical_columns(physical_region_id, logical_region_id)
             .await?;
         let mut projection = Vec::with_capacity(logical_columns.len());
-        let data_region_id = utils::to_data_region_id(physical_region_id);
         let physical_metadata = self
-            .mito
-            .get_metadata(data_region_id)
-            .await
-            .context(MitoReadOperationSnafu)?;
-        for name in logical_columns {
+            .data_region
+            .physical_metadata(physical_region_id)
+            .await?;
+        for col in logical_columns.iter() {
             // Safety: logical columns is a strict subset of physical columns
-            projection.push(physical_metadata.column_index_by_name(&name).unwrap());
+            projection.push(
+                physical_metadata
+                    .column_index_by_name(&col.column_schema.name)
+                    .unwrap(),
+            );
         }
 
         Ok(projection)
@@ -283,8 +283,8 @@ impl MetricEngineInner {
             .collect::<Vec<_>>();
 
         let mut logical_metadata_builder = RegionMetadataBuilder::new(logical_region_id);
-        for col in logical_columns {
-            logical_metadata_builder.push_column_metadata(col);
+        for col in logical_columns.iter() {
+            logical_metadata_builder.push_column_metadata(ColumnMetadata::clone(col));
         }
         logical_metadata_builder.primary_key(primary_keys);
         let logical_metadata = logical_metadata_builder
