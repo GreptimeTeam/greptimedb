@@ -5,7 +5,6 @@ Date: 2026-10-27
 Author: @lczllx
 Status: Draft
 ---
-# In-Memory Frontend Write Retry Queue
 
 ## Summary
 
