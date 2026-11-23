@@ -233,7 +233,9 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   before `commit_staged_locked`. The catchup itself commits, as a Follower and before the
   promotion, an empty edit (`ManifestContext::commit_catchup`) that skips the deadline check,
   starts no checkpoint, does not fence the region on a conflict and commits nothing without
-  conditional publication. No flush or compaction trigger starts work for a waiting region except
+  conditional publication. It returns its `PendingManifestHook`: a hook may read the manifest, so
+  the caller fires it only once it holds no manifest guard, including the old instance's read
+  guard that `handle_caught_up_again` holds until the replacement is registered. No flush or compaction trigger starts work for a waiting region except
   a downgrade's flush. The lease that ends the wait wakes the worker
   (`handle_leader_lease_wait_ended`) to schedule the flushes the wait deferred and, only if the
   region is then a writable leader, start a compaction, build missing indexes, re-issue the
