@@ -193,6 +193,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 RegionCatchupTask::new(replacement.clone(), wal, config.allow_stale_entries)
                     .with_entry_receiver(entry_receiver)
                     .with_expected_last_entry_id(request.entry_id)
+                    .with_set_writable(request.set_writable)
                     .with_replay_checkpoint_entry_id(request.checkpoint.map(|c| c.entry_id))
                     .with_acknowledged_entry_id(acknowledged_entry_id)
                     .run()
@@ -213,10 +214,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     }
 
     /// Replaces the region with the instance its catchup again replayed into, or keeps the region
-    /// if the replay failed, the region was closed or reopened, waits for a reload or a flush, or
-    /// committed or took a write since the catchup began. A kept region ends its catchup, so a
-    /// later Leader lease can promote it with its memtable; one that waits for a reload is
-    /// reloaded instead.
+    /// if the replay failed, the region was closed or reopened, waits for a reload or a flush,
+    /// committed or took a write since the catchup began, or the catchup commit of the
+    /// replacement failed. A kept region ends its catchup, so a later Leader lease can promote it
+    /// with its memtable; one that waits for a reload is reloaded instead.
     pub(crate) async fn handle_caught_up_again(
         &mut self,
         region_id: RegionId,
@@ -247,6 +248,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let replacement = match result {
             _ if !registered => Err(error::RegionNotFoundSnafu { region_id }.build()),
             Ok(_) if !unchanged => Err(error::RegionBusySnafu { region_id }.build()),
+            // The replacement is never stopped or fenced before it is registered, so the checks
+            // above stand for the guards of its commit: a registered instance is not stopped, and
+            // the lock held keeps the commits of the old instance out until the replacement is
+            // registered, so no refusal follows the commit.
+            Ok(replacement) if set_writable => replacement
+                .manifest_ctx
+                .commit_catchup()
+                .await
+                .map(|()| replacement),
             result => result,
         };
         let replacement = match replacement {
