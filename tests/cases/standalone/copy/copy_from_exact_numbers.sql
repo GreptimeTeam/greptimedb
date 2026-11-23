@@ -55,6 +55,31 @@ Copy exact_integers_csv FROM '${SQLNESS_HOME}/demo/export/exact_numbers/integers
 
 SELECT k, CAST(u AS STRING) AS u, CAST(i AS STRING) AS i FROM exact_integers_csv ORDER BY k;
 
+-- A value with more fractional digits than the column scale is rounded, not truncated.
+CREATE TABLE rounded_decimals(k STRING, price DECIMAL(38, 12), amount DECIMAL(20, 4), ts TIMESTAMP TIME INDEX, PRIMARY KEY(k));
+
+INSERT INTO rounded_decimals VALUES
+    ('a', CAST('1.123456789050' AS DECIMAL(38, 12)), CAST('1.0050' AS DECIMAL(20, 4)), 1000),
+    ('b', CAST('-1.123456789050' AS DECIMAL(38, 12)), CAST('-1.0050' AS DECIMAL(20, 4)), 2000),
+    ('c', CAST('0.123456789149' AS DECIMAL(38, 12)), CAST('2.9949' AS DECIMAL(20, 4)), 3000),
+    ('d', CAST('7' AS DECIMAL(38, 12)), CAST('2.9950' AS DECIMAL(20, 4)), 4000);
+
+Copy rounded_decimals TO '${SQLNESS_HOME}/demo/export/exact_numbers/rounded_decimals.csv' WITH (format='csv');
+
+CREATE TABLE rounded_decimals_csv(k STRING, price DECIMAL(38, 10), amount DECIMAL(20, 2), ts TIMESTAMP TIME INDEX, PRIMARY KEY(k));
+
+Copy rounded_decimals_csv FROM '${SQLNESS_HOME}/demo/export/exact_numbers/rounded_decimals.csv' WITH (format='csv');
+
+SELECT k, CAST(price AS STRING) AS price, CAST(amount AS STRING) AS amount FROM rounded_decimals_csv ORDER BY k;
+
+Copy rounded_decimals TO '${SQLNESS_HOME}/demo/export/exact_numbers/rounded_decimals.json' WITH (format='json');
+
+CREATE TABLE rounded_decimals_json(k STRING, price DECIMAL(38, 10), amount DECIMAL(20, 2), ts TIMESTAMP TIME INDEX, PRIMARY KEY(k));
+
+Copy rounded_decimals_json FROM '${SQLNESS_HOME}/demo/export/exact_numbers/rounded_decimals.json' WITH (format='json');
+
+SELECT k, CAST(price AS STRING) AS price, CAST(amount AS STRING) AS amount FROM rounded_decimals_json ORDER BY k;
+
 DROP TABLE exact_decimals;
 
 DROP TABLE exact_decimals_csv;
@@ -68,3 +93,9 @@ DROP TABLE exact_integers_csv;
 DROP TABLE exact_integers_json;
 
 DROP TABLE exact_integers_late_json;
+
+DROP TABLE rounded_decimals;
+
+DROP TABLE rounded_decimals_csv;
+
+DROP TABLE rounded_decimals_json;

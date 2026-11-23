@@ -40,7 +40,10 @@ use datafusion_common::arrow::error::ArrowError;
 use datafusion_common::config::CsvOptions;
 use datafusion_expr::Expr;
 use datatypes::arrow::compute::can_cast_types;
-use datatypes::arrow::datatypes::{DataType as ArrowDataType, Schema, SchemaRef};
+use datatypes::arrow::datatypes::{
+    DECIMAL128_MAX_PRECISION, DECIMAL256_MAX_PRECISION, DataType as ArrowDataType, Schema,
+    SchemaRef,
+};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::vectors::Helper;
 use futures_util::StreamExt;
@@ -735,7 +738,8 @@ fn can_cast_types_for_greptime(from: &ArrowDataType, to: &ArrowDataType) -> bool
 /// Schema inference reads a number as `Int64` or `Float64`. Casting such a column to a wider
 /// table type afterwards rounds every value a `Float64` can't hold, and a value outside the
 /// `Int64` range fails to parse. So a column with one of those inferred types takes its table
-/// type when `can_parse_exactly` says the reader parses that type from the text.
+/// type when `can_parse_exactly` says the reader parses that type from the text. A decimal is
+/// read with one more fractional digit, see [`decimal_reader_type`].
 fn exact_numeric_reader_schema(
     file: &SchemaRef,
     compat: &SchemaRef,
@@ -756,7 +760,7 @@ fn exact_numeric_reader_schema(
                     file_field
                         .as_ref()
                         .clone()
-                        .with_data_type(compat_field.data_type().clone()),
+                        .with_data_type(decimal_reader_type(compat_field.data_type())),
                 )
             }
             _ => file_field.clone(),
@@ -764,6 +768,30 @@ fn exact_numeric_reader_schema(
         .collect::<Vec<_>>();
 
     Schema::new_with_metadata(fields, file.metadata().clone())
+}
+
+/// Returns the type to read a column of the table type `data_type` with.
+///
+/// The readers drop the fractional digits a decimal has beyond its scale, while the cast from
+/// `Float64` used to round them. So a decimal is read with one more fractional digit, and the
+/// cast to the table type that follows rounds on that digit, half away from zero, which is all
+/// the rounding depends on. Other types are returned as they are.
+fn decimal_reader_type(data_type: &ArrowDataType) -> ArrowDataType {
+    let (precision, scale) = match data_type {
+        ArrowDataType::Decimal32(precision, scale)
+        | ArrowDataType::Decimal64(precision, scale)
+        | ArrowDataType::Decimal128(precision, scale)
+        | ArrowDataType::Decimal256(precision, scale) => (*precision, *scale),
+        _ => return data_type.clone(),
+    };
+
+    if precision < DECIMAL128_MAX_PRECISION {
+        ArrowDataType::Decimal128(precision + 1, scale + 1)
+    } else if precision < DECIMAL256_MAX_PRECISION {
+        ArrowDataType::Decimal256(precision + 1, scale + 1)
+    } else {
+        data_type.clone()
+    }
 }
 
 fn is_decimal_type(data_type: &ArrowDataType) -> bool {
@@ -1507,13 +1535,14 @@ mod tests {
 
         let csv_schema =
             exact_numeric_reader_schema(&file_schema, &compat_schema, can_csv_reader_parse_exactly);
+        // A decimal is read with one more fractional digit, so that the cast rounds on it.
         assert_eq!(
             csv_schema.field(0),
-            &Field::new("price", DataType::Decimal128(38, 10), true)
+            &Field::new("price", DataType::Decimal256(39, 11), true)
         );
         assert_eq!(
             csv_schema.field(1),
-            &Field::new("amount", DataType::Decimal128(20, 2), true)
+            &Field::new("amount", DataType::Decimal128(21, 3), true)
         );
         for idx in 2..file_schema.fields().len() {
             assert_eq!(csv_schema.field(idx), file_schema.field(idx));
@@ -1526,11 +1555,11 @@ mod tests {
         );
         assert_eq!(
             json_schema.field(0),
-            &Field::new("price", DataType::Decimal128(38, 10), true)
+            &Field::new("price", DataType::Decimal256(39, 11), true)
         );
         assert_eq!(
             json_schema.field(1),
-            &Field::new("amount", DataType::Decimal128(20, 2), true)
+            &Field::new("amount", DataType::Decimal128(21, 3), true)
         );
         assert_eq!(
             json_schema.field(2),
