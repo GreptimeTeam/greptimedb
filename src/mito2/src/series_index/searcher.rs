@@ -61,6 +61,14 @@ impl SeriesIndexSearcher {
         predicate: Option<&Predicate>,
         time_range: Option<TimestampRange>,
     ) -> Result<Self> {
+        if predicate.is_some_and(|p| !p.dyn_filters().is_empty()) {
+            crate::metrics::DYNAMIC_INDEX_FILTER_TOTAL
+                .with_label_values(&["series", "offered"])
+                .inc();
+            crate::metrics::DYNAMIC_INDEX_FILTER_TOTAL
+                .with_label_values(&["series", "declined"])
+                .inc();
+        }
         // Keep search-time metadata validation identical to the writer.
         series_index_schema(&metadata)?;
         if time_range.as_ref().is_some_and(TimestampRange::is_empty) {
@@ -467,6 +475,39 @@ mod tests {
         .await
         .unwrap();
         let ids = collect_ids(searcher.search().unwrap()).await;
+        let dynamic_predicate = Predicate::with_dyn_filters(
+            predicate.exprs().to_vec(),
+            vec![Arc::new(
+                datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr::new(
+                    vec![],
+                    datafusion::physical_plan::expressions::lit(true),
+                ),
+            )],
+        );
+        let declined = crate::metrics::DYNAMIC_INDEX_FILTER_TOTAL
+            .with_label_values(&["series", "declined"])
+            .get();
+        let dynamic_ids = collect_ids(
+            SeriesIndexSearcher::try_new(
+                metadata.clone(),
+                object_store.clone(),
+                index.clone(),
+                Some(&dynamic_predicate),
+                Some(time_range),
+            )
+            .await
+            .unwrap()
+            .search()
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(ids, dynamic_ids);
+        assert!(
+            crate::metrics::DYNAMIC_INDEX_FILTER_TOTAL
+                .with_label_values(&["series", "declined"])
+                .get()
+                > declined
+        );
         assert_eq!(
             ids,
             vec![MetricSeriesId {

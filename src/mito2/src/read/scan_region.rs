@@ -17,7 +17,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::num::NonZeroU64;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use api::v1::SemanticType;
@@ -87,6 +87,9 @@ use crate::sst::index::fulltext_index::applier::FulltextIndexApplierRef;
 use crate::sst::index::fulltext_index::applier::builder::FulltextIndexApplierBuilder;
 use crate::sst::index::inverted_index::applier::InvertedIndexApplierRef;
 use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
+use crate::sst::index::inverted_index::dynamic_applier::{
+    DynamicInvertedIndexApplier, DynamicInvertedIndexConfig,
+};
 use crate::sst::parquet::Json2RewriteTargets;
 use crate::sst::parquet::file_range::PreFilterMode;
 use crate::sst::parquet::reader::ReaderMetrics;
@@ -617,6 +620,16 @@ impl ScanRegion {
             self.build_fulltext_index_applier(&field_filters),
         ];
 
+        let dynamic_indexed_column_ids = (!self.ignore_inverted_index).then(|| {
+            self.version.metadata.inverted_indexed_column_ids(
+                self.version
+                    .options
+                    .index_options
+                    .inverted_index
+                    .ignore_column_ids
+                    .iter(),
+            )
+        });
         let input = ScanInput::builder(self.access_layer, mapper)
             .with_series_index(self.series_index)
             .with_ignore_range_index(self.ignore_range_index)
@@ -628,6 +641,7 @@ impl ScanRegion {
             .with_primary_key_mapper(self.version.ssts.primary_key_mapper())
             .with_cache(self.cache_strategy)
             .with_inverted_index_appliers(inverted_index_appliers)
+            .with_dynamic_indexed_column_ids(dynamic_indexed_column_ids)
             .with_bloom_filter_index_appliers(bloom_filter_appliers)
             .with_fulltext_index_appliers(fulltext_index_appliers)
             .with_max_concurrent_scan_files(self.max_concurrent_scan_files)
@@ -1000,6 +1014,12 @@ pub struct ScanInput {
     scan_memory_tracker: Option<QueryMemoryTracker>,
     /// Index appliers.
     inverted_index_appliers: [Option<InvertedIndexApplierRef>; 2],
+    /// Immutable eligibility/configuration; execution-specific state belongs to Pruner.
+    dynamic_indexed_column_ids: Option<HashSet<ColumnId>>,
+    /// Synchronizes one series range loader after cache admission in regression tests.
+    #[cfg(test)]
+    pub(crate) series_range_cache_pause:
+        Mutex<Option<crate::read::series_scan::SeriesRangeCachePause>>,
     bloom_filter_index_appliers: [Option<BloomFilterIndexApplierRef>; 2],
     fulltext_index_appliers: [Option<FulltextIndexApplierRef>; 2],
     /// Start time of the query.
@@ -1082,6 +1102,9 @@ impl ScanInput {
                 max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
                 scan_memory_tracker: None,
                 inverted_index_appliers: [None, None],
+                dynamic_indexed_column_ids: None,
+                #[cfg(test)]
+                series_range_cache_pause: Mutex::new(None),
                 bloom_filter_index_appliers: [None, None],
                 fulltext_index_appliers: [None, None],
                 query_start: None,
@@ -1358,6 +1381,14 @@ impl ScanInputBuilder {
         self
     }
 
+    pub(crate) fn with_dynamic_indexed_column_ids(
+        mut self,
+        ids: Option<HashSet<ColumnId>>,
+    ) -> Self {
+        self.input.dynamic_indexed_column_ids = ids;
+        self
+    }
+
     /// Sets bloom filter appliers.
     #[must_use]
     pub(crate) fn with_bloom_filter_index_appliers(
@@ -1506,6 +1537,29 @@ impl ScanInput {
         ranges
     }
 
+    /// Create one lazy dynamic applier per execution; never store it in ScanInput.
+    pub(crate) fn new_dynamic_inverted_applier(&self) -> Option<Arc<DynamicInvertedIndexApplier>> {
+        let indexed_column_ids = self.dynamic_indexed_column_ids.as_ref()?;
+        if indexed_column_ids.is_empty() || self.compaction {
+            return None;
+        }
+        Some(Arc::new(DynamicInvertedIndexApplier::new(
+            DynamicInvertedIndexConfig {
+                table_dir: self.access_layer.table_dir().to_string(),
+                path_type: self.access_layer.path_type(),
+                store: self.access_layer.object_store().clone(),
+                puffin_manager_factory: self.access_layer.puffin_manager_factory().clone(),
+                file_cache: self.cache_strategy.write_cache().map(|w| w.file_cache()),
+                inverted_index_cache: self.cache_strategy.inverted_index_cache().cloned(),
+                puffin_metadata_cache: self.cache_strategy.puffin_metadata_cache().cloned(),
+                metadata: self.mapper.metadata().clone(),
+                output_schema: self.mapper.output_schema().arrow_schema().clone(),
+                indexed_column_ids: indexed_column_ids.clone(),
+                predicate: self.predicate.predicate_all.clone(),
+            },
+        )))
+    }
+
     pub(crate) fn predicate_for_file(&self, file: &FileHandle) -> Option<Predicate> {
         if self.should_skip_region_partition(file) {
             self.predicate.predicate_without_region().cloned()
@@ -1643,8 +1697,15 @@ impl ScanInput {
             return Ok(FileRangeBuilder::default());
         }
 
-        self.prune_file_after_manifest_check(file, pre_filter_mode, true, predicate, reader_metrics)
-            .await
+        self.prune_file_after_manifest_check(
+            file,
+            pre_filter_mode,
+            true,
+            predicate,
+            None,
+            reader_metrics,
+        )
+        .await
     }
 
     /// Second half of `prune_file` — performs the actual parquet metadata /
@@ -1660,6 +1721,7 @@ impl ScanInput {
         pre_filter_mode: PreFilterMode,
         enable_predicate_prefilter: bool,
         predicate: Option<Predicate>,
+        dynamic_inverted_index_applier: Option<Arc<DynamicInvertedIndexApplier>>,
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<FileRangeBuilder> {
         let may_build_selective_row_selection = predicate.is_some();
@@ -1680,10 +1742,12 @@ impl ScanInput {
             )
             .memory_tracker(self.scan_memory_tracker.clone())
             .predicate(predicate)
+            .index_predicate(self.predicate.predicate_all.clone())
             .projection(Some(self.read_cols.clone()))
             .json2_rewrite_targets(self.json2_rewrite_targets.clone())
             .cache(self.cache_strategy.clone())
             .inverted_index_appliers(self.inverted_index_appliers.clone())
+            .dynamic_inverted_index_applier(dynamic_inverted_index_applier)
             .bloom_filter_index_appliers(self.bloom_filter_index_appliers.clone())
             .fulltext_index_appliers(self.fulltext_index_appliers.clone());
         let reader = reader.batch_size(self.batch_size);
@@ -2428,19 +2492,32 @@ impl StreamContext {
             .into_iter()
             .filter_map(|expr| {
                 if let Ok(dyn_filter) = (expr as Arc<dyn std::any::Any + Send + Sync + 'static>)
-                .downcast::<datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr>()
-            {
-                supported.push(true);
-                Some(dyn_filter)
-            } else {
-                supported.push(false);
-                None
-            }
+                    .downcast::<DynamicFilterPhysicalExpr>()
+                {
+                    supported.push(true);
+                    Some(dyn_filter)
+                } else {
+                    supported.push(false);
+                    None
+                }
             })
             .collect();
-        self.input.predicate.add_dyn_filters(filter_expr);
+        if !self.input.predicate.add_dyn_filters(filter_expr) {
+            supported.fill(false);
+        }
         supported
     }
+}
+
+/// Admission state shared by a scanner's predicate and memtable ranges.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum DynamicInstallState {
+    #[default]
+    Open,
+    /// A static range-cache key was admitted during this execution.
+    CacheClosed,
+    /// Series tasks can outlive reset, so this scanner never accepts dynamic filters.
+    PermanentClosed,
 }
 
 /// Predicates to evaluate.
@@ -2454,6 +2531,8 @@ pub struct PredicateGroup {
     predicate_without_region: Predicate,
     /// Region partition expression restored from metadata.
     region_partition_expr: Option<PartitionExpr>,
+    /// Serializes cache admission and permanent scanner-local rejection against installation.
+    dynamic_install_state: Arc<Mutex<DynamicInstallState>>,
 }
 
 impl PredicateGroup {
@@ -2517,6 +2596,7 @@ impl PredicateGroup {
             predicate_all,
             predicate_without_region,
             region_partition_expr,
+            dynamic_install_state: Arc::new(Mutex::new(DynamicInstallState::Open)),
         })
     }
 
@@ -2543,16 +2623,64 @@ impl PredicateGroup {
         }
     }
 
-    /// Add dynamic filters in the predicates.
-    pub(crate) fn add_dyn_filters(&self, dyn_filters: Vec<Arc<DynamicFilterPhysicalExpr>>) {
+    /// Install atomically with static range-cache admission. A rejected filter remains
+    /// the responsibility of the residual filter above the scan.
+    pub(crate) fn add_dyn_filters(&self, dyn_filters: Vec<Arc<DynamicFilterPhysicalExpr>>) -> bool {
+        if dyn_filters.is_empty() {
+            return true;
+        }
+        let state = self.dynamic_install_state.lock().unwrap();
+        let index = match *state {
+            DynamicInstallState::Open => None,
+            DynamicInstallState::CacheClosed => Some("range_cache"),
+            DynamicInstallState::PermanentClosed => Some("series"),
+        };
+        if let Some(index) = index {
+            for _ in &dyn_filters {
+                crate::metrics::DYNAMIC_INDEX_FILTER_TOTAL
+                    .with_label_values(&[index, "rejected_install"])
+                    .inc();
+            }
+            return false;
+        }
         self.predicate_all.add_dyn_filters(dyn_filters.clone());
         self.predicate_without_region.add_dyn_filters(dyn_filters);
+        true
     }
 
-    /// Removes dynamic filters while preserving the static and region predicates.
-    pub(crate) fn clear_dyn_filters(&self) {
+    /// Permanently decline series filters while its detached tasks may outlive reset.
+    /// This is called before exposing the fresh scanner; its memtable clones share the state.
+    pub(crate) fn disable_dynamic_install_for_series(&self) {
+        let mut state = self.dynamic_install_state.lock().unwrap();
         self.predicate_all.clear_dyn_filters();
         self.predicate_without_region.clear_dyn_filters();
+        *state = DynamicInstallState::PermanentClosed;
+    }
+
+    /// Close installation only if the entire execution has no dynamic filters. A static
+    /// key then remains static through prefetch, shared loaders and both series phases.
+    pub(crate) fn close_dynamic_install_for_cache(&self) -> bool {
+        let mut state = self.dynamic_install_state.lock().unwrap();
+        if !self.predicate_all.dyn_filters().is_empty()
+            || !self.predicate_without_region.dyn_filters().is_empty()
+        {
+            return false;
+        }
+        if *state == DynamicInstallState::Open {
+            *state = DynamicInstallState::CacheClosed;
+        }
+        true
+    }
+
+    /// Reset a sequential or unordered execution after its streams have been dropped.
+    /// A permanently disabled series group must never be reopened by reset.
+    pub(crate) fn clear_dyn_filters(&self) {
+        let mut state = self.dynamic_install_state.lock().unwrap();
+        self.predicate_all.clear_dyn_filters();
+        self.predicate_without_region.clear_dyn_filters();
+        if *state == DynamicInstallState::CacheClosed {
+            *state = DynamicInstallState::Open;
+        }
     }
 
     /// Returns the region partition expr from metadata, if any.

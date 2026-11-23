@@ -5501,6 +5501,89 @@ async fn test_reset_state_discards_dynamic_field_pruning() {
     }
 }
 
+/// A scanner reset replaces its pruner, and hence its dynamic inverted applier.
+#[tokio::test]
+async fn test_dynamic_index_reset_pruner_wiring() {
+    for append_mode in [false, true] {
+        let mut env = TestEnv::with_prefix(if append_mode {
+            "dynamic_reset_unordered"
+        } else {
+            "dynamic_reset_seq"
+        })
+        .await;
+        let engine = env.create_engine(MitoConfig::default()).await;
+        let region_id = RegionId::new(1, u32::from(append_mode) + 990);
+        let request = CreateRequestBuilder::new()
+            .all_not_null(true)
+            .insert_option("append_mode", &append_mode.to_string())
+            .insert_option("index.inverted_index.segment_row_count", "1")
+            .build_with_index();
+        let schema = test_util::rows_schema(&request);
+        engine
+            .handle_request(region_id, RegionRequest::Create(request))
+            .await
+            .unwrap();
+        test_util::put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema,
+                rows: test_util::build_rows(0, 10),
+            },
+        )
+        .await;
+        test_util::flush_region(&engine, region_id, None).await;
+        let mut scanner: Box<dyn RegionScanner> = match engine
+            .scanner(region_id, ScanRequest::default())
+            .await
+            .unwrap()
+        {
+            Scanner::Seq(scanner) => Box::new(scanner),
+            Scanner::Unordered(scanner) => Box::new(scanner),
+            Scanner::Series(_) => panic!("unexpected series scanner"),
+        };
+        let make_filter = |value: &'static str| {
+            let column = Arc::new(Column::new("tag_0", 0));
+            Arc::new(DynamicFilterPhysicalExpr::new(
+                vec![column.clone()],
+                Arc::new(BinaryExpr::new(column, Operator::Eq, physical_lit(value))),
+            ))
+        };
+        let a = make_filter("1");
+        assert_eq!(
+            vec![true],
+            scanner.add_dyn_filter_to_predicate(vec![a.clone()])
+        );
+        let run = |scanner: &dyn RegionScanner| {
+            scanner
+                .scan_partition(&Default::default(), &ExecutionPlanMetricsSet::default(), 0)
+                .unwrap()
+        };
+        let first = run(scanner.as_ref()).try_collect::<Vec<_>>().await.unwrap();
+        let values = |batches: &[common_recordbatch::RecordBatch]| {
+            batches
+                .iter()
+                .flat_map(|batch| {
+                    let tags = batch.column_by_name("tag_0").unwrap();
+                    (0..batch.num_rows()).map(move |row| {
+                        datatypes::arrow_array::string_array_value_at_index(tags, row)
+                            .unwrap()
+                            .to_string()
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(vec!["1"], values(&first));
+        scanner.reset_state();
+        let b = make_filter("2");
+        use datafusion::physical_plan::PhysicalExpr;
+        assert_eq!(a.snapshot_generation(), b.snapshot_generation());
+        assert_eq!(vec![true], scanner.add_dyn_filter_to_predicate(vec![b]));
+        let second = run(scanner.as_ref()).try_collect::<Vec<_>>().await.unwrap();
+        assert_eq!(vec!["2"], values(&second));
+    }
+}
+
 fn scan_field_values(batches: &[common_recordbatch::RecordBatch]) -> Vec<f64> {
     batches
         .iter()
@@ -7654,8 +7737,9 @@ async fn test_mito_raw_series_invalid_binding_before_legacy_read() {
         rows
     );
 
-    // Runtime pruning wrappers are deliberately ineligible for native planning, and
-    // wrappers installed after planning must be caught at execute time.
+    // Series scans decline dynamic hints in this phase because detached tasks can outlive
+    // reset. A rejected offer must neither disable native execution nor remove any rows.
+    use common_query::series_frame::unpack_raw_series;
     use datafusion::execution::TaskContext;
     use datafusion::physical_plan::ExecutionPlan;
     use table::table::scan::RegionScanExec;
@@ -7688,16 +7772,14 @@ async fn test_mito_raw_series_invalid_binding_before_legacy_read() {
     let before_source = dynamic_source_for(before.as_ref());
     let before_scan = Arc::new(RegionScanExec::new(before, dynamic_request.clone(), None).unwrap());
     assert_eq!(
-        vec![true],
+        vec![false],
         before_scan.add_dyn_filters_to_predicate(vec![make_dynamic()])
     );
-    assert!(
-        before_scan
-            .clone()
-            .try_to_series_scan(before_source)
-            .unwrap()
-            .is_none()
-    );
+    let before_plan = before_scan
+        .clone()
+        .try_to_series_scan(before_source)
+        .unwrap()
+        .expect("rejected hint leaves native planning unchanged");
 
     let after = engine
         .handle_query(region_id, dynamic_request.clone())
@@ -7711,14 +7793,37 @@ async fn test_mito_raw_series_invalid_binding_before_legacy_read() {
         .unwrap()
         .expect("native plan before dynamic wrapper installation");
     assert_eq!(
-        vec![true],
+        vec![false],
         after_scan.add_dyn_filters_to_predicate(vec![make_dynamic()])
     );
-    assert!(
-        after_plan
-            .execute(0, Arc::new(TaskContext::default()))
-            .is_err()
-    );
+    for plan in [before_plan, after_plan] {
+        let schema = plan.series_schema().clone();
+        let frames = plan.execute(0, Arc::new(TaskContext::default())).unwrap();
+        let chunks = unpack_raw_series(frames, Some(schema))
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        let mut rows = chunks
+            .iter()
+            .flat_map(|chunk| {
+                chunk
+                    .time
+                    .as_buffer()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, time)| {
+                        let SampleRef::Float(value) = chunk.fields.get(0).unwrap().sample(i) else {
+                            panic!("expected raw float sample")
+                        };
+                        (*time, value)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        rows.sort_by_key(|(time, _)| *time);
+        assert_eq!(vec![(0, 0.0), (1000, 1.0)], rows);
+    }
 }
 
 #[tokio::test]

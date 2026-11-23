@@ -328,6 +328,19 @@ impl SeqScan {
                     key
                 }
             });
+        #[cfg(test)]
+        if let Some(key) = cache_key.as_ref() {
+            let pause = stream_ctx
+                .input
+                .series_range_cache_pause
+                .lock()
+                .unwrap()
+                .take();
+            if let Some(pause) = pause {
+                let _ = pause.admitted.send(key.clone());
+                let _ = pause.resume.await;
+            }
+        }
         let ctx = stream_ctx.clone();
         let range = *part_range;
         let metrics = part_metrics.clone();
@@ -852,6 +865,11 @@ impl SeqScan {
     /// Returns the input.
     pub(crate) fn input(&self) -> &ScanInput {
         &self.stream_ctx.input
+    }
+
+    /// Returns the per-execution pruner for regression assertions.
+    pub(crate) fn pruner_for_test(&self) -> &Arc<Pruner> {
+        &self.pruner
     }
 }
 

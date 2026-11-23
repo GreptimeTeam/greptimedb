@@ -46,6 +46,12 @@ pub(crate) const INDEX_DISCARD_MEMORY_BUDGET_EXCEEDED: &str = "memory_budget_exc
 
 // Write metrics.
 lazy_static! {
+    /// Index-local decisions and scan/range-cache installation rejections.
+    pub static ref DYNAMIC_INDEX_FILTER_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "greptime_mito_dynamic_index_filter_total",
+        "Dynamic filter offers and decisions by index, scan type or range-cache admission",
+        &["index", "decision"]
+    ).unwrap();
     /// Global write buffer size in bytes.
     pub static ref WRITE_BUFFER_BYTES: IntGauge =
         register_int_gauge!("greptime_mito_write_buffer_bytes", "mito write buffer bytes").unwrap();
@@ -507,6 +513,11 @@ lazy_static! {
         "index apply memory usage",
     )
     .unwrap();
+    /// Gauge of memory retained by dynamic inverted-index translations.
+    pub static ref DYNAMIC_INDEX_APPLY_MEMORY_USAGE: IntGauge = register_int_gauge!(
+        "greptime_dynamic_index_apply_memory_usage",
+        "dynamic index apply memory usage",
+    ).unwrap();
     /// Timer of index creation.
     pub static ref INDEX_CREATE_ELAPSED: HistogramVec = register_histogram_vec!(
         "greptime_index_create_elapsed",

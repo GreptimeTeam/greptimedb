@@ -505,16 +505,6 @@ fn build_range_cache_key_inner(
 
     let fingerprint = stream_ctx.input.scan_fingerprint()?;
 
-    // Dyn filters can change at runtime, so we can't cache when they're present.
-    let has_dyn_filters = stream_ctx
-        .input
-        .predicate_group()
-        .predicate_without_region()
-        .is_some_and(|p| !p.dyn_filters().is_empty());
-    if has_dyn_filters {
-        return None;
-    }
-
     let range_meta = &stream_ctx.ranges[part_range.identifier];
     let mut files = Vec::with_capacity(range_meta.row_group_indices.len());
     for index in &range_meta.row_group_indices {
@@ -586,6 +576,17 @@ fn build_range_cache_key_inner(
     };
 
     scan.file_reads = Some(Arc::new(file_reads));
+    // Static-key shared streams must stay static from admission through prefetch,
+    // pruning and publication. Atomically close installation only after every other
+    // eligibility check; an already-installed filter instead bypasses the cache.
+    // A late producer receives `false` and its residual filter remains authoritative.
+    if !stream_ctx
+        .input
+        .predicate_group()
+        .close_dynamic_install_for_cache()
+    {
+        return None;
+    }
     Some(RangeScanCacheKey {
         region_id: stream_ctx.input.region_metadata().region_id,
         row_groups,

@@ -1306,6 +1306,33 @@ mod tests {
             col(store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME).eq(lit(1_u32)),
         ]);
         let filter = build_primary_key_filter(&metadata, None, Some(&predicate));
+        let dynamic_predicate = Predicate::with_dyn_filters(
+            predicate.exprs().to_vec(),
+            vec![Arc::new(
+                datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr::new(
+                    vec![],
+                    datafusion::physical_plan::expressions::lit(true),
+                ),
+            )],
+        );
+        let declined = crate::metrics::DYNAMIC_INDEX_FILTER_TOTAL
+            .with_label_values(&["encoded_pk", "declined"])
+            .get();
+        let dynamic_filter = build_primary_key_filter(&metadata, None, Some(&dynamic_predicate));
+        assert!(
+            crate::metrics::DYNAMIC_INDEX_FILTER_TOTAL
+                .with_label_values(&["encoded_pk", "declined"])
+                .get()
+                > declined
+        );
+        let dynamic_input = Box::pin(futures::stream::iter(vec![Ok(dictionary_batch(
+            &[table_1.as_slice(), table_2.as_slice()],
+            &[0, 1],
+        ))]));
+        let dynamic_batches = candidate_primary_key_stream(dynamic_input, dynamic_filter)
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
         let input = Box::pin(futures::stream::iter(vec![Ok(dictionary_batch(
             &[table_1.as_slice(), table_2.as_slice()],
             &[0, 1],
@@ -1315,6 +1342,7 @@ mod tests {
             .await
             .unwrap();
 
+        assert_eq!(batches, dynamic_batches);
         assert_eq!(batches.len(), 1);
         let array = batches[0]
             .column(0)

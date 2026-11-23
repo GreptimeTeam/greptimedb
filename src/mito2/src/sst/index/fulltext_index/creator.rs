@@ -842,13 +842,42 @@ mod tests {
                             .is_none()
                     );
                     for _ in 0..2 {
+                        let dyn_predicate = table::predicate::Predicate::with_dyn_filters(
+                            vec![],
+                            vec![Arc::new(
+                            datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr::new(
+                                vec![], datafusion::physical_plan::expressions::lit(true),
+                            ),
+                        )],
+                        );
+                        let declined = crate::metrics::DYNAMIC_INDEX_FILTER_TOTAL
+                            .with_label_values(&["fulltext", "declined"])
+                            .get();
                         match backend {
                             FulltextBackend::Tantivy => {
                                 let rows = applier
-                                    .apply_fine(index_id, None, &requests, None)
+                                    .apply_fine(index_id, None, &requests, None, None)
                                     .await
                                     .unwrap()
                                     .unwrap();
+                                let with_dynamic = applier
+                                    .apply_fine(
+                                        index_id,
+                                        None,
+                                        &requests,
+                                        Some(&dyn_predicate),
+                                        None,
+                                    )
+                                    .await
+                                    .unwrap()
+                                    .unwrap();
+                                assert_eq!(rows, with_dynamic);
+                                assert!(
+                                    crate::metrics::DYNAMIC_INDEX_FILTER_TOTAL
+                                        .with_label_values(&["fulltext", "declined"])
+                                        .get()
+                                        > declined
+                                );
                                 assert_eq!(
                                     rows.into_iter().collect::<Vec<_>>(),
                                     expected.iter().map(|v| *v as RowId).collect::<Vec<_>>()
@@ -862,10 +891,30 @@ mod tests {
                                         [(4, true)].into_iter(),
                                         &requests,
                                         None,
+                                        None,
                                     )
                                     .await
                                     .unwrap()
                                     .unwrap();
+                                let with_dynamic = applier
+                                    .apply_coarse(
+                                        index_id,
+                                        None,
+                                        [(4, true)].into_iter(),
+                                        &requests,
+                                        Some(&dyn_predicate),
+                                        None,
+                                    )
+                                    .await
+                                    .unwrap()
+                                    .unwrap();
+                                assert_eq!(ranges, with_dynamic);
+                                assert!(
+                                    crate::metrics::DYNAMIC_INDEX_FILTER_TOTAL
+                                        .with_label_values(&["fulltext", "declined"])
+                                        .get()
+                                        > declined
+                                );
                                 let rows: Vec<_> = ranges[0].1.iter().cloned().flatten().collect();
                                 // A Bloom filter may retain extra rows, but must retain every match.
                                 assert!(expected.iter().all(|row| rows.contains(row)));
@@ -1125,7 +1174,7 @@ mod tests {
             async move {
                 match backend {
                     FulltextBackend::Tantivy => applier
-                        .apply_fine(index_id, None, &requests, None)
+                        .apply_fine(index_id, None, &requests, None, None)
                         .await
                         .unwrap(),
                     FulltextBackend::Bloom => {
@@ -1133,7 +1182,7 @@ mod tests {
                         let row_groups = (0..coarse_mask.len()).map(|i| (1, coarse_mask[i]));
                         // row group id == row id
                         let resp = applier
-                            .apply_coarse(index_id, None, row_groups, &requests, None)
+                            .apply_coarse(index_id, None, row_groups, &requests, None, None)
                             .await
                             .unwrap();
                         resp.map(|r| {

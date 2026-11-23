@@ -45,7 +45,9 @@ use crate::error::{
     ApplyInvertedIndexSnafu, BuildIndexApplierSnafu, MetadataSnafu, PuffinBuildReaderSnafu,
     PuffinReadBlobSnafu, Result,
 };
-use crate::metrics::{INDEX_APPLY_ELAPSED, INDEX_APPLY_MEMORY_USAGE};
+use crate::metrics::{
+    DYNAMIC_INDEX_APPLY_MEMORY_USAGE, INDEX_APPLY_ELAPSED, INDEX_APPLY_MEMORY_USAGE,
+};
 use crate::sst::file::RegionIndexId;
 use crate::sst::index::inverted_index::INDEX_BLOB_TYPE;
 use crate::sst::index::puffin_manager::{BlobReader, PuffinManagerFactory, SstPuffinManager};
@@ -143,6 +145,8 @@ pub(crate) struct InvertedIndexApplier {
     /// All collected predicates.
     predicates: BTreeMap<IndexTarget, Vec<Predicate>>,
 
+    /// Whether memory is charged to the dynamic rather than static metric.
+    dynamic_metrics: bool,
     /// Default apply plan built from all collected predicates.
     default_plan: SstApplyPlan,
 
@@ -160,6 +164,7 @@ pub(crate) struct SstApplyPlan {
 
 impl InvertedIndexApplier {
     /// Creates a new `InvertedIndexApplier`.
+    #[cfg(test)]
     pub fn new(
         table_dir: String,
         path_type: PathType,
@@ -168,12 +173,37 @@ impl InvertedIndexApplier {
         predicates: BTreeMap<IndexTarget, Vec<Predicate>>,
         expected_predicate_target_types: BTreeMap<IndexTarget, ConcreteDataType>,
     ) -> Result<Self> {
+        Self::new_with_metrics(
+            table_dir,
+            path_type,
+            store,
+            puffin_manager_factory,
+            predicates,
+            expected_predicate_target_types,
+            false,
+        )
+    }
+
+    pub(crate) fn new_with_metrics(
+        table_dir: String,
+        path_type: PathType,
+        store: ObjectStore,
+        puffin_manager_factory: PuffinManagerFactory,
+        predicates: BTreeMap<IndexTarget, Vec<Predicate>>,
+        expected_predicate_target_types: BTreeMap<IndexTarget, ConcreteDataType>,
+        dynamic_metrics: bool,
+    ) -> Result<Self> {
         let remote_puffin_manager = puffin_manager_factory.build(
             store.clone(),
             RegionFilePathFactory::new(table_dir.clone(), path_type),
         );
         let default_plan = Self::build_apply_plan(&predicates)?;
-        INDEX_APPLY_MEMORY_USAGE.add(default_plan.index_applier.memory_usage() as i64);
+        let bytes = default_plan.index_applier.memory_usage() as i64;
+        if dynamic_metrics {
+            DYNAMIC_INDEX_APPLY_MEMORY_USAGE.add(bytes);
+        } else {
+            INDEX_APPLY_MEMORY_USAGE.add(bytes);
+        }
 
         Ok(Self {
             table_dir,
@@ -186,6 +216,7 @@ impl InvertedIndexApplier {
             inverted_index_cache: None,
             puffin_metadata_cache: None,
             predicates,
+            dynamic_metrics,
             default_plan,
             expected_predicate_target_types,
         })
@@ -235,7 +266,43 @@ impl InvertedIndexApplier {
         file_id: RegionIndexId,
         file_size_hint: Option<u64>,
         index_applier: &PredicatesIndexApplier,
+        metrics: Option<&mut InvertedIndexApplyMetrics>,
+    ) -> Result<ApplyOutput> {
+        self.apply_with_label(
+            file_id,
+            file_size_hint,
+            index_applier,
+            metrics,
+            TYPE_INVERTED_INDEX,
+        )
+        .await
+    }
+
+    /// Applies a separate dynamic plan without recording static-index timing.
+    pub(crate) async fn apply_dynamic(
+        &self,
+        file_id: RegionIndexId,
+        file_size_hint: Option<u64>,
+        index_applier: &PredicatesIndexApplier,
+        metrics: Option<&mut InvertedIndexApplyMetrics>,
+    ) -> Result<ApplyOutput> {
+        self.apply_with_label(
+            file_id,
+            file_size_hint,
+            index_applier,
+            metrics,
+            "inverted-dynamic",
+        )
+        .await
+    }
+
+    async fn apply_with_label(
+        &self,
+        file_id: RegionIndexId,
+        file_size_hint: Option<u64>,
+        index_applier: &PredicatesIndexApplier,
         mut metrics: Option<&mut InvertedIndexApplyMetrics>,
+        metric_label: &str,
     ) -> Result<ApplyOutput> {
         let start = Instant::now();
 
@@ -293,7 +360,7 @@ impl InvertedIndexApplier {
         // Record elapsed time to histogram and collect metrics if requested
         let elapsed = start.elapsed();
         INDEX_APPLY_ELAPSED
-            .with_label_values(&[TYPE_INVERTED_INDEX])
+            .with_label_values(&[metric_label])
             .observe(elapsed.as_secs_f64());
 
         if let Some(metrics) = metrics {
@@ -381,12 +448,32 @@ impl InvertedIndexApplier {
     ///
     /// Returns `None` when no compatible predicate remains for this SST.
     pub fn plan_for_sst(&self, sst_metadata: &RegionMetadataRef) -> Result<Option<SstApplyPlan>> {
-        let mut compatible_predicates = BTreeMap::new();
         let mut has_type_mismatch = false;
+        for target in self.predicates.keys() {
+            let compatible = self
+                .expected_predicate_target_types
+                .get(target)
+                .is_some_and(|expected| {
+                    let actual = index_target_data_type(sst_metadata, target);
+                    match target {
+                        IndexTarget::ColumnId(_) => actual.as_ref().is_none_or(|ty| ty == expected),
+                        IndexTarget::JsonPath(_) => actual.as_ref() == Some(expected),
+                    }
+                });
+            if !compatible {
+                has_type_mismatch = true;
+                break;
+            }
+        }
+        // Common case, especially a large single-target dynamic membership: avoid
+        // cloning every encoded literal only to return the existing default plan.
+        if !has_type_mismatch {
+            return Ok((!self.predicates.is_empty()).then(|| self.default_plan.clone()));
+        }
 
+        let mut compatible_predicates = BTreeMap::new();
         for (target, predicates) in &self.predicates {
             let Some(expected) = self.expected_predicate_target_types.get(target) else {
-                has_type_mismatch = true;
                 continue;
             };
             let actual = index_target_data_type(sst_metadata, target);
@@ -397,7 +484,6 @@ impl InvertedIndexApplier {
                 IndexTarget::JsonPath(_) => actual.as_ref() == Some(expected),
             };
             if !compatible {
-                has_type_mismatch = true;
                 continue;
             }
 
@@ -406,10 +492,6 @@ impl InvertedIndexApplier {
 
         if compatible_predicates.is_empty() {
             return Ok(None);
-        }
-
-        if !has_type_mismatch {
-            return Ok(Some(self.default_plan.clone()));
         }
 
         let plan = Self::build_apply_plan(&compatible_predicates)?;
@@ -437,7 +519,12 @@ impl InvertedIndexApplier {
 
 impl Drop for InvertedIndexApplier {
     fn drop(&mut self) {
-        INDEX_APPLY_MEMORY_USAGE.sub(self.default_plan.index_applier.memory_usage() as i64);
+        let bytes = self.default_plan.index_applier.memory_usage() as i64;
+        if self.dynamic_metrics {
+            DYNAMIC_INDEX_APPLY_MEMORY_USAGE.sub(bytes);
+        } else {
+            INDEX_APPLY_MEMORY_USAGE.sub(bytes);
+        }
     }
 }
 

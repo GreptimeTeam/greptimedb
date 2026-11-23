@@ -77,6 +77,9 @@ pub(crate) struct InvertedIndexApplierBuilder<'a> {
 
     /// Cache for puffin metadata.
     puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
+
+    /// Attribute resource metrics to dynamic rather than static index plans.
+    dynamic_metrics: bool,
 }
 
 impl<'a> InvertedIndexApplierBuilder<'a> {
@@ -100,6 +103,7 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
             file_cache: None,
             inverted_index_cache: None,
             puffin_metadata_cache: None,
+            dynamic_metrics: false,
         }
     }
 
@@ -127,6 +131,12 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
         self
     }
 
+    /// Attribute the resulting applier's memory to dynamic-index metrics.
+    pub(crate) fn with_dynamic_metrics(mut self) -> Self {
+        self.dynamic_metrics = true;
+        self
+    }
+
     /// Consumes the builder to construct an [`InvertedIndexApplier`], optionally returned based on
     /// the expressions provided. If no predicates match, returns `None`.
     pub fn build(mut self, exprs: &[Expr]) -> Result<Option<InvertedIndexApplier>> {
@@ -141,13 +151,14 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
         let expected_predicate_target_types = self.expected_predicate_target_types();
 
         Ok(Some(
-            InvertedIndexApplier::new(
+            InvertedIndexApplier::new_with_metrics(
                 self.table_dir,
                 self.path_type,
                 self.object_store,
                 self.puffin_manager_factory,
                 self.output,
                 expected_predicate_target_types,
+                self.dynamic_metrics,
             )?
             .with_file_cache(self.file_cache)
             .with_puffin_metadata_cache(self.puffin_metadata_cache)
