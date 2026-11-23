@@ -838,12 +838,11 @@ impl DefaultSstMerger {
                 .with_puffin_metadata_cache(context.cache_manager.puffin_metadata_cache().cloned()),
             can_merge_inputs,
         });
-        let source = tokio::select! {
+        let (source, row_group_size) = tokio::select! {
             biased;
             _ = cancellation.cancelled() => return error::CompactionCancelledSnafu.fail(),
             source = builder.build_flat_sst_reader_and_row_group_size(write_opts.row_group_size) => source?,
         };
-        let (source, row_group_size) = source;
         let write_opts = WriteOptions {
             row_group_size,
             ..write_opts
