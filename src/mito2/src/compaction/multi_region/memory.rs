@@ -96,8 +96,8 @@ impl MemoryLimits {
             .saturating_mul((plan.sources.len() + BATCH_SIZE + 2) as u64)
             .saturating_mul(self.batch as u64)
             .saturating_add(6 * self.group as u64);
-        for footer in footers {
-            bytes = bytes.saturating_add(reader_bytes(footer));
+        for (footer, source) in footers.iter().zip(&plan.sources) {
+            bytes = bytes.saturating_add(reader_bytes(footer, !source.blob_refs.is_empty()));
         }
         for target in plan.targets.values() {
             bytes = bytes.saturating_add(self.target_bytes(target, &context.config)?);
@@ -217,7 +217,7 @@ fn extra_delta_encoder_bytes(target: &MultiRegionTarget) -> Result<usize> {
     Ok(bytes)
 }
 
-pub(super) fn reader_bytes(footer: &ParquetMetaData) -> u64 {
+pub(super) fn reader_bytes(footer: &ParquetMetaData, references_other_sidecars: bool) -> u64 {
     // Dictionary-encoded values decode to more than the uncompressed row group size; the footer
     // records the largest decoded row group of the file.
     let decoded = max_row_group_value_bytes(footer);
@@ -233,7 +233,7 @@ pub(super) fn reader_bytes(footer: &ParquetMetaData) -> u64 {
         .max()
         .unwrap_or(0);
     // Readers materialize external values outside the Parquet pages, one bounded chunk at a time.
-    let external = if blob_file_size(footer).is_none() {
+    let external = if blob_file_size(footer).is_none() && !references_other_sidecars {
         0
     } else {
         max_row_group_value_bytes(footer).min(MAX_RESOLVED_BATCH_BYTES as u64)

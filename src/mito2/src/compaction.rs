@@ -46,6 +46,8 @@ pub(crate) use scheduler::{
     CancelCompactionResult, CompactionCoordinator, CompactionExecution, CompactionPickFinished,
     CompactionScheduler, CompactionState, CompactionStateRef, CompactionTransition,
 };
+#[cfg(test)]
+pub(crate) use scheduler::{history::PickHistory, pick_automatic_for_test};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use store_api::mito_engine_options::{TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM, TWCS_TRIGGER_FILE_NUM};

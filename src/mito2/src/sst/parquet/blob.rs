@@ -369,8 +369,6 @@ impl BlobFileWriter {
 pub(crate) struct PendingBatch {
     batch: RecordBatch,
     targets: Vec<(usize, Vec<Option<BlobRef>>)>,
-    /// Columns whose references the reader otherwise keeps; see [decode_rows].
-    kept_columns: Arc<HashSet<usize>>,
     next_row: usize,
 }
 
@@ -404,10 +402,9 @@ pub(crate) struct KeptRefs {
     /// Region of the output; only references of its own files can be kept, since sidecars
     /// sit next to the SSTs of their region.
     pub(crate) region_id: RegionId,
-    /// Columns whose references may be kept.
+    /// Columns whose references are kept. Every input declares them external in its footer,
+    /// so each value there that starts with [REF_PREFIX] is a reference.
     pub(crate) columns: HashSet<String>,
-    /// Sidecars whose values are copied to the output's own sidecar so they can be deleted.
-    pub(crate) rewritten: HashSet<FileId>,
 }
 
 impl BlobResolver {
@@ -462,16 +459,12 @@ impl BlobResolver {
     /// to resolve.
     pub(crate) fn prepare(&self, batch: RecordBatch) -> Result<Option<PendingBatch>> {
         let mut targets = Vec::new();
-        let mut kept_columns = HashSet::new();
         for name in &self.columns {
             if let Some((index, _)) = batch.schema().column_with_name(name) {
-                let kept = self
+                let keep = self
                     .kept
                     .as_deref()
-                    .filter(|kept| kept.columns.contains(name));
-                if kept.is_some() {
-                    kept_columns.insert(index);
-                }
+                    .is_some_and(|kept| kept.columns.contains(name));
                 let mut refs = Vec::with_capacity(batch.num_rows());
                 for value in byte_values(batch.column(index))? {
                     let blob_ref = value.map(BlobRef::decode).transpose()?.flatten();
@@ -486,9 +479,7 @@ impl BlobResolver {
                         }
                         .fail();
                     }
-                    refs.push(blob_ref.filter(|blob_ref| {
-                        kept.is_none_or(|kept| kept.rewritten.contains(&blob_ref.file_id))
-                    }));
+                    refs.push(blob_ref.filter(|_| !keep));
                 }
                 if refs.iter().any(Option::is_some) {
                     targets.push((index, refs));
@@ -498,7 +489,6 @@ impl BlobResolver {
         Ok((!targets.is_empty()).then_some(PendingBatch {
             batch,
             targets,
-            kept_columns: Arc::new(kept_columns),
             next_row: 0,
         }))
     }
@@ -528,21 +518,15 @@ impl BlobResolver {
             end += 1;
         }
         pending.next_row = end;
-        self.resolve_rows(
-            &pending.batch,
-            &pending.targets,
-            pending.kept_columns.clone(),
-            start..end,
-        )
-        .await
-        .map(Some)
+        self.resolve_rows(&pending.batch, &pending.targets, start..end)
+            .await
+            .map(Some)
     }
 
     async fn resolve_rows(
         &self,
         batch: &RecordBatch,
         targets: &[(usize, Vec<Option<BlobRef>>)],
-        kept_columns: Arc<HashSet<usize>>,
         rows: Range<usize>,
     ) -> Result<RecordBatch> {
         let sliced = batch.slice(rows.start, rows.len());
@@ -561,7 +545,7 @@ impl BlobResolver {
             fetched.insert(file_id, self.fetch(file_id, &refs).await?);
         }
         // Decompressing up to MAX_RESOLVED_BATCH_BYTES is CPU-bound; keep it off the async workers.
-        spawn_blocking_global(move || decode_rows(sliced, targets, &kept_columns, &fetched))
+        spawn_blocking_global(move || decode_rows(sliced, targets, &fetched))
             .await
             .context(JoinSnafu)?
     }
@@ -699,14 +683,9 @@ impl ByteBuilder {
 
 /// Replaces references of `targets` in `batch` with values from `fetched`, which holds
 /// coalesced ranges of each sidecar sorted by offset that cover every reference.
-///
-/// In `kept_columns`, a value that itself starts with [REF_PREFIX] keeps its reference: the
-/// writer takes every prefixed value there for a kept reference, so the value cannot be
-/// handed over inline. Its sidecar then stays until a later compaction rewrites it.
 fn decode_rows(
     batch: RecordBatch,
     targets: Vec<(usize, Vec<Option<BlobRef>>)>,
-    kept_columns: &HashSet<usize>,
     fetched: &HashMap<FileId, Vec<(Range<u64>, Bytes)>>,
 ) -> Result<RecordBatch> {
     // Locates the compressed frame of `r` and checks that it decodes to `r.len` bytes.
@@ -773,18 +752,10 @@ fn decode_rows(
                 None => value.map_or(0, <[u8]>::len),
             };
         }
-        let keep_prefixed = kept_columns.contains(&index);
         let mut builder = ByteBuilder::new(column.data_type(), refs.len(), data_bytes);
         for (value, blob_ref) in byte_values(column)?.zip(&refs) {
             match blob_ref {
-                Some(blob_ref) => {
-                    let resolved = value_of(blob_ref)?;
-                    if keep_prefixed && resolved.starts_with(REF_PREFIX.as_bytes()) {
-                        builder.append(value)?;
-                    } else {
-                        builder.append(Some(&resolved))?;
-                    }
-                }
+                Some(blob_ref) => builder.append(Some(&value_of(blob_ref)?))?,
                 None => builder.append(value)?,
             }
         }
@@ -906,15 +877,7 @@ mod tests {
         let column: ArrayRef = Arc::new(BinaryArray::from(vec![blob_ref.encode().as_bytes()]));
         let batch = RecordBatch::try_from_iter([("bin", column)]).unwrap();
         let fetched = HashMap::from([(blob_ref.file_id, vec![(blob_ref.range(), frame)])]);
-        assert!(
-            decode_rows(
-                batch,
-                vec![(0, vec![Some(blob_ref)])],
-                &HashSet::new(),
-                &fetched
-            )
-            .is_err()
-        );
+        assert!(decode_rows(batch, vec![(0, vec![Some(blob_ref)])], &fetched).is_err());
     }
 
     #[test]

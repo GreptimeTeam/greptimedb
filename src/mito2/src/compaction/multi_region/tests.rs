@@ -2356,7 +2356,7 @@ async fn test_reader_admission_counts_decoded_values() {
             .iter()
             .all(|group| group.total_byte_size() < 1 << 20)
     );
-    assert!(memory::reader_bytes(&footer) >= 128 << 20);
+    assert!(memory::reader_bytes(&footer, false) >= 128 << 20);
 }
 
 #[rstest::rstest]

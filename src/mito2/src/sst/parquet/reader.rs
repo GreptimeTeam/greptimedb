@@ -578,6 +578,7 @@ impl ParquetReaderBuilder {
             &read_format,
             &codec,
             &parquet_meta,
+            !self.file_handle.meta_ref().blob_refs.is_empty(),
         );
 
         if self.defer_optional_page_index
@@ -3254,6 +3255,7 @@ mod tests {
             &read_format,
             &codec,
             &parquet_meta,
+            false,
         );
         assert!(filter_plan.prefilter_builder.is_some());
 

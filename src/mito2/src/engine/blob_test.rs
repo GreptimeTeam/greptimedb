@@ -15,6 +15,7 @@
 //! Tests for external storage of large field values.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::helper::row;
@@ -26,12 +27,20 @@ use common_test_util::temp_dir::create_temp_dir;
 use datafusion_expr::{col, lit};
 use datatypes::arrow::array::AsArray;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::StorageOptions;
+use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, StorageOptions};
+use datatypes::value::Value;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use store_api::metadata::ColumnMetadata;
 use store_api::region_engine::{MitoCopyRegionFromRequest, RegionEngine};
-use store_api::region_request::{RegionCreateRequest, RegionRequest};
+use store_api::region_request::{
+    AddColumn, AlterKind, RegionAlterRequest, RegionCreateRequest, RegionRequest,
+};
 use store_api::storage::{FileId, RegionId, ScanRequest};
 
 use crate::cache::file_cache::{FileType, IndexKey};
+use crate::compaction::compactor::CompactionRegion;
+use crate::compaction::picker::PickerOutput;
+use crate::compaction::{PickHistory, pick_automatic_for_test};
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::engine::compaction_test::compact;
@@ -515,7 +524,7 @@ async fn test_compaction_keeps_references_to_input_sidecars() {
             .all(|blob| blob.referenced_bytes == blob.size)
     );
     // Row group sizing counts kept values at their decoded size, like the inputs did.
-    assert!(output.max_row_group_uncompressed_size >= payload(0, 0).len() as u64);
+    assert!(output.max_row_group_decoded_size >= payload(0, 0).len() as u64);
     assert_stored_blobs_are_referenced(&env, &engine, region_id).await;
 
     let expected: Vec<_> = (0..8).map(|i| (i as i64 * 1000, payload(i, 0))).collect();
@@ -523,6 +532,17 @@ async fn test_compaction_keeps_references_to_input_sidecars() {
         expected,
         scan(&engine, region_id, ScanRequest::default()).await
     );
+    // The output has no sidecar of its own, yet its references must not reach predicates.
+    let filtered = scan(
+        &engine,
+        region_id,
+        ScanRequest {
+            filters: vec![col("field_0").eq(lit(payload(4, 0)))],
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(vec![(4000, payload(4, 0))], filtered);
     // The references survive in the manifest.
     let table_dir = region.access_layer.table_dir().to_string();
     drop(version);
@@ -532,6 +552,168 @@ async fn test_compaction_keeps_references_to_input_sidecars() {
         expected,
         scan(&engine, region_id, ScanRequest::default()).await
     );
+}
+
+#[tokio::test]
+async fn test_compaction_keeps_references_next_to_inputs_without_sidecars() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let request = create_request(true);
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    put(&engine, region_id, &schema, &[0, 2], 0).await;
+    flush_region(&engine, region_id, None).await;
+    let with_sidecar = sst_ids(&engine, region_id)[0];
+    // Only short values: this SST has no sidecar.
+    put(&engine, region_id, &schema, &[1, 5], 0).await;
+    flush_region(&engine, region_id, None).await;
+
+    compact(&engine, region_id).await;
+    let region = engine.get_region(region_id).unwrap();
+    let version = region.version();
+    let output = version.ssts.levels()[1].files().next().unwrap().meta_ref();
+    assert_eq!(0, output.blob_file_size);
+    assert_eq!(
+        vec![with_sidecar],
+        output
+            .blob_refs
+            .iter()
+            .map(|blob| blob.file_id)
+            .collect::<Vec<_>>()
+    );
+    let expected: Vec<_> = [0, 1, 2, 5]
+        .into_iter()
+        .map(|i| (i as i64 * 1000, payload(i, 0)))
+        .collect();
+    assert_eq!(
+        expected,
+        scan(&engine, region_id, ScanRequest::default()).await
+    );
+}
+
+async fn pick_automatic(engine: &MitoEngine, region_id: RegionId) -> Option<PickerOutput> {
+    let region = engine.get_region(region_id).unwrap();
+    let version = region.version();
+    let compaction_region = CompactionRegion {
+        region_id,
+        region_options: version.options.clone(),
+        engine_config: Arc::new(MitoConfig::default()),
+        region_metadata: version.metadata.clone(),
+        cache_manager: engine.cache_manager(),
+        access_layer: region.access_layer.clone(),
+        manifest_ctx: region.manifest_ctx.clone(),
+        current_version: version.into(),
+        file_purger: None,
+        ttl: None,
+        max_parallelism: 1,
+        plugins: common_base::Plugins::new(),
+    };
+    pick_automatic_for_test(&compaction_region, &mut PickHistory::default(), None)
+        .await
+        .unwrap()
+}
+
+/// Returns the physical values of `column` in the SST `file_id`, without resolving references.
+async fn physical_values(env: &TestEnv, file_id: FileId, column: &str) -> Vec<String> {
+    let store = env.get_object_store().unwrap();
+    let suffix = format!("{file_id}.parquet");
+    for entry in store.list_with("").recursive(true).await.unwrap() {
+        if !entry.path().ends_with(&suffix) {
+            continue;
+        }
+        let data = store.read(entry.path()).await.unwrap().to_bytes();
+        let reader = ParquetRecordBatchReaderBuilder::try_new(data)
+            .unwrap()
+            .build()
+            .unwrap();
+        let mut values = Vec::new();
+        for batch in reader {
+            let batch = batch.unwrap();
+            let column = batch.column_by_name(column).unwrap().as_string::<i32>();
+            values.extend(column.iter().map(|v| v.unwrap().to_string()));
+        }
+        return values;
+    }
+    panic!("SST {file_id} not found");
+}
+
+#[tokio::test]
+async fn test_compaction_copies_reference_like_values_of_undeclared_inputs() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let request = create_request(true);
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    put(&engine, region_id, &schema, &[0], 0).await;
+    flush_region(&engine, region_id, None).await;
+    let old = sst_ids(&engine, region_id)[0];
+    let real_ref = physical_values(&env, old, "field_0").await.remove(0);
+
+    // `old` predates `field_1`, so its footer does not declare it external, and compaction
+    // fills it with a default that is byte-identical to a real reference into `old`.
+    let field_1 = ColumnSchema::new("field_1", ConcreteDataType::string_datatype(), true)
+        .with_default_constraint(Some(ColumnDefaultConstraint::Value(Value::from(
+            real_ref.as_str(),
+        ))))
+        .unwrap()
+        .with_storage_options(StorageOptions::default())
+        .unwrap();
+    let alter = RegionAlterRequest {
+        kind: AlterKind::AddColumns {
+            columns: vec![AddColumn {
+                column_metadata: ColumnMetadata {
+                    column_schema: field_1,
+                    semantic_type: SemanticType::Field,
+                    column_id: 3,
+                },
+                location: None,
+            }],
+        },
+    };
+    engine
+        .handle_request(region_id, RegionRequest::Alter(alter))
+        .await
+        .unwrap();
+    let mut schema = schema;
+    schema.push(api::v1::ColumnSchema {
+        column_name: "field_1".to_string(),
+        datatype: api::v1::ColumnDataType::String as i32,
+        semantic_type: api::v1::SemanticType::Field as i32,
+        ..Default::default()
+    });
+    let rows = vec![row(vec![
+        ValueData::StringValue("a".to_string()),
+        ValueData::StringValue(payload(2, 0)),
+        ValueData::TimestampMillisecondValue(2000),
+        ValueData::StringValue(payload(4, 0)),
+    ])];
+    put_rows(&engine, region_id, Rows { schema, rows }).await;
+    flush_region(&engine, region_id, None).await;
+
+    compact(&engine, region_id).await;
+    let stream = engine
+        .scan_to_stream(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    let mut values = Vec::new();
+    for batch in batches.iter() {
+        let column = batch
+            .df_record_batch()
+            .column_by_name("field_1")
+            .unwrap()
+            .as_string::<i32>();
+        values.extend(column.iter().map(|v| v.unwrap().to_string()));
+    }
+    assert_eq!(vec![real_ref, payload(4, 0)], values);
 }
 
 /// Writes `first` to one SST, overwrites `overwritten` in a second one, and compacts twice:
@@ -585,7 +767,7 @@ async fn test_compaction_rewrites_sidecars_that_are_mostly_garbage() {
 }
 
 #[tokio::test]
-async fn test_rewritten_sidecar_keeps_values_that_look_like_references() {
+async fn test_rewritten_sidecar_evacuates_values_that_look_like_references() {
     let mut env = TestEnv::new().await;
     let engine = env.create_engine(MitoConfig::default()).await;
     let region_id = RegionId::new(1, 1);
@@ -607,8 +789,7 @@ async fn test_rewritten_sidecar_keeps_values_that_look_like_references() {
         expected,
         scan(&engine, region_id, ScanRequest::default()).await
     );
-    // Handing that value over inline would make it a reference, so it keeps its own.
-    assert!(referenced_blobs(&engine, region_id).contains(&first));
+    assert!(!referenced_blobs(&engine, region_id).contains(&first));
     assert_stored_blobs_are_referenced(&env, &engine, region_id).await;
 }
 
@@ -664,7 +845,23 @@ async fn test_files_pointing_at_garbage_sidecars_are_rewritten_without_new_data(
     compact(&engine, region_id).await;
     assert!(referenced_blobs(&engine, region_id).contains(&first));
 
-    // The window gets no new data, yet the file that keeps the garbage alive is rewritten.
+    // The window gets no new data, yet the file that keeps the garbage alive is rewritten,
+    // by automatic and manual compaction alike.
+    let picked = pick_automatic(&engine, region_id).await.unwrap();
+    let inputs: Vec<_> = picked
+        .outputs
+        .iter()
+        .flat_map(|output| &output.inputs)
+        .collect();
+    assert_eq!(1, inputs.len());
+    assert!(
+        inputs[0]
+            .meta_ref()
+            .blob_files()
+            .any(|blob| blob.file_id == first)
+    );
+    // The picked handles would keep the garbage sidecar alive.
+    drop(picked);
     compact(&engine, region_id).await;
     assert!(!referenced_blobs(&engine, region_id).contains(&first));
     let expected: Vec<_> = [(0, 1), (1, 1), (2, 1), (3, 0)]

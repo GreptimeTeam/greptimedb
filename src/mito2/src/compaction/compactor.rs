@@ -200,8 +200,9 @@ impl TryFrom<&CompactionRegion> for CompactionContext {
 pub(crate) const BLOB_GARBAGE_RATIO: f64 = 0.5;
 
 impl CompactionContext {
-    /// Returns the references to other sidecars that compaction of `inputs` keeps, or `None`
-    /// when it copies every external value to the outputs' own sidecars.
+    /// Returns the columns whose references compaction of `inputs` may keep, or `None` when it
+    /// copies every external value to the outputs' own sidecars. The reader narrows the columns
+    /// to those that every input footer declares external.
     fn kept_blob_refs(&self, inputs: &[FileHandle]) -> Result<Option<Arc<KeptRefs>>> {
         // A sidecar sits next to the SSTs of its region, where outputs of other regions
         // cannot reach it.
@@ -209,6 +210,16 @@ impl CompactionContext {
             .iter()
             .any(|input| input.region_id() != self.region_id)
         {
+            return Ok(None);
+        }
+        // An output that evacuates a sidecar resolves every value, so it references no sidecar
+        // being rewritten, whatever the values look like.
+        if inputs.iter().any(|input| {
+            input
+                .meta_ref()
+                .blob_files()
+                .any(|blob| self.rewritten_blobs.contains(&blob.file_id))
+        }) {
             return Ok(None);
         }
         // Indexes and partition filters read the values, so their columns are always resolved.
@@ -239,7 +250,6 @@ impl CompactionContext {
         Ok(Some(Arc::new(KeptRefs {
             region_id: self.region_id,
             columns,
-            rewritten: (*self.rewritten_blobs).clone(),
         })))
     }
 }
@@ -835,8 +845,6 @@ impl DefaultSstMerger {
         let region_id = context.region_id;
         validate_region_compaction_output(region_id, &output)?;
         let kept_blob_refs = context.kept_blob_refs(&output.inputs)?;
-        let mut write_opts = write_opts;
-        write_opts.kept_blob_refs = kept_blob_refs.clone();
         let index_options = context.version_options.index_options.clone();
         let append_mode = context.version_options.append_mode;
         let merge_mode = context.version_options.merge_mode();
@@ -910,9 +918,10 @@ impl DefaultSstMerger {
             _ = cancellation.cancelled() => return error::CompactionCancelledSnafu.fail(),
             source = builder.build_flat_sst_reader_and_row_group_size(write_opts.row_group_size) => source?,
         };
-        let (source, row_group_size) = source;
+        let (source, row_group_size, kept_blob_refs) = source;
         let write_opts = WriteOptions {
             row_group_size,
+            kept_blob_refs,
             ..write_opts
         };
         let source = spawn_merge(source);

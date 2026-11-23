@@ -41,7 +41,7 @@ use crate::read::seq_scan::SeqScan;
 use crate::read::stream::spawn_compact_stream;
 use crate::region::options::MergeMode;
 use crate::sst::file::FileHandle;
-use crate::sst::parquet::blob::KeptRefs;
+use crate::sst::parquet::blob::{KeptRefs, blob_columns};
 use crate::sst::parquet::reader::MetadataCacheMetrics;
 use crate::sst::parquet::{Json2RewriteTargets, Json2TargetLayout};
 use crate::sst::parquet::{decoded_input_size, row_group_size_for};
@@ -68,25 +68,33 @@ impl CompactionSstReaderBuilder<'_> {
     #[cfg(test)]
     pub(crate) async fn build_flat_sst_reader(self) -> Result<FlatSource> {
         let parquet_metadata = self.collect_parquet_metadata().await?;
-        self.build_flat_sst_reader_from(parquet_metadata).await
+        let (source, _) = self.build_flat_sst_reader_from(parquet_metadata).await?;
+        Ok(source)
     }
 
     /// Like [Self::build_flat_sst_reader], and also returns the output row group size for
-    /// `configured` from the decoded value bytes that the input footers record.
+    /// `configured` from the decoded value bytes that the input footers record, and the
+    /// references the reader keeps, which the output writer must keep as well.
     pub(crate) async fn build_flat_sst_reader_and_row_group_size(
         self,
         configured: usize,
-    ) -> Result<(FlatSource, usize)> {
+    ) -> Result<(FlatSource, usize, Option<Arc<KeptRefs>>)> {
         let parquet_metadata = self.collect_parquet_metadata().await?;
         let (rows, bytes) = decoded_input_size(parquet_metadata.iter().map(Arc::as_ref));
-        let source = self.build_flat_sst_reader_from(parquet_metadata).await?;
-        Ok((source, row_group_size_for(rows, bytes, configured)))
+        let (source, kept_blob_refs) = self.build_flat_sst_reader_from(parquet_metadata).await?;
+        Ok((
+            source,
+            row_group_size_for(rows, bytes, configured),
+            kept_blob_refs,
+        ))
     }
 
     async fn build_flat_sst_reader_from(
-        self,
+        mut self,
         parquet_metadata: Vec<Arc<ParquetMetaData>>,
-    ) -> Result<FlatSource> {
+    ) -> Result<(FlatSource, Option<Arc<KeptRefs>>)> {
+        self.kept_blob_refs = kept_by_all_inputs(self.kept_blob_refs.take(), &parquet_metadata);
+        let kept_blob_refs = self.kept_blob_refs.clone();
         let plans = collect_json2_rewrite_plans_from_parquet(&self.metadata, &parquet_metadata)?;
         let scan_input = self.build_scan_input(&parquet_metadata, &plans)?;
 
@@ -98,7 +106,7 @@ impl CompactionSstReaderBuilder<'_> {
             .build_flat_reader_for_compaction()
             .boxed()
             .await?;
-        Ok(FlatSource::new_stream(schema, stream))
+        Ok((FlatSource::new_stream(schema, stream), kept_blob_refs))
     }
 
     fn build_scan_input(
@@ -213,6 +221,32 @@ impl CompactionSstReaderBuilder<'_> {
             Err(e) if e.is_object_not_found() => Ok(None),
             Err(e) => Err(e),
         }
+    }
+}
+
+/// Narrows `kept` to the columns that every input footer declares external. In a column an
+/// input does not declare, such as one written before the column became external, a value
+/// that starts with the reference prefix is a literal, which the output would otherwise
+/// take for a reference.
+fn kept_by_all_inputs(
+    kept: Option<Arc<KeptRefs>>,
+    parquet_metadata: &[Arc<ParquetMetaData>],
+) -> Option<Arc<KeptRefs>> {
+    let kept = kept?;
+    let mut columns = kept.columns.clone();
+    for metadata in parquet_metadata {
+        let declared = blob_columns(metadata);
+        columns.retain(|column| declared.contains(column));
+    }
+    if columns.is_empty() {
+        None
+    } else if columns.len() == kept.columns.len() {
+        Some(kept)
+    } else {
+        Some(Arc::new(KeptRefs {
+            region_id: kept.region_id,
+            columns,
+        }))
     }
 }
 
@@ -436,7 +470,7 @@ mod tests {
             .unwrap();
         assert!(encoded < 1024 * 1024, "{encoded}");
 
-        let (_, row_group_size) = CompactionSstReaderBuilder {
+        let (_, row_group_size, _) = CompactionSstReaderBuilder {
             metadata: version.metadata.clone(),
             sst_layer: region.access_layer.clone(),
             cache: engine.cache_manager(),
