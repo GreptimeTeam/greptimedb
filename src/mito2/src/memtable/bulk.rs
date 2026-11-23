@@ -35,6 +35,7 @@ fn env_usize(name: &str, default: usize) -> usize {
 
 use common_time::Timestamp;
 use datatypes::arrow::datatypes::SchemaRef;
+use datatypes::arrow::record_batch::RecordBatch;
 use mito_codec::key_values::KeyValue;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -587,7 +588,7 @@ impl Memtable for BulkMemtable {
                             context: context.clone(),
                             sequence,
                             // The sorted part may share buffers with the buffered writes.
-                            _charges: bulk_parts.unordered_charges.clone(),
+                            charges: bulk_parts.unordered_charges.clone(),
                         }),
                         predicate.clone(),
                     )),
@@ -611,13 +612,13 @@ impl Memtable for BulkMemtable {
                         part: part.clone(),
                         context: context.clone(),
                         sequence,
-                        _charges: charges,
+                        charges,
                     }),
                     PartToMerge::Multi { part, .. } => Box::new(MultiBulkRangeIterBuilder {
                         part: part.clone(),
                         context: context.clone(),
                         sequence,
-                        _charges: charges,
+                        charges,
                     }),
                     PartToMerge::Encoded { part, file_id } => {
                         Box::new(EncodedBulkRangeIterBuilder {
@@ -625,7 +626,7 @@ impl Memtable for BulkMemtable {
                             part: part.clone(),
                             context: context.clone(),
                             sequence,
-                            _charges: charges,
+                            charges,
                         })
                     }
                 };
@@ -930,8 +931,8 @@ pub struct BulkRangeIterBuilder {
     pub part: BulkPart,
     pub context: Arc<BulkIterContext>,
     pub sequence: Option<SequenceRange>,
-    /// Keeps the write buffer charged for the part while the range is alive.
-    _charges: Vec<Arc<MemoryCharge>>,
+    /// Keeps the write buffer charged for the part while the range or its iterators are alive.
+    charges: Vec<Arc<MemoryCharge>>,
 }
 
 /// Iterator builder for multi bulk range
@@ -939,8 +940,8 @@ struct MultiBulkRangeIterBuilder {
     part: MultiBulkPart,
     context: Arc<BulkIterContext>,
     sequence: Option<SequenceRange>,
-    /// Keeps the write buffer charged for the part while the range is alive.
-    _charges: Vec<Arc<MemoryCharge>>,
+    /// Keeps the write buffer charged for the part while the range or its iterators are alive.
+    charges: Vec<Arc<MemoryCharge>>,
 }
 
 impl IterBuilder for BulkRangeIterBuilder {
@@ -974,7 +975,7 @@ impl IterBuilder for BulkRangeIterBuilder {
             metrics,
         );
 
-        Ok(Box::new(iter))
+        Ok(charged(Box::new(iter), &self.charges))
     }
 
     fn record_batch_schema_hint(&self) -> Option<SchemaRef> {
@@ -1007,7 +1008,7 @@ impl IterBuilder for MultiBulkRangeIterBuilder {
             .part
             .read(self.context.clone(), self.sequence, metrics)?
         {
-            Some(iter) => Ok(iter),
+            Some(iter) => Ok(charged(iter, &self.charges)),
             // All batches were pruned by the predicate. Return an empty iterator.
             None => Ok(Box::new(std::iter::empty())),
         }
@@ -1028,8 +1029,8 @@ struct EncodedBulkRangeIterBuilder {
     part: EncodedBulkPart,
     context: Arc<BulkIterContext>,
     sequence: Option<SequenceRange>,
-    /// Keeps the write buffer charged for the part while the range is alive.
-    _charges: Vec<Arc<MemoryCharge>>,
+    /// Keeps the write buffer charged for the part while the range or its iterators are alive.
+    charges: Vec<Arc<MemoryCharge>>,
 }
 
 impl IterBuilder for EncodedBulkRangeIterBuilder {
@@ -1053,7 +1054,7 @@ impl IterBuilder for EncodedBulkRangeIterBuilder {
             .part
             .read(self.context.clone(), self.sequence, metrics)?
         {
-            Ok(iter)
+            Ok(charged(iter, &self.charges))
         } else {
             // Return an empty iterator if no data to read
             Ok(Box::new(std::iter::empty()))
@@ -1068,8 +1069,33 @@ impl IterBuilder for EncodedBulkRangeIterBuilder {
         Some(EncodedRange {
             data: self.part.data().clone(),
             sst_info: self.part.to_sst_info(self.file_id),
+            _charges: self.charges.clone(),
         })
     }
+}
+
+/// Iterator that keeps the write buffer charges of the parts it reads.
+struct ChargedIter {
+    iter: BoxedRecordBatchIterator,
+    _charges: Vec<Arc<MemoryCharge>>,
+}
+
+impl Iterator for ChargedIter {
+    type Item = Result<RecordBatch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next()
+    }
+}
+
+fn charged(
+    iter: BoxedRecordBatchIterator,
+    charges: &[Arc<MemoryCharge>],
+) -> BoxedRecordBatchIterator {
+    Box::new(ChargedIter {
+        iter,
+        _charges: charges.to_vec(),
+    })
 }
 
 struct BulkPartWrapper {
@@ -2454,6 +2480,22 @@ mod tests {
         drop(ranges);
         assert_eq!(held, manager.memory_usage());
         assert_eq!(held, manager.mutable_usage());
+
+        // Iterators and encoded data built from a range keep the charge after the range drops,
+        // as flush does with its sources.
+        let ranges = memtable.ranges(None, RangesOptions::default()).unwrap();
+        let range = ranges.ranges.values().next().unwrap();
+        let encoded = range.encoded().unwrap();
+        let iter = range.build_record_batch_iter(None, None).unwrap();
+        drop(ranges);
+        memtable.write_bulk(part(2)).unwrap();
+        let merged = memtable.stats().estimated_bytes;
+        assert_eq!(held + merged, manager.memory_usage());
+        drop(encoded);
+        assert_eq!(held + merged, manager.memory_usage());
+        assert!(iter.count() > 0);
+        assert_eq!(merged, manager.memory_usage());
+        let held = merged;
 
         // A scan also keeps the parts of a flushed memtable charged after the memtable drops.
         let ranges = memtable.ranges(None, RangesOptions::default()).unwrap();

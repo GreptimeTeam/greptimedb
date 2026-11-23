@@ -98,6 +98,13 @@ pub trait WriteBufferManager: Send + Sync + std::fmt::Debug {
     /// We have freed `mem` bytes.
     fn free_mem(&self, mem: usize);
 
+    /// Frees `mem` bytes that a memtable gives back while it is still alive. Unlike
+    /// [Self::free_mem], it wakes the workers only when writes may be stalled on the
+    /// global limit, so frequent small releases do not wake every worker.
+    fn release_mem(&self, mem: usize) {
+        self.free_mem(mem);
+    }
+
     /// Returns the total memory used by memtables.
     fn memory_usage(&self) -> usize;
 
@@ -200,6 +207,15 @@ impl WriteBufferManager for WriteBufferManagerImpl {
             // Notifies the worker after the memory usage is decreased. When we drop the memtable
             // outside of the worker, the worker may still stall requests because the memory usage
             // is not updated. So we need to notify the worker to handle stalled requests again.
+            let _ = notifier.send(());
+        }
+    }
+
+    fn release_mem(&self, mem: usize) {
+        let previous = self.memory_used.fetch_sub(mem, Ordering::Relaxed);
+        if previous >= self.global_write_buffer_size
+            && let Some(notifier) = &self.notifier
+        {
             let _ = notifier.send(());
         }
     }
@@ -1936,6 +1952,25 @@ mod tests {
     }
 
     #[test]
+    fn test_release_mem_wakes_workers_only_when_writes_may_stall() {
+        let (sender, mut receiver) = watch::channel(());
+        let manager = WriteBufferManagerImpl::new(100).with_notifier(sender);
+        manager.reserve_mem(60);
+        manager.release_mem(10);
+        assert!(!receiver.has_changed().unwrap());
+
+        manager.reserve_mem(50);
+        assert!(manager.should_stall());
+        manager.release_mem(10);
+        assert!(receiver.has_changed().unwrap());
+        receiver.mark_unchanged();
+
+        // Freeing a dropped memtable always wakes the workers.
+        manager.free_mem(10);
+        assert!(receiver.has_changed().unwrap());
+    }
+
+    #[test]
     fn test_get_mutable_limit() {
         assert_eq!(4, WriteBufferManagerImpl::get_mutable_limit(8));
         assert_eq!(5, WriteBufferManagerImpl::get_mutable_limit(10));
@@ -2587,6 +2622,7 @@ mod tests {
                 self.batch.is_none().then(|| EncodedRange {
                     data: Bytes::new(),
                     sst_info: SstInfo::default(),
+                    _charges: Vec::new(),
                 })
             }
         }

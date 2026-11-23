@@ -436,7 +436,7 @@ impl AllocTracker {
             if !self.is_done_allocating.load(Ordering::Relaxed) {
                 write_buffer_manager.schedule_free_mem(bytes);
             }
-            write_buffer_manager.free_mem(bytes);
+            write_buffer_manager.release_mem(bytes);
         }
     }
 
@@ -470,8 +470,8 @@ impl Drop for AllocTracker {
 /// Memory charged to an [AllocTracker] until this charge drops.
 ///
 /// The charge keeps its tracker alive, so data still held by readers stays charged after its
-/// memtable is dropped. Batches that a reader passes on without copying are no longer covered
-/// once the reader drops.
+/// memtable is dropped. Ranges, and the iterators and encoded data built from them, hold the
+/// charge; batches that an iterator passes on without copying are not covered once it drops.
 pub(crate) struct MemoryCharge {
     tracker: Arc<AllocTracker>,
     bytes: usize,
@@ -687,6 +687,8 @@ pub struct EncodedRange {
     pub data: Bytes,
     /// Metadata of the encoded range.
     pub sst_info: SstInfo,
+    /// Keeps the write buffer charged for `data`.
+    pub(crate) _charges: Vec<Arc<MemoryCharge>>,
 }
 
 /// Builder to build an iterator to read the range.
