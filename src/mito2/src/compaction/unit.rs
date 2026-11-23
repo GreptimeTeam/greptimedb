@@ -199,13 +199,19 @@ fn output_memory_bytes(inputs: &[FileHandle]) -> u64 {
     let batch_rows =
         estimate_batch_size(shapes.iter().map(|shape| (shape.rows, shape.bytes))) as u64;
     let merges = inputs.len() > 1;
-    // The merge emits batches of `batch_rows`; a single input passes its batches through, and
-    // those never span row groups.
+    let total_rows = shapes.iter().fold(0u64, |total, shape| {
+        total.saturating_add(shape.rows.saturating_mul(shape.num_row_groups))
+    });
+    let total_bytes = shapes.iter().fold(0u64, |total, shape| {
+        total.saturating_add(shape.bytes.saturating_mul(shape.num_row_groups))
+    });
+    // The merge emits batches of `batch_rows`, but never more rows than the inputs have; a
+    // single input passes its batches through, and those never span row groups.
     let output_batch_bytes = shapes
         .iter()
         .map(|shape| {
             let rows = if merges {
-                batch_rows
+                batch_rows.min(total_rows)
             } else {
                 batch_rows.min(shape.rows)
             };
@@ -231,10 +237,12 @@ fn output_memory_bytes(inputs: &[FileHandle]) -> u64 {
     let merge_bytes = if merges { output_batch_bytes } else { 0 };
     let output_bytes = (MERGED_BATCH_CHANNEL_SIZE as u64 + 2).saturating_mul(output_batch_bytes);
 
+    // Batches past the readers hold distinct rows, so together they never exceed the inputs.
+    let downstream_bytes = merge_bytes.saturating_add(output_bytes).min(total_bytes);
+
     row_group_bytes
         .saturating_add(input_batch_bytes)
-        .saturating_add(merge_bytes)
-        .saturating_add(output_bytes)
+        .saturating_add(downstream_bytes)
 }
 
 /// Finds a dependency group's representative while shortening the parent chain.
@@ -396,6 +404,14 @@ mod tests {
         assert_eq!(
             4 * MIB + 4 * MIB + 4 * 4 * MIB,
             unit(vec![output(vec![d.clone()])]).estimated_memory_bytes()
+        );
+
+        // Two one-row files of 8 KiB: a batch holds both rows at most, and the batches past
+        // the readers never hold more than the two rows.
+        let (f, g) = (file(8 * 1024, 1, 1), file(8 * 1024, 1, 1));
+        assert_eq!(
+            2 * 8 * 1024 + 2 * 8 * 1024 + 2 * 8 * 1024,
+            unit(vec![output(vec![f, g])]).estimated_memory_bytes()
         );
 
         // An input without row group statistics turns off concurrent reads of the output.
