@@ -1353,9 +1353,10 @@ impl LogStore for ObjectStoreLogStore {
     /// repeated until it succeeds, and in the `durable` mode a seal that only
     /// carries records waits for the backoff of earlier rollbacks. A hand-off
     /// pending when stop begins gets the outcome of the object that carries
-    /// its record, except in the `durable` mode when that object's create had
-    /// not started: the hand-off then fails as stopped, and stop writes the
-    /// record into its last object.
+    /// its record, which is stop's last object if its record was still in the
+    /// open batch. In the `durable` mode, one whose record was in a sealed
+    /// batch whose create had not started fails as stopped, and stop writes
+    /// the record into its last object.
     async fn handoff(&self, provider: &Provider, entry_id: EntryId) -> Result<()> {
         let region_id = self.region_of(provider)?;
         let (response_tx, response_rx) = oneshot::channel();
