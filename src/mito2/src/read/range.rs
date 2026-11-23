@@ -102,17 +102,20 @@ impl RangeMeta {
         Self::push_extension_ranges(input, &mut ranges);
 
         let per_series = input.distribution == Some(TimeSeriesDistribution::PerSeries);
+        // Scans with a distribution keep grouping ranges by time only. `TimeWindowed` scans
+        // advertise `(ts, primary key)` ordering, which key-disjoint ranges assigned to one
+        // partition in any order would not keep.
+        let split_by_key = input.distribution.is_none();
         let num_memtables = input.memtables.len();
         let mapper = input.primary_key_mapper();
         let ranges = ranges
             .into_iter()
             .map(|range| {
-                // Per-series scans keep grouping ranges by time only.
                 let primary_keys = range.indices[0]
                     .index
                     .checked_sub(num_memtables)
                     .and_then(|i| input.files.get(i))
-                    .filter(|_| !per_series)
+                    .filter(|_| split_by_key)
                     .and_then(|file| file.primary_key_range(mapper));
                 (range, primary_keys)
             })

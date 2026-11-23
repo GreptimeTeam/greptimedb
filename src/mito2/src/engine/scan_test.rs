@@ -7795,3 +7795,76 @@ async fn test_seq_scan_reads_files_with_disjoint_keys_in_parallel() {
     let ranges: Vec<_> = scanner.properties().partitions.iter().flatten().collect();
     assert_eq!(2, ranges.len(), "unexpected ranges: {ranges:?}");
 }
+
+#[tokio::test]
+async fn test_time_windowed_seq_scan_keeps_files_with_disjoint_keys_together() {
+    let mut env = TestEnv::with_prefix("test_time_windowed_disjoint_keys").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    // All rows share one timestamp. The second file holds more rows than the first.
+    for keys in [&["a"][..], &["b", "c"][..]] {
+        let rows = Rows {
+            schema: column_schemas.clone(),
+            rows: keys
+                .iter()
+                .flat_map(|key| test_util::build_rows_for_key(key, 0, 1, 0))
+                .collect(),
+        };
+        test_util::put_rows(&engine, region_id, rows).await;
+        test_util::flush_region(&engine, region_id, None).await;
+    }
+
+    let request = ScanRequest {
+        distribution: Some(TimeSeriesDistribution::TimeWindowed),
+        ..Default::default()
+    };
+    let Scanner::Seq(mut scanner) = engine.scanner(region_id, request).await.unwrap() else {
+        panic!("Scanner should be seq scan");
+    };
+    // Assign the ranges to one partition with the largest first, as partition assignment
+    // orders them by rows.
+    let mut ranges: Vec<_> = scanner
+        .properties()
+        .partitions
+        .iter()
+        .flatten()
+        .copied()
+        .collect();
+    ranges.sort_by_key(|range| std::cmp::Reverse(range.num_rows));
+    scanner
+        .prepare(
+            PrepareRequest::default()
+                .with_ranges(vec![ranges])
+                .with_target_partitions(1),
+        )
+        .unwrap();
+    let batches = scanner
+        .scan_partition(
+            &store_api::region_engine::QueryScanContext::default(),
+            &ExecutionPlanMetricsSet::default(),
+            0,
+        )
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    let mut keys = Vec::new();
+    for batch in batches {
+        let tags = batch.column_by_name("tag_0").unwrap();
+        for row in 0..batch.num_rows() {
+            keys.push(
+                datatypes::arrow_array::string_array_value_at_index(tags, row)
+                    .unwrap()
+                    .to_string(),
+            );
+        }
+    }
+    // Rows come out in `(ts, primary key)` order without sorting them.
+    assert_eq!(vec!["a", "b", "c"], keys);
+}
