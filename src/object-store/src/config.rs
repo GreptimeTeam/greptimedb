@@ -234,7 +234,8 @@ pub struct AzblobConnection {
     #[serde(skip_serializing)]
     pub account_key: SecretString,
     pub endpoint: String,
-    pub sas_token: Option<String>,
+    #[serde(skip_serializing)]
+    pub sas_token: Option<SecretString>,
 }
 
 impl From<&AzblobConnection> for Azblob {
@@ -248,7 +249,7 @@ impl From<&AzblobConnection> for Azblob {
             .account_key(connection.account_key.expose_secret());
 
         if let Some(token) = &connection.sas_token {
-            builder = builder.sas_token(token);
+            builder = builder.sas_token(token.expose_secret());
         };
 
         builder
@@ -444,6 +445,20 @@ impl ObjectStorageCacheConfig {
 mod tests {
     use super::*;
     use crate::config::ObjectStoreConfig;
+
+    #[test]
+    fn test_azblob_sas_token_is_not_disclosed() {
+        let config: AzblobConnection =
+            toml::from_str("container = 'test'\nsas_token = 'sas-secret'").unwrap();
+        assert_eq!(
+            config.sas_token.as_ref().unwrap().expose_secret(),
+            "sas-secret"
+        );
+        let serialized = toml::to_string(&config).unwrap();
+        assert!(!serialized.contains("sas_token"));
+        assert!(!format!("{config:#?}").contains("sas-secret"));
+        assert!(serialized.contains("container = \"test\""));
+    }
 
     #[test]
     fn test_config_name() {

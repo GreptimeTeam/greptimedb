@@ -23,6 +23,13 @@ use snafu::{Location, Snafu};
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Failed to initialize logging"))]
+    InitLogging {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_telemetry::logging::InitLoggingError,
+    },
+
     #[snafu(display("Failed to install ring crypto provider: {}", msg))]
     InitTlsProvider {
         #[snafu(implicit)]
@@ -83,6 +90,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         source: datanode::error::Error,
+    },
+
+    #[snafu(display("Failed to close the metadata kv backend"))]
+    CloseMetadataKvBackend {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
     },
 
     #[snafu(display("Failed to start flownode"))]
@@ -330,9 +344,11 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
+            Error::InitLogging { source, .. } => source.status_code(),
             Error::StartDatanode { source, .. } => source.status_code(),
             Error::StartFrontend { source, .. } => source.status_code(),
             Error::ShutdownDatanode { source, .. } => source.status_code(),
+            Error::CloseMetadataKvBackend { source, .. } => source.status_code(),
             Error::ShutdownFrontend { source, .. } => source.status_code(),
             Error::StartMetaServer { source, .. } => source.status_code(),
             Error::ShutdownMetaServer { source, .. } => source.status_code(),

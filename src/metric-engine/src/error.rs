@@ -149,6 +149,14 @@ pub enum Error {
         target_region_id: RegionId,
     },
 
+    #[snafu(display("Failed to pause compaction for region {}", region_id))]
+    MitoPauseCompactionOperation {
+        region_id: RegionId,
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Mito edit region operation fails, region id: {}", region_id))]
     MitoEditRegion {
         region_id: RegionId,
@@ -180,6 +188,13 @@ pub enum Error {
 
     #[snafu(display("Mito truncate operation fails"))]
     MitoTruncateOperation {
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Mito discard pending tails operation fails"))]
+    MitoDiscardPendingTailsOperation {
         source: BoxedError,
         #[snafu(implicit)]
         location: Location,
@@ -249,6 +264,18 @@ pub enum Error {
 
     #[snafu(display("Column {} not found in logical region {}", name, region_id))]
     ColumnNotFound {
+        name: String,
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Column {} is missing from physical region {} after adding columns",
+        name,
+        region_id
+    ))]
+    MissingPhysicalColumn {
         name: String,
         region_id: RegionId,
         #[snafu(implicit)]
@@ -433,8 +460,8 @@ impl ErrorExt for Error {
 
             ForbiddenPhysicalAlter { .. }
             | ForbiddenPhysicalWrite { .. }
-            | UnsupportedRegionRequest { .. }
-            | MissingFiles { .. } => StatusCode::Unsupported,
+            | UnsupportedRegionRequest { .. } => StatusCode::Unsupported,
+            MissingFiles { .. } => StatusCode::StorageUnavailable,
 
             DeserializeColumnMetadata { .. }
             | SerializeColumnMetadata { .. }
@@ -451,6 +478,10 @@ impl ErrorExt for Error {
 
             ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
 
+            // The physical region was read twice around the alter and lost a column in
+            // between, so the failure is an inconsistent server state, not a bad request.
+            MissingPhysicalColumn { .. } => StatusCode::Unexpected,
+
             CreateMitoRegion { source, .. }
             | OpenMitoRegion { source, .. }
             | CleanUpMitoRegion { source, .. }
@@ -459,11 +490,13 @@ impl ErrorExt for Error {
             | MitoWriteOperation { source, .. }
             | MitoFlushOperation { source, .. }
             | MitoTruncateOperation { source, .. }
+            | MitoDiscardPendingTailsOperation { source, .. }
             | MitoSyncOperation { source, .. }
             | MitoEnterStagingOperation { source, .. }
             | BatchOpenMitoRegion { source, .. }
             | BatchCatchupMitoRegion { source, .. }
             | MitoCopyRegionFromOperation { source, .. }
+            | MitoPauseCompactionOperation { source, .. }
             | MitoEditRegion { source, .. } => source.status_code(),
 
             EncodePrimaryKey { source, .. } => source.status_code(),
@@ -486,6 +519,7 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
+            MissingFiles { .. } => RetryHint::Retryable,
             PhysicalRegionNotFound { .. } | LogicalRegionNotFound { .. } => {
                 RetryHint::RetryAfterRouteRefresh
             }
@@ -499,9 +533,11 @@ impl ErrorExt for Error {
             | MitoWriteOperation { source, .. }
             | MitoFlushOperation { source, .. }
             | MitoTruncateOperation { source, .. }
+            | MitoDiscardPendingTailsOperation { source, .. }
             | MitoSyncOperation { source, .. }
             | MitoEnterStagingOperation { source, .. }
             | MitoCopyRegionFromOperation { source, .. }
+            | MitoPauseCompactionOperation { source, .. }
             | MitoEditRegion { source, .. } => source.retry_hint(),
 
             EncodePrimaryKey { source, .. } => source.retry_hint(),
@@ -517,6 +553,38 @@ impl ErrorExt for Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_metadata_sync_missing_files_instruction_retry_hint() {
+        use common_meta::instruction::InstructionError;
+        use snafu::IntoError;
+
+        let source = RegionId::new(1, 1);
+        let target = RegionId::new(1, 2);
+        let missing_source = mito2::error::MetadataCopyFileNotFoundSnafu {
+            path: "table/data.parquet",
+        }
+        .into_error(object_store::Error::new(
+            object_store::ErrorKind::NotFound,
+            "missing",
+        ));
+        for err in [
+            MitoCopyRegionFromOperationSnafu {
+                source_region_id: source,
+                target_region_id: target,
+            }
+            .into_error(BoxedError::new(missing_source)),
+            MissingFilesSnafu {
+                region_id: target,
+                file_ids: vec![FileId::random()],
+            }
+            .build(),
+        ] {
+            let reply = InstructionError::from_error(&err);
+            assert_eq!(reply.code, StatusCode::StorageUnavailable);
+            assert_eq!(reply.retry_hint, RetryHint::Retryable);
+        }
+    }
 
     #[test]
     fn test_missing_region_retry_hints() {

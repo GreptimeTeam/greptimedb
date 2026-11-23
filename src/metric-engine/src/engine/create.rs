@@ -43,6 +43,7 @@ use store_api::storage::consts::ReservedColumnId;
 use crate::engine::MetricEngineInner;
 use crate::engine::create::extract_new_columns::extract_new_columns;
 use crate::engine::options::{PhysicalRegionOptions, set_data_region_options};
+use crate::engine::region_metadata;
 use crate::error::{
     ColumnTypeMismatchSnafu, ConflictRegionOptionSnafu, CreateMitoRegionSnafu,
     InternalColumnOccupiedSnafu, InvalidMetadataSnafu, MissingRegionOptionSnafu,
@@ -289,55 +290,41 @@ impl MetricEngineInner {
         };
 
         // TODO(weny): we dont need to pass a mutable new_columns here.
-        self.data_region
-            .add_columns(data_region_id, new_columns, index_option)
+        self.add_physical_columns(physical_region_id, new_columns, index_option)
             .await?;
 
-        let physical_columns = self.data_region.physical_columns(data_region_id).await?;
-        let physical_schema_map = physical_columns
-            .iter()
-            .map(|metadata| (metadata.column_schema.name.as_str(), metadata))
-            .collect::<HashMap<_, _>>();
+        let physical_metadata = self
+            .data_region
+            .physical_metadata(physical_region_id)
+            .await?;
         let logical_regions = requests
             .iter()
             .map(|(region_id, _)| *region_id)
             .collect::<Vec<_>>();
-        let logical_region_columns = requests.iter().map(|(region_id, request)| {
-            (
-                *region_id,
-                request
-                    .column_metadatas
-                    .iter()
-                    .map(|metadata| {
-                        // Safety: previous steps ensure the physical region exist
-                        let column_metadata = *physical_schema_map
-                            .get(metadata.column_schema.name.as_str())
-                            .unwrap();
-                        (metadata.column_schema.name.as_str(), column_metadata)
-                    })
-                    .collect::<HashMap<_, _>>(),
-            )
-        });
+        // The physical region now has every requested column, either because this call
+        // added it or because it was already there with the same definition.
+        let mut logical_region_columns = Vec::with_capacity(requests.len());
+        for (region_id, request) in &requests {
+            let mut column_metadata = HashMap::with_capacity(request.column_metadatas.len());
+            for metadata in &request.column_metadatas {
+                let name = metadata.column_schema.name.as_str();
+                let column = region_metadata::physical_column(&physical_metadata, name)?;
+                column_metadata.insert(name, column);
+            }
+            logical_region_columns.push((*region_id, column_metadata));
+        }
 
-        let new_add_columns = new_column_indices.keys().map(|name| {
-            // Safety: previous steps ensure the physical region exist
-            let column_metadata = *physical_schema_map.get(name).unwrap();
-            (name.to_string(), column_metadata.clone())
-        });
-        // The data region has the new columns, whatever happens to the metadata write.
-        self.state
-            .write()
-            .unwrap()
-            .add_physical_columns(data_region_id, new_add_columns);
+        self.cache_new_physical_columns(&physical_metadata, new_column_indices.keys().copied())?;
 
         extension_return_value.insert(
             ALTER_PHYSICAL_EXTENSION_KEY.to_string(),
-            ColumnMetadata::encode_list(&physical_columns).context(SerializeColumnMetadataSnafu)?,
+            ColumnMetadata::encode_list(&physical_metadata.column_metadatas)
+                .context(SerializeColumnMetadataSnafu)?,
         );
 
         // Writes logical regions metadata to metadata region
         self.metadata_region
-            .add_logical_regions(physical_region_id, true, logical_region_columns)
+            .add_logical_regions(physical_region_id, true, logical_region_columns.into_iter())
             .await?;
 
         self.state

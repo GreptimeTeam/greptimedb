@@ -345,6 +345,7 @@ impl ParquetbenchCommand {
                 level: 0,
                 file_size,
                 max_row_group_uncompressed_size: 0,
+                max_row_group_decoded_size: 0,
                 available_indexes: Default::default(),
                 indexes: Default::default(),
                 index_file_size: 0,
@@ -357,6 +358,7 @@ impl ParquetbenchCommand {
                 primary_key_min: None,
                 primary_key_max: None,
                 preserve_row_sequence: false,
+                format: Default::default(),
             },
             Arc::new(NoopFilePurger),
         );

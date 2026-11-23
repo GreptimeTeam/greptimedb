@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use common_base::range_read::Metadata;
+use futures::future;
 use tokio::sync::Semaphore;
 
 use super::*;

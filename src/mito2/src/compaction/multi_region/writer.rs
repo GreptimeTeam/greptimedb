@@ -16,24 +16,30 @@ use common_base::readable_size::ReadableSize;
 use partition::expr::PartitionExpr;
 use snafu::{ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
+use tokio_util::sync::CancellationToken;
 
 use crate::access_layer::{Metrics, OperationType, SstWriteRequest, WriteType};
 use crate::compaction::multi_region::memory::{self, MemoryLimits};
 use crate::compaction::multi_region::{MultiRegionCompactionContext, MultiRegionTarget};
-use crate::config::MemoryThreshold;
 use crate::error::{ComputeArrowSnafu, Result};
 use crate::read::FlatSource;
 use crate::sst::FormatType;
 use crate::sst::file::FileMeta;
+use crate::sst::index::build::IndexBuildInputs;
+use crate::sst::index::registry::IndexBuildPlan;
 use crate::sst::parquet::metadata::extract_primary_key_range;
 use crate::sst::parquet::parallel_writer::EncodeRuntime;
-use crate::sst::parquet::{SstInfo, WriteOptions};
+use crate::sst::parquet::writer::SstWriteContext;
+use crate::sst::parquet::{SstInfo, WriteOptions, row_group_size_for};
 
 pub(crate) struct TargetWriter<'a> {
     target: &'a MultiRegionTarget,
     context: &'a MultiRegionCompactionContext,
     limits: &'a MemoryLimits,
+    index_plan: Arc<IndexBuildPlan>,
     max_file_size: usize,
+    /// Rows and decoded bytes of the shared sources.
+    input_size: (u64, u64),
     sequence: Option<NonZeroU64>,
     preserve_row_sequence: bool,
 }
@@ -44,6 +50,8 @@ impl<'a> TargetWriter<'a> {
         context: &'a MultiRegionCompactionContext,
         limits: &'a MemoryLimits,
         max_file_size: usize,
+        input_size: (u64, u64),
+        index_plan: Arc<IndexBuildPlan>,
     ) -> Self {
         let sequence = crate::sst::file::known_max_input_sequence(target.inputs.values());
         let preserve_row_sequence = target.options.preserve_row_sequence
@@ -55,7 +63,9 @@ impl<'a> TargetWriter<'a> {
             target,
             context,
             limits,
+            index_plan,
             max_file_size,
+            input_size,
             sequence,
             preserve_row_sequence,
         }
@@ -71,13 +81,14 @@ impl<'a> TargetWriter<'a> {
         let infos = self
             .context
             .access_layer
-            .write_sst_with_guard(
+            .write_sst_with_context(
                 request,
                 &self.options(),
                 &mut metrics,
-                crate::sst::parquet::writer::SstWriteContext {
-                    guard: self.context.protection.clone(),
-                    limits: self.limits.writer,
+                SstWriteContext {
+                    guard: Some(self.context.protection.clone()),
+                    limits: Some(self.limits.writer),
+                    ..Default::default()
                 },
             )
             .await?;
@@ -88,7 +99,7 @@ impl<'a> TargetWriter<'a> {
             .iter()
             .map(|info| {
                 self.validate_sequence(info)?;
-                Ok(self.file_metadata(info, expression.clone()))
+                self.file_metadata(info, expression.clone())
             })
             .collect::<Result<Vec<_>>>()?;
         Ok((files, infos.into_iter().collect()))
@@ -96,15 +107,19 @@ impl<'a> TargetWriter<'a> {
 
     fn request(&self, source: FlatSource) -> Result<SstWriteRequest> {
         let config = &self.context.config;
-        let mut inverted = config.inverted_index.clone();
-        inverted.mem_threshold_on_create = self.index_threshold(inverted.mem_threshold_on_create());
-        let mut fulltext = config.fulltext_index.clone();
-        fulltext.mem_threshold_on_create =
-            self.index_threshold(Some(fulltext.mem_threshold_on_create()));
-        let mut bloom = config.bloom_filter_index.clone();
-        bloom.mem_threshold_on_create = self.index_threshold(bloom.mem_threshold_on_create());
+        // The shared source plan already applies the admitted index thresholds.
         let source = output_projection(self.target, source, self.context.cancellation.clone())?;
+        let index_build_inputs = Some(IndexBuildInputs {
+            output_rows: None,
+            plan: self.index_plan.clone(),
+            input_puffin_manager: self.context.access_layer.build_puffin_manager(),
+            // Routing and file rollover change coverage. Consume only actual output rows.
+            inputs: Arc::from([]),
+            can_merge_inputs: false,
+            memory_limit: self.limits.extension_index_memory_limit,
+        });
         Ok(SstWriteRequest {
+            index_build_inputs,
             op_type: OperationType::Compact,
             metadata: self.target.metadata.clone(),
             source,
@@ -120,31 +135,26 @@ impl<'a> TargetWriter<'a> {
             preserve_row_sequence: self.preserve_row_sequence,
             index_options: self.target.options.index_options.clone(),
             index_config: config.index.clone(),
-            inverted_index_config: inverted,
-            fulltext_index_config: fulltext,
-            bloom_filter_index_config: bloom,
+            inverted_index_config: config.inverted_index.clone(),
+            fulltext_index_config: config.fulltext_index.clone(),
+            bloom_filter_index_config: config.bloom_filter_index.clone(),
         })
     }
 
-    fn index_threshold(&self, configured: Option<usize>) -> MemoryThreshold {
-        MemoryThreshold::Size(ReadableSize(
-            configured
-                .unwrap_or(self.limits.index)
-                .min(self.limits.index) as u64,
-        ))
-    }
-
-    fn options(&self) -> WriteOptions {
+    pub(super) fn options(&self) -> WriteOptions {
         WriteOptions {
             write_buffer_size: ReadableSize(self.limits.batch as u64),
             max_file_size: Some(self.max_file_size),
             // Capped so each admitted encoder stays within the task budget; see
             // [memory::MAX_ROW_GROUP_SIZE].
-            row_group_size: self
-                .target
-                .options
-                .row_group_size()
-                .min(memory::MAX_ROW_GROUP_SIZE),
+            row_group_size: row_group_size_for(
+                self.input_size.0,
+                self.input_size.1,
+                self.target
+                    .options
+                    .row_group_size()
+                    .min(memory::MAX_ROW_GROUP_SIZE),
+            ),
             float_field_encoding: self.target.options.float_field_encoding,
             // Every resident encoder and its finish workspace are admitted together.
             encode_parallelism: 1,
@@ -169,38 +179,46 @@ impl<'a> TargetWriter<'a> {
         Ok(())
     }
 
-    fn file_metadata(&self, info: &SstInfo, partition_expr: Option<PartitionExpr>) -> FileMeta {
+    fn file_metadata(
+        &self,
+        info: &SstInfo,
+        partition_expr: Option<PartitionExpr>,
+    ) -> Result<FileMeta> {
         let range = info
             .file_metadata
             .as_ref()
             .and_then(|footer| extract_primary_key_range(footer, &self.target.metadata));
-        FileMeta {
+        Ok(FileMeta {
             region_id: self.target.metadata.region_id,
             file_id: info.file_id,
             time_range: info.time_range,
-            level: 1,
+            // Region-local L0: window merges and semantic folding stay with
+            // ordinary region compaction.
+            level: 0,
             file_size: info.file_size,
             max_row_group_uncompressed_size: info.max_row_group_uncompressed_size,
+            max_row_group_decoded_size: info.max_row_group_decoded_size,
             available_indexes: info.index_metadata.build_available_indexes(),
-            indexes: info.index_metadata.build_indexes(),
+            indexes: info.index_metadata.build_indexes()?,
             index_file_size: info.index_metadata.file_size,
             index_version: 0,
             num_rows: info.num_rows as u64,
             num_row_groups: info.num_row_groups,
             sequence: self.sequence,
-            partition_expr,
+            partition_expr: partition_expr.map(Into::into),
             num_series: info.num_series,
             primary_key_min: range.as_ref().map(|(min, _)| min.clone()),
             primary_key_max: range.map(|(_, max)| max),
             preserve_row_sequence: self.preserve_row_sequence,
-        }
+            format: info.format.clone(),
+        })
     }
 }
 
 fn output_projection(
     target: &MultiRegionTarget,
     mut source: FlatSource,
-    cancellation: Arc<common_base::cancellation::CancellationHandle>,
+    cancellation: CancellationToken,
 ) -> Result<FlatSource> {
     let projection: Vec<_> = source
         .schema()

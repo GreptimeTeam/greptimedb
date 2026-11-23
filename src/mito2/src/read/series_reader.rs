@@ -270,9 +270,10 @@ impl SeriesReader {
     /// Creates a reader for the series assigned to one data partition.
     ///
     /// `partition_pruner` must come from the candidate scanner's pruner, which
-    /// has predicate prefiltering disabled. The file read path applies precise
-    /// filters with tag filtering skipped because candidate discovery has already
-    /// enforced tag predicates through the exact assigned-series set.
+    /// has predicate prefiltering disabled. Candidate discovery narrows the assignment
+    /// by tag predicate, but an assigned series is a `(table_id, tsid)` hash: a series
+    /// that collides with it shares the identifier without matching the predicate. The
+    /// file read path therefore still applies the tag predicates of its precise filter.
     ///
     /// A single `range_semaphore` covers both the range-build phase and the final
     /// merge.
@@ -559,10 +560,13 @@ fn scan_series_file_ranges(
                 };
 
                 let num_rows_before_filter = record_batch.num_rows();
+                // Tag predicates are applied here, not assumed: the assigned series are
+                // `(table_id, tsid)` hashes, so a colliding partner shares the identifier
+                // without matching the predicate that selected this series.
                 let Some(record_batch) = range.precise_filter_flat(
                     record_batch,
                     range.pre_filter_mode().skip_fields(),
-                    true,
+                    false,
                 )? else {
                     reader_metrics.filter_metrics.rows_precise_filtered +=
                         num_rows_before_filter;
@@ -571,11 +575,6 @@ fn scan_series_file_ranges(
                 reader_metrics.filter_metrics.rows_precise_filtered +=
                     num_rows_before_filter - record_batch.num_rows();
 
-                let record_batch = if let Some(mapper) = range.compaction_projection_mapper() {
-                    mapper.project(record_batch)?
-                } else {
-                    record_batch
-                };
                 if let Some(compat) = range.compat_batch() {
                     yield compat.compat(record_batch)?;
                 } else {
@@ -586,7 +585,6 @@ fn scan_series_file_ranges(
         }
 
         reader_metrics.observe_rows("series_data");
-        reader_metrics.filter_metrics.observe();
         part_metrics.merge_reader_metrics(&reader_metrics, None);
     }
 }

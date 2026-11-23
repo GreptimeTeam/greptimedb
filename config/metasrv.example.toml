@@ -231,7 +231,14 @@ max_send_message_size = "512MB"
 # Available wal providers:
 # - `raft_engine` (default): there're none raft-engine wal config since metasrv only involves in remote wal currently.
 # - `kafka`: metasrv **have to be** configured with kafka wal config when using kafka wal provider in datanode.
+# - `experimental_object_store`: enterprise-only; requires the distributed WAL enablement plugin.
 provider = "raft_engine"
+
+## Public root prefix for `experimental_object_store` WAL (enterprise builds only).
+## The distributed WAL enablement plugin is also required. Metasrv only reads
+## this prefix; it can use the same WAL configuration as the datanodes.
+## All datanodes must configure the same prefix and shared object storage.
+#+ prefix = "wal"
 
 ## The broker endpoints of the Kafka cluster.
 ##
@@ -392,6 +399,8 @@ max_log_files = 720
 
 ## The maximum total size of managed log files in `dir`.
 ## Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable.
+## Requires symbolic links in the log directory; initialization fails if they cannot be created.
+## On Windows, enable Developer Mode or leave this at `0B`.
 max_log_dir_size = "0B"
 
 ## The OTLP tracing export protocol. Can be `grpc`/`http`.

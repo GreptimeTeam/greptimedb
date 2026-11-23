@@ -32,6 +32,7 @@ use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
+use crate::engine::lease_test::promote_to_await_leader_lease;
 use crate::error::Error;
 use crate::manifest::action::RegionEdit;
 use crate::test_util::{
@@ -270,6 +271,7 @@ async fn test_catchup_preserves_region_edit_sequence(
                 flushed_entry_id: None,
                 flushed_sequence: None,
                 committed_sequence: None,
+                ..Default::default()
             },
         )
         .await
@@ -961,8 +963,13 @@ async fn test_catchup_not_exist_with_format(flat_format: bool) {
     assert_matches!(err.status_code(), StatusCode::RegionNotFound);
 }
 
+/// With `awaiting_leader_lease`, a catchup made the region writable and it awaits its Leader
+/// lease: a catchup refused as busy leaves it as it is, so the catchup in progress keeps it.
+#[rstest]
+#[case::follower(false)]
+#[case::awaiting_leader_lease(true)]
 #[tokio::test]
-async fn test_catchup_region_busy() {
+async fn test_catchup_region_busy(#[case] awaiting_leader_lease: bool) {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::new().await;
     let engine = env.create_engine(MitoConfig::default()).await;
@@ -972,9 +979,14 @@ async fn test_catchup_region_busy() {
         .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
-    engine
-        .set_region_role(region_id, RegionRole::Follower)
-        .unwrap();
+    if awaiting_leader_lease {
+        engine.require_write_lease();
+        promote_to_await_leader_lease(&engine, region_id).await;
+    } else {
+        engine
+            .set_region_role(region_id, RegionRole::Follower)
+            .unwrap();
+    }
     let worker = engine.inner.workers.worker(region_id);
     let catchup_regions = worker.catchup_regions();
     catchup_regions.insert_region(region_id);
@@ -989,4 +1001,9 @@ async fn test_catchup_region_busy() {
         .await
         .unwrap_err();
     assert_matches!(err.status_code(), StatusCode::RegionBusy);
+    if awaiting_leader_lease {
+        let region = engine.get_region(region_id).unwrap();
+        assert!(region.is_writable());
+        assert!(region.manifest_ctx.awaits_leader_lease());
+    }
 }

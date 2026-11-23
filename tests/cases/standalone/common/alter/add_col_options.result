@@ -1,0 +1,95 @@
+-- ADD COLUMN must keep the column options that CREATE TABLE keeps; both SHOW CREATE TABLE
+-- outputs below list the same column definitions. ADD COLUMN rejects inline indexes.
+CREATE TABLE add_col_options (ts TIMESTAMP TIME INDEX, host STRING PRIMARY KEY);
+
+Affected Rows: 0
+
+ALTER TABLE add_col_options ADD COLUMN az STRING PRIMARY KEY COMMENT 'availability zone';
+
+Affected Rows: 0
+
+ALTER TABLE add_col_options ADD COLUMN body STRING NOT NULL DEFAULT '' COMMENT 'log body';
+
+Affected Rows: 0
+
+ALTER TABLE add_col_options ADD COLUMN prompt STRING COMPRESSION WITH (level = 5, page_size = '1MiB');
+
+Affected Rows: 0
+
+SHOW CREATE TABLE add_col_options;
+
++-----------------+------------------------------------------------------------------------------------------+
+| Table           | Create Table                                                                             |
++-----------------+------------------------------------------------------------------------------------------+
+| add_col_options | CREATE TABLE IF NOT EXISTS "add_col_options" (                                           |
+|                 |   "ts" TIMESTAMP(3) NOT NULL,                                                            |
+|                 |   "host" STRING NULL,                                                                    |
+|                 |   "az" STRING NULL COMMENT 'availability zone',                                          |
+|                 |   "body" STRING NOT NULL DEFAULT '' COMMENT 'log body',                                  |
+|                 |   "prompt" STRING NULL COMPRESSION WITH(level = '5', page_size = '1MiB', type = 'zstd'), |
+|                 |   TIME INDEX ("ts"),                                                                     |
+|                 |   PRIMARY KEY ("host", "az")                                                             |
+|                 | )                                                                                        |
+|                 |                                                                                          |
+|                 | ENGINE=mito                                                                              |
+|                 |                                                                                          |
++-----------------+------------------------------------------------------------------------------------------+
+
+INSERT INTO add_col_options (ts, host, az, prompt) VALUES (1, 'h1', 'az1', 'hello');
+
+Affected Rows: 1
+
+ADMIN flush_table('add_col_options');
+
++--------------------------------------+
+| ADMIN flush_table('add_col_options') |
++--------------------------------------+
+| 0                                    |
++--------------------------------------+
+
+SELECT * FROM add_col_options;
+
++-------------------------+------+-----+------+--------+
+| ts                      | host | az  | body | prompt |
++-------------------------+------+-----+------+--------+
+| 1970-01-01T00:00:00.001 | h1   | az1 |      | hello  |
++-------------------------+------+-----+------+--------+
+
+CREATE TABLE create_col_options (
+    ts TIMESTAMP TIME INDEX,
+    host STRING,
+    az STRING COMMENT 'availability zone',
+    body STRING NOT NULL DEFAULT '' COMMENT 'log body',
+    prompt STRING COMPRESSION WITH (level = 5, page_size = '1MiB'),
+    PRIMARY KEY (host, az),
+);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE create_col_options;
+
++--------------------+------------------------------------------------------------------------------------------+
+| Table              | Create Table                                                                             |
++--------------------+------------------------------------------------------------------------------------------+
+| create_col_options | CREATE TABLE IF NOT EXISTS "create_col_options" (                                        |
+|                    |   "ts" TIMESTAMP(3) NOT NULL,                                                            |
+|                    |   "host" STRING NULL,                                                                    |
+|                    |   "az" STRING NULL COMMENT 'availability zone',                                          |
+|                    |   "body" STRING NOT NULL DEFAULT '' COMMENT 'log body',                                  |
+|                    |   "prompt" STRING NULL COMPRESSION WITH(level = '5', page_size = '1MiB', type = 'zstd'), |
+|                    |   TIME INDEX ("ts"),                                                                     |
+|                    |   PRIMARY KEY ("host", "az")                                                             |
+|                    | )                                                                                        |
+|                    |                                                                                          |
+|                    | ENGINE=mito                                                                              |
+|                    |                                                                                          |
++--------------------+------------------------------------------------------------------------------------------+
+
+DROP TABLE add_col_options;
+
+Affected Rows: 0
+
+DROP TABLE create_col_options;
+
+Affected Rows: 0
+

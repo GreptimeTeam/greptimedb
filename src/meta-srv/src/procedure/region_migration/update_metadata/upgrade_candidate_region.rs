@@ -227,8 +227,11 @@ impl UpdateMetadata {
 #[cfg(test)]
 mod tests {
     use std::assert_matches;
+    use std::sync::Arc;
 
+    use common_meta::key::TableMetadataManager;
     use common_meta::key::test_utils::new_test_table_info;
+    use common_meta::kv_backend::test_util::MockKvBackendBuilder;
     use common_meta::peer::Peer;
     use common_meta::region_keeper::MemoryRegionKeeper;
     use common_meta::rpc::router::{LeaderState, Region, RegionRoute};
@@ -238,7 +241,9 @@ mod tests {
 
     use crate::error::Error;
     use crate::procedure::region_migration::close_downgraded_region::CloseDowngradedRegion;
-    use crate::procedure::region_migration::test_util::{self, TestingEnv, new_procedure_context};
+    use crate::procedure::region_migration::test_util::{
+        self, TestingEnv, assert_table_cache_invalidated, new_procedure_context,
+    };
     use crate::procedure::region_migration::update_metadata::UpdateMetadata;
     use crate::procedure::region_migration::{ContextFactory, PersistentContext, State};
 
@@ -363,6 +368,82 @@ mod tests {
         assert!(new_region_routes[0].leader_down_since.is_none());
         assert_eq!(new_region_routes[0].follower_peers, vec![Peer::empty(3)]);
         assert_eq!(new_region_routes[0].leader_peer.as_ref().unwrap().id, 2);
+    }
+
+    #[tokio::test]
+    async fn test_failed_upgrade_broadcasts_invalidation() {
+        // The procedure iterates the tables of a batch in the order of a `HashMap` with a random
+        // hasher (`PersistentContext::table_regions`), so the attempt is repeated until the table
+        // that fails comes after the one that is switched. Each attempt orders the two tables
+        // independently, so all 64 miss with probability 2^-64; a map with a fixed order could
+        // make this test fail every time.
+        for _ in 0..64 {
+            let mut state = Box::new(UpdateMetadata::Upgrade);
+            let mut env = TestingEnv::new();
+            // The table of the second region has been dropped.
+            let mut persistent_context = new_persistent_context();
+            persistent_context.region_ids = vec![RegionId::new(1024, 1), RegionId::new(1025, 1)];
+            let mut ctx = env.context_factory().new_context(persistent_context);
+            let region_routes = vec![RegionRoute {
+                region: Region::new_test(RegionId::new(1024, 1)),
+                leader_peer: Some(Peer::empty(1)),
+                leader_state: Some(LeaderState::Downgrading),
+                ..Default::default()
+            }];
+            env.create_physical_table_metadata(new_test_table_info(1024), region_routes)
+                .await;
+            let mut rx = env.frontend_receiver().await;
+
+            let err = state
+                .next(&mut ctx, &new_procedure_context())
+                .await
+                .unwrap_err();
+
+            assert_matches!(err, Error::TableRouteNotFound { .. });
+            assert_table_cache_invalidated(&mut rx, &[1024, 1025]);
+            let table_route = ctx.get_table_route_value(1024).await.unwrap();
+            let switched = table_route.region_routes().unwrap()[0]
+                .leader_peer
+                .as_ref()
+                .is_some_and(|leader| leader.id == 2);
+            if switched {
+                return;
+            }
+        }
+        panic!("In 64 attempts the failing table never came after the switched one");
+    }
+
+    #[tokio::test]
+    async fn test_retried_upgrade_broadcasts_invalidation() {
+        let mut state = Box::new(UpdateMetadata::Upgrade);
+        let mut env = TestingEnv::new();
+        // The table route cannot be read.
+        let kv_backend = MockKvBackendBuilder::default()
+            .range_fn(Arc::new(|_| {
+                common_meta::error::UnexpectedSnafu {
+                    err_msg: "mock range failed",
+                }
+                .fail()
+            }))
+            .build()
+            .unwrap();
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(Arc::new(kv_backend)));
+        let mut ctx = env
+            .context_factory_with_metadata(table_metadata_manager)
+            .new_context(new_persistent_context());
+        let mut rx = env.frontend_receiver().await;
+
+        // Every failed attempt broadcasts.
+        for _ in 0..2 {
+            let err = state
+                .next(&mut ctx, &new_procedure_context())
+                .await
+                .unwrap_err();
+
+            assert_matches!(err, Error::RetryLaterWithSource { .. });
+            assert!(err.is_retryable());
+            assert_table_cache_invalidated(&mut rx, &[1024]);
+        }
     }
 
     #[tokio::test]

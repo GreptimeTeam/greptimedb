@@ -44,6 +44,28 @@ pub fn index_dir(region_dir: &str) -> String {
     util::join_dir(region_dir, "index")
 }
 
+/// Directory containing one authoritative narthex artifact.
+pub(crate) fn narthex_file_dir(region_dir: &str, file_id: FileId) -> String {
+    util::join_dir(region_dir, &file_id.to_string())
+}
+
+/// Recognizes an artifact directory in a region listing.
+pub(crate) fn is_narthex_file_dir(path: &str) -> bool {
+    path.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .is_some_and(|name| FileId::parse_str(name).is_ok())
+}
+
+/// Recovers the physical owner from a listed artifact object, without FileMeta.
+pub(crate) fn parse_narthex_file_id(path: &str) -> Option<FileId> {
+    let (parent, name) = path.rsplit_once('/')?;
+    if name.is_empty() || name == "." || name == ".." {
+        return None;
+    }
+    parent.rsplit('/').next()?.parse().ok()
+}
+
 pub fn sst_file_path(table_dir: &str, region_file_id: RegionFileId, path_type: PathType) -> String {
     let region_dir = region_dir_from_table_dir(table_dir, region_file_id.region_id(), path_type);
     util::join_path(
@@ -146,6 +168,30 @@ mod tests {
     use store_api::storage::{FileId, RegionId};
 
     use super::*;
+
+    #[test]
+    fn test_narthex_locations() {
+        let id = FileId::random();
+        let dir = narthex_file_dir("table/region/", id);
+        assert_eq!(dir, format!("table/region/{id}/"));
+        {
+            assert!(is_narthex_file_dir(&dir));
+            for name in ["manifest.json", "part-0.samples", "part-0.series"] {
+                let path = format!("{dir}{name}");
+                assert_eq!(parse_narthex_file_id(&path), Some(id));
+            }
+            assert_eq!(parse_narthex_file_id(&dir), None);
+        }
+        assert_eq!(
+            parse_narthex_file_id("table/region/index/manifest.json"),
+            None
+        );
+        assert_eq!(
+            parse_narthex_file_id(&format!("{dir}../manifest.json")),
+            None
+        );
+        assert!(!is_narthex_file_dir("table/region/index/"));
+    }
 
     #[test]
     fn test_sst_file_path() {

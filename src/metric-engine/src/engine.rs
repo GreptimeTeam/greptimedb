@@ -25,7 +25,7 @@ mod put;
 mod read;
 mod region_metadata;
 mod staging;
-mod state;
+pub(crate) mod state;
 mod sync;
 
 use std::any::Any;
@@ -58,9 +58,10 @@ use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 
 use crate::config::EngineConfig;
 use crate::data_region::DataRegion;
+use crate::engine::region_metadata::ColumnMetadataInterner;
 use crate::error::{
-    self, Error, Result, StartRepeatedTaskSnafu, UnsupportedRegionRequestSnafu,
-    UnsupportedRemapManifestsRequestSnafu,
+    self, Error, PhysicalRegionNotFoundSnafu, Result, StartRepeatedTaskSnafu,
+    UnsupportedRegionRequestSnafu, UnsupportedRemapManifestsRequestSnafu,
 };
 use crate::metadata_region::MetadataRegion;
 use crate::repeated_task::FlushMetadataRegionTask;
@@ -247,7 +248,7 @@ impl RegionEngine for MetricEngine {
                     .alter_regions(vec![(region_id, alter)], &mut extension_return_value)
                     .await
             }
-            RegionRequest::Compact(_) => {
+            RegionRequest::Compact(_) | RegionRequest::CancelCompaction(_) => {
                 if self.inner.is_physical_region(region_id) {
                     self.inner
                         .mito
@@ -294,6 +295,19 @@ impl RegionEngine for MetricEngine {
                 request: RegionRequest::Truncate(request),
             }
             .fail(),
+            // Only the data region's pending tails are discarded; the metadata region's are not.
+            RegionRequest::DiscardPendingTails(_) => {
+                if self.inner.is_physical_region(region_id) {
+                    self.inner
+                        .mito
+                        .handle_request(utils::to_data_region_id(region_id), request)
+                        .await
+                        .context(error::MitoDiscardPendingTailsOperationSnafu)
+                        .map(|response| response.affected_rows)
+                } else {
+                    UnsupportedRegionRequestSnafu { request }.fail()
+                }
+            }
             RegionRequest::Delete(delete) => self.inner.delete_region(region_id, delete).await,
             RegionRequest::Catchup(_) => {
                 let mut response = self
@@ -390,20 +404,32 @@ impl RegionEngine for MetricEngine {
         role: RegionRole,
         sent_at: Instant,
         deadline: Instant,
+        candidate_lease_id: Option<u64>,
     ) -> Result<bool, BoxedError> {
         // The metadata region goes first. If it ignores the grant, the data region, whose role the
         // engine reports, must not take it either. A region that is not found is ignored.
-        for x in [
-            utils::to_metadata_region_id(region_id),
-            utils::to_data_region_id(region_id),
-        ] {
-            match self
-                .inner
-                .mito
-                .set_region_role_with_lease(x, role, sent_at, deadline)
-            {
+        let metadata_region_id = utils::to_metadata_region_id(region_id);
+        let data_region_id = utils::to_data_region_id(region_id);
+        for x in [metadata_region_id, data_region_id] {
+            match self.inner.mito.set_region_role_with_lease(
+                x,
+                role,
+                sent_at,
+                deadline,
+                candidate_lease_id,
+            ) {
                 Ok(true) => {}
-                Ok(false) => return Ok(false),
+                Ok(false) => {
+                    // If the metadata region ignored the grant, the data region is not handed it, so
+                    // record it and extend the deadline for the data region, as an ignored Leader
+                    // lease does. If the data region ignored it, the data region has done both.
+                    if x == metadata_region_id {
+                        let mito = &self.inner.mito;
+                        mito.record_granted_lease(data_region_id, sent_at, candidate_lease_id);
+                        mito.extend_leader_deadline(data_region_id, deadline);
+                    }
+                    return Ok(false);
+                }
                 Err(e) if e.status_code() != StatusCode::RegionNotFound => return Err(e),
                 Err(_) => {}
             }
@@ -511,6 +537,18 @@ impl RegionEngine for MetricEngine {
         }
     }
 
+    /// A physical region is a confirmed leader only if both regions of the pair are, since one
+    /// may have been promoted without the other.
+    fn is_confirmed_leader(&self, region_id: RegionId) -> Option<bool> {
+        if !self.inner.is_physical_region(region_id) {
+            return None;
+        }
+        let mito = &self.inner.mito;
+        let metadata = mito.is_confirmed_leader(utils::to_metadata_region_id(region_id))?;
+        let data = mito.is_confirmed_leader(utils::to_data_region_id(region_id))?;
+        Some(metadata && data)
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -528,6 +566,17 @@ pub struct PutGroupResult {
 }
 
 impl MetricEngine {
+    /// Pauses compaction on the metadata half of a physical metric region.
+    pub async fn pause_metadata_compaction(
+        &self,
+        physical_region: RegionId,
+    ) -> mito2::error::Result<mito2::compaction::CompactionGuard> {
+        self.inner
+            .mito
+            .pause_compaction(crate::utils::to_metadata_region_id(physical_region))
+            .await
+    }
+
     pub fn try_new(mito: MitoEngine, mut config: EngineConfig) -> Result<Self> {
         let metadata_region = MetadataRegion::new(mito.clone());
         let data_region = DataRegion::new(mito.clone());
@@ -538,6 +587,7 @@ impl MetricEngine {
             mito: mito.clone(),
             metadata_region,
             data_region,
+            column_metadata_interner: ColumnMetadataInterner::default(),
             state: state.clone(),
             row_modifier: RowModifier::default(),
             flush_task: RepeatedTask::new(
@@ -565,6 +615,20 @@ impl MetricEngine {
         requests: impl ExactSizeIterator<Item = (RegionId, RegionPutRequest)>,
     ) -> Vec<PutGroupResult> {
         self.inner.put_regions_batch(requests).await
+    }
+
+    /// Returns the physical region's logical regions from the loaded engine state.
+    /// Unlike `logical_regions`, this does not read the metadata region and remains usable
+    /// while a partially completed drop or close is being retried.
+    pub fn loaded_logical_regions(&self, physical_region_id: RegionId) -> Vec<RegionId> {
+        self.inner
+            .state
+            .read()
+            .unwrap()
+            .physical_region_states()
+            .get(&utils::to_data_region_id(physical_region_id))
+            .map(|state| state.logical_regions().iter().copied().collect())
+            .unwrap_or_default()
     }
 
     /// Returns all logical regions associated with the physical region.
@@ -608,7 +672,7 @@ impl MetricEngine {
 }
 
 /// Shared definitions must agree before CREATE/ALTER mutates either region.
-fn validate_shared_column(
+pub(crate) fn validate_shared_column(
     region_id: store_api::storage::RegionId,
     existing: &store_api::metadata::ColumnMetadata,
     proposed: &store_api::metadata::ColumnMetadata,
@@ -642,9 +706,46 @@ struct MetricEngineInner {
     mito: MitoEngine,
     metadata_region: MetadataRegion,
     data_region: DataRegion,
+    column_metadata_interner: ColumnMetadataInterner,
     state: Arc<RwLock<MetricEngineState>>,
     row_modifier: RowModifier,
     flush_task: RepeatedTask<Error>,
+}
+
+impl MetricEngineInner {
+    /// Adds columns to the physical region while holding its column-add lock.
+    ///
+    /// Column ids are derived from the metadata of the physical region, so requests
+    /// on logical regions that share one physical region must not allocate ids at
+    /// the same time, otherwise two different columns could get one id.
+    async fn add_physical_columns(
+        &self,
+        physical_region_id: RegionId,
+        columns: Vec<store_api::metadata::ColumnMetadata>,
+        index_options: IndexOptions,
+    ) -> Result<()> {
+        if columns.is_empty() {
+            return Ok(());
+        }
+
+        let data_region_id = utils::to_data_region_id(physical_region_id);
+        let column_add_lock = {
+            let state = self.state.read().unwrap();
+            state
+                .physical_region_states()
+                .get(&data_region_id)
+                .with_context(|| PhysicalRegionNotFoundSnafu {
+                    region_id: data_region_id,
+                })?
+                .column_add_lock()
+                .clone()
+        };
+
+        let _guard = column_add_lock.lock().await;
+        self.data_region
+            .add_columns(physical_region_id, columns, index_options)
+            .await
+    }
 }
 
 #[cfg(test)]
@@ -658,11 +759,13 @@ mod test {
     use common_wal::options::{KafkaWalOptions, WalOptions};
     use mito2::sst::location::region_dir_from_table_dir;
     use mito2::test_util::{kafka_log_store_factory, prepare_test_for_kafka_log_store};
+    use rstest::rstest;
     use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
     use store_api::mito_engine_options::WAL_OPTIONS_KEY;
     use store_api::region_request::{
-        PathType, RegionCleanUpRequest, RegionCloseRequest, RegionDropRequest, RegionFlushRequest,
-        RegionOpenRequest, RegionPutRequest, RegionRequest, RegionTruncateRequest,
+        PathType, RegionCancelCompactionRequest, RegionCleanUpRequest, RegionCloseRequest,
+        RegionDiscardPendingTailsRequest, RegionDropRequest, RegionFlushRequest, RegionOpenRequest,
+        RegionPutRequest, RegionRequest, RegionTruncateRequest,
     };
 
     use super::*;
@@ -691,6 +794,73 @@ mod test {
             .unwrap_err();
         let error = format!("{error:?}");
         assert!(error.contains("series index is disabled"), "{error}");
+        let error = env
+            .metric()
+            .handle_request(env.default_logical_region_id(), request())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            common_error::status_code::StatusCode::Unsupported,
+            error.status_code()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cancel_compaction_physical_and_logical_regions() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let request = || {
+            RegionRequest::CancelCompaction(RegionCancelCompactionRequest {
+                task_id: "stale-task-id".to_string(),
+            })
+        };
+        // Mito returns zero for an absent task; reaching that result proves forwarding.
+        let response = env
+            .metric()
+            .handle_request(env.default_physical_region_id(), request())
+            .await
+            .unwrap();
+        assert_eq!(response.affected_rows, 0);
+
+        let error = env
+            .metric()
+            .handle_request(env.default_logical_region_id(), request())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            common_error::status_code::StatusCode::Unsupported,
+            error.status_code()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_discard_pending_tails_physical_and_logical_regions() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let request =
+            || RegionRequest::DiscardPendingTails(RegionDiscardPendingTailsRequest { node_id: 1 });
+        let data_region_id = utils::to_data_region_id(env.default_physical_region_id());
+        // A physical region accepts the request; neither of its Mito regions has pending tails.
+        let response = env
+            .metric()
+            .handle_request(env.default_physical_region_id(), request())
+            .await
+            .unwrap();
+        assert_eq!(response.affected_rows, 0);
+        // The request reaches the data region, which refuses it as a follower.
+        env.mito()
+            .set_region_role(data_region_id, RegionRole::Follower)
+            .unwrap();
+        let error = env
+            .metric()
+            .handle_request(env.default_physical_region_id(), request())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            common_error::status_code::StatusCode::RegionNotReady,
+            error.status_code()
+        );
+
         let error = env
             .metric()
             .handle_request(env.default_logical_region_id(), request())
@@ -891,22 +1061,54 @@ mod test {
         assert!(!object_store.exists(&data_region_dir).await.unwrap());
     }
 
+    const LEASE: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// Asserts that both the metadata and the data region of `physical_region_id` recorded
+    /// `expected` as the candidate lease id of their latest lease.
+    fn assert_candidate_lease_id_recorded(
+        mito: &MitoEngine,
+        physical_region_id: RegionId,
+        expected: Option<u64>,
+    ) {
+        for region_id in [
+            utils::to_metadata_region_id(physical_region_id),
+            utils::to_data_region_id(physical_region_id),
+        ] {
+            assert_eq!(mito.granted_candidate_lease_id(region_id), expected);
+        }
+    }
+
+    /// The region that ignores a Leader grant is the one downgraded after the heartbeat is sent;
+    /// the other one is downgraded before it.
+    #[rstest]
+    #[case::metadata_region_ignores(
+        utils::to_data_region_id,
+        utils::to_metadata_region_id,
+        RegionRole::Follower
+    )]
+    #[case::data_region_ignores(
+        utils::to_metadata_region_id,
+        utils::to_data_region_id,
+        RegionRole::Leader
+    )]
     #[tokio::test]
-    async fn test_leader_grant_ignored_by_metadata_region_leaves_data_region() {
+    async fn test_leader_grant_ignored_by_one_region(
+        #[case] downgraded_before_sent: fn(RegionId) -> RegionId,
+        #[case] downgraded_after_sent: fn(RegionId) -> RegionId,
+        #[case] metadata_role: RegionRole,
+    ) {
         let env = TestEnv::new().await;
         env.init_metric_region().await;
         let (engine, mito) = (env.metric(), env.mito());
         let physical_region_id = env.default_physical_region_id();
-        let lease = std::time::Duration::from_secs(10);
-        // The data region is downgraded before the heartbeat is sent, the metadata region after it.
         let downgrade = |region_id| {
             mito.set_region_role_state_gracefully(region_id, SettableRegionRoleState::Follower)
         };
-        downgrade(utils::to_data_region_id(physical_region_id))
+        downgrade(downgraded_before_sent(physical_region_id))
             .await
             .unwrap();
         let sent_at = Instant::now();
-        downgrade(utils::to_metadata_region_id(physical_region_id))
+        downgrade(downgraded_after_sent(physical_region_id))
             .await
             .unwrap();
 
@@ -916,15 +1118,172 @@ mod test {
                     physical_region_id,
                     RegionRole::Leader,
                     sent_at,
-                    sent_at + lease,
+                    sent_at + LEASE,
+                    Some(7),
                 )
                 .unwrap()
         };
         assert!(!grant(sent_at));
         assert_eq!(engine.role(physical_region_id), Some(RegionRole::Follower));
+        assert_eq!(
+            mito.role(utils::to_metadata_region_id(physical_region_id)),
+            Some(metadata_role)
+        );
+        // Both regions record the grant, including the one that is not handed it.
+        assert_candidate_lease_id_recorded(&mito, physical_region_id, Some(7));
 
         assert!(grant(Instant::now()));
         assert_eq!(engine.role(physical_region_id), Some(RegionRole::Leader));
+    }
+
+    #[tokio::test]
+    async fn test_physical_region_is_confirmed_leader_only_with_both_regions() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let (engine, mito) = (env.metric(), env.mito());
+        mito.require_write_lease();
+        mito.renew_node_lease(Instant::now() + LEASE);
+        let physical_region_id = env.default_physical_region_id();
+        let metadata_region_id = utils::to_metadata_region_id(physical_region_id);
+        // A logical region has no role of its own.
+        assert_eq!(
+            engine.is_confirmed_leader(env.default_logical_region_id()),
+            None
+        );
+        for region_id in [
+            metadata_region_id,
+            utils::to_data_region_id(physical_region_id),
+        ] {
+            mito.set_region_role_state_gracefully(region_id, SettableRegionRoleState::Follower)
+                .await
+                .unwrap();
+        }
+        let catchup = RegionCatchupRequest {
+            set_writable: true,
+            ..Default::default()
+        };
+        engine
+            .handle_batch_catchup_requests(1, vec![(physical_region_id, catchup)])
+            .await
+            .unwrap()
+            .into_iter()
+            .for_each(|(_, result)| {
+                result.unwrap();
+            });
+        assert_eq!(engine.role(physical_region_id), Some(RegionRole::Leader));
+        assert_eq!(engine.is_confirmed_leader(physical_region_id), Some(false));
+
+        // The data region still waits after the metadata region received its lease.
+        let sent_at = Instant::now();
+        mito.set_region_role_with_lease(
+            metadata_region_id,
+            RegionRole::Leader,
+            sent_at,
+            sent_at + LEASE,
+            None,
+        )
+        .unwrap();
+        assert_eq!(engine.is_confirmed_leader(physical_region_id), Some(false));
+
+        engine
+            .set_region_role_with_lease(
+                physical_region_id,
+                RegionRole::Leader,
+                sent_at,
+                sent_at + LEASE,
+                None,
+            )
+            .unwrap();
+        assert_eq!(engine.is_confirmed_leader(physical_region_id), Some(true));
+
+        // A confirmed data region alone does not make the physical region confirmed.
+        mito.set_region_role(metadata_region_id, RegionRole::Follower)
+            .unwrap();
+        assert_eq!(engine.is_confirmed_leader(physical_region_id), Some(false));
+    }
+
+    /// A physical Leader lease that the metadata region ignores is still recorded for the data
+    /// region and extends its deadline.
+    #[tokio::test]
+    async fn test_lease_ignored_by_metadata_region_extends_data_deadline() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let (engine, mito) = (env.metric(), env.mito());
+        let physical_region_id = env.default_physical_region_id();
+        let metadata_region_id = utils::to_metadata_region_id(physical_region_id);
+        let data_region_id = utils::to_data_region_id(physical_region_id);
+        let start = Instant::now();
+        mito.require_write_lease();
+        mito.renew_node_lease(start + LEASE);
+        mito.set_region_role_state_gracefully(data_region_id, SettableRegionRoleState::Follower)
+            .await
+            .unwrap();
+        // The data region's catchup sets its deadline to the node lease's.
+        let catchup = RegionCatchupRequest {
+            set_writable: true,
+            ..Default::default()
+        };
+        mito.handle_request(data_region_id, RegionRequest::Catchup(catchup))
+            .await
+            .unwrap();
+        mito.renew_node_lease(start + 10 * LEASE);
+        let sent_at = Instant::now();
+        mito.set_region_role_state_gracefully(
+            metadata_region_id,
+            SettableRegionRoleState::Follower,
+        )
+        .await
+        .unwrap();
+        // The metadata region was downgraded after `sent_at`, so it ignores the lease.
+        let promoted = engine
+            .set_region_role_with_lease(
+                physical_region_id,
+                RegionRole::Leader,
+                sent_at,
+                start + 5 * LEASE,
+                None,
+            )
+            .unwrap();
+        assert!(!promoted);
+
+        // Past the deadline the data region's catchup set, before the lease's.
+        mito.freeze_lease_clock(start + 2 * LEASE);
+        engine
+            .handle_request(
+                env.default_logical_region_id(),
+                RegionRequest::Put(RegionPutRequest {
+                    skip_wal: false,
+                    rows: Rows {
+                        schema: row_schema_with_tags(&["job"]),
+                        rows: build_rows(1, 5),
+                    },
+                    hint: None,
+                    partition_expr_version: None,
+                }),
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_candidate_lease_id_reaches_metadata_and_data_regions() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let (engine, mito) = (env.metric(), env.mito());
+        let physical_region_id = env.default_physical_region_id();
+        let sent_at = Instant::now();
+
+        engine
+            .set_region_role_with_lease(
+                physical_region_id,
+                RegionRole::Follower,
+                sent_at,
+                sent_at + LEASE,
+                Some(7),
+            )
+            .unwrap();
+
+        assert_candidate_lease_id_recorded(&mito, physical_region_id, Some(7));
     }
 
     #[tokio::test]

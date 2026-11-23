@@ -6,6 +6,7 @@ license.workspace = true
 
 [features]
 default = []
+enterprise = []
 test = []
 
 [lints]
@@ -26,12 +27,13 @@ enum_dispatch = "0.3"
 jsonb.workspace = true
 num = "0.4"
 num-traits = "0.2"
+once_cell.workspace = true
 ordered-float.workspace = true
 parquet-variant.workspace = true
 parquet-variant-compute.workspace = true
 parquet-variant-json.workspace = true
 paste.workspace = true
-serde.workspace = true
+serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true
 snafu.workspace = true
 sqlparser.workspace = true

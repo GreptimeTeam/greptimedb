@@ -16,7 +16,7 @@ mod otlp;
 
 pub use otlp::MetricInsertPreflight;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
@@ -55,7 +55,7 @@ use common_meta::rpc::ddl::TriggerReason;
 use common_query::Output;
 use common_query::native_histogram::{is_native_histogram_value_type, native_histogram_value_type};
 use common_query::prelude::{
-    EXEMPLAR_LABELS_COLUMN, EXEMPLAR_METRIC_COLUMN, greptime_timestamp, greptime_value,
+    EXEMPLAR_METRIC_COLUMN, greptime_exemplar_labels, greptime_timestamp, greptime_value,
 };
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{debug, error, warn};
@@ -64,7 +64,7 @@ use common_time::timestamp::TimeUnit;
 use datatypes::schema::{
     ColumnDefaultConstraint, ColumnEncoding, CompressionOptions, SkippingIndexOptions,
 };
-use futures_util::future;
+use futures_util::{StreamExt, TryStreamExt, future, stream};
 use meter_core::data::MeterRecord;
 use meter_macros::write_meter;
 use partition::manager::PartitionRuleManagerRef;
@@ -105,9 +105,10 @@ use crate::region_req_factory::RegionRequestFactory;
 use crate::req_convert::common::preprocess_row_insert_requests;
 use crate::req_convert::insert::{
     ColumnToRow, ImpureDefaultFiller, RowToRegion, StatementToRegion, TableToRegion,
-    fill_reqs_with_impure_default, rows_to_record_batch,
+    fill_reqs_with_impure_default, rows_to_record_batch, value_matches_type,
 };
 use crate::statement::StatementExecutor;
+use crate::statement::ddl::is_retention_ttl;
 use crate::write_dispatcher::{WriteDispatcher, WriteDispatcherRef};
 
 pub struct Inserter {
@@ -120,6 +121,11 @@ pub struct Inserter {
     /// When `false`, missing tables are never auto-created regardless of the
     /// per-request `auto_create_table` hint. When `true`, the hint still applies.
     auto_create_table: bool,
+    /// Time index unit for physical metric tables created by auto table creation.
+    /// New logical tables created under such a physical table inherit its unit,
+    /// so all metric-engine ingestion paths write timestamps in this unit.
+    /// Defaults to milliseconds for compatibility.
+    auto_create_physical_table_timestamp_unit: TimeUnit,
     pending_rows_batcher: Option<Arc<dyn PendingRowsBatcher>>,
     /// Rows handed to detached flow mirror tasks that have not finished yet.
     /// Bounds how much row data in-flight mirror writes may keep alive, see
@@ -342,9 +348,16 @@ impl Inserter {
             node_manager,
             table_flownode_set_cache,
             auto_create_table,
+            auto_create_physical_table_timestamp_unit: TimeUnit::Millisecond,
             pending_rows_batcher: None,
             mirror_pending_rows: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Sets the time index unit for auto-created physical metric tables.
+    pub fn with_auto_create_physical_table_timestamp_unit(mut self, unit: TimeUnit) -> Self {
+        self.auto_create_physical_table_timestamp_unit = unit;
+        self
     }
 
     /// Installs the shared dispatcher used by direct writes and batch flushes.
@@ -411,9 +424,10 @@ impl Inserter {
                 reason: "invalid exemplar destination"
             }
         );
-        self.bind_exemplar_table_ids(&mut requests, &ctx, sources)
-            .await?;
+        validate_column_count_match(&requests)?;
         preprocess_row_insert_requests(&mut requests.inserts)?;
+        self.bind_exemplar_table_ids(&mut requests, &ctx, sources, statement_executor)
+            .await?;
         self.handle_row_inserts_with_create_type(
             requests,
             ctx,
@@ -430,9 +444,10 @@ impl Inserter {
         requests: &mut RowInsertRequests,
         ctx: &QueryContextRef,
         sources: &[TableInfoRef],
+        statement_executor: &StatementExecutor,
     ) -> Result<()> {
-        validate_column_count_match(requests)?;
         let mut tables = HashMap::new();
+        let mut required_tags = BTreeMap::<String, BTreeSet<String>>::new();
         for info in sources.iter().filter(|info| {
             info.catalog_name == ctx.current_catalog() && info.schema_name == ctx.current_schema()
         }) {
@@ -452,6 +467,7 @@ impl Inserter {
             let Some(rows) = request.rows.as_mut() else {
                 continue;
             };
+            validate_exemplar_rows(rows)?;
             ensure!(
                 !rows
                     .schema
@@ -497,12 +513,99 @@ impl Inserter {
                         ),
                     }
                 );
+                let tags = required_tags.entry(name.clone()).or_default();
+                for (column, value) in rows.schema.iter().zip(&row.values) {
+                    if column.semantic_type == SemanticType::Tag as i32
+                        && column.column_name != EXEMPLAR_METRIC_COLUMN
+                        && column.column_name != DATA_SCHEMA_TSID_COLUMN_NAME
+                        && value.value_data.is_some()
+                    {
+                        tags.insert(column.column_name.clone());
+                    }
+                }
                 row.values.push(ValueData::U32Value(info.table_id()).into());
             }
             rows.schema.push(api::v1::helper::tag_column_schema(
                 DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
                 ColumnDataType::Uint32,
             ));
+        }
+
+        let mut alters = Vec::new();
+        let mut refresh = Vec::new();
+        for (name, tags) in required_tags {
+            let info = &tables[&name];
+            let tags = tags
+                .into_iter()
+                .map(|name| api::v1::helper::tag_column_schema(&name, ColumnDataType::String))
+                .collect::<Vec<_>>();
+            if let Some(add_columns) = exemplar_source_add_columns(info, &tags)? {
+                ensure!(
+                    self.auto_create_disabled_reason(ctx)?.is_none(),
+                    InvalidInsertRequestSnafu {
+                        reason: format!(
+                            "exemplar source {name} requires new tags, but automatic DDL is disabled"
+                        ),
+                    }
+                );
+                alters.push((
+                    info.table_id(),
+                    AlterTableExpr {
+                        catalog_name: info.catalog_name.clone(),
+                        schema_name: info.schema_name.clone(),
+                        table_name: name,
+                        kind: Some(Kind::AddColumns(add_columns)),
+                    },
+                ));
+                refresh.push((info, tags));
+            }
+        }
+        if !alters.is_empty() {
+            if let Some(table) = self
+                .get_table(
+                    ctx.current_catalog(),
+                    &ctx.current_schema(),
+                    METRICS_EXEMPLARS_TABLE,
+                )
+                .await?
+            {
+                // Reject an incompatible destination before changing any source schema.
+                validate_exemplar_table(&table.table_info())?;
+            }
+            statement_executor
+                .alter_logical_tables_with_ids(alters, ctx.clone(), TriggerReason::AutoAlter)
+                .await?;
+            for (pinned, tags) in refresh {
+                let table = self
+                    .get_table(&pinned.catalog_name, &pinned.schema_name, &pinned.name)
+                    .await?
+                    .with_context(|| InvalidInsertRequestSnafu {
+                        reason: format!(
+                            "exemplar source {} disappeared during reconciliation",
+                            pinned.name
+                        ),
+                    })?;
+                let info = table.table_info();
+                ensure!(
+                    info.table_id() == pinned.table_id(),
+                    InvalidInsertRequestSnafu {
+                        reason: format!(
+                            "exemplar source {} changed during reconciliation",
+                            pinned.name
+                        ),
+                    }
+                );
+                // Concurrent ADD IF NOT EXISTS can succeed on names alone; verify their definitions.
+                ensure!(
+                    exemplar_source_add_columns(&info, &tags)?.is_none(),
+                    InvalidInsertRequestSnafu {
+                        reason: format!(
+                            "exemplar source {} is still missing inherited tags",
+                            pinned.name
+                        ),
+                    }
+                );
+            }
         }
         Ok(())
     }
@@ -654,7 +757,7 @@ impl Inserter {
             .values()
             .map(|info| (info.name.as_str(), info))
             .collect::<HashMap<_, _>>();
-        let mut prepared = Vec::with_capacity(requests.inserts.len());
+        let mut estimated_bytes = Some(0usize);
         for request in &mut requests.inserts {
             let table_info =
                 by_name
@@ -666,8 +769,34 @@ impl Inserter {
                 continue;
             };
             ImpureDefaultFiller::new((*table_info).clone())?.fill_rows(rows);
-            let batch = rows_to_record_batch(rows, table_info)?;
-            prepared.push(((*table_info).clone(), batch));
+            if batcher.memory_limit_bytes() != 0 {
+                estimated_bytes = estimated_bytes.and_then(|bytes| {
+                    bytes.checked_add(crate::req_convert::insert::estimated_record_batch_bytes(
+                        rows, table_info,
+                    )?)
+                });
+            }
+        }
+        // Reserve once for the whole request before constructing any Arrow arrays.
+        // PB rows and the converted batches coexist, so this is additional memory.
+        let permit = if requests.inserts.is_empty() {
+            None
+        } else {
+            Some(
+                batcher
+                    .acquire(
+                        estimated_bytes.unwrap_or(usize::MAX),
+                        ctx.held_memory_bytes(),
+                    )
+                    .await?,
+            )
+        };
+        let mut prepared = Vec::with_capacity(requests.inserts.len());
+        for request in &requests.inserts {
+            let table_info = by_name[request.table_name.as_str()];
+            if let Some(rows) = &request.rows {
+                prepared.push((table_info.clone(), rows_to_record_batch(rows, table_info)?));
+            }
         }
         // Preserve the existing meter input and original request boundary. These
         // envelopes are only for accounting; routing happens after batching.
@@ -698,11 +827,8 @@ impl Inserter {
         .await
         .context(WriteRejectedSnafu)?;
         prepared.retain(|(_, batch)| batch.num_rows() != 0);
-        let results = if prepared.is_empty() {
-            Vec::new()
-        } else {
+        let results = if let Some(permit) = permit {
             // One original request shares admission across all table submissions.
-            let permit = batcher.acquire().await?;
             let submissions = prepared.into_iter().map(|(info, batch)| {
                 // Route to the same target database used for admission above.
                 let mut target_ctx = ctx.fork();
@@ -712,6 +838,8 @@ impl Inserter {
             });
             // Observe every table completion even when another table fails.
             future::join_all(submissions).await
+        } else {
+            Vec::new()
         };
         let mut affected_rows = 0;
         let mut meta = OutputMeta::new_with_cost(write_cost as _);
@@ -1753,7 +1881,9 @@ impl Inserter {
         let default_schema = vec![
             ColumnSchema {
                 column_name: greptime_timestamp().to_string(),
-                datatype: ColumnDataType::TimestampMillisecond as _,
+                datatype: api::helper::timestamp_datatype(
+                    self.auto_create_physical_table_timestamp_unit,
+                ) as _,
                 semantic_type: SemanticType::Timestamp as _,
                 datatype_extension: None,
                 options: None,
@@ -1773,6 +1903,7 @@ impl Inserter {
         create_table_expr
             .table_options
             .insert(PHYSICAL_TABLE_METADATA_KEY.to_string(), "true".to_string());
+        apply_retention_ttl_hint(&mut create_table_expr.table_options, ctx);
 
         // create physical table
         let res = statement_executor
@@ -2195,6 +2326,95 @@ fn validate_column_count_match(requests: &RowInsertRequests) -> Result<()> {
     Ok(())
 }
 
+fn validate_exemplar_rows(rows: &Rows) -> Result<()> {
+    let mut names = HashSet::new();
+    for (index, column) in rows.schema.iter().enumerate() {
+        let data_type: datatypes::prelude::ConcreteDataType =
+            api::helper::ColumnDataTypeWrapper::try_new(
+                column.datatype,
+                column.datatype_extension.clone(),
+            )
+            .context(crate::error::ColumnDataTypeSnafu)?
+            .into();
+        let valid = match column.column_name.as_str() {
+            DATA_SCHEMA_TSID_COLUMN_NAME => {
+                data_type == datatypes::prelude::ConcreteDataType::uint64_datatype()
+                    && column.semantic_type == SemanticType::Tag as i32
+            }
+            EXEMPLAR_METRIC_COLUMN => {
+                data_type.is_string() && column.semantic_type == SemanticType::Tag as i32
+            }
+            name if name == greptime_timestamp() => {
+                data_type.is_timestamp() && column.semantic_type == SemanticType::Timestamp as i32
+            }
+            name if name == greptime_value() => {
+                data_type == datatypes::prelude::ConcreteDataType::float64_datatype()
+                    && column.semantic_type == SemanticType::Field as i32
+            }
+            name if name == greptime_exemplar_labels() => {
+                data_type.is_json2() && column.semantic_type == SemanticType::Field as i32
+            }
+            _ => data_type.is_string() && column.semantic_type == SemanticType::Tag as i32,
+        };
+        ensure!(
+            valid && names.insert(column.column_name.as_str()),
+            InvalidInsertRequestSnafu {
+                reason: format!(
+                    "invalid or duplicate exemplar column {}",
+                    column.column_name
+                ),
+            }
+        );
+        ensure!(
+            rows.rows.iter().all(|row| value_matches_type(
+                &row.values[index],
+                column.datatype,
+                column.datatype_extension.as_ref(),
+            )),
+            InvalidInsertRequestSnafu {
+                reason: format!("invalid value for exemplar column {}", column.column_name),
+            }
+        );
+    }
+    ensure!(
+        [
+            DATA_SCHEMA_TSID_COLUMN_NAME,
+            EXEMPLAR_METRIC_COLUMN,
+            greptime_timestamp(),
+            greptime_value(),
+            greptime_exemplar_labels(),
+        ]
+        .iter()
+        .all(|name| names.contains(name)),
+        InvalidInsertRequestSnafu {
+            reason: "missing required exemplar columns",
+        }
+    );
+    Ok(())
+}
+
+fn exemplar_source_add_columns(
+    info: &TableInfo,
+    tags: &[ColumnSchema],
+) -> Result<Option<api::v1::AddColumns>> {
+    for tag in tags {
+        if let Some(index) = info.meta.schema.column_index_by_name(&tag.column_name) {
+            let column = &info.meta.schema.column_schemas()[index];
+            // Existing source defaults may already be part of the normalized series identity.
+            ensure!(
+                info.meta.primary_key_indices.contains(&index) && column.data_type.is_string(),
+                InvalidInsertRequestSnafu {
+                    reason: format!(
+                        "exemplar source {} column {} must be a string tag",
+                        info.name, tag.column_name
+                    ),
+                }
+            );
+        }
+    }
+    expr_helper::extract_add_columns_expr(&info.meta.schema, ColumnExpr::from_column_schemas(tags))
+}
+
 /// Validates the fixed exemplar contract before writing or scanning a shared table.
 pub fn validate_exemplar_table(table: &TableInfo) -> Result<()> {
     let meta = &table.meta;
@@ -2271,11 +2491,11 @@ pub fn validate_exemplar_table(table: &TableInfo) -> Result<()> {
             reason: "exemplar value must be a DOUBLE field"
         }
     );
-    let (labels_index, labels) = lookup(EXEMPLAR_LABELS_COLUMN)?;
+    let (labels_index, labels) = lookup(greptime_exemplar_labels())?;
     ensure!(
         labels.data_type.is_json2() && !meta.primary_key_indices.contains(&labels_index),
         InvalidInsertRequestSnafu {
-            reason: "exemplar_labels must be a JSON2 field"
+            reason: format!("{} must be a JSON2 field", greptime_exemplar_labels())
         }
     );
     if let Some(extension) = labels
@@ -2304,7 +2524,7 @@ pub fn validate_exemplar_table(table: &TableInfo) -> Result<()> {
             greptime_timestamp(),
             greptime_value(),
             EXEMPLAR_METRIC_COLUMN,
-            EXEMPLAR_LABELS_COLUMN,
+            greptime_exemplar_labels(),
             DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
             DATA_SCHEMA_TSID_COLUMN_NAME,
         ]
@@ -2356,6 +2576,19 @@ pub fn validate_trace_table_model(table_info: &TableInfo, ctx: &QueryContextRef)
         );
     }
     Ok(())
+}
+
+/// Copies a retention `ttl` hint onto a physical metric table being created.
+/// Only `ttl` is copied: other ingest hints must not land on the shared physical
+/// table, and `ttl=instant` stays on the logical table for flow forwarding.
+/// Once the physical table exists, the hint has no effect.
+pub fn apply_retention_ttl_hint(
+    table_options: &mut std::collections::HashMap<String, String>,
+    ctx: &QueryContextRef,
+) {
+    if let Some(ttl) = ctx.extension(TTL_KEY).filter(|ttl| is_retention_ttl(ttl)) {
+        table_options.insert(TTL_KEY.to_string(), ttl.to_string());
+    }
 }
 
 /// Fill table options for a new table by create type.
@@ -2594,62 +2827,28 @@ impl FlowMirrorTask {
         cache: &TableFlownodeSetCacheRef,
         requests: impl Iterator<Item = &RegionInsertRequest>,
     ) -> Result<Self> {
-        let mut src_table_reqs: HashMap<TableId, Option<(Vec<Peer>, RegionInsertRequests)>> =
-            HashMap::new();
+        // A cold table needs a prefix scan to discover its flow partitions.
+        const MAX_CONCURRENT_FLOW_LOOKUPS: usize = 8;
 
+        let mut by_table: HashMap<TableId, Vec<&RegionInsertRequest>> = HashMap::new();
         for req in requests {
             let table_id = RegionId::from_u64(req.region_id).table_id();
-            match src_table_reqs.get_mut(&table_id) {
-                Some(Some((_peers, reqs))) => reqs.requests.push(req.clone()),
-                // already know this is not source table
-                Some(None) => continue,
-                _ => {
-                    // dedup peers
-                    let peers = cache
-                        .get(table_id)
-                        .await
-                        .context(RequestInsertsSnafu)?
-                        .unwrap_or_default()
-                        .values()
-                        .cloned()
-                        .collect::<HashSet<_>>()
-                        .into_iter()
-                        .collect::<Vec<_>>();
-
-                    if !peers.is_empty() {
-                        let mut reqs = RegionInsertRequests::default();
-                        reqs.requests.push(req.clone());
-                        src_table_reqs.insert(table_id, Some((peers, reqs)));
-                    } else {
-                        // insert a empty entry to avoid repeat query
-                        src_table_reqs.insert(table_id, None);
-                    }
-                }
-            }
+            by_table.entry(table_id).or_default().push(req);
         }
 
+        let table_ids: Vec<_> = by_table.keys().copied().collect();
+        let mut lookups = stream::iter(table_ids)
+            .map(|id| async move { cache.get(id).await.map(|flows| (id, flows)) })
+            .buffer_unordered(MAX_CONCURRENT_FLOW_LOOKUPS);
         let mut inserts: HashMap<Peer, RegionInsertRequests> = HashMap::new();
-
-        for (_table_id, (peers, reqs)) in src_table_reqs
-            .into_iter()
-            .filter_map(|(k, v)| v.map(|v| (k, v)))
-        {
-            if peers.len() == 1 {
-                // fast path, zero copy
-                inserts
-                    .entry(peers[0].clone())
-                    .or_default()
-                    .requests
-                    .extend(reqs.requests);
-                continue;
-            } else {
-                // TODO(discord9): need to split requests to multiple flownodes
-                for flownode in peers {
+        while let Some((id, flows)) = lookups.try_next().await.context(RequestInsertsSnafu)? {
+            if let Some(flows) = flows {
+                for peer in flows.values().collect::<HashSet<_>>() {
                     inserts
-                        .entry(flownode.clone())
+                        .entry(peer.clone())
                         .or_default()
                         .requests
-                        .extend(reqs.requests.clone());
+                        .extend(by_table[&id].iter().copied().cloned());
                 }
             }
         }
@@ -2810,6 +3009,7 @@ mod tests {
     use common_meta::cache::new_table_flownode_set_cache;
     use common_meta::cache_invalidator::DummyCacheInvalidator;
     use common_meta::ddl::test_util::datanode_handler::NaiveDatanodeHandler;
+    use common_meta::instruction::{CacheIdent, CreateFlow};
     use common_meta::node_manager::{
         Datanode, DatanodeManager, DatanodeRef, FlownodeManager, FlownodeRef,
     };
@@ -2830,6 +3030,14 @@ mod tests {
         create_partition_rule_manager, new_test_table_info, prepare_mocked_backend,
     };
     use crate::write_dispatcher::{TrackedWrite, WriteRetryOptions};
+
+    async fn cache_test_flow(cache: &TableFlownodeSetCacheRef, flow: CreateFlow) {
+        cache.get_many(&flow.source_table_ids).await.unwrap();
+        cache
+            .invalidate(&[CacheIdent::CreateFlow(flow)])
+            .await
+            .unwrap();
+    }
 
     fn make_table_ref_with_schema(
         ts_name: &str,
@@ -3510,14 +3718,13 @@ mod tests {
             };
             Ok(RegionResponse::new(rows))
         });
-        let flow_cache = Cache::new(100);
         let inserter = Inserter::new(
             catalog::memory::MemoryCatalogManager::new(),
             partition_manager,
             Arc::new(MockDatanodeManager::new(watcher)),
             Arc::new(new_table_flownode_set_cache(
                 String::new(),
-                flow_cache.clone(),
+                Cache::new(100),
                 kv_backend,
             )),
             true,
@@ -3578,8 +3785,10 @@ mod tests {
         assert_eq!(output.meta.cost, if enabled { 17 } else { 0 });
         assert!(matches!(output.data, OutputData::AffectedRows(3)));
         dispatched.try_recv().unwrap();
+        let flow_cache = inserter.table_flownode_set_cache();
         assert!(flow_cache.contains_key(&1));
-        flow_cache.invalidate_all();
+        common_meta::cache_invalidator::CacheInvalidator::invalidate_all(flow_cache.as_ref())
+            .unwrap();
         meter.reject.store(true, Ordering::Relaxed);
         let result = inserter
             .do_request(rows_request(), &table_infos, &ctx)
@@ -3612,9 +3821,11 @@ mod tests {
         }
         meter.attempts.lock().unwrap().clear();
 
-        // Rejection must also precede admission to the table batcher's queue.
+        // Rejection must precede queue submission, but conversion memory is reserved first.
         if enabled {
-            let batcher: Arc<dyn PendingRowsBatcher> = Arc::new(UnexpectedBatcher);
+            let batcher: Arc<dyn PendingRowsBatcher> = Arc::new(UnexpectedBatcher {
+                allow_acquire: true,
+            });
             let rows = Rows {
                 schema: vec![
                     api::v1::helper::tag_column_schema("a", ColumnDataType::Int32),
@@ -3964,6 +4175,29 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_retention_ttl_hint_copies_only_retention_ttl() {
+        let mut instant_ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+        instant_ctx.set_extension(TTL_KEY, "instant");
+        instant_ctx.set_extension(APPEND_MODE_KEY, "true");
+        let instant_ctx = Arc::new(instant_ctx);
+        let mut instant_options = std::collections::HashMap::new();
+        apply_retention_ttl_hint(&mut instant_options, &instant_ctx);
+        assert!(instant_options.is_empty());
+
+        let mut retention_ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+        retention_ctx.set_extension(TTL_KEY, "7d");
+        retention_ctx.set_extension(APPEND_MODE_KEY, "true");
+        let retention_ctx = Arc::new(retention_ctx);
+        let mut retention_options = std::collections::HashMap::new();
+        apply_retention_ttl_hint(&mut retention_options, &retention_ctx);
+        assert_eq!(
+            retention_options.get(TTL_KEY).map(String::as_str),
+            Some("7d")
+        );
+        assert!(!retention_options.contains_key(APPEND_MODE_KEY));
+    }
+
+    #[test]
     fn test_apply_per_table_semantic_options() {
         use table::requests::{
             SEMANTIC_METRIC_TYPE, SEMANTIC_METRIC_UNIT, SEMANTIC_PER_TABLE_INDEX_KEY,
@@ -4099,12 +4333,19 @@ mod tests {
         );
     }
 
-    struct UnexpectedBatcher;
+    #[derive(Default)]
+    struct UnexpectedBatcher {
+        allow_acquire: bool,
+    }
 
     #[async_trait::async_trait]
     impl PendingRowsBatcher for UnexpectedBatcher {
-        async fn acquire(&self) -> Result<Arc<tokio::sync::OwnedSemaphorePermit>> {
-            panic!("empty writes must not acquire batch admission")
+        async fn acquire(&self, _: usize, _: u64) -> Result<crate::batcher::PendingRowsPermit> {
+            assert!(
+                self.allow_acquire,
+                "empty writes must not acquire batch admission"
+            );
+            Ok(Arc::new(()))
         }
 
         async fn submit(
@@ -4112,9 +4353,9 @@ mod tests {
             _table_info: TableInfoRef,
             _batch: arrow::record_batch::RecordBatch,
             _ctx: QueryContextRef,
-            _permit: Arc<tokio::sync::OwnedSemaphorePermit>,
+            _permit: crate::batcher::PendingRowsPermit,
         ) -> Result<Output> {
-            panic!("empty writes must not submit a batch")
+            panic!("writes must not submit a batch")
         }
     }
 
@@ -4137,7 +4378,6 @@ mod tests {
     async fn test_logical_batcher_eligibility() {
         use catalog::RegisterTableRequest;
         use catalog::memory::MemoryCatalogManager;
-        use common_meta::instruction::{CacheIdent, CreateFlow};
         use common_meta::kv_backend::KvBackendRef;
         use common_meta::kv_backend::memory::MemoryKvBackend;
         use datatypes::schema::{ColumnDefaultConstraint, SchemaBuilder};
@@ -4226,15 +4466,15 @@ mod tests {
                 kv_backend,
             ));
             if case == "flow" {
-                inserter
-                    .table_flownode_set_cache
-                    .invalidate(&[CacheIdent::CreateFlow(CreateFlow {
+                cache_test_flow(
+                    &inserter.table_flownode_set_cache,
+                    CreateFlow {
                         flow_id: 1,
                         source_table_ids: vec![1],
                         partition_to_peer_mapping: vec![(0, Peer::empty(1))],
-                    })])
-                    .await
-                    .unwrap();
+                    },
+                )
+                .await;
             }
             assert_eq!(
                 inserter
@@ -4271,7 +4511,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_instant_table_bypasses_batcher() {
-        let batcher: Arc<dyn PendingRowsBatcher> = Arc::new(UnexpectedBatcher);
+        let batcher: Arc<dyn PendingRowsBatcher> = Arc::new(UnexpectedBatcher::default());
         let inserter = batcher_test_inserter()
             .await
             .with_pending_rows_batcher(Some(batcher));
@@ -4291,7 +4531,7 @@ mod tests {
         let inserter = batcher_test_inserter().await;
         let table = make_table_ref_with_schema("ts", "value", ConcreteDataType::float64_datatype())
             .table_info();
-        let batcher: Arc<dyn PendingRowsBatcher> = Arc::new(UnexpectedBatcher);
+        let batcher: Arc<dyn PendingRowsBatcher> = Arc::new(UnexpectedBatcher::default());
         let ctx = QueryContext::arc();
         let output = inserter
             .submit_table_rows(
@@ -4514,17 +4754,15 @@ mod tests {
             true,
         );
         let peer = flownode_peer();
-        inserter
-            .table_flownode_set_cache
-            .invalidate(&[common_meta::instruction::CacheIdent::CreateFlow(
-                common_meta::instruction::CreateFlow {
-                    flow_id: 1,
-                    source_table_ids: vec![1, 2],
-                    partition_to_peer_mapping: vec![(0, peer)],
-                },
-            )])
-            .await
-            .unwrap();
+        cache_test_flow(
+            &inserter.table_flownode_set_cache,
+            CreateFlow {
+                flow_id: 1,
+                source_table_ids: vec![1, 2],
+                partition_to_peer_mapping: vec![(0, peer)],
+            },
+        )
+        .await;
         let mut normal_info = new_test_table_info(1, "normal_table", [1].into_iter());
         normal_info.catalog_name = DEFAULT_CATALOG_NAME.to_string();
         normal_info.schema_name = DEFAULT_SCHEMA_NAME.to_string();
@@ -4642,8 +4880,6 @@ mod tests {
 
     #[tokio::test]
     async fn flow_mirror_new_counts_regions_and_peer_clones() {
-        use common_meta::instruction::{CacheIdent, CreateFlow};
-
         let peer1 = flownode_peer();
         let peer2 = Peer {
             id: 2,
@@ -4655,14 +4891,15 @@ mod tests {
             Cache::new(10),
             cache_backend,
         ));
-        cache
-            .invalidate(&[CacheIdent::CreateFlow(CreateFlow {
+        cache_test_flow(
+            &cache,
+            CreateFlow {
                 flow_id: 1,
                 source_table_ids: vec![1],
                 partition_to_peer_mapping: vec![(0, peer1), (1, peer2)],
-            })])
-            .await
-            .unwrap();
+            },
+        )
+        .await;
         let request = |region_id| RegionInsertRequest {
             region_id,
             rows: Some(Rows {
@@ -4678,6 +4915,52 @@ mod tests {
         let task = FlowMirrorTask::new(&cache, requests.iter()).await.unwrap();
         assert_eq!(12, task.pending_rows());
         assert_eq!(2, task.requests.len());
+        for mirrored in task.requests.values() {
+            assert_eq!(mirrored.requests.as_slice(), requests.as_slice());
+        }
+    }
+
+    #[tokio::test]
+    async fn flow_mirror_bounds_and_deduplicates_cold_lookups() {
+        let (started, mut loads) = tokio::sync::mpsc::unbounded_channel();
+        let cache = Arc::new(common_meta::cache::CacheContainer::new(
+            "test".into(),
+            Cache::new(32),
+            Arc::new(move |&id| {
+                let (resume, gate) = tokio::sync::oneshot::channel();
+                started.send((id, resume)).unwrap();
+                Box::pin(async move {
+                    gate.await.unwrap();
+                    Ok(Some(Default::default()))
+                })
+            }),
+            common_meta::instruction::CacheIdent::table_id_key,
+        ));
+        let requests: Vec<_> = (1..=12)
+            .flat_map(|id| {
+                (0..2).map(move |region| RegionInsertRequest {
+                    region_id: RegionId::new(id, region).as_u64(),
+                    ..Default::default()
+                })
+            })
+            .collect();
+        let mut task = Box::pin(FlowMirrorTask::new(&cache, requests.iter()));
+        let mut seen = BTreeSet::new();
+        // Every table occurs twice. Only eight distinct misses may start before one completes.
+        for expected in [8, 4] {
+            assert!(futures_util::poll!(&mut task).is_pending());
+            let mut gates = Vec::new();
+            while let Ok((id, resume)) = loads.try_recv() {
+                assert!(seen.insert(id));
+                gates.push(resume);
+            }
+            assert_eq!(gates.len(), expected);
+            for gate in gates {
+                gate.send(()).unwrap();
+            }
+        }
+        assert!(task.await.unwrap().requests.is_empty());
+        assert_eq!(seen.len(), 12);
     }
 
     #[tokio::test]

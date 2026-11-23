@@ -12,11 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Shared memory cache primitives with native asynchronous load deduplication.
+//! Shared memory caches.
 
 mod cache;
 mod sync_cache;
 
+pub mod batch;
 pub mod metrics;
 pub mod page;
 pub mod paged;

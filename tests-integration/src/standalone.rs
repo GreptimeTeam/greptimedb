@@ -19,10 +19,10 @@ use cache::{
     build_datanode_layered_cache_registry, build_fundamental_cache_registry,
     with_default_composite_cache_registry,
 };
-use catalog::information_schema::NoopInformationExtension;
 use catalog::kvbackend::KvBackendCatalogManagerBuilder;
 use catalog::process_manager::ProcessManager;
 use common_base::Plugins;
+use common_base::readable_size::ReadableSize;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_config::KvBackendConfig;
 use common_datasource::object_store::LocalFileAccess;
@@ -55,7 +55,10 @@ use frontend::service_config::{BatcherOptions, PendingRowsBatcherOptions};
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
 use servers::grpc::GrpcOptions;
 use standalone::options::StandaloneOptions;
-use standalone::{StandaloneDatanodeManager, StandaloneRepartitionProcedureFactory};
+use standalone::{
+    StandaloneDatanodeManager, StandaloneInformationExtension,
+    StandaloneRepartitionProcedureFactory,
+};
 
 use crate::test_util::{self, StorageType, TestGuard, create_tmp_dir_and_datanode_opts};
 
@@ -88,9 +91,12 @@ pub struct GreptimeDbStandaloneBuilder {
     slow_query_options: SlowQueryOptions,
     event_recorder_options: EventRecorderOptions,
     auto_create_table: bool,
+    auto_create_physical_table_timestamp_unit: Option<common_time::timestamp::TimeUnit>,
     logical_batcher: Option<BatcherOptions>,
     table_batcher: BatcherOptions,
+    max_in_flight_write_bytes: ReadableSize,
     mito_config: Option<mito2::config::MitoConfig>,
+    query_options: query::options::QueryOptions,
     pipeline_options: pipeline::PipelineOptions,
 }
 
@@ -110,11 +116,21 @@ impl GreptimeDbStandaloneBuilder {
             },
             event_recorder_options: EventRecorderOptions::default(),
             auto_create_table: true,
+            auto_create_physical_table_timestamp_unit: None,
             logical_batcher: None,
             table_batcher: BatcherOptions::default(),
+            max_in_flight_write_bytes: ReadableSize(0),
             mito_config: None,
+            query_options: query::options::QueryOptions::default(),
             pipeline_options: pipeline::PipelineOptions::default(),
         }
+    }
+
+    /// Overrides query options for this standalone test instance.
+    #[must_use]
+    pub fn with_query_options(mut self, options: query::options::QueryOptions) -> Self {
+        self.query_options = options;
+        self
     }
 
     /// Overrides the Mito configuration for this test instance.
@@ -138,6 +154,13 @@ impl GreptimeDbStandaloneBuilder {
         self
     }
 
+    /// Configures the shared protocol and conversion memory quota.
+    #[must_use]
+    pub fn with_write_memory_limit(mut self, bytes: u64) -> Self {
+        self.max_in_flight_write_bytes = ReadableSize(bytes);
+        self
+    }
+
     /// Configures logical-table batching for integration tests.
     #[must_use]
     pub fn with_logical_batcher(mut self, options: BatcherOptions) -> Self {
@@ -148,6 +171,16 @@ impl GreptimeDbStandaloneBuilder {
     #[must_use]
     pub fn with_auto_create_table(mut self, auto_create_table: bool) -> Self {
         self.auto_create_table = auto_create_table;
+        self
+    }
+
+    /// Sets the time index unit for auto-created physical metric tables.
+    #[must_use]
+    pub fn with_auto_create_physical_table_timestamp_unit(
+        mut self,
+        unit: common_time::timestamp::TimeUnit,
+    ) -> Self {
+        self.auto_create_physical_table_timestamp_unit = Some(unit);
         self
     }
 
@@ -234,8 +267,12 @@ impl GreptimeDbStandaloneBuilder {
             .build(),
         );
 
+        let information_extension = Arc::new(StandaloneInformationExtension::new(
+            datanode.region_server(),
+            procedure_manager.clone(),
+        ));
         let catalog_manager = KvBackendCatalogManagerBuilder::new(
-            Arc::new(NoopInformationExtension),
+            information_extension.clone(),
             kv_backend.clone(),
             cache_registry.clone(),
         )
@@ -253,6 +290,9 @@ impl GreptimeDbStandaloneBuilder {
             Arc::new(frontend_client),
         );
         let flownode = Arc::new(flow_builder.build().await.unwrap());
+        information_extension
+            .set_flow_engine(flownode.flow_engine())
+            .await;
 
         let node_manager = Arc::new(StandaloneDatanodeManager {
             region_server: datanode.region_server(),
@@ -401,7 +441,12 @@ impl GreptimeDbStandaloneBuilder {
             slow_query: self.slow_query_options.clone(),
             event_recorder: self.event_recorder_options.clone(),
             auto_create_table: self.auto_create_table,
+            query: self.query_options.clone(),
+            auto_create_physical_table_timestamp_unit: self
+                .auto_create_physical_table_timestamp_unit
+                .unwrap_or(common_time::timestamp::TimeUnit::Millisecond),
             pipeline: self.pipeline_options.clone(),
+            max_in_flight_write_bytes: self.max_in_flight_write_bytes,
             pending_rows_batcher: PendingRowsBatcherOptions {
                 logical_table: self.logical_batcher.clone(),
                 table: self.table_batcher.clone(),

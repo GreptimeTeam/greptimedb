@@ -63,6 +63,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let options = RegionOptions::try_from_options(region_id, &request.options)?;
         let object_store = get_object_store(&options.storage, &self.object_store_manager)?;
         let provider = provider_from_wal_options::<S>(region_id, &options.wal_options)?;
+        let provider = self.wal.resolve_provider(region_id, provider)?;
         self.wal.obsolete_all(region_id, &provider).await?;
 
         let table_dir = normalize_dir(&request.table_dir);
@@ -185,6 +186,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             region_id,
             &request.table_dir,
             request.path_type,
+            self.node_lease.clone(),
             self.memtable_builder_provider.clone(),
             self.object_store_manager.clone(),
             self.purge_scheduler.clone(),

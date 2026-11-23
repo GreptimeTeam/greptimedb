@@ -278,6 +278,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[cfg(feature = "enterprise")]
+    #[snafu(display("Invalid sketch option: {}", msg))]
+    InvalidSketchOption {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid skipping index option: {}", msg))]
     InvalidSkippingIndexOption {
         msg: String,
@@ -335,6 +343,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid series: {reason}"))]
+    InvalidSeries {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("unexpected: {reason}"))]
     Unexpected {
         reason: String,
@@ -368,7 +383,11 @@ impl ErrorExt for Error {
             | InvalidVector { .. }
             | InvalidFulltextOption { .. }
             | InvalidSkippingIndexOption { .. }
-            | InvalidCompressionOption { .. } => StatusCode::InvalidArguments,
+            | InvalidCompressionOption { .. }
+            | InvalidSeries { .. } => StatusCode::InvalidArguments,
+
+            #[cfg(feature = "enterprise")]
+            InvalidSketchOption { .. } => StatusCode::InvalidArguments,
 
             ValueExceedsPrecision { .. }
             | CastType { .. }

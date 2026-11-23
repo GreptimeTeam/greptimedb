@@ -33,3 +33,8 @@ pub mod storage;
 pub type ManifestVersion = u64;
 pub const MIN_VERSION: u64 = 0;
 pub const MAX_VERSION: u64 = u64::MAX;
+
+/// Returns whether `value` is false, for `skip_serializing_if` on a flag that defaults to false.
+pub fn is_false(value: &bool) -> bool {
+    !*value
+}

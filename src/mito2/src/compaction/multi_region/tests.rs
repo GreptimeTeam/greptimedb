@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use api::v1::{OpType, SemanticType};
+use common_error::ext::BoxedError;
 use datatypes::arrow::array::{
     Array, ArrayRef, BinaryArray, BinaryDictionaryBuilder, BooleanArray, DictionaryArray,
     StringArray, StringDictionaryBuilder, TimestampMillisecondArray, UInt8Array, UInt64Array,
@@ -48,7 +49,9 @@ use crate::error::InvalidMultiRegionCompactionSnafu;
 use crate::read::FlatSource;
 use crate::sst::file::{FileHandle, RegionFileId};
 use crate::sst::file_purger::NoopFilePurger;
+use crate::sst::index::handler::{IndexKindHandler, IndexKindProvider, PlanContext, PlannedIndex};
 use crate::sst::index::intermediate::IntermediateManager;
+use crate::sst::index::kind::{ExtensionIndexKind, IndexKind};
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::sst::parquet::WriteOptions;
 use crate::sst::parquet::flat_format::{
@@ -57,7 +60,8 @@ use crate::sst::parquet::flat_format::{
 use crate::sst::{FlatSchemaOptions, FormatType, to_flat_sst_arrow_schema};
 use crate::test_util::scheduler_util::SchedulerEnv;
 use crate::test_util::sst_util::{
-    new_flat_source_from_record_batches, new_record_batch_with_custom_sequence,
+    build_test_binary_test_region_metadata, new_flat_source_from_record_batches,
+    new_record_batch_with_binary_values, new_record_batch_with_custom_sequence,
     new_sparse_primary_key, sst_region_metadata_with_encoding,
 };
 
@@ -273,11 +277,12 @@ impl Fixture {
         });
         (
             MultiRegionCompactionContext {
+                index_kind_provider: None,
                 access_layer: self.layer.clone(),
                 cache: Arc::new(CacheManager::default()),
                 config: self.config.clone(),
                 protection: protection.clone(),
-                cancellation: Arc::new(CancellationHandle::default()),
+                cancellation: CancellationToken::new(),
             },
             protection,
         )
@@ -447,6 +452,7 @@ fn write_request(
     format: FormatType,
 ) -> SstWriteRequest {
     SstWriteRequest {
+        index_build_inputs: None,
         op_type: OperationType::Flush,
         metadata,
         source,
@@ -534,6 +540,11 @@ async fn test_single_scan_routes_all_versions_without_folding(
                 assert_eq!(file.file_id, footer.file_id);
                 assert_eq!(file.file_size, footer.file_size);
                 assert_eq!(file.num_rows, footer.num_rows as u64);
+                assert!(file.max_row_group_decoded_size > 0);
+                assert_eq!(
+                    file.max_row_group_decoded_size,
+                    footer.max_row_group_decoded_size
+                );
             }
             let target = &targets[&id];
             let mut actual_rows = Vec::new();
@@ -542,7 +553,7 @@ async fn test_single_scan_routes_all_versions_without_folding(
             }
             for file in files {
                 assert!(protected.files.lock().unwrap().contains(&file.file_id()));
-                assert_eq!(1, file.level);
+                assert_eq!(0, file.level);
                 assert_eq!(id, file.region_id);
                 assert_eq!(id != fixture.metadata.region_id, file.preserve_row_sequence);
                 let rows = fixture
@@ -1664,7 +1675,7 @@ async fn test_streaming_merge_preserves_overlapping_versions_and_field_routing(
         for (file, info) in files.into_iter().zip(&output.sst_infos[&id]) {
             assert!(protection.files.lock().unwrap().contains(&file.file_id()));
             assert_eq!(id, file.region_id);
-            assert_eq!(1, file.level);
+            assert_eq!(0, file.level);
             assert_eq!(info.file_id, file.file_id);
             assert_eq!(info.num_rows as u64, file.num_rows);
             assert_eq!(info.file_size, file.file_size);
@@ -2001,7 +2012,7 @@ async fn test_interrupted_indexed_worker_cleans_tantivy_files(#[case] fail_sibli
     }
 }
 
-struct CancelBeforeCreate(Arc<CancellationHandle>);
+struct CancelBeforeCreate(CancellationToken);
 
 #[async_trait::async_trait]
 impl SstWriteGuard for CancelBeforeCreate {
@@ -2306,6 +2317,48 @@ async fn test_oversized_equal_key_group_fails_without_partial_outputs_or_spill()
     assert_spill_cleaned(&fixture.env.path.path().join("spill")).await;
 }
 
+#[tokio::test]
+async fn test_target_writer_sizes_row_groups_from_source_size() {
+    let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
+    let plan = fixture.plan(1);
+    let (context, _protection) = fixture.context(None);
+    let source = new_flat_source_from_record_batches(vec![source_batch(&fixture.metadata, 0, 100)]);
+    let limits = memory::MemoryLimits::new(&plan, source.schema()).unwrap();
+    // 64 decoded rows of 4 MiB: 32 rows fill the 128 MiB target. The target's `FileMeta` inputs
+    // describe the narrow fixture rows, which would allow the full cap.
+    let writer = writer::TargetWriter::new(
+        &plan.targets[&RegionId::new(1, 0)],
+        &context,
+        &limits,
+        plan.max_output_file_size,
+        (64, 256 << 20),
+        Arc::default(),
+    );
+    assert_eq!(32, writer.options().row_group_size);
+}
+
+#[tokio::test]
+async fn test_reader_admission_counts_decoded_values() {
+    let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
+    // 2048 copies of one 64 KiB value: tiny once dictionary-encoded, 128 MiB decoded.
+    let batch = new_record_batch_with_binary_values("a", &vec![vec![7u8; 64 * 1024]; 2048]);
+    let info = fixture
+        .write_source(
+            build_test_binary_test_region_metadata(),
+            vec![batch],
+            FormatType::Flat,
+        )
+        .await;
+    let footer = info.file_metadata.unwrap();
+    assert!(
+        footer
+            .row_groups()
+            .iter()
+            .all(|group| group.total_byte_size() < 1 << 20)
+    );
+    assert!(memory::reader_bytes(&footer) >= 128 << 20);
+}
+
 #[rstest::rstest]
 #[case::encoder("encoder")]
 #[case::metadata("metadata")]
@@ -2326,6 +2379,8 @@ async fn test_limited_writer_fails_instead_of_publishing_over_budget(#[case] kin
         &context,
         &limits,
         plan.max_output_file_size,
+        (0, 0),
+        Arc::default(),
     )
     .write(source)
     .await
@@ -2453,4 +2508,167 @@ async fn test_invalid_plan_is_rejected_before_creating_outputs(
         "expected `{reason}`, got {error:?}"
     );
     assert!(protection.files.lock().unwrap().is_empty());
+}
+
+#[derive(Debug)]
+struct InvalidOptionalIndexHandler;
+
+impl IndexKindProvider for InvalidOptionalIndexHandler {
+    fn handlers(&self) -> Vec<Arc<dyn IndexKindHandler>> {
+        vec![Arc::new(Self)]
+    }
+}
+
+impl IndexKindHandler for InvalidOptionalIndexHandler {
+    fn validate(&self, context: &PlanContext<'_>) -> std::result::Result<(), BoxedError> {
+        self.plan(context).map(|_| ())
+    }
+
+    fn kinds(&self) -> &[IndexKind] {
+        &[IndexKind::Extension(ExtensionIndexKind::Hll)]
+    }
+
+    fn plan(
+        &self,
+        context: &PlanContext<'_>,
+    ) -> std::result::Result<Option<Arc<dyn PlannedIndex>>, BoxedError> {
+        assert!(
+            context.metadata.column_metadatas[0]
+                .column_schema
+                .hll_options()
+                .is_err()
+        );
+        Err(BoxedError::new(
+            crate::error::InvalidConfigSnafu {
+                reason: "invalid optional index configuration",
+            }
+            .build(),
+        ))
+    }
+}
+
+#[derive(Debug, Default)]
+struct ConflictingRegistrationProvider(std::sync::atomic::AtomicUsize);
+
+impl IndexKindProvider for ConflictingRegistrationProvider {
+    fn handlers(&self) -> Vec<Arc<dyn IndexKindHandler>> {
+        // Preflight succeeds; source preparation must propagate its own failure too.
+        let calls = self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let handler: Arc<dyn IndexKindHandler> = Arc::new(InvalidOptionalIndexHandler);
+        if calls == 0 {
+            vec![handler]
+        } else {
+            vec![handler.clone(), handler]
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_source_index_registration_failure_does_not_fall_back() {
+    let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
+    let (mut context, protection) = fixture.context(None);
+    context.index_kind_provider = Some(Arc::new(ConflictingRegistrationProvider::default()));
+    let error = compact_regions(fixture.plan(2), context)
+        .await
+        .err()
+        .expect("conflicting registration must fail");
+    assert!(
+        format!("{error:?}").contains("registering index handlers"),
+        "unexpected registration error: {error:?}"
+    );
+    assert!(protection.files.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_invalid_optional_index_options_do_not_block_routed_compaction() {
+    let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
+    for invalid_value in ["missing-column", "bad-capacity"] {
+        let mut plan = fixture.plan(2);
+        for target in plan.targets.values_mut() {
+            Arc::make_mut(&mut target.metadata).column_metadatas[0]
+                .column_schema
+                .mut_metadata()
+                .insert(datatypes::schema::HLL_KEY.into(), invalid_value.into());
+        }
+        let (mut context, _) = fixture.context(None);
+        context.index_kind_provider = Some(Arc::new(InvalidOptionalIndexHandler));
+        let output = compact_regions(plan, context).await.unwrap();
+        assert_eq!(output.stats.source_rows, output.stats.output_rows);
+        assert!(output.stats.output_rows > 0);
+        assert!(
+            output
+                .files
+                .values()
+                .flatten()
+                .all(|file| file
+                    .indexes
+                    .iter()
+                    .all(|index| index.created_indexes.iter().all(|kind| !matches!(
+                        kind,
+                        crate::sst::file::IndexType::HllIndex
+                            | crate::sst::file::IndexType::KllIndex
+                            | crate::sst::file::IndexType::MgIndex
+                    ))))
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_missing_index_handler_does_not_block_routed_compaction() {
+    use crate::sst::file::{ColumnIndexMetadata, IndexType};
+
+    let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
+    for required_by in ["schema", "file", "column", "target"] {
+        let mut plan = fixture.plan(2);
+        match required_by {
+            "schema" => {
+                for target in plan.targets.values_mut() {
+                    Arc::make_mut(&mut target.metadata).column_metadatas[0]
+                        .column_schema
+                        .set_hll_options(&datatypes::schema::HllOptions::default())
+                        .unwrap();
+                }
+            }
+            "file" => plan.sources[0].available_indexes.push(IndexType::HllIndex),
+            "column" => plan.sources[0].indexes.push(ColumnIndexMetadata {
+                column_id: 0,
+                created_indexes: [IndexType::HllIndex].into_iter().collect(),
+                ..Default::default()
+            }),
+            _ => {
+                plan.targets
+                    .values_mut()
+                    .next()
+                    .unwrap()
+                    .inputs
+                    .values_mut()
+                    .next()
+                    .unwrap()
+                    .available_indexes
+                    .push(IndexType::HllIndex);
+            }
+        }
+        let (context, _) = fixture.context(None);
+        let output = compact_regions(plan, context)
+            .await
+            .unwrap_or_else(|error| panic!("{required_by}: {error}"));
+        assert_eq!(output.stats.source_rows, output.stats.output_rows);
+        assert!(output.stats.output_rows > 0);
+        assert!(!output.files.is_empty());
+        for file in output.files.values().flatten() {
+            assert!(file.num_rows > 0);
+            assert!(file.available_indexes.iter().all(|kind| !matches!(
+                kind,
+                IndexType::HllIndex | IndexType::KllIndex | IndexType::MgIndex
+            )));
+            assert!(
+                file.indexes
+                    .iter()
+                    .all(|index| index.created_indexes.iter().all(|kind| !matches!(
+                        kind,
+                        IndexType::HllIndex | IndexType::KllIndex | IndexType::MgIndex
+                    )))
+            );
+        }
+    }
 }

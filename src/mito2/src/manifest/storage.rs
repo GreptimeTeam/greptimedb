@@ -24,22 +24,23 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use common_datasource::compression::CompressionType;
+use common_error::ext::ErrorExt;
 use common_telemetry::{debug, warn};
 use crc32fast::Hasher;
+use futures::TryStreamExt;
 use lazy_static::lazy_static;
 use object_store::util::join_dir;
 use object_store::{Lister, ObjectStore, util};
 use regex::Regex;
-#[cfg(test)]
-use snafu::ResultExt;
-use snafu::ensure;
-use store_api::ManifestVersion;
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::RegionId;
+use store_api::{MIN_VERSION, ManifestVersion};
 
 use crate::cache::manifest_cache::ManifestCache;
-#[cfg(test)]
-use crate::error::OpenDalSnafu;
-use crate::error::{ChecksumMismatchSnafu, Result};
+use crate::error::{
+    ChecksumMismatchSnafu, EmptyManifestDirSnafu, ManifestVersionConflictSnafu, OpenDalSnafu,
+    Result, UnsupportedOperationSnafu,
+};
 use crate::manifest::storage::checkpoint::CheckpointStorage;
 use crate::manifest::storage::delta::DeltaStorage;
 use crate::manifest::storage::size_tracker::{CheckpointTracker, DeltaTracker, SizeTracker};
@@ -167,6 +168,8 @@ pub struct ManifestObjectStore {
     delta_storage: DeltaStorage<DeltaTracker>,
     /// The staging file storage.
     staging_storage: StagingStorage,
+    /// Whether deltas are created conditionally and the last checkpoint is found by LIST.
+    conditional_publication: bool,
 }
 
 impl ManifestObjectStore {
@@ -216,8 +219,7 @@ impl ManifestObjectStore {
             manifest_cache.clone(),
             delta_tracker,
         );
-        let staging_storage =
-            StagingStorage::new(path.clone(), object_store.clone(), compress_type);
+        let staging_storage = StagingStorage::new(path.clone(), object_store.clone());
 
         Self {
             object_store,
@@ -227,7 +229,32 @@ impl ManifestObjectStore {
             checkpoint_storage,
             delta_storage,
             staging_storage,
+            conditional_publication: false,
         }
+    }
+
+    /// Sets whether this store publishes deltas by conditional create and recovers from the
+    /// highest checkpoint found by LIST.
+    ///
+    /// Returns an error if the mode is enabled on a backend without conditional create.
+    pub(crate) fn with_conditional_publication(mut self, enabled: bool) -> Result<Self> {
+        let capability = self.object_store.info().capability();
+        ensure!(
+            !enabled || capability.write_with_if_not_exists,
+            UnsupportedOperationSnafu {
+                err_msg: format!(
+                    "conditional create is required for manifest {} of a region whose writes need a lease",
+                    self.path
+                ),
+            }
+        );
+        self.conditional_publication = enabled;
+        Ok(self)
+    }
+
+    /// Returns whether this store publishes deltas by conditional create.
+    pub(crate) fn is_conditional_publication(&self) -> bool {
+        self.conditional_publication
     }
 
     /// Returns the manifest dir
@@ -235,21 +262,44 @@ impl ManifestObjectStore {
         &self.path
     }
 
-    /// Returns an iterator of manifests from normal or staging directory.
+    /// Returns whether the directory holds a delta or checkpoint of a version after
+    /// `last_version`. It reads the directory without locking it.
+    pub(crate) async fn has_version_after(&self, last_version: ManifestVersion) -> Result<bool> {
+        // Skip older files at the object-store layer. Files for `v == last_version`
+        // may still appear (`{path}{v:020}` sorts before `{path}{v:020}.json`) but
+        // they are filtered out below by the `version > last_version` check.
+        let start_after = list_start_after(self.manifest_dir(), last_version);
+        let streamer =
+            self.manifest_lister(Some(&start_after))
+                .await?
+                .context(EmptyManifestDirSnafu {
+                    manifest_dir: self.manifest_dir(),
+                })?;
+
+        streamer
+            .try_any(|entry| async move {
+                let file_name = entry.name();
+                if is_delta_file(file_name) || is_checkpoint_file(file_name) {
+                    let version = file_version(file_name);
+                    if version > last_version {
+                        return true;
+                    }
+                }
+                false
+            })
+            .await
+            .context(OpenDalSnafu)
+    }
+
+    /// Returns an iterator of manifests.
     ///
-    /// `start_after` is forwarded to the non-staging lister to skip entries
-    /// whose name is lexicographically less than or equal to it. It is
-    /// ignored for the staging directory.
+    /// `start_after` is forwarded to the lister to skip entries whose name is
+    /// lexicographically less than or equal to it.
     pub(crate) async fn manifest_lister(
         &self,
-        is_staging: bool,
         start_after: Option<&str>,
     ) -> Result<Option<Lister>> {
-        if is_staging {
-            self.staging_storage.manifest_lister().await
-        } else {
-            self.delta_storage.manifest_lister(start_after).await
-        }
+        self.delta_storage.manifest_lister(start_after).await
     }
 
     /// Fetches manifests in range [start_version, end_version).
@@ -383,17 +433,34 @@ impl ManifestObjectStore {
     }
 
     /// Save the delta manifest file.
-    pub async fn save(
-        &mut self,
-        version: ManifestVersion,
-        bytes: &[u8],
-        is_staging: bool,
-    ) -> Result<()> {
-        if is_staging {
-            self.staging_storage.save(version, bytes).await
+    pub async fn save(&mut self, version: ManifestVersion, bytes: &[u8]) -> Result<()> {
+        if self.conditional_publication {
+            self.delta_storage.save_conditional(version, bytes).await
         } else {
             self.delta_storage.save(version, bytes).await
         }
+    }
+
+    /// Fails with a version conflict unless LIST proves that no checkpoint at or above `version`
+    /// exists.
+    ///
+    /// Cleanup deletes a delta only after a checkpoint that covers it is saved, and never deletes
+    /// the highest checkpoint. So a late create that landed on a deleted name always finds one.
+    pub(crate) async fn ensure_version_not_checkpointed(
+        &self,
+        version: ManifestVersion,
+    ) -> Result<()> {
+        let reason = match self.list_highest_checkpoint(version).await {
+            Ok(None) => return Ok(()),
+            Ok(Some((checkpoint, _))) => format!("covered by checkpoint {checkpoint}"),
+            Err(e) => format!("cannot list the checkpoints: {}", e.output_msg()),
+        };
+        ManifestVersionConflictSnafu {
+            version,
+            manifest_dir: &self.path,
+            reason,
+        }
+        .fail()
     }
 
     /// Save the checkpoint manifest file.
@@ -411,7 +478,21 @@ impl ManifestObjectStore {
     /// Return manifest version and the raw [RegionCheckpoint](crate::manifest::action::RegionCheckpoint) content if any
     /// Also applies the checkpoint retention rule to the tracked size.
     pub async fn load_last_checkpoint(&mut self) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
-        let checkpoint = self.checkpoint_storage.load_last_checkpoint().await?;
+        let checkpoint = if self.conditional_publication {
+            match self.list_highest_checkpoint(MIN_VERSION).await {
+                Ok(Some((version, compress_type))) => Some(
+                    self.checkpoint_storage
+                        .load_listed_checkpoint(version, compress_type)
+                        .await?,
+                ),
+                Ok(None) => None,
+                // A region that does not exist yet can have no manifest directory.
+                Err(e) if e.is_object_not_found() => None,
+                Err(e) => return Err(e),
+            }
+        } else {
+            self.checkpoint_storage.load_last_checkpoint().await?
+        };
         if let Some((version, _)) = &checkpoint {
             self.retain_manifest_size_after(*version);
         }
@@ -455,11 +536,6 @@ impl ManifestObjectStore {
         self.size_tracker.retain_after(version);
     }
 
-    /// Fetch all staging manifest files and return them as (version, action_list) pairs.
-    pub async fn fetch_staging_manifests(&self) -> Result<Vec<(ManifestVersion, Vec<u8>)>> {
-        self.staging_storage.fetch_manifests().await
-    }
-
     /// Clear all staging manifest files.
     pub async fn clear_staging_manifests(&mut self) -> Result<()> {
         self.staging_storage.clear().await
@@ -468,6 +544,31 @@ impl ManifestObjectStore {
     /// Returns the staging storage.
     pub(crate) fn staging_storage(&self) -> &StagingStorage {
         &self.staging_storage
+    }
+
+    /// Returns the version and compression of the highest checkpoint at or above `min_version`
+    /// found by LIST.
+    async fn list_highest_checkpoint(
+        &self,
+        min_version: ManifestVersion,
+    ) -> Result<Option<(ManifestVersion, CompressionType)>> {
+        let mut lister = self
+            .object_store
+            .lister_with(&self.path)
+            .start_after(&list_start_after(&self.path, min_version))
+            .await
+            .context(OpenDalSnafu)?;
+        let mut highest = None;
+        while let Some(entry) = lister.try_next().await.context(OpenDalSnafu)? {
+            let file_name = entry.name();
+            if is_checkpoint_file(file_name) {
+                let version = file_version(file_name);
+                if version >= min_version && highest.is_none_or(|(v, _)| v < version) {
+                    highest = Some((version, file_compress_type(file_name)));
+                }
+            }
+        }
+        Ok(highest)
     }
 }
 
@@ -492,7 +593,6 @@ impl ManifestObjectStore {
     pub(crate) fn set_compress_type(&mut self, compress_type: CompressionType) {
         self.checkpoint_storage.set_compress_type(compress_type);
         self.delta_storage.set_compress_type(compress_type);
-        self.staging_storage.set_compress_type(compress_type);
     }
 }
 
@@ -558,7 +658,7 @@ mod tests {
     async fn test_manifest_log_store_case(mut log_store: ManifestObjectStore) {
         for v in 0..5 {
             log_store
-                .save(v, format!("hello, {v}").as_bytes(), false)
+                .save(v, format!("hello, {v}").as_bytes())
                 .await
                 .unwrap();
         }
@@ -635,7 +735,7 @@ mod tests {
         log_store.set_compress_type(CompressionType::Uncompressed);
         for v in 0..5 {
             log_store
-                .save(v, format!("hello, {v}").as_bytes(), false)
+                .save(v, format!("hello, {v}").as_bytes())
                 .await
                 .unwrap();
         }
@@ -655,7 +755,7 @@ mod tests {
         // write compressed data to stimulate compress algorithm take effect
         for v in 5..10 {
             log_store
-                .save(v, format!("hello, {v}").as_bytes(), false)
+                .save(v, format!("hello, {v}").as_bytes())
                 .await
                 .unwrap();
         }
@@ -712,7 +812,7 @@ mod tests {
         log_store.set_compress_type(CompressionType::Uncompressed);
         for v in 0..5 {
             log_store
-                .save(v, format!("hello, {v}").as_bytes(), false)
+                .save(v, format!("hello, {v}").as_bytes())
                 .await
                 .unwrap();
         }
@@ -753,7 +853,7 @@ mod tests {
         // write 5 manifest files
         for v in 0..5 {
             log_store
-                .save(v, format!("hello, {v}").as_bytes(), false)
+                .save(v, format!("hello, {v}").as_bytes())
                 .await
                 .unwrap();
         }
@@ -812,7 +912,7 @@ mod tests {
     async fn test_scan_with_start_after_case(mut log_store: ManifestObjectStore) {
         for v in 0..10 {
             log_store
-                .save(v, format!("hello, {v}").as_bytes(), false)
+                .save(v, format!("hello, {v}").as_bytes())
                 .await
                 .unwrap();
         }
@@ -933,7 +1033,7 @@ mod tests {
         if matches!(payload, PayloadKind::Checkpoint { .. }) {
             store.save_checkpoint(3, data).await.unwrap();
         } else {
-            store.save(3, data, false).await.unwrap();
+            store.save(3, data).await.unwrap();
         }
         let encoded = remote.read(&key).await.unwrap().to_vec();
         if source == CacheSource::LegacyDecoded {

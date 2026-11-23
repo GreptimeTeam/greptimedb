@@ -23,7 +23,7 @@ use auth::{
 use client::Output;
 use common_error::ext::BoxedError;
 use datatypes::timestamp::TimestampNanosecond;
-use pipeline::{Pipeline, PipelineInfo, PipelineVersion};
+use pipeline::{Pipeline, PipelineInfo, PipelineOptions, PipelineVersion};
 use servers::error::{
     AuthSnafu, Error as ServerError, ExecuteGrpcRequestSnafu, PipelineSnafu, Result as ServerResult,
 };
@@ -144,6 +144,10 @@ impl PipelineHandler for Instance {
         self.catalog_manager
             .table(catalog, &schema, table, None)
             .await
+    }
+
+    fn pipeline_options(&self) -> &PipelineOptions {
+        self.pipeline_operator.options()
     }
 
     fn build_pipeline(&self, pipeline: &str) -> ServerResult<Pipeline> {

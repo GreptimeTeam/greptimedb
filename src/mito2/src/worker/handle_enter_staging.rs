@@ -63,6 +63,20 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             sender.send(Ok(0));
             return;
         }
+        if let Err(e) = region.version().ensure_no_pending_tails() {
+            sender.send(Err(e));
+            return;
+        }
+        // Rows in the memtable need a flush first, which a region that awaits its Leader lease
+        // cannot commit.
+        if !region.version().memtables.is_empty()
+            && let Err(e) = region
+                .manifest_ctx
+                .ensure_leader_lease_or_downgrading(region_id)
+        {
+            sender.send(Err(e));
+            return;
+        }
 
         // Retain the compaction fence while the DDL later waits for flush.
         let (sender, partition_directive) = match self.compaction_scheduler.try_cancel_and_add_ddl(

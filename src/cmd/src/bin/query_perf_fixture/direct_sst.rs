@@ -34,7 +34,7 @@ use mito2::config::IndexConfig;
 use mito2::manifest::action::{RegionCheckpoint, RegionManifest, RemovedFilesRecord};
 use mito2::memtable::sort_primary_key_record_batch;
 use mito2::read::FlatSource;
-use mito2::sst::file::{FileMeta, RegionFileId};
+use mito2::sst::file::{FileMeta, FileMetaRef, RegionFileId};
 use mito2::sst::index::{Indexer, IndexerBuilder};
 use mito2::sst::parquet::writer::ParquetWriter;
 use mito2::sst::parquet::{SstInfo, WriteOptions};
@@ -302,6 +302,7 @@ fn file_meta_from_sst_info(
         level: 0,
         file_size: info.file_size,
         max_row_group_uncompressed_size: info.max_row_group_uncompressed_size,
+        max_row_group_decoded_size: info.max_row_group_decoded_size,
         available_indexes: Default::default(),
         indexes: Default::default(),
         index_file_size: 0,
@@ -314,6 +315,7 @@ fn file_meta_from_sst_info(
         primary_key_min: None,
         primary_key_max: None,
         preserve_row_sequence: false,
+        format: Default::default(),
     }
 }
 
@@ -490,7 +492,7 @@ pub(super) async fn run_direct_sst(args: DirectArgs) {
             remap_sst_file(&obj_store_dir, &table_dir, region_id, info.file_id, file_id);
             files.insert(
                 file_id,
-                file_meta_from_sst_info(&info, region_id, file_id, sequence),
+                FileMetaRef::from(file_meta_from_sst_info(&info, region_id, file_id, sequence)),
             );
         }
     }
@@ -512,6 +514,9 @@ pub(super) async fn run_direct_sst(args: DirectArgs) {
         compaction_time_window: None,
         sst_format: format,
         append_mode: table.append_mode,
+        pending_tails: Default::default(),
+        series_indexes: Default::default(),
+        handoff_floors: Default::default(),
     };
     let checkpoint = RegionCheckpoint {
         last_version: args.checkpoint_version,

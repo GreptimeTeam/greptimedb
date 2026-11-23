@@ -82,6 +82,7 @@ jsonb.workspace = true
 lazy_static.workspace = true
 log-query.workspace = true
 loki-proto.workspace = true
+lz4_flex.workspace = true
 meter-core.workspace = true
 meter-macros.workspace = true
 metric-engine.workspace = true
@@ -98,7 +99,7 @@ otel-arrow-rust.workspace = true
 parking_lot.workspace = true
 partition.workspace = true
 pg_interval = "0.6"
-pgwire = { version = "0.42.1", default-features = false, features = [
+pgwire = { version = "0.42.2", default-features = false, features = [
     "server-api-aws-lc-rs",
     "pg-ext-types",
 ] }

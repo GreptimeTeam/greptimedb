@@ -355,10 +355,15 @@ fn flight_stream_error(addr: &str, error: error::Error) -> error::Error {
         );
     }
 
-    error::Error::FlightGet {
+    // The failure's own sentence travels with it: a region read crosses a process boundary, and
+    // the message is the only thing that says what the region refused.
+    let message = error.to_string();
+    error::Error::FlightStream {
         addr: addr.to_string(),
         tonic_code,
+        message,
         source: BoxedError::new(error),
+        location: snafu::location!(),
     }
 }
 
@@ -623,6 +628,44 @@ mod tests {
             }),
             affected_rows: 1,
             ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cancel_compaction_through_handle() {
+        let server = RegionTestServer::start().await;
+        let requester = server.create_requester(ChannelConfig::default(), false, false);
+        let request = RegionRequest {
+            header: Some(RegionRequestHeader::default()),
+            body: Some(region_request::Body::CancelCompaction(
+                api::v1::region::CancelCompactionRequest {
+                    region_id: 42,
+                    task_id: "cycle-id".into(),
+                },
+            )),
+        };
+        for affected_rows in [0, 1] {
+            let mut response = build_response(StatusCode::Success);
+            response.affected_rows = affected_rows;
+            server
+                .service
+                .responses
+                .lock()
+                .unwrap()
+                .push_back(Ok(response));
+            assert_eq!(
+                requester
+                    .handle(request.clone())
+                    .await
+                    .unwrap()
+                    .affected_rows,
+                affected_rows as usize
+            );
+        }
+        let requests = server.service.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        for (actual, _, _) in requests.iter() {
+            assert_eq!(actual.body, request.body);
         }
     }
 
@@ -1167,7 +1210,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            error::Error::FlightGet {
+            error::Error::FlightStream {
                 addr,
                 tonic_code: tonic::Code::Unavailable,
                 ..
@@ -1188,7 +1231,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            error::Error::FlightGet {
+            error::Error::FlightStream {
                 addr,
                 tonic_code: tonic::Code::Unknown,
                 ..
@@ -1757,10 +1800,15 @@ mod tests {
         .unwrap();
 
         let err = recordbatches.next().await.unwrap().unwrap_err();
-        assert_eq!("External error", err.to_string());
+        // The failure keeps its message: a client reading the error learns what went wrong, not
+        // just that a stream failed.
         assert!(
-            format!("{err:?}").contains("boom after metrics"),
-            "unexpected error: {err:?}"
+            err.to_string().starts_with("External error: "),
+            "unexpected error: {err}"
+        );
+        assert!(
+            err.to_string().contains("boom after metrics"),
+            "unexpected error: {err}"
         );
         assert!(recordbatches.next().await.is_none());
     }

@@ -40,6 +40,11 @@ pub struct RegionLeaseHandler {
 pub type CustomizedRegionLeaseRenewerRef = Arc<dyn CustomizedRegionLeaseRenewer>;
 
 pub trait CustomizedRegionLeaseRenewer: Send + Sync {
+    /// Returns the leases to grant for the renewed `regions`.
+    ///
+    /// The handler sets the `candidate_lease_id` of each returned lease from the entry of
+    /// `regions` with the same region id, or to `None` if there is no such entry. The value set
+    /// by the renewer is ignored.
     fn renew(
         &self,
         ctx: &mut Context,
@@ -94,17 +99,31 @@ impl HeartbeatHandler for RegionLeaseHandler {
                 renewed,
             }) => {
                 let renewed = if let Some(renewer) = &self.customized_region_lease_renewer {
+                    let candidate_lease_ids = renewed
+                        .iter()
+                        .filter_map(|(region_id, region_lease_info)| {
+                            region_lease_info
+                                .candidate_lease_id
+                                .map(|candidate_lease_id| (*region_id, candidate_lease_id))
+                        })
+                        .collect::<HashMap<_, _>>();
                     renewer
                         .renew(ctx, renewed)
                         .into_iter()
-                        .map(|region| region.into())
+                        .map(|region| {
+                            GrantedRegion {
+                                candidate_lease_id: candidate_lease_ids
+                                    .get(&region.region_id)
+                                    .copied(),
+                                ..region
+                            }
+                            .into()
+                        })
                         .collect()
                 } else {
                     renewed
-                        .into_iter()
-                        .map(|(region_id, region_lease_info)| {
-                            GrantedRegion::new(region_id, region_lease_info.role).into()
-                        })
+                        .into_values()
+                        .map(|region_lease_info| GrantedRegion::from(region_lease_info).into())
                         .collect::<Vec<_>>()
                 };
 
@@ -180,11 +199,12 @@ mod test {
             data_topic_latest_entry_id: 0,
             metadata_topic_latest_entry_id: 0,
             written_bytes: 0,
-            flushed_parquet_bytes: 0,
+            ingested_parquet_bytes: 0,
             query_cpu_time: 0,
             query_scanned_bytes: 0,
             min_timestamp: None,
             max_timestamp: None,
+            has_pending_tails: false,
         }
     }
 
@@ -288,6 +308,10 @@ mod test {
         let _guard = opening_region_keeper
             .register_with_role(follower_peer.id, opening_region_id, RegionRole::Follower)
             .unwrap();
+        let candidate_region_id = RegionId::new(table_id, region_number + 3);
+        let candidate_guard = opening_region_keeper
+            .register_candidate_region(follower_peer.id, candidate_region_id)
+            .unwrap();
 
         let acc = &mut HeartbeatAccumulator::default();
 
@@ -297,6 +321,7 @@ mod test {
                 new_empty_region_stat(region_id, RegionRole::Follower),
                 new_empty_region_stat(another_region_id, RegionRole::Follower),
                 new_empty_region_stat(opening_region_id, RegionRole::Follower),
+                new_empty_region_stat(candidate_region_id, RegionRole::Follower),
             ],
             ..Default::default()
         });
@@ -313,12 +338,116 @@ mod test {
             vec![
                 GrantedRegion::new(region_id, RegionRole::Follower),
                 GrantedRegion::new(opening_region_id, RegionRole::Follower),
+                GrantedRegion {
+                    candidate_lease_id: Some(candidate_guard.candidate_lease_id().unwrap()),
+                    ..GrantedRegion::new(candidate_region_id, RegionRole::Follower)
+                },
             ],
         );
         assert_eq!(acc.inactive_region_ids, HashSet::from([another_region_id]));
         assert_eq!(
             acc.region_lease.as_ref().unwrap().closeable_region_ids,
             vec![another_region_id]
+        );
+    }
+
+    /// Grants every renewed region except `skipped`, plus `extra`, which is not in the heartbeat.
+    /// Each lease has a candidate lease id the handler must not keep.
+    struct StubRegionLeaseRenewer {
+        skipped: RegionId,
+        extra: RegionId,
+    }
+
+    impl CustomizedRegionLeaseRenewer for StubRegionLeaseRenewer {
+        fn renew(
+            &self,
+            _ctx: &mut Context,
+            regions: HashMap<RegionId, RegionLeaseInfo>,
+        ) -> Vec<GrantedRegion> {
+            regions
+                .into_values()
+                .filter(|info| info.region_id != self.skipped)
+                .map(|info| (info.region_id, info.role))
+                .chain([(self.extra, RegionRole::Follower)])
+                .map(|(region_id, role)| GrantedRegion {
+                    candidate_lease_id: Some(u64::MAX),
+                    ..GrantedRegion::new(region_id, role)
+                })
+                .collect()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_customized_renewer_leases_carry_candidate_lease_id() {
+        let table_id = 10;
+        let region_id = RegionId::new(table_id, 1);
+        let candidate_region_id = RegionId::new(table_id, 2);
+        let skipped_region_id = RegionId::new(table_id, 3);
+        let extra_region_id = RegionId::new(table_id, 4);
+        let leader_peer = Peer::empty(1);
+        let follower_peer = Peer::empty(2);
+
+        let keeper = new_test_keeper();
+        let table_metadata_manager = keeper.table_metadata_manager();
+        table_metadata_manager
+            .create_table_metadata(
+                new_test_table_info(table_id),
+                TableRouteValue::physical(vec![RegionRoute {
+                    region: Region::new_test(region_id),
+                    leader_peer: Some(leader_peer),
+                    follower_peers: vec![follower_peer.clone()],
+                    ..Default::default()
+                }]),
+                HashMap::default(),
+            )
+            .await
+            .unwrap();
+
+        let opening_region_keeper = Arc::new(MemoryRegionKeeper::default());
+        let candidate_guard = opening_region_keeper
+            .register_candidate_region(follower_peer.id, candidate_region_id)
+            .unwrap();
+        let _skipped_guard = opening_region_keeper
+            .register_candidate_region(follower_peer.id, skipped_region_id)
+            .unwrap();
+
+        let handler = RegionLeaseHandler::new(
+            default_distributed_time_constants().region_lease.as_secs(),
+            table_metadata_manager.clone(),
+            opening_region_keeper,
+            Some(Arc::new(StubRegionLeaseRenewer {
+                skipped: skipped_region_id,
+                extra: extra_region_id,
+            })),
+        );
+        let metasrv = MetasrvBuilder::new().build().await.unwrap();
+        let ctx = &mut metasrv.new_ctx();
+        let acc = &mut HeartbeatAccumulator::default();
+        acc.stat = Some(Stat {
+            id: follower_peer.id,
+            region_stats: vec![
+                new_empty_region_stat(region_id, RegionRole::Follower),
+                new_empty_region_stat(candidate_region_id, RegionRole::Follower),
+                new_empty_region_stat(skipped_region_id, RegionRole::Follower),
+            ],
+            ..Default::default()
+        });
+
+        handler
+            .handle(&HeartbeatRequest::default(), ctx, acc)
+            .await
+            .unwrap();
+
+        assert_region_lease(
+            acc,
+            vec![
+                GrantedRegion::new(region_id, RegionRole::Follower),
+                GrantedRegion {
+                    candidate_lease_id: Some(candidate_guard.candidate_lease_id().unwrap()),
+                    ..GrantedRegion::new(candidate_region_id, RegionRole::Follower)
+                },
+                GrantedRegion::new(extra_region_id, RegionRole::Follower),
+            ],
         );
     }
 

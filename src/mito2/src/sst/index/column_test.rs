@@ -178,6 +178,47 @@ fn input() -> (RegionMetadataRef, RecordBatch, Vec<Vec<u8>>) {
 }
 
 #[tokio::test]
+async fn inverted_segments_keep_the_configured_size_across_row_groups() {
+    let (metadata, batch, _) = input();
+    let (dir, factory) = PuffinManagerFactory::new_for_test_async("inverted_segment_size").await;
+    let puffin = factory.build(
+        ObjectStore::new(Memory::default()).unwrap(),
+        TestPathProvider,
+    );
+    let mut options = IndexOptions::default();
+    options.inverted_index.segment_row_count = 2048;
+    let builder = IndexerBuilderImpl {
+        index_build_inputs: None,
+        build_type: IndexBuildType::Flush,
+        metadata: metadata.clone(),
+        puffin_manager: puffin.clone(),
+        write_cache_enabled: false,
+        intermediate_manager: IntermediateManager::init_fs(dir.path().to_str().unwrap())
+            .await
+            .unwrap(),
+        index_options: options,
+        registry: Arc::new(crate::sst::index::registry::IndexRegistry::new(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        )),
+    };
+    let file = RegionFileId::new(metadata.region_id, FileId::random());
+    // 64,512 rows per row group is not a multiple of 2,048. Widening the segments to whole row
+    // groups would make a single matching row select its whole row group.
+    let mut indexer = builder.build(file, 0, Some(64_512)).await;
+    indexer.update_flat(&batch).await;
+    assert!(indexer.finish().await.file_size > 0);
+    let reader = puffin.reader(&RegionIndexId::new(file, 0)).await.unwrap();
+    let blob = reader.blob("greptime-inverted-index-v1").await.unwrap();
+    let metas = InvertedIndexBlobReader::new(blob.reader().await.unwrap())
+        .metadata(None)
+        .await
+        .unwrap();
+    assert_eq!(2048, metas.segment_row_count);
+}
+
+#[tokio::test]
 async fn materialized_runs_match_legacy_index_bytes_and_bloom_lookups() {
     let (metadata, batch, encoded) = input();
     let (dir, factory) = PuffinManagerFactory::new_for_test_async("materialized_index_bytes").await;
@@ -188,6 +229,7 @@ async fn materialized_runs_match_legacy_index_bytes_and_bloom_lookups() {
     let mut options = IndexOptions::default();
     options.inverted_index.segment_row_count = 3;
     let builder = IndexerBuilderImpl {
+        index_build_inputs: None,
         build_type: IndexBuildType::Flush,
         metadata: metadata.clone(),
         puffin_manager: puffin.clone(),
@@ -196,9 +238,11 @@ async fn materialized_runs_match_legacy_index_bytes_and_bloom_lookups() {
             .await
             .unwrap(),
         index_options: options,
-        inverted_index_config: Default::default(),
-        fulltext_index_config: Default::default(),
-        bloom_filter_index_config: Default::default(),
+        registry: Arc::new(crate::sst::index::registry::IndexRegistry::new(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        )),
     };
     let mut expected = None;
     // Demand is the union of active creators' PK columns, not their counts or
@@ -227,7 +271,14 @@ async fn materialized_runs_match_legacy_index_bytes_and_bloom_lookups() {
         let mut case_builder = builder.clone();
         case_builder.metadata = Arc::new(case_metadata.build().unwrap());
         if disable_bloom {
-            case_builder.bloom_filter_index_config.create_on_flush = crate::config::Mode::Disable;
+            case_builder.registry = Arc::new(crate::sst::index::registry::IndexRegistry::new(
+                Default::default(),
+                Default::default(),
+                crate::config::BloomFilterConfig {
+                    create_on_flush: crate::config::Mode::Disable,
+                    ..Default::default()
+                },
+            ));
         }
         let mut indexer = case_builder
             .build(
@@ -313,8 +364,7 @@ async fn materialized_runs_match_legacy_index_bytes_and_bloom_lookups() {
             }
         }
         let output = indexer.finish().await;
-        assert_eq!(output.inverted_index.row_count, batch.num_rows(), "{mode}");
-        assert_eq!(output.bloom_filter.row_count, batch.num_rows(), "{mode}");
+        assert!(output.file_size > 0, "{mode}");
         let reader = puffin.reader(&RegionIndexId::new(file, 0)).await.unwrap();
         let blob = reader.blob("greptime-inverted-index-v1").await.unwrap();
         let inverted = InvertedIndexBlobReader::new(blob.reader().await.unwrap());

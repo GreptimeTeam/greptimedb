@@ -66,29 +66,27 @@ ORDER BY f.k;
 | logical_plan  | Sort: f.k ASC NULLS LAST                                                                                                         |
 |               |   Projection: f.k, f.val                                                                                                         |
 |               |     Inner Join: f.k = __scalar_sq_1.k Filter: f.val > __scalar_sq_1.max(d.threshold)                                             |
-|               |       Projection: f.k, f.val                                                                                                     |
-|               |         MergeScan [is_placeholder=false, remote_input=[                                                                          |
-|               | SubqueryAlias: f                                                                                                                 |
-|               |   TableScan: scalar_fact                                                                                                         |
+|               |       MergeScan [is_placeholder=false, remote_input=[                                                                            |
+|               | Projection: f.k, f.val                                                                                                           |
+|               |   SubqueryAlias: f                                                                                                               |
+|               |     TableScan: scalar_fact                                                                                                       |
 |               | ]]                                                                                                                               |
-|               |       Projection: __scalar_sq_1.max(d.threshold), __scalar_sq_1.k                                                                |
-|               |         MergeScan [is_placeholder=false, remote_input=[                                                                          |
-|               | SubqueryAlias: __scalar_sq_1                                                                                                     |
-|               |   Projection: max(d.threshold), d.k, __always_true                                                                               |
-|               |     Aggregate: groupBy=[[d.k, Boolean(true) AS __always_true]], aggr=[[max(d.threshold)]]                                        |
-|               |       SubqueryAlias: d                                                                                                           |
-|               |         Filter: scalar_dim.k IS NOT NULL                                                                                         |
-|               |           TableScan: scalar_dim, partial_filters=[scalar_dim.k IS NOT NULL]                                                      |
+|               |       MergeScan [is_placeholder=false, remote_input=[                                                                            |
+|               | Projection: __scalar_sq_1.max(d.threshold), __scalar_sq_1.k                                                                      |
+|               |   SubqueryAlias: __scalar_sq_1                                                                                                   |
+|               |     Projection: max(d.threshold), d.k, __always_true                                                                             |
+|               |       Aggregate: groupBy=[[d.k, Boolean(true) AS __always_true]], aggr=[[max(d.threshold)]]                                      |
+|               |         SubqueryAlias: d                                                                                                         |
+|               |           Filter: scalar_dim.k IS NOT NULL                                                                                       |
+|               |             TableScan: scalar_dim, partial_filters=[scalar_dim.k IS NOT NULL]                                                    |
 |               | ]]                                                                                                                               |
 | physical_plan | SortPreservingMergeExec: [k@0 ASC NULLS LAST]                                                                                    |
 |               |   SortExec: expr=[k@0 ASC NULLS LAST], preserve_partitioning=[true]                                                              |
 |               |     HashJoinExec: mode=Partitioned, join_type=Inner, on=[(k@0, k@1)], filter=val@0 > max(d.threshold)@1, projection=[k@0, val@1] |
 |               |       RepartitionExec: partitioning=Hash([REDACTED
-|               |         ProjectionExec: expr=[k@1 as k, val@2 as val]                                                                            |
-|               |           MergeScanExec: REDACTED
+|               |         MergeScanExec: REDACTED
 |               |       RepartitionExec: partitioning=Hash([REDACTED
-|               |         ProjectionExec: expr=[max(d.threshold)@0 as max(d.threshold), k@1 as k]                                                  |
-|               |           MergeScanExec: REDACTED
+|               |         MergeScanExec: REDACTED
 |               |                                                                                                                                  |
 +---------------+----------------------------------------------------------------------------------------------------------------------------------+
 

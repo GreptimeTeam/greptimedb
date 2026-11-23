@@ -23,6 +23,7 @@ use crate::error::Result;
 use crate::metrics::GC_REF_FILE_CNT;
 use crate::region::MitoRegionRef;
 use crate::sst::file::FileMeta;
+use crate::sst::file_metadata::{FileMetadataInterner, FileMetadataInternerRef};
 
 /// File references grouped by their physical source region.
 #[derive(Debug, Clone, Default)]
@@ -34,9 +35,11 @@ struct RegionFileRefs {
 /// Tracks reader references to SST metadata views in one datanode for object-store GC.
 #[derive(Debug)]
 pub struct FileReferenceManager {
-    /// Datanode id. used to determine tmp ref file name.
+    /// Id of this datanode. Names the tmp ref files and identifies the WAL ranges of
+    /// this node in region manifests.
     node_id: Option<u64>,
     files_per_region: DashMap<RegionId, RegionFileRefs>,
+    pub(crate) file_metadata_interner: FileMetadataInternerRef,
     /// Whether global GC is enabled.
     /// This is only meaningful when using object store (not local filesystem).
     gc_enabled: bool,
@@ -49,6 +52,7 @@ impl FileReferenceManager {
         Self {
             node_id,
             files_per_region: Default::default(),
+            file_metadata_interner: FileMetadataInterner::new(),
             gc_enabled: false,
         }
     }
@@ -58,6 +62,7 @@ impl FileReferenceManager {
         Self {
             node_id,
             files_per_region: Default::default(),
+            file_metadata_interner: FileMetadataInterner::new(),
             gc_enabled,
         }
     }
@@ -108,7 +113,7 @@ impl FileReferenceManager {
 
         for (dst_region, src_regions) in &dst_region_to_src_regions {
             let manifest = dst_region.manifest_ctx.manifest().await;
-            for meta in manifest.files.values() {
+            for meta in manifest.all_files() {
                 if src_regions.contains(&meta.region_id) {
                     cross_region_refs
                         .entry(meta.region_id)
@@ -138,6 +143,7 @@ impl FileReferenceManager {
                     !manifest
                         .files
                         .get(&f.file_id)
+                        .or_else(|| manifest.series_indexes.get(&f.file_id))
                         .is_some_and(|meta| meta.index_version() == f.index_version)
                 });
             });

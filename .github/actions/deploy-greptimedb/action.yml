@@ -19,6 +19,12 @@ inputs:
 runs:
   using: composite
   steps:
+    # Ubuntu 26.04 does not apply the runner's /etc/sysctl.conf at boot.
+    # https://github.com/actions/runner-images/issues/15108
+    - name: Configure inotify limits for kind
+      shell: bash
+      run: sudo sysctl -w fs.inotify.max_user_instances=1280 fs.inotify.max_user_watches=655360
+
     - name: Deploy GreptimeDB by Helm
       shell: bash
       env:
@@ -28,4 +34,5 @@ runs:
         AWS_ACCESS_KEY_ID: ${{ inputs.aws-access-key-id }}
         AWS_SECRET_ACCESS_KEY: ${{ inputs.aws-secret-access-key }}
       run: |
-        ./.github/scripts/deploy-greptimedb.sh
+        # Composite steps do not support timeout-minutes.
+        timeout --kill-after=30s 30m ./.github/scripts/deploy-greptimedb.sh

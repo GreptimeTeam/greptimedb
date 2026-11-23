@@ -15,6 +15,18 @@ read-preference defaulting and unrelated metadata preservation:
 cargo nextest run -p session -E 'test(test_legacy_query_context_wire_defaults_to_leader)'
 ```
 
+The same legacy fixture also checks that logical ALTER requests without pinned
+table IDs retain their original behavior, and that new pinned IDs survive the
+query-context protobuf conversion:
+
+```shell
+cargo nextest run -p common-meta -E 'test(test_pinned_logical_table_ids_wire_compatibility)'
+```
+
+The ID guard requires an updated metasrv; older metasrvs ignore the new internal
+extension. Update metasrv before enabling exemplar source-schema reconciliation
+on frontends. No procedure-state or protobuf fields are added.
+
 The [native histogram Remote Read fixture](wire/native_histogram_remote_read/README.md)
 checks the sampled encoder against independent Prometheus protobuf values,
 including exact integer counts, custom bounds, and NaN payloads:
@@ -23,11 +35,55 @@ including exact integer counts, custom bounds, and NaN payloads:
 cargo nextest run -p servers -E 'test(native_histogram_remote_read_wire_fixture)'
 ```
 
+The [legacy region lease fixture](wire/candidate_lease_id/README.md) checks that a
+lease without a candidate lease id decodes as such and encodes to the same bytes
+as before the field existed:
+
+```shell
+cargo nextest run -p store-api -E 'test(test_legacy_granted_region_wire)'
+```
+
+The [pending tails discard fixture](wire/discard_pending_tails/README.md) checks that
+a region request discarding pending WAL tails stays at body field 24:
+
+```shell
+cargo nextest run -p store-api -E 'test(test_discard_pending_tails_request_wire)'
+```
+
+The [region statistic fixtures](wire/region_statistic_pending_tails/README.md) check that a
+region statistic without pending tails decodes and encodes as before the flag existed:
+
+```shell
+cargo nextest run -p common-meta -E 'test(test_has_pending_tails_wire)'
+```
+
 ## Object store WAL fixtures
 
 Frozen objects of the object store WAL are checked byte for byte by the format tests of
 `log-store`. The SQL runner cannot cover the object store WAL: it owns `wal.provider`. See the
 [fixture notes](wal/object_store/README.md).
+
+## Manifest fixtures
+
+[Table-compaction fixtures](manifest/table_compaction/README.md) are exercised by
+mito2's Rust tests. They cover ordinary file-edit compatibility, supported SST
+levels, and explicit rejection of unpublished prototype task-state records.
+
+The inline sketch-index fixtures in `src/mito2/src/manifest/action.rs` cover both
+file-level and column-level descriptors and mixed builtin/sketch indexes. They run without the enterprise feature:
+
+```shell
+cargo nextest run -p mito2 -E 'test(test_sketch_index_manifest_fixture)'
+```
+
+These fixtures verify supported-reader decoding, not downgrade support for binaries
+that predate the new index types. Upgrade all manifest readers before enabling a
+writer that emits these descriptors; downgrade only to readers that recognize them.
+The OSS build does not generate sketch payloads, so SQL restart cases cannot create
+these descriptors through an OSS writer.
+
+Frozen region manifests that carry pending WAL tails are checked by the manifest tests of `mito2`.
+No SQL statement records a pending tail. See the [fixture notes](manifest/pending_tails/README.md).
 
 ## Quick Start
 

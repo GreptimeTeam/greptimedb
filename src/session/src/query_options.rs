@@ -22,9 +22,18 @@ pub fn canonical_query_option_name(key: &str) -> Option<String> {
         "query_fallback" | "allow_query_fallback" | "query.allow_query_fallback" => {
             Some("query.allow_query_fallback".to_string())
         }
+        "experimental_enable_factorized_join_agg"
+        | "query.experimental_enable_factorized_join_agg" => {
+            Some("query.experimental_enable_factorized_join_agg".to_string())
+        }
         "query.enable_remote_dynamic_filter_pushdown" => {
             Some("query.enable_remote_dynamic_filter_pushdown".to_string())
         }
+        // The native PromQL route is gated on this per-request extension together with the
+        // engine-wide `experimental_native_promql` option. Without this arm the snapshot
+        // rejects it as an unknown `query.` option, which silently disables the route.
+        // TODO(narthex-merge): drop the public alias once the native route is GA.
+        "query.experimental_native_promql" => Some("query.experimental_native_promql".to_string()),
         _ if key.starts_with("datafusion.optimizer.") => Some(key),
         _ => None,
     }

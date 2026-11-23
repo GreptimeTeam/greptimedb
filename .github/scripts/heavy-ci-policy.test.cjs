@@ -103,3 +103,16 @@ test('script tests gate expensive Rust and Checks jobs', () => {
     }
   }
 });
+
+test('platform compilation runs only on schedule or manual dispatch', () => {
+  const workflow = readFileSync(resolve(workflows, 'rust.yml'), 'utf8');
+  for (const job of ['check-windows', 'check-riscv64']) {
+    for (const event of ['pull_request', 'merge_group']) {
+      assert.equal(enabled(job, { workflow, event, action: 'opened' }), false, job);
+    }
+    for (const event of ['schedule', 'workflow_dispatch']) {
+      assert.equal(enabled(job, { workflow, event }), true, job);
+      assert.equal(enabled(job, { workflow, event, repository: 'fork/greptimedb' }), false, job);
+    }
+  }
+});

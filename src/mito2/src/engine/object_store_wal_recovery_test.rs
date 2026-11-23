@@ -23,7 +23,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use api::v1::Rows;
 use common_base::readable_size::ReadableSize;
@@ -31,9 +31,10 @@ use common_error::ext::{BoxedError, ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
 use common_wal::config::object_store::{
-    AckMode, CorruptedSegmentAction, ObjectStoreWalConfig, STANDALONE_GENERATION,
+    AckMode, CorruptedSegmentAction, FIXED_DIRECTORY_GENERATION, ObjectStoreWalConfig,
 };
 use common_wal::options::{ObjectStoreWalOptions, WAL_OPTIONS_KEY, WalOptions};
+use futures::TryStreamExt;
 use log_store::ObjectStoreLogStore;
 use log_store::metrics::{
     METRIC_OBJECT_STORE_WAL_FAILING, METRIC_OBJECT_STORE_WAL_MISSING_HISTORY_ACCEPTED_TOTAL,
@@ -47,7 +48,7 @@ use rstest::rstest;
 use store_api::logstore::LogStore;
 use store_api::logstore::provider::Provider;
 use store_api::mito_engine_options::SKIP_WAL_KEY;
-use store_api::region_engine::{RegionEngine, RegionRole};
+use store_api::region_engine::{RegionEngine, RegionManifestInfo, RegionRole};
 use store_api::region_request::{
     PathType, RegionCatchupRequest, RegionCloseRequest, RegionDropRequest, RegionFlushRequest,
     RegionOpenRequest, RegionPutRequest, RegionRequest, RegionTruncateRequest,
@@ -56,11 +57,20 @@ use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
-use crate::region::MitoRegionRef;
-use crate::test_util::{
-    CreateRequestBuilder, TestEnv, build_rows, build_rows_for_key, flush_region, put_rows,
-    rows_schema,
+use crate::engine::lease_test::promote_to_await_leader_lease;
+use crate::engine::object_store_wal_test::{
+    encode_delta, is_replaced, next_manifest_version, publish_delta, wait_until,
 };
+use crate::engine::pending_tail_test::{set_pending_tails, tail};
+use crate::manifest::action::{PendingTail, UptoKind};
+use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
+use crate::request::WorkerRequest;
+use crate::sst::location::region_dir_from_table_dir;
+use crate::test_util::{
+    CreateRequestBuilder, TestEnv, build_rows, build_rows_for_key, flush_region, nop_action,
+    put_rows, rows_schema,
+};
+use crate::wal::entry_distributor::WalEntryReceiver;
 
 /// The root the store derives its node prefix from.
 const ROOT: &str = "cluster-a/wal";
@@ -96,7 +106,7 @@ async fn open_store(object_store: &ObjectStore, ack_mode: AckMode) -> Arc<Object
         object_store.clone(),
         &store_config(ack_mode),
         0,
-        STANDALONE_GENERATION,
+        FIXED_DIRECTORY_GENERATION,
     )
     .await
     .unwrap()
@@ -565,7 +575,7 @@ async fn test_reopen_with_a_corrupted_segment(
         ..store_config(AckMode::Durable)
     };
     let store =
-        ObjectStoreLogStore::try_new(object_store.clone(), &config, 0, STANDALONE_GENERATION)
+        ObjectStoreLogStore::try_new(object_store.clone(), &config, 0, FIXED_DIRECTORY_GENERATION)
             .await
             .unwrap();
     let engine = new_engine(&mut env, store.clone()).await;
@@ -636,11 +646,15 @@ async fn test_open_region_rejects_mismatched_wal_prefix() {
     // The process now runs its store under the next generation while the
     // region still persists the prefix it was created with.
     let config = store_config(AckMode::Durable);
-    let other_prefix = config.node_prefix(0, STANDALONE_GENERATION + 1);
-    let store =
-        ObjectStoreLogStore::try_new(object_store.clone(), &config, 0, STANDALONE_GENERATION + 1)
-            .await
-            .unwrap();
+    let other_prefix = config.node_prefix(0, FIXED_DIRECTORY_GENERATION + 1);
+    let store = ObjectStoreLogStore::try_new(
+        object_store.clone(),
+        &config,
+        0,
+        FIXED_DIRECTORY_GENERATION + 1,
+    )
+    .await
+    .unwrap();
     let engine = new_engine(&mut env, store).await;
     let err = open_region(&engine, REGION_A, &table_dir, &[])
         .await
@@ -663,7 +677,7 @@ async fn open_store_accepting_missing_history(
         accept_missing_history: true,
         ..store_config(AckMode::Durable)
     };
-    ObjectStoreLogStore::try_new(object_store.clone(), &config, 0, STANDALONE_GENERATION)
+    ObjectStoreLogStore::try_new(object_store.clone(), &config, 0, FIXED_DIRECTORY_GENERATION)
         .await
         .unwrap()
 }
@@ -755,7 +769,7 @@ async fn test_open_on_an_empty_prefix_requires_accepting_the_missing_history() {
         assert_missing_history(
             &err,
             REGION_A,
-            "the prefix held no object when the WAL opened",
+            "the prefix held no object when the prefix was listed",
         );
         assert!(!engine.is_region_exists(REGION_A));
         assert!(wal_object_seqs(&new_location).await.is_empty());
@@ -923,7 +937,7 @@ async fn test_moving_the_wal_keeps_the_history_only_with_its_objects() {
     // nor through a catch-up after an open that skipped the replay.
     let store = open_store(&memory_store(), AckMode::Durable).await;
     let engine = new_engine(&mut env, store.clone()).await;
-    let reason = "the prefix held no object when the WAL opened";
+    let reason = "the prefix held no object when the prefix was listed";
     let err = open_region(&engine, REGION_A, &table_dir, &[])
         .await
         .unwrap_err();
@@ -1046,7 +1060,7 @@ async fn test_open_region_fails_when_its_watermark_is_above_the_wal_objects() {
                 .await
                 .unwrap_err();
             let reason = format!(
-                "its watermark, entry {watermark}, names object {}, but the prefix held entries only in objects below 2 when the WAL opened",
+                "its watermark, entry {watermark}, names object {}, but the prefix held entries only in objects below 2 when the prefix was listed",
                 watermark >> 20
             );
             assert_missing_history(&err, region_id, &reason);
@@ -1428,6 +1442,407 @@ async fn test_flush_waits_until_the_wal_is_durable() {
         region_recovery_state(&engine, REGION_A).await
     );
     assert_eq!(3, engine.get_region_statistic(REGION_A).unwrap().num_rows);
+}
+
+/// A region that a catchup made writable and that awaits its Leader lease, holding rows 0..3:
+/// durable ones, or with `AckMode::Enqueued` ones acknowledged on admission whose object is not
+/// created while creates are held.
+struct WaitingRegion {
+    env: TestEnv,
+    store: Arc<ObjectStoreLogStore>,
+    engine: MitoEngine,
+    schema: Vec<api::v1::ColumnSchema>,
+    table_dir: String,
+    waiting: MitoRegionRef,
+}
+
+async fn waiting_region(prefix: &str, ack_mode: AckMode) -> WaitingRegion {
+    let mut env = TestEnv::with_prefix(prefix).await;
+    let store = open_store(&memory_store(), ack_mode).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    engine.require_write_lease();
+    let (table_dir, schema) = create_region(&engine, REGION_A, &[]).await;
+    promote_to_await_leader_lease(&engine, REGION_A).await;
+    if ack_mode == AckMode::Enqueued {
+        store.hold_creates();
+        put_rows(&engine, REGION_A, rows(&schema, 0, 3)).await;
+    } else {
+        SealedWriter::new(&store)
+            .put_and_seal(&engine, vec![(REGION_A, rows(&schema, 0, 3))])
+            .await;
+    }
+    let waiting = region(&engine, REGION_A);
+    WaitingRegion {
+        env,
+        store,
+        engine,
+        schema,
+        table_dir,
+        waiting,
+    }
+}
+
+type CatchupHandle = tokio::task::JoinHandle<Result<api::region::RegionResponse, BoxedError>>;
+
+fn spawn_catchup(engine: &MitoEngine, set_writable: bool, entry_id: Option<u64>) -> CatchupHandle {
+    let engine = engine.clone();
+    tokio::spawn(async move {
+        let request = RegionCatchupRequest {
+            set_writable,
+            entry_id,
+            ..Default::default()
+        };
+        engine
+            .handle_request(REGION_A, RegionRequest::Catchup(request))
+            .await
+    })
+}
+
+async fn catchup_result(catchup: CatchupHandle) -> Result<api::region::RegionResponse, BoxedError> {
+    tokio::time::timeout(WAIT, catchup).await.unwrap().unwrap()
+}
+
+/// Starts a catchup of a region with held creates and returns it, and the seal of the held batch,
+/// once the catchup waits for that batch to be durable.
+async fn spawn_catchup_waiting_for_durability(
+    w: &WaitingRegion,
+    set_writable: bool,
+) -> (
+    CatchupHandle,
+    tokio::task::JoinHandle<log_store::error::Result<()>>,
+) {
+    let catchup = spawn_catchup(&w.engine, set_writable, None);
+    let seal = spawn_seal(&w.store);
+    wait_for(w.store.wait_for_parked_creates(1)).await;
+    wait_for(w.store.wait_for_durability_waits(1)).await;
+    (catchup, seal)
+}
+
+/// Lets the held batch be created, which ends the durability wait.
+async fn release_held_batch(
+    store: &ObjectStoreLogStore,
+    seal: tokio::task::JoinHandle<log_store::error::Result<()>>,
+) {
+    store.release_creates();
+    tokio::time::timeout(WAIT, seal)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
+
+/// Grants a Leader lease of a heartbeat sent at `sent_at`.
+fn grant_leader_lease(engine: &MitoEngine, sent_at: Instant, deadline: Instant) -> bool {
+    engine
+        .set_region_role_with_lease(REGION_A, RegionRole::Leader, sent_at, deadline, None)
+        .unwrap()
+}
+
+async fn memtable_rows(engine: &MitoEngine) -> u64 {
+    region_recovery_state(engine, REGION_A).await.memtable_rows
+}
+
+/// Writes row 3 to [REGION_A] without the WAL.
+async fn put_row_without_wal(engine: &MitoEngine, schema: &[api::v1::ColumnSchema]) {
+    let request = RegionPutRequest {
+        skip_wal: true,
+        rows: rows(schema, 3, 4),
+        hint: None,
+        partition_expr_version: None,
+    };
+    engine
+        .handle_request(REGION_A, RegionRequest::Put(request))
+        .await
+        .unwrap();
+}
+
+/// Asserts that a catchup failed because its replay ended below the entries it had to reach.
+fn assert_replay_short(error: &BoxedError) {
+    assert!(
+        matches!(
+            error.as_any().downcast_ref::<crate::error::Error>(),
+            Some(crate::error::Error::Unexpected { reason, .. })
+                if reason.contains("it was expected to replay to")
+        ),
+        "{error:?}"
+    );
+}
+
+/// A Leader lease that arrives while a catchup again waits for the durability of the entries the
+/// region acknowledged does not promote the region and ends no wait, nor does a StagingLeader
+/// lease, and a second catchup meanwhile answers busy. If the wait fails, the region keeps its
+/// instance with its rows and a later lease promotes it; otherwise the instance the catchup
+/// replayed into replaces it and becomes writable when the catchup ends.
+#[rstest]
+#[case::wait_fails(true)]
+#[case::wait_succeeds(false)]
+#[tokio::test]
+async fn test_leader_lease_during_durability_wait_does_not_promote(#[case] wait_fails: bool) {
+    let w = waiting_region(
+        "object-store-wal-lease-during-durability-wait",
+        AckMode::Enqueued,
+    )
+    .await;
+    let (engine, waiting) = (&w.engine, &w.waiting);
+    let sent_before_catchup = Instant::now();
+    let (catchup, seal) = spawn_catchup_waiting_for_durability(&w, true).await;
+
+    let deadline = Instant::now() + WAIT;
+    assert!(!grant_leader_lease(engine, Instant::now(), deadline));
+    // The demoted instance stays registered while the catchup runs.
+    assert!(Arc::ptr_eq(waiting, &region(engine, REGION_A)));
+    assert!(waiting.is_follower());
+    assert!(waiting.manifest_ctx.awaits_leader_lease());
+    engine
+        .set_region_role_with_lease(
+            REGION_A,
+            RegionRole::StagingLeader,
+            Instant::now(),
+            deadline,
+            None,
+        )
+        .unwrap();
+    assert!(waiting.is_follower());
+    assert!(waiting.manifest_ctx.awaits_leader_lease());
+    let error = catchup_result(spawn_catchup(engine, true, None))
+        .await
+        .unwrap_err();
+    assert_eq!(StatusCode::RegionBusy, error.status_code(), "{error:?}");
+
+    if wait_fails {
+        w.store.crash().await;
+        let error = catchup_result(catchup).await.unwrap_err();
+        assert!(
+            matches!(
+                error.as_any().downcast_ref::<crate::error::Error>(),
+                Some(crate::error::Error::WaitWalDurable { .. })
+            ),
+            "{error:?}"
+        );
+        assert!(seal.await.unwrap().is_err());
+        assert!(!engine.is_region_catching_up(REGION_A));
+        // The region keeps its instance. The failed catchup no longer holds leases back: one sent
+        // before it still does not promote the region, one sent after it does.
+        assert!(Arc::ptr_eq(waiting, &region(engine, REGION_A)));
+        assert!(!grant_leader_lease(engine, sent_before_catchup, deadline));
+        assert!(waiting.is_follower());
+        assert!(grant_leader_lease(engine, Instant::now(), deadline));
+        assert!(waiting.is_writable());
+    } else {
+        assert!(!catchup.is_finished());
+        release_held_batch(&w.store, seal).await;
+        catchup_result(catchup).await.unwrap();
+        let caught_up = region(engine, REGION_A);
+        assert!(!Arc::ptr_eq(waiting, &caught_up));
+        assert!(caught_up.is_writable());
+        // The leases held back during the wait end no wait: the catchup's promotion starts one.
+        assert!(caught_up.manifest_ctx.awaits_leader_lease());
+    }
+    assert_eq!(3, memtable_rows(engine).await);
+}
+
+/// A manifest version that another writer published before a catchup again does not keep the
+/// region's instance: the replacement opens from that version. Without `set_writable` the
+/// replacement stays a follower and ignores a Leader lease of a heartbeat sent before the swap,
+/// while it replayed; a later lease promotes it.
+#[tokio::test]
+async fn test_catchup_again_replaces_region_behind_published_manifest() {
+    let w = waiting_region("object-store-wal-catchup-again-foreign", AckMode::Enqueued).await;
+    let engine = &w.engine;
+    let version = next_manifest_version(&w.waiting).await;
+    let region_dir = region_dir_from_table_dir(&w.table_dir, REGION_A, PathType::Bare);
+    publish_delta(
+        &w.env.get_object_store().unwrap(),
+        &region_dir,
+        version,
+        encode_delta(nop_action()).await,
+    )
+    .await;
+    let (catchup, seal) = spawn_catchup_waiting_for_durability(&w, false).await;
+    let sent_during_replay = Instant::now();
+    release_held_batch(&w.store, seal).await;
+    catchup_result(catchup).await.unwrap();
+
+    let caught_up = region(engine, REGION_A);
+    assert!(!Arc::ptr_eq(&w.waiting, &caught_up));
+    assert_eq!(version, caught_up.manifest_ctx.manifest_version().await);
+    assert_eq!(3, memtable_rows(engine).await);
+    let deadline = Instant::now() + WAIT;
+    assert!(!grant_leader_lease(engine, sent_during_replay, deadline));
+    assert!(caught_up.is_follower());
+    assert!(grant_leader_lease(engine, Instant::now(), deadline));
+    assert!(caught_up.is_writable());
+}
+
+/// What happens to the waiting region while its catchup again waits for durability.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Interference {
+    /// It becomes writable and acknowledges a write without the WAL.
+    SkipWalWrite,
+    /// It commits a manifest action of its own.
+    OwnCommit,
+    /// It is fenced for a reload.
+    ReloadPending,
+    /// It is closed, and the wait then succeeds.
+    Close,
+    /// It is closed, and the wait then fails.
+    CloseWaitFails,
+}
+
+/// A catchup again keeps the region's instance and answers busy if, while the replacement
+/// replayed, the instance took a write without the WAL, committed, or was fenced for a reload:
+/// the replay may miss the write, and the replacement the commit. A region closed meanwhile is not
+/// registered again, also when the wait fails, and the catchup answers RegionNotFound.
+#[rstest]
+#[case::skip_wal_write(Interference::SkipWalWrite)]
+#[case::own_commit(Interference::OwnCommit)]
+#[case::reload_pending(Interference::ReloadPending)]
+#[case::close(Interference::Close)]
+#[case::close_wait_fails(Interference::CloseWaitFails)]
+#[tokio::test]
+async fn test_catchup_again_region_changed_during_durability_wait(
+    #[case] interference: Interference,
+) {
+    let w = waiting_region("object-store-wal-catchup-again-changed", AckMode::Enqueued).await;
+    let (engine, waiting) = (&w.engine, &w.waiting);
+    let (catchup, seal) = spawn_catchup_waiting_for_durability(&w, true).await;
+
+    match interference {
+        Interference::SkipWalWrite => {
+            // Stands in for an edit that fails while the region is Editing: the registered
+            // instance becomes writable during the replay and acknowledges a write.
+            engine
+                .set_region_role(REGION_A, RegionRole::Leader)
+                .unwrap();
+            put_row_without_wal(engine, &w.schema).await;
+        }
+        Interference::OwnCommit => {
+            let mut manager = waiting.manifest_ctx.manifest_manager.write().await;
+            manager.update(nop_action(), false).await.unwrap();
+        }
+        Interference::ReloadPending => {
+            let mut manager = waiting.manifest_ctx.manifest_manager.write().await;
+            waiting
+                .manifest_ctx
+                .fence_for_reload(&mut manager, REGION_A)
+                .await;
+        }
+        Interference::Close | Interference::CloseWaitFails => {
+            let request = RegionRequest::Close(RegionCloseRequest::default());
+            engine.handle_request(REGION_A, request).await.unwrap();
+        }
+    }
+    if interference == Interference::CloseWaitFails {
+        w.store.crash().await;
+        assert!(seal.await.unwrap().is_err());
+    } else {
+        release_held_batch(&w.store, seal).await;
+    }
+    let error = catchup_result(catchup).await.unwrap_err();
+    match interference {
+        Interference::SkipWalWrite => {
+            assert_eq!(StatusCode::RegionBusy, error.status_code(), "{error:?}");
+            assert!(!engine.is_region_catching_up(REGION_A));
+            assert!(Arc::ptr_eq(waiting, &region(engine, REGION_A)));
+            assert_eq!(4, memtable_rows(engine).await);
+        }
+        Interference::OwnCommit => {
+            assert_eq!(StatusCode::RegionBusy, error.status_code(), "{error:?}");
+            assert!(!engine.is_region_catching_up(REGION_A));
+            assert!(Arc::ptr_eq(waiting, &region(engine, REGION_A)));
+            assert_eq!(3, memtable_rows(engine).await);
+        }
+        Interference::ReloadPending => {
+            assert_eq!(StatusCode::RegionBusy, error.status_code(), "{error:?}");
+            // The worker reloads the kept, fenced instance once the catchup ends.
+            wait_until(|| is_replaced(engine, waiting)).await;
+            assert!(!engine.is_region_catching_up(REGION_A));
+            assert_eq!(3, memtable_rows(engine).await);
+        }
+        Interference::Close | Interference::CloseWaitFails => {
+            assert_eq!(StatusCode::RegionNotFound, error.status_code(), "{error:?}");
+            assert!(!engine.is_region_catching_up(REGION_A));
+            assert!(engine.get_region(REGION_A).is_none());
+            assert!(!waiting.is_writable());
+        }
+    }
+}
+
+/// A successful catchup again replaces the region with an instance that holds only the rows its
+/// WAL replays: an unflushed row written without the WAL is dropped.
+#[tokio::test]
+async fn test_catchup_again_drops_rows_written_without_wal() {
+    let w = waiting_region("object-store-wal-catchup-again-skip-wal", AckMode::Durable).await;
+    let engine = &w.engine;
+    put_row_without_wal(engine, &w.schema).await;
+    assert_eq!(4, memtable_rows(engine).await);
+
+    catchup_result(spawn_catchup(engine, true, None))
+        .await
+        .unwrap();
+    assert!(is_replaced(engine, &w.waiting));
+    assert_eq!(3, memtable_rows(engine).await);
+}
+
+/// A catchup again whose replay falls short keeps the region's instance with its rows, and a
+/// manifest sync of the kept instance answers busy; a retry that reaches the leader's last entry
+/// replaces it. The replay falls short of the leader's last entry, or, reading nothing past the
+/// flushed entry, of the entries the region acknowledged.
+#[rstest]
+#[case::entry_beyond(false)]
+#[case::empty_replay(true)]
+#[tokio::test]
+async fn test_catchup_again_failed_replay_keeps_rows(#[case] empty_replay: bool) {
+    let w = waiting_region(
+        "object-store-wal-catchup-again-failed-replay",
+        AckMode::Durable,
+    )
+    .await;
+    let (engine, waiting) = (&w.engine, &w.waiting);
+    let last_entry_id = waiting.version_control.current().last_entry_id;
+    let error = if empty_replay {
+        let (entry_sender, entry_receiver) = tokio::sync::mpsc::channel(1);
+        let (start_sender, _start_receiver) = tokio::sync::oneshot::channel();
+        let (request, response) = WorkerRequest::new_catchup_region_request(
+            REGION_A,
+            RegionCatchupRequest {
+                set_writable: true,
+                ..Default::default()
+            },
+            Some(WalEntryReceiver::new(entry_receiver, start_sender)),
+        );
+        // The replay reads no entry.
+        drop(entry_sender);
+        let workers = &engine.inner.workers;
+        workers.submit_to_worker(REGION_A, request).await.unwrap();
+        let result = tokio::time::timeout(WAIT, response).await.unwrap().unwrap();
+        BoxedError::new(result.unwrap_err())
+    } else {
+        // The WAL holds no entry up to this one.
+        let beyond = Some(last_entry_id + 10);
+        catchup_result(spawn_catchup(engine, true, beyond))
+            .await
+            .unwrap_err()
+    };
+    assert_replay_short(&error);
+    assert!(Arc::ptr_eq(waiting, &region(engine, REGION_A)));
+    assert!(waiting.is_follower());
+    assert!(!engine.is_region_catching_up(REGION_A));
+    assert_eq!(3, memtable_rows(engine).await);
+    let version = waiting.manifest_ctx.manifest_version().await;
+    let error = engine
+        .sync_region(REGION_A, RegionManifestInfo::mito(version, 0, 0).into())
+        .await
+        .unwrap_err();
+    assert_eq!(StatusCode::RegionBusy, error.status_code(), "{error:?}");
+
+    catchup_result(spawn_catchup(engine, true, Some(last_entry_id)))
+        .await
+        .unwrap();
+    let caught_up = region(engine, REGION_A);
+    assert!(!Arc::ptr_eq(waiting, &caught_up));
+    assert!(caught_up.is_writable());
+    assert_eq!(3, memtable_rows(engine).await);
 }
 
 #[tokio::test]
@@ -1866,7 +2281,7 @@ async fn test_flush_does_not_publish_a_frontier_for_a_lost_enqueued_backlog() {
         engine
             .get_region_statistic(REGION_A)
             .unwrap()
-            .flushed_parquet_bytes,
+            .ingested_parquet_bytes,
         0
     );
     assert!(store.stop().await.is_err());
@@ -1973,4 +2388,919 @@ async fn test_enqueued_writes_fail_fast_while_the_object_store_refuses_the_backl
         },
         region_recovery_state(&engine, REGION_A).await
     );
+}
+
+#[rstest]
+#[case(AckMode::Durable)]
+#[case(AckMode::Enqueued)]
+#[tokio::test]
+async fn test_close_persists_bounded_release_without_losing_unflushed_rows(
+    #[case] ack_mode: AckMode,
+) {
+    let mut env = TestEnv::with_prefix("close-bounded-release").await;
+    let object_store = memory_store();
+    let store = open_store(&object_store, ack_mode).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    let (table_dir, schema) = create_region(&engine, REGION_A, &[]).await;
+    let (other_dir, other_schema) = create_region(&engine, REGION_B, &[]).await;
+    let mut writer = SealedWriter::new(&store);
+    writer
+        .put_and_seal(
+            &engine,
+            vec![
+                (REGION_A, rows(&schema, 0, 3)),
+                (REGION_B, rows(&other_schema, 0, 2)),
+            ],
+        )
+        .await;
+    flush_region(&engine, REGION_A, None).await;
+    writer
+        .put_and_seal(&engine, vec![(REGION_A, rows(&schema, 3, 6))])
+        .await;
+    let expected = scan_rows(&engine, REGION_A).await;
+    let expected_other = scan_rows(&engine, REGION_B).await;
+    // Region B pins the shared object: reclaim-boundary recovery alone cannot
+    // discard region A's flushed entries without the close release record.
+    let before = wal_object_seqs(&object_store).await;
+    tokio::time::timeout(WAIT, close_region(&engine, REGION_A))
+        .await
+        .unwrap();
+    assert_eq!(before, wal_object_seqs(&object_store).await);
+    // The close completes without an upload; sealing persists its bounded release.
+    store.seal_open_batch().await.unwrap();
+    drop(writer);
+    crash(engine, store).await;
+    let store = open_store(&object_store, ack_mode).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    // Recovery uses the release even before this region is reopened.
+    let batches = store.read(&provider(REGION_A), 0).await.unwrap();
+    let entries: Vec<_> = batches.try_collect().await.unwrap();
+    assert_eq!(1, entries.iter().map(|batch| batch.len()).sum::<usize>());
+    open_region(&engine, REGION_A, &table_dir, &[])
+        .await
+        .unwrap();
+    assert_eq!(expected, scan_rows(&engine, REGION_A).await);
+    open_region(&engine, REGION_B, &other_dir, &[])
+        .await
+        .unwrap();
+    assert_eq!(expected_other, scan_rows(&engine, REGION_B).await);
+    engine.stop().await.unwrap();
+}
+
+#[rstest]
+#[case::local_tail(true)]
+#[case::foreign_tail(false)]
+#[tokio::test]
+async fn test_close_bounded_release_preserves_pending_tails(
+    #[case] local_tail: bool,
+    #[values(AckMode::Durable, AckMode::Enqueued)] ack_mode: AckMode,
+) {
+    let mut env = TestEnv::with_prefix("close-pending-tails")
+        .await
+        .with_node_id(0);
+    let object_store = memory_store();
+    let store = open_store(&object_store, ack_mode).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    let (table_dir, schema) = create_region(&engine, REGION_A, &[]).await;
+    let (_, other_schema) = create_region(&engine, REGION_B, &[]).await;
+    let mut writer = SealedWriter::new(&store);
+    writer
+        .put_and_seal(
+            &engine,
+            vec![
+                (REGION_A, rows(&schema, 0, 1)),
+                (REGION_B, rows(&other_schema, 0, 1)),
+            ],
+        )
+        .await;
+    for i in 1..3 {
+        writer
+            .put_and_seal(&engine, vec![(REGION_A, rows(&schema, i, i + 1))])
+            .await;
+    }
+    // A foreign tail with a lower bound must not cap this node's release.
+    let mut tails = vec![tail(1, 0, entry_id(3, 1))];
+    if local_tail {
+        tails.push(tail(0, entry_id(2, 1), entry_id(3, 1)));
+        tails.push(tail(0, entry_id(1, 1), entry_id(2, 1)));
+    }
+    set_pending_tails(&engine, REGION_A, tails.clone()).await;
+    flush_region(&engine, REGION_A, None).await;
+    assert_eq!(
+        entry_id(3, 1),
+        engine
+            .get_region(REGION_A)
+            .unwrap()
+            .version()
+            .flushed_entry_id
+    );
+    close_region(&engine, REGION_A).await;
+    store.seal_open_batch().await.unwrap();
+    drop(writer);
+    crash(engine, store).await;
+
+    let store = open_store(&object_store, ack_mode).await;
+    let batches: Vec<_> = store
+        .read(&provider(REGION_A), 0)
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    let ids: Vec<_> = batches
+        .into_iter()
+        .flatten()
+        .map(|entry| entry.entry_id())
+        .collect();
+    let expected = if local_tail {
+        vec![entry_id(2, 1), entry_id(3, 1)]
+    } else {
+        vec![]
+    };
+    assert_eq!(expected, ids);
+    let engine = new_engine(&mut env, store).await;
+    open_region(&engine, REGION_A, &table_dir, &[])
+        .await
+        .unwrap();
+    assert_eq!(
+        tails,
+        engine.get_region(REGION_A).unwrap().version().pending_tails
+    );
+    engine.stop().await.unwrap();
+}
+
+#[rstest]
+#[case(AckMode::Durable)]
+#[case(AckMode::Enqueued)]
+#[tokio::test]
+async fn test_close_reopens_after_its_release_record_is_collected(#[case] ack_mode: AckMode) {
+    let mut env = TestEnv::with_prefix("close-collected-release").await;
+    let object_store = memory_store();
+    let store = open_store(&object_store, ack_mode).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    let (dir_a, schema_a) = create_region(&engine, REGION_A, &[]).await;
+    let (dir_b, schema_b) = create_region(&engine, REGION_B, &[]).await;
+    let mut writer = SealedWriter::new(&store);
+    for i in 0..9 {
+        let (region_id, schema) = if i < 5 {
+            (REGION_A, &schema_a)
+        } else {
+            (REGION_B, &schema_b)
+        };
+        writer
+            .put_and_seal(&engine, vec![(region_id, rows(schema, i, i + 1))])
+            .await;
+    }
+    let expected_a = scan_rows(&engine, REGION_A).await;
+    let expected_b = scan_rows(&engine, REGION_B).await;
+    // A's unflushed data pins the prefix while the higher-watermark B closes.
+    flush_region(&engine, REGION_B, None).await;
+    assert_eq!(
+        entry_id(9, 1),
+        region(&engine, REGION_B).version().flushed_entry_id
+    );
+    close_region(&engine, REGION_B).await;
+    store.seal_open_batch().await.unwrap();
+    wait_for_collection(&store).await;
+    assert!(wal_object_seqs(&object_store).await.contains(&10));
+    flush_region(&engine, REGION_A, None).await;
+    assert_eq!(
+        entry_id(5, 1),
+        region(&engine, REGION_A).version().flushed_entry_id
+    );
+    close_region(&engine, REGION_A).await;
+    store.seal_open_batch().await.unwrap();
+    wait_for_collection(&store).await;
+    // Only A's release remains: neither B's entries nor its release can
+    // short-circuit the history check after restart.
+    assert_eq!(vec![11], wal_object_seqs(&object_store).await);
+    drop(writer);
+    crash(engine, store).await;
+    for _ in 0..2 {
+        let store = open_store(&object_store, ack_mode).await;
+        let engine = new_engine(&mut env, store.clone()).await;
+        open_region(&engine, REGION_B, &dir_b, &[]).await.unwrap();
+        open_region(&engine, REGION_A, &dir_a, &[]).await.unwrap();
+        assert_eq!(expected_b, scan_rows(&engine, REGION_B).await);
+        assert_eq!(expected_a, scan_rows(&engine, REGION_A).await);
+        crash(engine, store).await;
+    }
+}
+
+#[rstest]
+#[case::stopped(true)]
+#[case::poisoned(false)]
+#[tokio::test]
+async fn test_close_handles_unavailable_bounded_release(#[case] stopped: bool) {
+    let mut env = TestEnv::with_prefix("close-release-admission-failure").await;
+    let store = open_store(&memory_store(), AckMode::Durable).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    create_region(&engine, REGION_A, &[]).await;
+    if stopped {
+        store.stop().await.unwrap();
+    } else {
+        // Exhausting the sequence poisons the live actor: this is a real
+        // admission failure, unlike the expected stop-before-close order.
+        assert!(
+            store
+                .obsolete(&provider(REGION_A), REGION_A, u64::MAX)
+                .await
+                .is_err()
+        );
+    }
+    let failures = crate::metrics::WAL_RELEASE_ADMISSION_FAILURE_TOTAL.get();
+    close_region(&engine, REGION_A).await;
+    assert!(engine.get_region(REGION_A).is_none());
+    assert_eq!(
+        failures + u64::from(!stopped),
+        crate::metrics::WAL_RELEASE_ADMISSION_FAILURE_TOTAL.get()
+    );
+    engine.stop().await.unwrap();
+}
+
+#[rstest]
+#[case(AckMode::Durable)]
+#[case(AckMode::Enqueued)]
+#[tokio::test]
+async fn test_flush_on_close_persists_bounded_release(#[case] ack_mode: AckMode) {
+    let mut env = TestEnv::with_prefix("flush-on-close-bounded-release").await;
+    let object_store = memory_store();
+    let store = open_store(&object_store, ack_mode).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    let (table_dir, schema) = create_region(&engine, REGION_A, &[]).await;
+    let (_, other_schema) = create_region(&engine, REGION_B, &[]).await;
+    let mut writer = SealedWriter::new(&store);
+    writer
+        .put_and_seal(
+            &engine,
+            vec![
+                (REGION_A, rows(&schema, 0, 3)),
+                (REGION_B, rows(&other_schema, 0, 2)),
+            ],
+        )
+        .await;
+    let expected = scan_rows(&engine, REGION_A).await;
+    tokio::time::timeout(
+        WAIT,
+        engine.handle_request(
+            REGION_A,
+            RegionRequest::Close(RegionCloseRequest {
+                flush_on_close: true,
+            }),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(engine.get_region(REGION_A).is_none());
+    store.seal_open_batch().await.unwrap();
+    drop(writer);
+    crash(engine, store).await;
+    let store = open_store(&object_store, ack_mode).await;
+    // B pins the shared object. Before A is reopened, only the persisted
+    // release can hide its entries; the manifest has not supplied its floor.
+    let entries: Vec<_> = store
+        .read(&provider(REGION_A), 0)
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert!(entries.iter().all(Vec::is_empty));
+    let entries: Vec<_> = store
+        .read(&provider(REGION_B), 0)
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(1, entries.iter().map(Vec::len).sum::<usize>());
+    let engine = new_engine(&mut env, store.clone()).await;
+    open_region(&engine, REGION_A, &table_dir, &[])
+        .await
+        .unwrap();
+    assert_eq!(expected, scan_rows(&engine, REGION_A).await);
+    engine.stop().await.unwrap();
+}
+
+/// Reports the actual scheduler state before the worker can process flush
+/// completion. This distinguishes skipped admission from a later commit failure.
+struct PressureAdmissionListener {
+    checked: tokio::sync::mpsc::UnboundedSender<(RegionId, bool)>,
+}
+
+#[async_trait::async_trait]
+impl crate::engine::listener::EventListener for PressureAdmissionListener {
+    fn on_wal_pressure_checked(&self, region_id: RegionId, flush_requested: bool) {
+        let _ = self.checked.send((region_id, flush_requested));
+    }
+}
+
+async fn wait_for_pressure_admission(
+    checked: &mut tokio::sync::mpsc::UnboundedReceiver<(RegionId, bool)>,
+    region_id: RegionId,
+) -> bool {
+    tokio::time::timeout(WAIT, async {
+        loop {
+            let (id, requested) = checked.recv().await.unwrap();
+            if id == region_id {
+                return requested;
+            }
+        }
+    })
+    .await
+    .expect("worker must process the pressure snapshot")
+}
+
+/// Exercises the production threshold, worker timers, flush and WAL release.
+/// Both regions pin the oldest object and belong to different workers.
+/// With `awaiting_leader_lease`, region A is a writable leader that awaits its Leader lease.
+#[rstest]
+#[case::writable(RegionRoleState::Leader(RegionLeaderState::Writable), false)]
+#[case::follower(RegionRoleState::Follower, false)]
+#[case::staging(RegionRoleState::Leader(RegionLeaderState::Staging), false)]
+#[case::awaiting_leader_lease(RegionRoleState::Leader(RegionLeaderState::Writable), true)]
+#[tokio::test]
+async fn test_wal_pressure_flushes_blockers_across_workers(
+    #[case] state: RegionRoleState,
+    #[case] awaiting_leader_lease: bool,
+) {
+    use crate::time_provider::mock::MockTimeProvider;
+
+    let mut env = TestEnv::new().await;
+    let object_store = memory_store();
+    let store = open_store(&object_store, AckMode::Durable).await;
+    let clock = Arc::new(MockTimeProvider::new(
+        common_time::util::current_time_millis(),
+    ));
+    let (checked, mut observations) = tokio::sync::mpsc::unbounded_channel();
+    let listener = Arc::new(PressureAdmissionListener { checked });
+    let engine = env
+        .create_engine_with_log_store_and_time(
+            MitoConfig {
+                num_workers: 2,
+                auto_flush_interval: Duration::from_secs(3600),
+                ..Default::default()
+            },
+            store.clone(),
+            clock.clone(),
+            Some(listener),
+        )
+        .await;
+    let (_, schema_a) = create_region(&engine, REGION_A, &[]).await;
+    let (_, schema_b) = create_region(&engine, REGION_B, &[]).await;
+    let mut writer = SealedWriter::new(&store);
+    writer
+        .put_and_seal(
+            &engine,
+            vec![
+                (
+                    REGION_A,
+                    Rows {
+                        schema: schema_a,
+                        rows: build_rows(0, 1),
+                    },
+                ),
+                (
+                    REGION_B,
+                    Rows {
+                        schema: schema_b.clone(),
+                        rows: build_rows(0, 1),
+                    },
+                ),
+            ],
+        )
+        .await;
+    // Fill the retained suffix without advancing the periodic clock.
+    for i in 1..1_200 {
+        writer
+            .put_and_seal(
+                &engine,
+                vec![(
+                    REGION_B,
+                    Rows {
+                        schema: schema_b.clone(),
+                        rows: build_rows(i, i + 1),
+                    },
+                )],
+            )
+            .await;
+    }
+    assert!(store.flush_candidates().is_empty());
+    let now = common_time::util::current_time_millis();
+    clock.set_now(now + 120_000);
+    clock.set_elapsed(120_000);
+    let premature_flush = tokio::time::timeout(Duration::from_millis(200), async {
+        loop {
+            if [REGION_A, REGION_B]
+                .iter()
+                .any(|&id| region(&engine, id).version().flushed_entry_id != 0)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        premature_flush.is_err(),
+        "the threshold itself must not trigger a flush"
+    );
+    writer
+        .put_and_seal(
+            &engine,
+            vec![(
+                REGION_B,
+                Rows {
+                    schema: schema_b.clone(),
+                    rows: build_rows(1_200, 1_201),
+                },
+            )],
+        )
+        .await;
+    assert_eq!(vec![REGION_A, REGION_B], store.flush_candidates());
+    for id in [REGION_A, REGION_B] {
+        assert_eq!(0, region(&engine, id).version().flushed_entry_id);
+    }
+    let expected_a = latest(&store, REGION_A);
+    let expected_b = latest(&store, REGION_B);
+    let region_a = region(&engine, REGION_A);
+    match state {
+        RegionRoleState::Follower => engine
+            .set_region_role(REGION_A, RegionRole::Follower)
+            .unwrap(),
+        RegionRoleState::Leader(RegionLeaderState::Staging) => {
+            let mut manager = region_a.manifest_ctx.manifest_manager.write().await;
+            region_a.set_staging(&mut manager).await.unwrap();
+        }
+        RegionRoleState::Leader(RegionLeaderState::Writable) => {}
+        _ => unreachable!(),
+    }
+    let lease_deadline = std::time::Instant::now() + Duration::from_secs(600);
+    if awaiting_leader_lease {
+        region(&engine, REGION_B)
+            .manifest_ctx
+            .leader_deadline
+            .extend(lease_deadline);
+        region_a
+            .manifest_ctx
+            .start_leader_lease_wait_for_test(REGION_A);
+    }
+    clock.set_now(now + 240_000);
+    if state != RegionRoleState::Leader(RegionLeaderState::Writable) || awaiting_leader_lease {
+        // Observe admission itself: a failed manifest commit would also leave
+        // the watermark unchanged, but must not make this assertion pass.
+        assert!(!wait_for_pressure_admission(&mut observations, REGION_A).await);
+        // The other worker must make progress while A is not eligible.
+        tokio::time::timeout(WAIT, async {
+            while region(&engine, REGION_B).version().flushed_entry_id != expected_b {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        // Publish distinct snapshots and wait for A's worker to process each.
+        for offset in [360_000, 480_000] {
+            clock.set_now(now + offset);
+            assert!(!wait_for_pressure_admission(&mut observations, REGION_A).await);
+        }
+        assert_eq!(0, region_a.version().flushed_entry_id);
+        assert_eq!(vec![REGION_A], store.flush_candidates());
+        if region_a.is_staging() {
+            region_a.exit_staging().unwrap();
+        } else if awaiting_leader_lease {
+            let sent_at = std::time::Instant::now();
+            engine
+                .set_region_role_with_lease(
+                    REGION_A,
+                    RegionRole::Leader,
+                    sent_at,
+                    lease_deadline,
+                    None,
+                )
+                .unwrap();
+        } else {
+            engine
+                .set_region_role(REGION_A, RegionRole::Leader)
+                .unwrap();
+        }
+        // A previously skipped candidate is retried on the next refresh.
+        clock.set_now(now + 600_000);
+        assert!(wait_for_pressure_admission(&mut observations, REGION_A).await);
+    }
+    tokio::time::timeout(WAIT, async {
+        loop {
+            if region(&engine, REGION_A).version().flushed_entry_id == expected_a
+                && region(&engine, REGION_B).version().flushed_entry_id == expected_b
+                && store.flush_candidates().is_empty()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // A subsequent object persists the new reclaim boundary, allowing the
+    // store to delete the whole old suffix without an explicit flush request.
+    writer
+        .put_and_seal(&engine, vec![(REGION_B, rows(&schema_b, 1_201, 1_202))])
+        .await;
+    wait_for_collection(&store).await;
+    assert_eq!(vec![1_202], wal_object_seqs(&object_store).await);
+    assert_eq!(
+        expected_a,
+        region_recovery_state(&engine, REGION_A)
+            .await
+            .manifest_flushed_entry_id
+    );
+    assert_eq!(
+        expected_b,
+        region_recovery_state(&engine, REGION_B)
+            .await
+            .manifest_flushed_entry_id
+    );
+    engine.stop().await.unwrap();
+    store.stop().await.unwrap();
+}
+
+/// Pressure leaves alone a region whose own pending tail starts at or below its flushed entry id,
+/// since a flush cannot move its WAL release past that tail, and flushes any other region.
+#[rstest]
+#[case::own_tail(0, 0, false)]
+#[case::own_tail_ahead(0, 1, true)]
+#[case::other_node_tail(1, 0, true)]
+#[tokio::test]
+async fn test_wal_pressure_skips_regions_capped_by_own_tails(
+    #[case] node_id: u64,
+    #[case] after: u64,
+    #[case] flushed: bool,
+) {
+    use crate::time_provider::mock::MockTimeProvider;
+
+    let mut env = TestEnv::new().await.with_node_id(0);
+    let store = open_store(&memory_store(), AckMode::Durable).await;
+    let now = common_time::util::current_time_millis();
+    let clock = Arc::new(MockTimeProvider::new(now));
+    let (checked, mut observations) = tokio::sync::mpsc::unbounded_channel();
+    let engine = env
+        .create_engine_with_log_store_and_time(
+            MitoConfig {
+                auto_flush_interval: Duration::from_secs(3600),
+                ..Default::default()
+            },
+            store.clone(),
+            clock.clone(),
+            Some(Arc::new(PressureAdmissionListener { checked })),
+        )
+        .await;
+    let (_, schema) = create_region(&engine, REGION_A, &[]).await;
+    let mut writer = SealedWriter::new(&store);
+    for i in 0..=1_200 {
+        writer
+            .put_and_seal(&engine, vec![(REGION_A, rows(&schema, i, i + 1))])
+            .await;
+    }
+    assert_eq!(vec![REGION_A], store.flush_candidates());
+    let tail = PendingTail {
+        node_id,
+        after,
+        upto: latest(&store, REGION_A),
+        upto_kind: UptoKind::Reported,
+    };
+    set_pending_tails(&engine, REGION_A, vec![tail]).await;
+
+    clock.set_now(now + 120_000);
+    clock.set_elapsed(120_000);
+
+    assert_eq!(
+        flushed,
+        wait_for_pressure_admission(&mut observations, REGION_A).await
+    );
+}
+
+/// Different regions pin successive old objects. One refresh must flush all
+/// blockers, including while new objects arrive, rather than advance one pin
+/// per minute. Repeat after reclamation to exercise ongoing pressure.
+#[tokio::test]
+async fn test_wal_pressure_flushes_separate_objects_under_continued_writes() {
+    use crate::time_provider::mock::MockTimeProvider;
+
+    let mut env = TestEnv::new().await;
+    let objects = memory_store();
+    let store = open_store(&objects, AckMode::Durable).await;
+    let now = common_time::util::current_time_millis();
+    let clock = Arc::new(MockTimeProvider::new(now));
+    let engine = env
+        .create_engine_with_log_store_and_time(
+            pressure_config(),
+            store.clone(),
+            clock.clone(),
+            None,
+        )
+        .await;
+    let ids = [REGION_A, REGION_B, RegionId::new(1, 3), RegionId::new(1, 4)];
+    let mut schemas = Vec::new();
+    for id in ids {
+        schemas.push(create_region(&engine, id, &[]).await.1);
+    }
+    let mut writer = SealedWriter::new(&store);
+    for round in 0..2 {
+        for i in 0..1_204 {
+            let index = if i < 3 { i } else { 3 };
+            let row = round * 2_000 + i;
+            writer
+                .put_and_seal(
+                    &engine,
+                    vec![(ids[index], rows(&schemas[index], row, row + 1))],
+                )
+                .await;
+        }
+        let expected = ids.map(|id| latest(&store, id));
+        clock.set_now(now + (round as i64 + 1) * 120_000);
+        clock.set_elapsed((round as i64 + 1) * 120_000);
+        // Continue appending after publishing pressure, without another clock
+        // advance: recovery must not require another candidate refresh.
+        for i in 1_204..1_236 {
+            let row = round * 2_000 + i;
+            writer
+                .put_and_seal(&engine, vec![(ids[3], rows(&schemas[3], row, row + 1))])
+                .await;
+        }
+        tokio::time::timeout(WAIT, async {
+            loop {
+                if ids
+                    .iter()
+                    .zip(expected)
+                    .all(|(&id, upto)| region(&engine, id).version().flushed_entry_id >= upto)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("one refresh must flush all old-object blockers");
+        for (id, upto) in ids.into_iter().zip(expected) {
+            assert!(
+                region_recovery_state(&engine, id)
+                    .await
+                    .manifest_flushed_entry_id
+                    >= upto
+            );
+        }
+        // Persist the advanced reclaim boundary and wait for physical deletion.
+        let row = round * 2_000 + 1_236;
+        writer
+            .put_and_seal(&engine, vec![(ids[3], rows(&schemas[3], row, row + 1))])
+            .await;
+        wait_for_collection(&store).await;
+        assert!(wal_object_seqs(&objects).await.len() <= 1_200);
+        assert!(store.flush_candidates().is_empty());
+    }
+    engine.stop().await.unwrap();
+    store.stop().await.unwrap();
+}
+
+/// Builds actual WAL objects without allowing the ordinary hourly flush to run.
+async fn fill_pressure_objects(
+    engine: &MitoEngine,
+    store: &Arc<ObjectStoreLogStore>,
+    schema: &[api::v1::ColumnSchema],
+) {
+    let mut writer = SealedWriter::new(store);
+    for i in 0..1_201 {
+        writer
+            .put_and_seal(engine, vec![(REGION_A, rows(schema, i, i + 1))])
+            .await;
+    }
+    assert_eq!(vec![REGION_A], store.flush_candidates());
+    assert_eq!(0, region(engine, REGION_A).version().flushed_entry_id);
+}
+
+fn pressure_config() -> MitoConfig {
+    MitoConfig {
+        num_workers: 2,
+        auto_flush_interval: Duration::from_secs(3600),
+        ..Default::default()
+    }
+}
+
+async fn wait_for_pressure_flush(engine: &MitoEngine, store: &ObjectStoreLogStore, expected: u64) {
+    tokio::time::timeout(WAIT, async {
+        while region(engine, REGION_A).version().flushed_entry_id != expected
+            || !store.flush_candidates().is_empty()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("WAL pressure must flush the region");
+    assert_eq!(
+        expected,
+        region_recovery_state(engine, REGION_A)
+            .await
+            .manifest_flushed_entry_id
+    );
+}
+
+#[rstest]
+#[case::sst(".parquet")]
+#[case::manifest(".json")]
+#[tokio::test]
+async fn test_wal_pressure_retries_failed_persistence(#[case] suffix: &'static str) {
+    use crate::time_provider::mock::MockTimeProvider;
+
+    let denied = Arc::new(AtomicBool::new(false));
+    let failed = Arc::new(tokio::sync::Notify::new());
+    let layer = MockLayerBuilder::default()
+        .writer_factory(Arc::new({
+            let denied = denied.clone();
+            let failed = failed.clone();
+            move |path, _, inner| {
+                if path.contains(suffix) && denied.load(Ordering::SeqCst) {
+                    failed.notify_one();
+                    Box::new(DeniedWriter)
+                } else {
+                    inner
+                }
+            }
+        }))
+        .build()
+        .unwrap();
+    let mut env = TestEnv::new().await.with_mock_layer(layer);
+    let objects = memory_store();
+    let store = open_store(&objects, AckMode::Durable).await;
+    let now = common_time::util::current_time_millis();
+    let clock = Arc::new(MockTimeProvider::new(now));
+    let engine = env
+        .create_engine_with_log_store_and_time(
+            pressure_config(),
+            store.clone(),
+            clock.clone(),
+            None,
+        )
+        .await;
+    let (_, schema) = create_region(&engine, REGION_A, &[]).await;
+    fill_pressure_objects(&engine, &store, &schema).await;
+    let expected = latest(&store, REGION_A);
+    let before = wal_object_seqs(&objects).await;
+    let expected_rows = scan_rows(&engine, REGION_A).await;
+    denied.store(true, Ordering::SeqCst);
+    clock.set_now(now + 120_000);
+    clock.set_elapsed(120_000);
+    tokio::time::timeout(WAIT, failed.notified())
+        .await
+        .expect("pressure flush must reach the failing persistence layer");
+    assert_eq!(
+        0,
+        region_recovery_state(&engine, REGION_A)
+            .await
+            .manifest_flushed_entry_id
+    );
+    assert_eq!(0, region(&engine, REGION_A).version().flushed_entry_id);
+    assert_eq!(vec![REGION_A], store.flush_candidates());
+    assert_eq!(before, wal_object_seqs(&objects).await);
+    denied.store(false, Ordering::SeqCst);
+    // Advance subsequent refreshes until the worker has processed the failure.
+    // No manual flush or additional user write may drive the retry.
+    tokio::time::timeout(WAIT, async {
+        let mut tick = now + 240_000;
+        while region(&engine, REGION_A).version().flushed_entry_id != expected {
+            clock.set_now(tick);
+            // Stay below the hourly automatic flush even on a slow machine.
+            tick = (tick + 60_000).min(now + 1_800_000);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a later pressure refresh must retry the failed flush");
+    wait_for_pressure_flush(&engine, &store, expected).await;
+    assert!(store.flush_candidates().is_empty());
+    assert_eq!(expected_rows, scan_rows(&engine, REGION_A).await);
+    engine.stop().await.unwrap();
+    store.stop().await.unwrap();
+}
+
+#[rstest]
+#[case(AckMode::Durable)]
+#[case(AckMode::Enqueued)]
+#[tokio::test]
+async fn test_wal_pressure_survives_restart(#[case] ack_mode: AckMode) {
+    use crate::time_provider::mock::MockTimeProvider;
+
+    let mut env = TestEnv::new().await;
+    let objects = memory_store();
+    let store = open_store(&objects, ack_mode).await;
+    let now = common_time::util::current_time_millis();
+    let clock = Arc::new(MockTimeProvider::new(now));
+    let engine = env
+        .create_engine_with_log_store_and_time(
+            pressure_config(),
+            store.clone(),
+            clock.clone(),
+            None,
+        )
+        .await;
+    let (table_dir, schema) = create_region(&engine, REGION_A, &[]).await;
+    fill_pressure_objects(&engine, &store, &schema).await;
+    let expected = latest(&store, REGION_A);
+    let expected_rows = scan_rows(&engine, REGION_A).await;
+    crash(engine, store).await;
+
+    let store = open_store(&objects, ack_mode).await;
+    assert_eq!(vec![REGION_A], store.flush_candidates());
+    let engine = env
+        .create_engine_with_log_store_and_time(
+            pressure_config(),
+            store.clone(),
+            clock.clone(),
+            None,
+        )
+        .await;
+    open_region(&engine, REGION_A, &table_dir, &[])
+        .await
+        .unwrap();
+    assert_eq!(expected_rows, scan_rows(&engine, REGION_A).await);
+    assert_eq!(0, region(&engine, REGION_A).version().flushed_entry_id);
+    clock.set_now(now + 120_000);
+    clock.set_elapsed(120_000);
+    wait_for_pressure_flush(&engine, &store, expected).await;
+    assert!(store.flush_candidates().is_empty());
+    assert_eq!(expected_rows, scan_rows(&engine, REGION_A).await);
+    engine.stop().await.unwrap();
+    store.stop().await.unwrap();
+}
+
+#[derive(Default)]
+struct PressureFlushGate {
+    started: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+}
+
+#[async_trait::async_trait]
+impl crate::engine::listener::EventListener for PressureFlushGate {
+    async fn on_flush_begin(&self, _: RegionId) {
+        self.started.notify_one();
+        self.resume.notified().await;
+    }
+}
+
+#[tokio::test]
+async fn test_wal_pressure_flush_races_with_close() {
+    use crate::time_provider::mock::MockTimeProvider;
+
+    let mut env = TestEnv::new().await;
+    let objects = memory_store();
+    let store = open_store(&objects, AckMode::Durable).await;
+    let now = common_time::util::current_time_millis();
+    let clock = Arc::new(MockTimeProvider::new(now));
+    let gate = Arc::new(PressureFlushGate::default());
+    let engine = env
+        .create_engine_with_log_store_and_time(
+            pressure_config(),
+            store.clone(),
+            clock.clone(),
+            Some(gate.clone()),
+        )
+        .await;
+    let (table_dir, schema) = create_region(&engine, REGION_A, &[]).await;
+    fill_pressure_objects(&engine, &store, &schema).await;
+    let expected_rows = scan_rows(&engine, REGION_A).await;
+    let region_a = region(&engine, REGION_A);
+    clock.set_now(now + 120_000);
+    clock.set_elapsed(120_000);
+    tokio::time::timeout(WAIT, gate.started.notified())
+        .await
+        .unwrap();
+    tokio::time::timeout(WAIT, close_region(&engine, REGION_A))
+        .await
+        .unwrap();
+    assert!(!engine.is_region_exists(REGION_A));
+    gate.resume.notify_one();
+    assert_eq!(
+        0,
+        region_a
+            .manifest_ctx
+            .manifest_manager
+            .read()
+            .await
+            .manifest()
+            .flushed_entry_id
+    );
+    assert_eq!(vec![REGION_A], store.flush_candidates());
+    // Reopening must replay every row retained by the cancelled flush.
+    open_region(&engine, REGION_A, &table_dir, &[])
+        .await
+        .unwrap();
+    assert_eq!(expected_rows, scan_rows(&engine, REGION_A).await);
+    clock.set_now(now + 240_000);
+    tokio::time::timeout(WAIT, gate.started.notified())
+        .await
+        .unwrap();
+    gate.resume.notify_one();
+    wait_for_pressure_flush(&engine, &store, latest(&store, REGION_A)).await;
+    assert!(store.flush_candidates().is_empty());
+    engine.stop().await.unwrap();
+    store.stop().await.unwrap();
 }

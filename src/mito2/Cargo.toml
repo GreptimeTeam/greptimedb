@@ -9,7 +9,7 @@ default = []
 test = ["common-test-util", "rstest", "rstest_reuse", "rskafka"]
 testing = ["test"]
 test-shared-fs-region-migration = []
-enterprise = ["tokio-util/rt"]
+enterprise = ["datatypes/enterprise", "tokio-util/rt"]
 hdfs-object-store = ["object-store/hdfs-object-store"]
 
 [lints]
@@ -59,6 +59,7 @@ greptime-proto.workspace = true
 humantime.workspace = true
 humantime-serde.workspace = true
 index.workspace = true
+intern-arc.workspace = true
 itertools.workspace = true
 lazy_static = "1.4"
 log-store = { workspace = true }
@@ -89,6 +90,7 @@ tokio.workspace = true
 tokio-stream.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
+twox-hash.workspace = true
 uuid.workspace = true
 winner_tree.workspace = true
 zstd.workspace = true

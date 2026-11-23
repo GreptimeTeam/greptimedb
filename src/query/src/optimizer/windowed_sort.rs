@@ -213,7 +213,7 @@ fn fetch_partition_range(input: Arc<dyn ExecutionPlan>) -> DataFusionResult<Opti
     Ok(result)
 }
 
-fn is_time_index_expr(
+pub(crate) fn is_time_index_expr(
     plan: &Arc<dyn ExecutionPlan>,
     expr: &Arc<dyn PhysicalExpr>,
 ) -> DataFusionResult<bool> {

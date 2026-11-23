@@ -1,0 +1,168 @@
+-- The SQL forms of the partition hash: measure a value, derive breakpoints, and
+-- render a rule list that can be pasted into `PARTITION ON COLUMNS`.
+SELECT iceberg_hash('iceberg'), iceberg_hash(34), iceberg_hash(NULL);
+
++-------------------------------+-------------------------+--------------------+
+| iceberg_hash(Utf8("iceberg")) | iceberg_hash(Int64(34)) | iceberg_hash(NULL) |
++-------------------------------+-------------------------+--------------------+
+| 1210000089                    | 2017239379              |                    |
++-------------------------------+-------------------------+--------------------+
+
+SELECT iceberg_hash_bounds(2), iceberg_hash_bounds(4);
+
++-------------------------------+-------------------------------+
+| iceberg_hash_bounds(Int64(2)) | iceberg_hash_bounds(Int64(4)) |
++-------------------------------+-------------------------------+
+| 0                             | -1073741824, 0, 1073741824    |
++-------------------------------+-------------------------------+
+
+SELECT iceberg_hash_breakpoints('iceberg', 'a', 'iceberg');
+
++---------------------------------------------------------------------+
+| iceberg_hash_breakpoints(Utf8("iceberg"),Utf8("a"),Utf8("iceberg")) |
++---------------------------------------------------------------------+
+| 1009084850, 1210000089                                              |
++---------------------------------------------------------------------+
+
+-- The column name is quoted, so a name that is not a plain lowercase identifier
+-- can be pasted as-is.
+SELECT iceberg_hash_ranges_sql('host-name', 4);
+
++-----------------------------------------------------------------------------+
+| iceberg_hash_ranges_sql(Utf8("host-name"),Int64(4))                         |
++-----------------------------------------------------------------------------+
+| iceberg_hash("host-name") < -1073741824,                                    |
+| iceberg_hash("host-name") >= -1073741824 AND iceberg_hash("host-name") < 0, |
+| iceberg_hash("host-name") >= 0 AND iceberg_hash("host-name") < 1073741824,  |
+| iceberg_hash("host-name") >= 1073741824                                     |
++-----------------------------------------------------------------------------+
+
+-- A column name in another Arrow string representation renders the same rules.
+SELECT iceberg_hash_ranges_sql(arrow_cast('host-name', 'Utf8View'), 4);
+
++----------------------------------------------------------------------------------+
+| iceberg_hash_ranges_sql(arrow_cast(Utf8("host-name"),Utf8("Utf8View")),Int64(4)) |
++----------------------------------------------------------------------------------+
+| iceberg_hash("host-name") < -1073741824,                                         |
+| iceberg_hash("host-name") >= -1073741824 AND iceberg_hash("host-name") < 0,      |
+| iceberg_hash("host-name") >= 0 AND iceberg_hash("host-name") < 1073741824,       |
+| iceberg_hash("host-name") >= 1073741824                                          |
++----------------------------------------------------------------------------------+
+
+-- The rules below are the exact output of
+-- `iceberg_hash_ranges_sql('host-name', 4)` pasted into a table definition.
+CREATE TABLE hash_function_rules (
+  "host-name" STRING,
+  ts TIMESTAMP TIME INDEX,
+  v INT,
+  PRIMARY KEY ("host-name")
+)
+PARTITION ON COLUMNS ("host-name") (
+  iceberg_hash("host-name") < -1073741824,
+  iceberg_hash("host-name") >= -1073741824 AND iceberg_hash("host-name") < 0,
+  iceberg_hash("host-name") >= 0 AND iceberg_hash("host-name") < 1073741824,
+  iceberg_hash("host-name") >= 1073741824
+);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE hash_function_rules;
+
++---------------------+-------------------------------------------------------------------------------+
+| Table               | Create Table                                                                  |
++---------------------+-------------------------------------------------------------------------------+
+| hash_function_rules | CREATE TABLE IF NOT EXISTS "hash_function_rules" (                            |
+|                     |   "host-name" STRING NULL,                                                    |
+|                     |   "ts" TIMESTAMP(3) NOT NULL,                                                 |
+|                     |   "v" INT NULL,                                                               |
+|                     |   TIME INDEX ("ts"),                                                          |
+|                     |   PRIMARY KEY ("host-name")                                                   |
+|                     | )                                                                             |
+|                     | PARTITION ON COLUMNS ("host-name") (                                          |
+|                     |   iceberg_hash("host-name") < -1073741824,                                    |
+|                     |   iceberg_hash("host-name") >= -1073741824 AND iceberg_hash("host-name") < 0, |
+|                     |   iceberg_hash("host-name") >= 0 AND iceberg_hash("host-name") < 1073741824,  |
+|                     |   iceberg_hash("host-name") >= 1073741824                                     |
+|                     | )                                                                             |
+|                     | ENGINE=mito                                                                   |
+|                     |                                                                               |
++---------------------+-------------------------------------------------------------------------------+
+
+SELECT partition_name, partition_description
+FROM information_schema.partitions
+WHERE table_name = 'hash_function_rules'
+ORDER BY partition_name;
+
++----------------+------------------------------------------------------------------------+
+| partition_name | partition_description                                                  |
++----------------+------------------------------------------------------------------------+
+| p0             | iceberg_hash(host-name) < -1073741824                                  |
+| p1             | iceberg_hash(host-name) >= -1073741824 AND iceberg_hash(host-name) < 0 |
+| p2             | iceberg_hash(host-name) >= 0 AND iceberg_hash(host-name) < 1073741824  |
+| p3             | iceberg_hash(host-name) >= 1073741824                                  |
++----------------+------------------------------------------------------------------------+
+
+-- One value per bucket, plus NULL, which the first rule catches.
+INSERT INTO hash_function_rules VALUES
+  ('b', 1, 1),
+  ('delta', 2, 2),
+  ('a', 3, 3),
+  ('iceberg', 4, 4),
+  (NULL, 5, 5);
+
+Affected Rows: 5
+
+-- The hashes the rendered predicates compare against, computed by the function
+-- the rules evaluate: b < -1073741824, -1073741824 <= delta < 0,
+-- 0 <= a < 1073741824, iceberg >= 1073741824, NULL hashes to NULL.
+SELECT "host-name", iceberg_hash("host-name") FROM hash_function_rules ORDER BY ts;
+
++-----------+---------------------------------------------+
+| host-name | iceberg_hash(hash_function_rules.host-name) |
++-----------+---------------------------------------------+
+| b         | -1780580861                                 |
+| delta     | -418823380                                  |
+| a         | 1009084850                                  |
+| iceberg   | 1210000089                                  |
+|           |                                             |
++-----------+---------------------------------------------+
+
+-- Row counts per rendered predicate, plus the NULL hash no comparison matches ...
+SELECT
+  sum(CASE WHEN iceberg_hash("host-name") < -1073741824 THEN 1 ELSE 0 END) AS p0,
+  sum(CASE WHEN iceberg_hash("host-name") >= -1073741824 AND iceberg_hash("host-name") < 0 THEN 1 ELSE 0 END) AS p1,
+  sum(CASE WHEN iceberg_hash("host-name") >= 0 AND iceberg_hash("host-name") < 1073741824 THEN 1 ELSE 0 END) AS p2,
+  sum(CASE WHEN iceberg_hash("host-name") >= 1073741824 THEN 1 ELSE 0 END) AS p3,
+  sum(CASE WHEN iceberg_hash("host-name") IS NULL THEN 1 ELSE 0 END) AS nulls
+FROM hash_function_rules;
+
++----+----+----+----+-------+
+| p0 | p1 | p2 | p3 | nulls |
++----+----+----+----+-------+
+| 1  | 1  | 1  | 1  | 1     |
++----+----+----+----+-------+
+
+-- ... must match the rows each region actually stored: region 0 holds p0 plus
+-- the NULL rows, and every other region holds exactly its bucket.
+-- SQLNESS SLEEP 3s
+SELECT region_number, region_rows
+FROM information_schema.region_statistics
+WHERE table_id IN (
+  SELECT table_id FROM information_schema.tables
+  WHERE table_name = 'hash_function_rules' AND table_schema = 'public'
+)
+ORDER BY region_number;
+
++---------------+-------------+
+| region_number | region_rows |
++---------------+-------------+
+| 0             | 2           |
+| 1             | 1           |
+| 2             | 1           |
+| 3             | 1           |
++---------------+-------------+
+
+DROP TABLE hash_function_rules;
+
+Affected Rows: 0
+

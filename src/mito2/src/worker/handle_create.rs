@@ -22,9 +22,10 @@ use store_api::storage::RegionId;
 
 use crate::error::Result;
 use crate::region::opener::{RegionOpener, check_recovered_region};
+use crate::sst::index::handler::IndexKindProviderRef;
 #[cfg(feature = "hdfs-object-store")]
 use crate::temp_file_sweeper;
-use crate::worker::RegionWorkerLoop;
+use crate::worker::{RegionWorkerLoop, index_registry};
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) async fn handle_create_request(
@@ -57,10 +58,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         // Create a MitoRegion from the RegionMetadata.
         let requirements = request.requirements;
+        let registry = index_registry(&self.config, self.plugins.get::<IndexKindProviderRef>())?;
         let opener = RegionOpener::new(
             region_id,
             &request.table_dir,
             request.path_type,
+            self.node_lease.clone(),
             self.memtable_builder_provider.clone(),
             self.object_store_manager.clone(),
             self.purge_scheduler.clone(),
@@ -75,7 +78,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         .cache(Some(self.cache_manager.clone()))
         .series_index_store(self.series_index_store.clone())
         .series_index_purger(self.series_index_purger.clone())
-        .hook(self.plugins.get());
+        .hook(self.plugins.get())
+        .with_index_registry(registry);
 
         opener.ensure_region_requirements(requirements)?;
 

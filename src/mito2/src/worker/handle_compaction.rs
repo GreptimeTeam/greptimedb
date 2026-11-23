@@ -29,6 +29,7 @@ use crate::request::{
 };
 use crate::sst::index::IndexBuildType;
 use crate::worker::RegionWorkerLoop;
+use crate::worker::handle_rebuild_index::needs_background_indexes;
 
 fn made_progress(files_to_add: usize, files_to_remove: usize) -> bool {
     files_to_add > 0 || files_to_remove > files_to_add
@@ -71,14 +72,19 @@ impl<S> RegionWorkerLoop<S> {
                             plan_id,
                             Ok(progress),
                         );
+                        let files_to_index = edit
+                            .files_to_add
+                            .into_iter()
+                            .filter(needs_background_indexes)
+                            .collect::<Vec<_>>();
                         if self.config.index.build_mode == IndexBuildMode::Async
-                            && !edit.files_to_add.is_empty()
+                            && !files_to_index.is_empty()
                         {
                             self.handle_rebuild_index(
                                 BuildIndexRequest {
                                     region_id,
                                     build_type: IndexBuildType::Compact,
-                                    file_metas: edit.files_to_add,
+                                    file_metas: files_to_index,
                                     result_senders: Vec::new(),
                                 },
                                 OptionOutputTx::new(None),
@@ -231,7 +237,10 @@ impl<S> RegionWorkerLoop<S> {
             region.file_purger.clone(),
         );
 
-        let index_build_file_metas = std::mem::take(&mut request.edit.files_to_add);
+        let index_build_file_metas = std::mem::take(&mut request.edit.files_to_add)
+            .into_iter()
+            .filter(needs_background_indexes)
+            .collect::<Vec<_>>();
 
         // compaction finished.
         request.on_success();
@@ -298,7 +307,7 @@ impl<S> RegionWorkerLoop<S> {
 
     /// Schedule compaction for the region if necessary.
     pub(crate) async fn schedule_compaction(&mut self, region: &MitoRegionRef) {
-        if region.is_staging() || region.is_enter_staging() || region.is_truncating() {
+        if region.in_staging_session() || region.is_enter_staging() || region.is_truncating() {
             info!(
                 "Region {} is staging, entering staging, or truncating, skip compaction",
                 region.region_id

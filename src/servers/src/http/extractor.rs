@@ -220,7 +220,7 @@ fn parse_otlp_metric_translation_strategy(
 }
 
 #[inline]
-fn string_value_from_header(
+pub(crate) fn string_value_from_header(
     headers: &HeaderMap,
     header_keys: &[&str],
 ) -> Result<Option<String>, (StatusCode, String)> {

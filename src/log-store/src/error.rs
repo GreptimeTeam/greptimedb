@@ -85,6 +85,20 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to join a blocking task of the log store"))]
+    Join {
+        #[snafu(source)]
+        error: tokio::task::JoinError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Object store WAL I/O permit is already installed"))]
+    WalIoPermitAlreadyInstalled {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Log store not started yet"))]
     IllegalState {
         #[snafu(implicit)]
@@ -446,6 +460,19 @@ pub enum Error {
     },
 
     #[snafu(display(
+        "Source WAL prefix {prefix} on {storage} does not hold the history of region {region_id}: {reason}. \
+         Check the source node prefix and whether its WAL objects were reclaimed or moved"
+    ))]
+    MissingSourceWalHistory {
+        region_id: RegionId,
+        prefix: String,
+        storage: String,
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
         "Object store WAL gave up its start object {} after refusing a region without its history, and accepts nothing more until it opens again",
         path
     ))]
@@ -457,6 +484,12 @@ pub enum Error {
 
     #[snafu(display("Object store WAL log store is stopped"))]
     ObjectStoreWalStopped {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Object store WAL node lease is unavailable or expired"))]
+    ObjectStoreWalLeaseExpired {
         #[snafu(implicit)]
         location: Location,
     },
@@ -510,11 +543,13 @@ impl ErrorExt for Error {
             | InvalidWalObjectStore { .. }
             | MismatchedWalPrefix { .. }
             | MissingWalHistory { .. }
+            | MissingSourceWalHistory { .. }
             | MismatchedWalRegion { .. }
             | IncompleteWalEntry { .. }
             | InvalidWalEntryRange { .. } => StatusCode::InvalidArguments,
             StartWalTask { .. }
             | StopWalTask { .. }
+            | Join { .. }
             | IllegalState { .. }
             | NoMaxValue { .. }
             | Cast { .. }
@@ -533,11 +568,14 @@ impl ErrorExt for Error {
             | WalObjectConflict { .. }
             | WalObjectSequenceExhausted { .. }
             | WalEntryPositionExhausted { .. } => StatusCode::Unexpected,
-            WalObjectSequenceUnsettled { .. } => StatusCode::IllegalState,
+            WalObjectSequenceUnsettled { .. } | WalIoPermitAlreadyInstalled { .. } => {
+                StatusCode::IllegalState
+            }
 
             InvalidWalObject { source, .. } => source.status_code(),
             ObjectStoreWal { source, .. } => source.status_code(),
             ObjectStoreWalFailing { .. } => StatusCode::StorageUnavailable,
+            ObjectStoreWalLeaseExpired { .. } => StatusCode::RegionNotReady,
 
             // Object store related errors
             WalObjectStore { .. }
@@ -579,6 +617,7 @@ impl ErrorExt for Error {
             | StaleWalObject { .. }
             | UnconfirmedWalEpochStart { .. }
             | ObjectStoreWalFailing { .. } => RetryHint::Retryable,
+            ObjectStoreWalLeaseExpired { .. } => RetryHint::RetryAfterRouteRefresh,
             ProduceRecord { error, .. } => match error {
                 rskafka::client::producer::Error::Client(error) => {
                     rskafka_client_error_to_retry_hint(error)

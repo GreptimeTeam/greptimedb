@@ -29,6 +29,7 @@ datatypes.workspace = true
 futures-util.workspace = true
 fxhash = "0.2"
 humantime-serde.workspace = true
+intern-arc.workspace = true
 itertools.workspace = true
 lazy_static = "1.4"
 mito-codec.workspace = true
@@ -53,6 +54,7 @@ log-store = { workspace = true, features = ["testing"] }
 mito2 = { workspace = true, features = ["test"] }
 mur3 = "0.1"
 partition = { workspace = true }
+rstest = { workspace = true }
 
 [[bench]]
 name = "bench_tsid_generator"

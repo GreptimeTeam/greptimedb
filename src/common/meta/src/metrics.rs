@@ -23,6 +23,9 @@ pub const STATS_TYPE_NO_REGION_METADATA: &str = "no_region_metadata";
 pub const STATS_TYPE_REGION_NOT_OPEN: &str = "region_not_open";
 
 lazy_static! {
+    pub static ref METRIC_AUTHORITY_STORAGE_EVENTS: IntCounterVec = register_int_counter_vec!(
+        "greptime_meta_authority_storage_events", "Authority storage failures and conflicts", &["outcome"]
+    ).unwrap();
     pub static ref METRIC_META_TXN_REQUEST: HistogramVec = register_histogram_vec!(
         "greptime_meta_txn_request",
         "meta txn request",

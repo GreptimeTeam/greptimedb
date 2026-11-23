@@ -2,7 +2,7 @@
 ## @toml2docs:none-default
 default_timezone = "UTC"
 
-## The default column prefix for auto-created time index, value, and native histogram columns.
+## The default column prefix for auto-created time index, value, native histogram, and exemplar-label columns.
 ## Legacy OTLP summary columns keep their historical `greptime_` prefix.
 ## @toml2docs:none-default
 default_column_prefix = "greptime"
@@ -10,6 +10,13 @@ default_column_prefix = "greptime"
 ## Server-side global switch for auto table creation on write.
 ## When `false`, a missing table is never auto-created even if the request sets the `auto_create_table` hint to `true`. Default: `true`.
 #+ auto_create_table = true
+
+## Time index unit for physical metric tables created by auto table creation
+## (Prometheus remote write, OTLP metrics, and other metric-engine ingestion).
+## New logical tables created under such a physical table inherit its unit.
+## Options: "Second", "Millisecond" (default), "Microsecond", "Nanosecond".
+## @toml2docs:none-default
+#+ auto_create_physical_table_timestamp_unit = "Millisecond"
 
 ## The user provider for authentication.
 ## Examples: "static_user_provider:file:/path/to/users", "static_user_provider:cmd:greptime_user=greptime_pwd"
@@ -27,13 +34,17 @@ default_column_prefix = "greptime"
 ## @toml2docs:none-default
 #+ user_provider = "static_user_provider:file:/path/to/users"
 
-## Maximum total memory for all concurrent write request bodies and messages (HTTP, gRPC, Flight).
+## Shared quota for concurrent write request bodies and messages (HTTP, gRPC, Flight)
+## plus retained decoder memory and estimated PB-to-Arrow conversion memory for ordinary-table batching.
+## A batch must fit together with its request's existing reservations; only additional memory is acquired.
 ## Set to 0 to disable the limit. Default: "0" (unlimited)
 ## @toml2docs:none-default="0"
 #+ max_in_flight_write_bytes = "1GB"
 
 ## Policy when write bytes quota is exhausted.
 ## Options: "wait" (default, 10s timeout), "wait(<duration>)" (e.g., "wait(30s)"), "fail"
+## Table-batch conversion never waits for additional memory. Under a wait policy,
+## temporary contention returns a retryable error; requests that cannot fit are rejected.
 #+ write_bytes_exhausted_policy = "wait"
 
 ## Initialize all regions in the background during the startup.
@@ -552,6 +563,16 @@ max_running_procedures = 128
 
 ## The query engine options.
 [query]
+
+## Enable experimental native PromQL execution for compatible queries.
+## This is the engine-wide default: a session
+## SET query.experimental_native_promql = true or a per-request
+## query.experimental_native_promql option overrides it, in that order.
+## Default: false
+#+ experimental_native_promql = false
+## Experimental opt-in for shape-based AVG/SUM join aggregation; default false.
+experimental_enable_factorized_join_agg = false
+
 ## Parallelism of the query engine.
 ## Default to 0, which means the number of CPU cores.
 parallelism = 0
@@ -771,6 +792,9 @@ compress_manifest = false
 ## Under development; do not enable. Whether to enable series indexes.
 ## Indexes are stored on the local filesystem under `{data_home}/series_index`.
 #+ experimental_enable_series_index = false
+
+## Under development. Select legacy Parquet indexes or paired columnar series and samples.
+#+ experimental_series_index_format = "legacy"
 
 ## Approximate series and range index size limit in open regions, shared across workers.
 ## Workers periodically refresh usage and skip maintenance when full. In-flight reconciliation
@@ -1099,6 +1123,8 @@ max_log_files = 720
 
 ## The maximum total size of managed log files in `dir`.
 ## Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable.
+## Requires symbolic links in the log directory; initialization fails if they cannot be created.
+## On Windows, enable Developer Mode or leave this at `0B`.
 max_log_dir_size = "0B"
 
 ## Whether to enable per-region metrics.
@@ -1156,6 +1182,12 @@ cache_ttl = "10s"
 ## network, and logs. Default is false. Enable only for trusted pipeline authors.
 ## Applies to pipeline creation, execution, and dry-runs. Requires a restart.
 allow_vrl_host_access = false
+## Default for the HTTP log ingestion and pipeline dry-run `ignore_errors` parameter.
+## Explicit request values override this setting. Malformed input may be discarded,
+## and invalid custom timestamps in identity ingestion fall back to server time.
+## Pipeline execution errors are controlled separately by `skip_error`.
+## Default is false. Requires a restart.
+ignore_errors = false
 
 ## Configuration options for the event recorder.
 [event_recorder]

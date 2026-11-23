@@ -18,11 +18,11 @@ use common_meta::instruction::{
     FlushErrorStrategy, FlushRegionReply, FlushRegions, FlushStrategy, InstructionError,
     InstructionReply,
 };
-use common_telemetry::{debug, warn};
+use common_telemetry::{debug, error, warn};
 use store_api::region_request::{RegionFlushReason, RegionFlushRequest, RegionRequest};
 use store_api::storage::RegionId;
 
-use crate::error::{self, RegionNotFoundSnafu, RegionNotReadySnafu, Result, UnexpectedSnafu};
+use crate::error::{self, RegionNotFoundSnafu, RegionNotReadySnafu, Result};
 use crate::heartbeat::handler::{HandlerContext, InstructionHandler};
 
 pub struct FlushRegionsHandler;
@@ -125,6 +125,9 @@ impl HandlerContext {
             match &result {
                 Ok(_) => results.push((region_id, Ok(()))),
                 Err(err) => {
+                    // Log the full error chain here; the reply carries the
+                    // classification and the root cause of the original error.
+                    error!(err; "Failed to flush region, region_id: {}", region_id);
                     results.push((region_id, Err(InstructionError::from_error(err))));
 
                     // For fail-fast strategy, abort on first error
@@ -179,13 +182,7 @@ impl HandlerContext {
         }
 
         let mut watcher = register_result.into_watcher();
-        match self.flush_tasks.wait_until_finish(&mut watcher).await {
-            Ok(()) => Ok(()),
-            Err(err) => Err(UnexpectedSnafu {
-                violated: format!("Flush task failed: {err:?}"),
-            }
-            .build()),
-        }
+        self.flush_tasks.wait_until_finish(&mut watcher).await
     }
 }
 
@@ -193,12 +190,15 @@ impl HandlerContext {
 mod tests {
     use std::sync::{Arc, RwLock};
 
+    use common_error::ext::RetryHint;
+    use common_error::status_code::StatusCode;
     use common_meta::instruction::{FlushErrorStrategy, FlushRegions};
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use mito2::engine::MITO_ENGINE_NAME;
     use store_api::storage::RegionId;
 
     use super::*;
+    use crate::error::{RegionBusySnafu, UnexpectedSnafu};
     use crate::tests::{MockRegionEngine, mock_region_server};
 
     type FlushedRequests = Arc<RwLock<Vec<(RegionId, Option<RegionFlushReason>)>>>;
@@ -364,6 +364,100 @@ mod tests {
         // First should succeed, second should fail
         assert!(flush_reply.results[0].1.is_ok());
         assert!(flush_reply.results[1].1.is_err());
+    }
+
+    /// A task body error used to verify that the reply keeps its classification.
+    #[derive(Clone, Copy, Debug)]
+    enum TaskFlushError {
+        RegionBusy,
+        Unexpected,
+    }
+
+    impl TaskFlushError {
+        fn build(self, region_id: RegionId) -> crate::error::Error {
+            match self {
+                Self::RegionBusy => RegionBusySnafu { region_id }.build(),
+                Self::Unexpected => UnexpectedSnafu {
+                    violated: "flush task boom marker",
+                }
+                .build(),
+            }
+        }
+
+        fn expected(self) -> (StatusCode, RetryHint) {
+            match self {
+                Self::RegionBusy => (StatusCode::RegionBusy, RetryHint::Retryable),
+                Self::Unexpected => (StatusCode::Unexpected, RetryHint::NonRetryable),
+            }
+        }
+
+        fn message_fragment(self, region_id: RegionId) -> String {
+            match self {
+                Self::RegionBusy => format!("Region {region_id} is busy"),
+                Self::Unexpected => "flush task boom marker".to_string(),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_flush_region_sync_keeps_task_error_classification() {
+        let failing_region = RegionId::new(1024, 1);
+        let succeeding_region = RegionId::new(1024, 2);
+
+        for error in [TaskFlushError::RegionBusy, TaskFlushError::Unexpected] {
+            let flushed_regions: Arc<RwLock<Vec<RegionId>>> = Arc::new(RwLock::new(Vec::new()));
+
+            let mock_region_server = mock_region_server();
+            let flushed_regions_ref = flushed_regions.clone();
+            let (mock_engine, _) =
+                MockRegionEngine::with_custom_apply_fn(MITO_ENGINE_NAME, move |region_engine| {
+                    region_engine.handle_request_mock_fn =
+                        Some(Box::new(move |region_id, _request| {
+                            flushed_regions_ref.write().unwrap().push(region_id);
+                            if region_id == failing_region {
+                                Err(error.build(region_id))
+                            } else {
+                                Ok(0)
+                            }
+                        }));
+                });
+            mock_region_server.register_test_region(failing_region, mock_engine.clone());
+            mock_region_server.register_test_region(succeeding_region, mock_engine);
+
+            let kv_backend = Arc::new(MemoryKvBackend::new());
+            let handler_context = HandlerContext::new_for_test(mock_region_server, kv_backend);
+            let instruction = FlushRegions::sync_batch(
+                vec![failing_region, succeeding_region],
+                FlushErrorStrategy::TryAll,
+            );
+            let reply = FlushRegionsHandler
+                .handle(&handler_context, instruction)
+                .await
+                .unwrap()
+                .expect_flush_regions_reply();
+
+            assert!(!reply.overall_success, "{error:?}");
+            assert_eq!(reply.results.len(), 2, "{error:?}");
+            assert_eq!(reply.results[0].0, failing_region, "{error:?}");
+            let reply_error = reply.results[0].1.as_ref().unwrap_err();
+            let (code, retry_hint) = error.expected();
+            assert_eq!(reply_error.code, code, "{error:?}");
+            assert_eq!(reply_error.retry_hint, retry_hint, "{error:?}");
+            assert!(
+                reply_error
+                    .message
+                    .contains(&error.message_fragment(failing_region)),
+                "{error:?}: {}",
+                reply_error.message
+            );
+            assert_eq!(reply.results[1].0, succeeding_region, "{error:?}");
+            assert!(reply.results[1].1.is_ok(), "{error:?}");
+            assert_eq!(
+                *flushed_regions.read().unwrap(),
+                vec![failing_region, succeeding_region],
+                "{error:?}"
+            );
+        }
     }
 
     #[test]

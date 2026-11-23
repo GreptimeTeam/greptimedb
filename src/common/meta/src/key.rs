@@ -994,6 +994,26 @@ impl TableMetadataManager {
         Ok(())
     }
 
+    const TABLE_IDENTITY_KEYS: usize = 4;
+
+    /// Keys shared by physical and logical tables, independent of region placement.
+    pub(crate) fn table_identity_keys(
+        table_id: TableId,
+        table_name: &TableName,
+    ) -> [Vec<u8>; Self::TABLE_IDENTITY_KEYS] {
+        [
+            TableNameKey::new(
+                &table_name.catalog_name,
+                &table_name.schema_name,
+                &table_name.table_name,
+            )
+            .to_bytes(),
+            TableInfoKey::new(table_id).to_bytes(),
+            TableRouteKey::new(table_id).to_bytes(),
+            TableRepartKey::new(table_id).to_bytes(),
+        ]
+    }
+
     fn table_metadata_keys(
         &self,
         table_id: TableId,
@@ -1009,15 +1029,7 @@ impl TableMetadataManager {
         } else {
             vec![]
         };
-        let mut keys = Vec::with_capacity(3 + datanode_ids.len());
-        let table_name = TableNameKey::new(
-            &table_name.catalog_name,
-            &table_name.schema_name,
-            &table_name.table_name,
-        );
-        let table_info_key = TableInfoKey::new(table_id);
-        let table_route_key = TableRouteKey::new(table_id);
-        let table_repart_key = TableRepartKey::new(table_id);
+        let mut keys = Vec::from(Self::table_identity_keys(table_id, table_name));
         let datanode_table_keys = datanode_ids
             .into_iter()
             .map(|datanode_id| DatanodeTableKey::new(datanode_id, table_id))
@@ -1029,10 +1041,6 @@ impl TableMetadataManager {
             .iter()
             .map(|(region_id, topic)| TopicRegionKey::new(*region_id, topic))
             .collect::<Vec<_>>();
-        keys.push(table_name.to_bytes());
-        keys.push(table_info_key.to_bytes());
-        keys.push(table_route_key.to_bytes());
-        keys.push(table_repart_key.to_bytes());
         for key in &datanode_table_keys {
             keys.push(key.to_bytes());
         }
@@ -1165,31 +1173,34 @@ impl TableMetadataManager {
             return Ok(dropped_tables);
         }
 
-        let marker_keys = dropped_tables
-            .iter()
-            .flat_map(|table| {
-                vec![
-                    dropped_at_key(table.table_id),
-                    retention_expires_at_key(table.table_id),
-                    drop_generation_key(table.table_id),
-                    purging_key(table.table_id),
-                ]
-            })
-            .collect::<Vec<_>>();
-        let marker_values = self.tombstone_manager.batch_get(&marker_keys).await?;
-        for table in &mut dropped_tables {
-            table.dropped_at = Self::parse_dropped_at(
-                table.table_id,
-                marker_values.get(&dropped_at_key(table.table_id)),
-            )?;
-            table.retention_expires_at = Self::parse_retention_expires_at(
-                table.table_id,
-                marker_values.get(&retention_expires_at_key(table.table_id)),
-            )?;
-            table.drop_generation = Self::parse_drop_generation(
-                marker_values.get(&drop_generation_key(table.table_id)),
-            );
-            table.purging = marker_values.contains_key(&purging_key(table.table_id));
+        // Each dropped table has four independent marker keys.
+        for batch in dropped_tables.chunks_mut(128) {
+            let marker_keys = batch
+                .iter()
+                .flat_map(|table| {
+                    vec![
+                        dropped_at_key(table.table_id),
+                        retention_expires_at_key(table.table_id),
+                        drop_generation_key(table.table_id),
+                        purging_key(table.table_id),
+                    ]
+                })
+                .collect::<Vec<_>>();
+            let marker_values = self.tombstone_manager.batch_get(&marker_keys).await?;
+            for table in batch {
+                table.dropped_at = Self::parse_dropped_at(
+                    table.table_id,
+                    marker_values.get(&dropped_at_key(table.table_id)),
+                )?;
+                table.retention_expires_at = Self::parse_retention_expires_at(
+                    table.table_id,
+                    marker_values.get(&retention_expires_at_key(table.table_id)),
+                )?;
+                table.drop_generation = Self::parse_drop_generation(
+                    marker_values.get(&drop_generation_key(table.table_id)),
+                );
+                table.purging = marker_values.contains_key(&purging_key(table.table_id));
+            }
         }
 
         Ok(dropped_tables)
@@ -1318,6 +1329,30 @@ impl TableMetadataManager {
             .kv_backend
             .batch_delete(BatchDeleteRequest::new().with_keys(keys))
             .await?;
+        Ok(())
+    }
+
+    /// Permanently deletes a batch of logical tables. The caller holds their schema write lock
+    /// and persists the deletion plan before calling, since backend requests may partially succeed.
+    pub(crate) async fn destroy_logical_tables_metadata(
+        &self,
+        tables: &[(TableId, TableName)],
+    ) -> Result<()> {
+        let max_ops = self.kv_backend.max_txn_ops().max(1);
+        let tables_per_request = (max_ops / Self::TABLE_IDENTITY_KEYS).max(1);
+        // Keep a table's keys together whenever they fit in one backend request. A backend
+        // limit smaller than a single table still requires splitting, as with single-table drop.
+        for tables in tables.chunks(tables_per_request) {
+            let keys = tables
+                .iter()
+                .flat_map(|(id, name)| Self::table_identity_keys(*id, name))
+                .collect::<Vec<_>>();
+            for keys in keys.chunks(max_ops) {
+                self.kv_backend
+                    .batch_delete(BatchDeleteRequest::new().with_keys(keys.to_vec()))
+                    .await?;
+            }
+        }
         Ok(())
     }
 
@@ -3092,6 +3127,79 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn test_destroy_logical_tables_metadata_limits_and_partial_failure() {
+        use crate::kv_backend::test_util::MockKvBackendBuilder;
+        use crate::rpc::store::{BatchDeleteRequest, BatchDeleteResponse};
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        for limit in [1, 3, 127, 128, 129] {
+            let tables = (0..65)
+                .map(|id| {
+                    (
+                        id,
+                        TableName::new("greptime", "public", format!("logical_{id}")),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let remaining = Arc::new(Mutex::new(
+                tables
+                    .iter()
+                    .flat_map(|(id, name)| TableMetadataManager::table_identity_keys(*id, name))
+                    .collect::<HashSet<_>>(),
+            ));
+            let requests = Arc::new(AtomicUsize::new(0));
+            let backend = MockKvBackendBuilder::default()
+                .max_txn_ops(limit)
+                .batch_delete_fn({
+                    let remaining = remaining.clone();
+                    let requests = requests.clone();
+                    Arc::new(move |req: BatchDeleteRequest| {
+                        assert!(!req.keys.is_empty());
+                        assert!(req.keys.len() <= limit);
+                        if limit >= 4 {
+                            assert_eq!(req.keys.len() % 4, 0, "single-table keys stay together");
+                        }
+                        for key in &req.keys {
+                            remaining.lock().unwrap().remove(key);
+                        }
+                        // Simulate a response lost after the second chunk committed.
+                        if requests.fetch_add(1, Ordering::Relaxed) == 1 {
+                            return crate::error::UnexpectedSnafu {
+                                err_msg: "injected lost response",
+                            }
+                            .fail();
+                        }
+                        Ok(BatchDeleteResponse::default())
+                    })
+                })
+                .build()
+                .unwrap();
+            let manager = TableMetadataManager::new(Arc::new(backend));
+            assert!(
+                manager
+                    .destroy_logical_tables_metadata(&tables)
+                    .await
+                    .is_err()
+            );
+            assert!(!remaining.lock().unwrap().is_empty());
+            manager
+                .destroy_logical_tables_metadata(&tables)
+                .await
+                .unwrap();
+            assert!(remaining.lock().unwrap().is_empty());
+            assert_eq!(
+                requests.load(Ordering::Relaxed),
+                2 + if limit < 4 {
+                    65_usize * 4_usize.div_ceil(limit)
+                } else {
+                    65_usize.div_ceil(limit / 4)
+                }
+            );
+        }
     }
 
     #[tokio::test]

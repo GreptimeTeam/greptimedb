@@ -1,0 +1,103 @@
+CREATE TABLE projection_spans (
+  trace_id STRING,
+  span_id STRING,
+  parent_span_id STRING,
+  service_name STRING,
+  payload STRING,
+  ts TIMESTAMP TIME INDEX,
+  PRIMARY KEY (service_name)
+)
+PARTITION ON COLUMNS (service_name) (
+  service_name < 'storage', service_name >= 'storage'
+)
+WITH (append_mode = 'true');
+
+Affected Rows: 0
+
+INSERT INTO projection_spans VALUES
+  ('trace-a', 'root', NULL, 'front', 'root payload', 0),
+  ('trace-a', 'child', 'root', 'storage', 'child payload', 1),
+  ('trace-a', 'same', 'root', 'front', 'same service', 2),
+  ('trace-b', 'child', 'root', 'storage', 'unmatched trace', 3);
+
+Affected Rows: 4
+
+ADMIN FLUSH_TABLE('projection_spans');
+
++---------------------------------------+
+| ADMIN FLUSH_TABLE('projection_spans') |
++---------------------------------------+
+| 0                                     |
++---------------------------------------+
+
+-- Each remote scan supplies the three join columns without a local projection.
+-- SQLNESS REPLACE (peers.*) peers=REDACTED
+EXPLAIN SELECT p.service_name AS parent_service,
+  c.service_name AS child_service, COUNT(*) AS call_count
+FROM projection_spans c JOIN projection_spans p
+  ON c.trace_id = p.trace_id AND c.parent_span_id = p.span_id
+WHERE c.service_name <> p.service_name
+GROUP BY p.service_name, c.service_name
+ORDER BY p.service_name, c.service_name;
+
++---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                                            |
++---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | Sort: parent_service ASC NULLS LAST, child_service ASC NULLS LAST                                                                                                                                               |
+|               |   Projection: p.service_name AS parent_service, c.service_name AS child_service, count(Int64(1)) AS count(*) AS call_count                                                                                      |
+|               |     Aggregate: groupBy=[[p.service_name, c.service_name]], aggr=[[count(Int64(1))]]                                                                                                                             |
+|               |       Projection: c.service_name, p.service_name                                                                                                                                                                |
+|               |         Inner Join: c.trace_id = p.trace_id, c.parent_span_id = p.span_id Filter: p.service_name != c.service_name                                                                                              |
+|               |           MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                       |
+|               | Projection: c.trace_id, c.parent_span_id, c.service_name                                                                                                                                                        |
+|               |   SubqueryAlias: c                                                                                                                                                                                              |
+|               |     Filter: projection_spans.trace_id IS NOT NULL AND projection_spans.parent_span_id IS NOT NULL                                                                                                               |
+|               |       TableScan: projection_spans, partial_filters=[projection_spans.trace_id IS NOT NULL, projection_spans.parent_span_id IS NOT NULL]                                                                         |
+|               | ]]                                                                                                                                                                                                              |
+|               |           MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                       |
+|               | Projection: p.trace_id, p.span_id, p.service_name                                                                                                                                                               |
+|               |   SubqueryAlias: p                                                                                                                                                                                              |
+|               |     Filter: projection_spans.trace_id IS NOT NULL AND projection_spans.span_id IS NOT NULL                                                                                                                      |
+|               |       TableScan: projection_spans, partial_filters=[projection_spans.trace_id IS NOT NULL, projection_spans.span_id IS NOT NULL]                                                                                |
+|               | ]]                                                                                                                                                                                                              |
+| physical_plan | SortPreservingMergeExec: [parent_service@0 ASC NULLS LAST, child_service@1 ASC NULLS LAST]                                                                                                                      |
+|               |   ProjectionExec: expr=[service_name@0 as parent_service, service_name@1 as child_service, count(Int64(1))@2 as call_count]                                                                                     |
+|               |     SortExec: expr=[service_name@0 ASC NULLS LAST, service_name@1 ASC NULLS LAST], preserve_partitioning=[true]                                                                                                 |
+|               |       AggregateExec: mode=FinalPartitioned, gby=[service_name@0 as service_name, service_name@1 as service_name], aggr=[count(Int64(1))]                                                                        |
+|               |         RepartitionExec: partitioning=Hash([service_name@0, service_name@1], 4), input_partitions=4                                                                                                             |
+|               |           AggregateExec: mode=Partial, gby=[service_name@1 as service_name, service_name@0 as service_name], aggr=[count(Int64(1))]                                                                             |
+|               |             HashJoinExec: mode=Partitioned, join_type=Inner, on=[(trace_id@0, trace_id@0), (parent_span_id@1, span_id@1)], filter=service_name@1 != service_name@0, projection=[service_name@2, service_name@5] |
+|               |               RepartitionExec: partitioning=Hash([trace_id@0, parent_span_id@1], 4), input_partitions=2                                                                                                         |
+|               |                 MergeScanExec: peers=REDACTED
+|               |               RepartitionExec: partitioning=Hash([trace_id@0, span_id@1], 4), input_partitions=2                                                                                                                |
+|               |                 MergeScanExec: peers=REDACTED
+|               |                                                                                                                                                                                                                 |
++---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+SELECT p.service_name AS parent_service,
+  c.service_name AS child_service, COUNT(*) AS call_count
+FROM projection_spans c JOIN projection_spans p
+  ON c.trace_id = p.trace_id AND c.parent_span_id = p.span_id
+WHERE c.service_name <> p.service_name
+GROUP BY p.service_name, c.service_name
+ORDER BY p.service_name, c.service_name;
+
++----------------+---------------+------------+
+| parent_service | child_service | call_count |
++----------------+---------------+------------+
+| front          | storage       | 1          |
++----------------+---------------+------------+
+
+SELECT COUNT(*) AS cross_rows
+FROM projection_spans a CROSS JOIN projection_spans b;
+
++------------+
+| cross_rows |
++------------+
+| 16         |
++------------+
+
+DROP TABLE projection_spans;
+
+Affected Rows: 0
+

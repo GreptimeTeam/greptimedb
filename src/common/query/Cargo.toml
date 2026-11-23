@@ -5,7 +5,10 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-testing = []
+# `datafusion-datasource` is only needed by `testing`, which builds the real hash-join
+# fixtures. `futures-util` stays a regular dependency here because the series-frame API
+# exposes `futures_util::Stream` in its public signatures.
+testing = ["dep:datafusion-datasource"]
 
 [lints]
 workspace = true
@@ -22,9 +25,11 @@ common-recordbatch.workspace = true
 common-time.workspace = true
 datafusion.workspace = true
 datafusion-common.workspace = true
+datafusion-datasource = { workspace = true, optional = true }
 datafusion-expr.workspace = true
 datafusion-proto.workspace = true
 datatypes.workspace = true
+futures-util.workspace = true
 once_cell.workspace = true
 prost.workspace = true
 serde.workspace = true
@@ -33,12 +38,13 @@ snafu.workspace = true
 sqlparser.workspace = true
 sqlparser_derive = "0.1"
 store-api.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 common-base.workspace = true
-futures-util.workspace = true
+datafusion-datasource.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 
 [package.metadata.cargo-shear]
 # `sqlparser` is required by `sqlparser_derive`: the generated code references

@@ -36,6 +36,7 @@ pub(crate) use planning::CompactionPickFinished;
 pub use planning::CompactionRequest;
 #[cfg(test)]
 pub(crate) use planning::pick_automatic_for_test;
+pub use state::CompactionGuard;
 pub(crate) use state::{CompactionExecution, CompactionState, CompactionStateRef};
 use state::{CompactionStatus, CompactionTrigger, DdlExecution, PendingCompaction};
 #[cfg(test)]
@@ -51,12 +52,38 @@ use crate::error::{
     CompactionCancelledSnafu, Error, ManualCompactionAlreadyRunningSnafu, RegionClosedSnafu,
     RegionDroppedSnafu, RegionTruncatedSnafu, Result, UnsupportedOperationSnafu,
 };
+use crate::region::ManifestContextRef;
 use crate::region::version::VersionControlRef;
-use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState};
-use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest, WorkerRequestWithTime};
-#[cfg(test)]
+use crate::request::{
+    DdlRequest, OptionOutputTx, PauseCompactionResponse, SenderDdlRequest, WorkerRequestWithTime,
+};
 use crate::schedule::RequestCancelResult;
 use crate::worker::WorkerListener;
+
+/// Outcome of cancelling one live compaction task by its exact task identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CancelCompactionResult {
+    /// Cancellation was requested; completion is asynchronous.
+    CancelIssued,
+    /// The task is already cancelling.
+    AlreadyCancelling,
+    /// The task has crossed its non-cancellable commit boundary.
+    TooLateToCancel,
+    /// The task is no longer present on this region.
+    NotFound,
+    /// This engine or execution mode does not support cancellation.
+    Unsupported,
+}
+
+impl From<RequestCancelResult> for CancelCompactionResult {
+    fn from(result: RequestCancelResult) -> Self {
+        match result {
+            RequestCancelResult::CancelIssued => Self::CancelIssued,
+            RequestCancelResult::AlreadyCancelling => Self::AlreadyCancelling,
+            RequestCancelResult::TooLateToCancel => Self::TooLateToCancel,
+        }
+    }
+}
 
 /// Internal testing switch to prevent SST compaction from changing file layouts
 /// during query regression tests. This is not a public configuration option.
@@ -202,6 +229,30 @@ impl CompactionScheduler {
             CompactionStatus::new(region_id, version_control.clone(), access_layer.clone());
         status.shared_state = shared_state.clone();
         self.region_status.insert(region_id, status);
+    }
+
+    pub(crate) fn pause_compaction(
+        &mut self,
+        region_id: RegionId,
+        sender: tokio::sync::oneshot::Sender<Result<PauseCompactionResponse>>,
+    ) {
+        if let Some(status) = self.region_status.get_mut(&region_id) {
+            status.pause(sender);
+        } else {
+            let _ = sender.send(crate::error::RegionNotFoundSnafu { region_id }.fail());
+        }
+    }
+
+    /// Cancels an exact live identity, checking the pending slot before the active cycle.
+    pub(crate) fn cancel_task(
+        &mut self,
+        region_id: RegionId,
+        task_id: &str,
+    ) -> CancelCompactionResult {
+        let Some(status) = self.region_status.get_mut(&region_id) else {
+            return CancelCompactionResult::NotFound;
+        };
+        status.cancel_task(task_id)
     }
 
     /// Reports active work rather than the existence of a resident region record.
@@ -480,6 +531,23 @@ impl CompactionScheduler {
         status.pending_ddl_requests.push(request);
         Ok(())
     }
+
+    /// Pending and handed-off DDLs retain their turn until the final reply.
+    pub(crate) fn blocks_region_edits(&self, region_id: RegionId) -> bool {
+        self.region_status
+            .get(&region_id)
+            .is_some_and(|status| status.has_ddl())
+    }
+
+    /// Whether a staging request is still waiting for compaction cancellation.
+    pub(crate) fn has_pending_enter_staging(&self, region_id: RegionId) -> bool {
+        self.region_status.get(&region_id).is_some_and(|status| {
+            status
+                .pending_ddl_requests
+                .iter()
+                .any(|ddl| matches!(ddl.request, DdlRequest::EnterStaging(_)))
+        })
+    }
 }
 
 // Internal state-machine helpers.
@@ -522,6 +590,10 @@ impl CompactionScheduler {
         let status = self.region_status.entry(region_id).or_insert_with(|| {
             CompactionStatus::new(region_id, version_control.clone(), access_layer.clone())
         });
+        if status.is_paused() {
+            waiter.send(CompactionCancelledSnafu.fail());
+            return Ok(false);
+        }
         if status.has_ddl() {
             info!(
                 "Region {} has pending DDL requests, ignoring compaction: queued={}, executing={}",
@@ -533,9 +605,25 @@ impl CompactionScheduler {
             return Ok(false);
         }
         let current_state = manifest_ctx.current_state();
-        if current_state == RegionRoleState::Leader(RegionLeaderState::Staging) {
+        if current_state.in_staging_session() {
             info!(
                 "Skipping compaction for region {} in staging mode, options: {:?}",
+                region_id, compact_options
+            );
+            waiter.send(Ok(0));
+            return Ok(false);
+        }
+        if manifest_ctx.awaits_leader_lease() {
+            info!(
+                "Skipping compaction for region {} that awaits its Leader lease, options: {:?}",
+                region_id, compact_options
+            );
+            waiter.send(Ok(0));
+            return Ok(false);
+        }
+        if status.has_pending_tails() {
+            info!(
+                "Skipping compaction for region {} with pending WAL tails, options: {:?}",
                 region_id, compact_options
             );
             waiter.send(Ok(0));
@@ -608,6 +696,18 @@ impl CompactionScheduler {
         let Some(pending_request) = std::mem::take(&mut status.pending_request) else {
             return false;
         };
+        let awaits_leader_lease = manifest_ctx.awaits_leader_lease();
+        if awaits_leader_lease {
+            info!(
+                "Region {region_id} awaits its Leader lease, answering its queued compaction without compacting"
+            );
+        }
+        if status.has_pending_tails() || awaits_leader_lease {
+            status.pending_task_state = None;
+            status.publish_state();
+            pending_request.waiter.send(Ok(0));
+            return false;
+        }
 
         let PendingCompaction {
             options,
@@ -701,6 +801,13 @@ impl CompactionScheduler {
         let Some(status) = self.region_status.get_mut(&region_id) else {
             return false;
         };
+        let awaits_leader_lease = manifest_ctx.awaits_leader_lease();
+        if awaits_leader_lease {
+            info!("Region {region_id} awaits its Leader lease, starting no follow-up compaction");
+        }
+        if status.is_paused() || status.has_pending_tails() || awaits_leader_lease {
+            return false;
+        }
         // An external automatic trigger requires one unrestricted follow-up pick.
         let request = status.new_compaction_request(
             self.request_sender.clone(),
@@ -787,6 +894,22 @@ impl CompactionScheduler {
         if let Some(status) = self.region_status.get_mut(&region_id) {
             status.on_failure(err);
         }
+    }
+
+    /// Completes task-specific cancellation without discarding another pending request.
+    fn finish_cancelled_compaction(
+        &mut self,
+        region_id: RegionId,
+        manifest: &ManifestContextRef,
+        schemas: SchemaMetadataManagerRef,
+    ) -> CompactionTransition {
+        if let Some(status) = self.region_status.get_mut(&region_id)
+            && status.finish_task_cancellation()
+        {
+            self.handle_pending_compaction_request(region_id, manifest, schemas);
+            return CompactionTransition::NoAction;
+        }
+        CompactionTransition::from_pending_ddls(self.finish_compaction_on_cancel(region_id))
     }
 
     /// Returns the cycle to idle and records any DDL handoff in the same resident entry.

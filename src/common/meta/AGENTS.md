@@ -27,6 +27,10 @@ and durable DDL procedures. Metasrv process and service wiring live in
   invalidation.
 - Procedure changes must preserve persisted state and `TYPE_NAME`; new
   procedures need loader registration in `src/common/meta/src/ddl_manager.rs`.
+- Database drops persist bounded logical-table batches before deleting metadata.
+  Replays must finish cache invalidation even after table-name keys are gone;
+  physical-region removal follows the logical phase. Keep the legacy single-table
+  executor readable for in-flight procedures from older versions.
 - Marker-style table options that no region consumes (`greptime.semantic.*`,
   `repartition.column.hint`) go through `AnnotationFamily` in
   `src/table/src/requests.rs` — classification, validation, logical-table

@@ -101,6 +101,15 @@ pub enum Error {
         error: object_store::Error,
     },
 
+    #[snafu(display("Source metadata file disappeared while copying {path}"))]
+    MetadataCopyFileNotFound {
+        path: String,
+        #[snafu(source)]
+        error: object_store::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display(
         "Manifest delta {} disappeared after it was listed, path: {}",
         version,
@@ -147,6 +156,25 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Manifest version {version} conflicts in {manifest_dir}: {reason}"))]
+    ManifestVersionConflict {
+        version: ManifestVersion,
+        manifest_dir: String,
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Manifest checkpoint {version} in {manifest_dir} was removed after it was listed"
+    ))]
+    ManifestCheckpointVanished {
+        version: ManifestVersion,
+        manifest_dir: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to serialize manifest, region_id: {}", region_id))]
     SerializeManifest {
         region_id: RegionId,
@@ -189,6 +217,12 @@ pub enum Error {
     #[snafu(display("Worker {} is stopped", id))]
     WorkerStopped {
         id: WorkerId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Engine is stopped"))]
+    EngineStopped {
         #[snafu(implicit)]
         location: Location,
     },
@@ -491,6 +525,15 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("Failed to read the WAL of node {} for region {}", node_id, region_id))]
+    ReadNodeWal {
+        region_id: RegionId,
+        node_id: u64,
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
     #[snafu(display("Failed to decode WAL entry, region_id: {}", region_id))]
     DecodeWal {
         region_id: RegionId,
@@ -518,6 +561,14 @@ pub enum Error {
 
     #[snafu(display("Failed to check the WAL history, region_id: {}", region_id))]
     CheckWalHistory {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to resolve the WAL provider, region_id: {}", region_id))]
+    ResolveWalProvider {
         region_id: RegionId,
         #[snafu(implicit)]
         location: Location,
@@ -582,6 +633,14 @@ pub enum Error {
 
     #[snafu(display("Failed to merge candidate series"))]
     MergeCandidateSeries {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: datafusion::error::DataFusionError,
+    },
+
+    #[snafu(display("Scan memory exhausted"))]
+    ScanMemoryExhausted {
         #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
@@ -711,8 +770,51 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Region {} still has WAL tails to recover", region_id))]
+    RegionPendingTails {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Region {} cannot read pending WAL tails of node {}",
+        region_id,
+        node_id
+    ))]
+    RemoteWalUnsupported {
+        region_id: RegionId,
+        node_id: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Region {} cannot read entry {} of the WAL of node {}, where its pending tail ends",
+        region_id,
+        entry_id,
+        node_id
+    ))]
+    TailEntryMissing {
+        region_id: RegionId,
+        node_id: u64,
+        entry_id: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Region {} does not hold a valid leader lease", region_id))]
     RegionLeaseExpired {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Region {} has not received a leader lease since a catchup made it writable",
+        region_id
+    ))]
+    RegionLeaseNotReceived {
         region_id: RegionId,
         #[snafu(implicit)]
         location: Location,
@@ -740,6 +842,24 @@ pub enum Error {
     EditRegion {
         region_id: RegionId,
         source: Arc<Error>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Failed to end staging of region {}, which is still staging",
+        region_id
+    ))]
+    EndStaging {
+        region_id: RegionId,
+        source: Arc<Error>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Region {} waits for a retry of its end-of-staging commit", region_id))]
+    EndStagingPending {
+        region_id: RegionId,
         #[snafu(implicit)]
         location: Location,
     },
@@ -1313,6 +1433,9 @@ pub enum Error {
     #[snafu(display("Compaction is cancelled."))]
     CompactionCancelled {},
 
+    #[snafu(display("SST write is cancelled."))]
+    SstWriteCancelled {},
+
     #[snafu(display("Flush is cancelled."))]
     FlushCancelled {},
 
@@ -1525,10 +1648,15 @@ impl Error {
     /// from a revoked key, a changed bucket policy or clock skew) never proves nothing was written.
     pub(crate) fn may_have_persisted_manifest_update(&self) -> bool {
         match self {
-            Error::UpdateManifest { .. }
+            // Applicability and capability checks reject the edit before storage I/O.
+            Error::InvalidRequest { .. }
+            | Error::UpdateManifest { .. }
             | Error::RegionState { .. }
             | Error::RegionTruncated { .. }
             | Error::RegionStopped { .. }
+            | Error::RegionLeaseExpired { .. }
+            | Error::RegionLeaseNotReceived { .. }
+            | Error::EndStagingPending { .. }
             | Error::SerdeJson { .. }
             | Error::CompressObject { .. } => false,
             Error::OpenDal { error, .. } => !matches!(
@@ -1561,13 +1689,18 @@ impl ErrorExt for Error {
             MultiRegionCompactionResource { .. } => StatusCode::RuntimeResourcesExhausted,
             SstWriteMemoryExceeded { .. } => StatusCode::RuntimeResourcesExhausted,
             DataTypeMismatch { source, .. } => source.status_code(),
-            OpenDal { .. } | ManifestDeltaNotFound { .. } | ReadParquet { .. } => {
-                StatusCode::StorageUnavailable
-            }
+            OpenDal { .. }
+            | MetadataCopyFileNotFound { .. }
+            | ManifestDeltaNotFound { .. }
+            | ManifestVersionConflict { .. }
+            | ManifestCheckpointVanished { .. }
+            | ReadParquet { .. } => StatusCode::StorageUnavailable,
             WriteWal { source, .. }
             | ReadWal { source, .. }
+            | ReadNodeWal { source, .. }
             | DeleteWal { source, .. }
             | WaitWalDurable { source, .. }
+            | ResolveWalProvider { source, .. }
             | CheckWalHistory { source, .. } => source.status_code(),
             CompressObject { .. }
             | DecompressObject { .. }
@@ -1620,6 +1753,7 @@ impl ErrorExt for Error {
             | RegionMetadataNotFound { .. }
             | Join { .. }
             | WorkerStopped { .. }
+            | EngineStopped { .. }
             | Recv { .. }
             | DecodeWal { .. }
             | ComputeArrow { .. }
@@ -1665,11 +1799,16 @@ impl ErrorExt for Error {
             RegionTruncated { .. } => StatusCode::Cancelled,
             RejectWrite { .. } | RejectWriteInStaging { .. } => StatusCode::StorageUnavailable,
             CompactRegion { source, .. } => source.status_code(),
-            EditRegion { source, .. } => source.status_code(),
+            EditRegion { source, .. } | EndStaging { source, .. } => source.status_code(),
             CompatReader { .. } => StatusCode::Unexpected,
             InvalidRegionRequest { source, .. } => source.status_code(),
             RegionState { .. } | UpdateManifest { .. } => StatusCode::RegionNotReady,
-            RegionLeaseExpired { .. } | UnacknowledgedWrite { .. } => StatusCode::RegionNotReady,
+            RegionLeaseExpired { .. }
+            | RegionLeaseNotReceived { .. }
+            | UnacknowledgedWrite { .. } => StatusCode::RegionNotReady,
+            RegionPendingTails { .. } => StatusCode::RegionNotReady,
+            RemoteWalUnsupported { .. } => StatusCode::Unsupported,
+            TailEntryMissing { .. } => StatusCode::StorageUnavailable,
             JsonOptions { .. } => StatusCode::InvalidArguments,
             EmptyRegionDir { .. } | EmptyManifestDir { .. } => StatusCode::RegionNotFound,
             ConvertValue { source, .. } => source.status_code(),
@@ -1712,7 +1851,7 @@ impl ErrorExt for Error {
             | StatsNotPresent { .. }
             | InvalidPrimaryKeyRange { .. }
             | DecodePrimaryKeyRange { .. } => StatusCode::Internal,
-            RegionBusy { .. } => StatusCode::RegionBusy,
+            RegionBusy { .. } | EndStagingPending { .. } => StatusCode::RegionBusy,
             GetSchemaMetadata { source, .. } => source.status_code(),
             Timeout { .. } => StatusCode::Cancelled,
 
@@ -1722,14 +1861,17 @@ impl ErrorExt for Error {
                 source.status_code()
             }
 
-            ManualCompactionOverride {} | CompactionCancelled {} | FlushCancelled {} => {
-                StatusCode::Cancelled
-            }
+            ManualCompactionOverride {}
+            | CompactionCancelled {}
+            | FlushCancelled {}
+            | SstWriteCancelled {} => StatusCode::Cancelled,
 
             // A concurrent manual compaction fails fast instead of being queued;
             // the conflict is reported to the caller, which decides whether to
             // issue a new request after the running one finishes.
             ManualCompactionAlreadyRunning { .. } => StatusCode::RegionBusy,
+
+            ScanMemoryExhausted { .. } => StatusCode::RuntimeResourcesExhausted,
 
             CompactionMemoryExhausted { source, .. } => source.status_code(),
 
@@ -1768,6 +1910,7 @@ impl ErrorExt for Error {
             | RegionClosed { .. }
             | RejectWriteInStaging { .. }
             | RegionLeaseExpired { .. }
+            | RegionLeaseNotReceived { .. }
             | UnacknowledgedWrite { .. }
             | RegionState {
                 state: RegionRoleState::Follower,
@@ -1782,9 +1925,15 @@ impl ErrorExt for Error {
             | UpdateManifest { .. }
             | RegionStopped { .. }
             | RegionBusy { .. }
+            | RegionPendingTails { .. }
+            | EndStaging { .. }
+            | EndStagingPending { .. }
             | ManualCompactionAlreadyRunning { .. }
             | FlushableRegionState { .. }
-            | ManifestDeltaNotFound { .. } => RetryHint::Retryable,
+            | MetadataCopyFileNotFound { .. }
+            | ManifestDeltaNotFound { .. }
+            | ManifestVersionConflict { .. }
+            | ManifestCheckpointVanished { .. } => RetryHint::Retryable,
 
             OpenDal { error, .. }
             | DeleteSsts { error, .. }
@@ -1793,8 +1942,10 @@ impl ErrorExt for Error {
 
             WriteWal { source, .. }
             | ReadWal { source, .. }
+            | ReadNodeWal { source, .. }
             | DeleteWal { source, .. }
             | WaitWalDurable { source, .. }
+            | ResolveWalProvider { source, .. }
             | CheckWalHistory { source, .. }
             | FetchManifests { source, .. }
             | External { source, .. } => source.retry_hint(),
@@ -1998,9 +2149,42 @@ mod tests {
         let region_id = RegionId::new(1, 1);
         let error = RegionTruncatedSnafu { region_id }.build();
         assert!(!error.may_have_persisted_manifest_update());
+        let error = InvalidRequestSnafu {
+            region_id,
+            reason: "manifest applicability check rejected the edit",
+        }
+        .build();
+        assert!(!error.may_have_persisted_manifest_update());
+        // Staging that waits for a retried end commit refuses before storage I/O.
+        let error = EndStagingPendingSnafu { region_id }.build();
+        assert!(!error.may_have_persisted_manifest_update());
+        assert!(error.retry_hint().is_retryable());
+        assert_eq!(error.status_code(), StatusCode::RegionBusy);
+        // Other busy errors keep the conservative classification.
+        let error = RegionBusySnafu { region_id }.build();
+        assert!(error.may_have_persisted_manifest_update());
+
+        // A commit refused before its PUT because the Leader deadline has passed.
+        let error = RegionLeaseExpiredSnafu { region_id }.build();
+        assert!(!error.may_have_persisted_manifest_update());
+
+        // A commit refused before its PUT because no Leader lease has confirmed the catchup.
+        let error = RegionLeaseNotReceivedSnafu { region_id }.build();
+        assert!(!error.may_have_persisted_manifest_update());
+        assert_eq!(error.status_code(), StatusCode::RegionNotReady);
+        assert!(error.retry_hint().is_retryable());
 
         // This can be raised while applying an edit after its manifest file was saved.
         let error = RegionMetadataNotFoundSnafu {}.build();
         assert!(error.may_have_persisted_manifest_update());
+
+        let error = ManifestVersionConflictSnafu {
+            version: 1u64,
+            manifest_dir: "manifest/",
+            reason: "test",
+        }
+        .build();
+        assert!(error.may_have_persisted_manifest_update());
+        assert!(error.retry_hint().is_retryable());
     }
 }

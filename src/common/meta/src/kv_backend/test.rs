@@ -313,6 +313,53 @@ pub async fn test_kv_range_2_with_prefix(kv_backend: &impl KvBackend, prefix: Ve
     assert!(resp.prev_kvs.is_empty());
 }
 
+/// A batch read must not mix values from either side of an atomic update.
+/// `key_count` includes missing keys so callers can cross their statement boundary
+/// while the writer only needs a two-operation transaction.
+pub async fn test_kv_batch_get_concurrent_updates(
+    backend: &impl KvBackend<Error = Error>,
+    key_count: usize,
+) {
+    assert!(key_count >= 2);
+    let first = b"consistent/a".to_vec();
+    let last = b"consistent/z".to_vec();
+    let mut keys = vec![first.clone()];
+    keys.extend((0..key_count - 2).map(|i| format!("consistent/m{i:06}").into_bytes()));
+    keys.push(last.clone());
+    let update = |value: Vec<u8>| {
+        Txn::new().and_then(vec![
+            TxnOp::Put(first.clone(), value.clone()),
+            TxnOp::Put(last.clone(), value),
+        ])
+    };
+    backend.txn(update(vec![0])).await.unwrap();
+    let read = async {
+        for _ in 0..64 {
+            let mut kvs = backend
+                .batch_get(BatchGetRequest { keys: keys.clone() })
+                .await
+                .unwrap()
+                .kvs;
+            kvs.sort_unstable_by(|a, b| a.key.cmp(&b.key));
+            assert_eq!(kvs.len(), 2);
+            assert_eq!(kvs[0].key, first);
+            assert_eq!(kvs[1].key, last);
+            assert_eq!(kvs[0].value, kvs[1].value, "mixed atomic update: {kvs:?}");
+        }
+    };
+    let write = async {
+        for version in 1..=64 {
+            backend.txn(update(vec![version])).await.unwrap();
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        tokio::join!(read, write);
+    })
+    .await
+    .expect("concurrent batch reads and writes must finish");
+    unprepare_kv(backend, b"consistent/").await;
+}
+
 pub async fn test_kv_batch_get(kv_backend: &impl KvBackend) {
     test_kv_batch_get_with_prefix(kv_backend, vec![]).await;
 }

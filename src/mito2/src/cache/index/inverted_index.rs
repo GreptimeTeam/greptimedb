@@ -22,16 +22,18 @@ use bytes::Bytes;
 use index::inverted_index::error::{CommonIoSnafu, Error, Result, SharedReadSnafu};
 use index::inverted_index::format::reader::{InvertedIndexReadMetrics, InvertedIndexReader};
 use prost::Message;
+use puffin::puffin_manager::file_key::PuffinFileKey;
 use snafu::IntoError;
-use store_api::storage::{FileId, IndexVersion};
+use store_api::storage::FileId;
 
 use crate::cache::index::{INDEX_METADATA_TYPE, IndexCache};
 use crate::metrics::{CACHE_HIT, CACHE_MISS};
+use crate::sst::file::RegionIndexId;
 
 const INDEX_TYPE_INVERTED_INDEX: &str = "inverted_index";
 
 /// Cache for inverted index.
-pub type InvertedIndexCache = IndexCache<(FileId, IndexVersion), InvertedIndexMetas>;
+pub type InvertedIndexCache = IndexCache<PuffinFileKey<RegionIndexId>, InvertedIndexMetas>;
 pub type InvertedIndexCacheRef = Arc<InvertedIndexCache>;
 
 impl InvertedIndexCache {
@@ -50,24 +52,26 @@ impl InvertedIndexCache {
 
     /// Removes all cached entries for the given `file_id`.
     pub fn invalidate_file(&self, file_id: FileId) {
-        self.invalidate_if(move |key| key.0 == file_id);
+        self.invalidate_if(move |key| key.handle().file_id() == file_id);
     }
 }
 
 /// Calculates weight for inverted index metadata.
-fn inverted_index_metadata_weight(k: &(FileId, IndexVersion), v: &Arc<InvertedIndexMetas>) -> u32 {
-    (k.0.as_bytes().len() + size_of::<IndexVersion>() + v.encoded_len()) as u32
+fn inverted_index_metadata_weight(
+    k: &PuffinFileKey<RegionIndexId>,
+    v: &Arc<InvertedIndexMetas>,
+) -> u32 {
+    (k.estimated_size() + v.encoded_len()) as u32
 }
 
 /// Calculates weight for inverted index content.
-fn inverted_index_content_weight((k, _): &((FileId, IndexVersion), u64), v: &Bytes) -> u32 {
-    (k.0.as_bytes().len() + size_of::<IndexVersion>() + v.len()) as u32
+fn inverted_index_content_weight((k, _): &(PuffinFileKey<RegionIndexId>, u64), v: &Bytes) -> u32 {
+    (k.estimated_size() + v.len()) as u32
 }
 
 /// Inverted index blob reader with cache.
 pub struct CachedInvertedIndexBlobReader<R> {
-    file_id: FileId,
-    index_version: IndexVersion,
+    file_key: PuffinFileKey<RegionIndexId>,
     blob_size: u64,
     inner: R,
     cache: InvertedIndexCacheRef,
@@ -76,15 +80,13 @@ pub struct CachedInvertedIndexBlobReader<R> {
 impl<R> CachedInvertedIndexBlobReader<R> {
     /// Creates a new inverted index blob reader with cache.
     pub fn new(
-        file_id: FileId,
-        index_version: IndexVersion,
+        file_key: PuffinFileKey<RegionIndexId>,
         blob_size: u64,
         inner: R,
         cache: InvertedIndexCacheRef,
     ) -> Self {
         Self {
-            file_id,
-            index_version,
+            file_key,
             blob_size,
             inner,
             cache,
@@ -106,7 +108,7 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
         let (result, cache_metrics) = self
             .cache
             .get_or_load(
-                (self.file_id, self.index_version),
+                self.file_key.clone(),
                 self.blob_size,
                 offset,
                 size,
@@ -137,7 +139,7 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
         let (pages, total_cache_metrics) = self
             .cache
             .get_or_load_vec(
-                (self.file_id, self.index_version),
+                self.file_key.clone(),
                 self.blob_size,
                 ranges,
                 move |ranges| async move { inner.read_vec(&ranges, None).await },
@@ -159,8 +161,8 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
         &self,
         metrics: Option<&'a mut InvertedIndexReadMetrics>,
     ) -> Result<Arc<InvertedIndexMetas>> {
-        let key = (self.file_id, self.index_version);
-        if let Some(cached) = self.cache.get_metadata(key).await {
+        let key = self.file_key.clone();
+        if let Some(cached) = self.cache.get_metadata(key.clone()).await {
             CACHE_HIT.with_label_values(&[INDEX_METADATA_TYPE]).inc();
             if let Some(m) = metrics {
                 m.cache_hit += 1;
@@ -216,11 +218,104 @@ mod test {
     use index::inverted_index::format::reader::{InvertedIndexBlobReader, InvertedIndexReader};
     use index::inverted_index::format::writer::{InvertedIndexBlobWriter, InvertedIndexWriter};
     use prometheus::register_int_counter_vec;
+    use puffin::puffin_manager::file_key::PuffinStorageScope;
     use rand::{Rng, RngCore};
+    use store_api::storage::{IndexVersion, RegionId};
 
     use super::*;
+    use crate::sst::file::RegionFileId;
     use crate::sst::index::store::InstrumentedStore;
     use crate::test_util::TestEnv;
+
+    fn file_key(file_id: FileId, version: IndexVersion) -> PuffinFileKey<RegionIndexId> {
+        PuffinFileKey::new(
+            Arc::new(PuffinStorageScope::new(
+                "memory".into(),
+                "test".into(),
+                "/".into(),
+            )),
+            format!("{file_id}.{version}.puffin"),
+            RegionIndexId::new(RegionFileId::new(RegionId::new(1, 1), file_id), version),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_cache_keys_isolate_storage_and_generation() {
+        let cache = InvertedIndexCache::new(1024 * 1024, 1024 * 1024, 1024);
+        let file_id = FileId::random();
+        let original = file_key(file_id, 0);
+        let keys = [
+            original.clone(),
+            file_key(file_id, 1),
+            PuffinFileKey::new(
+                Arc::new(PuffinStorageScope::new(
+                    "memory".into(),
+                    "other".into(),
+                    "/".into(),
+                )),
+                format!("{file_id}.0.puffin"),
+                *original.handle(),
+            ),
+            PuffinFileKey::new(
+                Arc::new(PuffinStorageScope::new(
+                    "memory".into(),
+                    "test".into(),
+                    "/".into(),
+                )),
+                format!("other/{file_id}.0.puffin"),
+                *original.handle(),
+            ),
+        ];
+
+        let metas: Vec<_> = keys
+            .iter()
+            .map(|_| Arc::new(InvertedIndexMetas::default()))
+            .collect();
+        for (i, key) in keys.iter().enumerate() {
+            assert!(cache.get_metadata(key.clone()).await.is_none());
+            cache.put_metadata(key.clone(), metas[i].clone()).await;
+            let (bytes, metrics) = cache
+                .get_or_load(key.clone(), 1, 0, 1, |_| async move {
+                    Ok::<_, std::io::Error>(vec![bytes::Bytes::from(vec![i as u8])])
+                })
+                .await
+                .unwrap();
+            assert_eq!(bytes.as_ref(), &[i as u8]);
+            assert_eq!(metrics.cache_miss, 1);
+        }
+        let reconstructed = file_key(file_id, 0);
+        assert!(Arc::ptr_eq(
+            &cache.get_metadata(reconstructed).await.unwrap(),
+            &metas[0]
+        ));
+        for (i, key) in keys.iter().enumerate() {
+            assert!(Arc::ptr_eq(
+                &cache.get_metadata(key.clone()).await.unwrap(),
+                &metas[i]
+            ));
+            let (bytes, metrics) = cache
+                .get_or_load(key.clone(), 1, 0, 1, |_| async {
+                    Err::<Vec<bytes::Bytes>, _>(std::io::Error::other(
+                        "cached page must not reload",
+                    ))
+                })
+                .await
+                .unwrap();
+            assert_eq!(bytes.as_ref(), &[i as u8]);
+            assert_eq!(metrics.cache_hit, 1);
+        }
+        cache.invalidate_file(file_id);
+        for key in keys {
+            assert!(cache.get_metadata(key.clone()).await.is_none());
+            let (_, metrics) = cache
+                .get_or_load(key, 1, 0, 1, |_| async {
+                    Ok::<_, std::io::Error>(vec![bytes::Bytes::from_static(&[42])])
+                })
+                .await
+                .unwrap();
+            assert_eq!(metrics.cache_miss, 1);
+        }
+    }
 
     // Repeat times for following little fuzz tests.
     const FUZZ_REPEAT_TIMES: usize = 100;
@@ -272,8 +367,7 @@ mod test {
         for fail in [false, true] {
             let cache = Arc::new(InvertedIndexCache::new(4096, 4096, 1024));
             let reader = CachedInvertedIndexBlobReader::new(
-                FileId::random(),
-                0,
+                file_key(FileId::random(), 0),
                 8192,
                 MetadataReader {
                     release: tokio::sync::Notify::new(),
@@ -434,8 +528,7 @@ mod test {
 
         let reader = InvertedIndexBlobReader::new(range_reader);
         let cached_reader = CachedInvertedIndexBlobReader::new(
-            FileId::random(),
-            index_version,
+            file_key(FileId::random(), index_version),
             file_size,
             reader,
             Arc::new(InvertedIndexCache::new(8192, 8192, 50)),
@@ -572,7 +665,7 @@ mod test {
             let (read, _cache_metrics) = cached_reader
                 .cache
                 .get_or_load(
-                    (cached_reader.file_id, cached_reader.index_version),
+                    cached_reader.file_key.clone(),
                     file_size,
                     offset,
                     size,
@@ -593,10 +686,10 @@ mod test {
         rng.fill_bytes(&mut data);
         let file_size = data.len() as u64;
         let cache = InvertedIndexCache::new(1024 * 1024, 1024 * 1024, 1000);
-        let key = (FileId::random(), 0);
+        let key = file_key(FileId::random(), 0);
 
         for _ in 0..FUZZ_REPEAT_TIMES {
-            cache.invalidate_file(key.0);
+            cache.invalidate_file(key.handle().file_id());
             let ranges = (0..rng.random_range(1..20))
                 .map(|_| {
                     let start = rng.random_range(0..file_size);
@@ -631,7 +724,7 @@ mod test {
                 }
             };
             let (cold, cold_metrics) = cache
-                .get_or_load_vec(key, file_size, &ranges, load)
+                .get_or_load_vec(key.clone(), file_size, &ranges, load)
                 .await
                 .unwrap();
             assert_eq!(cold, expected);
@@ -646,7 +739,7 @@ mod test {
             );
 
             let (warm, metrics) = cache
-                .get_or_load_vec(key, file_size, &ranges, load)
+                .get_or_load_vec(key.clone(), file_size, &ranges, load)
                 .await
                 .unwrap();
             assert_eq!(warm, expected);
