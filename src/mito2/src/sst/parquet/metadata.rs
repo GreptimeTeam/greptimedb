@@ -23,11 +23,13 @@ use parquet::arrow::async_reader::MetadataFetch;
 use parquet::errors::{ParquetError, Result as ParquetResult};
 use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData, ParquetMetaDataReader};
 use parquet::file::statistics::Statistics;
+use parquet::schema::types::SchemaDescriptor;
 use snafu::{IntoError as _, ResultExt};
 use store_api::metadata::RegionMetadata;
 use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 
 use crate::error::{self, Result};
+use crate::sst::PRIMARY_KEY_PARQUET_FIELD_ID;
 use crate::sst::parquet::reader::MetadataCacheMetrics;
 
 /// The estimated size of the footer and metadata need to read from the end of parquet file.
@@ -121,6 +123,29 @@ fn unbox_external_error(e: ParquetError) -> StdResult<object_store::Error, Parqu
     }
 }
 
+/// Returns the leaf index of the internal primary key column.
+///
+/// Prefers the reserved parquet field id, which is unambiguous. A JSON2 column is written as
+/// a nested struct, so one of its children can share the internal column's name; files written
+/// before field ids were stamped fall back to the top-level name.
+///
+/// `pub(super)` rather than private so the parquet tests can exercise both branches; it is not
+/// reachable from outside `sst::parquet`.
+pub(super) fn internal_primary_key_leaf_index(schema_descr: &SchemaDescriptor) -> Option<usize> {
+    let columns = schema_descr.columns();
+    columns
+        .iter()
+        .position(|column| {
+            let info = column.self_type().get_basic_info();
+            info.has_id() && info.id() == PRIMARY_KEY_PARQUET_FIELD_ID as i32
+        })
+        .or_else(|| {
+            columns.iter().position(|column| {
+                column.name() == PRIMARY_KEY_COLUMN_NAME && column.path().parts().len() == 1
+            })
+        })
+}
+
 pub(crate) fn extract_primary_key_range(
     parquet_meta: &ParquetMetaData,
     region_metadata: &RegionMetadata,
@@ -129,12 +154,8 @@ pub(crate) fn extract_primary_key_range(
         return None;
     }
 
-    let pk_column_idx = parquet_meta
-        .file_metadata()
-        .schema_descr()
-        .columns()
-        .iter()
-        .position(|column| column.name() == PRIMARY_KEY_COLUMN_NAME)?;
+    let pk_column_idx =
+        internal_primary_key_leaf_index(parquet_meta.file_metadata().schema_descr())?;
 
     let mut min: Option<Bytes> = None;
     let mut max: Option<Bytes> = None;

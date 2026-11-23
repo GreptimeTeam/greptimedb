@@ -524,10 +524,10 @@ mod tests {
     use object_store::ObjectStore;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use parquet::arrow::{ArrowWriter, AsyncArrowWriter};
-    use parquet::basic::{Compression, Encoding, ZstdLevel};
+    use parquet::basic::{Compression, Encoding, Repetition, Type as PhysicalType, ZstdLevel};
     use parquet::file::metadata::{KeyValue, PageIndexPolicy};
     use parquet::file::properties::WriterProperties;
-    use parquet::schema::types::ColumnPath;
+    use parquet::schema::types::{ColumnPath, SchemaDescriptor, Type};
     use store_api::codec::PrimaryKeyEncoding;
     use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
     use store_api::mito_engine_options::FloatFieldEncoding;
@@ -546,6 +546,7 @@ mod tests {
     use crate::config::IndexConfig;
     use crate::read::FlatSource;
     use crate::region::options::{IndexOptions, InvertedIndexOptions};
+    use crate::sst::PRIMARY_KEY_PARQUET_FIELD_ID;
     use crate::sst::file::{FileHandle, FileMeta, RegionFileId, RegionIndexId};
     use crate::sst::file_purger::NoopFilePurger;
     use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplierBuilder;
@@ -553,7 +554,9 @@ mod tests {
     use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
     use crate::sst::index::{IndexBuildType, Indexer, IndexerBuilder, IndexerBuilderImpl};
     use crate::sst::parquet::flat_format::{FlatWriteFormat, time_index_column_index};
-    use crate::sst::parquet::metadata::{MetadataLoader, extract_primary_key_range};
+    use crate::sst::parquet::metadata::{
+        MetadataLoader, extract_primary_key_range, internal_primary_key_leaf_index,
+    };
     use crate::sst::parquet::reader::{ParquetReader, ParquetReaderBuilder, ReaderMetrics};
     use crate::sst::parquet::row_selection::RowGroupSelection;
     use crate::sst::parquet::writer::ParquetWriter;
@@ -3825,5 +3828,259 @@ mod tests {
         assert_eq!(metrics.filter_metrics.rg_minmax_filtered, 0);
         assert_eq!(metrics.filter_metrics.rg_fulltext_filtered, 2);
         assert_eq!(metrics.filter_metrics.rows_fulltext_filtered, 100);
+    }
+
+    /// Regression test for issue 10582: a JSON2 struct child leaf literally named
+    /// `__primary_key` must not shadow the internal encoded primary key column, which is the
+    /// only top-level leaf with that name.
+    #[tokio::test]
+    async fn test_primary_key_range_ignores_json2_child_with_same_name() {
+        use datatypes::arrow::array::StructArray;
+        use datatypes::extension::json::Json2ExtensionType;
+        use datatypes::json::{JsonSettings, JsonTypeHint};
+        use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
+        use datatypes::vectors::json::array::JsonArray;
+
+        // A JSON2 v2 target layout with one string child literally named `__primary_key`.
+        let settings = JsonSettings::try_new(
+            vec![JsonTypeHint {
+                path: vec![PRIMARY_KEY_COLUMN_NAME.to_string()],
+                data_type: ConcreteDataType::string_datatype(),
+                inverted_index: false,
+                skipping_index: None,
+                fulltext_index: None,
+            }],
+            None,
+        )
+        .unwrap();
+
+        // Build the v2 physical JSON2 array through the normal JSON2 write machinery.
+        let legacy: ArrayRef = Arc::new(StructArray::from(vec![(
+            Arc::new(Field::new(PRIMARY_KEY_COLUMN_NAME, DataType::Utf8, true)),
+            Arc::new(StringArray::from_iter_values(["\u{1}A", "\u{1}B"])) as ArrayRef,
+        )]));
+        let legacy_field = Field::new("j", legacy.data_type().clone(), true)
+            .with_extension_type(Json2ExtensionType::default());
+        let json = JsonArray::from(&legacy)
+            .rewrite_to_v2(&legacy_field, &settings, &settings)
+            .unwrap();
+
+        // Region metadata: dense string primary key `host` + JSON2 field `j` + `ts`.
+        let mut json_column_schema = ColumnSchema::new(
+            "j",
+            ConcreteDataType::json2(JsonNativeType::Object(JsonObjectType::new())),
+            true,
+        );
+        json_column_schema.with_extension_type(&Json2ExtensionType::default());
+        let mut metadata_builder = RegionMetadataBuilder::new(REGION_ID);
+        metadata_builder
+            .primary_key_encoding(PrimaryKeyEncoding::Dense)
+            .primary_key(vec![0])
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
+                semantic_type: SemanticType::Tag,
+                column_id: 0,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: json_column_schema,
+                semantic_type: SemanticType::Field,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 2,
+            });
+        let metadata = Arc::new(metadata_builder.build().unwrap());
+
+        let mut options = FlatSchemaOptions::default();
+        options
+            .concretized_json_types
+            .insert("j".to_string(), json.data_type().clone());
+
+        let mut host = StringDictionaryBuilder::<UInt32Type>::new();
+        host.append("host-1").unwrap();
+        host.append("host-1").unwrap();
+        let encoded_pk = new_primary_key(&["host-1"]);
+        let mut keys = BinaryDictionaryBuilder::<UInt32Type>::new();
+        keys.append(&encoded_pk).unwrap();
+        keys.append(&encoded_pk).unwrap();
+
+        let input = RecordBatch::try_new(
+            to_flat_sst_arrow_schema(&metadata, &options),
+            vec![
+                Arc::new(host.finish()),
+                json,
+                Arc::new(TimestampMillisecondArray::from(vec![1, 2])),
+                Arc::new(keys.finish()),
+                Arc::new(UInt64Array::from_value(1, 2)),
+                Arc::new(UInt8Array::from_value(OpType::Put as u8, 2)),
+            ],
+        )
+        .unwrap();
+
+        let mut env = TestEnv::new().await;
+        let object_store = env.init_object_store_manager();
+        let path_provider = RegionFilePathFactory {
+            table_dir: "test_repro_10582".to_string(),
+            path_type: PathType::Bare,
+        };
+        let mut metrics = Metrics::new(WriteType::Flush);
+        let mut writer = ParquetWriter::new_with_object_store(
+            object_store,
+            metadata.clone(),
+            IndexConfig::default(),
+            NoopIndexBuilder,
+            path_provider,
+            &mut metrics,
+        )
+        .await;
+        // JSON2 regions always use the flat SST format.
+        let write_opts = WriteOptions {
+            row_group_size: 100,
+            ..Default::default()
+        };
+        let files = writer
+            .write_all_flat(
+                new_flat_source_from_record_batches(vec![input]),
+                None,
+                &write_opts,
+            )
+            .await
+            .unwrap();
+        assert_eq!(1, files.len());
+
+        let parquet_meta = files[0].file_metadata.as_ref().unwrap();
+        let leaves = parquet_meta.file_metadata().schema_descr().columns();
+        let pk_leaves: Vec<usize> = leaves
+            .iter()
+            .enumerate()
+            .filter(|(_, leaf)| leaf.name() == PRIMARY_KEY_COLUMN_NAME)
+            .map(|(idx, _)| idx)
+            .collect();
+        // The fixture must actually exercise the ambiguity: a nested JSON2 child leaf and the
+        // real top-level internal column leaf share the same name, and the child comes first.
+        assert!(
+            pk_leaves.len() > 1,
+            "expected both a JSON2 child leaf and the internal column leaf named {PRIMARY_KEY_COLUMN_NAME}"
+        );
+        let internal_idx = *pk_leaves.last().unwrap();
+        assert!(
+            leaves[pk_leaves[0]].path().parts().len() > 1,
+            "the first leaf named {PRIMARY_KEY_COLUMN_NAME} should be the nested JSON2 child"
+        );
+        assert_eq!(
+            leaves[internal_idx].path().parts().len(),
+            1,
+            "the internal {PRIMARY_KEY_COLUMN_NAME} column must be a top-level field"
+        );
+        assert!(
+            pk_leaves[0] < internal_idx,
+            "the JSON2 child leaf should precede the internal column leaf"
+        );
+        // The field id must single out the internal column, so the id branch (not the name
+        // fallback) is what resolves it here.
+        let internal_info = leaves[internal_idx].self_type().get_basic_info();
+        assert!(
+            internal_info.has_id() && internal_info.id() == PRIMARY_KEY_PARQUET_FIELD_ID as i32,
+            "the internal {PRIMARY_KEY_COLUMN_NAME} leaf must carry the reserved field id"
+        );
+        let child_info = leaves[pk_leaves[0]].self_type().get_basic_info();
+        assert_ne!(
+            child_info.has_id().then(|| child_info.id()),
+            Some(PRIMARY_KEY_PARQUET_FIELD_ID as i32),
+            "the JSON2 child leaf must not carry the reserved field id"
+        );
+        assert_eq!(
+            internal_primary_key_leaf_index(parquet_meta.file_metadata().schema_descr()),
+            Some(internal_idx)
+        );
+
+        let internal_stats = parquet_meta
+            .row_group(0)
+            .column(internal_idx)
+            .statistics()
+            .unwrap();
+        assert_eq!(
+            internal_stats.min_bytes_opt().unwrap(),
+            encoded_pk.as_slice()
+        );
+        assert_eq!(
+            internal_stats.max_bytes_opt().unwrap(),
+            encoded_pk.as_slice()
+        );
+
+        // The extracted bounds must come from the internal column, not from the JSON2 child
+        // whose BYTE_ARRAY statistics hold the user string values (`\x01A`/`\x01B`).
+        let extracted = extract_primary_key_range(parquet_meta, &metadata).unwrap();
+        assert_eq!(&*extracted.0, encoded_pk.as_slice());
+        assert_eq!(&*extracted.1, encoded_pk.as_slice());
+    }
+
+    /// Files written before field ids were stamped on internal columns carry no id at all, so
+    /// the lookup must fall back to the top-level name and still skip the JSON2 child.
+    #[test]
+    fn test_primary_key_column_index_falls_back_to_top_level_name() {
+        let leaf = |name: &str| {
+            Arc::new(
+                Type::primitive_type_builder(name, PhysicalType::BYTE_ARRAY)
+                    .with_repetition(Repetition::OPTIONAL)
+                    .build()
+                    .unwrap(),
+            )
+        };
+        // No `.with_id(...)` anywhere, mimicking an SST written before field ids.
+        let json = Arc::new(
+            Type::group_type_builder("j")
+                .with_repetition(Repetition::OPTIONAL)
+                .with_fields(vec![leaf(PRIMARY_KEY_COLUMN_NAME)])
+                .build()
+                .unwrap(),
+        );
+        let schema_descr = SchemaDescriptor::new(Arc::new(
+            Type::group_type_builder("schema")
+                .with_fields(vec![
+                    leaf("host"),
+                    json,
+                    leaf("ts"),
+                    leaf(PRIMARY_KEY_COLUMN_NAME),
+                    leaf(SEQUENCE_COLUMN_NAME),
+                    leaf(OP_TYPE_COLUMN_NAME),
+                ])
+                .build()
+                .unwrap(),
+        ));
+
+        let leaves = schema_descr.columns();
+        assert!(
+            leaves
+                .iter()
+                .all(|column| !column.self_type().get_basic_info().has_id()),
+            "the fixture must have no field ids so the fallback branch is exercised"
+        );
+        let named: Vec<usize> = leaves
+            .iter()
+            .enumerate()
+            .filter(|(_, column)| column.name() == PRIMARY_KEY_COLUMN_NAME)
+            .map(|(idx, _)| idx)
+            .collect();
+        assert_eq!(
+            named.len(),
+            2,
+            "expected the JSON2 child and the internal leaf"
+        );
+        let internal_idx = named[1];
+        assert!(leaves[named[0]].path().parts().len() > 1);
+        assert_eq!(internal_idx, 3);
+
+        assert_eq!(
+            internal_primary_key_leaf_index(&schema_descr),
+            Some(internal_idx),
+            "without field ids the top-level name must resolve the internal column"
+        );
     }
 }
