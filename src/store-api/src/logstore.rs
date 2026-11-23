@@ -194,19 +194,26 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     }
 
     /// Hands the provider's region over to this log store before the region
-    /// becomes writable on it.
+    /// becomes writable on it, and returns the bound: an id at or above
+    /// `entry_id` and every id the log store assigned to the region before.
     ///
-    /// Once it returns, every id the log store assigns to the region is above
-    /// `entry_id` and every id it assigned to the region before, also after a
-    /// restart, no entry of the region is obsolete that was not before, and
-    /// [`check_region_history`](Self::check_region_history) accepts the
-    /// region as [`start_region_history`](Self::start_region_history) makes it.
+    /// Once it returns:
+    /// - every id the log store assigns to the region is above the bound,
+    ///   also after a restart;
+    /// - no entry of the region is obsolete that was not before;
+    /// - [`check_region_history`](Self::check_region_history) accepts the
+    ///   region, as [`start_region_history`](Self::start_region_history)
+    ///   makes it.
     ///
-    /// The default does nothing. It suits a log store that never assigns a
-    /// region an id at or below one already used for the region, wherever it
-    /// was used, and that accepts every history.
-    async fn handoff(&self, _provider: &Provider, _entry_id: EntryId) -> Result<(), Self::Error> {
-        Ok(())
+    /// The default does nothing and returns `entry_id`. It suits a log store
+    /// that never assigns a region an id at or below one already used for the
+    /// region, wherever it was used, and that accepts every history.
+    async fn handoff(
+        &self,
+        _provider: &Provider,
+        entry_id: EntryId,
+    ) -> Result<EntryId, Self::Error> {
+        Ok(entry_id)
     }
 
     /// Streams the entries of `region_id` in `(after, upper]` from the WAL of node `node_id`,

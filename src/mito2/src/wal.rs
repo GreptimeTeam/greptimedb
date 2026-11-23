@@ -222,13 +222,13 @@ impl<S: LogStore> Wal<S> {
     }
 
     /// Hands the region over to the log store before it becomes writable on
-    /// this node, see [LogStore::handoff].
+    /// this node and returns the bound, see [LogStore::handoff].
     pub(crate) async fn handoff(
         &self,
         region_id: RegionId,
         provider: &Provider,
         entry_id: EntryId,
-    ) -> Result<()> {
+    ) -> Result<EntryId> {
         self.store
             .handoff(provider, entry_id)
             .await
