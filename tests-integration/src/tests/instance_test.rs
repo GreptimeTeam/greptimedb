@@ -3589,6 +3589,58 @@ async fn test_execute_copy_from_orc_with_cast(instance: Arc<dyn MockInstance>) {
     check_output_stream(output, expected).await;
 }
 
+// Numbers in scientific notation, and with more fractional digits than the scale, load into a
+// DECIMAL column with the value they have in the file.
+#[apply(standalone_instance_case)]
+async fn test_execute_copy_from_decimal_notation(instance: Arc<dyn MockInstance>) {
+    common_telemetry::init_default_ut_logging();
+    let instance = instance.frontend();
+
+    for format in ["csv", "json"] {
+        let table_name = format!("decimal_notation_{format}");
+        assert!(matches!(
+            execute_sql(
+                &instance,
+                &format!(
+                    "create table {table_name}(k string, price decimal(38, 2), ts timestamp time index, primary key(k));"
+                ),
+            )
+            .await
+            .data,
+            OutputData::AffectedRows(0)
+        ));
+
+        let filepath =
+            find_testing_resource(&format!("/tests/data/{format}/decimal_notation.{format}"));
+        let output = execute_sql(
+            &instance,
+            &format!("copy {table_name} from '{filepath}' WITH(FORMAT='{format}');"),
+        )
+        .await
+        .data;
+        assert!(matches!(output, OutputData::AffectedRows(7)));
+
+        let output = execute_sql(
+            &instance,
+            &format!("select k, price from {table_name} order by k;"),
+        )
+        .await
+        .data;
+        let expected = r#"+---+-----------------------------------------+
+| k | price                                   |
++---+-----------------------------------------+
+| a | 1.25                                    |
+| b | 0.00                                    |
+| c | 12.35                                   |
+| d | 1.01                                    |
+| e | -1.01                                   |
+| f | 123456789012345678901234567890123456.78 |
+| g |                                         |
++---+-----------------------------------------+"#;
+        check_output_stream(output, expected).await;
+    }
+}
+
 #[apply(standalone_instance_case)]
 async fn test_execute_copy_from_orc(instance: Arc<dyn MockInstance>) {
     common_telemetry::init_default_ut_logging();
