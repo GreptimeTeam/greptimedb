@@ -10,6 +10,12 @@ ALTER TABLE add_col_options ADD COLUMN prompt STRING COMPRESSION WITH (level = 5
 
 SHOW CREATE TABLE add_col_options;
 
+INSERT INTO add_col_options (ts, host, az, prompt) VALUES (1, 'h1', 'az1', 'hello');
+
+ADMIN flush_table('add_col_options');
+
+SELECT * FROM add_col_options;
+
 CREATE TABLE create_col_options (
     ts TIMESTAMP TIME INDEX,
     host STRING,

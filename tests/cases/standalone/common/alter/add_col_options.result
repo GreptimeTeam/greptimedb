@@ -35,6 +35,26 @@ SHOW CREATE TABLE add_col_options;
 |                 |                                                                                          |
 +-----------------+------------------------------------------------------------------------------------------+
 
+INSERT INTO add_col_options (ts, host, az, prompt) VALUES (1, 'h1', 'az1', 'hello');
+
+Affected Rows: 1
+
+ADMIN flush_table('add_col_options');
+
++--------------------------------------+
+| ADMIN flush_table('add_col_options') |
++--------------------------------------+
+| 0                                    |
++--------------------------------------+
+
+SELECT * FROM add_col_options;
+
++-------------------------+------+-----+------+--------+
+| ts                      | host | az  | body | prompt |
++-------------------------+------+-----+------+--------+
+| 1970-01-01T00:00:00.001 | h1   | az1 |      | hello  |
++-------------------------+------+-----+------+--------+
+
 CREATE TABLE create_col_options (
     ts TIMESTAMP TIME INDEX,
     host STRING,
