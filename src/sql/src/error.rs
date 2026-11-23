@@ -224,13 +224,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to serialize column default constraint"))]
-    SerializeColumnDefaultConstraint {
-        #[snafu(implicit)]
-        location: Location,
-        source: datatypes::error::Error,
-    },
-
     #[snafu(display("Failed to convert data type to gRPC data type defined in proto"))]
     ConvertToGrpcDataType {
         #[snafu(implicit)]
@@ -394,9 +387,7 @@ impl ErrorExt for Error {
             #[cfg(feature = "enterprise")]
             InvalidTriggerWebhookOption { .. } => StatusCode::InvalidArguments,
 
-            SerializeColumnDefaultConstraint { source, .. } | Datatypes { source, .. } => {
-                source.status_code()
-            }
+            Datatypes { source, .. } => source.status_code(),
 
             ConvertToGrpcDataType { source, .. } => source.status_code(),
             SqlCommon { source, .. } => source.status_code(),
