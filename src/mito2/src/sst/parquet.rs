@@ -286,7 +286,7 @@ pub(crate) fn max_row_group_uncompressed_size(metadata: &ParquetMetaData) -> u64
 
 /// Returns the size of the largest row group of `metadata`, counting string and binary values
 /// at their decoded size when the footer records it under [MAX_ROW_GROUP_VALUE_BYTES_KEY].
-pub(crate) fn max_row_group_decoded_size(metadata: &ParquetMetaData) -> u64 {
+pub fn max_row_group_decoded_size(metadata: &ParquetMetaData) -> u64 {
     max_row_group_uncompressed_size(metadata).max(max_row_group_value_bytes(metadata))
 }
 
