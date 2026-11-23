@@ -37,7 +37,7 @@ use tokio_util::sync::CancellationToken;
 use crate::access_layer::{
     AccessLayer, AccessLayerRef, Metrics, OperationType, SstWriteRequest, WriteType,
 };
-use crate::cache::{CacheManager, CacheManagerRef};
+use crate::cache::{CacheManager, CacheManagerRef, CacheStrategy};
 use crate::compaction::picker::PickerOutput;
 use crate::compaction::reader::{CompactionSstReaderBuilder, spawn_merge};
 use crate::compaction::unit::CompactionUnit;
@@ -64,8 +64,8 @@ use crate::sst::index::handler::{IndexKindProviderRef, PlanContext};
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::sst::index::registry::{IndexBuildPlan, IndexRegistry};
-use crate::sst::location::region_dir_from_table_dir;
-use crate::sst::parquet::blob::{KeptRefs, external_columns};
+use crate::sst::location::{region_dir_from_table_dir, sst_file_path};
+use crate::sst::parquet::blob::{BlobSources, KeptRefs, external_columns};
 use crate::sst::parquet::metadata::extract_primary_key_range;
 use crate::sst::parquet::parallel_writer::EncodeRuntime;
 use crate::sst::parquet::writer::SstWriteContext;
@@ -212,16 +212,6 @@ impl CompactionContext {
         {
             return Ok(None);
         }
-        // An output that evacuates a sidecar resolves every value, so it references no sidecar
-        // being rewritten, whatever the values look like.
-        if inputs.iter().any(|input| {
-            input
-                .meta_ref()
-                .blob_files()
-                .any(|blob| self.rewritten_blobs.contains(&blob.file_id))
-        }) {
-            return Ok(None);
-        }
         // Indexes and partition filters read the values, so their columns are always resolved.
         let indexed: HashSet<_> = self.index_plan.entries().map(|e| e.column_id).collect();
         let mut partition_columns = HashSet::new();
@@ -250,7 +240,39 @@ impl CompactionContext {
         Ok(Some(Arc::new(KeptRefs {
             region_id: self.region_id,
             columns,
+            relocated: self.relocated_blobs(inputs).map(Arc::new),
         })))
+    }
+
+    /// Returns the sidecars being rewritten that `inputs` reference, or `None` if there are none.
+    fn relocated_blobs(&self, inputs: &[FileHandle]) -> Option<BlobSources> {
+        let mut blobs: Vec<BlobFileRef> = inputs
+            .iter()
+            .flat_map(|input| input.meta_ref().blob_files().collect::<Vec<_>>())
+            .filter(|blob| self.rewritten_blobs.contains(&blob.file_id))
+            .collect();
+        blobs.sort_unstable_by_key(|blob| blob.file_id);
+        blobs.dedup_by_key(|blob| blob.file_id);
+        let first = blobs.first()?.file_id;
+        // Sidecars of a region share its directory, so any of their SST paths locates them all.
+        let sst_path = sst_file_path(
+            self.access_layer.table_dir(),
+            RegionFileId::new(self.region_id, first),
+            self.access_layer.path_type(),
+        );
+        let mut sources = BlobSources::new(self.access_layer.object_store().clone())
+            .with_blobs(&sst_path, blobs.into_iter());
+        if self
+            .cache_manager
+            .write_cache()
+            .is_some_and(|cache| cache.cache_blobs())
+        {
+            sources = sources.with_cache(
+                CacheStrategy::Compaction(self.cache_manager.clone()),
+                self.region_id,
+            );
+        }
+        Some(sources)
     }
 }
 

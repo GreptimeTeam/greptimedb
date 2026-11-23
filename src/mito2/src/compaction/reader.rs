@@ -246,6 +246,7 @@ fn kept_by_all_inputs(
         Some(Arc::new(KeptRefs {
             region_id: kept.region_id,
             columns,
+            relocated: kept.relocated.clone(),
         }))
     }
 }

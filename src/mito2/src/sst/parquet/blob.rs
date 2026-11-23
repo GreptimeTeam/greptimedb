@@ -25,10 +25,10 @@
 //! with [BLOB_COLUMN_KEY_PREFIX], with or without a sidecar. An entry guarantees that in this SST
 //! every physical value of the column that starts with [REF_PREFIX] is a reference; SSTs written
 //! before the column became external carry no entry and may hold such values as plain data. An
-//! SST with a sidecar also records the sidecar size under [BLOB_FILE_SIZE_KEY], and only such an
-//! SST has references to resolve. The sidecar shares the SST's file id and is deleted with it, so
-//! every reference names its own SST. The id is in the reference so that SSTs can later share
-//! blob files without a format change.
+//! SST with a sidecar also records the sidecar size under [BLOB_FILE_SIZE_KEY]. The sidecar shares
+//! the SST's file id. Compaction outputs may keep references into their inputs' sidecars, which
+//! `FileMeta::blob_refs` lists, so a reference names the sidecar it points into, and a sidecar
+//! lives as long as some file references it.
 //!
 //! Readers resolve references right after decoding a row group, so filters, merges and
 //! compaction see the original values.
@@ -251,21 +251,29 @@ pub(crate) async fn compress_external_values(
 }
 
 /// Adds the compressed bytes that the kept references in `array` point to, per sidecar, and
-/// to `decoded_extra` how much larger each row's value is than its reference.
+/// to `decoded_extra` how much larger each row's value is than its reference. References into
+/// `relocated` sidecars count toward `decoded_extra` only, since the writer copies their values
+/// into its own sidecar. Returns whether any reference points into `relocated`.
 pub(crate) fn add_kept_ref_bytes(
     array: &ArrayRef,
     bytes: &mut HashMap<FileId, u64>,
     decoded_extra: &mut [u64],
-) -> Result<()> {
+    relocated: Option<&BlobSources>,
+) -> Result<bool> {
+    let mut relocates = false;
     for (value, extra) in byte_values(array)?.zip(decoded_extra) {
         if let Some(value) = value
             && let Some(blob_ref) = BlobRef::decode(value)?
         {
-            *bytes.entry(blob_ref.file_id).or_default() += blob_ref.compressed_len;
+            if relocated.is_some_and(|sources| sources.contains(blob_ref.file_id)) {
+                relocates = true;
+            } else {
+                *bytes.entry(blob_ref.file_id).or_default() += blob_ref.compressed_len;
+            }
             *extra += blob_ref.len.saturating_sub(value.len() as u64);
         }
     }
-    Ok(())
+    Ok(relocates)
 }
 
 /// Appends values of one SST to its blob object.
@@ -343,6 +351,63 @@ impl BlobFileWriter {
         Ok(builder.finish())
     }
 
+    /// Copies the compressed values that references in `array` point to in `sources` into
+    /// this blob object, and returns `array` with those references replaced by references
+    /// into it. The values are neither decompressed nor recompressed.
+    pub(crate) async fn relocate(
+        &mut self,
+        array: &ArrayRef,
+        sources: &BlobSources,
+    ) -> Result<ArrayRef> {
+        let mut olds = Vec::with_capacity(array.len());
+        for value in byte_values(array)? {
+            olds.push(
+                value
+                    .map(BlobRef::decode)
+                    .transpose()?
+                    .flatten()
+                    .filter(|r| sources.contains(r.file_id)),
+            );
+        }
+        // Fetch and write in chunks, like the resolver, so memory stays bounded however many
+        // values a batch relocates.
+        let mut relocated = vec![None; olds.len()];
+        let mut start = 0;
+        while start < olds.len() {
+            let mut end = start;
+            let mut bytes = 0;
+            while end < olds.len() {
+                let len = olds[end].map_or(0, |r| r.compressed_len as usize);
+                if end > start && bytes + len > MAX_RESOLVED_BATCH_BYTES {
+                    break;
+                }
+                bytes += len;
+                end += 1;
+            }
+            let fetched = sources
+                .fetch_all(olds[start..end].iter().flatten().copied())
+                .await?;
+            for (old, new) in olds[start..end].iter().zip(&mut relocated[start..end]) {
+                let Some(old) = old else { continue };
+                let frame = frame_in(&fetched, old)?;
+                let blob_ref = BlobRef {
+                    file_id: self.file_id,
+                    offset: self.offset,
+                    ..*old
+                };
+                self.offset += blob_ref.compressed_len;
+                self.writer.write(frame).await.context(OpenDalSnafu)?;
+                *new = Some(blob_ref.encode());
+            }
+            start = end;
+        }
+        let mut builder = ByteBuilder::new(array.data_type(), array.len(), 0);
+        for (value, new) in byte_values(array)?.zip(&relocated) {
+            builder.append(new.as_deref().map(str::as_bytes).or(value))?;
+        }
+        Ok(builder.finish())
+    }
+
     /// Completes the object and returns its footer entries.
     pub(crate) async fn finish(mut self, columns: &[ExternalColumn]) -> Result<Vec<KeyValue>> {
         if let Err(error) = self.writer.close().await {
@@ -375,17 +440,28 @@ pub(crate) struct PendingBatch {
 /// Resolves references of an SST's external columns.
 pub(crate) struct BlobResolver {
     file_id: FileId,
-    store: ObjectStore,
-    /// Sidecars the SST may reference, by id.
-    sources: HashMap<FileId, BlobSource>,
+    /// Sidecars the SST may reference.
+    sources: BlobSources,
     columns: Vec<String>,
     /// Upper bound of resolved value bytes in one output batch.
     chunk_bytes: usize,
-    /// Write cache lookup of the sidecars, keyed by the region they belong to.
-    cache: Option<(CacheStrategy, RegionId)>,
     /// References that stay unresolved, for compaction outputs that keep pointing at the
     /// same values.
     kept: Option<Arc<KeptRefs>>,
+}
+
+/// Sidecars of one region that can be read, by id.
+pub(crate) struct BlobSources {
+    store: ObjectStore,
+    sources: HashMap<FileId, BlobSource>,
+    /// Write cache lookup of the sidecars, keyed by the region they belong to.
+    cache: Option<(CacheStrategy, RegionId)>,
+}
+
+impl std::fmt::Debug for BlobSources {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_set().entries(self.sources.keys()).finish()
+    }
 }
 
 /// A sidecar that an SST may reference.
@@ -405,6 +481,11 @@ pub(crate) struct KeptRefs {
     /// Columns whose references are kept. Every input declares them external in its footer,
     /// so each value there that starts with [REF_PREFIX] is a reference.
     pub(crate) columns: HashSet<String>,
+    /// Sidecars being rewritten that the inputs reference. Readers keep references into them
+    /// like any other, and the writer copies their values into the output's own sidecar.
+    /// Resolving them in the reader instead would turn a value that looks like a reference
+    /// into something the writer takes for a kept reference.
+    pub(crate) relocated: Option<Arc<BlobSources>>,
 }
 
 impl BlobResolver {
@@ -415,14 +496,15 @@ impl BlobResolver {
         sst_path: &str,
         columns: Vec<String>,
     ) -> Self {
-        let sources = HashMap::from([(file_id, BlobSource::new(blob_path(sst_path), 0))]);
+        let mut sources = BlobSources::new(store);
+        sources
+            .sources
+            .insert(file_id, BlobSource::new(blob_path(sst_path), 0));
         Self {
             file_id,
-            store,
             sources,
             columns,
             chunk_bytes: MAX_RESOLVED_BATCH_BYTES,
-            cache: None,
             kept: None,
         }
     }
@@ -433,19 +515,14 @@ impl BlobResolver {
         sst_path: &str,
         blobs: impl Iterator<Item = BlobFileRef>,
     ) -> Self {
-        for blob in blobs {
-            self.sources.insert(
-                blob.file_id,
-                BlobSource::new(sibling_blob_path(sst_path, blob.file_id), blob.size),
-            );
-        }
+        self.sources = self.sources.with_blobs(sst_path, blobs);
         self
     }
 
     /// Reads sidecars from the write cache when they are there, and on a miss asks for
     /// them to be downloaded, as the reader does for the SST.
     pub(crate) fn with_cache(mut self, strategy: CacheStrategy, region_id: RegionId) -> Self {
-        self.cache = Some((strategy, region_id));
+        self.sources = self.sources.with_cache(strategy, region_id);
         self
     }
 
@@ -469,7 +546,7 @@ impl BlobResolver {
                 for value in byte_values(batch.column(index))? {
                     let blob_ref = value.map(BlobRef::decode).transpose()?.flatten();
                     if let Some(blob_ref) = &blob_ref
-                        && !self.sources.contains_key(&blob_ref.file_id)
+                        && !self.sources.contains(blob_ref.file_id)
                     {
                         return UnexpectedSnafu {
                             reason: format!(
@@ -534,9 +611,64 @@ impl BlobResolver {
             .iter()
             .map(|(index, refs)| (*index, refs[rows.clone()].to_vec()))
             .collect();
+        let fetched = self
+            .sources
+            .fetch_all(
+                targets
+                    .iter()
+                    .flat_map(|(_, refs)| refs.iter().flatten().copied()),
+            )
+            .await?;
+        // Decompressing up to MAX_RESOLVED_BATCH_BYTES is CPU-bound; keep it off the async workers.
+        spawn_blocking_global(move || decode_rows(sliced, targets, &fetched))
+            .await
+            .context(JoinSnafu)?
+    }
+}
+
+impl BlobSources {
+    pub(crate) fn new(store: ObjectStore) -> Self {
+        Self {
+            store,
+            sources: HashMap::new(),
+            cache: None,
+        }
+    }
+
+    /// Adds `blobs`, which sit next to the SST at `sst_path`.
+    pub(crate) fn with_blobs(
+        mut self,
+        sst_path: &str,
+        blobs: impl Iterator<Item = BlobFileRef>,
+    ) -> Self {
+        for blob in blobs {
+            self.sources.insert(
+                blob.file_id,
+                BlobSource::new(sibling_blob_path(sst_path, blob.file_id), blob.size),
+            );
+        }
+        self
+    }
+
+    /// Reads sidecars from the write cache when they are there, and on a miss asks for
+    /// them to be downloaded.
+    pub(crate) fn with_cache(mut self, strategy: CacheStrategy, region_id: RegionId) -> Self {
+        self.cache = Some((strategy, region_id));
+        self
+    }
+
+    pub(crate) fn contains(&self, file_id: FileId) -> bool {
+        self.sources.contains_key(&file_id)
+    }
+
+    /// Fetches `refs` with coalesced range requests, grouped by sidecar and sorted by offset.
+    async fn fetch_all(
+        &self,
+        refs: impl Iterator<Item = BlobRef>,
+    ) -> Result<HashMap<FileId, Vec<(Range<u64>, Bytes)>>> {
         let mut wanted: BTreeMap<FileId, Vec<BlobRef>> = BTreeMap::new();
-        for blob_ref in targets.iter().flat_map(|(_, refs)| refs.iter().flatten()) {
-            wanted.entry(blob_ref.file_id).or_default().push(*blob_ref);
+        for blob_ref in refs {
+            wanted.entry(blob_ref.file_id).or_default().push(blob_ref);
         }
         let mut fetched = HashMap::with_capacity(wanted.len());
         for (file_id, mut refs) in wanted {
@@ -544,10 +676,7 @@ impl BlobResolver {
             refs.dedup();
             fetched.insert(file_id, self.fetch(file_id, &refs).await?);
         }
-        // Decompressing up to MAX_RESOLVED_BATCH_BYTES is CPU-bound; keep it off the async workers.
-        spawn_blocking_global(move || decode_rows(sliced, targets, &fetched))
-            .await
-            .context(JoinSnafu)?
+        Ok(fetched)
     }
 
     /// Fetches `refs` (sorted by offset) of one sidecar with coalesced range requests.
@@ -681,6 +810,39 @@ impl ByteBuilder {
     }
 }
 
+/// Returns the compressed frame of `r` from `fetched`, which holds coalesced ranges of each
+/// sidecar sorted by offset, and checks that the frame decodes to `r.len` bytes.
+fn frame_in(fetched: &HashMap<FileId, Vec<(Range<u64>, Bytes)>>, r: &BlobRef) -> Result<Bytes> {
+    let corrupted = || {
+        UnexpectedSnafu {
+            reason: format!(
+                "blob value at {} of {} bytes is missing from blob file {}",
+                r.offset, r.compressed_len, r.file_id
+            ),
+        }
+        .build()
+    };
+    let fetched = fetched.get(&r.file_id).ok_or_else(corrupted)?;
+    let pos = fetched
+        .partition_point(|(range, _)| range.start <= r.offset)
+        .checked_sub(1)
+        .ok_or_else(corrupted)?;
+    let (range, data) = &fetched[pos];
+    let begin = (r.offset - range.start) as usize;
+    let end = begin + r.compressed_len as usize;
+    if end > data.len() {
+        return Err(corrupted());
+    }
+    let compressed = data.slice(begin..end);
+    let content_size = zstd::zstd_safe::get_frame_content_size(&compressed)
+        .ok()
+        .flatten();
+    if content_size != Some(r.len) {
+        return Err(corrupted());
+    }
+    Ok(compressed)
+}
+
 /// Replaces references of `targets` in `batch` with values from `fetched`, which holds
 /// coalesced ranges of each sidecar sorted by offset that cover every reference.
 fn decode_rows(
@@ -688,42 +850,14 @@ fn decode_rows(
     targets: Vec<(usize, Vec<Option<BlobRef>>)>,
     fetched: &HashMap<FileId, Vec<(Range<u64>, Bytes)>>,
 ) -> Result<RecordBatch> {
-    // Locates the compressed frame of `r` and checks that it decodes to `r.len` bytes.
-    let frame_of = |r: &BlobRef| -> Result<&[u8]> {
-        let corrupted = || {
-            UnexpectedSnafu {
-                reason: format!(
-                    "blob value at {} of {} bytes is missing from blob file {}",
-                    r.offset, r.compressed_len, r.file_id
-                ),
-            }
-            .build()
-        };
-        let fetched = fetched.get(&r.file_id).ok_or_else(corrupted)?;
-        let pos = fetched
-            .partition_point(|(range, _)| range.start <= r.offset)
-            .checked_sub(1)
-            .ok_or_else(corrupted)?;
-        let (range, data) = &fetched[pos];
-        let begin = (r.offset - range.start) as usize;
-        let compressed = data
-            .get(begin..begin + r.compressed_len as usize)
-            .ok_or_else(corrupted)?;
-        let content_size = zstd::zstd_safe::get_frame_content_size(compressed)
-            .ok()
-            .flatten();
-        if content_size != Some(r.len) {
-            return Err(corrupted());
-        }
-        Ok(compressed)
-    };
     let value_of = |r: &BlobRef| -> Result<Vec<u8>> {
-        let value = zstd::bulk::decompress(frame_of(r)?, r.len as usize).map_err(|e| {
-            UnexpectedSnafu {
-                reason: format!("failed to decompress blob value at {}: {e}", r.offset),
-            }
-            .build()
-        })?;
+        let value =
+            zstd::bulk::decompress(&frame_in(fetched, r)?, r.len as usize).map_err(|e| {
+                UnexpectedSnafu {
+                    reason: format!("failed to decompress blob value at {}: {e}", r.offset),
+                }
+                .build()
+            })?;
         if value.len() as u64 != r.len {
             return UnexpectedSnafu {
                 reason: format!(
@@ -746,7 +880,7 @@ fn decode_rows(
         for (value, blob_ref) in byte_values(column)?.zip(&refs) {
             data_bytes += match blob_ref {
                 Some(blob_ref) => {
-                    frame_of(blob_ref)?;
+                    frame_in(fetched, blob_ref)?;
                     blob_ref.len as usize
                 }
                 None => value.map_or(0, <[u8]>::len),

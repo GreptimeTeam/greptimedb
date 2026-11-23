@@ -903,18 +903,26 @@ where
             let Some((index, _)) = batch.schema().column_with_name(&column.name) else {
                 continue;
             };
-            let keep_refs = opts
+            let kept = opts
                 .kept_blob_refs
                 .as_deref()
-                .is_some_and(|kept| kept.columns.contains(&column.name));
+                .filter(|kept| kept.columns.contains(&column.name));
+            let keep_refs = kept.is_some();
+            let relocated = kept.and_then(|kept| kept.relocated.as_deref());
+            let mut relocates = false;
             if keep_refs {
                 kept_extra.resize(batch.num_rows(), 0);
-                add_kept_ref_bytes(&arrays[index], &mut self.kept_ref_bytes, &mut kept_extra)?;
+                relocates = add_kept_ref_bytes(
+                    &arrays[index],
+                    &mut self.kept_ref_bytes,
+                    &mut kept_extra,
+                    relocated,
+                )?;
             }
             let values =
                 compress_external_values(arrays[index].clone(), column.threshold, keep_refs)
                     .await?;
-            if values.iter().all(Option::is_none) {
+            if values.iter().all(Option::is_none) && !relocates {
                 continue;
             }
             if self.blob_writer.is_none() {
@@ -941,6 +949,9 @@ where
             }
             let blob_writer = self.blob_writer.as_mut().unwrap();
             arrays[index] = blob_writer.externalize(&arrays[index], values).await?;
+            if relocates && let Some(relocated) = relocated {
+                arrays[index] = blob_writer.relocate(&arrays[index], relocated).await?;
+            }
         }
         let batch = RecordBatch::try_new(batch.schema(), arrays).context(NewRecordBatchSnafu)?;
         Ok((batch, kept_extra))

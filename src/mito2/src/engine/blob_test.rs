@@ -718,26 +718,30 @@ async fn test_compaction_copies_reference_like_values_of_undeclared_inputs() {
 
 /// Writes `first` to one SST, overwrites `overwritten` in a second one, and compacts twice:
 /// after the first compaction the first sidecar is mostly garbage, so the second one copies
-/// its live values out. Returns the id of the first sidecar.
+/// its live values out. Returns the ids of the first and the second sidecar.
 async fn rewrite_garbage_sidecar(
     engine: &MitoEngine,
     region_id: RegionId,
     first: &[usize],
     overwritten: &[usize],
-) -> FileId {
+) -> (FileId, FileId) {
     let schema = rows_schema(&create_request(true));
     put(engine, region_id, &schema, first, 0).await;
     flush_region(engine, region_id, None).await;
     let sidecar = sst_ids(engine, region_id)[0];
     put(engine, region_id, &schema, overwritten, 1).await;
     flush_region(engine, region_id, None).await;
+    let second = sst_ids(engine, region_id)
+        .into_iter()
+        .find(|id| *id != sidecar)
+        .unwrap();
     compact(engine, region_id).await;
     assert!(referenced_blobs(engine, region_id).contains(&sidecar));
 
     put(engine, region_id, &schema, &[8], 0).await;
     flush_region(engine, region_id, None).await;
     compact(engine, region_id).await;
-    sidecar
+    (sidecar, second)
 }
 
 #[tokio::test]
@@ -749,7 +753,8 @@ async fn test_compaction_rewrites_sidecars_that_are_mostly_garbage() {
         .handle_request(region_id, RegionRequest::Create(create_request(true)))
         .await
         .unwrap();
-    let first = rewrite_garbage_sidecar(&engine, region_id, &[0, 2, 4, 6], &[0, 2, 4]).await;
+    let (first, second) =
+        rewrite_garbage_sidecar(&engine, region_id, &[0, 2, 4, 6], &[0, 2, 4]).await;
 
     let expected = vec![
         (0, payload(0, 1)),
@@ -762,7 +767,10 @@ async fn test_compaction_rewrites_sidecars_that_are_mostly_garbage() {
         expected,
         scan(&engine, region_id, ScanRequest::default()).await
     );
-    assert!(!referenced_blobs(&engine, region_id).contains(&first));
+    // Only the garbage sidecar is copied out; the output keeps referencing the other one.
+    let referenced = referenced_blobs(&engine, region_id);
+    assert!(!referenced.contains(&first));
+    assert!(referenced.contains(&second));
     assert_stored_blobs_are_referenced(&env, &engine, region_id).await;
 }
 
@@ -776,7 +784,7 @@ async fn test_rewritten_sidecar_evacuates_values_that_look_like_references() {
         .await
         .unwrap();
     // Row 3 holds a value that starts like a reference, so it always sits in a sidecar.
-    let first = rewrite_garbage_sidecar(&engine, region_id, &[0, 2, 3, 4], &[0, 2, 4]).await;
+    let (first, _) = rewrite_garbage_sidecar(&engine, region_id, &[0, 2, 3, 4], &[0, 2, 4]).await;
 
     let expected = vec![
         (0, payload(0, 1)),
