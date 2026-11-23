@@ -192,16 +192,16 @@ pub(crate) fn var_len_value_bytes(batch: &RecordBatch) -> u64 {
 
 /// Footer key holding the decoded bytes of string and binary values in the row group with the
 /// most such bytes.
-pub(crate) const MAX_ROW_GROUP_VALUE_BYTES_KEY: &str = "greptime:max_row_group_value_bytes";
+pub const MAX_ROW_GROUP_VALUE_BYTES_KEY: &str = "greptime:max_row_group_value_bytes";
 /// Footer key holding the largest average decoded bytes of string and binary values per row
 /// within one row group.
-pub(crate) const MAX_ROW_VALUE_WIDTH_KEY: &str = "greptime:max_row_value_width";
+pub const MAX_ROW_VALUE_WIDTH_KEY: &str = "greptime:max_row_value_width";
 
 /// Tracks, over the row groups of a file, the largest [var_len_value_bytes] of a row group and
 /// the largest of those bytes per row. Row groups are cut every `row_group_rows` rows from the
 /// start of the file like the parquet writers do; the last one may be shorter.
 #[derive(Debug)]
-pub(crate) struct RowGroupValueBytes {
+pub struct RowGroupValueBytes {
     row_group_rows: usize,
     rows_in_current: usize,
     current: u64,
@@ -210,7 +210,7 @@ pub(crate) struct RowGroupValueBytes {
 }
 
 impl RowGroupValueBytes {
-    pub(crate) fn new(row_group_rows: usize) -> Self {
+    pub fn new(row_group_rows: usize) -> Self {
         Self {
             row_group_rows: row_group_rows.max(1),
             rows_in_current: 0,
@@ -221,7 +221,7 @@ impl RowGroupValueBytes {
     }
 
     /// Adds the next batch written to the file.
-    pub(crate) fn update(&mut self, batch: &RecordBatch) {
+    pub fn update(&mut self, batch: &RecordBatch) {
         let mut offset = 0;
         while offset < batch.num_rows() {
             let len = (self.row_group_rows - self.rows_in_current).min(batch.num_rows() - offset);
@@ -246,7 +246,7 @@ impl RowGroupValueBytes {
     }
 
     /// Returns the footer entries, or nothing when the file has no such values.
-    pub(crate) fn into_key_values(mut self) -> Vec<KeyValue> {
+    pub fn into_key_values(mut self) -> Vec<KeyValue> {
         self.finish_row_group();
         if self.max_bytes == 0 {
             return Vec::new();
