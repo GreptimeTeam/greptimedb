@@ -1326,7 +1326,7 @@ async fn test_catchup_commit_conflict_keeps_the_region_a_follower() {
     let region_dir = region_dir_from_table_dir(&table_dir, region_id, PathType::Bare);
     publish_delta(&store, &region_dir, version, encode_delta(other).await).await;
 
-    let error = region.manifest_ctx.commit_catchup().await.unwrap_err();
+    let error = region.manifest_ctx.commit_catchup().await.err().unwrap();
     assert!(error.retry_hint().is_retryable(), "{error:?}");
     assert!(region.is_follower());
     assert!(!region.manifest_ctx.is_reload_pending());
@@ -1371,7 +1371,7 @@ async fn test_catchup_commit_covered_by_a_checkpoint_conflicts() {
     );
     store.write(&checkpoint, Vec::<u8>::new()).await.unwrap();
 
-    let error = region.manifest_ctx.commit_catchup().await.unwrap_err();
+    let error = region.manifest_ctx.commit_catchup().await.err().unwrap();
     assert!(
         matches!(error, Error::ManifestVersionConflict { .. }),
         "{error:?}"
@@ -1394,7 +1394,7 @@ async fn test_catchup_commit_of_a_stopping_region_commits_nothing() {
     let version = next_manifest_version(&region).await;
     region.manifest_ctx.mark_stopped_for_test();
 
-    let error = region.manifest_ctx.commit_catchup().await.unwrap_err();
+    let error = region.manifest_ctx.commit_catchup().await.err().unwrap();
     assert!(matches!(error, Error::RegionStopped { .. }), "{error:?}");
     assert_eq!(version, next_manifest_version(&region).await);
 }
@@ -1891,6 +1891,57 @@ async fn test_catchup_commit_fires_the_hook_after_unlocking(#[case] close: bool)
         caught_up.unwrap();
         assert!(region.is_writable());
     }
+}
+
+/// A catchup again fires the hook of its commit once it holds no manifest lock, so a hook that
+/// reads the manifest is not queued behind a writer that waits for the old instance's lock.
+#[tokio::test]
+async fn test_catchup_again_fires_the_hook_without_manifest_locks() {
+    let mut env = TestEnv::with_prefix("catchup-again-commit-hook").await;
+    let hook = Arc::new(BlockingManifestHook::default());
+    let plugins = Plugins::new();
+    plugins.insert::<RegionHookRef>(hook.clone());
+    let engine = env
+        .create_engine_with_log_store_and_plugins(
+            MitoConfig::default(),
+            new_log_store().await,
+            plugins,
+        )
+        .await;
+    let region_id = RegionId::new(1, 1);
+    create_leased_region_on(&engine, region_id).await;
+    promote_to_await_leader_lease(&engine, region_id).await;
+    let old = engine.get_region(region_id).unwrap();
+    hook.armed.store(true, Ordering::Relaxed);
+    let catchup = {
+        let engine = engine.clone();
+        let request = RegionRequest::Catchup(RegionCatchupRequest {
+            set_writable: true,
+            ..Default::default()
+        });
+        tokio::spawn(async move { engine.handle_request(region_id, request).await })
+    };
+
+    let wait = Duration::from_secs(10);
+    tokio::time::timeout(wait, hook.entered.notified())
+        .await
+        .unwrap();
+    // While the hook runs, a writer of the old instance and a reader of the registered one get
+    // their locks.
+    drop(
+        tokio::time::timeout(wait, old.manifest_ctx.manifest_manager.write())
+            .await
+            .unwrap(),
+    );
+    let registered = engine.get_region(region_id).unwrap();
+    drop(
+        tokio::time::timeout(wait, registered.manifest_ctx.manifest_manager.read())
+            .await
+            .unwrap(),
+    );
+    hook.release.notify_one();
+    catchup.await.unwrap().unwrap();
+    assert!(!Arc::ptr_eq(&old, &registered));
 }
 
 fn edit_files(files_to_add: Vec<FileMeta>, files_to_remove: Vec<FileMeta>) -> RegionEdit {

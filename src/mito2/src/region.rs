@@ -1939,10 +1939,13 @@ impl ManifestContext {
     /// starts no checkpoint and applies only if no checkpoint covers its version. A conflict
     /// leaves the region and its manifest manager as they are: the next catchup reopens the
     /// region from the newer manifest. A stopped region commits nothing.
-    pub(crate) async fn commit_catchup(&self) -> Result<()> {
+    ///
+    /// Returns the receipt of the manifest hook, which the caller fires once it holds no manifest
+    /// lock, or None if it committed nothing.
+    pub(crate) async fn commit_catchup(&self) -> Result<Option<PendingManifestHook>> {
         let mut manager = self.manifest_manager.write().await;
         if !manager.is_conditional_publication() {
-            return Ok(());
+            return Ok(None);
         }
         let region_id = manager.manifest().metadata.region_id;
         let state = self.state.load();
@@ -1970,9 +1973,7 @@ impl ManifestContext {
             self.hook.clone(),
             false,
         );
-        drop(manager);
-        pending.fire().await;
-        Ok(())
+        Ok(Some(pending))
     }
 
     /// Performs a manifest write under a caller-held write lock and returns a

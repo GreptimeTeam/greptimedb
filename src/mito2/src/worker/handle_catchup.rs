@@ -122,10 +122,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             // catchup committed the next manifest version.
             let result = match task.run().await {
                 Ok(_) if request.set_writable => region.manifest_ctx.commit_catchup().await,
-                result => result,
+                result => result.map(|()| None),
             };
             match result {
-                Ok(_) => {
+                Ok(hook) => {
+                    if let Some(hook) = hook {
+                        hook.fire().await;
+                    }
                     let promoted = if !request.set_writable {
                         region.manifest_ctx.end_catchup();
                         false
@@ -245,6 +248,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             // meanwhile makes it writable again, and the replay misses the writes it then
             // acknowledges, with or without the WAL.
             && old.version_control.current().last_sequence == last_sequence;
+        let mut catchup_hook = None;
         let replacement = match result {
             _ if !registered => Err(error::RegionNotFoundSnafu { region_id }.build()),
             Ok(_) if !unchanged => Err(error::RegionBusySnafu { region_id }.build()),
@@ -252,11 +256,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             // above stand for the guards of its commit: a registered instance is not stopped, and
             // the lock held keeps the commits of the old instance out until the replacement is
             // registered, so no refusal follows the commit.
-            Ok(replacement) if set_writable => replacement
-                .manifest_ctx
-                .commit_catchup()
-                .await
-                .map(|()| replacement),
+            Ok(replacement) if set_writable => {
+                replacement.manifest_ctx.commit_catchup().await.map(|hook| {
+                    catchup_hook = hook;
+                    replacement
+                })
+            }
             result => result,
         };
         let replacement = match replacement {
@@ -282,6 +287,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         self.reject_region_requests_as_not_found(region_id);
         self.register_region(replacement.clone());
         drop(manager);
+        // A hook may read the manifest of the region, so it fires once no manifest lock is held.
+        if let Some(hook) = catchup_hook {
+            hook.fire().await;
+        }
         if let Some(state) = &self.series_index_task_state {
             state.wake();
         }
