@@ -1,0 +1,255 @@
+src/mito2/src/worker/handle_close.rs
+  s_c311425adc0214::t_526a9302b87a6f 63-69,137
+src/common/datasource/src/packed_writer.rs
+  s_c311425adc0214::t_526a9302b87a6f 332-336,632-671,673
+  s_c311425adc0214::t_ef10110f92f7d2 672,674
+tests/cases/standalone/common/information_schema/tables.result
+  s_c311425adc0214::t_526a9302b87a6f 25-26
+tests/compatibility/README.md
+  s_c311425adc0214::t_526a9302b87a6f 53-59
+src/frontend/src/instance/grpc.rs
+  s_c311425adc0214::t_526a9302b87a6f 98-103
+src/frontend/src/instance/jaeger.rs
+  s_c311425adc0214::t_526a9302b87a6f 45,75-76
+src/common/meta/src/cache/table/table_route.rs
+  s_c311425adc0214::t_526a9302b87a6f 24-25,39-56,71
+src/mito2/src/worker/handle_flush.rs
+  s_c311425adc0214::t_526a9302b87a6f 138,140-141,246-254,394-398,434,460-464
+src/store-api/src/lib.rs
+  s_c311425adc0214::t_526a9302b87a6f 36-40
+src/auth/src/lib.rs
+  s_c311425adc0214::t_526a9302b87a6f 40
+src/mito2/src/worker/handle_catchup.rs
+  s_c311425adc0214::t_526a9302b87a6f 15,17,27,29,33-36,40-42,232-314
+src/common/meta/src/key/flow/flow_info.rs
+  s_c311425adc0214::t_526a9302b87a6f 39,388-400
+  s_c311425adc0214::t_81cd87217aad4b 401-402
+src/catalog/src/system_schema/information_schema/views.rs
+  s_c311425adc0214::t_526a9302b87a6f 35,37,42,128-131,184-199,201-224,227,283
+src/mito2/src/compaction/scheduler_test.rs
+  s_c311425adc0214::t_526a9302b87a6f 3820-3824,3826-3828,3853-3861
+src/catalog/src/system_schema/information_schema/loaders.rs
+  s_c311425adc0214::t_526a9302b87a6f 1-137
+src/catalog/src/system_schema/information_schema/flows.rs
+  s_c311425adc0214::t_526a9302b87a6f 37,47,49-50,53,55,220,289-356,362,364,376,427,461,509-577
+  s_c311425adc0214::t_b89ce7ebd1d412 578-579
+src/mito2/src/compaction/scheduler.rs
+  s_c311425adc0214::t_526a9302b87a6f 614-621,697-703,802-805
+  s_c311425adc0214::t_1380d49e0f8be7 806
+src/meta-srv/src/region/flush_trigger.rs
+  s_c311425adc0214::t_526a9302b87a6f 915,927
+src/partition/src/manager.rs
+  s_c311425adc0214::t_526a9302b87a6f 144-156,194,198,201
+src/common/meta/src/cache/table/schema.rs
+  s_c311425adc0214::t_526a9302b87a6f 32,38
+src/meta-srv/src/selector/weight_compute.rs
+  s_c311425adc0214::t_526a9302b87a6f 208,244,280
+src/catalog/src/system_schema/utils.rs
+  s_c311425adc0214::t_526a9302b87a6f 19,40-64,152
+src/meta-srv/src/handler/region_lease_handler.rs
+  s_c311425adc0214::t_526a9302b87a6f 207
+src/common/meta/src/key.rs
+  s_c311425adc0214::t_526a9302b87a6f 1176-1203
+tests/compatibility/wire/region_statistic_pending_tails/README.md
+  s_c311425adc0214::t_526a9302b87a6f 1-51
+src/common/meta/src/key/table_route.rs
+  s_c311425adc0214::t_526a9302b87a6f 65-101,466-469,471,473-475,477-494,496-498,500-506,508-524,526-527,529-530,532-540,1230-1278,1306-1321
+  s_c311425adc0214::t_b6ab5b92326cb2 1322
+src/common/meta/src/cache/table/view_info.rs
+  s_c311425adc0214::t_526a9302b87a6f 35,39-51,82-103,143-146
+src/mito2/src/engine/lease_test.rs
+  s_c311425adc0214::t_526a9302b87a6f 16-17,21,25,27,29,33-35,37-39,47-56,58,60-61,63-65,67-69,82-93,95,105,533-1150
+src/mito2/src/engine/object_store_wal_recovery_test.rs
+  s_c311425adc0214::t_526a9302b87a6f 2309,2311-2314,2316-2319,2431-2440,2442,2463-2473
+src/mito2/src/test_util.rs
+  s_c311425adc0214::t_526a9302b87a6f 535-540
+src/common/meta/src/cache/flow/table_flownode.rs
+  s_c311425adc0214::t_526a9302b87a6f 24,60,66-71,111,119-132,138,146-152,154-161,167-169,173-176,280-353,355-368,376-378,427-429
+src/operator/src/statement/export_logical_tables/writers.rs
+  s_c311425adc0214::t_526a9302b87a6f 27-28,144,152-158
+src/meta-srv/src/handler/failure_handler.rs
+  s_c311425adc0214::t_526a9302b87a6f 114
+src/meta-srv/src/handler/collect_leader_region_handler.rs
+  s_c311425adc0214::t_526a9302b87a6f 51,98,111-114,144,177,211
+src/mito2/src/read/scan_util.rs
+  s_c311425adc0214::t_526a9302b87a6f 1583,1657
+src/promql/src/histogram_eval/aggregate.rs
+  s_c311425adc0214::t_526a9302b87a6f 15-18,20,26
+src/meta-srv/src/gc/mock.rs
+  s_c311425adc0214::t_526a9302b87a6f 459
+src/common/meta/src/cache/container.rs
+  s_c311425adc0214::t_526a9302b87a6f 39-76,82-83,86,91-92,95-98,101,103,105,108,112,116-117,120,164,175-182,184-188,191,202-203,206,225-227,238-254,256-258,260-262,273,299,325,360,409,421,428,442,462,490-491,511,625,632,634,638,645,652-653,655,658,665,668-669,674-677,684-686,688,691-692,698-699,761,798-808
+  s_c311425adc0214::t_b92da1a6ce2879 809
+src/mito2/src/engine/object_store_wal_test.rs
+  s_c311425adc0214::t_526a9302b87a6f 58,60,541-544,546,552-564,570,590-592,594-600,645-660,1223-1280
+  s_c311425adc0214::t_9f0f63a0478ecd 1281-1282
+src/catalog/src/system_schema/information_schema/tables.rs
+  s_c311425adc0214::t_526a9302b87a6f 19,22,36,39,44,48,166-169,250-289,292-293,295-303,306,308,311-338,340-356,360-372,374,384-398,487
+src/meta-srv/src/procedure/test_util.rs
+  s_c311425adc0214::t_526a9302b87a6f 418-430,437
+src/common/recordbatch/src/filter.rs
+  s_c311425adc0214::t_526a9302b87a6f 40,54-55,80
+src/common/recordbatch/src/filter/predicate.rs
+  s_c311425adc0214::t_526a9302b87a6f 15-20,35-37,47,178,227-229,233,253,259,289-401,403,407,416-418,420,446,463-465,473,507-510,515-517,984,994,1032,1037-1045,1073,1084,1134-1135,1180-1604
+src/meta-srv/src/gc/handler.rs
+  s_c311425adc0214::t_526a9302b87a6f 505
+src/catalog/src/kvbackend/table_cache.rs
+  s_c311425adc0214::t_526a9302b87a6f 40
+src/catalog/src/system_schema/information_schema/schemata.rs
+  s_c311425adc0214::t_526a9302b87a6f 35,37,180-190
+src/cache/src/lib.rs
+  s_c311425adc0214::t_526a9302b87a6f 24-25,46,169-173,200
+src/mito2/src/worker/handle_drop.rs
+  s_c311425adc0214::t_526a9302b87a6f 118
+src/mito2/src/engine/staging_test.rs
+  s_c311425adc0214::t_526a9302b87a6f 55,82,1441,1538,1665-1669,1671,1688,1690-1697,1699-1711,1721,2262
+src/catalog/src/batch_scan.rs
+  s_c311425adc0214::t_526a9302b87a6f 1-101
+src/common/meta/src/cache.rs
+  s_c311425adc0214::t_526a9302b87a6f 20-28,39-102
+src/mito2/src/engine/open_test.rs
+  s_c311425adc0214::t_526a9302b87a6f 38,40,1177,1202-1209,1213,1250-1261,1303
+src/operator/src/statement/copy_table_to.rs
+  s_c311425adc0214::t_526a9302b87a6f 26,189-198,208-217,221,242-257,261-270,272,277-282,291-300,305,326-339,341-344,489-581
+  s_c311425adc0214::t_e651ccc4e99124 582
+src/mito2/src/engine/listener.rs
+  s_c311425adc0214::t_526a9302b87a6f 41-48
+src/frontend/src/instance/logs.rs
+  s_c311425adc0214::t_526a9302b87a6f 22,42-43
+src/catalog/src/kvbackend/manager.rs
+  s_c311425adc0214::t_526a9302b87a6f 16,38-39,52,102-121,179-185,187-232,234-237,239-240,242,244-280,576-586,590-593,595-606,608-618,620-622,624-650,800,922-1136,1164,1183
+src/common/meta/src/cache/table/table_info.rs
+  s_c311425adc0214::t_526a9302b87a6f 42-43,53-54
+src/mito2/src/region.rs
+  s_c311425adc0214::t_526a9302b87a6f 28,61-63,441-447,775,795-859,941,1300-1301,1445-1453,1459-1461,1470-1471,1870,1896-1905,1923-1925,1927-1931,1937-1949,1955-1956,1958-1959,1961-1962,1967,1992,2031-2038,2084-2093,2108,2208-2211,2216,2219-2222,2226-2234,2245-2256,2276-2277,2282-2285,2287-2288,2290,2293-2306,2311-2338,2930,2953,3045-3051,3064,3224-3226,3233-3252,3263-3267,3270-3274,3278-3322,3362-3423
+  s_c311425adc0214::t_fb08269c8bd006 3424
+src/servers/src/batcher/test_util.rs
+  s_c311425adc0214::t_526a9302b87a6f 36
+src/store-api/src/region_engine.rs
+  s_c311425adc0214::t_526a9302b87a6f 861-864
+src/mito2/src/error.rs
+  s_c311425adc0214::t_526a9302b87a6f 814-822,1658,1806-1808,1913,2171-2175
+  s_c311425adc0214::t_fc80b8e7f336c6 813,2176
+src/common/recordbatch/Cargo.toml
+  s_c311425adc0214::t_526a9302b87a6f 25
+src/partition/src/cache.rs
+  s_c311425adc0214::t_526a9302b87a6f 121
+tests/cases/standalone/common/information_schema/tables.sql
+  s_c311425adc0214::t_526a9302b87a6f 13-14
+tests/compatibility/wire/region_statistic_pending_tails/legacy_region_stat.json
+  s_c311425adc0214::t_526a9302b87a6f 1
+src/common/meta/src/cache/table/table_name.rs
+  s_c311425adc0214::t_526a9302b87a6f 42-43,59-60
+src/meta-srv/src/procedure/repartition/test_util.rs
+  s_c311425adc0214::t_526a9302b87a6f 47,235-246
+  s_c311425adc0214::t_c59f00bfac46b2 247-248
+src/mito2/src/engine/tail_replay_test.rs
+  s_c311425adc0214::t_526a9302b87a6f 47-49,105,142-143,149-152,177,206-209,769-773,775-776,781-786,791-792,795-836,943-958,1812-1813,1815-1817,1819-1823,1825-1826,1831-1835,1862-1892,2306-2346,2735-2750
+src/frontend/src/instance.rs
+  s_c311425adc0214::t_526a9302b87a6f 45,114-115,121-131,657-662,709,715-723,1354,1364,1367,1369-1370,1372-1375,1377-1382,1384-1385,1387-1392,1394-1399,1401-1467,1469-1470,1473-1489,1930-1931,4689-4707,4711-4720,4732-4733,4740-4761,4763-4780,4784-4794,4796-4797,4800-4807,4922-4929,4932-4943,6493-7106
+src/catalog/src/system_schema/information_schema.rs
+  s_c311425adc0214::t_526a9302b87a6f 22
+src/promql/src/histogram_eval.rs
+  s_c311425adc0214::t_526a9302b87a6f 42
+src/mito2/src/worker/handle_alter.rs
+  s_c311425adc0214::t_526a9302b87a6f 154-161
+src/operator/src/insert.rs
+  s_c311425adc0214::t_526a9302b87a6f 67,2830-2831,2833,2836,2839-2842,2844-2846,2848,2851,3012,3034-3041,3727,3788,3790-3791,4469-4471,4475-4477,4757-4765,4894-4896,4900-4902,4918-4963
+tests/compatibility/wire/region_statistic_pending_tails/legacy_region_statistic.json
+  s_c311425adc0214::t_526a9302b87a6f 1
+src/mito2/src/worker/handle_enter_staging.rs
+  s_c311425adc0214::t_526a9302b87a6f 70-79
+src/servers/src/batcher/logical_table/flow_notifier.rs
+  s_c311425adc0214::t_526a9302b87a6f 140-143,147,149-150
+src/common/meta/src/region_registry.rs
+  s_c311425adc0214::t_526a9302b87a6f 31-32
+src/metric-engine/src/utils.rs
+  s_c311425adc0214::t_526a9302b87a6f 93-95,174-189
+  s_c311425adc0214::t_95d8a3c78e53e3 190-191
+src/mito2/src/engine/region_hook.rs
+  s_c311425adc0214::t_526a9302b87a6f 124-126,131-134,177-178
+src/common/datasource/src/parquet_writer.rs
+  s_c311425adc0214::t_526a9302b87a6f 65,109-112,127,129,132,198,230,243,245,254,536-539,742-745
+src/catalog/src/lib.rs
+  s_c311425adc0214::t_526a9302b87a6f 30
+src/common/meta/src/cache/table/table_schema.rs
+  s_c311425adc0214::t_526a9302b87a6f 36,42-43
+src/mito2/src/engine/table_compaction/tests.rs
+  s_c311425adc0214::t_526a9302b87a6f 14,23,30,32,150-188
+  s_c311425adc0214::t_16707cfbc52775 189-190
+src/mito2/src/worker.rs
+  s_c311425adc0214::t_526a9302b87a6f 39-41,87-88,446-454,910,1377-1379,1879-1881,1985,2008,2085-2099
+  s_c311425adc0214::t_d1f87963b85909 2100
+src/operator/src/statement/export_logical_tables.rs
+  s_c311425adc0214::t_526a9302b87a6f 33,355,360,368,371-398,413,424,433,459,527-529,564-566,588-591
+src/meta-srv/src/error.rs
+  s_c311425adc0214::t_526a9302b87a6f 1086-1094,1249,1384
+  s_c311425adc0214::t_c5a34e427c94ac 1085
+src/catalog/src/system_schema/information_schema/partitions.rs
+  s_c311425adc0214::t_526a9302b87a6f 35,258,262,312-323,478,502,504-505,551,632-716
+  s_c311425adc0214::t_9663ac7dc92c2a 717-718
+src/common/meta/src/key/flow.rs
+  s_c311425adc0214::t_526a9302b87a6f 570-647
+src/mito2/src/request.rs
+  s_c311425adc0214::t_526a9302b87a6f 1180-1182,1248
+src/mito2/src/tail_replay.rs
+  s_c311425adc0214::t_526a9302b87a6f 358-360,363-365
+src/mito2/src/worker/handle_rebuild_index.rs
+  s_c311425adc0214::t_526a9302b87a6f 21,38,40,57-93,256-275,355,623,630-675
+  s_c311425adc0214::t_5dd04c65c32529 676
+src/operator/src/statement/export_logical_tables/tests.rs
+  s_c311425adc0214::t_526a9302b87a6f 313-362,378,672-675,858-861,1185,1193,1292-1298
+  s_c311425adc0214::t_3ddb46852166ae 312
+src/promql/src/histogram_eval/tests.rs
+  s_c311425adc0214::t_526a9302b87a6f 15,27-29,31,267,306-309,312,318-324,459-497,501,503,511-512,514-537,540-565,568-570,573,575,577,582-693,705-714,995-997,1001,1003-1004,1032,1035-1036,1038-1044,1061
+src/mito2/src/worker/handle_compaction.rs
+  s_c311425adc0214::t_526a9302b87a6f 32
+src/query/src/promql/planner/test.rs
+  s_c311425adc0214::t_526a9302b87a6f 3449-3452,3455-3460,3465
+src/mito2/src/engine.rs
+  s_c311425adc0214::t_526a9302b87a6f 111,1430-1446,1804,1808-1817
+src/meta-srv/src/procedure/repartition/repartition_start.rs
+  s_c311425adc0214::t_526a9302b87a6f 203,224-251,506-507,519-520,913-983
+src/auth/src/permission.rs
+  s_c311425adc0214::t_526a9302b87a6f 237-252,289-330,398-412,853-997
+  s_c311425adc0214::t_b1b6635353a43b 998
+src/common/meta/src/cache/flow.rs
+  s_c311425adc0214::t_526a9302b87a6f 19-67
+src/meta-srv/src/handler/persist_stats_handler.rs
+  s_c311425adc0214::t_526a9302b87a6f 308
+src/frontend/src/instance/prom_store.rs
+  s_c311425adc0214::t_526a9302b87a6f 694-699
+src/standalone/src/information_extension.rs
+  s_c311425adc0214::t_526a9302b87a6f 146
+src/table/src/predicate.rs
+  s_c311425adc0214::t_526a9302b87a6f 15-16,20-21,27,31-32,42-43,173-180,194,196,198,201-285,288-296,300-303,309,322,355-480,929,932-935,1688,1694-2129
+src/mito2/AGENTS.md
+  s_c311425adc0214::t_526a9302b87a6f 92-93,206,212-221,224-226
+src/common/meta/src/cache/registry.rs
+  s_c311425adc0214::t_526a9302b87a6f 162,164,171,173-175,177-179,186-189,209,216,221,227,232-236,249-252,291-292,302-303
+src/common/meta/src/datanode.rs
+  s_c311425adc0214::t_526a9302b87a6f 133-136,354,620,791-833
+  s_c311425adc0214::t_afefffb392bb69 834-835
+src/common/meta/src/instruction.rs
+  s_c311425adc0214::t_526a9302b87a6f 430-443
+Cargo.lock
+  s_c311425adc0214::t_d059e39925dfa5 2860
+src/servers/dashboard/VERSION
+  s_c311425adc0214::t_4439750829a374 1
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "2cb0c2bf2cf93598bcdb4ef88401aefaa24b50ca",
+  "prompts": {},
+  "sessions": {
+    "s_c311425adc0214": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1f2e1-9b9d-7ba2-a9ef-a23895482316",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
