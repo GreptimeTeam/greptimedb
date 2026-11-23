@@ -100,6 +100,7 @@ GROUP BY m.mhost, n.nhost ORDER BY m.mhost, n.nhost;
 
 -- The rewrite appears in the plan as partial count/sum aggregates joined.
 -- SQLNESS PROTOCOL MYSQL
+-- SQLNESS REPLACE (peers.*) REDACTED
 EXPLAIN SELECT m.mhost, n.area, AVG(m.mval * n.wgt) AS score
 FROM ffx_metrics m JOIN ffx_nodes n ON m.mhost = n.nhost
 GROUP BY m.mhost, n.area;
@@ -129,13 +130,13 @@ GROUP BY m.mhost, n.area;
 |               |       RepartitionExec: partitioning=Hash([mhost@0], 4), input_partitions=4                                                                                                                                                                                                                                |
 |               |         AggregateExec: mode=Partial, gby=[mhost@0 as mhost], aggr=[count(m.mval) as partial_nv_1, sum(m.mval) as partial_sv_2]                                                                                                                                                                            |
 |               |           RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1                                                                                                                                                                                                                            |
-|               |             MergeScanExec: peers=[4398046511104(1024, 0), ]                                                                                                                                                                                                                                               |
+|               |             MergeScanExec: REDACTED
 |               |     RepartitionExec: partitioning=Hash([nhost@0], 4), input_partitions=4                                                                                                                                                                                                                                  |
 |               |       AggregateExec: mode=FinalPartitioned, gby=[nhost@0 as nhost, area@1 as area], aggr=[count(n.wgt) as partial_nw_3, sum(n.wgt) as partial_sw_4]                                                                                                                                                       |
 |               |         RepartitionExec: partitioning=Hash([nhost@0, area@1], 4), input_partitions=4                                                                                                                                                                                                                      |
 |               |           AggregateExec: mode=Partial, gby=[nhost@0 as nhost, area@1 as area], aggr=[count(n.wgt) as partial_nw_3, sum(n.wgt) as partial_sw_4]                                                                                                                                                            |
 |               |             RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1                                                                                                                                                                                                                          |
-|               |               MergeScanExec: peers=[4402341478400(1025, 0), ]                                                                                                                                                                                                                                             |
+|               |               MergeScanExec: REDACTED
 |               |                                                                                                                                                                                                                                                                                                           |
 +---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
@@ -174,6 +175,7 @@ GROUP BY m.mhost, n.area ORDER BY m.mhost, n.area;
 
 -- SET false restores the plain aggregate plan without partial aliases.
 -- SQLNESS PROTOCOL MYSQL
+-- SQLNESS REPLACE (peers.*) REDACTED
 EXPLAIN SELECT m.mhost, n.area, AVG(m.mval * n.wgt) AS score
 FROM ffx_metrics m JOIN ffx_nodes n ON m.mhost = n.nhost
 GROUP BY m.mhost, n.area;
@@ -201,9 +203,9 @@ GROUP BY m.mhost, n.area;
 |               |   AggregateExec: mode=SinglePartitioned, gby=[mhost@0 as mhost, area@2 as area], aggr=[avg(m.mval * n.wgt)]               |
 |               |     HashJoinExec: mode=Partitioned, join_type=Inner, on=[(mhost@0, nhost@0)], projection=[mhost@0, mval@1, area@3, wgt@4] |
 |               |       RepartitionExec: partitioning=Hash([mhost@0], 4), input_partitions=1                                                |
-|               |         MergeScanExec: peers=[4398046511104(1024, 0), ]                                                                   |
+|               |         MergeScanExec: REDACTED
 |               |       RepartitionExec: partitioning=Hash([nhost@0], 4), input_partitions=1                                                |
-|               |         MergeScanExec: peers=[4402341478400(1025, 0), ]                                                                   |
+|               |         MergeScanExec: REDACTED
 |               |                                                                                                                           |
 +---------------+---------------------------------------------------------------------------------------------------------------------------+
 

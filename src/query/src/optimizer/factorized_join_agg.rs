@@ -49,6 +49,7 @@
 //! described by `matching_payload_shape`. It is registered in the optimizer but
 //! remains inert unless enabled by config/session extension state.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::dist_plan::MergeScanLogicalPlan;
@@ -149,11 +150,8 @@ fn rewrite_payload(
         dim_payload,
     } = matched;
 
-    let fact_payloads_name = config.alias_generator().next("partial_nv");
-    let fact_sum_name = config.alias_generator().next("partial_sv");
-
-    let dim_payloads_name = config.alias_generator().next("partial_nw");
-    let dim_sum_name = config.alias_generator().next("partial_sw");
+    let (fact_payloads_name, fact_sum_name, dim_payloads_name, dim_sum_name) =
+        partial_aliases(agg, join, config);
 
     let left = Aggregate::try_new(
         Arc::clone(&join.left),
@@ -249,6 +247,45 @@ fn rewrite_payload(
     ];
     let projection = Projection::try_new(output, Arc::new(LogicalPlan::Join(rewritten_join)))?;
     Ok(Transformed::yes(LogicalPlan::Projection(projection)))
+}
+
+/// The four partial-aggregate output names, made collision-free against every
+/// field name the rewritten aggregates can still see.
+///
+/// `OptimizerConfig::alias_generator` only keeps generated aliases apart from
+/// each other, not from the input fields. A column literally named like a
+/// generated alias (say `partial_nv_1`) would then land next to the qualified
+/// grouping key of the same name in a partial aggregate's output schema, and
+/// `DFSchema` rejects that plan as ambiguous: `Schema contains qualified field
+/// name m.partial_nv_1 and unqualified field name partial_nv_1 which would be
+/// ambiguous`. Prepending underscores until the name is unused keeps the names
+/// deterministic and mutually distinct; the visible column set is finite, so
+/// the loop terminates.
+fn partial_aliases(
+    agg: &Aggregate,
+    join: &Join,
+    config: &dyn OptimizerConfig,
+) -> (String, String, String, String) {
+    // `agg.input` is the optional projection above the join, so it already
+    // covers both join inputs; the join schemas are collected as well so the
+    // used set does not depend on whether that projection is present.
+    let mut used: HashSet<String> = HashSet::new();
+    for schema in [join.left.schema(), join.right.schema(), agg.input.schema()] {
+        used.extend(schema.fields().iter().map(|field| field.name().clone()));
+    }
+    let mut unique = |prefix: &str| {
+        let mut name = config.alias_generator().next(prefix);
+        while !used.insert(name.clone()) {
+            name = format!("_{name}");
+        }
+        name
+    };
+    (
+        unique("partial_nv"),
+        unique("partial_sv"),
+        unique("partial_nw"),
+        unique("partial_sw"),
+    )
 }
 
 fn partial_aggregate(udaf: Arc<AggregateUDF>, args: Vec<Expr>, alias: &str) -> Expr {

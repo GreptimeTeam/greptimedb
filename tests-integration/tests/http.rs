@@ -4963,6 +4963,7 @@ ttl = "2months 29days 2h 52m 48s"
 [query]
 parallelism = 0
 allow_query_fallback = false
+experimental_enable_factorized_join_agg = false
 experimental_spill_mode = "default"
 experimental_spill_max_temp_directory_size = "1GiB"
 experimental_spill_compression = "uncompressed"

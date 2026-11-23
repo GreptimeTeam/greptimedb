@@ -733,3 +733,83 @@ async fn session_set_false_overrides_server_true() {
         "session true must rewrite"
     );
 }
+
+/// Two tables whose group/join keys are literally named like the aliases the
+/// rewrite generates: `partial_nv_1` is the left grouping/join key and
+/// `partial_nw_3` the right group column, so both land next to a qualified
+/// group field of the same bare name in a partial aggregate's output schema.
+/// `partial_sv_2`/`partial_sw_4` are plain payload-side columns named like the
+/// remaining two aliases. hosts: a{2.0}, b{4.0};
+/// areas: a:west(3.0), b:east(0.5).
+fn alias_like_column_names() -> (RecordBatch, RecordBatch) {
+    let metrics = RecordBatch::new(
+        Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new("partial_nv_1", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), true),
+            ColumnSchema::new("partial_sv_2", ConcreteDataType::string_datatype(), true),
+        ])),
+        vec![
+            Arc::new(TimestampMillisecondVector::from_slice(vec![0, 1])) as _,
+            Arc::new(StringVector::from(vec![Some("a"), Some("b")])) as _,
+            Arc::new(Float64Vector::from(vec![Some(2.0), Some(4.0)])) as _,
+            Arc::new(StringVector::from(vec![Some("x"), Some("y")])) as _,
+        ],
+    )
+    .unwrap();
+    let nodes = RecordBatch::new(
+        Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("partial_nw_3", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("weight", ConcreteDataType::float64_datatype(), true),
+            ColumnSchema::new("partial_sw_4", ConcreteDataType::string_datatype(), true),
+        ])),
+        vec![
+            Arc::new(TimestampMillisecondVector::from_slice(vec![0, 1])) as _,
+            Arc::new(StringVector::from(vec![Some("a"), Some("b")])) as _,
+            Arc::new(StringVector::from(vec![Some("west"), Some("east")])) as _,
+            Arc::new(Float64Vector::from(vec![Some(3.0), Some(0.5)])) as _,
+            Arc::new(StringVector::from(vec![Some("p"), Some("q")])) as _,
+        ],
+    )
+    .unwrap();
+    (metrics, nodes)
+}
+
+/// A column named like a generated alias must not make the partial aggregates'
+/// schemas ambiguous: the aliases are renamed instead, and the results still
+/// match the baseline exactly.
+#[tokio::test]
+async fn aliases_do_not_collide_with_column_names() {
+    let (metrics, nodes) = alias_like_column_names();
+    let sql = "SELECT m.partial_nv_1, n.partial_nw_3, AVG(m.value * n.weight) AS score \
+               FROM metrics m JOIN nodes n ON m.partial_nv_1 = n.host \
+               GROUP BY m.partial_nv_1, n.partial_nw_3";
+    let baseline = engine_over(metrics.clone(), nodes.clone(), false);
+    let rewritten = engine_over(metrics, nodes, true);
+    let baseline_plan = query_plan(&baseline, sql).await;
+    let rewritten_plan = query_plan(&rewritten, sql).await;
+    assert!(
+        rewritten_plan.contains("_partial_nv_1") && rewritten_plan.contains("_partial_nw_3"),
+        "colliding column names must be renamed in the rewrite:\n{rewritten_plan}"
+    );
+    assert!(
+        !baseline_plan.contains("_partial_"),
+        "switch off must keep the baseline plan:\n{baseline_plan}"
+    );
+    assert_eq!(
+        query_output(&baseline, sql).await,
+        query_output(&rewritten, sql).await
+    );
+}

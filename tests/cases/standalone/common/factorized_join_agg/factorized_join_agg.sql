@@ -60,6 +60,7 @@ GROUP BY m.mhost, n.nhost ORDER BY m.mhost, n.nhost;
 
 -- The rewrite appears in the plan as partial count/sum aggregates joined.
 -- SQLNESS PROTOCOL MYSQL
+-- SQLNESS REPLACE (peers.*) REDACTED
 EXPLAIN SELECT m.mhost, n.area, AVG(m.mval * n.wgt) AS score
 FROM ffx_metrics m JOIN ffx_nodes n ON m.mhost = n.nhost
 GROUP BY m.mhost, n.area;
@@ -81,6 +82,7 @@ GROUP BY m.mhost, n.area ORDER BY m.mhost, n.area;
 
 -- SET false restores the plain aggregate plan without partial aliases.
 -- SQLNESS PROTOCOL MYSQL
+-- SQLNESS REPLACE (peers.*) REDACTED
 EXPLAIN SELECT m.mhost, n.area, AVG(m.mval * n.wgt) AS score
 FROM ffx_metrics m JOIN ffx_nodes n ON m.mhost = n.nhost
 GROUP BY m.mhost, n.area;
