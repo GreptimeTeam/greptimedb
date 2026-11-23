@@ -41,7 +41,9 @@ use crate::error::{
 };
 use crate::region::ManifestContextRef;
 use crate::region::version::VersionControlRef;
-use crate::request::{OptionOutputTx, OutputTx, SenderDdlRequest, WorkerRequestWithTime};
+use crate::request::{
+    OptionOutputTx, OutputTx, PauseCompactionResponse, SenderDdlRequest, WorkerRequestWithTime,
+};
 #[cfg(test)]
 use crate::schedule::CancellableTaskState;
 use crate::schedule::RequestCancelResult;
@@ -366,7 +368,7 @@ pub(super) struct CompactionStatus {
     pub(crate) shared_state: CompactionStateRef,
     /// Live guards and callers waiting for in-flight work to finish.
     pause: Weak<()>,
-    pause_waiters: Vec<(CompactionGuard, oneshot::Sender<Result<CompactionGuard>>)>,
+    pause_waiters: Vec<oneshot::Sender<Result<()>>>,
     /// Resident automatic-pick history, retained across batches until region unload.
     pub(crate) pick_history: PickHistory,
     /// Id of the region.
@@ -406,20 +408,33 @@ impl CompactionStatus {
         self.pause.strong_count() != 0
     }
 
-    pub(super) fn pause(&mut self, sender: oneshot::Sender<Result<CompactionGuard>>) {
+    pub(super) fn pause(&mut self, sender: oneshot::Sender<Result<PauseCompactionResponse>>) {
         let token = self.pause.upgrade().unwrap_or_else(|| {
             let token = Arc::new(());
             self.pause = Arc::downgrade(&token);
             token
         });
         let guard = CompactionGuard { _token: token };
-        if self.is_compacting() {
-            self.cancel_pending();
-            self.pause_waiters.push((guard, sender));
-            self.request_cancel();
-        } else {
-            let _ = sender.send(Ok(guard));
+        if !self.is_compacting() {
+            let _ = sender.send(Ok(PauseCompactionResponse { guard, idle: None }));
+            return;
         }
+
+        let (notify, idle) = oneshot::channel();
+        if sender
+            .send(Ok(PauseCompactionResponse {
+                guard,
+                idle: Some(idle),
+            }))
+            .is_err()
+        {
+            return;
+        }
+
+        self.pause_waiters.retain(|waiter| !waiter.is_closed());
+        self.pause_waiters.push(notify);
+        self.cancel_pending();
+        self.request_cancel();
     }
 
     fn cancel_pending(&mut self) {
@@ -430,8 +445,8 @@ impl CompactionStatus {
     }
 
     fn notify_idle(&mut self) {
-        for (guard, sender) in self.pause_waiters.drain(..) {
-            let _ = sender.send(Ok(guard));
+        for sender in self.pause_waiters.drain(..) {
+            let _ = sender.send(Ok(()));
         }
     }
 
@@ -634,7 +649,7 @@ impl CompactionStatus {
     }
 
     pub(super) fn on_failure(&mut self, err: Arc<Error>) {
-        for (_, sender) in self.pause_waiters.drain(..) {
+        for sender in self.pause_waiters.drain(..) {
             let _ = sender.send(Err(err.clone()).context(CompactRegionSnafu {
                 region_id: self.region_id,
             }));

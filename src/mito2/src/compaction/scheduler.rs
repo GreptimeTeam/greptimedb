@@ -54,7 +54,9 @@ use crate::error::{
 };
 use crate::region::ManifestContextRef;
 use crate::region::version::VersionControlRef;
-use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest, WorkerRequestWithTime};
+use crate::request::{
+    DdlRequest, OptionOutputTx, PauseCompactionResponse, SenderDdlRequest, WorkerRequestWithTime,
+};
 use crate::schedule::RequestCancelResult;
 use crate::worker::WorkerListener;
 
@@ -232,7 +234,7 @@ impl CompactionScheduler {
     pub(crate) fn pause_compaction(
         &mut self,
         region_id: RegionId,
-        sender: tokio::sync::oneshot::Sender<Result<CompactionGuard>>,
+        sender: tokio::sync::oneshot::Sender<Result<PauseCompactionResponse>>,
     ) {
         if let Some(status) = self.region_status.get_mut(&region_id) {
             status.pause(sender);

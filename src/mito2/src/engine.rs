@@ -572,7 +572,7 @@ impl MitoEngine {
                 WorkerRequest::PauseCompaction { region_id, sender },
             )
             .await?;
-        receiver.await.context(RecvSnafu)?
+        receiver.await.context(RecvSnafu)??.wait().await
     }
 
     /// Handles copy region from request.

@@ -22,6 +22,7 @@ use common_meta::key::schema_name::SchemaNameValue;
 use common_recordbatch::filter::MetadataFilter;
 use common_time::{DatabaseTimeToLive, Timestamp};
 use datafusion_expr::{col, lit};
+use futures::FutureExt;
 use store_api::mito_engine_options::{
     COMPACTION_TYPE, TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM, TWCS_TRIGGER_FILE_NUM,
 };
@@ -1359,9 +1360,9 @@ async fn test_cancelled_queued_unit_releases_fenced_ddl(
     let CompactionTransition::DdlReady(mut ddls) = transition else {
         panic!("cancelled queued work must hand off its fenced DDL");
     };
-    if let Some([mut first, mut second]) = pause_waiters {
-        let first = first.try_recv().unwrap().unwrap();
-        let second = second.try_recv().unwrap().unwrap();
+    if let Some([first, second]) = pause_waiters {
+        let first = first.wait().now_or_never().unwrap().unwrap();
+        let second = second.wait().now_or_never().unwrap().unwrap();
         drop(first);
         assert!(scheduler.region_status[&region_id].is_paused());
         drop(second);
@@ -2440,14 +2441,56 @@ async fn test_add_ddl_request_to_pending() {
 fn pending_pause(
     scheduler: &mut CompactionScheduler,
     region_id: RegionId,
-) -> oneshot::Receiver<Result<CompactionGuard>> {
+) -> PauseCompactionResponse {
     let (sender, mut receiver) = oneshot::channel();
     scheduler.pause_compaction(region_id, sender);
+    let response = receiver.try_recv().unwrap().unwrap();
+    assert!(response.idle.is_some());
+    response
+}
+
+#[tokio::test]
+async fn test_dropping_pause_waiters_releases_only_their_guards() {
+    let env = SchedulerEnv::new().await;
+    let (tx, _rx) = mpsc::channel(4);
+    let mut scheduler = env.mock_compaction_scheduler(tx);
+    let version = compactable_version();
+    let id = version.region_id();
+    scheduler.register_region(&version, &env.access_layer, &Default::default());
+    scheduler
+        .region_status
+        .get_mut(&id)
+        .unwrap()
+        .start_picking(7);
+
+    let (sender, receiver) = oneshot::channel();
+    drop(receiver);
+    scheduler.pause_compaction(id, sender);
+    assert!(!scheduler.region_status[&id].is_paused());
     assert_matches!(
-        receiver.try_recv(),
-        Err(oneshot::error::TryRecvError::Empty)
+        scheduler.region_status[&id].active.phase,
+        CompactionPhase::Picking {
+            cancelled: false,
+            ..
+        }
     );
-    receiver
+
+    let mut first = Box::pin(pending_pause(&mut scheduler, id).wait());
+    assert!(futures::poll!(&mut first).is_pending());
+    let (sender, second) = oneshot::channel();
+    scheduler.pause_compaction(id, sender);
+    drop(first);
+    assert!(scheduler.region_status[&id].is_paused());
+    // The second guard is still in the reply channel.
+    drop(second);
+    assert!(!scheduler.region_status[&id].is_paused());
+    assert_matches!(
+        scheduler.region_status[&id].active.phase,
+        CompactionPhase::Picking {
+            cancelled: true,
+            ..
+        }
+    );
 }
 
 #[tokio::test]
@@ -2469,9 +2512,9 @@ async fn test_failed_compaction_notifies_all_pause_waiters() {
     let error = Arc::new(InvalidSchedulerStateSnafu.build());
     scheduler.on_compaction_failed(id, error.clone());
 
-    for mut receiver in [first, second] {
+    for response in [first, second] {
         assert_matches!(
-            receiver.try_recv().unwrap(),
+            response.wait().now_or_never().unwrap(),
             Err(Error::CompactRegion { region_id, source, .. })
                 if region_id == id && Arc::ptr_eq(&error, &source)
         );
@@ -2528,7 +2571,7 @@ async fn test_pause_compaction_drains_active_cycle_and_blocks_new_triggers(#[cas
             None,
         )
         .unwrap();
-    let mut first = pending_pause(&mut scheduler, id);
+    let first = pending_pause(&mut scheduler, id);
     assert!(!schedule(&mut scheduler));
     assert_matches!(
         pending.try_recv().unwrap(),
@@ -2548,10 +2591,12 @@ async fn test_pause_compaction_drains_active_cycle_and_blocks_new_triggers(#[cas
         );
         scheduler.on_compaction_cancelled(id).await;
     }
-    let first = first.try_recv().unwrap().unwrap();
+    let first = first.wait().now_or_never().unwrap().unwrap();
     let (tx, second) = oneshot::channel();
     scheduler.pause_compaction(id, tx);
     let second = second.await.unwrap().unwrap();
+    assert!(second.idle.is_none());
+    let second = second.wait().await.unwrap();
     drop(first);
     assert!(!schedule(&mut scheduler));
     assert!(!scheduler.schedule_automatic_followup(id, &manifest, schemas.clone()));
