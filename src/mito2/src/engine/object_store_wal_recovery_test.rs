@@ -997,8 +997,9 @@ async fn test_moving_the_wal_keeps_the_history_only_with_its_objects() {
 }
 
 /// A catchup whose source reported entries above the flushed entry id cannot replay them from this
-/// node's WAL, so it hands nothing over: it fails, and a catchup without a reported entry id is
-/// still refused after a restart.
+/// node's WAL, so it hands nothing over: it fails, and so do one without a reported entry id and
+/// one that does not make the region writable, also after a restart. A writable catchup of a
+/// region that skips the WAL hands nothing over either.
 #[tokio::test]
 async fn test_catchup_that_cannot_reach_the_reported_entry_id_hands_nothing_over() {
     let mut env = TestEnv::with_prefix("object-store-wal-no-handoff").await;
@@ -1016,8 +1017,10 @@ async fn test_catchup_that_cannot_reach_the_reported_entry_id_hands_nothing_over
     };
     let engine = new_engine(&mut env, open_store(memory_store()).await).await;
     let (table_dir, schema) = create_region(&engine, REGION_A, &[]).await;
+    let (table_dir_b, _) = create_region(&engine, REGION_B, &[(SKIP_WAL_KEY, "true")]).await;
     put_rows(&engine, REGION_A, rows(&schema, 0, 3)).await;
     flush_region(&engine, REGION_A, None).await;
+    let flushed_entry_id = region(&engine, REGION_A).version().flushed_entry_id;
     put_rows(&engine, REGION_A, rows(&schema, 3, 5)).await;
     let reported_entry_id = region(&engine, REGION_A)
         .version_control
@@ -1027,9 +1030,9 @@ async fn test_catchup_that_cannot_reach_the_reported_entry_id_hands_nothing_over
     drop(engine);
 
     let location = memory_store();
-    let catchup = |entry_id| {
+    let catchup = |set_writable, entry_id| {
         RegionRequest::Catchup(RegionCatchupRequest {
-            set_writable: true,
+            set_writable,
             entry_id,
             ..Default::default()
         })
@@ -1040,7 +1043,11 @@ async fn test_catchup_that_cannot_reach_the_reported_entry_id_hands_nothing_over
             ..open_request(&table_dir)
         })
     };
-    for entry_id in [Some(reported_entry_id), None] {
+    for (set_writable, entry_id) in [
+        (true, Some(reported_entry_id)),
+        (true, None),
+        (false, Some(flushed_entry_id)),
+    ] {
         let store = open_store(location.clone()).await;
         let engine = new_engine(&mut env, store.clone()).await;
         engine
@@ -1048,7 +1055,7 @@ async fn test_catchup_that_cannot_reach_the_reported_entry_id_hands_nothing_over
             .await
             .unwrap();
         let error = engine
-            .handle_request(REGION_A, catchup(entry_id))
+            .handle_request(REGION_A, catchup(set_writable, entry_id))
             .await
             .unwrap_err();
         assert!(
@@ -1056,10 +1063,25 @@ async fn test_catchup_that_cannot_reach_the_reported_entry_id_hands_nothing_over
                 error.as_any().downcast_ref::<crate::error::Error>(),
                 Some(crate::error::Error::CheckWalHistory { .. })
             ),
-            "{entry_id:?}: {error:?}"
+            "{set_writable} {entry_id:?}: {error:?}"
         );
         crash(engine, store).await;
     }
+
+    let store = open_store(location.clone()).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    open_region(&engine, REGION_B, &table_dir_b, &[(SKIP_WAL_KEY, "true")])
+        .await
+        .unwrap();
+    engine
+        .set_region_role(REGION_B, RegionRole::Follower)
+        .unwrap();
+    let objects = wal_object_seqs(&location).await;
+    engine
+        .handle_request(REGION_B, catchup(true, Some(0)))
+        .await
+        .unwrap();
+    assert_eq!(objects, wal_object_seqs(&location).await);
 }
 
 /// A catchup that makes a region writable with the last entry id its source reported hands the

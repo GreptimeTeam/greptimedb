@@ -1965,7 +1965,8 @@ impl ManifestContext {
         let action_list_for_hook = self.hook.as_ref().map(|_| action_list.clone());
         let version = manager
             .update_with_verification(action_list, false, false, || true)
-            .await?;
+            .await
+            .inspect_err(|e| error!(e; "Failed to update manifest, region_id: {}", region_id))?;
         let pending = PendingManifestHook::new(
             region_id,
             action_list_for_hook,

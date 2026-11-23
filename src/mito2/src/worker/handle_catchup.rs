@@ -160,8 +160,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     /// region stays registered, demoted unless it is in a transient leader state, while a
     /// replacement opened from its manifest replays the WAL outside the worker;
     /// [Self::handle_caught_up_again] registers the replacement only if its replay succeeded (on
-    /// a remote WAL it must reach the entries the region acknowledged) and the region took no
-    /// write and made no commit meanwhile. Otherwise the region keeps its memtable, so a later
+    /// a remote WAL it must reach the entries the region acknowledged), the region took no
+    /// write and made no commit meanwhile and, for a catchup that makes the region writable, the
+    /// replacement committed its catchup edit. Otherwise the region keeps its memtable, so a later
     /// Leader lease can promote it; one that waits for a reload is reloaded instead.
     async fn catch_up_again(
         &mut self,
@@ -252,10 +253,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let replacement = match result {
             _ if !registered => Err(error::RegionNotFoundSnafu { region_id }.build()),
             Ok(_) if !unchanged => Err(error::RegionBusySnafu { region_id }.build()),
-            // The replacement is never stopped or fenced before it is registered, so the checks
-            // above stand for the guards of its commit: a registered instance is not stopped, and
-            // the lock held keeps the commits of the old instance out until the replacement is
-            // registered, so no refusal follows the commit.
+            // The replacement's own commit guards pass, as it is unregistered; the checks of the
+            // old instance above do the guarding. The old instance's commits wait on the read
+            // guard held here, so once the commit succeeds nothing below can refuse the swap.
+            // This awaits one conditional PUT and one LIST on the worker, under that guard: the
+            // commit cannot move into a spawned task, since the old instance could then commit or
+            // be fenced between it and the checks. A catchup again is rare.
             Ok(replacement) if set_writable => {
                 replacement.manifest_ctx.commit_catchup().await.map(|hook| {
                     catchup_hook = hook;

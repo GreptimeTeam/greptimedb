@@ -2734,8 +2734,8 @@ async fn test_conditional_discard_over_uncertain_replay_reloads_region() {
 /// records the tail ensures: a later write past the bound, or a catchup that carries the last
 /// entry id the source reported and so hands the region over to this node's WAL.
 #[rstest]
-#[case::history_below_bound(BoundHistory::Below)]
 #[case::history_past_bound(BoundHistory::Written)]
+#[case::history_below_bound(BoundHistory::Below)]
 #[case::history_handed_over_past_bound(BoundHistory::HandedOver)]
 #[tokio::test]
 async fn test_discard_reopens_after_crash_with_history_past_bound(#[case] history: BoundHistory) {

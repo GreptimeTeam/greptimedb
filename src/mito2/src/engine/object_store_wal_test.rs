@@ -1400,7 +1400,7 @@ async fn test_catchup_commit_of_a_stopping_region_commits_nothing() {
 }
 
 /// A catchup whose hand-off fails returns a retryable error before it replays or commits, and
-/// leaves the region a Follower; the next catchup hands the region over.
+/// leaves the region a Follower; the next catchup makes the region writable.
 #[tokio::test]
 async fn test_catchup_whose_handoff_fails_can_be_retried() {
     let mut env = TestEnv::with_prefix("catchup-handoff-fails").await;
