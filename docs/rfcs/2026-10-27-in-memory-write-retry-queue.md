@@ -2,6 +2,7 @@
 Feature Name: In-Memory Frontend Write Retry Queue
 Tracking Issue: https://github.com/GreptimeTeam/greptimedb/issues/8085
 Date: 2026-10-27
+Author: @lczllx
 Status: Draft
 ---
 # In-Memory Frontend Write Retry Queue
