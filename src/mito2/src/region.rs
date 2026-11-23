@@ -2990,7 +2990,6 @@ mod tests {
             region_id: region.region_id,
             file_size: 2,
             format: FileFormat::NarthexSamples(Box::new(NarthexSamplesMeta {
-                use_file_sequence: false,
                 manifest_size: 1,
                 parts: smallvec::smallvec![NarthexPartMeta { file_size: 1 }],
             })),

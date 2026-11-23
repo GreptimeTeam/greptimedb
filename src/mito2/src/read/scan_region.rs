@@ -563,6 +563,12 @@ impl ScanRegion {
         let mut mem_range_builders = Vec::new();
         // Narthex may serve raw-series output, which deduplicates append rows.
         // Keep field predicates residual so they cannot hide the newest row.
+        // TODO: Derive effective append/merge options from raw-series read intent
+        // before building ranges, and use them for both prefiltering and merging.
+        // Append-mode raw reads should use append=false and LastRow for any format,
+        // including Parquet; non-append reads should retain their merge mode, and
+        // ordinary batch reads should retain the region options. This would replace
+        // this format check and the extra LastRow reader in prepared series scans.
         let filter_mode =
             if self.version.options.sst_format == Some(crate::sst::FormatType::Narthex) {
                 PreFilterMode::SkipFields

@@ -149,6 +149,10 @@ impl CompactionSstReaderBuilder<'_> {
             .with_ignore_file_not_found(true)
             .with_merge_mode(self.merge_mode);
 
+        // Narthex prepared reads take sample time bounds from ScanInput::time_range;
+        // setting only the predicate below does not populate those bounds. Pass the
+        // half-open compaction window explicitly so an SST spanning multiple windows
+        // contributes only rows belonging to this output window.
         if self.narthex_format {
             scan_input = scan_input.with_time_range(self.time_range);
         }

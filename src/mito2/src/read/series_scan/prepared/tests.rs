@@ -1166,7 +1166,7 @@ async fn ordinal_range_batches_sample_requests_and_pushes_time_bounds() {
     let source = scan.prepared.source.get().unwrap().as_ref().unwrap();
     let requests = Arc::new(Mutex::new(Vec::new()));
     let source = ColumnarPreparedSource {
-        raw_last_row: false,
+        dedup_append_raw: false,
         scan_pool: source.scan_pool.clone(),
         merge_field_start: 0,
         context: source.context.clone(),
@@ -3196,7 +3196,7 @@ async fn authoritative_strict_windows_preserve_rows() {
 }
 
 #[tokio::test]
-async fn authoritative_compaction_last_non_null_and_raw_last_row() {
+async fn authoritative_compaction_and_raw_reads_use_last_non_null() {
     let (_env, engine, region) = authoritative_fixture("last_non_null").await;
     use mito_codec::row_converter::{PrimaryKeyCodec, SparsePrimaryKeyCodec};
     use store_api::storage::consts::ReservedColumnId;
@@ -3282,10 +3282,7 @@ async fn authoritative_compaction_last_non_null_and_raw_last_row() {
         .try_collect::<Vec<_>>()
         .await
         .unwrap();
-    assert!(!chunks.iter().any(|chunk| {
-        (0..chunk.time.len()).any(|i|
-        matches!(chunk.fields.get(0).unwrap().sample(i), SampleRef::Float(value) if value == 7.0))
-    }));
+    assert_eq!(samples(&chunks), vec![(1000, 7.0)]);
     let version = region.version();
     let inputs: Vec<_> = version
         .ssts
@@ -3369,7 +3366,7 @@ async fn authoritative_compaction_opener_uses_persisted_format() {
 }
 
 #[tokio::test]
-async fn authoritative_copy_failure_preserves_existing_objects() {
+async fn authoritative_copy_failure_cleans_only_planned_objects() {
     use crate::region::{FileDescriptor, RegionFileCopier};
     let (_env, engine, region) = authoritative_fixture("last_row").await;
     let store = region.access_layer.object_store();
@@ -3391,7 +3388,6 @@ async fn authoritative_copy_failure_preserves_existing_objects() {
                 store_api::storage::RegionId::new(43, 1),
                 region.region_id,
                 vec![
-                    descriptor("copy/source", "copy/target/existing"),
                     descriptor("copy/source", "copy/target/new"),
                     descriptor("copy/missing", "copy/target/failing")
                 ],

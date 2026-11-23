@@ -378,7 +378,8 @@ pub(crate) struct ColumnarPreparedSource {
     raw: Arc<RawScanPreparation>,
     sample_schema: Option<SchemaRef>,
     merge_field_start: usize,
-    raw_last_row: bool,
+    // Append-mode Narthex raw reads still require one row per series/timestamp.
+    dedup_append_raw: bool,
     candidates: Arc<Vec<Candidate>>,
     samples: Arc<Vec<Arc<dyn SamplesFormatReader>>>,
     metrics: PartitionMetrics,
@@ -496,7 +497,8 @@ impl ColumnarPreparedSource {
         let started = Instant::now();
         let mut raw = raw;
         let batch_output = matches!(labels, RawLabelSource::Explicit);
-        let raw_last_row = input.requires_narthex_preparation() && !batch_output;
+        let dedup_append_raw =
+            input.requires_narthex_preparation() && input.append_mode && !batch_output;
         let sample_schema = if batch_output {
             Some(input.mapper.input_arrow_schema(input.compaction))
         } else {
@@ -819,7 +821,7 @@ impl ColumnarPreparedSource {
             raw: Arc::new(raw),
             sample_schema,
             merge_field_start,
-            raw_last_row,
+            dedup_append_raw,
             candidates: Arc::new(candidates),
             samples: Arc::new(samples),
             metrics,
@@ -842,7 +844,7 @@ impl ColumnarPreparedSource {
         let reservation = self.reservation.clone();
         let scan_pool = self.scan_pool.clone();
         let field_column_start = self.merge_field_start;
-        let raw_last_row = self.raw_last_row;
+        let dedup_append_raw = self.dedup_append_raw;
         let filters =
             if matches!(self.labels, RawLabelSource::Explicit) && !context.input.compaction {
                 predicate_conjuncts(context.input.predicate_group().predicate())
@@ -932,11 +934,14 @@ impl ColumnarPreparedSource {
                 }));
             }
             let mut merged = if let Some(schema) = sample_schema {
-                SeqScan::merge_flat_sources(&context, sources, Some(&metrics), raw_last_row, schema, field_column_start).await?
+                SeqScan::merge_flat_sources(&context, sources, Some(&metrics), false, schema, field_column_start).await?
             } else {
-                SeqScan::build_flat_reader_from_sources(&context, sources, None, Some(&metrics), raw_last_row, 1).await?
+                SeqScan::build_flat_reader_from_sources(&context, sources, None, Some(&metrics), false, 1).await?
             };
-            if raw_last_row {
+            // Append mode skips dedup in the merge reader, but raw series reads
+            // require unique timestamps. Non-append reads use the configured merge
+            // mode above; batch reads retain append semantics.
+            if dedup_append_raw {
                 merged = Box::pin(crate::read::flat_dedup::FlatDedupReader::new(
                     merged,
                     crate::read::flat_dedup::FlatLastRow::new(context.input.filter_deleted),

@@ -147,7 +147,6 @@ pub(crate) async fn write_samples(
         file_metadata: None,
         index_metadata: Default::default(),
         format: FileFormat::NarthexSamples(Box::new(NarthexSamplesMeta {
-            use_file_sequence: false,
             manifest_size: manifest.file_size,
             parts: parts
                 .iter()

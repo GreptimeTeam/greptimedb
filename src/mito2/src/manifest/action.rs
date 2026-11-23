@@ -1665,6 +1665,10 @@ mod tests {
         assert_eq!(edit.series_indexes_to_add.len(), 1);
         let index = edit.series_indexes_to_add[0].clone();
         let first = edit.files_to_add[0].clone();
+        // Sequence trust follows file ownership without format-specific metadata.
+        assert!(!first.is_effective_target_sequence_trusted(first.region_id));
+        let foreign_target = RegionId::new(first.region_id.table_id(), 99);
+        assert!(first.is_effective_target_sequence_trusted(foreign_target));
         builder.apply_edit(1, edit);
         let checkpoint = builder.try_build().unwrap();
         let encoded = serde_json::to_vec(&checkpoint).unwrap();

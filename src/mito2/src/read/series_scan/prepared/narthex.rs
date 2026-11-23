@@ -151,11 +151,13 @@ pub(crate) async fn open_sources(
             context.input.cache_strategy.columnar_metadata(namespace),
         )
         .await?;
-        let sequence = match &file.meta_ref().format {
-            FileFormat::NarthexSamples(meta) if meta.use_file_sequence => {
-                file.meta_ref().sequence.map(|sequence| sequence.get())
-            }
-            _ => None,
+        // Match Parquet: foreign SSTs use the destination admission sequence,
+        // while local SSTs retain their encoded row sequences. A local file's
+        // sequence metadata is only a bound, not a replacement for every row.
+        let sequence = if file.region_id() != context.input.region_metadata().region_id {
+            file.meta_ref().sequence.map(|sequence| sequence.get())
+        } else {
+            None
         };
         let reader: Arc<dyn SamplesFormatReader> =
             Arc::new(NarthexSamplesReader { reader, sequence });

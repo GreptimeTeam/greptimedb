@@ -920,10 +920,8 @@ async fn test_narthex_copy_and_remap(
             if remap { Some(1) } else { None }
         );
         assert!(!file.preserve_row_sequence);
-        let FileFormat::NarthexSamples(samples) = &file.format else {
-            panic!("expected samples")
-        };
-        assert_eq!(samples.use_file_sequence, remap);
+        assert!(matches!(file.format, FileFormat::NarthexSamples(_)));
+        assert_eq!(file.is_effective_target_sequence_trusted(target), remap);
     }
 
     assert_eq!(after.series_indexes.len(), usize::from(with_index));
@@ -1288,7 +1286,6 @@ async fn test_region_storage_format_admission(
 
     let foreign_format = if source_format == "narthex" {
         FileFormat::NarthexSamples(Box::new(NarthexSamplesMeta {
-            use_file_sequence: false,
             manifest_size: 1,
             parts: Default::default(),
         }))

@@ -1049,9 +1049,6 @@ fn prepare_region_edit(region: &MitoRegionRef, edit: &mut RegionEdit) -> Result<
             NonZeroU64::new(sequence)
         };
     for file in &mut edit.files_to_add {
-        if let file::FileFormat::NarthexSamples(narthex) = &mut file.format {
-            narthex.use_file_sequence = true;
-        }
         file.sequence = existing_sequence(file).or(sequence);
         file.preserve_row_sequence = false;
     }

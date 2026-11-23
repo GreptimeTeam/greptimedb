@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 use common_telemetry::{debug, error, info};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::region_engine::MitoCopyRegionFromResponse;
@@ -30,22 +33,51 @@ use crate::sst::file::{self, FileMeta};
 use crate::sst::location::region_dir_from_table_dir;
 use crate::worker::{RegionWorkerLoop, WorkerRequestWithTime};
 
-// COPY writes deterministic object names before publishing its manifest edit.
-// Keep the lock outside region instances so a reopened instance shares the fence.
-fn copy_lock(region: &MitoRegionRef) -> std::sync::Arc<tokio::sync::Mutex<()>> {
-    type Locks =
-        std::collections::HashMap<(String, RegionId), std::sync::Weak<tokio::sync::Mutex<()>>>;
-    static LOCKS: std::sync::LazyLock<std::sync::Mutex<Locks>> =
-        std::sync::LazyLock::new(Default::default);
-    let mut locks = LOCKS.lock().unwrap();
-    locks.retain(|_, lock| lock.strong_count() > 0);
-    let key = (region.table_dir().to_string(), region.region_id);
-    if let Some(lock) = locks.get(&key).and_then(std::sync::Weak::upgrade) {
-        return lock;
+/// COPY locks shared by one region worker and its background tasks.
+#[derive(Clone, Default)]
+pub(super) struct CopyRegionLocks {
+    entries: Arc<Mutex<HashMap<RegionId, CopyRegionLock>>>,
+}
+
+struct CopyRegionLock {
+    mutex: Arc<tokio::sync::Mutex<()>>,
+    users: usize,
+}
+
+/// Registers a COPY before it is spawned, including while it waits for the lock.
+struct CopyRegionGuard {
+    locks: CopyRegionLocks,
+    region_id: RegionId,
+    mutex: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl CopyRegionLocks {
+    fn register(&self, region_id: RegionId) -> CopyRegionGuard {
+        let mut entries = self.entries.lock().unwrap();
+        let entry = entries.entry(region_id).or_insert_with(|| CopyRegionLock {
+            mutex: Arc::new(tokio::sync::Mutex::new(())),
+            users: 0,
+        });
+        entry.users += 1;
+        CopyRegionGuard {
+            locks: self.clone(),
+            region_id,
+            mutex: entry.mutex.clone(),
+        }
     }
-    let lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
-    locks.insert(key, std::sync::Arc::downgrade(&lock));
-    lock
+}
+
+impl Drop for CopyRegionGuard {
+    fn drop(&mut self) {
+        // Registration and removal share the map lock, so a queued COPY cannot
+        // lose its entry and race a new COPY using a different mutex.
+        let mut entries = self.locks.entries.lock().unwrap();
+        let entry = entries.get_mut(&self.region_id).unwrap();
+        entry.users -= 1;
+        if entry.users == 0 {
+            entries.remove(&self.region_id);
+        }
+    }
 }
 
 impl<S> RegionWorkerLoop<S> {
@@ -91,9 +123,9 @@ impl<S> RegionWorkerLoop<S> {
         );
         let worker_sender = self.sender.clone();
 
-        let copy_lock = copy_lock(&region);
+        let copy_guard = self.copy_region_locks.register(region_id);
         common_runtime::spawn_global(async move {
-            let _copy_guard = copy_lock.lock().await;
+            let _copy_lock = copy_guard.mutex.lock().await;
             let (region_edit, source_file_ids) = match Self::copy_region_from(
                 &region,
                 region_metadata_loader,
@@ -379,9 +411,6 @@ fn remap_copied_file_meta(file_meta: &FileMeta, target_region_id: RegionId) -> F
     // "proven disjoint".
     new_file_meta.preserve_row_sequence = false;
     new_file_meta.sequence = None;
-    if let file::FileFormat::NarthexSamples(samples) = &mut new_file_meta.format {
-        samples.use_file_sequence = false;
-    }
     new_file_meta
 }
 
@@ -465,4 +494,49 @@ async fn prepare_narthex_copy(
             .ok_or_else(|| invalid("narthex copy size overflow"))
     })?;
     Ok((copied, descriptors))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn copy_lock_guard_cleans_up_after_waiter_cancellation() {
+        let locks = CopyRegionLocks::default();
+        let region_id = RegionId::new(1, 1);
+        let first = locks.register(region_id);
+        let held = first.mutex.lock().await;
+        let waiting = locks.register(region_id);
+        assert!(Arc::ptr_eq(&first.mutex, &waiting.mutex));
+        let task = tokio::spawn(async move {
+            let _held = waiting.mutex.lock().await;
+        });
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(locks.entries.lock().unwrap()[&region_id].users, 1);
+        drop(held);
+        drop(first);
+        assert!(locks.entries.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn copy_lock_guard_retains_entry_for_waiting_copy() {
+        let locks = CopyRegionLocks::default();
+        let region_id = RegionId::new(1, 1);
+        let first = locks.register(region_id);
+        let held = first.mutex.lock().await;
+        let waiting = locks.register(region_id);
+        assert!(waiting.mutex.try_lock().is_err());
+        drop(held);
+        drop(first);
+        let next = locks.register(region_id);
+        assert!(Arc::ptr_eq(&waiting.mutex, &next.mutex));
+        let held = waiting.mutex.lock().await;
+        assert!(next.mutex.try_lock().is_err());
+        drop(held);
+        drop(waiting);
+        assert_eq!(locks.entries.lock().unwrap()[&region_id].users, 1);
+        drop(next);
+        assert!(locks.entries.lock().unwrap().is_empty());
+    }
 }

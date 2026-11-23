@@ -225,20 +225,6 @@ impl RegionFileCopier {
             "Copying files: {:?} from region {} to region {}",
             file_ids, source_region_id, target_region_id
         );
-        // Existing immutable objects are not owned by this attempt. In particular,
-        // a failed retry must not remove an earlier copy's objects.
-        let mut owned = Vec::new();
-        for descriptor in &file_ids {
-            let target = descriptor.file_path(target_region_id, table_dir, path_type);
-            if !object_store
-                .exists(&target)
-                .await
-                .context(error::OpenDalSnafu)?
-            {
-                owned.push(descriptor.clone());
-            }
-        }
-
         let mut tasks = Vec::with_capacity(parallelism);
         for skip in 0..parallelism {
             let target_file_ids = file_ids.iter().skip(skip).step_by(parallelism).cloned();
@@ -290,7 +276,7 @@ impl RegionFileCopier {
         // Finish sibling copies before deleting partially written target objects.
         if let Some(err) = join_all(tasks).await.into_iter().find_map(Result::err) {
             error!(err; "Failed to copy files from region {} to region {}", source_region_id, target_region_id);
-            self.clean_target_region(target_region_id, owned).await;
+            self.clean_target_region(target_region_id, file_ids).await;
             return Err(err);
         }
 
