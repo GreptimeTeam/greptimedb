@@ -45,7 +45,7 @@ use mito_codec::row_converter::{SortField, build_primary_key_codec_with_fields};
 use partition::expr::PartitionExpr;
 use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt, ensure};
-use store_api::metadata::{RegionMetadata, RegionMetadataRef};
+use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{PartitionRange, RegionScannerRef};
 use store_api::storage::{
     ColumnId, RegionId, ScanRequest, SequenceNumber, SequenceRange, TimeSeriesDistribution,
@@ -1528,7 +1528,10 @@ impl ScanInput {
     /// time range and primary key range, without reading any parquet metadata.
     ///
     /// Returns `None` if timestamp unit conversion overflows (conservative: keep the file).
-    fn try_file_level_pruning_stats(&self, file: &FileHandle) -> Option<FileLevelPruningStats> {
+    fn try_file_level_pruning_stats<'a>(
+        &'a self,
+        file: &'a FileHandle,
+    ) -> Option<FileLevelPruningStats<'a>> {
         let (ts_min, ts_max) = file.time_range();
         let time_index = self.mapper.metadata().time_index_column();
         let time_index_unit = time_index.column_schema.data_type.as_timestamp()?.unit();
@@ -1546,14 +1549,33 @@ impl ScanInput {
         })
     }
 
-    /// Returns the name, min and max of the first primary key column in `file`, decoded from
-    /// the primary key range in its file metadata. `None` when the range is unknown.
-    fn first_primary_key_stats(&self, file: &FileHandle) -> Option<(String, ArrayRef, ArrayRef)> {
-        use datatypes::data_type::DataType as _;
-
+    /// Returns the first primary key column of `file` when the file records its primary key
+    /// range. The range is decoded only when pruning asks for the column.
+    fn first_primary_key_stats<'a>(
+        &'a self,
+        file: &'a FileHandle,
+    ) -> Option<FirstPrimaryKeyStats<'a>> {
         file.meta_ref().primary_key_min.as_ref()?;
         let metadata = self.mapper.metadata();
         let column = metadata.column_by_id(*metadata.primary_key.first()?)?;
+        Some(FirstPrimaryKeyStats {
+            input: self,
+            file,
+            column,
+            range: OnceLock::new(),
+        })
+    }
+
+    /// Decodes the min and max of `column`, the first primary key column, from the primary key
+    /// range of `file`.
+    fn decode_first_primary_key_range(
+        &self,
+        file: &FileHandle,
+        column: &ColumnMetadata,
+    ) -> Option<(ArrayRef, ArrayRef)> {
+        use datatypes::data_type::DataType as _;
+
+        let metadata = self.mapper.metadata();
         let (min, max) = file.primary_key_range(self.primary_key_mapper())?;
         let codec = build_primary_key_codec_with_fields(
             metadata.primary_key_encoding,
@@ -1568,11 +1590,7 @@ impl ScanInput {
             builder.try_push_value_ref(&value.as_value_ref()).ok()?;
             Some(builder.to_vector().to_arrow_array())
         };
-        Some((
-            column.column_schema.name.clone(),
-            to_array(&min)?,
-            to_array(&max)?,
-        ))
+        Some((to_array(&min)?, to_array(&max)?))
     }
 
     /// Checks whether a file can be definitively pruned using only its manifest-level
@@ -1905,26 +1923,47 @@ impl ScanInput {
 /// Lightweight [PruningStatistics] that only uses the file-level time range and first primary
 /// key range from manifest metadata, avoiding any parquet metadata reads. Used for early
 /// file-level pruning before accessing row-group-level statistics.
-pub(crate) struct FileLevelPruningStats {
+pub(crate) struct FileLevelPruningStats<'a> {
     /// Scalar value for the file's minimum timestamp in the time index column's unit.
     pub(crate) min_scalar: ScalarValue,
     /// Scalar value for the file's maximum timestamp in the time index column's unit.
     pub(crate) max_scalar: ScalarValue,
     /// Name of the time index column.
     pub(crate) time_index_col_name: String,
-    /// Name, min and max of the first primary key column, when the file's key range is known.
-    pub(crate) first_primary_key: Option<(String, ArrayRef, ArrayRef)>,
+    /// First primary key column, when the file's key range is known.
+    pub(crate) first_primary_key: Option<FirstPrimaryKeyStats<'a>>,
 }
 
-impl PruningStatistics for FileLevelPruningStats {
+/// Min and max of the first primary key column of a file, decoded from the file's primary key
+/// range on first use. Predicates that do not reference the column skip the decoding.
+pub(crate) struct FirstPrimaryKeyStats<'a> {
+    input: &'a ScanInput,
+    file: &'a FileHandle,
+    column: &'a ColumnMetadata,
+    range: OnceLock<Option<(ArrayRef, ArrayRef)>>,
+}
+
+impl FirstPrimaryKeyStats<'_> {
+    fn range_of(&self, column: &Column) -> Option<&(ArrayRef, ArrayRef)> {
+        if column.name != self.column.column_schema.name {
+            return None;
+        }
+        self.range
+            .get_or_init(|| {
+                self.input
+                    .decode_first_primary_key_range(self.file, self.column)
+            })
+            .as_ref()
+    }
+}
+
+impl PruningStatistics for FileLevelPruningStats<'_> {
     fn min_values(&self, column: &Column) -> Option<ArrayRef> {
         if column.name == self.time_index_col_name {
             ScalarValue::iter_to_array(std::iter::once(self.min_scalar.clone())).ok()
         } else {
-            self.first_primary_key
-                .as_ref()
-                .filter(|(name, _, _)| *name == column.name)
-                .map(|(_, min, _)| min.clone())
+            let (min, _) = self.first_primary_key.as_ref()?.range_of(column)?;
+            Some(min.clone())
         }
     }
 
@@ -1932,10 +1971,8 @@ impl PruningStatistics for FileLevelPruningStats {
         if column.name == self.time_index_col_name {
             ScalarValue::iter_to_array(std::iter::once(self.max_scalar.clone())).ok()
         } else {
-            self.first_primary_key
-                .as_ref()
-                .filter(|(name, _, _)| *name == column.name)
-                .map(|(_, _, max)| max.clone())
+            let (_, max) = self.first_primary_key.as_ref()?.range_of(column)?;
+            Some(max.clone())
         }
     }
 
