@@ -797,6 +797,11 @@ fn build_evaluated_segment(
             .samples()
             .is_some_and(|schema| schema.eval_grid.is_some())
             || is_raw_series_source(&child)
+            // A selector that discovered several metrics is prepared as the union of one source per
+            // metric, which already declares the frames this segment reads: it names each metric's
+            // source, so there is no single metric to bind it to and nothing to wrap it in. See
+            // [`is_sourced_plan`].
+            || is_sourced_plan(&child)
             // The typed empty frame of a selector that matched no table is an input in its own
             // right: it reads no region and carries no metric, so there is nothing to wrap it in.
             // A segment over it is still an explicit-label frame with no series.

@@ -229,26 +229,19 @@ pub(crate) fn split(
             op: BoundVectorOp::TopK { .. },
             ..
         } => Err(declined("a whole-vector operation above a split aggregate")),
-        // A canonical merge hands on the samples it was given, one series per canonical label set,
-        // so on the aggregate's own input side it belongs to the prefix: every partition collects
-        // the pieces of one label set its own scan returned, groups them and folds them, and the
-        // state router above the cut merges those partials. That is what keeps a metadata drop the
-        // canonical pass collected (`{job=NULL}` and `{job=''}` fold into one label set) from
-        // costing the statement its split.
+        // A canonical merge answers one series per canonical label set from every piece of that set,
+        // and the pieces of one set are not in one partition: a label rewrite created them after the
+        // scan split the rows. A split keeps that merge in the prefix, where it sees one partition's
+        // pieces - so two colliding series that landed in different partitions are each collected
+        // apart, the state router folds their partial states, and the statement answers a value
+        // where Prometheus reports `vector cannot contain metrics with the same labelset`.
         //
-        // What it costs is the cross-partition case: two colliding series whose values at one grid
-        // point land in two different partitions are each collected inside their own partition, so
-        // the collision is never seen and the final stage adds the two states instead of reporting
-        // `vector cannot contain metrics with the same labelset`. That is the answer the existing
-        // planner gives for this shape - it inserts no merge here at all - and the split is what a
-        // per-partition collection can promise.
-        //
-        // Above the cut the merge would have to be applied to merged state, which no arm below
-        // carries, so a merge standing over an aggregate still keeps the existing plan.
-        NativeExpr::Merge { input } => match split(input, fields, time_index)? {
-            Some(_) => Err(declined("an aggregate under a canonical merge")),
-            None => Ok(None),
-        },
+        // The merge therefore has to stay above every partition, and the tree keeps the plan the
+        // lowering gives a collected subtree: the merge is the boundary (`canonical_boundary_stages`
+        // builds its producer and the canonical router collects one label set from every partition),
+        // and the fold above it reads the whole series that boundary assembled. Refusing the split
+        // here is what sends the statement there instead of answering it per partition.
+        NativeExpr::Merge { .. } => Err(declined("an aggregate split across a canonical merge")),
         // A window whose input is already evaluated - a subquery - applies to the merged values the
         // suffix reads, provided it evaluates on a grid. The declared grid and the input's grid are
         // already required to be the same one when the window is bound, so the cut's grid need not be
@@ -456,10 +449,12 @@ pub(crate) fn admit_prefix(root: &NativeNode) -> DfResult<()> {
                     }
                 };
             }
-            // A canonical merge is a `merge_same_labelset` over the pieces one scan returned: it
-            // reads the series this partition holds and answers one series per label set, so it
-            // runs entirely inside the prefix, below the aggregate the cut splits at.
-            NativeExpr::Merge { input } => node = input,
+            // A canonical merge is a `merge_same_labelset` over the pieces one scan returned, so it
+            // reads across series even inside one partition: a prefix holding one cannot promise
+            // one series per label set, which is why the split refuses it above as well.
+            NativeExpr::Merge { .. } => {
+                return Err(declined("a per-series prefix that collects a label set"));
+            }
             _ => break,
         }
     }

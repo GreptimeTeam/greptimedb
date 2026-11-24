@@ -268,21 +268,21 @@ fn canonical_rate_tree_of(schema: Arc<SeriesSchema>) -> NativeTree {
     .expect("a merge over a window on a grid is a legal tree")
 }
 
-/// A canonical merge on the aggregate's input side runs inside the partial half of the split.
+/// A canonical merge on the aggregate's input side refuses the split.
 ///
-/// The merge is a `merge_same_labelset` over the pieces one scan returned, so it stays below the cut:
-/// each partition collects the pieces its own scan handed out, groups them and folds them, and only
-/// the state crosses to the final half. That is what lets a metadata drop the canonical pass had to
-/// collect - the `{job=NULL}` / `{job=''}` pair on a nullable key - keep the split a histogram fold
-/// needs, instead of sending `sum(rate(h[5m]))` back to the existing plan.
+/// The merge answers one series per canonical label set from every piece of that set, and the pieces
+/// of one set are not in one partition: the rewrite that created them ran after the scan split the
+/// rows. A split keeps the merge in its per-partition prefix, where it sees only the pieces its own
+/// partition holds, so two colliding series that landed in different partitions are each collected
+/// apart and the final half adds their states - a value where Prometheus reports
+/// `vector cannot contain metrics with the same labelset`.
 ///
-/// The cost this records: two colliding series whose values at one grid point reach two *different*
-/// partitions are each collected apart, so the final half adds their states rather than reporting
-/// `vector cannot contain metrics with the same labelset`. That is the answer the existing planner
-/// gives for this shape - it inserts no merge at all - and one per-partition collection is all the
-/// split can promise.
+/// So the split declines and the statement keeps the plan a collected subtree gets: the merge is the
+/// boundary, its producer collects each partition's pieces, and the canonical router collects one
+/// label set from every partition before anything folds it. That is the shape an overlap is reported
+/// in, whether the aggregate is the statement root or sits under the merge.
 #[test]
-fn a_canonical_merge_below_the_aggregate_runs_inside_the_partial() {
+fn a_canonical_merge_below_the_aggregate_refuses_the_split() {
     let merged = canonical_rate_tree_of(raw_schema());
     let output = merged.root().output.clone();
     let tree = NativeTree::try_new(NativeNode {
@@ -298,38 +298,29 @@ fn a_canonical_merge_below_the_aggregate_runs_inside_the_partial() {
         output: output.clone(),
     })
     .expect("an aggregate over a collected window on a grid is a legal tree");
-    let (partial, final_tree) = FusedSeries::split_aggregate(&tree, TIME)
-        .unwrap_or_else(|error| panic!("a merge below the aggregate must split, not fail: {error}"))
-        .unwrap_or_else(|| panic!("a merge below the aggregate must split: {tree}"));
+    // `split_aggregate` reads a decline as "no split here", which is what leaves the merge above the
+    // partitions instead of inside them.
     assert!(
-        matches!(
-            &partial.root().expr,
-            NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Partial
-        ),
-        "the partial half folds the collected pieces: {partial}"
+        FusedSeries::split_aggregate(&tree, TIME)
+            .unwrap_or_else(|error| panic!("a refused split is not a failure: {error}"))
+            .is_none(),
+        "a merge below the aggregate keeps the collected plan: {tree}"
     );
-    // The merge is the partial's own: one collection per partition, under that partition's fold.
-    let NativeExpr::Aggregate { input, .. } = &partial.root().expr else {
-        unreachable!("the partial root is the cut aggregate")
+    let fields = crate::native::split::prefix_fields(&tree).expect("the prefix fields are bound");
+    let error = match crate::native::split::split(tree.root(), &fields, TIME) {
+        Ok(_) => panic!("a merge below the aggregate is not a prefix the split carries: {tree}"),
+        Err(error) => error,
     };
     assert!(
-        matches!(input.expr, NativeExpr::Merge { .. }),
-        "the collected drop stays inside the partial: {partial}"
-    );
-    assert!(
-        matches!(&final_tree.root().expr, NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Final),
-        "the final half only folds the states: {final_tree}"
-    );
-    // Nothing above the cut collects: the merge did its work below it.
-    assert!(
-        !final_tree
-            .root()
-            .any(&|node| matches!(node.expr, NativeExpr::Merge { .. })),
-        "the merge must not cross the cut: {final_tree}"
+        error
+            .to_string()
+            .contains("an aggregate split across a canonical merge"),
+        "{error}"
     );
 
-    // A merge *above* the aggregate is the other shape: applying it to the merged state is what no
-    // arm of the split carries, so the split declines rather than dropping it.
+    // A merge *above* the aggregate is refused for the same reason, and by the same arm: applying it
+    // to the merged state is what no arm of the split carries, and collecting the state it folds is
+    // what the merge cannot do.
     let above = NativeTree::try_new(NativeNode {
         expr: NativeExpr::Merge {
             input: Box::new(tree.root().clone()),
@@ -345,7 +336,7 @@ fn a_canonical_merge_below_the_aggregate_runs_inside_the_partial() {
     assert!(
         error
             .to_string()
-            .contains("an aggregate under a canonical merge"),
+            .contains("an aggregate split across a canonical merge"),
         "{error}"
     );
 }

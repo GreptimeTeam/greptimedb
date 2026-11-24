@@ -11122,11 +11122,17 @@ async fn an_aggregate_over_an_unnamed_kind_keeps_the_existing_plan() {
             pending.extend(node.inputs());
         }
     }
-    // `sum(label_replace(...))` is no longer one of the shapes above: the rewrite collapses every
-    // series onto one `tag_0`, so the canonical pass collects it with a `Merge` above the window -
-    // and a split that declined across that merge is what used to keep the legacy histogram
-    // aggregate here. The merge stands on the aggregate's own input side, so the split carries it:
-    // the partial half collects each partition's pieces and folds them, and only the state crosses.
+    // `sum(label_replace(...))` is one of the shapes above. The rewrite collapses every series onto
+    // one `tag_0`, so the canonical pass collects it with a `Merge` on the fold's own input side -
+    // and a split keeps that merge inside its per-partition prefix, where the pieces of one label
+    // set are collected a partition at a time: two colliding series that landed in different
+    // partitions are each folded apart, their states are added above the router, and the statement
+    // answers a value where Prometheus reports `vector cannot contain metrics with the same
+    // labelset`. The split therefore refuses a merge, and no other execution of this route folds a
+    // histogram state: the chain built above a boundary folds floats, and what carries a histogram
+    // fold across a partition boundary is the split's state alone. So the statement keeps the
+    // existing plan - the plan it had before the split carried a merge - and the collision is the
+    // existing route's to report.
     let table_provider =
         build_test_native_histogram_table_provider_with_stable_keys("some_metric").await;
     let plan = build_native_fused_plan_with_provider(
@@ -11136,20 +11142,14 @@ async fn an_aggregate_over_an_unnamed_kind_keeps_the_existing_plan() {
     )
     .await;
     let display = plan.display_indent_schema().to_string();
-    let final_node = find_final_split(&plan).unwrap_or_else(|| {
-        panic!("the collected histogram fold kept the legacy aggregate: {display}")
-    });
     assert!(
-        partial_below(final_node).is_some(),
-        "the collected histogram fold lost its partial half: {display}"
+        display.contains("Aggregate: groupBy=")
+            && display.contains("prom_native_histogram_agg_sum("),
+        "the collected histogram fold kept the existing plan: {display}"
     );
-    let partial = partial_below(final_node).expect("the split's partial half");
     assert!(
-        partial
-            .tree()
-            .to_string()
-            .contains("Merge: canonical label-set merge"),
-        "the collection runs below the cut, inside the partial: {display}"
+        find_fused_series(&plan).is_none(),
+        "the collected histogram fold ran a native fold per segment: {display}"
     );
 
     // A float-producing window still answers on the route: its count, not the input histogram,
@@ -17029,10 +17029,11 @@ async fn a_histogram_aggregate_the_split_declines_keeps_the_existing_plan() {
 /// execution: a canonical merge carrying histograms.
 #[tokio::test]
 async fn histogram_state_stays_out_of_the_shapes_it_cannot_cross() {
-    // A `Merge` on the aggregate's own input side stays inside the partial half of the split: each
-    // partition collects the pieces of one label set its scan returned and folds them, so the frames
-    // the merge carries never cross the cut. This is the shape a metadata drop the canonical pass
-    // had to collect produces, and it keeps its split.
+    // A `Merge` on the aggregate's own input side is such a shape. The merge answers one series per
+    // label set from pieces that are spread over the scan's partitions, and a split keeps it in the
+    // per-partition prefix, where two colliding pieces from different partitions are folded apart
+    // instead of reported. A histogram fold has no execution above a boundary either - the chain
+    // this route builds there folds floats - so the statement keeps the existing plan.
     let table_provider = build_test_native_histogram_table_provider("some_metric").await;
     let plan = build_native_fused_plan_with_provider(
         "sum(label_replace(some_metric, \"tag_0\", \"x\", \"tag_0\", \".*\"))",
@@ -17041,11 +17042,9 @@ async fn histogram_state_stays_out_of_the_shapes_it_cannot_cross() {
     )
     .await;
     let display = plan.display_indent_schema().to_string();
-    let final_node = find_final_split(&plan)
-        .unwrap_or_else(|| panic!("the collected histogram fold left the route: {display}"));
     assert!(
-        partial_below(final_node).is_some(),
-        "the collected histogram fold lost its partial half: {display}"
+        find_fused_series(&plan).is_none(),
+        "the collected histogram fold ran a native fold: {display}"
     );
     // Two aggregates are two cuts, which this split still cannot carry: the inner one would have to
     // be replanned as its own pair above the outer one's answer.
