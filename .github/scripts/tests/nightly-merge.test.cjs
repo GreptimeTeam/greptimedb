@@ -19,27 +19,44 @@ const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const workflow = readFileSync(resolve(__dirname, '../../workflows/nightly-merge.yml'), 'utf8');
+const template = readFileSync(resolve(__dirname, '../../pull_request_template.md'), 'utf8');
 const scripts = [...workflow.matchAll(/          script: \|\n((?:            .*\n|\n)+)/g)]
-  .map(match => new AsyncFunction('github', 'context', 'core', 'process', match[1].replace(/^            /gm, '')));
+  .map(match => new AsyncFunction('github', 'context', 'core', 'process', 'require', match[1].replace(/^            /gm, '')));
 assert.equal(scripts.length, 2);
-const checked = '- [x] Merge during the nightly window <!-- nightly-merge -->';
+const { changesFor } = require('../migrate-pr-labels.cjs');
+const label = 'skip nightly merge';
+const checked = '- [x] Skip nightly merge';
+const unchecked = '- [ ] Skip nightly merge';
+const legacy = '- [x] Merge during the nightly window <!-- nightly-merge -->';
 
-async function run({ sync = false, body = checked, labels = ['merge nightly'],
-  detail = {}, current = {}, threads = [[true]], count = 1, dryRun = false,
+async function run({ sync = false, body = unchecked, labels = [], events = [], payload = {},
+  detail = {}, listed = {}, current = {}, threads = [[true]], count = 1, dryRun = false,
   failFirst = false, enqueueError = Error('head changed') } = {}) {
   const calls = [];
   let page = 0;
+  const pr = { state: 'open', draft: false, base: { ref: 'main' }, body, labels: labels.map(name => ({ name })) };
   const github = {
     rest: {
-      pulls: { get: async () => ({ data: { state: 'open', draft: false, base: { ref: 'main' },
-        body, labels: labels.map(name => ({ name })), ...current } }) },
+      pulls: { list() {}, get: async () => {
+        if (!sync) calls.push(['get']);
+        return { data: { ...pr, ...current } };
+      } },
       issues: {
-        listForRepo: () => {},
+        listEvents() {},
         addLabels: async args => calls.push(['add', args.labels]),
         removeLabel: async args => calls.push(['remove', args.name])
       }
     },
-    paginate: async () => Array.from({ length: count }, (_, i) => ({ number: i + 1, pull_request: {} })),
+    paginate: async (route, args) => {
+      if (route === github.rest.issues.listEvents) {
+        assert.equal(args.issue_number, 1);
+        return events;
+      }
+      assert.equal(route, github.rest.pulls.list);
+      assert.deepEqual(args, { owner: 'GreptimeTeam', repo: 'greptimedb', state: 'open', base: 'main',
+        sort: 'created', direction: 'asc', per_page: 100 });
+      return Array.from({ length: count }, (_, i) => ({ ...pr, number: i + 1, ...listed }));
+    },
     graphql: async (query, args) => {
       if (query.includes('mutation')) {
         calls.push(['enqueue', args]);
@@ -60,26 +77,59 @@ async function run({ sync = false, body = checked, labels = ['merge nightly'],
   };
   const summary = { addHeading() { return this; }, addTable(rows) { calls.push(['summary', rows]); return this; }, async write() {} };
   await scripts[sync ? 0 : 1](github,
-    { repo: { owner: 'GreptimeTeam', repo: 'greptimedb' }, payload: { pull_request: { number: 1 } } },
+    { repo: { owner: 'GreptimeTeam', repo: 'greptimedb' }, payload: { pull_request: { number: 1 }, ...payload } },
     { summary, info() {}, warning() {}, setFailed: message => calls.push(['failed', message]) },
-    { env: { DRY_RUN: String(dryRun) } });
+    { env: { DRY_RUN: String(dryRun) } }, path => require(resolve(__dirname, '../../..', path)));
   return calls;
 }
 
-test('label sync grants PR label write permission without checking out PR code', () => {
+test('label sync reads the helper from the trusted workflow commit', () => {
   const syncJob = workflow.split('  sync-label:\n')[1].split('  enqueue:\n')[0];
   assert.match(syncJob, /^      pull-requests: write$/m);
-  assert.doesNotMatch(syncJob, /uses: actions\/checkout/);
+  assert.match(syncJob, /ref: \$\{\{ github\.sha \}\}/);
+  assert.match(syncJob, /persist-credentials: false/);
+  assert.doesNotMatch(syncJob, /pull_request\.head/);
 });
 
-test('template opts in and checkbox edits reconcile only the nightly label', async () => {
-  assert.ok(readFileSync(resolve(__dirname, '../../pull_request_template.md'), 'utf8').includes(checked));
-  assert.deepEqual(await run({ sync: true, labels: ['bug'] }), [['add', ['merge nightly']]]);
-  assert.deepEqual(await run({ sync: true }), []);
-  for (const body of [checked.replace('[x]', '[ ]')]) {
-    assert.deepEqual(await run({ sync: true, body }), [['remove', 'merge nightly']]);
+test('enqueueing requires rollout activation and dry runs work while paused', () => {
+  const guard = workflow.split('  enqueue:\n')[1].match(/    if: >-\n((?:      .*\n)+)/)[1];
+  const enabled = new Function('github', 'vars', 'inputs', `return (${guard});`);
+  const repo = { repository: 'GreptimeTeam/greptimedb' };
+  for (const flag of ['', 'false', 'true']) {
+    const vars = { NIGHTLY_MERGE_ENABLED: flag };
+    const scheduled = { ...repo, event_name: 'schedule' };
+    const manual = { ...repo, event_name: 'workflow_dispatch' };
+    assert.equal(enabled(scheduled, vars, {}), flag === 'true');
+    assert.equal(enabled(manual, vars, { dry_run: false }), flag === 'true');
+    assert.equal(enabled(manual, vars, { dry_run: true }), true);
+    assert.equal(enabled({ ...repo, event_name: 'pull_request_target' }, vars, {}), false);
   }
-  assert.deepEqual(await run({ sync: true, body: checked.replace('[x]', '[X]'), labels: [] }), [['add', ['merge nightly']]]);
+});
+
+test('default template needs no label and a checked opt-out is effective before sync', async () => {
+  assert.ok(template.includes(unchecked));
+  assert.deepEqual(await run({ sync: true, body: template }), []);
+  for (const body of [checked, checked.replace('[x]', '[X]') + ' — wait for backport',
+    checked + ' <!-- note --> more details', unchecked + '\r\n' + checked]) {
+    assert.deepEqual(await run({ sync: true, body, labels: ['bug'] }), [['add', [label]]]);
+    assert.equal((await run({ body })).some(c => c[0] === 'enqueue'), false);
+  }
+  assert.deepEqual(await run({ sync: true }), []);
+  assert.deepEqual(await run({ sync: true, body: checked, labels: [label] }), []);
+});
+
+test('a coalesced uncheck releases a bot hold; delayed edits and reopens preserve a newer manual hold', async () => {
+  const bot = { id: 1, created_at: '2026-01-01T00:00:00Z', event: 'labeled', label: { name: label },
+    actor: { login: 'github-actions[bot]' } };
+  const removed = { ...bot, id: 2, event: 'unlabeled' };
+  const manual = { ...bot, id: 3, actor: { login: 'maintainer' } };
+  for (const payload of [{ action: 'edited', changes: { title: { from: 'before' } } },
+    { action: 'edited', changes: { body: { from: checked } } }, { action: 'reopened' }]) {
+    const opts = { sync: true, labels: [label], payload };
+    assert.deepEqual(await run({ ...opts, events: [bot] }), [['remove', label]]);
+    assert.deepEqual(await run({ ...opts, events: [manual, bot, removed] }), []);
+    assert.deepEqual(await run({ ...opts, events: [] }), []);
+  }
 });
 
 test('eligible PR is enqueued with its checked head; dry run performs no mutation', async () => {
@@ -89,7 +139,8 @@ test('eligible PR is enqueued with its checked head; dry run performs no mutatio
 
 test('each eligibility gate independently prevents enqueueing', async () => {
   for (const options of [
-    { labels: [] },
+    { labels: [label] }, { listed: { draft: true } }, { current: { labels: [{ name: label }] } },
+    { current: { body: checked } },
     { current: { draft: true } }, { current: { state: 'closed' } }, { current: { base: { ref: 'release/v1.3' } } },
     { detail: { reviewDecision: 'REVIEW_REQUIRED' } }, { detail: { reviewDecision: 'CHANGES_REQUESTED' } },
     { detail: { mergeStateStatus: 'BLOCKED' } }, { detail: { mergeStateStatus: 'UNKNOWN' } },
@@ -103,6 +154,7 @@ test('each eligibility gate independently prevents enqueueing', async () => {
 test('all thread pages are checked before enqueueing', async () => {
   const calls = await run({ threads: [[true], [true]] });
   assert.deepEqual(calls.filter(c => c[0] === 'threads'), [['threads', null], ['threads', 'page-0']]);
+  assert.ok(calls.findIndex(c => c[0] === 'get') > calls.findLastIndex(c => c[0] === 'threads'));
   assert.equal(calls.filter(c => c[0] === 'enqueue').length, 1);
 });
 
@@ -113,15 +165,80 @@ test('per-run cap and individual failures do not prevent later candidates', asyn
   assert.equal(calls.filter(c => c[0] === 'failed').length, 1);
 });
 
-test('label-only opt-in survives PRs without a template and does not require a checkbox', async () => {
-  for (const body of ['', null, 'Existing PR description', `> ${checked}`]) {
+test('checkbox-free PRs enter by default and manual holds work on any description', async () => {
+  for (const body of ['', null, 'Automated PR', `> ${checked}`, `\`\`\`md\n${checked}\n\`\`\``,
+    `<!--\n${checked}\n-->`, legacy, legacy.replace('[x]', '[ ]')]) {
     assert.deepEqual(await run({ sync: true, body }), []);
-    assert.deepEqual(await run({ sync: true, body, labels: [] }), []);
     assert.equal((await run({ body })).filter(call => call[0] === 'enqueue').length, 1);
-    assert.equal((await run({ body, labels: [] })).some(call => call[0] === 'enqueue'), false);
+    assert.equal((await run({ body, labels: [label] })).some(call => call[0] === 'enqueue'), false);
   }
-  // The label is authoritative for admission, even before checkbox synchronization.
-  assert.equal((await run({ body: checked.replace('[x]', '[ ]') })).some(call => call[0] === 'enqueue'), true);
+});
+
+test('list fences hide example checkboxes and leave the following merge checklist effective', async () => {
+  for (const [opening, indent, closing] of [
+    ['1. ```sql', '   ', '   ```'],
+    ['10) ~~~md', '    ', '      ~~~~'],
+    ['- ```md', '  ', ''],
+    ['1.\t```md', '    ', '\t```'],
+    ['1. Reproduction\n   ```md', '   ', '']
+  ]) {
+    const description = (sample, box) =>
+      [opening, indent + 'SELECT 1;', '', indent + sample, closing, '', '## Merge timing', '', box].join('\n');
+    for (const [sample, box] of [[unchecked, checked], [checked, unchecked]]) {
+      const body = description(sample, box);
+      assert.deepEqual(await run({ sync: true, body }), box === checked ? [['add', [label]]] : [], body);
+      assert.equal((await run({ body })).some(call => call[0] === 'enqueue'), box === unchecked, body);
+    }
+    assert.equal(changesFor({ optedIn: false }, { body: description(legacy, legacy), labels: [] }).body,
+      description(legacy, checked));
+  }
+});
+
+test('migration follows the snapshotted label, edits only visible legacy items and preserves docs overrides', () => {
+  for (const optedIn of [false, true]) {
+    const old = '- [ ] Merge during the nightly window';
+    const before = ['Author notes', `> ${old}`, '```md', old, '```', '<!--', old, '-->', ''];
+    const pr = { body: [...before, old + ' — note', legacy + ' (later)'].join('\r\n'),
+      labels: ['docs-required', 'bug', 'docs-not-required', ...(optedIn ? ['merge nightly'] : [])].map(name => ({ name })) };
+    const entry = { optedIn };
+    const result = changesFor(entry, pr);
+    const replacement = optedIn ? unchecked : checked;
+    assert.equal(result.body, [...before, replacement + ' — note', replacement + ' (later)'].join('\r\n'));
+    assert.deepEqual(result.remove, optedIn ? ['merge nightly', 'docs-not-required'] : ['docs-not-required']);
+    assert.equal(result.addHold, false);
+    assert.equal(result.waitingForSync, !optedIn);
+    const migrated = { body: result.body, labels: optedIn ? [] : [{ name: label }] };
+    assert.deepEqual(changesFor(entry, migrated), { body: migrated.body, addHold: false, remove: [],
+      waitingForSync: false, extraHold: false });
+  }
+});
+
+test('migration updates the stock help only in the comment following a converted checkbox', () => {
+  const oldHelp = 'Uncheck to opt out and remove the `merge nightly` label; this does not enable immediate merging.';
+  const newHelp = 'Check to opt out. Maintainers can also apply the `skip nightly merge` label directly.';
+  const migrate = (body, optedIn) => changesFor({ optedIn }, { body, labels: [] }).body;
+  assert.ok(template.includes(newHelp));
+  assert.equal(migrate(template.replace(unchecked, legacy).replace(newHelp, oldHelp), true), template);
+
+  const description = (box, help) => [
+    oldHelp, '', '```md', legacy, '<!--', oldHelp, '-->', '```', '',
+    box + ' — waiting for a backport', '', '<!--', 'Author note', help, '-->', '',
+    '<!--', oldHelp, '-->'
+  ].join('\r\n');
+  assert.equal(migrate(description(legacy, oldHelp), false), description(checked, newHelp));
+  assert.equal(migrate(description(legacy, oldHelp + ' Custom note.'), false),
+    description(checked, oldHelp + ' Custom note.'));
+  assert.equal(migrate(description(checked, oldHelp), false), description(checked, oldHelp));
+});
+
+test('migration holds checkbox-free PRs across retries and flags a later manual opt-out for review', () => {
+  const pr = { body: null, labels: [] };
+  assert.equal(changesFor({ optedIn: false }, pr).addHold, true);
+  assert.equal(changesFor({ optedIn: true }, pr).addHold, false);
+  pr.labels.push({ name: label });
+  assert.equal(changesFor({ optedIn: false }, pr).addHold, false);
+  assert.equal(changesFor({ optedIn: true }, pr).extraHold, true);
+  assert.equal(changesFor({ optedIn: false }, pr).body, null);
 });
 
 const stackMessage = 'This pull request is part of a stack and must be enqueued using the asynchronous merge REST API. For more information, see https://docs.github.com/rest/pulls/pulls#merge-a-pull-request-asynchronously';

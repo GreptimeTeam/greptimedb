@@ -23,40 +23,62 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
-      # PR label mutations require pull-request write permission.
+      contents: read
       pull-requests: write
       issues: write
     concurrency:
       group: nightly-merge-label-${{ github.event.pull_request.number }}
       cancel-in-progress: false
     steps:
-      # No checkout: PR contents are untrusted data, never executable code.
+      # On pull_request_target github.sha identifies trusted base-repository code.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: .github/scripts/nightly-merge.cjs
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
       - uses: actions/github-script@v7
         with:
           script: |
+            const { skipChecked, skipLabel } = require('./.github/scripts/nightly-merge.cjs');
             const { owner, repo } = context.repo;
             const issue_number = context.payload.pull_request.number;
             const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: issue_number });
-            const checkbox = /^- \[([ xX])\] Merge during the nightly window <!-- nightly-merge -->\s*$/m.exec(pr.body || '');
-            // PRs without the template manage their opt-in through the label.
-            if (!checkbox) return;
-            const selected = checkbox[1].toLowerCase() === 'x';
-            const label = 'merge nightly';
-            const labeled = pr.labels.some(item => item.name === label);
-            if (selected && !labeled) {
-              await github.rest.issues.addLabels({ owner, repo, issue_number, labels: [label] });
-            } else if (!selected && labeled) {
-              await github.rest.issues.removeLabel({ owner, repo, issue_number, name: label });
+            if (pr.state !== 'open') return;
+            const selected = skipChecked(pr.body);
+            const labeled = pr.labels.some(item => item.name === skipLabel);
+            if (selected === labeled) return;
+            if (selected) {
+              await github.rest.issues.addLabels({ owner, repo, issue_number, labels: [skipLabel] });
+            } else {
+              // Only undo the bot's own label. A maintainer may have applied a hold since the edit.
+              const events = await github.paginate(github.rest.issues.listEvents, { owner, repo, issue_number, per_page: 100 });
+              const [last] = events.filter(event => event.label?.name === skipLabel &&
+                (event.event === 'labeled' || event.event === 'unlabeled'))
+                .sort((a, b) => b.created_at.localeCompare(a.created_at) || b.id - a.id);
+              if (last?.event === 'labeled' && last.actor?.login === 'github-actions[bot]') {
+                await github.rest.issues.removeLabel({ owner, repo, issue_number, name: skipLabel });
+              }
             }
 
   enqueue:
-    if: github.repository == 'GreptimeTeam/greptimedb' && github.event_name != 'pull_request_target'
+    if: >-
+      github.repository == 'GreptimeTeam/greptimedb' && github.event_name != 'pull_request_target' &&
+      (vars.NIGHTLY_MERGE_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.dry_run))
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
     concurrency:
       group: nightly-merge-enqueue
       cancel-in-progress: false
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: .github/scripts/nightly-merge.cjs
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
       # Reuses the automation credential used by backport and compat updates.
       # A PAT (or App token) lets subsequent merge_group workflows run.
       - uses: actions/github-script@v7
@@ -65,25 +87,20 @@ jobs:
         with:
           github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
           script: |
+            const { eligibleForNightly } = require('./.github/scripts/nightly-merge.cjs');
             const { owner, repo } = context.repo;
             const dryRun = process.env.DRY_RUN === 'true';
-            const candidates = await github.paginate(github.rest.issues.listForRepo, {
-              owner, repo, state: 'open', labels: 'merge nightly',
+            const candidates = await github.paginate(github.rest.pulls.list, {
+              owner, repo, state: 'open', base: 'main',
               sort: 'created', direction: 'asc', per_page: 100
             });
             const rows = [];
             let enqueued = 0;
             for (const candidate of candidates) {
-              if (!candidate.pull_request || enqueued >= 5) continue;
+              if (enqueued >= 5) break;
+              if (!eligibleForNightly(candidate)) continue;
               const number = candidate.number;
               try {
-                // Fetch current labels and PR state, not the earlier list snapshot.
-                const { data: current } = await github.rest.pulls.get({ owner, repo, pull_number: number });
-                if (current.state !== 'open' || current.draft || current.base.ref !== 'main' ||
-                    !current.labels.some(label => label.name === 'merge nightly')) {
-                  rows.push([String(number), 'Skipped: not opted in, draft, closed, or not targeting main']);
-                  continue;
-                }
                 const { repository: { pullRequest: pr } } = await github.graphql(`
                   query($owner: String!, $repo: String!, $number: Int!) {
                     repository(owner: $owner, name: $repo) {
@@ -118,6 +135,12 @@ jobs:
                 } while (cursor && !unresolved);
                 if (unresolved) {
                   rows.push([String(number), 'Skipped: unresolved review threads']);
+                  continue;
+                }
+                // An opt-out may have arrived while checking reviews and threads.
+                const { data: current } = await github.rest.pulls.get({ owner, repo, pull_number: number });
+                if (!eligibleForNightly(current)) {
+                  rows.push([String(number), 'Skipped: opted out, draft, closed, or not targeting main']);
                   continue;
                 }
                 if (!dryRun) {
