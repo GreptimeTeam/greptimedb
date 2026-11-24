@@ -140,10 +140,14 @@ async fn test_narthex_manual_repair_with_full_sidecar_budget() -> WhateverResult
             )
             .await?;
         let region = engine.find_region(id).unwrap();
-        let key = new_sparse_primary_key(&["api"], &region.metadata(), 42, 7);
-        engine
-            .handle_request(id, test_util::sparse_metric_put(key, 1000, Some(1.0)))
-            .await?;
+        // Give both formats enough distinct tag data to exceed the minimum 1 KiB budget.
+        for tsid in 0..64 {
+            let tag = uuid::Uuid::new_v4().to_string();
+            let key = new_sparse_primary_key(&[&tag], &region.metadata(), 42, tsid);
+            engine
+                .handle_request(id, test_util::sparse_metric_put(key, 1000, Some(1.0)))
+                .await?;
+        }
         test_util::flush_region(&engine, id, None).await;
         engine
             .handle_request(id, build_series_index_request())
