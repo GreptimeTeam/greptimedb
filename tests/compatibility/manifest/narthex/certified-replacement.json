@@ -26,7 +26,6 @@
             "sequence": 7,
             "format": {
               "narthex_series_index": {
-                "sources": [],
                 "manifest_size": 10,
                 "parts": [
                   {

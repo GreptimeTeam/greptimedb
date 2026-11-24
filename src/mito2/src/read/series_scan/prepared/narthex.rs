@@ -101,32 +101,20 @@ pub(crate) async fn open_sources(
             continue;
         };
         let region = context.input.region_metadata().region_id;
-        let selected: Vec<_> = if let Some(proof) = &index.coverage {
-            if proof.schema_version != context.input.region_metadata().schema_version
-                || proof.region_id != region
-            {
-                continue;
-            }
-            indices
-                .iter()
-                .map(|i| &context.input.files[*i])
-                .filter(|sample| proof.covers(sample.meta_ref()))
-                .map(|sample| sample.file_id())
-                .collect()
-        } else {
-            if !index
-                .sources
-                .iter()
-                .all(|id| context.input.files.iter().any(|f| f.file_id() == *id))
-            {
-                continue;
-            }
-            indices
-                .iter()
-                .map(|i| context.input.files[*i].file_id())
-                .filter(|id| index.sources.contains(id))
-                .collect()
+        let Some(proof) = &index.coverage else {
+            continue;
         };
+        if proof.schema_version != context.input.region_metadata().schema_version
+            || proof.region_id != region
+        {
+            continue;
+        }
+        let selected: Vec<_> = indices
+            .iter()
+            .map(|i| &context.input.files[*i])
+            .filter(|sample| proof.covers(sample.meta_ref()))
+            .map(|sample| sample.file_id())
+            .collect();
         if selected.is_empty() {
             continue;
         }

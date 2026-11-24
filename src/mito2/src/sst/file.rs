@@ -321,8 +321,7 @@ pub struct NarthexSeriesIndexMeta {
     pub manifest_size: u64,
     /// Parts in part-ID order, starting at zero.
     pub parts: SmallVec<[NarthexPartMeta; 1]>,
-    /// Exact source membership for legacy indexes. Certified builds leave this empty.
-    pub sources: Vec<RegionFileId>,
+    /// Absent on older indexes that cannot certify sample coverage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coverage: Option<NarthexCoverage>,
 }
@@ -1506,7 +1505,6 @@ mod tests {
             ],
         }));
         let series = FileFormat::NarthexSeriesIndex(Box::new(NarthexSeriesIndexMeta {
-            sources: vec![],
             coverage: None,
             manifest_size: 5,
             parts: smallvec::smallvec![

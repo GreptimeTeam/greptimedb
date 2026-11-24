@@ -123,12 +123,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 .map(|meta| meta.as_ref().clone())
                 .collect::<Vec<_>>();
             let edit = RegionEdit {
-                series_indexes_to_add: staging_manifest
-                    .series_indexes
-                    .values()
-                    .filter(|file| !matches!(&file.format, crate::sst::file::FileFormat::NarthexSeriesIndex(meta) if meta.coverage.is_some()))
-                    .map(|index| index.as_ref().clone())
-                    .collect(),
                 files_to_add,
                 files_to_remove: vec![],
                 timestamp_ms: Some(Utc::now().timestamp_millis()),

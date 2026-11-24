@@ -197,11 +197,6 @@ pub(crate) async fn write_series(
         format: FileFormat::NarthexSeriesIndex(Box::new(NarthexSeriesIndexMeta {
             manifest_size: 0,
             parts: Default::default(),
-            sources: if coverage.is_some() {
-                Vec::new()
-            } else {
-                sources.iter().map(|file| file.file_id()).collect()
-            },
             coverage,
         })),
         ..Default::default()

@@ -1719,7 +1719,7 @@ mod tests {
         let file::FileFormat::NarthexSeriesIndex(meta) = &native.format else {
             unreachable!()
         };
-        assert!(meta.sources.is_empty());
+        assert!(serde_json::to_value(meta).unwrap().get("sources").is_none());
         let proof = meta.coverage.as_ref().unwrap();
         let mut spanning = restored.files.values().next().unwrap().as_ref().clone();
         spanning.sequence = std::num::NonZeroU64::new(80);

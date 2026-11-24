@@ -111,7 +111,7 @@ fn sparse_metric_create_request(format: &str) -> store_api::region_request::Regi
     request
 }
 
-fn build_series_index_request() -> RegionRequest {
+pub(super) fn build_series_index_request() -> RegionRequest {
     RegionRequest::BuildIndex(store_api::region_request::RegionBuildIndexRequest {
         options: Some(api::v1::region::build_index_request::Options::SeriesIndex(
             Default::default(),
@@ -171,6 +171,7 @@ async fn test_narthex_manual_repair_with_full_sidecar_budget() -> WhateverResult
     let path = handle.manifest_path();
     let bytes = store.read(&path).await.unwrap().to_bytes();
     let mut manifest: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(manifest["coverage"].get("source_file_ids").is_none());
     assert_eq!(manifest["version"], 1);
     manifest["version"] = json!(2);
     let incompatible = serde_json::to_vec(&manifest).unwrap();

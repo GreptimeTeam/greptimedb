@@ -316,42 +316,8 @@ impl<S> RegionWorkerLoop<S> {
                 new_file_metas.push(copied);
             }
         }
-        let target_samples: std::collections::HashMap<_, _> = target_region_manifest
-            .files
-            .values()
-            .map(|meta| meta.as_ref())
-            .chain(new_file_metas.iter())
-            .filter_map(|target| {
-                let source = source_region_manifest.files.get(&target.file_id)?;
-                Some((source.file_id(), target.file_id()))
-            })
-            .collect();
-        let mut new_series_indexes = Vec::new();
-        for (id, index) in &source_region_manifest.series_indexes {
-            if matches!(&index.format, file::FileFormat::NarthexSeriesIndex(meta) if meta.coverage.is_some())
-            {
-                // Destination imports have their own admission sequences.
-                continue;
-            }
-            if target_region_manifest.series_indexes.contains_key(id) {
-                continue;
-            }
-            let (mut copied, objects) = prepare_narthex_copy(region, index).await?;
-            if let file::FileFormat::NarthexSeriesIndex(narthex) = &mut copied.format {
-                for source in &mut narthex.sources {
-                    // A retained index may refer to samples absent from this copy.
-                    if let Some(target) = target_samples.get(source) {
-                        *source = *target;
-                    }
-                }
-            }
-            // This index has its own physical target objects, even when some
-            // samples remain shared references to a different owner.
-            copied.level = 0;
-            new_series_indexes.push(copied);
-            file_descriptors.extend(objects);
-        }
-        if new_file_metas.is_empty() && new_series_indexes.is_empty() {
+        // Native series coverage belongs to the source region's sequence domain.
+        if new_file_metas.is_empty() {
             return Ok((None, source_file_ids));
         }
 
@@ -367,8 +333,6 @@ impl<S> RegionWorkerLoop<S> {
             )
             .await?;
         let edit = RegionEdit {
-            series_indexes_to_add: new_series_indexes,
-            series_indexes_to_remove: Vec::new(),
             files_to_add: new_file_metas,
             files_to_remove: vec![],
             timestamp_ms: Some(chrono::Utc::now().timestamp_millis()),

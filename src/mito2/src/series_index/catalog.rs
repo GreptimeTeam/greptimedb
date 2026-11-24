@@ -73,6 +73,7 @@ pub(crate) struct SeriesIndexEntry {
     pub(crate) bucket_end: Timestamp,
     /// Source SST IDs retained for diagnostics and exact coverage of unknown-sequence files. Compaction can replace these
     /// files without changing indexed data, so known-sequence reuse does not depend on IDs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) source_file_ids: Vec<FileId>,
     pub(crate) min_file_sequence: u64,
     pub(crate) max_file_sequence: u64,

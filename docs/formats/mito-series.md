@@ -20,9 +20,7 @@ Each part record contains its encoded `file_size` in bytes.
 In the region manifest, a native series index may carry a `coverage` object
 with `region_id`, `schema_version`, and an ordered array of `windows`. Each
 window describes a half-open timestamp interval `[start, end)` and an inclusive
-sequence upper bound `frontier`. Gaps between windows are permitted. Indexes
-without `coverage` identify their sample files by region-qualified IDs in
-`sources`.
+sequence upper bound `frontier`. Gaps between windows are permitted.
 
 ## Wire specification
 
@@ -65,7 +63,7 @@ One immutable artifact owns the following objects under a unique generation:
 | `region_id` | Physical region ID |
 | `generation` | Index UUID, using the existing `FileId` serialization |
 | `tags` | Ordered objects with `column_id` and `name`; all are nullable UTF-8 |
-| `coverage` | Existing `SeriesIndexEntry` representation, with `artifact` omitted and `file_size` zero |
+| `coverage` | Existing `SeriesIndexEntry` representation, with `artifact` omitted and `file_size` zero. Native artifacts omit `source_file_ids` |
 | `files` | Ordered objects with `part_id`, `file_size`, `num_series`, `first`, and `last` |
 
 `part_id` is an unsigned 32-bit integer, starting at zero and increasing by one

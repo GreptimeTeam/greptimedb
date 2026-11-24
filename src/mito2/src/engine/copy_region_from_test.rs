@@ -689,7 +689,6 @@ async fn test_narthex_copy_and_remap(
     #[case] with_index: bool,
     #[case] fail_copy: bool,
 ) {
-    use crate::manifest::action::RegionEdit;
     use crate::sst::file::FileFormat;
     use crate::test_util::sst_util::sst_region_metadata_with_encoding;
     use crate::test_util::{flush_region, reopen_region};
@@ -708,6 +707,7 @@ async fn test_narthex_copy_and_remap(
     ));
     let engine = env
         .create_engine(MitoConfig {
+            experimental_enable_series_index: with_index,
             schedule_compaction_after_edit: false,
             gc: crate::gc::GcConfig {
                 enable: true,
@@ -753,35 +753,18 @@ async fn test_narthex_copy_and_remap(
         flush_region(&engine, source, None).await;
     }
     let owner = engine.get_region(source).unwrap();
-    let sources: Vec<_> = owner
-        .version()
-        .ssts
-        .levels()
-        .iter()
-        .flat_map(|level| level.files.values().cloned())
-        .collect();
     if with_index {
-        let index = crate::sst::narthex::write_series(
-            &owner.access_layer,
-            owner.metadata(),
-            &sources,
-            None,
-        )
-        .await
-        .unwrap();
         engine
-            .edit_region(
+            .handle_request(
                 source,
-                RegionEdit {
-                    series_indexes_to_add: vec![index],
-                    ..Default::default()
-                },
+                crate::engine::scan_test::build_series_index_request(),
             )
             .await
             .unwrap();
     }
     let source_dir = owner.access_layer.build_region_dir(source);
     let before = owner.manifest_ctx.manifest().await;
+    assert_eq!(before.series_indexes.len(), usize::from(with_index));
     if fail_copy {
         let missing = before
             .files
@@ -901,7 +884,7 @@ async fn test_narthex_copy_and_remap(
         assert_eq!(file.is_effective_target_sequence_trusted(target), remap);
     }
 
-    assert_eq!(after.series_indexes.len(), usize::from(with_index));
+    assert!(after.series_indexes.is_empty());
     let physical_owner = if remap { source } else { target };
     for meta in after.all_files() {
         assert_eq!(meta.region_id, physical_owner);
@@ -927,22 +910,9 @@ async fn test_narthex_copy_and_remap(
                 .unwrap();
             assert_eq!(actual.content_length(), object.file_size);
         }
-        if let FileFormat::NarthexSeriesIndex(index) = &meta.format {
-            assert_eq!(index.sources.len(), 2);
-            assert!(
-                index
-                    .sources
-                    .iter()
-                    .all(|id| id.region_id() == physical_owner)
-            );
-            if remap {
-                assert_eq!(meta, &before.series_indexes[&meta.file_id]);
-            }
-        }
     }
     // Physical copies survive complete deletion of their source. Remaps retain
     // source-owned objects via references and use the partial-drop contract.
-    drop(sources);
     drop(owner);
     engine
         .handle_request(
@@ -1017,22 +987,18 @@ async fn test_narthex_copy_and_remap(
     let text = batches.pretty_print().unwrap();
     assert!(text.contains("api"));
     assert_eq!(text.contains("worker"), !remap);
-    assert_eq!(
+    assert!(
         engine
             .get_region(target)
             .unwrap()
             .version()
             .ssts
             .series_indexes()
-            .len(),
-        usize::from(with_index)
+            .is_empty()
     );
     crate::engine::compaction_test::compact(&engine, target).await;
     let compacted = engine.get_region(target).unwrap();
-    assert_eq!(
-        compacted.version().ssts.series_indexes().len(),
-        usize::from(with_index)
-    );
+    assert!(compacted.version().ssts.series_indexes().is_empty());
     assert!(
         compacted
             .version()
@@ -1061,7 +1027,7 @@ async fn test_narthex_copy_and_remap(
     .unwrap();
     assert_eq!(result.pretty_print().unwrap(), text);
     if with_index && !remap && !fail_copy {
-        // The index is still present, but its original samples were compacted away.
+        // A second copy uses the compacted samples.
         let next = RegionId::new(2, 3);
         engine
             .handle_request(next, RegionRequest::Create(request.clone()))
@@ -1286,7 +1252,6 @@ async fn test_region_storage_format_admission(
         FileFormat::NarthexSeriesIndex(Box::new(NarthexSeriesIndexMeta {
             manifest_size: 1,
             parts: Default::default(),
-            sources: Vec::new(),
             coverage: None,
         }))
     };
