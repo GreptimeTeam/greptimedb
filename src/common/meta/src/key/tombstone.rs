@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use common_telemetry::debug;
 use futures_util::stream::BoxStream;
-use snafu::ensure;
+use snafu::{OptionExt, ensure};
 
 use crate::error::{self, Result};
 use crate::key::TABLE_NAME_KEY_PREFIX;
@@ -294,16 +294,20 @@ impl TombstoneManager {
         .fail()
     }
 
-    fn max_txn_ops(&self) -> usize {
+    fn max_txn_ops(&self) -> Result<usize> {
         #[cfg(test)]
         if let Some(max_txn_ops) = self.max_txn_ops {
-            return max_txn_ops;
+            return Ok(max_txn_ops);
         }
-        self.kv_backend.max_txn_ops()
+        Ok(self
+            .kv_backend
+            .txn_capability()
+            .context(error::UnsupportedSnafu { operation: "txn" })?
+            .max_ops)
     }
 
     async fn execute_extra_ops(&self, extra_ops: Vec<TxnOp>) -> Result<()> {
-        let max_txn_ops = self.max_txn_ops();
+        let max_txn_ops = self.max_txn_ops()?;
         ensure!(
             max_txn_ops > 0,
             error::UnexpectedSnafu {
@@ -348,7 +352,7 @@ impl TombstoneManager {
         } else {
             MOVE_VALUE_TXN_OPS_PER_KEY
         };
-        let max_txn_ops = self.max_txn_ops();
+        let max_txn_ops = self.max_txn_ops()?;
         ensure!(
             max_txn_ops >= txn_ops_per_key,
             error::UnexpectedSnafu {
@@ -571,7 +575,7 @@ mod tests {
     };
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::kv_backend::txn::{Txn, TxnRequest, TxnResponse};
-    use crate::kv_backend::{KvBackend, TxnService};
+    use crate::kv_backend::{KvBackend, TxnCapability, TxnService};
     use crate::rpc::KeyValue;
     use crate::rpc::store::{
         BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse,
@@ -605,8 +609,10 @@ mod tests {
             self.inner.txn(txn).await
         }
 
-        fn max_txn_ops(&self) -> usize {
-            self.max_txn_ops
+        fn txn_capability(&self) -> Option<TxnCapability> {
+            Some(TxnCapability {
+                max_ops: self.max_txn_ops,
+            })
         }
     }
 
@@ -654,6 +660,10 @@ mod tests {
     #[async_trait::async_trait]
     impl TxnService for StalePointGetKvBackend {
         type Error = Error;
+
+        fn txn_capability(&self) -> Option<TxnCapability> {
+            self.inner.txn_capability()
+        }
 
         async fn txn(&self, txn: Txn) -> Result<TxnResponse> {
             self.inner.txn(txn).await

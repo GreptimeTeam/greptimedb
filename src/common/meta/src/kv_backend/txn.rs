@@ -20,6 +20,13 @@ use crate::rpc::store::{DeleteRangeResponse, PutResponse, RangeResponse};
 
 mod etcd;
 
+/// Limits for backends that support explicit transactions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TxnCapability {
+    /// Maximum number of operations permitted in one transaction.
+    pub max_ops: usize,
+}
+
 #[async_trait::async_trait]
 pub trait TxnService: Sync + Send {
     type Error: ErrorExt;
@@ -28,9 +35,9 @@ pub trait TxnService: Sync + Send {
         unimplemented!("txn is not implemented")
     }
 
-    /// Maximum number of operations permitted in a transaction.
-    fn max_txn_ops(&self) -> usize {
-        unimplemented!("txn is not implemented")
+    /// Returns None when explicit transactions are unsupported.
+    fn txn_capability(&self) -> Option<TxnCapability> {
+        None
     }
 }
 
