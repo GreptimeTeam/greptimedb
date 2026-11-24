@@ -47,7 +47,7 @@ pub(crate) enum IndexWriteBuffer {
     Default,
     Chunk(usize),
     #[cfg(feature = "enterprise")]
-    Bounded(crate::sst::upload::UploadLimits),
+    Bounded(crate::sst::upload::buffered::UploadLimits),
 }
 
 impl From<Option<usize>> for IndexWriteBuffer {
@@ -153,7 +153,7 @@ impl InstrumentedStore {
         #[cfg(feature = "enterprise")]
         let writer: IndexObjectWriter = match self.write_buffer {
             IndexWriteBuffer::Bounded(limits) => Either::Right(Box::new(
-                crate::sst::upload::buffered_writer(writer, limits),
+                crate::sst::upload::buffered::writer(writer, limits),
             )),
             _ => Either::Left(writer.into_futures_async_write()),
         };

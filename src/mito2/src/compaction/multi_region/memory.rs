@@ -26,7 +26,7 @@ use crate::error::{IndexOptionsSnafu, MultiRegionCompactionResourceSnafu, Result
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
 use crate::sst::parquet::max_row_group_value_bytes;
 use crate::sst::parquet::writer::SstWriteLimits;
-use crate::sst::upload::UploadLimits;
+use crate::sst::upload::buffered::UploadLimits;
 
 pub(crate) const BATCH_SIZE: usize = 64;
 /// Cap on the rows of one output row group.

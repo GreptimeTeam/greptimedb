@@ -127,7 +127,10 @@ impl PuffinManagerFactory {
 
     /// Overrides only this task's upload buffers, sharing the existing stager.
     #[cfg(feature = "enterprise")]
-    pub(crate) fn with_upload_limits(mut self, limits: crate::sst::upload::UploadLimits) -> Self {
+    pub(crate) fn with_upload_limits(
+        mut self,
+        limits: crate::sst::upload::buffered::UploadLimits,
+    ) -> Self {
         self.write_buffer = IndexWriteBuffer::Bounded(limits);
         self
     }

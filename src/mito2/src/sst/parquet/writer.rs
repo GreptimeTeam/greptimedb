@@ -212,7 +212,7 @@ pub(crate) struct SstWriteLimits {
     pub(crate) working_bytes: usize,
     pub(crate) metadata_bytes: usize,
     #[cfg(feature = "enterprise")]
-    pub(crate) upload_limits: upload::UploadLimits,
+    pub(crate) upload_limits: upload::buffered::UploadLimits,
 }
 
 /// Tracks retained footer memory across rolled files as well as the current file.
@@ -311,7 +311,7 @@ pub struct ObjectStoreWriter {
     write_buffer_size: usize,
     cancellation: Option<CancellationToken>,
     #[cfg(feature = "enterprise")]
-    buffered_upload: Option<upload::UploadBuffer>,
+    buffered_upload: Option<upload::buffered::UploadBuffer>,
 }
 
 impl ObjectStoreWriter {
@@ -400,7 +400,7 @@ pub struct ObjectStoreWriterFactory {
     object_store: ObjectStore,
     concurrency: usize,
     #[cfg(feature = "enterprise")]
-    upload_limits: Option<upload::UploadLimits>,
+    upload_limits: Option<upload::buffered::UploadLimits>,
 }
 
 impl WriterFactory for ObjectStoreWriterFactory {
@@ -426,7 +426,7 @@ impl WriterFactory for ObjectStoreWriterFactory {
                     ObjectStoreWriter::new(writer, write_buffer_size, cancellation.cloned());
                 #[cfg(feature = "enterprise")]
                 let writer = ObjectStoreWriter {
-                    buffered_upload: self.upload_limits.map(upload::UploadBuffer::new),
+                    buffered_upload: self.upload_limits.map(upload::buffered::UploadBuffer::new),
                     ..writer
                 };
                 writer
@@ -450,7 +450,7 @@ where
     }
 
     #[cfg(feature = "enterprise")]
-    pub(crate) fn with_upload_limits(mut self, limits: upload::UploadLimits) -> Self {
+    pub(crate) fn with_upload_limits(mut self, limits: upload::buffered::UploadLimits) -> Self {
         self.writer_factory.upload_limits = Some(limits);
         // Upload admission accounts for the serial OpenDAL writer.
         self.writer_factory.concurrency = 1;
@@ -998,7 +998,7 @@ fn map_write_error(error: ParquetError) -> Error {
             return crate::error::SstWriteCancelledSnafu.build();
         }
         #[cfg(feature = "enterprise")]
-        if let Some(error) = source.downcast_ref::<upload::UploadObjectLimit>() {
+        if let Some(error) = source.downcast_ref::<upload::buffered::UploadObjectLimit>() {
             return crate::error::MultiRegionCompactionResourceSnafu {
                 reason: error.to_string(),
             }
