@@ -1605,6 +1605,7 @@ WITH(
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "Exemplar writes require pre-encoded keys: https://github.com/GreptimeTeam/greptimedb/issues/10598"]
     async fn test_exemplar_otlp_existing_ordinary_tables() {
         use common_memory_manager::OnExhaustedPolicy;
         use servers::request_memory_limiter::ServerMemoryLimiter;
@@ -1925,6 +1926,7 @@ WITH(
 
     #[rstest::rstest]
     #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "Exemplar writes require pre-encoded keys: https://github.com/GreptimeTeam/greptimedb/issues/10598"]
     async fn test_exemplar_otlp_memory_wait_and_lifetime(#[values(false, true)] gate_source: bool) {
         use common_memory_manager::OnExhaustedPolicy;
         use servers::request_memory_limiter::ServerMemoryLimiter;
@@ -2147,6 +2149,7 @@ WITH(
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "Exemplar writes require pre-encoded keys: https://github.com/GreptimeTeam/greptimedb/issues/10598"]
     async fn test_exemplar_otlp_inherited_label_collisions() {
         use otel_arrow_rust::proto::opentelemetry::metrics::v1::{Exemplar, exemplar};
 
@@ -2234,6 +2237,7 @@ WITH(
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "Exemplar writes require pre-encoded keys: https://github.com/GreptimeTeam/greptimedb/issues/10598"]
     async fn test_exemplar_otlp_defaulted_source_identity() {
         use otel_arrow_rust::proto::opentelemetry::metrics::v1::{Exemplar, exemplar};
 

@@ -49,6 +49,10 @@ of one request to several regions (one message per worker) → worker loop
 writes SSTs via `access_layer.rs` and appends a `RegionEdit` to the manifest
 (`manifest/manager.rs`).
 
+When reconstructing primary key bytes, follow the writer's ordering. Mito encodes
+raw tags in declared primary key order. Metric-engine sparse keys encode table ID
+and TSID first, then non-null labels in label-name order.
+
 ## Read path
 
 `MitoEngine::handle_query` (`engine.rs`) → `read/scan_region.rs` takes an
