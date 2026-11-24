@@ -2455,6 +2455,87 @@ async fn test_execute_copy_from_csv_strict_headers(instance: Arc<dyn MockInstanc
 }
 
 #[apply(standalone_instance_case)]
+async fn test_execute_copy_from_csv_header_matching_no_column(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+    let tmp_dir =
+        create_local_file_test_dir("test_execute_copy_from_csv_header_matching_no_column");
+    let data_as_header_path = tmp_dir.path().join("data_as_header.csv");
+    let header_only_path = tmp_dir.path().join("header_only.csv");
+    let extra_column_path = tmp_dir.path().join("extra_column.csv");
+    let data_as_header_location = prepare_path(data_as_header_path.to_str().unwrap());
+    let header_only_location = prepare_path(header_only_path.to_str().unwrap());
+    let extra_column_location = prepare_path(extra_column_path.to_str().unwrap());
+    std::fs::write(&data_as_header_path, "1\n").unwrap();
+    std::fs::write(&header_only_path, "ts\n").unwrap();
+    std::fs::write(
+        &extra_column_path,
+        "ts,extra\n2024-01-01T00:00:00,ignored\n",
+    )
+    .unwrap();
+
+    let output = execute_sql(
+        &instance,
+        "CREATE TABLE csv_header_match(ts TIMESTAMP TIME INDEX);",
+    )
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(0)));
+
+    // The only row is read as a header that names no column of the table.
+    let err = try_execute_sql(
+        &instance,
+        &format!(
+            "COPY csv_header_match FROM '{}' WITH (FORMAT='csv');",
+            data_as_header_location
+        ),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        unwrap_frontend_error(&err),
+        Error::TableOperation {
+            source: OperatorError::CsvHeaderNoMatchingColumns { header_columns, .. },
+            ..
+        } if header_columns == &vec!["1".to_string()]
+    ));
+
+    // A valid header with no data rows still imports nothing without an error.
+    let output = execute_sql(
+        &instance,
+        &format!(
+            "COPY csv_header_match FROM '{}' WITH (FORMAT='csv');",
+            header_only_location
+        ),
+    )
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(0)));
+
+    // A header column the table doesn't have is still ignored.
+    let output = execute_sql(
+        &instance,
+        &format!(
+            "COPY csv_header_match FROM '{}' WITH (FORMAT='csv');",
+            extra_column_location
+        ),
+    )
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(1)));
+
+    let output = execute_sql(&instance, "SELECT * FROM csv_header_match;")
+        .await
+        .data;
+    let expect = "\
++---------------------+
+| ts                  |
++---------------------+
+| 2024-01-01T00:00:00 |
++---------------------+";
+    check_output_stream(output, expect).await;
+}
+
+#[apply(standalone_instance_case)]
 async fn test_execute_query_external_table_json(instance: Arc<dyn MockInstance>) {
     unsafe {
         std::env::set_var("TZ", "UTC");

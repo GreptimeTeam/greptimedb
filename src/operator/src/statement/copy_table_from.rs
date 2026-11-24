@@ -799,7 +799,29 @@ fn validate_csv_headers_if_required(file_metadata: &FileMetadata, table: &Schema
         return Ok(());
     };
 
+    if !format.has_header {
+        return Ok(());
+    }
+
     if !format.strict_headers {
+        // By default, header columns that match no table column are skipped.
+        // When none of them match, nothing is imported, which usually means the
+        // first row is data that was read as the header.
+        let matches_a_table_column = schema
+            .fields()
+            .iter()
+            .any(|field| table.fields().find(field.name()).is_some());
+        ensure!(
+            schema.fields().is_empty() || matches_a_table_column,
+            error::CsvHeaderNoMatchingColumnsSnafu {
+                path,
+                header_columns: schema
+                    .fields()
+                    .iter()
+                    .map(|field| field.name().clone())
+                    .collect::<Vec<_>>(),
+            }
+        );
         return Ok(());
     }
 
@@ -1554,6 +1576,50 @@ mod tests {
                 && missing_columns.is_empty()
                 && duplicate_columns == vec!["host_id".to_string()]
         ));
+    }
+
+    #[test]
+    fn test_csv_header_matching_no_table_column_is_rejected() {
+        // A file containing only `1`: the data row is read as a header named "1".
+        let file_schema = make_test_schema(&[Field::new("1", DataType::Int64, true)]);
+        let table_schema = make_test_schema(&[Field::new("ts", DataType::Utf8, true)]);
+
+        let err =
+            validate_csv_headers_if_required(&make_csv_metadata(file_schema, true), &table_schema)
+                .unwrap_err();
+
+        assert!(err.to_string().contains("HEADERS='false'"), "{err}");
+        assert!(matches!(
+            err,
+            error::Error::CsvHeaderNoMatchingColumns { header_columns, .. }
+                if header_columns == vec!["1".to_string()]
+        ));
+    }
+
+    #[test]
+    fn test_csv_header_matching_a_table_column_is_accepted() {
+        let table_schema = make_test_schema(&[Field::new("ts", DataType::Utf8, true)]);
+
+        // A header-only file, and a header with a column the table doesn't have.
+        for header in [&["ts"][..], &["ts", "extra"][..]] {
+            let file_schema = make_test_schema(
+                &header
+                    .iter()
+                    .map(|name| Field::new(*name, DataType::Utf8, true))
+                    .collect::<Vec<_>>(),
+            );
+            validate_csv_headers_if_required(&make_csv_metadata(file_schema, true), &table_schema)
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn test_headerless_csv_does_not_match_header_names() {
+        let file_schema = make_test_schema(&[Field::new("column_1", DataType::Int64, true)]);
+        let table_schema = make_test_schema(&[Field::new("ts", DataType::Utf8, true)]);
+
+        validate_csv_headers_if_required(&make_csv_metadata(file_schema, false), &table_schema)
+            .unwrap();
     }
 
     #[test]
