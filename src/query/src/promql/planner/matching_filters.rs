@@ -19,10 +19,6 @@ use promql_parser::parser::{
     AggregateExpr, BinaryExpr, Expr, LabelModifier, VectorMatchCardinality, token,
 };
 
-/// [`super::PromPlanner::matchers_to_expr`] emits no filter for this, so copying it would only
-/// force a re-plan.
-const MATCH_ALL_REGEX: &str = "^(?:.*)$";
-
 /// Rollup functions emitting at most one output series per input series, carrying the labels of
 /// the matrix selector they wrap. `absent_over_time` is excluded: it synthesizes a series from
 /// the matchers when its input has none.
@@ -181,8 +177,30 @@ fn try_propagate(
     Ok(rewritten)
 }
 
+/// The match-all (`.*`) and match-nonempty (`.+`) patterns, recognized through the parser's
+/// `^(?:...)$` anchor and any number of transparent non-capturing wrappers around the whole
+/// pattern.
+///
+/// A plain non-capturing group (no flags) does not change the matching language, so `.*`,
+/// `(?:.*)` and `(?:(?:.*))` are the same matcher. Peeling paired `(?:` / `)` wrappers and
+/// comparing against exactly `.*` / `.+` suffices: only pure nested wrappers reduce to those.
+/// Flagged groups such as `(?s:.*)` are not peeled because they can change what `.` matches.
+pub(super) fn match_all_pattern(regex: &str) -> Option<&'static str> {
+    let mut inner = regex.strip_prefix("^(?:")?.strip_suffix(")$")?;
+    while let Some(rest) = inner.strip_prefix("(?:") {
+        inner = rest.strip_suffix(')')?;
+    }
+    match inner {
+        ".*" => Some(".*"),
+        ".+" => Some(".+"),
+        _ => None,
+    }
+}
+
+/// [`super::PromPlanner::matchers_to_expr`] emits no filter for a match-all matcher, so copying
+/// it to the other operand would only force a re-plan.
 fn matches_every_value(matcher: &Matcher) -> bool {
-    matches!(&matcher.op, MatchOp::Re(re) if re.as_str() == MATCH_ALL_REGEX)
+    matches!(&matcher.op, MatchOp::Re(re) if match_all_pattern(re.as_str()) == Some(".*"))
 }
 
 /// Aggregations partitioning their input by the grouping labels, so that dropping input series
@@ -411,6 +429,9 @@ mod tests {
             assert_rewrite(query, expected);
         }
         assert!(rewrite(r#"a / b{host=~".*"}"#).is_none());
+        assert!(rewrite(r#"a / b{host=~"(?:.*)"}"#).is_none());
+        assert!(rewrite(r#"a / b{host=~"(?:(?:.*))"}"#).is_none());
+        assert!(rewrite(r#"a{host=~"(?:.*)"} / on(host) b"#).is_none());
     }
 
     #[test]

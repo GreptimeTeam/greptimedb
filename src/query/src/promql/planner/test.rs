@@ -13464,6 +13464,91 @@ async fn test_matchers_to_expr() {
 }
 
 #[tokio::test]
+async fn test_matchers_to_expr_redundant_non_capturing_groups() {
+    // Regression test for #10573: `.*` and `(?:.*)` match exactly the same
+    // label values, so they must produce the same label predicate. The same
+    // holds for `.+` / `(?:.+)` and the negated matchers.
+    let state = build_query_engine_state();
+    let table = [(DEFAULT_SCHEMA_NAME.to_string(), "regex_metric".to_string())];
+
+    async fn plan(case: &str, table: &[(String, String)], state: &QueryEngineState) -> String {
+        let provider = build_test_table_provider_with_fields(table, &["region"]).await;
+        let stmt = build_eval_stmt(case);
+        PromPlanner::stmt_to_plan(provider, &stmt, state)
+            .await
+            .unwrap()
+            .display_indent_schema()
+            .to_string()
+    }
+
+    // Match-all: the regex predicate is dropped entirely. The `.`/newline
+    // caveat applies equally to every spelling.
+    let plain = plan(r#"regex_metric{region=~".*"}"#, &table, &state).await;
+    assert!(
+        !plain.contains("region ~"),
+        "match-all must drop the regex predicate: {plain}"
+    );
+    for grouped in [
+        r#"regex_metric{region=~"(?:.*)"}"#,
+        r#"regex_metric{region=~"(?:(?:.*))"}"#,
+    ] {
+        assert_eq!(
+            plan(grouped, &table, &state).await,
+            plain,
+            "grouped match-all must plan like `.*`"
+        );
+    }
+
+    // Match-nonempty: simplified to `region != ''`.
+    let plus = plan(r#"regex_metric{region=~".+"}"#, &table, &state).await;
+    assert!(
+        plus.contains(r#"region != Utf8("")"#),
+        "match-nonempty must become != '': {plus}"
+    );
+    assert_eq!(
+        plan(r#"regex_metric{region=~"(?:.+)"}"#, &table, &state).await,
+        plus
+    );
+
+    // Negated match-all: constant false.
+    let not_all = plan(r#"regex_metric{region!~".*"}"#, &table, &state).await;
+    assert!(
+        not_all.contains("Boolean(false)"),
+        "negated match-all must be false: {not_all}"
+    );
+    assert_eq!(
+        plan(r#"regex_metric{region!~"(?:.*)"}"#, &table, &state).await,
+        not_all
+    );
+
+    // Negated match-nonempty: `region = ''`.
+    let not_plus = plan(r#"regex_metric{region!~".+"}"#, &table, &state).await;
+    assert!(
+        not_plus.contains(r#"region = Utf8("")"#),
+        "negated match-nonempty must become = '': {not_plus}"
+    );
+    assert_eq!(
+        plan(r#"regex_metric{region!~"(?:.+)"}"#, &table, &state).await,
+        not_plus
+    );
+
+    // A group around a real pattern is not a match-all spelling: the regex
+    // predicate must survive untouched.
+    let real = plan(r#"regex_metric{region=~"(?:foo|bar)"}"#, &table, &state).await;
+    assert!(
+        real.contains(r#"region ~ Utf8("^(?:(?:foo|bar))$")"#),
+        "real pattern must keep its regex: {real}"
+    );
+
+    // A flagged group can change what `.` matches, so it must not be peeled.
+    let dotall = plan(r#"regex_metric{region=~"(?s:.*)"}"#, &table, &state).await;
+    assert!(
+        dotall.contains(r#"region ~ Utf8("^(?:(?s:.*))$")"#),
+        "flagged group must keep its regex: {dotall}"
+    );
+}
+
+#[tokio::test]
 async fn test_topk_expr() {
     let mut eval_stmt = EvalStmt {
         expr: PromExpr::NumberLiteral(NumberLiteral { val: 1.0 }),

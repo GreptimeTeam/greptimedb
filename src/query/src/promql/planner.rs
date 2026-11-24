@@ -2947,10 +2947,11 @@ impl PromPlanner {
                     // This is a hack to handle `.+` and `.*`, and is not strictly correct
                     // `.` doesn't match newline (`\n`). Given this is in PromQL context,
                     // most of the time it's fine.
-                    if re.as_str() == "^(?:.*)$" {
+                    let inner = matching_filters::match_all_pattern(re.as_str());
+                    if inner == Some(".*") {
                         continue;
                     }
-                    if re.as_str() == "^(?:.+)$" {
+                    if inner == Some(".+") {
                         col.not_eq(DfExpr::Literal(
                             ScalarValue::Utf8(Some(String::new())),
                             None,
@@ -2967,9 +2968,10 @@ impl PromPlanner {
                     }
                 }
                 MatchOp::NotRe(re) => {
-                    if re.as_str() == "^(?:.*)$" {
+                    let inner = matching_filters::match_all_pattern(re.as_str());
+                    if inner == Some(".*") {
                         DfExpr::Literal(ScalarValue::Boolean(Some(false)), None)
-                    } else if re.as_str() == "^(?:.+)$" {
+                    } else if inner == Some(".+") {
                         col.eq(DfExpr::Literal(
                             ScalarValue::Utf8(Some(String::new())),
                             None,
