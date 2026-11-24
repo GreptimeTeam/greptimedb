@@ -611,4 +611,13 @@ mod tests {
         assert_eq!(lossy_result, "simple_ascii_123");
         assert_eq!(unchecked_result, "simple_ascii_123");
     }
+
+    #[test]
+    fn test_decode_string_unchecked_replaces_invalid_utf8() {
+        let invalid = Bytes::from_static(b"a\xffb");
+        let result = PromValidationMode::Unchecked
+            .decode_string(&invalid)
+            .unwrap();
+        assert_eq!(result, "a\u{FFFD}b");
+    }
 }
