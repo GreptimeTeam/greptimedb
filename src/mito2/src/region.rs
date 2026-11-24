@@ -3505,11 +3505,12 @@ mod tests {
             |r| r.manifest_ctx.demote_candidate(r.region_id),
             // What a catchup's promotion does under the lock.
             |fence| {
-                assert!(region.manifest_ctx.promote_unless_reload_pending(
-                    fence,
-                    region.region_id,
-                    true
-                ))
+                assert!(
+                    region
+                        .manifest_ctx
+                        .promote_unless_reload_pending(fence, region.region_id, true)
+                        .promoted
+                )
             },
         );
         assert_eq!(demoted, None);
