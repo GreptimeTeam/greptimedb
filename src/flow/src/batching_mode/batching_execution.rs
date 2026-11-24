@@ -23,6 +23,7 @@ use table::TableRef;
 use crate::Result;
 use crate::batching_mode::frontend_client::FrontendClient;
 use crate::batching_mode::task::{BatchingExecutionGuard, BatchingTask, ExecuteOnceOutcome};
+use crate::error::UnsupportedSnafu;
 
 #[async_trait::async_trait]
 pub trait BatchingExecution: Send + Sync + 'static {
@@ -57,4 +58,31 @@ pub trait BatchingExecutionFactory: Send + Sync + 'static {
         engine: &QueryEngineRef,
         frontend: &Arc<FrontendClient>,
     ) -> Result<Option<Arc<dyn BatchingExecution>>>;
+
+    /// Admits one backfill attempt of the flow `catalog.flow` over the half-open
+    /// range `[start_ms, end_ms)` and returns its attempt id.
+    ///
+    /// An attempt is process-local state of the execution this factory serves,
+    /// so a factory that does not serve backfill refuses the request instead of
+    /// pretending to have recorded one.
+    async fn backfill(
+        &self,
+        _catalog: &str,
+        _flow: &str,
+        _start_ms: i64,
+        _end_ms: i64,
+    ) -> Result<String> {
+        UnsupportedSnafu {
+            reason: "this batching execution factory does not serve flow backfill",
+        }
+        .fail()
+    }
+
+    /// Returns the JSON status of the flow's process-local backfill attempt.
+    async fn backfill_status(&self, _catalog: &str, _flow: &str) -> Result<String> {
+        UnsupportedSnafu {
+            reason: "this batching execution factory does not serve flow backfill status",
+        }
+        .fail()
+    }
 }

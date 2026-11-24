@@ -13,6 +13,8 @@
 // limitations under the License.
 
 mod admin;
+#[cfg(feature = "enterprise")]
+mod backfill;
 mod flush_flow;
 mod macros;
 mod permission;
