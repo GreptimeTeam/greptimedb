@@ -21,7 +21,9 @@ use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 
 use crate::kv_backend::txn::{Txn, TxnOp, TxnOpResponse, TxnRequest, TxnResponse};
-use crate::kv_backend::{KvBackend, KvBackendRef, ResettableKvBackend, TxnCapability, TxnService};
+use crate::kv_backend::{
+    KvBackend, KvBackendCapabilities, KvBackendRef, ResettableKvBackend, TxnCapability, TxnService,
+};
 use crate::metrics::METRIC_META_TXN_REQUEST;
 use crate::rpc::KeyValue;
 use crate::rpc::store::{
@@ -76,6 +78,12 @@ impl<T> MemoryKvBackend<T> {
 
 #[async_trait]
 impl<T: ErrorExt + Send + Sync + 'static> KvBackend for MemoryKvBackend<T> {
+    fn capabilities(&self) -> KvBackendCapabilities {
+        KvBackendCapabilities {
+            atomic_batch_put: true,
+        }
+    }
+
     fn name(&self) -> &str {
         "Memory"
     }

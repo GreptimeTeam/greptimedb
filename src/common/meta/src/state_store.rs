@@ -393,6 +393,14 @@ mod tests {
     use crate::kv_backend::memory::MemoryKvBackend;
 
     #[tokio::test]
+    async fn test_atomic_checkpoint_round_trip() {
+        crate::kv_backend::test::check_atomic_checkpoint_round_trip(Arc::new(
+            MemoryKvBackend::new(),
+        ))
+        .await;
+    }
+
+    #[tokio::test]
     async fn test_atomic_segmented_put() {
         use crate::kv_backend::KvBackendCapabilities;
         use crate::kv_backend::test_util::MockKvBackendBuilder;

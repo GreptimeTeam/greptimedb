@@ -66,7 +66,7 @@ pub const DEFAULT_META_ELECTION_LOCK_ID: u64 = 1;
 /// Guarantees provided by a key-value backend.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct KvBackendCapabilities {
-    /// All writes in one batch_put commit atomically, even across SQL statements.
+    /// All key-value pairs in one [`KvBackend::batch_put`] call are applied atomically.
     pub atomic_batch_put: bool,
 }
 

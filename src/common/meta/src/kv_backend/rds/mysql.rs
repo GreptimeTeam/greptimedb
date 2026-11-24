@@ -41,8 +41,9 @@ use crate::rpc::store::{
 };
 
 const MYSQL_STORE_NAME: &str = "mysql_store";
+
 /// Local batching budget when the server does not expose its packet limit.
-const FALLBACK_MAX_ALLOWED_PACKET: usize = 16 * 1024 * 1024;
+const FALLBACK_MAX_ALLOWED_PACKET: usize = 4 * 1024 * 1024;
 
 // MySQL prepared statements accept at most 65,535 parameters.
 const MAX_BATCH_KEYS: usize = u16::MAX as usize;
@@ -811,7 +812,7 @@ mod tests {
             sqlx::mysql::MySqlPoolOptions::new().connect_lazy_with(MySqlConnectOptions::new());
         pool.close().await;
         let factory = MySqlExecutorFactory::new(pool).await;
-        assert_eq!(factory.max_allowed_packet, FALLBACK_MAX_ALLOWED_PACKET);
+        assert_eq!(factory.max_allowed_packet, 4 * 1024 * 1024);
     }
 
     #[tokio::test]

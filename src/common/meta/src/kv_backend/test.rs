@@ -23,6 +23,23 @@ use crate::rpc::KeyValue;
 use crate::rpc::store::{BatchGetRequest, PutRequest};
 use crate::util;
 
+#[cfg(any(test, feature = "testing"))]
+pub async fn check_atomic_checkpoint_round_trip(backend: KvBackendRef) {
+    use common_procedure::store::state_store::StateStore;
+    use futures::TryStreamExt;
+
+    use crate::state_store::KvStateStore;
+
+    assert!(backend.capabilities().atomic_batch_put);
+    let store = KvStateStore::new(backend).with_max_value_size(Some(2));
+    store.put("step", b"abcde".to_vec()).await.unwrap();
+    let mut stream = store.walk_top_down("step").await.unwrap();
+    let (keys, value) = stream.try_next().await.unwrap().unwrap();
+    assert_eq!(keys.keys(), ["step", "step/0000000001", "step/0000000002"]);
+    assert_eq!(value, b"abcde");
+    assert!(stream.try_next().await.unwrap().is_none());
+}
+
 /// Exercises the procedure path against a table configured to reject the value "fail".
 #[cfg(all(test, any(feature = "pg_kvbackend", feature = "mysql_kvbackend")))]
 pub(crate) async fn check_segmented_checkpoint(writer: KvBackendRef, reader: KvBackendRef) {

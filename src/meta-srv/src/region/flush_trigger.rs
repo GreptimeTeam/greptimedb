@@ -354,6 +354,7 @@ impl RegionFlushTrigger {
             return Ok(Vec::new());
         }
 
+        // A transaction limit bounds the batch size when available. Otherwise write one region per request.
         let max_txn_ops = self
             .table_metadata_manager
             .kv_backend()

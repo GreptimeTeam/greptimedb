@@ -223,6 +223,8 @@ pub trait KvQueryExecutor<T: Executor> {
         Ok(PutResponse::default())
     }
 
+    /// Applies all writes atomically. Implementations that split a request across
+    /// statements must run them in one transaction, reusing the caller's transaction if present.
     async fn batch_put_with_query_executor(
         &self,
         query_executor: &mut ExecutorImpl<'_, T>,

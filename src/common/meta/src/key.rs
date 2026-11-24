@@ -1338,10 +1338,11 @@ impl TableMetadataManager {
         &self,
         tables: &[(TableId, TableName)],
     ) -> Result<()> {
+        // Without a transaction limit, delete one table's identity keys per request.
         let max_ops = self
             .kv_backend
             .txn_capability()
-            .map_or(1, |txn| txn.max_ops.max(1));
+            .map_or(Self::TABLE_IDENTITY_KEYS, |txn| txn.max_ops.max(1));
         let tables_per_request = (max_ops / Self::TABLE_IDENTITY_KEYS).max(1);
         // Keep a table's keys together whenever they fit in one backend request. A backend
         // limit smaller than a single table still requires splitting, as with single-table drop.
@@ -3143,7 +3144,8 @@ mod tests {
         use std::sync::Mutex;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        for limit in [1, 3, 127, 128, 129] {
+        for txn_limit in [None, Some(1), Some(3), Some(127), Some(128), Some(129)] {
+            let limit = txn_limit.unwrap_or(TableMetadataManager::TABLE_IDENTITY_KEYS);
             let tables = (0..65)
                 .map(|id| {
                     (
@@ -3159,8 +3161,11 @@ mod tests {
                     .collect::<HashSet<_>>(),
             ));
             let requests = Arc::new(AtomicUsize::new(0));
-            let backend = MockKvBackendBuilder::default()
-                .max_txn_ops(limit)
+            let mut builder = MockKvBackendBuilder::default();
+            if let Some(limit) = txn_limit {
+                builder.max_txn_ops(limit);
+            }
+            let backend = builder
                 .batch_delete_fn({
                     let remaining = remaining.clone();
                     let requests = requests.clone();
