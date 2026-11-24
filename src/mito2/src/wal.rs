@@ -229,6 +229,9 @@ impl<S: LogStore> Wal<S> {
         provider: &Provider,
         entry_id: EntryId,
     ) -> Result<EntryId> {
+        if let Provider::Noop = provider {
+            return Ok(entry_id);
+        }
         self.store
             .handoff(provider, entry_id)
             .await
