@@ -11,6 +11,17 @@
 threshold_kb=$((20 * 1024))
 sleep_interval=$((10 * 60))
 
+# Servers with a user provider require credentials on /debug endpoints. Set
+# GREPTIME_CURL_CONFIG to a curl config file containing `user = "<username>:<password>"`.
+curl_args=(-sf -X POST)
+if [ -n "${GREPTIME_CURL_CONFIG:-}" ]; then
+    if [ ! -r "$GREPTIME_CURL_CONFIG" ]; then
+        echo "$(date): Cannot read curl config file: '$GREPTIME_CURL_CONFIG'."
+        exit 1
+    fi
+    curl_args+=(--config "$GREPTIME_CURL_CONFIG")
+fi
+
 # Variable to store the last measured memory usage in KB
 last_mem_kb=0
 
@@ -55,7 +66,7 @@ while true; do
         timestamp=$(date +%Y%m%d%H%M%S)
         profile_file="greptime-${timestamp}.gprof"
         # Execute curl and capture output to file
-        if curl -sf -X POST localhost:4000/debug/prof/mem > "$profile_file"; then
+        if curl "${curl_args[@]}" localhost:4000/debug/prof/mem > "$profile_file"; then
             echo "$(date): Memory profile saved to $profile_file"
         else
             echo "$(date): Failed to dump memory profile (curl exit code: $?)."
