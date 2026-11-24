@@ -52,29 +52,72 @@
 //! (a legal split hands the same object to both) and does not compare `file_id`s inside
 //! one manifest (a broken merge that keeps two copies of one file passes such a check).
 //!
+//! # The specification state
+//!
+//! [`RefModel`] is the executable specification: an independent model of the table that is
+//! mutated only by the transitions [`Op`] describes and never by an engine observation.
+//!
+//! - A *published region* has a domain (a range of the trace's own keys), a set of
+//!   *references*, and the keys of the rows it wrote and has not flushed yet (a memtable is
+//!   not a physical file). Every reference is an opaque physical-file id the model minted
+//!   itself plus the set of keys whose rows that reference authorizes inside that file
+//!   ([`KeyAuth`], `None` meaning the whole file).
+//! - `write` adds its rows' keys to the destination region's memtable.
+//! - `flush` turns a region's memtable into one new physical file authorized for exactly
+//!   the keys it holds.
+//! - `split(source, cut)` gives each target the source's references restricted to that
+//!   target's domain; a restriction that authorizes no row is not published.
+//! - `merge(inputs, survivor)` combines references per physical file and unions their
+//!   authorized sets.
+//! - `region compaction(region)` is legal while the region holds a file another holder
+//!   keeps: the output is a *new* physical file carrying exactly the rows the region owns
+//!   (`domain ∩ authorized`), and the consumed references leave *that region only*.
+//! - `import` publishes a byte copy of one of the region's own files under a new id, so the
+//!   region's authorized rows do not move; multi-region compaction is a byte copy of the
+//!   region's admitted inputs, so it does not move them either.
+//!
+//! # Model-side assertion (separate from the ledger oracle)
+//!
+//! After every published step [`StorageModel::check_model_authorization`] asserts that a
+//! region's visible rows are a subset of the union of its own references' authorized sets
+//! (plus the keys of its own unflushed rows). That is "selecting a file does not authorize
+//! reading all of it", stated on the model side: a split that hands both halves the same
+//! object still leaves each half authorized to read only its own rows.
+//!
+//! This statement and the ledger oracle are independent: the model derives from the
+//! transitions above only, the oracle from the ledger only, and neither hands a mutable
+//! object to the other. The oracle keeps its exact meaning (each committed event exactly
+//! once, nothing added, nothing misplaced); the model-side check can pass while the oracle
+//! fails, because authorization is not counting.
+//!
 //! # Layering
 //!
 //! Physical objects, per-holder region references and the published routing are three
 //! separate views. Only immutable snapshots ([`SstRef`]) cross a layer boundary; no layer
-//! ever receives a `FileMeta` that another layer mutates.
+//! ever receives a `FileMeta` that another layer mutates. The specification state is a
+//! fourth view that reads none of the three: it is advanced by the transitions only.
 //!
 //! # Invariants beyond the oracle
 //!
-//! The oracle above is the visible-row statement of the bug. This module also checks four
-//! storage-side invariant categories after *every* published step, each reported under its
-//! own name so a trace can fail on one without hiding the others:
+//! The oracle above is the visible-row statement of the bug. This module also checks five
+//! invariant categories after *every* published step, each reported under its own name so a
+//! trace can fail on one without hiding the others:
 //!
 //! | category | what it checks |
 //! | --- | --- |
 //! | `manifest-consistency` | a holder's persisted manifest file set equals its live version file set (id, level, admission sequence, row count), and the published routing equals the regions that actually applied it (writable, applied partition expr, demoted when retired) |
+//! | `model-authorization` | the model-side statement above: a region shows no row outside the union of its own references' authorized sets |
 //! | `reference-bounds` | every reference a live holder shows authorizes only rows inside that holder's domain |
 //! | `sequence-monotonicity` | per region the committed sequence never decreases across steps, and the persisted committed sequence never moves backwards |
 //! | `physical-liveness` | every object still referenced by a live holder still reads back as a complete Parquet object, with the object id, the holding set and the step that dropped it reported when it does not |
 //!
-//! `reference-bounds` is reported but never fatal here: on this branch one *legal* split
-//! already makes both halves reference an SST whose creator domain is the whole table, so
-//! the category fires on every split by construction. See the `FileMeta::owned_range` TODO
-//! on [`SstRef::creator_domain`] for the field that narrows that authorization.
+//! `reference-bounds` is reported but never fatal: it can only speak about what the engine
+//! exposes, and on this branch one *legal* split already makes both halves reference an SST
+//! whose creator domain is the whole table, so the category fires on every split by
+//! construction. [`RefModel`] states the precise version of the same property per holder
+//! (which keys each reference authorizes) and that statement *is* fatal. See the
+//! `FileMeta::owned_range` TODO on [`SstRef::creator_domain`] for the field that would let
+//! the observed check be as precise as the model.
 //!
 //! # Operations
 //!
@@ -99,6 +142,18 @@
 //! is applied to that region's manifest and version. A split/merge step publishes every
 //! target region (create -> enter staging -> apply staging manifest) before the routing
 //! switches and the oracle runs.
+//!
+//! # Traces
+//!
+//! Every seed's plan opens with the shape the model previously could not express, generated
+//! deliberately rather than hoped for (`shared_file_shape`): collapse to one live region,
+//! write rows over several distinct keys, flush that one file, split it so *both* halves keep
+//! the shared file, and region-compact exactly one half. The block starts with a `Merge`, so
+//! the split always has exactly two halves and the compaction always lands on one of them.
+//! The two widened paths (`import`, multi-region compaction) then run against that two-holder
+//! state, and the plan's merge completes the shape by merging both halves.
+//! [`RefModel::shapes`] records which of the three steps a trace actually drove, and every
+//! report prints them; random ops after the prologue may reach the same shape on their own.
 //!
 //! # Seed space
 //!
@@ -145,7 +200,7 @@ const KEY_COUNT: usize = 10;
 /// Wide enough to cover every timestamp the traces write.
 const COMPACTION_WINDOW_SECONDS: i64 = 3600;
 /// Length of one random trace.
-const PLAN_LEN: usize = 14;
+const PLAN_LEN: usize = 18;
 /// Fixed seeds; each seed is one independently reproducible trace.
 const DEFAULT_SEEDS: [u64; 3] = [0x5EED_0001, 0x5EED_0002, 0x5EED_0003];
 /// Upper bound on the number of seeds one `start:end` range may expand to.
@@ -346,6 +401,361 @@ impl Ledger {
     }
 }
 
+/// The keys one reference authorizes inside its own physical file.
+///
+/// `None` is the universe: every row of that physical file. A reference is stated in the
+/// trace's own vocabulary — an opaque model-minted file id plus this set — never in an
+/// implementation type (`FileId`, `PartitionExpr`, an owned range).
+type KeyAuth = Option<BTreeSet<usize>>;
+
+/// Every key the traces can write, i.e. the universe of a `None` authorization.
+fn key_universe() -> BTreeSet<usize> {
+    (0..KEY_COUNT).collect()
+}
+
+/// The keys `auth` authorizes, with `None` expanded to the universe.
+fn auth_keys(auth: &KeyAuth) -> BTreeSet<usize> {
+    auth.clone().unwrap_or_else(key_universe)
+}
+
+/// `auth` restricted to the keys of `domain`.
+///
+/// The outer `None` means "not published": a reference left authorizing no row is dropped,
+/// so a split can hand out strictly fewer references than it was given. The inner
+/// [`KeyAuth`] keeps its own meaning (`None` = the whole file).
+fn auth_restrict(auth: &KeyAuth, domain: Domain) -> Option<KeyAuth> {
+    let keys: BTreeSet<usize> = auth_keys(auth)
+        .into_iter()
+        .filter(|key| domain.contains_key(*key))
+        .collect();
+    (!keys.is_empty()).then(|| Some(keys))
+}
+
+/// The union of two authorizations of the *same* physical file.
+fn auth_union(left: &KeyAuth, right: &KeyAuth) -> KeyAuth {
+    match (left, right) {
+        (None, _) | (_, None) => None,
+        (Some(left), Some(right)) => Some(left.union(right).copied().collect()),
+    }
+}
+
+/// Renders a key set as the `k03, k07` form the reports use.
+fn describe_keys(keys: &BTreeSet<usize>) -> String {
+    if keys.is_empty() {
+        return "{}".to_string();
+    }
+    format!(
+        "{{{}}}",
+        keys.iter()
+            .map(|key| key_name(*key))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+/// The three steps of the shape the model exists for, recorded when a transition reaches
+/// one so every report can say what the engine was actually driven through.
+const SHAPE_SPLIT_SHARED: &str = "split handed the shared file to both halves";
+const SHAPE_ONE_SIDE_COMPACTION: &str = "region compaction while another holder kept the file";
+const SHAPE_MERGE_RECOMBINES: &str = "merge of both holders after that compaction";
+
+/// One published region of the specification.
+#[derive(Debug, Clone)]
+struct SpecRegion {
+    /// The keys this region serves.
+    domain: Domain,
+    /// Model-minted physical-file id -> the keys this region may read from that file.
+    refs: BTreeMap<u64, KeyAuth>,
+    /// Keys of the rows this region wrote and has not flushed. A memtable is not a
+    /// physical file, so it is tracked apart from `refs` and counts as authorized.
+    memtable: BTreeSet<usize>,
+}
+
+impl SpecRegion {
+    fn new(domain: Domain) -> SpecRegion {
+        SpecRegion {
+            domain,
+            refs: BTreeMap::new(),
+            memtable: BTreeSet::new(),
+        }
+    }
+}
+
+/// The specification: what every published region serves and what its references authorize.
+///
+/// Only the transitions on this type mutate it. Nothing here is derived from an engine
+/// observation, and the ledger oracle never receives it, so model state and judgement share
+/// no mutable object.
+#[derive(Debug)]
+struct RefModel {
+    /// Mints the opaque physical-file ids of this model (never a `FileId`).
+    next_file: u64,
+    /// Every currently published region.
+    regions: BTreeMap<RegionId, SpecRegion>,
+    /// The shapes the transitions have driven the engine through.
+    shapes: BTreeSet<&'static str>,
+}
+
+impl RefModel {
+    fn new() -> RefModel {
+        RefModel {
+            next_file: 0,
+            regions: BTreeMap::new(),
+            shapes: BTreeSet::new(),
+        }
+    }
+
+    /// A new opaque physical-file id.
+    fn mint(&mut self) -> u64 {
+        let file = self.next_file;
+        self.next_file += 1;
+        file
+    }
+
+    fn region(&self, region: RegionId) -> Option<&SpecRegion> {
+        self.regions.get(&region)
+    }
+
+    /// The live regions that hold `file`.
+    fn holders_of(&self, file: u64) -> BTreeSet<RegionId> {
+        self.regions
+            .iter()
+            .filter(|(_, state)| state.refs.contains_key(&file))
+            .map(|(region, _)| *region)
+            .collect()
+    }
+
+    /// `Create` / publication: the region serves `domain` and holds nothing yet.
+    fn publish(&mut self, region: RegionId, domain: Domain) {
+        self.regions.insert(region, SpecRegion::new(domain));
+    }
+
+    /// `write`: the rows land in the destination region's own memtable first.
+    fn note_write(&mut self, region: RegionId, key: usize) {
+        if let Some(state) = self.regions.get_mut(&region) {
+            state.memtable.insert(key);
+        }
+    }
+
+    /// `flush`: the memtable becomes one new physical file, authorized for exactly the keys
+    /// it holds. A flush with nothing to write publishes nothing.
+    fn flushed(&mut self, region: RegionId) {
+        let keys = {
+            let Some(state) = self.regions.get_mut(&region) else {
+                return;
+            };
+            std::mem::take(&mut state.memtable)
+        };
+        if keys.is_empty() {
+            return;
+        }
+        let file = self.mint();
+        self.regions
+            .get_mut(&region)
+            .expect("a flushed region is published")
+            .refs
+            .insert(file, Some(keys));
+    }
+
+    /// `split`: each target gets the source's references restricted to its own domain.
+    ///
+    /// An empty restriction is not published, so a half whose rows all fall on the other
+    /// side of the cut holds no reference to the shared file at all.
+    fn split(
+        &mut self,
+        source: RegionId,
+        left: RegionId,
+        left_domain: Domain,
+        right: RegionId,
+        right_domain: Domain,
+    ) {
+        let Some(state) = self.regions.remove(&source) else {
+            return;
+        };
+        assert!(
+            state.memtable.is_empty(),
+            "the model split region {source} with unflushed rows; a split must flush its \
+             source first"
+        );
+        let mut left_refs: BTreeMap<u64, KeyAuth> = BTreeMap::new();
+        let mut right_refs: BTreeMap<u64, KeyAuth> = BTreeMap::new();
+        for (file, auth) in &state.refs {
+            if let Some(restricted) = auth_restrict(auth, left_domain) {
+                left_refs.insert(*file, restricted);
+            }
+            if let Some(restricted) = auth_restrict(auth, right_domain) {
+                right_refs.insert(*file, restricted);
+            }
+        }
+        if left_refs.keys().any(|file| right_refs.contains_key(file)) {
+            self.shapes.insert(SHAPE_SPLIT_SHARED);
+        }
+        self.regions.insert(
+            left,
+            SpecRegion {
+                domain: left_domain,
+                refs: left_refs,
+                memtable: BTreeSet::new(),
+            },
+        );
+        self.regions.insert(
+            right,
+            SpecRegion {
+                domain: right_domain,
+                refs: right_refs,
+                memtable: BTreeSet::new(),
+            },
+        );
+    }
+
+    /// `merge`: references combined per physical file, authorized sets unioned.
+    fn merge(&mut self, inputs: &[RegionId], survivor: RegionId) {
+        let compacted_one_side = self.shapes.contains(SHAPE_ONE_SIDE_COMPACTION);
+        let mut refs: BTreeMap<u64, KeyAuth> = BTreeMap::new();
+        for input in inputs {
+            let Some(state) = self.regions.remove(input) else {
+                continue;
+            };
+            assert!(
+                state.memtable.is_empty(),
+                "the model merged region {input} with unflushed rows; a merge must flush its \
+                 inputs first"
+            );
+            for (file, auth) in state.refs {
+                // A reference is never empty, so the only merge to compute is the union;
+                // `None` (the whole file) absorbs everything else.
+                let authorized = match refs.remove(&file) {
+                    Some(existing) => auth_union(&existing, &auth),
+                    None => auth,
+                };
+                refs.insert(file, authorized);
+            }
+        }
+        if compacted_one_side && refs.len() > 1 {
+            self.shapes.insert(SHAPE_MERGE_RECOMBINES);
+        }
+        self.regions.insert(
+            survivor,
+            SpecRegion {
+                domain: Domain::FULL,
+                refs,
+                memtable: BTreeSet::new(),
+            },
+        );
+    }
+
+    /// `region compaction`: legal even while another holder keeps a file this region holds.
+    ///
+    /// The output is a *new* physical file carrying exactly the rows the region owns
+    /// (`domain ∩ authorized`); the consumed references leave this region only, so every
+    /// other holder keeps its own authorization of the same file.
+    fn compact(&mut self, region: RegionId) {
+        let Some(state) = self.regions.get(&region) else {
+            return;
+        };
+        if state.refs.is_empty() {
+            return;
+        }
+        let domain = state.domain;
+        let shared: Vec<u64> = state
+            .refs
+            .keys()
+            .copied()
+            .filter(|file| self.holders_of(*file).len() > 1)
+            .collect();
+        let mut owned = BTreeSet::new();
+        for auth in state.refs.values() {
+            owned.extend(auth_keys(auth));
+        }
+        owned.retain(|key| domain.contains_key(*key));
+        if !shared.is_empty() {
+            self.shapes.insert(SHAPE_ONE_SIDE_COMPACTION);
+        }
+
+        let file = self.mint();
+        let state = self
+            .regions
+            .get_mut(&region)
+            .expect("the compacted region is published");
+        state.refs.clear();
+        if !owned.is_empty() {
+            state.refs.insert(file, Some(owned));
+        }
+    }
+
+    /// `import`: a byte copy of one of the region's own flushed files, published under a new
+    /// physical id, while the original reference leaves the region in the same edit.
+    ///
+    /// The region keeps exactly the rows it had, so only the identity of one reference
+    /// changes. Which reference the engine picked cannot change what any transition below
+    /// derives, because every one of them reads only intersections and unions of the
+    /// authorized sets.
+    fn remint(&mut self, region: RegionId) {
+        let Some((file, auth)) = self.regions.get(&region).and_then(|state| {
+            state
+                .refs
+                .iter()
+                .next()
+                .map(|(file, auth)| (*file, auth.clone()))
+        }) else {
+            return;
+        };
+        let new_file = self.mint();
+        let state = self
+            .regions
+            .get_mut(&region)
+            .expect("an imported region is published");
+        state.refs.remove(&file);
+        state.refs.insert(new_file, auth);
+    }
+
+    /// The keys `region` may read: the union of its references' authorizations plus the keys
+    /// of its own unflushed rows.
+    fn authorized_keys(&self, region: RegionId) -> BTreeSet<usize> {
+        let mut keys = BTreeSet::new();
+        let Some(state) = self.regions.get(&region) else {
+            return keys;
+        };
+        for auth in state.refs.values() {
+            keys.extend(auth_keys(auth));
+        }
+        keys.extend(state.memtable.iter().copied());
+        keys
+    }
+
+    /// One region's specification state, for a diff.
+    fn describe(&self, region: RegionId) -> String {
+        match self.regions.get(&region) {
+            None => format!("region {region}: the specification has no state for it"),
+            Some(state) => {
+                let refs: Vec<String> = state
+                    .refs
+                    .iter()
+                    .map(|(file, auth)| format!("f{file} -> {}", describe_keys(&auth_keys(auth))))
+                    .collect();
+                format!(
+                    "region {region} (domain [{}, {})): refs {refs:?}, unflushed keys {}",
+                    key_name(state.domain.lo),
+                    key_name(state.domain.hi),
+                    describe_keys(&state.memtable)
+                )
+            }
+        }
+    }
+
+    /// Every published region's specification state, for a diff.
+    fn describe_all(&self) -> String {
+        if self.regions.is_empty() {
+            return "  (no published region)".to_string();
+        }
+        self.regions
+            .keys()
+            .map(|region| format!("  {}", self.describe(*region)))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
 /// Layer 1: one physical SST object, as observed through the manifests.
 ///
 /// An immutable snapshot: no layer below ever receives a live `FileMeta`.
@@ -431,6 +841,9 @@ enum Category {
     /// The visible-row oracle (not an invariant below, reported for context).
     Visibility,
     ManifestConsistency,
+    /// The model-side statement: a region shows no row outside the union of its references'
+    /// authorized sets.
+    ModelAuthorization,
     ReferenceBounds,
     SequenceMonotonicity,
     PhysicalLiveness,
@@ -441,6 +854,7 @@ impl Category {
         match self {
             Category::Visibility => "visibility",
             Category::ManifestConsistency => "manifest-consistency",
+            Category::ModelAuthorization => "model-authorization",
             Category::ReferenceBounds => "reference-bounds",
             Category::SequenceMonotonicity => "sequence-monotonicity",
             Category::PhysicalLiveness => "physical-liveness",
@@ -532,13 +946,17 @@ impl Rng {
     }
 }
 
-/// The real engine plus the three views and the ledger.
+/// The real engine plus the three observed views, the ledger and the specification.
 struct StorageModel {
     /// Dropped before `_env`, so the engine never outlives its data directory.
     engine: MitoEngine,
     request: RegionCreateRequest,
     schema: Vec<api::v1::ColumnSchema>,
+    /// The judgement: every committed event, its own mutable object.
     ledger: Ledger,
+    /// The specification: what every published region serves and what its references
+    /// authorize. Advanced by the transitions only, never by an observation.
+    spec: RefModel,
     next_region_seq: u32,
 
     /// Layer 3 (published routing): the regions that serve the table, with their domain.
@@ -616,6 +1034,7 @@ impl StorageModel {
             request,
             schema,
             ledger: Ledger::default(),
+            spec: RefModel::new(),
             next_region_seq: 2,
             routing: BTreeMap::new(),
             holders: BTreeMap::new(),
@@ -635,6 +1054,7 @@ impl StorageModel {
 
         model.tracked.insert(region_id);
         model.routing.insert(region_id, Domain::FULL);
+        model.spec.publish(region_id, Domain::FULL);
         model.refresh_views().await;
         model
     }
@@ -804,6 +1224,41 @@ impl StorageModel {
         counts
     }
 
+    /// A plain region scan, as `(event_id, partition key)` pairs.
+    ///
+    /// The model-side check needs the key each *visible* row carries — what the region
+    /// actually shows — not what the ledger believes about that row. It therefore reads no
+    /// ledger state at all.
+    async fn scan_rows(&self, region_id: RegionId) -> Vec<(i64, usize)> {
+        let stream = self
+            .engine
+            .scan_to_stream(region_id, ScanRequest::default())
+            .await
+            .unwrap();
+        let batches = RecordBatches::try_collect(stream).await.unwrap();
+        let mut rows = Vec::new();
+        for batch in batches.iter() {
+            let ids = batch
+                .column_by_name("event_id")
+                .expect("a plain scan must project the event_id column")
+                .as_primitive::<Int64Type>();
+            let keys = batch
+                .column_by_name("k")
+                .expect("a plain scan must project the partition key column")
+                .as_string::<i32>();
+            for i in 0..batch.num_rows() {
+                let key = key_index(keys.value(i)).unwrap_or_else(|| {
+                    panic!(
+                        "the harness wrote an unknown partition key {:?}",
+                        keys.value(i)
+                    )
+                });
+                rows.push((ids.value(i), key));
+            }
+        }
+        rows
+    }
+
     /// The oracle. Returns a report when the invariant is violated, `None` otherwise.
     async fn check(&mut self, ctx: &str) -> Option<String> {
         self.refresh_views().await;
@@ -914,10 +1369,104 @@ impl StorageModel {
         let mut violations = Vec::new();
         self.check_manifest_consistency(ctx, &mut violations);
         self.check_routing_applied(ctx, &mut violations);
+        self.check_model_authorization(ctx, &mut violations).await;
         self.check_reference_bounds(ctx, &mut violations);
         self.check_sequence_monotonicity(ctx, &mut violations);
         self.check_physical_liveness(ctx, &mut violations).await;
         violations
+    }
+
+    /// The model-side assertion, separate from the ledger oracle.
+    ///
+    /// After every published step each region may only show rows one of its own references
+    /// authorizes, plus the rows it wrote and has not flushed yet. Selecting a file does not
+    /// authorize reading all of it: a split hands both halves the same object but each half
+    /// is authorized for its own rows only, and a region compaction of one half produces a
+    /// new object whose authorization is `domain ∩ authorized`, not the whole file.
+    ///
+    /// This reads a fresh scan and the specification state and nothing else — never the
+    /// ledger, whose oracle in [`StorageModel::check`] in turn never reads the
+    /// specification.
+    async fn check_model_authorization(&self, ctx: &str, violations: &mut Vec<Violation>) {
+        for (region_id, domain) in self
+            .routing
+            .iter()
+            .map(|(region, domain)| (*region, *domain))
+        {
+            let Some(state) = self.spec.region(region_id) else {
+                violations.push(Violation {
+                    category: Category::ModelAuthorization,
+                    detail: format!(
+                        "[{ctx}] region {region_id} is published but the specification has no \
+                         state for it: a transition was missed"
+                    ),
+                });
+                continue;
+            };
+            if state.domain != domain {
+                violations.push(Violation {
+                    category: Category::ModelAuthorization,
+                    detail: format!(
+                        "[{ctx}] the model published region {region_id} for [{}, {}) but the \
+                         specification advanced it to [{}, {})",
+                        key_name(domain.lo),
+                        key_name(domain.hi),
+                        key_name(state.domain.lo),
+                        key_name(state.domain.hi)
+                    ),
+                });
+                continue;
+            }
+            // Everything the diff needs is copied out first: the scan below is an await and
+            // it must not overlap a borrow of the specification.
+            let authorized = self.spec.authorized_keys(region_id);
+            let state_desc = self.spec.describe(region_id);
+
+            let mut rows_outside = 0usize;
+            let mut keys_outside = BTreeSet::new();
+            let mut examples = Vec::new();
+            for (event_id, key) in self.scan_rows(region_id).await {
+                if authorized.contains(&key) {
+                    continue;
+                }
+                rows_outside += 1;
+                keys_outside.insert(key);
+                if examples.len() < 8 {
+                    examples.push(format!("event_id {event_id} at {}", key_name(key)));
+                }
+            }
+            if rows_outside == 0 {
+                continue;
+            }
+            violations.push(Violation {
+                category: Category::ModelAuthorization,
+                detail: format!(
+                    "[{ctx}] region {region_id} (domain [{}, {})) shows {rows_outside} row(s) \
+                     no reference authorizes, keys {} (e.g. {examples:?}); the references \
+                     authorize {}; specification state: {state_desc}",
+                    key_name(domain.lo),
+                    key_name(domain.hi),
+                    describe_keys(&keys_outside),
+                    describe_keys(&authorized)
+                ),
+            });
+        }
+    }
+
+    /// Asserts the model-side authorization statement on its own.
+    ///
+    /// The oracle is not consulted: this pins that the visible rows of every published
+    /// region are inside the union of that region's references' authorized sets.
+    async fn assert_model_authorization(&mut self, ctx: &str) {
+        let mut violations = Vec::new();
+        self.check_model_authorization(ctx, &mut violations).await;
+        if !violations.is_empty() {
+            panic!(
+                "MODEL AUTHORIZATION VIOLATED\n{}\nthe specification state:\n{}",
+                format_violations(&violations),
+                self.spec.describe_all()
+            );
+        }
     }
 
     /// Asserts every invariant category except the non-fatal `reference-bounds` one.
@@ -1059,9 +1608,12 @@ impl StorageModel {
     /// Reference bounds: a reference must not authorize rows outside its own region's
     /// domain.
     ///
-    /// See the `FileMeta::owned_range` TODO on [`SstRef::creator_domain`]: without that
-    /// field the authorized range is the creator's domain, which a repartition hands to
-    /// every target region unchanged.
+    /// This is the *observed* approximation of the model-side statement
+    /// ([`StorageModel::check_model_authorization`]): the engine exposes no per-reference row
+    /// authorization, so all it can report is the creator's domain, which a repartition
+    /// hands to every target region unchanged. See the `FileMeta::owned_range` TODO on
+    /// [`SstRef::creator_domain`] for the field that would let this check speak about rows
+    /// instead of domains.
     fn check_reference_bounds(&self, ctx: &str, violations: &mut Vec<Violation>) {
         for region_id in self.live_regions() {
             let holder_domain = self.domain_of(region_id);
@@ -1291,6 +1843,8 @@ impl StorageModel {
             .await;
             for (event_id, planned, _) in pending {
                 committed.push(self.ledger.commit(event_id, planned));
+                // The row is in this region's memtable until a flush publishes it.
+                self.spec.note_write(region_id, planned.key);
             }
             self.dirty.insert(region_id);
         }
@@ -1309,6 +1863,8 @@ impl StorageModel {
                 .await
                 .unwrap();
             self.dirty.remove(region_id);
+            // A flush turns this region's memtable into one new physical file.
+            self.spec.flushed(*region_id);
         }
         dirty.len()
     }
@@ -1322,6 +1878,7 @@ impl StorageModel {
                 )
                 .await
                 .unwrap();
+            self.spec.flushed(region_id);
         }
     }
 
@@ -1379,6 +1936,8 @@ impl StorageModel {
         self.routing.remove(&source);
         self.routing.insert(left, left_domain);
         self.routing.insert(right, right_domain);
+        self.spec
+            .split(source, left, left_domain, right, right_domain);
         self.refresh_views().await;
         (left, right)
     }
@@ -1479,6 +2038,7 @@ impl StorageModel {
 
         self.tracked.insert(merged);
         self.routing = BTreeMap::from([(merged, Domain::FULL)]);
+        self.spec.merge(&inputs, merged);
         self.refresh_views().await;
         merged
     }
@@ -1502,6 +2062,7 @@ impl StorageModel {
             )
             .await
             .unwrap();
+        self.spec.compact(region_id);
         self.refresh_views().await;
     }
 
@@ -1568,6 +2129,10 @@ impl StorageModel {
             // unsupported shared level from a real rejection here.
             return format!("import {copy_id:?} into {target}: rejected at admission ({err:?})");
         }
+        // The copy carries exactly the rows the original reference carried out of this
+        // region, so the region's authorized rows do not move: only one reference changes
+        // its physical identity.
+        self.spec.remint(target);
         self.refresh_views().await;
         let assigned = self
             .holders
@@ -1978,6 +2543,8 @@ struct Failure {
     op: String,
     /// `(category, diff)` pairs, all categories violated at that step.
     violations: Vec<(Category, String)>,
+    /// The shapes the model had already driven the engine through at that step.
+    shapes: Vec<&'static str>,
 }
 
 impl Failure {
@@ -1998,11 +2565,13 @@ impl Failure {
              first violating step: {step}\n\
              operation: {op}\n\
              invariant categories: {categories:?}\n\
+             shapes driven so far: {shapes:?}\n\
              {details}",
             seed = self.seed,
             step = self.step,
             op = self.op,
             categories = categories,
+            shapes = self.shapes,
             details = details.join("\n"),
         )
     }
@@ -2014,6 +2583,8 @@ struct TraceReport {
     failure: Option<Failure>,
     /// Non-fatal observations (`reference-bounds`), which every legal split produces here.
     observations: Vec<(usize, Category, String)>,
+    /// Which steps of the shared-file shape the model drove the engine through.
+    shapes: Vec<&'static str>,
 }
 
 impl TraceReport {
@@ -2067,10 +2638,10 @@ fn distinct_rows(rng: &mut Rng, count: usize) -> Vec<PlannedRow> {
 
 /// A random op for the prologue: writes, flushes and splits only.
 ///
-/// The prologue must leave the two halves of the split as co-holders of one SST until the
-/// single-holder compaction has run, so these ops never merge (a merge would collapse the
-/// holders first) and never compact (compacting both halves is safe and would mask the
-/// class). The op after the prologue is free again.
+/// The extras run after the one-side compaction, so the holders of the shared file are
+/// already asymmetric; they never merge (a merge would collapse the halves before the plan's
+/// own merge) and never compact (a second compaction could mask the class by rewriting the
+/// remaining holder too). The op after the prologue is free again.
 fn prologue_op(rng: &mut Rng) -> Op {
     match rng.below(3) {
         0 => {
@@ -2111,43 +2682,59 @@ fn random_op(rng: &mut Rng) -> Op {
     }
 }
 
-/// Builds a trace for `seed`.
+/// The opening block of every plan: the shared-file shape, generated deliberately instead of
+/// hoped for.
 ///
-/// The prologue guarantees the trace reaches the bug class (one flush, a split that makes
-/// two holders share an SST, a single-holder region compaction, then a merge) instead of
-/// hoping random ops line up. The import and the table-level compaction follow the
-/// single-holder compaction deterministically, so every seed exercises the widened
-/// instrument, while the ops in between and after stay random: distinct seeds reach the
-/// class, and the two new paths, with different states.
-fn generate_plan(seed: u64, len: usize) -> Vec<Op> {
-    let mut rng = Rng::new(seed);
-    let first_count = 2 + rng.below(2);
-    let first_rows = distinct_rows(&mut rng, first_count);
-    let mut ops = vec![
-        Op::Write { rows: first_rows },
+/// One live region flushes one file, a split hands that file to *both* halves, and region
+/// compaction lands on exactly one half. The block starts with a `Merge` (a no-op on a
+/// single region), so the split that follows always has exactly two halves and the
+/// compaction always hits one of them; the plan's own merge closes the shape by merging both
+/// halves.
+///
+/// Every step is a published step, so both the ledger oracle and the model-side
+/// authorization assertion run on the flush state, on the split state (one file, two
+/// holders, two disjoint authorizations) and on the one-side-compacted state.
+fn shared_file_shape(rng: &mut Rng) -> Vec<Op> {
+    let count = 2 + rng.below(2);
+    vec![
+        Op::Merge,
+        Op::Write {
+            rows: distinct_rows(rng, count),
+        },
         Op::Flush,
         Op::Split {
             choice: rng.below(4),
         },
-    ];
-    let extra_before = rng.below(3);
-    for _ in 0..extra_before {
-        ops.push(prologue_op(&mut rng));
-    }
-    let compact_choice = rng.below(4);
-    ops.push(Op::Compact {
-        choice: compact_choice,
-    });
-    let extra_after = rng.below(2);
-    for _ in 0..extra_after {
-        ops.push(prologue_op(&mut rng));
-    }
+        Op::Compact {
+            choice: rng.below(2),
+        },
+    ]
+}
+
+/// Builds a trace for `seed`.
+///
+/// The plan opens with [`shared_file_shape`], so the trace reaches the bug class instead of
+/// hoping random ops line up: one flush, a split that makes two holders share the file, a
+/// single-holder region compaction on exactly one half, then the merge of both. The import
+/// and the table-level compaction follow the single-holder compaction deterministically, so
+/// every seed exercises the widened instrument against a two-holder state, while the ops in
+/// between and after stay random: distinct seeds reach the class, and the two paths, with
+/// different states.
+fn generate_plan(seed: u64, len: usize) -> Vec<Op> {
+    let mut rng = Rng::new(seed);
+    let mut ops = shared_file_shape(&mut rng);
     ops.push(Op::Import {
         choice: rng.below(4),
     });
     ops.push(Op::TableCompaction {
         choice: rng.below(4),
     });
+    let extra_after = rng.below(2);
+    for _ in 0..extra_after {
+        ops.push(prologue_op(&mut rng));
+    }
+    // The shape's last act: both halves — one holding the shared file, one holding the copy
+    // its own compaction materialized — merge into one whole-domain region.
     ops.push(Op::Merge);
     while ops.len() < len {
         ops.push(random_op(&mut rng));
@@ -2194,14 +2781,17 @@ async fn run_trace(prefix: &str, seed: u64, ops: &[Op]) -> TraceReport {
                     step,
                     op: op.describe(),
                     violations,
+                    shapes: model.spec.shapes.iter().copied().collect(),
                 }),
                 observations,
+                shapes: model.spec.shapes.iter().copied().collect(),
             };
         }
     }
     TraceReport {
         failure: None,
         observations,
+        shapes: model.spec.shapes.iter().copied().collect(),
     }
 }
 
@@ -2293,6 +2883,14 @@ fn parse_seed_spec(spec: &str) -> Vec<u64> {
 /// materializes `F` under a new local file id while `P` still holds `F`; the two halves are
 /// merged into one survivor whose domain is the whole table.
 ///
+/// The specification names the same trace in its own vocabulary and is asserted at every
+/// step: after the flush `f0` authorizes `{k01, k09}`; after the split both halves hold `f0`
+/// but `P` authorizes only `{k01}` and `R` only `{k09}`; after compacting `R`, `R` holds a
+/// new file `f1` authorized `{k09}` while `P` still holds `f0`; after the merge the survivor
+/// holds `f0` authorized `{k01}` and `f1` authorized `{k09}`, and its rows stay inside that
+/// union. Those per-region statements are what "selecting a file does not authorize reading
+/// all of it" means, and they are why the ledger oracle below is the independent judge.
+///
 /// The ledger expectation is exactly `{A: 1, B: 1}` and it never relaxes: a fix that
 /// refuses the compaction instead of rewriting it still has to make this assertion pass.
 #[tokio::test]
@@ -2331,6 +2929,21 @@ async fn test_mbt_split_shared_sst_single_side_compaction_duplicates_after_merge
         "the flush must produce exactly one SST, got {source_files:?}"
     );
     let shared = *source_files.iter().next().unwrap();
+    // The specification: one model file authorized for exactly the two keys it holds.
+    let spec_shared = model.spec.region(source).expect("the source is published");
+    assert_eq!(Domain::FULL, spec_shared.domain);
+    assert_eq!(
+        vec![Some(BTreeSet::from([1, 9]))],
+        spec_shared.refs.values().cloned().collect::<Vec<_>>(),
+        "the flush must mint one model file authorized for its own keys: {:?}",
+        model.spec.describe(source)
+    );
+    let spec_file = *spec_shared.refs.keys().next().unwrap();
+    assert_eq!(
+        BTreeSet::from([source]),
+        model.spec.holders_of(spec_file),
+        "one model file, one holder"
+    );
 
     // ---- Step 1: split into P: k < k05 and R: k05 <= k < k10. ----
     let (left, right) = model.split(source, 5).await;
@@ -2357,6 +2970,34 @@ async fn test_mbt_split_shared_sst_single_side_compaction_duplicates_after_merge
         BTreeMap::from([(b, 1)]),
         model.scan_counts(right).await,
         "the right half must show exactly event B"
+    );
+    model.assert_model_authorization("after split").await;
+    // The specification: both halves keep the *same* model file, but each is authorized for
+    // its own rows only — the shape that used to be unrepresentable.
+    let spec_left = model.spec.region(left).expect("the left half is published");
+    let spec_right = model
+        .spec
+        .region(right)
+        .expect("the right half is published");
+    assert_eq!(
+        BTreeMap::from([(spec_file, Some(BTreeSet::from([1])))]),
+        spec_left.refs,
+        "the left half must authorize only the rows of its own domain"
+    );
+    assert_eq!(
+        BTreeMap::from([(spec_file, Some(BTreeSet::from([9])))]),
+        spec_right.refs,
+        "the right half must authorize only the rows of its own domain"
+    );
+    assert_eq!(
+        BTreeSet::from([left, right]),
+        model.spec.holders_of(spec_file),
+        "a legal split hands the same physical file to both halves"
+    );
+    assert!(
+        model.spec.shapes.contains(SHAPE_SPLIT_SHARED),
+        "the model must record the split-shared-file shape: {:?}",
+        model.spec.shapes
     );
 
     // ---- Step 2: region compaction on the right half only. ----
@@ -2406,6 +3047,52 @@ async fn test_mbt_split_shared_sst_single_side_compaction_duplicates_after_merge
         holders_of_shared.len() >= 2,
         "the shared object is still referenced by more than one holder: {holders_of_shared:?}"
     );
+    model
+        .assert_model_authorization("after compacting only the right half")
+        .await;
+    // The specification: the compacted half now holds a *new* model file carrying exactly
+    // the rows it owns, and the consumed reference left that half only.
+    let spec_left = model.spec.region(left).expect("the left half is published");
+    let spec_right = model
+        .spec
+        .region(right)
+        .expect("the right half is published");
+    assert_eq!(
+        BTreeMap::from([(spec_file, Some(BTreeSet::from([1])))]),
+        spec_left.refs,
+        "the un-compacted half must keep the original file, still restricted to its rows"
+    );
+    let spec_copy = spec_right
+        .refs
+        .keys()
+        .find(|file| **file != spec_file)
+        .copied()
+        .unwrap_or_else(|| {
+            panic!(
+                "the compacted half must hold a new model file: {}",
+                model.spec.describe(right)
+            )
+        });
+    assert_eq!(
+        BTreeMap::from([(spec_copy, Some(BTreeSet::from([9])))]),
+        spec_right.refs,
+        "the compaction output authorizes the rows the region owns, not the whole file"
+    );
+    assert_eq!(
+        BTreeSet::from([right]),
+        model.spec.holders_of(spec_copy),
+        "the compaction output has one holder"
+    );
+    assert_eq!(
+        BTreeSet::from([left]),
+        model.spec.holders_of(spec_file),
+        "the consumed reference left the compacted half only"
+    );
+    assert!(
+        model.spec.shapes.contains(SHAPE_ONE_SIDE_COMPACTION),
+        "the model must record the one-side compaction shape: {:?}",
+        model.spec.shapes
+    );
 
     // ---- Step 3: merge both halves back into one whole-domain survivor. ----
     let merged = model.merge_all().await;
@@ -2416,6 +3103,36 @@ async fn test_mbt_split_shared_sst_single_side_compaction_duplicates_after_merge
     common_telemetry::info!(
         "[mbt-dup-row-mvp] invariant observations over this fixed trace:\n{}",
         format_violations(&observed)
+    );
+    model.assert_model_authorization(&ctx).await;
+    // The specification: the survivor holds the original file (authorized only for the rows
+    // the remaining holder authorized, because the compacted half's reference left it) and
+    // the compaction's output (authorized for the rows that half owns). The original object
+    // physically carries *both* rows, so the survivor reads a row the reference is not
+    // authorized for and the union covers it — authorization is not counting, which is why
+    // the oracle below is the judge of "exactly once".
+    let spec_merged = model
+        .spec
+        .region(merged)
+        .expect("the survivor is published");
+    assert_eq!(
+        BTreeMap::from([
+            (spec_file, Some(BTreeSet::from([1]))),
+            (spec_copy, Some(BTreeSet::from([9]))),
+        ]),
+        spec_merged.refs,
+        "the merge must combine the references per physical file: {:?}",
+        model.spec.describe(merged)
+    );
+    assert_eq!(
+        BTreeSet::from([1, 9]),
+        model.spec.authorized_keys(merged),
+        "together the references authorize every key the survivor serves"
+    );
+    assert!(
+        model.spec.shapes.contains(SHAPE_MERGE_RECOMBINES),
+        "the model must record the recombining merge: {:?}",
+        model.spec.shapes
     );
     assert!(
         violation.is_none(),
@@ -2431,10 +3148,13 @@ async fn test_mbt_split_shared_sst_single_side_compaction_duplicates_after_merge
 ///
 /// Ops: `write` (routed by partition key), `flush`, `split` (data-aware domain cut),
 /// `merge` (all live regions into one), `region compaction`, `import` (publish an SST the
-/// write path never produced) and table-level (multi-region) compaction. The oracle and all
-/// four invariant categories run after every published step. On a fatal failure the trace is
-/// shrunk to the shortest failing prefix, which is reported with the seed, the step index,
-/// the operation, the violated categories and the diff.
+/// write path never produced) and table-level (multi-region) compaction. The oracle, the
+/// model-side authorization assertion and the four observed invariant categories run after
+/// every published step. Every plan ends with [`shared_file_shape`], so each seed is driven
+/// through a split whose halves both keep the shared file, a compaction of exactly one half
+/// and the merge of both. On a fatal failure the trace is shrunk to the shortest failing
+/// prefix, which is reported with the seed, the step index, the operation, the violated
+/// categories, the diff and the shapes reached.
 ///
 /// The seed space comes from the environment (`MITO_MBT_SEED`, `MITO_MBT_SEEDS`) and falls
 /// back to the three default seeds.
@@ -2450,10 +3170,11 @@ async fn test_mbt_random_traces() {
         let ops = generate_plan(seed, PLAN_LEN);
         let report = run_trace(&format!("mbt-{seed}"), seed, &ops).await;
         let observations = if report.observations.is_empty() {
-            String::new()
+            format!("\n  shapes driven: {:?}", report.shapes)
         } else {
             format!(
-                "\n  non-fatal observations:\n  {}",
+                "\n  shapes driven: {:?}\n  non-fatal observations:\n  {}",
+                report.shapes,
                 report.observations_summary()
             )
         };
