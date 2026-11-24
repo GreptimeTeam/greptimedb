@@ -327,7 +327,6 @@ mod tests {
         RegionLeaseKeeper::new(table_metadata_manager, opening_region_keeper)
     }
 
-    /// Records the level of each event.
     #[derive(Clone, Default)]
     struct LevelCapture(Arc<std::sync::Mutex<Vec<tracing::Level>>>);
 
