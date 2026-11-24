@@ -147,6 +147,10 @@ struct FileReadFingerprint {
     preserve_row_sequence: bool,
     snapshot_sequence: Option<u64>,
     pre_filter_mode: PreFilterMode,
+    /// Row authorization of this reference. Two holders of the same physical
+    /// file can authorize different rows, so a cached range result must not be
+    /// shared between them.
+    owned_range: Option<String>,
 }
 
 /// Non-copiable struct of the fingerprint.
@@ -523,6 +527,14 @@ fn build_range_cache_key_inner(
         }
         let handle = stream_ctx.input.file_from_index(*index);
         let file = handle.meta_ref();
+        // A range that cannot be rendered cannot be fingerprinted: give up on
+        // caching this scan instead of treating it as an unrestricted file.
+        let owned_range = file
+            .owned_range
+            .as_deref()
+            .map(|range| range.as_json_str())
+            .transpose()
+            .ok()?;
         files.push((
             (handle.file_id().file_id(), index.row_group_index),
             FileReadFingerprint {
@@ -535,6 +547,7 @@ fn build_range_cache_key_inner(
                     || stream_ctx.range_pre_filter_mode(part_range),
                     |pruner| pruner.pre_filter_mode(index.index - stream_ctx.input.num_memtables()),
                 ),
+                owned_range,
             },
         ));
     }
