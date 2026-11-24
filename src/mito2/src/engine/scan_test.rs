@@ -46,16 +46,18 @@ use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
 use datatypes::json::JsonSettings;
 use datatypes::json::value::JsonValue;
 use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::ColumnSchema;
 use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
 use datatypes::vectors::json::array::JsonArray;
 use futures::TryStreamExt;
 use futures::future::try_join_all;
 use serde_json::json;
 use store_api::codec::PrimaryKeyEncoding;
+use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::PRIMARY_KEY_ENCODING;
 use store_api::region_engine::{PrepareRequest, RegionEngine, RegionScanner};
 use store_api::region_request::{
-    AlterKind, RegionAlterRequest, RegionBulkInsertsRequest, RegionCompactRequest,
+    AddColumn, AlterKind, RegionAlterRequest, RegionBulkInsertsRequest, RegionCompactRequest,
     RegionOpenRequest, RegionPutRequest, RegionRequest, SetRegionOption,
 };
 use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
@@ -68,11 +70,15 @@ use crate::error::Error;
 use crate::manifest::action::RegionEdit;
 use crate::read::read_columns::ReadColumns;
 use crate::read::scan_region::Scanner;
+use crate::series_index::format::{FormatReader, SamplesFormatReader};
 use crate::sst::file::{FileHandle, FileMeta};
 use crate::test_util;
 use crate::test_util::batch_util::sort_batches_and_print;
 use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
-use crate::test_util::{CreateRequestBuilder, TestEnv, reopen_region};
+use crate::test_util::{
+    CreateRequestBuilder, TestEnv, build_series_index_request, reopen_region,
+    sparse_metric_create_request,
+};
 
 #[tokio::test]
 async fn test_sparse_upsert_after_adding_nullable_tag() -> WhateverResult<()> {
@@ -82,41 +88,6 @@ async fn test_sparse_upsert_after_adding_nullable_tag() -> WhateverResult<()> {
 #[tokio::test]
 async fn test_narthex_sparse_upsert_after_adding_nullable_tag() -> WhateverResult<()> {
     check_sparse_upsert_after_adding_nullable_tag("narthex").await
-}
-
-fn sparse_metric_create_request(format: &str) -> store_api::region_request::RegionCreateRequest {
-    let mut request = CreateRequestBuilder::new()
-        .tag_num(1)
-        .field_num(1)
-        .insert_option("primary_key_encoding", "sparse")
-        .insert_option("sst_format", format)
-        .build();
-    if format == "narthex" {
-        for (key, value) in [
-            ("memtable.type", "bulk"),
-            ("memtable.bulk.merge_threshold", "2"),
-            ("memtable.bulk.encode_row_threshold", "1"),
-            ("memtable.bulk.encode_bytes_threshold", "1"),
-        ] {
-            request.options.insert(key.into(), value.into());
-        }
-    }
-    let reserved = sst_region_metadata_with_encoding(PrimaryKeyEncoding::Sparse);
-    request
-        .column_metadatas
-        .extend(reserved.column_metadatas.into_iter().take(2));
-    request
-        .primary_key
-        .splice(0..0, reserved.primary_key.into_iter().take(2));
-    request
-}
-
-pub(super) fn build_series_index_request() -> RegionRequest {
-    RegionRequest::BuildIndex(store_api::region_request::RegionBuildIndexRequest {
-        options: Some(api::v1::region::build_index_request::Options::SeriesIndex(
-            Default::default(),
-        )),
-    })
 }
 
 #[tokio::test]
@@ -203,10 +174,6 @@ async fn test_narthex_manual_repair_with_full_sidecar_budget() -> WhateverResult
 }
 
 async fn check_sparse_upsert_after_adding_nullable_tag(format: &str) -> WhateverResult<()> {
-    use datatypes::schema::ColumnSchema;
-    use store_api::metadata::ColumnMetadata;
-    use store_api::region_request::AddColumn;
-
     let series_reads = Arc::new(std::sync::Mutex::new(Vec::new()));
     let mut env = TestEnv::new().await;
     if format == "narthex" {
@@ -425,7 +392,6 @@ async fn check_sparse_upsert_after_adding_nullable_tag(format: &str) -> Whatever
                 .series_indexes()
                 .contains_key(&index_id)
         );
-        use crate::series_index::format::{FormatReader, SamplesFormatReader};
         let mut old_series = index_reader.read(crate::series_index::format::SeriesReadRequest {
             projection: index_reader
                 .schema()
@@ -435,7 +401,6 @@ async fn check_sparse_upsert_after_adding_nullable_tag(format: &str) -> Whatever
                 .collect(),
             ..Default::default()
         })?;
-        use futures::TryStreamExt;
         assert!(old_series.try_next().await?.is_some());
         assert!(
             samples_reader
@@ -505,9 +470,6 @@ async fn check_sparse_upsert_after_adding_nullable_tag(format: &str) -> Whatever
 
 #[tokio::test]
 async fn test_exemplar_sparse_storage_lifecycle() -> WhateverResult<()> {
-    use datatypes::schema::ColumnSchema;
-    use store_api::metadata::ColumnMetadata;
-    use store_api::region_request::AddColumn;
     use store_api::storage::consts::ReservedColumnId;
 
     for default_flat_format in [false, true] {

@@ -371,7 +371,11 @@ impl VersionControlData {
     }
 }
 
-/// Static metadata of a region.
+/// A region snapshot that owns both its memtables and its SST version.
+///
+/// Holding this snapshot across background I/O can keep flushed memtables alive.
+/// SST-only work should clone `ssts` and the metadata it needs, then release the
+/// region snapshot before starting I/O.
 #[derive(Clone, Debug)]
 pub(crate) struct Version {
     /// Metadata of the region.

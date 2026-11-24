@@ -755,10 +755,7 @@ async fn test_narthex_copy_and_remap(
     let owner = engine.get_region(source).unwrap();
     if with_index {
         engine
-            .handle_request(
-                source,
-                crate::engine::scan_test::build_series_index_request(),
-            )
+            .handle_request(source, crate::test_util::build_series_index_request())
             .await
             .unwrap();
     }

@@ -433,21 +433,23 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             waiters.reply_with(|| RegionBusySnafu { region_id }.fail());
             return RegionEditDispatch::Rejected;
         }
-        if let RegionEditKind::NativeSeries(origin, snapshot) = &kind {
+        if let RegionEditKind::NativeSeries {
+            origin,
+            schema_version,
+            truncated_entry_id,
+            index_ids,
+        } = &kind
+        {
             let current = region.version();
             if !Arc::ptr_eq(origin, &region)
                 || region.is_staging()
-                || current.metadata.schema_version != snapshot.metadata.schema_version
+                || current.metadata.schema_version != *schema_version
                 // Full truncate clears published indexes. Fence in-flight builds here
                 // because the index set can be empty on both sides of the truncate.
-                || current.truncated_entry_id != snapshot.truncated_entry_id
+                || current.truncated_entry_id != *truncated_entry_id
                 || !current.pending_tails.is_empty()
-                || current
-                    .ssts
-                    .series_indexes()
-                    .keys()
-                    .collect::<std::collections::HashSet<_>>()
-                    != snapshot.ssts.series_indexes().keys().collect()
+                || current.ssts.series_indexes().len() != index_ids.len()
+                || !index_ids.iter().all(|id| current.ssts.series_indexes().contains_key(id))
             {
                 waiters.reply_with(|| RegionBusySnafu { region_id }.fail());
                 return RegionEditDispatch::Rejected;
@@ -485,7 +487,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Updates manifest in background.
         common_runtime::spawn_global(async move {
             let result = match kind {
-                RegionEditKind::Import | RegionEditKind::NativeSeries(_, _) => {
+                RegionEditKind::Import | RegionEditKind::NativeSeries { .. } => {
                     edit_region(
                         &region,
                         edit.clone(),

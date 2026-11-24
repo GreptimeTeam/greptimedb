@@ -14,20 +14,28 @@
 
 //! Authoritative narthex samples SST writing.
 
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::sync::Arc;
 
 use datatypes::arrow::array::{Array, BinaryArray};
 use datatypes::arrow::compute::{cast, max, min};
 use datatypes::arrow::datatypes::DataType;
+use futures::TryStreamExt;
 use snafu::ResultExt;
 use store_api::storage::FileId;
 
 use crate::access_layer::SstInfoArray;
 use crate::access_layer::{AccessLayer, SstWriteRequest};
 use crate::error::{ComputeArrowSnafu, InvalidRecordBatchSnafu, Result};
-use crate::series_index::format::SamplesFormat;
+use crate::series_index::artifact::SamplesFileHandle;
+use crate::series_index::columnar::{ColumnarSeriesFormat, require};
+use crate::series_index::format::{FormatWriter, SamplesFormat, SamplesFormatReader};
 use crate::series_index::samples::ColumnarSamplesFormat;
-use crate::sst::file::{FileFormat, NarthexPartMeta, NarthexSamplesMeta, RegionFileId};
+use crate::series_index::samples::reader::SamplesReader;
+use crate::sst::file::{
+    FileFormat, FileMeta, NarthexPartMeta, NarthexSamplesMeta, NarthexSeriesIndexMeta, RegionFileId,
+};
 use crate::sst::location;
 use crate::sst::parquet::SstInfo;
 use crate::sst::parquet::writer::SstWriteGuard;
@@ -166,15 +174,6 @@ pub(crate) async fn write_series(
     sources: &[crate::sst::file::FileHandle],
     coverage: Option<crate::sst::file::NarthexCoverage>,
 ) -> Result<crate::sst::file::FileMeta> {
-    use std::cmp::Reverse;
-    use std::collections::BinaryHeap;
-
-    use crate::series_index::artifact::SamplesFileHandle;
-    use crate::series_index::columnar::{ColumnarSeriesFormat, require};
-    use crate::series_index::format::{FormatWriter, SamplesFormatReader};
-    use crate::series_index::samples::reader::SamplesReader;
-    use crate::sst::file::{FileMeta, NarthexSeriesIndexMeta};
-    use futures::TryStreamExt;
     require(!sources.is_empty(), "narthex series index requires samples")?;
     require(
         sources
