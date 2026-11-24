@@ -117,6 +117,40 @@ fn is_deferred_unknown_file(
         )
 }
 
+/// The narthex artifact that owns a listed object, if the object sits inside an
+/// artifact directory.
+///
+/// A listed object whose path this pass cannot classify must not be deleted, and
+/// neither must the artifact that holds it: the object is one of its parts, only
+/// named differently. Direct children (`<region>/<id>/<name>`) are recognized by
+/// `parse_narthex_file_id`, so this walks the ancestors instead and reports the
+/// nearest one whose name is a file id.
+fn narthex_owner_of_path(path: &str) -> Option<FileId> {
+    let mut dir = path;
+    while let Some((parent, _)) = dir.rsplit_once('/') {
+        if location::is_narthex_file_dir(parent) {
+            return parent.rsplit('/').next()?.parse().ok();
+        }
+        dir = parent;
+    }
+    None
+}
+
+/// Files one GC pass judged deletable, plus what the delete site needs to reclaim
+/// a narthex artifact object by object.
+#[derive(Debug, Default)]
+pub struct DeletableFiles {
+    /// Candidates for `delete_files`, and the source of the pass's report counts.
+    pub files: Vec<RemovedFile>,
+    /// Objects of each deletable narthex artifact, taken from the listing snapshot
+    /// this pass judged. Only these are removed, so a part a concurrent writer
+    /// appended after the listing is not in the set and survives.
+    pub narthex_parts: HashMap<FileId, Vec<String>>,
+    /// An unknown object was withheld by the young-object rule and needs a later
+    /// pass.
+    pub deferred_unknown: bool,
+}
+
 /// Limit the amount of concurrent GC jobs on the datanode
 pub struct GcLimiter {
     pub gc_job_limit: Arc<tokio::sync::Semaphore>,
@@ -613,7 +647,11 @@ impl LocalGcWorker {
             .map(|file_ref| (file_ref.file_id, file_ref.index_version))
             .collect::<HashSet<_>>();
 
-        let (mut deletable_files, deferred_unknown_files) = self
+        let DeletableFiles {
+            files: mut deletable_files,
+            narthex_parts,
+            deferred_unknown: deferred_unknown_files,
+        } = self
             .list_to_be_deleted_files(
                 region_id,
                 in_manifest,
@@ -686,7 +724,8 @@ impl LocalGcWorker {
             );
             deletable_files.clear();
         } else {
-            self.delete_files(region_id, &deletable_files).await?;
+            self.delete_files(region_id, &deletable_files, &narthex_parts)
+                .await?;
             debug!(
                 "Successfully deleted {} unused files for region {}",
                 deletable_files.len(),
@@ -757,7 +796,12 @@ impl LocalGcWorker {
         skip_all,
         fields(region_id = %region_id, removed_file_count = removed_files.len())
     )]
-    async fn delete_files(&self, region_id: RegionId, removed_files: &[RemovedFile]) -> Result<()> {
+    async fn delete_files(
+        &self,
+        region_id: RegionId,
+        removed_files: &[RemovedFile],
+        narthex_parts: &HashMap<FileId, Vec<String>>,
+    ) -> Result<()> {
         let mut index_ids = vec![];
         let file_pairs = removed_files
             .iter()
@@ -783,8 +827,18 @@ impl LocalGcWorker {
 
         for removed in removed_files {
             if let RemovedFile::Narthex(id) = removed {
+                let parts = match narthex_parts.get(id) {
+                    // Only the objects this pass listed and judged deletable are
+                    // removed: an object the listing did not hold, that is a part a
+                    // concurrent writer appended since, is never named here.
+                    Some(parts) => parts.clone(),
+                    // The fast mode holds no listing snapshot, so the objects of the
+                    // artifact are enumerated here. They are still removed one by
+                    // one, never with a recursive directory delete.
+                    None => self.list_narthex_artifact_parts(region_id, *id).await?,
+                };
                 self.access_layer
-                    .delete_narthex_artifact(region_id, *id)
+                    .delete_narthex_artifact_parts(region_id, *id, &parts)
                     .await?;
                 debug!("Deleted Narthex artifact {id} for region {region_id}");
             }
@@ -1024,6 +1078,35 @@ impl LocalGcWorker {
         Ok(entries)
     }
 
+    /// Lists the objects of one narthex artifact directory.
+    ///
+    /// Only the fast GC mode needs it: without a listing snapshot the objects of
+    /// the artifact are enumerated here, exactly like the recursive removal it
+    /// replaces would have walked, but so that each one is deleted on its own.
+    async fn list_narthex_artifact_parts(
+        &self,
+        region_id: RegionId,
+        file_id: FileId,
+    ) -> Result<Vec<String>> {
+        let dir =
+            location::narthex_file_dir(&self.access_layer.build_region_dir(region_id), file_id);
+        let mut lister = self
+            .access_layer
+            .object_store()
+            .lister_with(&dir)
+            .recursive(true)
+            .await
+            .context(OpenDalSnafu)?;
+        let mut parts = Vec::new();
+        while let Some(entry) = lister.try_next().await.context(OpenDalSnafu)? {
+            // Filesystem listings include the directory itself.
+            if entry.metadata().is_file() {
+                parts.push(entry.path().to_string());
+            }
+        }
+        Ok(parts)
+    }
+
     /// Concurrently list all files in the region directory using the provided listers.
     /// Returns a vector of all file entries found across all partitions.
     async fn list_region_files_concurrent(
@@ -1102,8 +1185,9 @@ impl LocalGcWorker {
         may_linger_files: &HashSet<&RemovedFile>,
         eligible_for_delete: &HashSet<&RemovedFile>,
         unknown_file_may_linger_until: chrono::DateTime<chrono::Utc>,
-    ) -> (Vec<RemovedFile>, bool) {
+    ) -> DeletableFiles {
         let mut ready_for_delete = vec![];
+        let mut narthex_parts: HashMap<FileId, Vec<String>> = HashMap::new();
         let mut deferred_unknown = false;
         // Every index-version reader needs the same Parquet file.
         let referenced_ssts: HashSet<_> = in_tmp_ref.iter().map(|(file_id, _)| *file_id).collect();
@@ -1150,6 +1234,12 @@ impl LocalGcWorker {
                     unknown_file_may_linger_until,
                 );
                 *narthex_eligibility.entry(file_id).or_insert(true) &= delete;
+                if delete {
+                    narthex_parts
+                        .entry(file_id)
+                        .or_default()
+                        .push(entry.path().to_string());
+                }
                 continue;
             }
             if entry.name() == DROPPING_MARKER_FILE {
@@ -1163,6 +1253,12 @@ impl LocalGcWorker {
                     // if we can't parse the file id, it means it's not a sst or index file
                     // shouldn't delete it because we don't know what it is
                     GC_SKIPPED_UNPARSABLE_FILES.inc();
+                    // An object of an artifact this pass cannot classify vetoes the
+                    // whole artifact: the artifact removal is not recursive any more,
+                    // but a part this pass did not judge must not be dropped with it.
+                    if let Some(owner) = narthex_owner_of_path(entry.path()) {
+                        narthex_eligibility.insert(owner, false);
+                    }
                     continue;
                 }
             };
@@ -1245,7 +1341,11 @@ impl LocalGcWorker {
                 .into_iter()
                 .filter_map(|(id, eligible)| eligible.then_some(RemovedFile::Narthex(id))),
         );
-        (ready_for_delete, deferred_unknown)
+        DeletableFiles {
+            files: ready_for_delete,
+            narthex_parts,
+            deferred_unknown,
+        }
     }
 
     /// List files to be deleted based on their presence in the manifest, temporary references, and recently removed files.
@@ -1267,7 +1367,7 @@ impl LocalGcWorker {
         in_tmp_ref: &HashSet<(FileId, Option<IndexVersion>)>,
         recently_removed_files: BTreeMap<Timestamp, HashSet<RemovedFile>>,
         all_entries: Vec<Entry>,
-    ) -> Result<(Vec<RemovedFile>, bool)> {
+    ) -> Result<DeletableFiles> {
         let now = chrono::Utc::now();
         let may_linger_until = self
             .opt
@@ -1343,22 +1443,24 @@ impl LocalGcWorker {
                 files_to_delete.len()
             );
 
-            return Ok((files_to_delete, false));
+            return Ok(DeletableFiles {
+                files: files_to_delete,
+                narthex_parts: HashMap::new(),
+                deferred_unknown: false,
+            });
         }
 
         // Full file listing mode: get the full list of files from object store
 
         // Step 3: Filter files to determine which ones can be deleted
-        let all_unused_files_ready_for_delete = self.filter_deletable_files(
+        Ok(self.filter_deletable_files(
             all_entries,
             manifest,
             in_tmp_ref,
             &all_may_linger_files,
             &eligible_for_removal,
             unknown_file_may_linger_until,
-        );
-
-        Ok(all_unused_files_ready_for_delete)
+        ))
     }
 }
 

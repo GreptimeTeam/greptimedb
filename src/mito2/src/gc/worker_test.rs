@@ -275,7 +275,7 @@ async fn test_gc_keeps_sst_across_index_versions(
             .into_iter()
             .map(|f| (f.file_id, f.index_version))
             .collect();
-        let (deleted, _deferred_unknown) = env
+        let deleted = env
             .worker
             .list_to_be_deleted_files(
                 region_id,
@@ -286,7 +286,7 @@ async fn test_gc_keeps_sst_across_index_versions(
             )
             .await
             .unwrap();
-        let deleted: HashSet<_> = deleted.into_iter().collect();
+        let deleted: HashSet<_> = deleted.files.into_iter().collect();
         let expected = match released {
             0 => HashSet::new(),
             1 => HashSet::from([RemovedFile::Index(meta.file_id, released_version)]),
@@ -319,7 +319,7 @@ async fn test_gc_reference_protects_parquet_and_only_its_index(
     } else {
         HashSet::from([(file_id, index_version)])
     };
-    let (deleted, _deferred_unknown) = env
+    let deleted = env
         .worker
         .list_to_be_deleted_files(
             env.meta.region_id,
@@ -329,7 +329,8 @@ async fn test_gc_reference_protects_parquet_and_only_its_index(
             env.entries.clone(),
         )
         .await
-        .unwrap();
+        .unwrap()
+        .files;
     let expected: HashSet<_> = [0, 1]
         .into_iter()
         .filter(|version| Some(*version) != index_version)
@@ -2004,7 +2005,7 @@ async fn test_narthex_artifact_gc_inventory_and_references() {
         (Some(&manifest), HashSet::new()),
         (None, HashSet::from([(id, None)])),
     ] {
-        let (delete, _) = env.worker.filter_deletable_files(
+        let deletable = env.worker.filter_deletable_files(
             entries.clone(),
             manifest,
             &readers,
@@ -2012,9 +2013,10 @@ async fn test_narthex_artifact_gc_inventory_and_references() {
             &HashSet::from([&removed]),
             threshold,
         );
-        assert!(delete.is_empty());
+        assert!(deletable.files.is_empty());
+        assert!(deletable.narthex_parts.is_empty());
     }
-    let (delete, _) = env.worker.filter_deletable_files(
+    let deletable = env.worker.filter_deletable_files(
         entries,
         None,
         &HashSet::new(),
@@ -2022,8 +2024,12 @@ async fn test_narthex_artifact_gc_inventory_and_references() {
         &HashSet::from([&removed]),
         threshold,
     );
-    assert_eq!(delete, vec![removed]);
-    env.worker.delete_files(region_id, &delete).await.unwrap();
+    assert_eq!(deletable.files, vec![removed]);
+    assert_eq!(deletable.narthex_parts.get(&id).map(Vec::len), Some(3));
+    env.worker
+        .delete_files(region_id, &deletable.files, &deletable.narthex_parts)
+        .await
+        .unwrap();
     assert!(!layer.object_store().exists(&prefix).await.unwrap());
     for path in paths {
         assert!(!layer.object_store().exists(&path).await.unwrap());
@@ -2046,7 +2052,7 @@ async fn test_narthex_artifact_gc_requires_age_for_every_object() {
     assert!(should_delete_file(
         false, false, false, false, &old, threshold
     ));
-    let (delete, deferred) = env.worker.filter_deletable_files(
+    let deletable = env.worker.filter_deletable_files(
         vec![old, unknown],
         None,
         &HashSet::new(),
@@ -2054,8 +2060,8 @@ async fn test_narthex_artifact_gc_requires_age_for_every_object() {
         &HashSet::new(),
         threshold,
     );
-    assert!(delete.is_empty());
-    assert!(deferred);
+    assert!(deletable.files.is_empty());
+    assert!(deletable.deferred_unknown);
 }
 
 // ===========================================================================
@@ -2199,6 +2205,10 @@ struct DeleteRecord {
     /// Deleter instance (`deleter()` call, i.e. deletion batch) the call belongs to.
     batch: usize,
     path: String,
+    /// The call asks the store to remove everything below `path`. A recursive
+    /// delete is the one unit a narthex artifact must never be reclaimed with:
+    /// it removes objects the pass never judged.
+    recursive: bool,
     /// `Some` when the underlying delete reported an error.
     error: Option<String>,
 }
@@ -2266,11 +2276,13 @@ struct RecordingDeleter {
 
 impl oio::Delete for RecordingDeleter {
     async fn delete(&mut self, path: &str, args: OpDelete) -> MockResult<()> {
+        let recursive = args.recursive();
         let result = self.inner.delete(path, args).await;
         self.log.records.lock().unwrap().push(DeleteRecord {
             round: self.log.current_round.load(Ordering::SeqCst),
             batch: self.batch,
             path: normalize_object_path(path),
+            recursive,
             error: result.as_ref().err().map(|err| err.to_string()),
         });
         result
@@ -2324,6 +2336,11 @@ struct OracleHook {
     block_next: AtomicBool,
     entered: tokio::sync::Notify,
     resume: tokio::sync::Notify,
+    /// Objects a concurrent writer appends while the next protection lookup is
+    /// blocked. The lookup runs after the pass listed the region and before it
+    /// deletes anything, so these objects are exactly the ones the listing
+    /// snapshot does not hold.
+    append_on_lookup: Mutex<Vec<(ObjectStore, String)>>,
 }
 
 impl OracleHook {
@@ -2347,6 +2364,15 @@ impl RegionHook for OracleHook {
         _access: &AccessLayer,
         files: &[RegionFileId],
     ) -> crate::error::Result<HashSet<RegionFileId>> {
+        // The pass has listed the region and not deleted anything yet: this is
+        // where a concurrent writer appends a part its snapshot cannot hold.
+        let appends = std::mem::take(&mut *self.append_on_lookup.lock().unwrap());
+        for (store, path) in appends {
+            store
+                .write(&path, b"oracle object".as_slice())
+                .await
+                .unwrap();
+        }
         if self.block_next.swap(false, Ordering::SeqCst) {
             self.entered.notify_one();
             self.resume.notified().await;
@@ -2490,8 +2516,10 @@ struct PassFacts {
     reported_indexes: BTreeSet<(FileId, IndexVersion)>,
     /// Narthex artifact directories the oracle expected the pass to remove.
     expected_narthex: BTreeSet<FileId>,
-    /// Narthex artifact directories the pass really handed to a recursive
-    /// delete. This is the unit the store sees, so it is checked on its own.
+    /// Narthex artifact directories whose removal the pass asked the store for.
+    narthex_dir_removals: BTreeSet<FileId>,
+    /// Narthex artifact directories the store really removed: the directory was
+    /// empty, so every part the pass judged deletable is gone.
     deleted_narthex: BTreeSet<FileId>,
 }
 
@@ -2521,6 +2549,8 @@ struct PassInput {
     hook_protected: HashSet<FileId>,
     /// Objects present in the region directory, with their modification time.
     listed: BTreeMap<GcObject, Option<i64>>,
+    /// Artifacts whose directory holds an object the pass cannot classify.
+    unclassified_narthex: BTreeSet<FileId>,
 }
 
 impl PassInput {
@@ -2646,6 +2676,11 @@ impl PassInput {
     /// artifact. Deleting a subset of the parts is not an option: the removal
     /// site drops the artifact directory.
     fn narthex_verdict(&self, id: FileId) -> Verdict {
+        // A listed object of the artifact that the pass cannot classify is part of
+        // the artifact all the same, and it was never judged deletable.
+        if self.knobs.full_listing && self.unclassified_narthex.contains(&id) {
+            return Verdict::Keep("an object of the artifact cannot be classified");
+        }
         let parts: Vec<GcObject> = self
             .listed
             .keys()
@@ -2832,6 +2867,13 @@ struct GcOracle {
     tmp_refs: HashSet<(FileId, Option<IndexVersion>)>,
     /// Objects deleted by any pass so far.
     deleted_ever: BTreeSet<GcObject>,
+    /// Narthex artifacts whose directory holds an object no [`GcObject`] models.
+    /// Such an object cannot be classified, so the artifact is withheld whole.
+    unclassified_narthex: BTreeSet<FileId>,
+    /// Objects a concurrent writer appends during the next pass, as the oracle
+    /// believes they exist. They join the inventory after that pass, because they
+    /// land after its listing snapshot.
+    pending_appends: Vec<GcObject>,
     /// Facts of the pass that ran last, for tests that pin one pass closely.
     last_pass: Option<PassFacts>,
     /// Branch labels folded from every pass so far. The seeded scenario's
@@ -2891,6 +2933,8 @@ impl GcOracle {
             inventory: BTreeSet::new(),
             tmp_refs: HashSet::new(),
             deleted_ever: BTreeSet::new(),
+            unclassified_narthex: BTreeSet::new(),
+            pending_appends: Vec::new(),
             last_pass: None,
             branches: ScenarioBranches::default(),
             scenario: scenario.to_string(),
@@ -3143,6 +3187,38 @@ impl GcOracle {
         .await;
     }
 
+    /// Writes one object into the artifact directory of `id` that no
+    /// [`GcObject`] models: its path cannot be classified, so the pass must not
+    /// delete the object and must withhold the artifact that holds it.
+    async fn write_unclassified_narthex_object(&mut self, id: FileId, name: &str) {
+        let path =
+            location::narthex_file_dir(&self.access_layer().build_region_dir(self.region_id), id);
+        let path = format!("{path}{name}");
+        self.access_layer()
+            .object_store()
+            .write(&path, b"oracle object".as_slice())
+            .await
+            .unwrap();
+        self.unclassified_narthex.insert(id);
+        self.history.push(format!("write unclassified {path}"));
+        self.verify_step("after unclassified write").await;
+    }
+
+    /// Arms a concurrent writer: the next pass appends `object` to its artifact
+    /// after listing the region and before deleting, so the listing snapshot the
+    /// pass judged cannot hold it.
+    fn arm_concurrent_write(&mut self, object: GcObject) {
+        let path = object_path(object, self.region_id, self.access_layer());
+        self.hook
+            .append_on_lookup
+            .lock()
+            .unwrap()
+            .push((self.access_layer().object_store().clone(), path));
+        self.pending_appends.push(object);
+        self.history
+            .push(format!("concurrent write {}", object.describe()));
+    }
+
     fn set_tmp_refs(&mut self, refs: impl IntoIterator<Item = (FileId, Option<IndexVersion>)>) {
         self.tmp_refs = refs.into_iter().collect();
         let mut refs = self.tmp_refs.iter().copied().collect::<Vec<_>>();
@@ -3318,6 +3394,7 @@ impl GcOracle {
             tmp_refs,
             hook_protected,
             listed,
+            unclassified_narthex: self.unclassified_narthex.clone(),
         };
         let candidates = input.candidates();
         let raw_expected = expand_candidates(
@@ -3360,7 +3437,9 @@ impl GcOracle {
         let in_round = |record: &DeleteRecord| record.round == round;
         let mut deleted_paths: BTreeSet<String> = BTreeSet::new();
         let mut attempted_paths: BTreeSet<String> = BTreeSet::new();
+        let mut narthex_dir_removals: BTreeSet<FileId> = BTreeSet::new();
         let mut deleted_narthex: BTreeSet<FileId> = BTreeSet::new();
+        let mut recursive_deletes: Vec<String> = Vec::new();
         for record in records
             .iter()
             .filter(|record| in_round(record) && self.is_data_path(&record.path))
@@ -3371,34 +3450,56 @@ impl GcOracle {
             // artifact directory delete attempts the artifact, not one part.
             attempted_paths.insert(record.path.clone());
             match narthex_artifact_dir(&record.path) {
-                // The artifact removal is one recursive delete naming the
-                // directory: it covers every part object the directory held.
-                Some(id) => {
+                // The artifact directory. A recursive delete removes every object
+                // the directory holds, judged or not, so it is never allowed: the
+                // delete site names each part itself and then asks for the empty
+                // directory, which fails while a part it did not judge is there.
+                Some(id) if record.recursive => {
+                    recursive_deletes.push(record.path.clone());
                     deleted_narthex.insert(id);
                     deleted_paths.extend(narthex_parts.get(&id).cloned().unwrap_or_default());
+                }
+                Some(id) => {
+                    narthex_dir_removals.insert(id);
+                    if record.error.is_none() {
+                        deleted_narthex.insert(id);
+                    }
                 }
                 None => {
                     deleted_paths.insert(record.path.clone());
                 }
             }
         }
+        assert!(
+            recursive_deletes.is_empty(),
+            "{}: pass `{what}` reclaimed narthex artifacts with a recursive directory delete, which removes parts it never judged: {recursive_deletes:?}",
+            self.context(),
+        );
         let actual_paths: BTreeSet<String> = deleted_paths
             .intersection(&existing_paths)
             .cloned()
             .collect();
         let phantom_deletes: BTreeSet<String> =
             deleted_paths.difference(&existing_paths).cloned().collect();
+        // A directory removal that finds a part the snapshot did not hold fails by
+        // design (`remove_dir` on a non-empty directory): that is the skip, not an
+        // error, so only object deletes are held to "must not fail".
         let failed_deletes: Vec<(String, Option<String>)> = records
             .iter()
             .filter(|record| in_round(record) && self.is_data_path(&record.path))
+            .filter(|record| narthex_artifact_dir(&record.path).is_none())
             .filter(|record| record.error.is_some())
             .map(|record| (record.path.clone(), record.error.clone()))
             .collect();
+        // A listing of one artifact directory belongs to the delete site, which
+        // enumerates an artifact it owns exclusively. The mode check below is about
+        // the region listing decision, so those listings are not part of it.
         let listed_round: Vec<String> = self
             .log
             .lists()
             .into_iter()
             .filter(|list| list.round == round && self.is_data_path(&list.path))
+            .filter(|list| narthex_artifact_dir(&list.path).is_none())
             .map(|list| list.path)
             .collect();
 
@@ -3439,34 +3540,43 @@ impl GcOracle {
         // objects: the SSTs of the removed files, the index versions of their
         // `0..=v` fan-out, and the explicitly recorded index removals. A batch
         // per object would grow this count with the inventory. Each narthex
-        // artifact is removed by its own recursive directory delete, so it adds
-        // exactly one batch per artifact.
+        // artifact adds two batches at most: one for the parts the pass judged,
+        // one for the empty directory removal.
         let batches: BTreeSet<usize> = records
             .iter()
             .filter(|record| in_round(record) && self.is_data_path(&record.path))
             .map(|record| record.batch)
             .collect();
-        let allowed_batches = 3 + deleted_narthex.len();
+        let allowed_batches = 3 + 2 * narthex_dir_removals.len();
         assert!(
             batches.len() <= allowed_batches,
             "{}: pass `{what}` used {} delete batches ({batches:?}) for the region's data objects, at most {allowed_batches} are expected",
             self.context(),
             batches.len()
         );
-        // Artifact directories are the unit the store sees, so they are compared
-        // on their own: a pass may neither remove an artifact the oracle keeps
-        // (even when only one of its parts is still protected) nor leave one the
-        // oracle expects to be gone.
+        // Artifact directories are compared on their own: a pass may neither
+        // remove an artifact the oracle keeps (even when only one of its parts is
+        // still protected) nor leave one the oracle expects to be gone. The
+        // removal may report that the directory was not empty, which is the
+        // intended skip, so the attempt is checked and the success only bounded.
         assert_eq!(
-            deleted_narthex,
+            narthex_dir_removals,
             expected_narthex,
-            "{}: pass `{what}` narthex artifact delete set mismatch\n  removed but not expected: {:?}\n  expected but not removed: {:?}\n",
+            "{}: pass `{what}` narthex artifact removal set mismatch\n  removed but not expected: {:?}\n  expected but not removed: {:?}\n",
             self.context(),
-            deleted_narthex
+            narthex_dir_removals
                 .difference(&expected_narthex)
                 .collect::<Vec<_>>(),
             expected_narthex
-                .difference(&deleted_narthex)
+                .difference(&narthex_dir_removals)
+                .collect::<Vec<_>>(),
+        );
+        assert!(
+            deleted_narthex.is_subset(&expected_narthex),
+            "{}: pass `{what}` really removed narthex artifacts the oracle keeps: {:?}",
+            self.context(),
+            deleted_narthex
+                .difference(&expected_narthex)
                 .collect::<Vec<_>>(),
         );
         // Two-sided check: no object may be deleted unexpectedly, and every
@@ -3650,6 +3760,7 @@ impl GcOracle {
             reported_files: reported_files.clone(),
             reported_indexes: reported_indexes.clone(),
             expected_narthex,
+            narthex_dir_removals,
             deleted_narthex,
         });
         for path in &actual_paths {
@@ -3686,6 +3797,17 @@ impl GcOracle {
             retraction: self.branches.retraction || retracted,
             index_replacement: self.branches.index_replacement || superseded_index,
         };
+        // Objects a concurrent writer appended during the pass landed after its
+        // listing snapshot, so they join the model inventory only now. If the pass
+        // deleted one of them anyway, the whole-inventory check below fails.
+        for object in std::mem::take(&mut self.pending_appends) {
+            assert!(
+                self.inventory.insert(object),
+                "{}: concurrent write of {} duplicated an inventoried object",
+                self.context(),
+                object.describe()
+            );
+        }
         self.history.push(format!(
             "pass({what}: {}, linger={:?}, unknown={:?})",
             if knobs.full_listing { "full" } else { "fast" },
@@ -3712,14 +3834,6 @@ impl SeedRng {
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         z ^ (z >> 31)
-    }
-
-    fn below(&mut self, bound: u64) -> u64 {
-        self.next() % bound
-    }
-
-    fn chance(&mut self, percent: u64) -> bool {
-        self.below(100) < percent
     }
 
     /// Deterministic file id, so a replayed seed lists the same objects.
@@ -4648,24 +4762,28 @@ fn test_gc_physical_delete_oracle_scenario_plans_are_distinct() {
 
 /// Narthex artifacts at the real delete site.
 ///
-/// A narthex artifact is one file made of parts under `<region>/<file id>/`,
-/// and it is reclaimed as a whole: `delete_narthex_artifact` hands the object
-/// store one recursive directory delete. The safety contract is therefore
-/// judged per part but executed per artifact, which is why the oracle models
-/// both levels: the parts are inventory objects with their own age, and the
-/// artifact directory is the unit a pass may or may not remove.
+/// A narthex artifact is one file made of parts under `<region>/<file id>/`.
+/// It is reclaimed object by object - the parts the pass listed and judged
+/// deletable - and the artifact directory is then removed without recursion,
+/// which fails while a part the pass did not judge is still there. The safety
+/// contract is judged per part but bounded per artifact, which is why the oracle
+/// models both levels: the parts are inventory objects with their own age, and
+/// the artifact directory is the unit a pass may or may not remove.
 ///
-/// Three properties are covered here, none of which a report-based test can
-/// see:
+/// The properties covered here, none of which a report-based test can see:
 /// * every part is past the grace period and the artifact is not in the
 ///   manifest - the whole directory is reclaimed, including its own
 ///   `manifest.json`;
 /// * one part is younger than the grace period - the whole artifact survives,
 ///   although its other parts are as old as the ones of a reclaimed artifact in
 ///   the very same pass;
-/// * one artifact is listed in the manifest - no age makes it reclaimable.
+/// * one artifact is listed in the manifest - no age makes it reclaimable;
+/// * a part a concurrent writer appends after the listing is not in the judged
+///   set, so it survives and the directory removal is skipped;
+/// * an object of the artifact that the pass cannot classify vetoes the whole
+///   artifact, although its other parts are old enough.
 ///
-/// A second pass then removes an artifact through the manifest record
+/// A later pass then removes an artifact through the manifest record
 /// (`RemovedFile::Narthex`), and leaves one alone while its record still
 /// lingers. `deleted_ever` and the inventory are checked for the parts, so a
 /// pass that removes the directory without accounting for its objects fails.
@@ -4861,6 +4979,112 @@ async fn test_gc_physical_delete_oracle_narthex() {
             .iter()
             .any(|object| object.file_id() == recorded),
         "{}: the reclaimed artifact {recorded} must hold no object any more",
+        oracle.context()
+    );
+
+    // The listing snapshot, not the directory, decides what may go: a part a
+    // concurrent writer appends after that listing is young, was never judged,
+    // and must survive. A recursive directory delete takes it along, so the
+    // removal of the directory has to be skipped while it is there.
+    let concurrent = FileId::from_bytes([0x11; 16]);
+    oracle.write_narthex_artifact(concurrent, 1).await;
+    oracle.arm_concurrent_write(GcObject::Narthex(concurrent, NarthexObject::Part(1)));
+    oracle
+        .run_pass(
+            RoundKnobs::full(NO_KNOWN_WAIT, MATURE_UNKNOWN_LINGER),
+            PassWiring::default(),
+            PassExpectation::complete_deleting(),
+            "full/concurrent-part",
+        )
+        .await;
+
+    let facts = oracle.last_pass();
+    assert!(
+        facts.narthex_dir_removals.contains(&concurrent),
+        "{}: the artifact {concurrent} is a candidate, so its directory removal must be attempted",
+        oracle.context()
+    );
+    assert!(
+        !facts.deleted_narthex.contains(&concurrent),
+        "{}: the directory of {concurrent} still held the part the pass never judged, so its removal must be skipped",
+        oracle.context()
+    );
+    for part in [NarthexObject::Manifest, NarthexObject::Part(0)] {
+        let object = GcObject::Narthex(concurrent, part);
+        assert!(
+            oracle.deleted_ever().contains(&object),
+            "{}: {} was listed, judged deletable and must be gone",
+            oracle.context(),
+            object.describe()
+        );
+    }
+    let appended = GcObject::Narthex(concurrent, NarthexObject::Part(1));
+    assert!(
+        oracle.inventory().contains(&appended),
+        "{}: {} landed after the listing, so it must survive",
+        oracle.context(),
+        appended.describe()
+    );
+    assert!(
+        !facts.actual.contains(&appended),
+        "{}: {} was never judged deletable and must not be deleted",
+        oracle.context(),
+        appended.describe()
+    );
+
+    // An object of the artifact the pass cannot classify is still one of its
+    // parts. It cannot be judged, so the artifact must be withheld whole: not
+    // even the parts of it that are old enough may go.
+    let unclassified = FileId::from_bytes([0x1B; 16]);
+    oracle.write_narthex_artifact(unclassified, 1).await;
+    oracle
+        .write_unclassified_narthex_object(unclassified, "tmp/part-0.samples")
+        .await;
+    oracle
+        .run_pass(
+            RoundKnobs::full(NO_KNOWN_WAIT, MATURE_UNKNOWN_LINGER),
+            PassWiring::default(),
+            PassExpectation::complete(),
+            "full/unclassified-object",
+        )
+        .await;
+
+    let facts = oracle.last_pass();
+    assert!(
+        !facts.narthex_dir_removals.contains(&unclassified),
+        "{}: the artifact {unclassified} holds an object the pass cannot classify, so nothing of it may be removed",
+        oracle.context()
+    );
+    for part in [NarthexObject::Manifest, NarthexObject::Part(0)] {
+        let object = GcObject::Narthex(unclassified, part);
+        assert!(
+            oracle.inventory().contains(&object),
+            "{}: {} must survive although it is old, because the artifact is withheld whole",
+            oracle.context(),
+            object.describe()
+        );
+        assert!(
+            !oracle.deleted_ever().contains(&object),
+            "{}: {} was deleted although the artifact is withheld whole",
+            oracle.context(),
+            object.describe()
+        );
+    }
+    let unclassified_path = format!(
+        "{}tmp/part-0.samples",
+        location::narthex_file_dir(
+            &oracle.access_layer().build_region_dir(oracle.region_id),
+            unclassified
+        )
+    );
+    assert!(
+        oracle
+            .access_layer()
+            .object_store()
+            .exists(&unclassified_path)
+            .await
+            .unwrap(),
+        "{}: the unclassifiable object {unclassified_path} must survive",
         oracle.context()
     );
 }

@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use async_stream::try_stream;
 use common_base::readable_size::ReadableSize;
 use common_runtime::runtime::RuntimeTrait;
-use common_telemetry::warn;
+use common_telemetry::{debug, warn};
 use common_time::Timestamp;
 use futures::{Stream, TryStreamExt};
 use object_store::services::Fs;
@@ -245,19 +245,59 @@ impl AccessLayer {
     }
 
     /// Deletes objects belonging to a fenced artifact in its canonical directory.
+    ///
+    /// Only for a caller that owns the artifact exclusively: an uncommitted write
+    /// being cleaned up, or the file purger holding the last reference. GC must
+    /// not use it - it reclaims an artifact through
+    /// [`Self::delete_narthex_artifact_parts`], so that only the objects its own
+    /// listing snapshot judged are removed.
     pub(crate) async fn delete_narthex_artifact(
         &self,
         region_id: RegionId,
         file_id: FileId,
     ) -> Result<()> {
-        let region_dir = self.build_region_dir(region_id);
-        let dir = location::narthex_file_dir(&region_dir, file_id);
+        let dir = self.narthex_artifact_dir(region_id, file_id);
         self.object_store
             .delete_with(&dir)
             .recursive(true)
             .await
             .context(OpenDalSnafu)?;
         Ok(())
+    }
+
+    /// Deletes `parts`, the objects one GC pass listed and judged deletable for
+    /// the artifact `file_id`, then the artifact directory itself.
+    ///
+    /// An object the caller did not observe — in particular a part a concurrent
+    /// writer appended after that listing — is never named here, so it survives:
+    /// the directory removal below is not recursive, and it is skipped while such
+    /// an object is still there.
+    pub(crate) async fn delete_narthex_artifact_parts(
+        &self,
+        region_id: RegionId,
+        file_id: FileId,
+        parts: &[String],
+    ) -> Result<()> {
+        if !parts.is_empty() {
+            let mut deleter = self.object_store.deleter().await.context(OpenDalSnafu)?;
+            // Deleter does not normalize leading slashes like Operator::delete does.
+            let paths = parts
+                .iter()
+                .map(|path| path.trim_start_matches('/').to_string());
+            deleter.delete_iter(paths).await.context(OpenDalSnafu)?;
+            deleter.close().await.context(OpenDalSnafu)?;
+        }
+
+        let dir = self.narthex_artifact_dir(region_id, file_id);
+        if let Err(error) = self.object_store.delete(&dir).await {
+            debug!("Narthex artifact directory {dir} is not empty, skip its removal: {error}");
+        }
+        Ok(())
+    }
+
+    /// Directory of the narthex artifact `file_id` in the region.
+    fn narthex_artifact_dir(&self, region_id: RegionId, file_id: FileId) -> String {
+        location::narthex_file_dir(&self.build_region_dir(region_id), file_id)
     }
 
     pub(crate) async fn delete_ssts(
