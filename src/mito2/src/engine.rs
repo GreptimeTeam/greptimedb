@@ -100,6 +100,8 @@ mod copy_region_from_test;
 mod remap_manifests_test;
 #[cfg(test)]
 mod repartition_dup_row_test;
+#[cfg(test)]
+mod repartition_mbt_test;
 
 #[cfg(test)]
 mod apply_staging_manifest_test;
