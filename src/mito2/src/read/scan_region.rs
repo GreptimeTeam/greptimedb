@@ -47,7 +47,7 @@ use partition::overlap::associate_from_to;
 use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
-use store_api::region_engine::{PartitionRange, RegionScannerRef};
+use store_api::region_engine::{PartitionRange, RegionScannerRef, ScanSnapshotIdentity};
 use store_api::storage::{
     ColumnId, CursorShard, RegionId, ScanRequest, SequenceNumber, SequenceRange,
     TimeSeriesDistribution, TimeSeriesRowSelector,
@@ -522,9 +522,62 @@ impl ScanRegion {
         self.request.distribution == Some(TimeSeriesDistribution::PerSeries)
     }
 
+    /// The region's partition-expression identity at this scan's version snapshot.
+    ///
+    /// [`Self::version`] is the `Version` whose `committed_sequence` the engine bound as this
+    /// scan's `memtable_max_sequence` (see `EngineHandle::scan_region`), so the identity read
+    /// here and that watermark describe one snapshot: a repartition that gives the region
+    /// another expression publishes a new `Version`, which this scan never consults again.
+    ///
+    /// The expression is reported in the canonical `PartitionExpr::as_json_str()` form an
+    /// observed slice and a cursor entry carry, so `(region, expression)` from this scan keys
+    /// the same slice as they do. `None` - no expression, or the explicit empty designation -
+    /// states the region's complete value domain.
+    fn snapshot_partition_expr(&self) -> Result<Option<String>> {
+        let Some(expr) =
+            crate::region::parse_partition_expr(self.version.metadata.partition_expr.as_deref())?
+        else {
+            return Ok(None);
+        };
+        let identity = expr
+            .canonicalize()
+            .as_json_str()
+            .context(crate::error::SerializePartitionExprSnafu)?;
+        Ok(Some(identity))
+    }
+
+    /// The creators of the files this scan's version snapshot has visible, excluding the region
+    /// itself, sorted and deduplicated.
+    ///
+    /// This reads the version's file list in memory - no manifest read, no file open - so it is
+    /// what the region held **when the scan opened**, before any predicate prunes a file away. A
+    /// consumer that enumerates the regions a flow's rows can come from needs exactly this: the
+    /// regions whose rows are sitting in this region's files, which a pruned read never delivers
+    /// and therefore never reports.
+    ///
+    /// The region's own files are its own rows, so its own id is not listed.
+    fn visible_foreign_file_creators(&self) -> Vec<u64> {
+        let region_id = self.region_id();
+        let mut creators = self
+            .version
+            .ssts
+            .levels()
+            .iter()
+            .flat_map(|level| level.files.values())
+            .map(|file| file.meta_ref().region_id.as_u64())
+            .filter(|creator| *creator != region_id)
+            .collect::<Vec<_>>();
+        creators.sort_unstable();
+        creators.dedup();
+        creators
+    }
+
     /// Creates a scan input.
     #[tracing::instrument(skip_all, fields(region_id = %self.region_id()))]
     async fn scan_input(mut self) -> Result<ScanInput> {
+        // Pinned together with `snapshot_sequence` below, all from `self.version`.
+        let snapshot_partition_expr = self.snapshot_partition_expr()?;
+        let visible_foreign_file_creators = self.visible_foreign_file_creators();
         let metadata = &self.version.metadata;
         let sst_min_sequence = self.request.sst_min_sequence.and_then(NonZeroU64::new);
         let time_range = self.build_time_range_predicate();
@@ -680,6 +733,8 @@ impl ScanRegion {
                     .then_some(self.request.memtable_max_sequence)
                     .flatten(),
             )
+            .with_snapshot_partition_expr(snapshot_partition_expr)
+            .with_visible_foreign_file_creators(visible_foreign_file_creators)
             .with_sequence_range(sequence_range)
             .with_read_across_invalid_boundary(self.request.read_across_invalid_boundary)
             .with_read_row_sequence(self.request.read_row_sequence)
@@ -1074,6 +1129,19 @@ pub struct ScanInput {
     explain_flat_format: bool,
     /// Snapshot upper bound bound at scan open and propagated back to the caller.
     pub(crate) snapshot_sequence: Option<SequenceNumber>,
+    /// The region's partition expression stated by the same version snapshot as
+    /// [`Self::snapshot_sequence`] (`None` = the region's complete value domain), read once at
+    /// scan open and propagated back to the caller.
+    ///
+    /// Set for every query scan, not only for one that bound a sequence: a caller that reads at
+    /// a bound it supplied itself still reports the expression the read happened under. Both
+    /// fields come from [`ScanRegion::version`], the version whose `committed_sequence` the
+    /// engine bound as `memtable_max_sequence` (`EngineHandle::scan_region`).
+    pub(crate) snapshot_partition_expr: Option<String>,
+    /// The creators of the files the same version snapshot had visible, excluding this region
+    /// (`Some(vec![])` = the region held no file of another region), read once at scan open and
+    /// propagated back to the caller.
+    pub(crate) visible_foreign_file_creators: Option<Vec<u64>>,
     /// Set only when the region preserves per-row sequences
     /// (`preserve_row_sequence` on an append-only table) and the scan
     /// carries an explicit exact range. When set, SST readers apply the same
@@ -1167,6 +1235,8 @@ impl ScanInput {
                 distribution: None,
                 explain_flat_format: false,
                 snapshot_sequence: None,
+                snapshot_partition_expr: None,
+                visible_foreign_file_creators: None,
                 sequence_range: None,
                 read_across_invalid_boundary: false,
                 read_row_sequence: false,
@@ -1533,6 +1603,24 @@ impl ScanInputBuilder {
         snapshot_sequence: Option<SequenceNumber>,
     ) -> Self {
         self.input.snapshot_sequence = snapshot_sequence;
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_visible_foreign_file_creators(
+        mut self,
+        visible_foreign_file_creators: Vec<u64>,
+    ) -> Self {
+        self.input.visible_foreign_file_creators = Some(visible_foreign_file_creators);
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_snapshot_partition_expr(
+        mut self,
+        snapshot_partition_expr: Option<String>,
+    ) -> Self {
+        self.input.snapshot_partition_expr = snapshot_partition_expr;
         self
     }
 
@@ -2014,6 +2102,17 @@ impl ScanInput {
 
     pub fn region_metadata(&self) -> &RegionMetadataRef {
         self.mapper.metadata()
+    }
+
+    /// The snapshot this scan pinned: the bound it set itself (if any) and the
+    /// partition-expression identity of the same version, in the canonical
+    /// `PartitionExpr::as_json_str()` form a cursor entry carries.
+    pub(crate) fn snapshot_identity(&self) -> ScanSnapshotIdentity {
+        ScanSnapshotIdentity {
+            bound_sequence: self.snapshot_sequence,
+            partition_expr: self.snapshot_partition_expr.clone(),
+            visible_foreign_file_creators: self.visible_foreign_file_creators.clone(),
+        }
     }
 
     pub(crate) fn substituted_row_ranges(&self) -> Option<&SubstitutedRowsAccumulator> {

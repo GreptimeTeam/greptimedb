@@ -51,7 +51,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::is_metric_engine_internal_column;
 use store_api::region_engine::{
     PartitionRange, PrepareRequest, QueryScanContext, RawLabelSource, RegionScanner,
-    ScannerProperties, SendableRawSeriesStream,
+    ScanSnapshotIdentity, ScannerProperties, SendableRawSeriesStream,
 };
 use store_api::storage::consts::{ReservedColumnId, is_internal_column};
 use table::predicate::Predicate;
@@ -1193,8 +1193,8 @@ impl RegionScanner for SeriesScan {
         self.properties.set_query_load_region_id(region_id);
     }
 
-    fn snapshot_sequence(&self) -> Option<u64> {
-        self.stream_ctx.input.snapshot_sequence
+    fn snapshot_identity(&self) -> Option<ScanSnapshotIdentity> {
+        Some(self.stream_ctx.input.snapshot_identity())
     }
 }
 

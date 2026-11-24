@@ -1452,6 +1452,9 @@ fn recovery_stream_output(
                     region_id,
                     partition_expr: None,
                     watermark,
+                    // The fixture states a region-wide watermark and says nothing about
+                    // which files were visible, which is "unknown" rather than "none".
+                    visible_foreign_file_creators: None,
                 })
                 .collect(),
             ..Default::default()
@@ -1828,6 +1831,160 @@ fn test_scheduled_loop_arithmetic_near_i64_boundary() {
     assert!(sleep_delta_secs(100, 200).is_err());
 }
 
+#[test]
+fn test_region_watermark_sample_keeps_the_partition_expr_of_every_slice() {
+    // One region, two expressions, plus a region holding a foreign file: the statements reach the
+    // caller with the expression dimension and the visible file creators intact instead of being
+    // projected onto their regions.
+    let sample = RegionWatermarkSample::new(
+        BTreeSet::from([1_u64, 3]),
+        vec![
+            RegionWatermarkEntry {
+                region_id: 1,
+                partition_expr: Some(r#"{"slice":"k0 < 10"}"#.to_string()),
+                watermark: Some(9),
+                visible_foreign_file_creators: Some(Vec::new()),
+            },
+            RegionWatermarkEntry {
+                region_id: 1,
+                partition_expr: Some(r#"{"slice":"k0 >= 10"}"#.to_string()),
+                watermark: Some(4),
+                visible_foreign_file_creators: Some(Vec::new()),
+            },
+            // This region holds a file another region created, so its rows may come from there
+            // even though this round pruned every file away.
+            RegionWatermarkEntry {
+                region_id: 3,
+                partition_expr: None,
+                watermark: Some(5),
+                visible_foreign_file_creators: Some(vec![7]),
+            },
+        ],
+    );
+
+    assert_eq!(
+        sample.slices(),
+        &[
+            RegionWatermarkEntry {
+                region_id: 1,
+                partition_expr: Some(r#"{"slice":"k0 < 10"}"#.to_string()),
+                watermark: Some(9),
+                visible_foreign_file_creators: Some(Vec::new()),
+            },
+            RegionWatermarkEntry {
+                region_id: 1,
+                partition_expr: Some(r#"{"slice":"k0 >= 10"}"#.to_string()),
+                watermark: Some(4),
+                visible_foreign_file_creators: Some(Vec::new()),
+            },
+            RegionWatermarkEntry {
+                region_id: 3,
+                partition_expr: None,
+                watermark: Some(5),
+                visible_foreign_file_creators: Some(vec![7]),
+            },
+        ]
+    );
+    assert_eq!(
+        sample.watermarks(),
+        &BTreeMap::from([(1_u64, 4_u64), (3_u64, 5_u64)]),
+        "the region projection may only advance to the least advanced slice"
+    );
+    assert_eq!(
+        sample.read_regions(),
+        &BTreeSet::from([1_u64, 3]),
+        "the participating set is unchanged"
+    );
+}
+
+#[test]
+fn test_region_watermark_sample_keeps_an_unproved_slice_beside_its_region() {
+    // A region read without a provable bound for one of its slices: the slice stays in the
+    // statements as unproved, and the region leaves the proved projection instead of advancing.
+    let sample = RegionWatermarkSample::new(
+        BTreeSet::from([1_u64, 2]),
+        vec![
+            RegionWatermarkEntry {
+                region_id: 1,
+                partition_expr: None,
+                watermark: None,
+                visible_foreign_file_creators: Some(vec![9]),
+            },
+            RegionWatermarkEntry {
+                region_id: 2,
+                partition_expr: Some(r#"{"slice":"k0 < 10"}"#.to_string()),
+                watermark: Some(7),
+                visible_foreign_file_creators: Some(Vec::new()),
+            },
+            // The same slice stated twice with two different proofs: a conflict, never min/max.
+            RegionWatermarkEntry {
+                region_id: 2,
+                partition_expr: Some(r#"{"slice":"k0 < 10"}"#.to_string()),
+                watermark: Some(6),
+                visible_foreign_file_creators: Some(Vec::new()),
+            },
+        ],
+    );
+
+    assert_eq!(
+        sample.slices(),
+        &[
+            // Participation without a proof still states which files the region held.
+            RegionWatermarkEntry {
+                region_id: 1,
+                partition_expr: None,
+                watermark: None,
+                visible_foreign_file_creators: Some(vec![9]),
+            },
+            RegionWatermarkEntry {
+                region_id: 2,
+                partition_expr: Some(r#"{"slice":"k0 < 10"}"#.to_string()),
+                watermark: None,
+                visible_foreign_file_creators: Some(Vec::new()),
+            },
+        ]
+    );
+    assert_eq!(
+        sample.watermarks(),
+        &BTreeMap::new(),
+        "no region proves a bound, and none is defaulted to 0"
+    );
+    assert_eq!(sample.read_regions(), &BTreeSet::from([1_u64, 2]));
+}
+
+#[test]
+fn test_region_watermark_sample_degrades_differing_file_creator_sets_to_unknown() {
+    // Two statements of one slice that saw different file lists: neither set is the one the slice
+    // was read under, so the sample states none instead of picking one.
+    let sample = RegionWatermarkSample::new(
+        BTreeSet::from([1_u64]),
+        vec![
+            RegionWatermarkEntry {
+                region_id: 1,
+                partition_expr: None,
+                watermark: Some(5),
+                visible_foreign_file_creators: Some(vec![7]),
+            },
+            RegionWatermarkEntry {
+                region_id: 1,
+                partition_expr: None,
+                watermark: Some(5),
+                visible_foreign_file_creators: Some(vec![8]),
+            },
+        ],
+    );
+
+    assert_eq!(
+        sample.slices(),
+        &[RegionWatermarkEntry {
+            region_id: 1,
+            partition_expr: None,
+            watermark: Some(5),
+            visible_foreign_file_creators: None,
+        }]
+    );
+}
+
 fn output_with_region_watermarks(
     watermarks: impl IntoIterator<Item = (u64, Option<u64>)>,
 ) -> OutputWithMetrics {
@@ -1839,6 +1996,7 @@ fn output_with_region_watermarks(
                 region_id,
                 partition_expr: None,
                 watermark,
+                visible_foreign_file_creators: None,
             })
             .collect(),
         ..Default::default()

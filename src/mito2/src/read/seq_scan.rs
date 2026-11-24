@@ -30,7 +30,8 @@ use futures::{StreamExt, TryStreamExt};
 use snafu::ensure;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
-    PartitionRange, PrepareRequest, QueryScanContext, RegionScanner, ScannerProperties,
+    PartitionRange, PrepareRequest, QueryScanContext, RegionScanner, ScanSnapshotIdentity,
+    ScannerProperties,
 };
 use store_api::storage::TimeSeriesRowSelector;
 use tokio::sync::Semaphore;
@@ -675,8 +676,8 @@ impl RegionScanner for SeqScan {
         self.properties.set_query_load_region_id(region_id);
     }
 
-    fn snapshot_sequence(&self) -> Option<u64> {
-        self.stream_ctx.input.snapshot_sequence
+    fn snapshot_identity(&self) -> Option<ScanSnapshotIdentity> {
+        Some(self.stream_ctx.input.snapshot_identity())
     }
 }
 

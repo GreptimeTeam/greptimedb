@@ -196,6 +196,20 @@ impl TableProvider for DummyTableProvider {
                 .map_err(|e| DataFusionError::External(Box::new(e)))?;
         }
 
+        // Bind what the region's scan stated about the snapshot it reads under: the partition
+        // expression it covers and the creators of the files it had visible. The engine states all
+        // of it from one version snapshot, so the expression a region read reports, the watermark
+        // it reports and the file list it started from describe the same instant: a scan that
+        // inherited a caller-fenced bound still states what it actually read under.
+        if let Some(query_ctx) = &self.query_ctx
+            && let Some(identity) = scanner.snapshot_identity()
+        {
+            query_ctx.bind_scan_partition_expr(self.region_id.as_u64(), identity.partition_expr);
+            if let Some(creators) = identity.visible_foreign_file_creators {
+                query_ctx.bind_scan_visible_file_creators(self.region_id.as_u64(), creators);
+            }
+        }
+
         let query_memory_tracker = self.engine.query_memory_tracker();
         let mut scan_exec = RegionScanExec::new(scanner, request, query_memory_tracker)?;
         if let Some(query_ctx) = &self.query_ctx {

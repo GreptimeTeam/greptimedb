@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -24,6 +25,7 @@ use common_error::ext::BoxedError;
 use common_meta::key::schema_name::SchemaNameKey;
 use common_query::OutputData;
 use common_query::logical_plan::breakup_insert_plan;
+use common_recordbatch::adapter::RegionWatermarkEntry;
 use common_telemetry::tracing::warn;
 use common_telemetry::{debug, info};
 use common_time::{TimeToLive, Timestamp};
@@ -206,6 +208,11 @@ fn encode_insert_plan_request(
 ///
 /// A region absent from the proved map is never reported as `0`: a missing report is not a
 /// sequence.
+///
+/// The sample keeps the `(region, partition expression, watermark)` statements it read
+/// ([`Self::slices`]) beside the projections built from them, because a caller that owns a
+/// per-slice cursor advances one slice at a time: projecting the round onto its regions first
+/// loses which part of a region's value domain the proved sequence belongs to.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RegionWatermarkSample {
     /// Regions this round covered, i.e. regions the sample plan named and whose
@@ -215,16 +222,97 @@ pub struct RegionWatermarkSample {
     /// (for example, a region the source route pruned), which this round did not read
     /// at all.
     read_regions: BTreeSet<u64>,
-    /// Watermarks proved for a subset of `read_regions`.
+    /// Watermarks proved for a subset of `read_regions`, projected over the region's slices.
     watermarks: BTreeMap<u64, u64>,
+    /// Every `(region, partition expression)` slice this round stated, ordered by region id and
+    /// then by expression, with the sequence it proved for that slice, the files the region had
+    /// visible when it was opened and the creator set of those files. `None` for the expression is
+    /// the region's complete value domain, never "unknown"; `watermark: None` is a slice that was
+    /// read without a provable bound.
+    slices: Vec<RegionWatermarkEntry>,
 }
 
 impl RegionWatermarkSample {
-    fn new(read_regions: BTreeSet<u64>, watermarks: BTreeMap<u64, u64>) -> Self {
+    fn new(
+        read_regions: BTreeSet<u64>,
+        entries: impl IntoIterator<Item = RegionWatermarkEntry>,
+    ) -> Self {
+        let mut by_slice = BTreeMap::<(u64, Option<String>), RegionWatermarkEntry>::new();
+        for entry in entries {
+            match by_slice.entry((entry.region_id, entry.partition_expr.clone())) {
+                Entry::Occupied(mut occupied) => {
+                    let merged = occupied.get_mut();
+                    // The same slice stated twice: equal proofs converge, a differing proof is a
+                    // conflict that leaves the slice unproved. Never the min/max of two proofs.
+                    merged.watermark = match (merged.watermark, entry.watermark) {
+                        (Some(current), Some(incoming)) if current == incoming => Some(current),
+                        _ => None,
+                    };
+                    // Two statements that named different file sets saw different file lists, so
+                    // neither set is the one the slice was read under.
+                    merged.visible_foreign_file_creators = match (
+                        &merged.visible_foreign_file_creators,
+                        entry.visible_foreign_file_creators,
+                    ) {
+                        (Some(current), Some(incoming)) if *current == incoming => Some(incoming),
+                        (Some(_), Some(_)) => None,
+                        (Some(current), None) => Some(current.clone()),
+                        (None, incoming) => incoming,
+                    };
+                }
+                Entry::Vacant(vacant) => {
+                    vacant.insert(entry);
+                }
+            }
+        }
+        let slices = by_slice.into_values().collect::<Vec<_>>();
+
+        // The region projection: a region may only advance to the least advanced of its slices,
+        // and it is omitted entirely when one of them is unproved.
+        let mut regions = BTreeMap::<u64, Option<u64>>::new();
+        for entry in &slices {
+            let slot = regions.entry(entry.region_id).or_insert(entry.watermark);
+            *slot = match (*slot, entry.watermark) {
+                (Some(current), Some(seq)) => Some(current.min(seq)),
+                _ => None,
+            };
+        }
+
         Self {
             read_regions,
-            watermarks,
+            watermarks: regions
+                .into_iter()
+                .filter_map(|(region_id, watermark)| watermark.map(|seq| (region_id, seq)))
+                .collect(),
+            slices,
         }
+    }
+
+    /// The `(region, partition expression, watermark)` statements of this round, ordered by
+    /// region id and then by expression.
+    ///
+    /// A caller that owns per-slice cursors builds one cursor entry per statement: the expression
+    /// keys the slice (as the identity a cursor entry is keyed by, `None` = the region's complete
+    /// value domain) and the watermark is the sequence that slice proved, or `None` when the
+    /// slice was read without a provable bound. A slice is never projected onto its region here,
+    /// and an unproved slice stays in place instead of disappearing.
+    ///
+    /// Each statement also carries
+    /// [`RegionWatermarkEntry::visible_foreign_file_creators`]: the creators of the files the
+    /// region had visible when this round opened it, i.e. the other regions whose rows its files
+    /// may hold - including rows this round's pinned time index pruned away and therefore never
+    /// delivered. A caller that enumerates the regions a source's rows can come from needs this
+    /// beside the participating set: it is the half of that domain a row-level read cannot
+    /// report. `Some(vec![])` states "no file of another region was visible", `None` states the
+    /// round could not say.
+    ///
+    /// A statement about the whole domain and a statement about one expression of the same
+    /// region are different slices: they are reported separately rather than merged, because
+    /// neither subsumes the other. A build that predates expression-keyed statements reports
+    /// every region as the whole domain, so mixing builds makes a region's statements disagree -
+    /// see the upgrade note on the datanode's region watermark reporting.
+    pub fn slices(&self) -> &[RegionWatermarkEntry] {
+        &self.slices
     }
 
     /// Proved watermarks, always a subset of `read_regions`.
@@ -974,17 +1062,16 @@ impl BatchingTask {
                 self.config.flow_id
             ),
         })?;
-        let watermarks = result
-            .region_watermark_map()
-            .context(UnexpectedSnafu {
-                reason: format!(
-                    "Flow {} region watermark query returned no per-region watermarks",
-                    self.config.flow_id
-                ),
-            })?
-            .into_iter()
-            .collect::<BTreeMap<u64, u64>>();
-        Ok(RegionWatermarkSample::new(read_regions, watermarks))
+        // The triples travel as stated: the sample keeps the expression dimension instead of
+        // only the region projection, so a caller that owns per-slice cursors can advance one
+        // slice at a time.
+        let entries = result.region_watermark_entries().context(UnexpectedSnafu {
+            reason: format!(
+                "Flow {} region watermark query returned no per-region watermarks",
+                self.config.flow_id
+            ),
+        })?;
+        Ok(RegionWatermarkSample::new(read_regions, entries))
     }
 
     /// Reads the proved region watermarks of this flow's sources.

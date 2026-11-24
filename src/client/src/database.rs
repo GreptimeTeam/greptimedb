@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, HashMap};
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -45,7 +46,7 @@ use common_grpc::flight::{
     FLOW_EXTENSIONS_METADATA_KEY, FlightDecoder, FlightMessage, SNAPSHOT_SEQS_METADATA_KEY,
 };
 use common_query::Output;
-use common_recordbatch::adapter::RecordBatchMetrics;
+use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, RecordBatchStreamWrapper};
 use common_telemetry::tracing::Span;
@@ -179,6 +180,48 @@ impl OutputMetrics {
         self.inner.metrics.read().unwrap().clone()
     }
 
+    /// Returns the `(region, partition expression, watermark)` statements of the terminal
+    /// metrics, one per slice, ordered by region id and then by expression.
+    ///
+    /// This is the form a caller that owns per-slice cursors consumes: `partition_expr` is the
+    /// identity a cursor entry is keyed by (`None` = the region's complete value domain), and
+    /// `watermark` is the sequence the read proved for that slice, or `None` when the slice
+    /// participated without a proof. A slice is never projected onto its region here, and an
+    /// unproved slice stays in place rather than disappearing.
+    ///
+    /// Statements about the **same** slice are merged with the rule the query's own merge uses
+    /// (`query::metrics`): equal proofs converge, and a differing proof is a conflict that
+    /// degrades the slice to unproved. Nothing takes the `min`/`max` of two proofs.
+    ///
+    /// Each entry also carries `visible_foreign_file_creators`: the creators of the files the
+    /// region had visible when the read opened it (`Some(vec![])` = it held none of another
+    /// region's files, `None` = the read stated none). Two statements of the same slice that name
+    /// different file sets are merged to `None` as well: they saw different file lists, so neither
+    /// set is the one the slice was read under.
+    ///
+    /// Note that `partition_expr: None` is a positive statement - the region has no partition
+    /// expression, so its value domain is the whole domain - and not "unknown": see the upgrade
+    /// note on the datanode's region watermark reporting for what mixing builds means.
+    pub fn region_watermark_entries(&self) -> Option<Vec<RegionWatermarkEntry>> {
+        let mut slices = BTreeMap::<(u64, Option<String>), RegionWatermarkEntry>::new();
+        for entry in self.get()?.region_watermarks {
+            match slices.entry((entry.region_id, entry.partition_expr.clone())) {
+                Entry::Occupied(mut occupied) => {
+                    let merged = occupied.get_mut();
+                    merged.watermark = merge_watermark_proof(merged.watermark, entry.watermark);
+                    merged.visible_foreign_file_creators = merge_visible_file_creators(
+                        merged.visible_foreign_file_creators.take(),
+                        entry.visible_foreign_file_creators,
+                    );
+                }
+                Entry::Vacant(vacant) => {
+                    vacant.insert(entry);
+                }
+            }
+        }
+        Some(slices.into_values().collect())
+    }
+
     /// Returns proved per-region watermarks.
     ///
     /// The terminal metrics state one entry per `(region, partition expression)`. A
@@ -187,9 +230,12 @@ impl OutputMetrics {
     /// (that entry represents a participating domain whose terminal sequence bound was not
     /// provable) and otherwise reports the *minimum* over its entries. With the region-wide
     /// entries a pre-expression producer writes, that minimum is exactly its one value.
+    ///
+    /// This is a convenience projection of [`Self::region_watermark_entries`]: a consumer that
+    /// owns per-slice cursors reads the triples instead of losing the expression dimension here.
     pub fn region_watermark_map(&self) -> Option<std::collections::HashMap<u64, u64>> {
         let mut regions: std::collections::HashMap<u64, Option<u64>> = Default::default();
-        for entry in self.get()?.region_watermarks {
+        for entry in self.region_watermark_entries()? {
             let slot = regions.entry(entry.region_id).or_insert(entry.watermark);
             *slot = match (*slot, entry.watermark) {
                 (Some(current), Some(seq)) => Some(current.min(seq)),
@@ -248,6 +294,13 @@ impl OutputWithMetrics {
         self.metrics.region_watermark_map()
     }
 
+    /// Returns the terminal metrics' `(region, partition expression, watermark)` statements.
+    ///
+    /// See [`OutputMetrics::region_watermark_entries`].
+    pub fn region_watermark_entries(&self) -> Option<Vec<RegionWatermarkEntry>> {
+        self.metrics.region_watermark_entries()
+    }
+
     /// Returns all regions participating in terminal metric collection.
     pub fn participating_regions(&self) -> Option<std::collections::BTreeSet<u64>> {
         self.metrics.participating_regions()
@@ -256,6 +309,40 @@ impl OutputWithMetrics {
     /// Drops the terminal metrics handle and returns the original output.
     pub fn into_output(self) -> Output {
         self.output
+    }
+}
+
+/// Merges two proofs of the **same** `(region, partition expression)` slice.
+///
+/// Equal proofs converge. Anything else - one side unproved, or two different sequences - is a
+/// slice whose bound is not provable, so the result is `None`. In particular this is not
+/// `min`/`max`: taking either would advance a cursor to a sequence one of the statements never
+/// proved.
+fn merge_watermark_proof(current: Option<u64>, incoming: Option<u64>) -> Option<u64> {
+    match (current, incoming) {
+        (Some(current), Some(incoming)) if current == incoming => Some(current),
+        _ => None,
+    }
+}
+
+/// Merges two statements about the files the same `(region, partition expression)` slice had
+/// visible when it was opened.
+///
+/// A statement that names no set adds no information and leaves a named set in place. Two
+/// statements that name different sets describe file lists that were not the same, so the merged
+/// answer is unknown rather than either of them: taking one would hide the regions whose rows the
+/// other set's files hold.
+fn merge_visible_file_creators(
+    current: Option<Vec<u64>>,
+    incoming: Option<Vec<u64>>,
+) -> Option<Vec<u64>> {
+    let Some(incoming) = incoming else {
+        return current;
+    };
+    match current {
+        None => Some(incoming),
+        Some(current) if current == incoming => Some(current),
+        Some(_) => None,
     }
 }
 
@@ -1150,6 +1237,7 @@ mod tests {
                 region_id: 7,
                 partition_expr: None,
                 watermark: Some(seq),
+                visible_foreign_file_creators: None,
             }],
             ..Default::default()
         })
@@ -1382,6 +1470,7 @@ mod tests {
                     region_id: 7,
                     partition_expr: None,
                     watermark: Some(42),
+                    visible_foreign_file_creators: None,
                 }],
                 ..Default::default()
             },
@@ -1723,28 +1812,33 @@ mod tests {
                     region_id: 1,
                     partition_expr: Some("k0 < 10".to_string()),
                     watermark: Some(9),
+                    visible_foreign_file_creators: None,
                 },
                 RegionWatermarkEntry {
                     region_id: 1,
                     partition_expr: Some("k0 >= 10".to_string()),
                     watermark: Some(4),
+                    visible_foreign_file_creators: None,
                 },
                 // One unproved expression omits the whole region.
                 RegionWatermarkEntry {
                     region_id: 2,
                     partition_expr: Some("k0 < 10".to_string()),
                     watermark: Some(7),
+                    visible_foreign_file_creators: None,
                 },
                 RegionWatermarkEntry {
                     region_id: 2,
                     partition_expr: Some("k0 >= 10".to_string()),
                     watermark: None,
+                    visible_foreign_file_creators: None,
                 },
                 // A region-wide entry keeps its single value.
                 RegionWatermarkEntry {
                     region_id: 3,
                     partition_expr: None,
                     watermark: Some(5),
+                    visible_foreign_file_creators: None,
                 },
             ],
             ..Default::default()
@@ -1760,6 +1854,195 @@ mod tests {
         assert_eq!(
             metrics.participating_regions(),
             Some(std::collections::BTreeSet::from([1_u64, 2, 3]))
+        );
+    }
+
+    #[test]
+    fn test_region_watermark_entries_keep_every_slice_of_a_region() {
+        let metrics = OutputMetrics::default();
+        metrics.update(Some(RecordBatchMetrics {
+            region_watermarks: vec![
+                RegionWatermarkEntry {
+                    region_id: 1,
+                    partition_expr: Some("k0 >= 10".to_string()),
+                    watermark: Some(4),
+                    visible_foreign_file_creators: Some(Vec::new()),
+                },
+                RegionWatermarkEntry {
+                    region_id: 1,
+                    partition_expr: Some("k0 < 10".to_string()),
+                    watermark: Some(9),
+                    visible_foreign_file_creators: Some(Vec::new()),
+                },
+                // A region without a partition expression states its whole domain, and the
+                // creator of the one foreign file it holds.
+                RegionWatermarkEntry {
+                    region_id: 3,
+                    partition_expr: None,
+                    watermark: Some(5),
+                    visible_foreign_file_creators: Some(vec![7]),
+                },
+                // Read, but not proved for this slice.
+                RegionWatermarkEntry {
+                    region_id: 2,
+                    partition_expr: Some("k0 < 10".to_string()),
+                    watermark: None,
+                    visible_foreign_file_creators: Some(Vec::new()),
+                },
+            ],
+            ..Default::default()
+        }));
+
+        assert_eq!(
+            metrics.region_watermark_entries(),
+            Some(vec![
+                RegionWatermarkEntry {
+                    region_id: 1,
+                    partition_expr: Some("k0 < 10".to_string()),
+                    watermark: Some(9),
+                    visible_foreign_file_creators: Some(Vec::new()),
+                },
+                RegionWatermarkEntry {
+                    region_id: 1,
+                    partition_expr: Some("k0 >= 10".to_string()),
+                    watermark: Some(4),
+                    visible_foreign_file_creators: Some(Vec::new()),
+                },
+                RegionWatermarkEntry {
+                    region_id: 2,
+                    partition_expr: Some("k0 < 10".to_string()),
+                    watermark: None,
+                    visible_foreign_file_creators: Some(Vec::new()),
+                },
+                RegionWatermarkEntry {
+                    region_id: 3,
+                    partition_expr: None,
+                    watermark: Some(5),
+                    visible_foreign_file_creators: Some(vec![7]),
+                },
+            ]),
+            "the statements reach the caller with the expression and file-creator dimensions intact"
+        );
+    }
+
+    #[test]
+    fn test_region_watermark_entries_degrade_differing_file_creator_sets_to_unknown() {
+        let metrics = OutputMetrics::default();
+        metrics.update(Some(RecordBatchMetrics {
+            region_watermarks: vec![
+                // One slice, two statements that saw different file lists: unknown, not either.
+                RegionWatermarkEntry {
+                    region_id: 1,
+                    partition_expr: None,
+                    watermark: Some(9),
+                    visible_foreign_file_creators: Some(vec![7]),
+                },
+                RegionWatermarkEntry {
+                    region_id: 1,
+                    partition_expr: None,
+                    watermark: Some(9),
+                    visible_foreign_file_creators: Some(vec![8]),
+                },
+                // A statement that names no set adds nothing to one that names it.
+                RegionWatermarkEntry {
+                    region_id: 2,
+                    partition_expr: None,
+                    watermark: Some(4),
+                    visible_foreign_file_creators: Some(vec![7]),
+                },
+                RegionWatermarkEntry {
+                    region_id: 2,
+                    partition_expr: None,
+                    watermark: Some(4),
+                    visible_foreign_file_creators: None,
+                },
+            ],
+            ..Default::default()
+        }));
+
+        assert_eq!(
+            metrics.region_watermark_entries(),
+            Some(vec![
+                RegionWatermarkEntry {
+                    region_id: 1,
+                    partition_expr: None,
+                    watermark: Some(9),
+                    visible_foreign_file_creators: None,
+                },
+                RegionWatermarkEntry {
+                    region_id: 2,
+                    partition_expr: None,
+                    watermark: Some(4),
+                    visible_foreign_file_creators: Some(vec![7]),
+                },
+            ])
+        );
+        assert_eq!(
+            metrics.region_watermark_map(),
+            Some(std::collections::HashMap::from([
+                (1_u64, 9_u64),
+                (2_u64, 4_u64)
+            ])),
+            "the file creator set does not decide the region projection"
+        );
+    }
+
+    #[test]
+    fn test_region_watermark_entries_degrade_conflicting_proofs_to_unproved() {
+        let metrics = OutputMetrics::default();
+        metrics.update(Some(RecordBatchMetrics {
+            region_watermarks: vec![
+                // The same slice proved twice with different sequences: not min/max, unproved.
+                RegionWatermarkEntry {
+                    region_id: 1,
+                    partition_expr: Some("k0 < 10".to_string()),
+                    watermark: Some(9),
+                    visible_foreign_file_creators: None,
+                },
+                RegionWatermarkEntry {
+                    region_id: 1,
+                    partition_expr: Some("k0 < 10".to_string()),
+                    watermark: Some(4),
+                    visible_foreign_file_creators: None,
+                },
+                // The same slice proved twice with the same sequence: still proved.
+                RegionWatermarkEntry {
+                    region_id: 2,
+                    partition_expr: None,
+                    watermark: Some(7),
+                    visible_foreign_file_creators: None,
+                },
+                RegionWatermarkEntry {
+                    region_id: 2,
+                    partition_expr: None,
+                    watermark: Some(7),
+                    visible_foreign_file_creators: None,
+                },
+            ],
+            ..Default::default()
+        }));
+
+        assert_eq!(
+            metrics.region_watermark_entries(),
+            Some(vec![
+                RegionWatermarkEntry {
+                    region_id: 1,
+                    partition_expr: Some("k0 < 10".to_string()),
+                    watermark: None,
+                    visible_foreign_file_creators: None,
+                },
+                RegionWatermarkEntry {
+                    region_id: 2,
+                    partition_expr: None,
+                    watermark: Some(7),
+                    visible_foreign_file_creators: None,
+                },
+            ])
+        );
+        assert_eq!(
+            metrics.region_watermark_map(),
+            Some(std::collections::HashMap::from([(2_u64, 7_u64)])),
+            "a conflicting slice keeps its region out of the region projection"
         );
     }
 

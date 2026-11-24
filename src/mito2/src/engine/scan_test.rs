@@ -1250,6 +1250,165 @@ async fn test_full_snapshot_upper_bound_returns_outdated_after_late_flush() {
     assert!(err_msg.contains(&format!("given_seq: {snapshot_upper_bound}")));
 }
 
+/// A scan states the creators of the files another region left in its file list: a read that
+/// prunes every file away still says which regions' rows the region may hold, and says the empty
+/// set when every visible file is its own.
+#[tokio::test]
+async fn test_snapshot_identity_states_visible_foreign_file_creators() {
+    let mut env = TestEnv::with_prefix("test_snapshot_identity_file_creators").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let foreign_creator = RegionId::new(1, 2);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: test_util::build_rows(0, 3),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    // Every visible file was created by the region itself: a positive "nothing foreign" answer.
+    let own = engine
+        .handle_query(region_id, ScanRequest::default())
+        .await
+        .unwrap()
+        .snapshot_identity()
+        .expect("a mito scan states its snapshot identity");
+    assert_eq!(Some(Vec::new()), own.visible_foreign_file_creators);
+
+    // Publish a file another region created into this region's file list, which is what a
+    // repartition leaves behind.
+    engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                files_to_add: vec![FileMeta {
+                    region_id: foreign_creator,
+                    file_id: FileId::random(),
+                    time_range: (
+                        Timestamp::new_millisecond(0),
+                        Timestamp::new_millisecond(1000),
+                    ),
+                    level: 0,
+                    file_size: 0,
+                    max_row_group_uncompressed_size: 0,
+                    available_indexes: Default::default(),
+                    indexes: vec![],
+                    index_file_size: 0,
+                    index_version: 0,
+                    num_rows: 0,
+                    num_row_groups: 0,
+                    sequence: None,
+                    partition_expr: None,
+                    num_series: 0,
+                    preserve_row_sequence: true,
+                    ..Default::default()
+                }],
+                files_to_remove: vec![],
+                timestamp_ms: None,
+                compaction_time_window: None,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+                committed_sequence: None,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    // A read whose time range prunes everything still states the creator: the file list is read
+    // from the version in memory, before any pruning.
+    let pruned = engine
+        .handle_query(
+            region_id,
+            ScanRequest {
+                filters: vec![col("ts").gt(lit(Timestamp::new_millisecond(i64::MAX / 2).value()))],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .snapshot_identity()
+        .expect("a mito scan states its snapshot identity");
+    assert_eq!(
+        Some(vec![foreign_creator.as_u64()]),
+        pruned.visible_foreign_file_creators
+    );
+}
+
+/// A scan states the partition expression of the **one** version whose `committed_sequence` it
+/// bound as its upper bound, in the canonical form a flow cursor entry is keyed by - and states
+/// the region's whole domain as `None` when that version has no expression.
+#[tokio::test]
+async fn test_snapshot_identity_states_the_partition_expr_of_the_bound_version() {
+    let mut env = TestEnv::with_prefix("test_snapshot_identity_partition_expr").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    // Value-first shape: the identity a cursor entry keys must be canonicalized before it is
+    // stated, or the same slice would be keyed two ways.
+    let expr_json =
+        r#"{"Expr":{"lhs":{"Value":{"String":"k5"}},"op":"Gt","rhs":{"Column":"tag_0"}}}"#;
+    let partitioned = RegionId::new(1, 1);
+    let unpartitioned = RegionId::new(1, 2);
+    for (region_id, request) in [
+        (
+            partitioned,
+            CreateRequestBuilder::new()
+                .partition_expr_json(Some(expr_json.to_string()))
+                .build(),
+        ),
+        (unpartitioned, CreateRequestBuilder::new().build()),
+    ] {
+        engine
+            .handle_request(region_id, RegionRequest::Create(request))
+            .await
+            .unwrap();
+    }
+
+    let expected_snapshot = engine.get_committed_sequence(partitioned).await.unwrap();
+    let scanner = engine
+        .handle_query(
+            partitioned,
+            ScanRequest {
+                snapshot_on_scan: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let identity = scanner
+        .snapshot_identity()
+        .expect("a mito scan states its snapshot identity");
+    let expected_identity = partition::expr::PartitionExpr::from_json_str(expr_json)
+        .unwrap()
+        .unwrap()
+        .as_json_str()
+        .unwrap();
+    assert_eq!(Some(expected_snapshot), identity.bound_sequence);
+    assert_eq!(Some(expected_identity), identity.partition_expr);
+
+    // One version, both fields: the sequence the trait reports is the identity's bound.
+    assert_eq!(scanner.snapshot_sequence(), identity.bound_sequence);
+
+    let whole_domain = engine
+        .handle_query(unpartitioned, ScanRequest::default())
+        .await
+        .unwrap()
+        .snapshot_identity()
+        .expect("a mito scan states its snapshot identity");
+    assert_eq!(None, whole_domain.partition_expr);
+}
+
 #[tokio::test]
 async fn test_snapshot_bound_query_binds_memtable_upper_bound_at_scan_open() {
     let mut env =

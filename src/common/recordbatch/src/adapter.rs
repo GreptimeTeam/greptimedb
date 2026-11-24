@@ -865,6 +865,22 @@ pub struct RegionWatermarkEntry {
     pub partition_expr: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watermark: Option<u64>,
+    /// One sentence: **the creators of the files the region had visible when this read opened
+    /// it**, i.e. the regions whose rows its own file list may hold, read from the same version
+    /// snapshot as `partition_expr` and `watermark` and independent of what the read pruned.
+    ///
+    /// The region itself is never listed: a file it wrote is its own rows, and a consumer that
+    /// enumerates candidates adds the region on its own. Sorted, deduplicated.
+    ///
+    /// - `Some(creators)` — possibly empty — states the set: `Some(vec![])` says every visible
+    ///   file was created by the region itself, which is a positive "nothing foreign" answer.
+    /// - `None` (also: the field's absence in a payload an earlier build wrote) states **nothing**
+    ///   about the file list, and must be read as "unknown", not as "empty".
+    ///
+    /// This is not [`RecordBatchMetrics::foreign_file_row_creators`]: that answers which creators
+    /// the read *delivered rows* of, this answers which creators were *visible* before it started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_foreign_file_creators: Option<Vec<u64>>,
 }
 
 /// Determines if a metric name represents a time measurement that should be formatted.
@@ -2090,11 +2106,13 @@ mod test {
                     region_id: 1,
                     partition_expr: None,
                     watermark: Some(100),
+                    visible_foreign_file_creators: None,
                 },
                 RegionWatermarkEntry {
                     region_id: 2,
                     partition_expr: None,
                     watermark: None,
+                    visible_foreign_file_creators: None,
                 },
             ],
             ..Default::default()
@@ -2228,6 +2246,7 @@ mod test {
                 region_id: 1,
                 partition_expr: Some(r#"{"lhs":...}"#.to_string()),
                 watermark: Some(100),
+                visible_foreign_file_creators: None,
             }],
             ..Default::default()
         };
@@ -2255,6 +2274,56 @@ mod test {
                 region_id: 3,
                 partition_expr: None,
                 watermark: None,
+                visible_foreign_file_creators: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_region_watermark_entry_states_visible_file_creators_on_the_wire() {
+        let metrics = RecordBatchMetrics {
+            region_watermarks: vec![
+                RegionWatermarkEntry {
+                    region_id: 1,
+                    partition_expr: None,
+                    watermark: Some(10),
+                    visible_foreign_file_creators: Some(vec![7, 9]),
+                },
+                // "Nothing foreign visible" is a positive answer and travels as an empty list.
+                RegionWatermarkEntry {
+                    region_id: 2,
+                    partition_expr: None,
+                    watermark: Some(20),
+                    visible_foreign_file_creators: Some(Vec::new()),
+                },
+            ],
+            ..Default::default()
+        };
+
+        let value = serde_json::to_value(&metrics).unwrap();
+        assert_eq!(
+            value.get("region_watermarks").unwrap(),
+            &json!([
+                { "region_id": 1, "watermark": 10, "visible_foreign_file_creators": [7, 9] },
+                { "region_id": 2, "watermark": 20, "visible_foreign_file_creators": [] }
+            ])
+        );
+
+        let decoded: RecordBatchMetrics = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.region_watermarks, metrics.region_watermarks);
+
+        // A statement written before the field existed states nothing about the region's files,
+        // which reads back as unknown - never as "holds no foreign file".
+        let mut legacy = serde_json::to_value(RecordBatchMetrics::default()).unwrap();
+        legacy["region_watermarks"] = json!([{ "region_id": 3, "watermark": 5 }]);
+        let decoded: RecordBatchMetrics = serde_json::from_value(legacy).unwrap();
+        assert_eq!(
+            decoded.region_watermarks,
+            vec![RegionWatermarkEntry {
+                region_id: 3,
+                partition_expr: None,
+                watermark: Some(5),
+                visible_foreign_file_creators: None,
             }]
         );
     }

@@ -30,7 +30,7 @@ use futures::{Stream, StreamExt};
 use snafu::ensure;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
-    PrepareRequest, QueryScanContext, RegionScanner, ScannerProperties,
+    PrepareRequest, QueryScanContext, RegionScanner, ScanSnapshotIdentity, ScannerProperties,
 };
 
 use crate::error::{PartitionOutOfRangeSnafu, Result};
@@ -394,8 +394,8 @@ impl RegionScanner for UnorderedScan {
         self.properties.set_query_load_region_id(region_id);
     }
 
-    fn snapshot_sequence(&self) -> Option<u64> {
-        self.stream_ctx.input.snapshot_sequence
+    fn snapshot_identity(&self) -> Option<ScanSnapshotIdentity> {
+        Some(self.stream_ctx.input.snapshot_identity())
     }
 }
 

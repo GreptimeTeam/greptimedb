@@ -318,7 +318,7 @@ pub fn terminal_recordbatch_metrics_from_plan_if_requested(
 /// Collects the proved terminal watermarks of `plan`, one entry per
 /// `(region, partition expression)` the plan's scans stated.
 fn collect_region_watermarks(plan: Arc<dyn ExecutionPlan>) -> Vec<RegionWatermarkEntry> {
-    let mut merged = BTreeMap::<WatermarkKey, MergeState>::new();
+    let mut merged = BTreeMap::<WatermarkKey, MergedWatermarkSlice>::new();
     let mut stack = vec![plan];
 
     while let Some(plan) = stack.pop() {
@@ -507,6 +507,38 @@ fn merge_foreign_file_row_creators(
     }
 }
 
+/// One `(region, partition expression)` slice's merged state.
+///
+/// Two independent statements live here, because a scan states both from one version snapshot:
+/// the proof of the slice's sequence bound, and the creators of the files the region had visible
+/// when it was opened ([`RegionWatermarkEntry::visible_foreign_file_creators`]).
+#[derive(Default)]
+struct MergedWatermarkSlice {
+    /// Proof state of the slice's bound; `None` until a report states one.
+    proof: Option<MergeState>,
+    /// The creators of the files visible at open, or `None` when no report stated them or two
+    /// reports stated different sets (then the merged answer is unknown, never one of them).
+    visible_foreign_file_creators: Option<Vec<u64>>,
+}
+
+impl MergedWatermarkSlice {
+    /// Merges one statement about the creators visible at open.
+    ///
+    /// A report that states nothing adds no information, so it leaves a stated set in place. Two
+    /// reports that state different sets describe file lists that were not the same, so the
+    /// merged answer is unknown rather than either set.
+    fn merge_visible_foreign_file_creators(&mut self, incoming: Option<Vec<u64>>) {
+        let Some(incoming) = incoming else {
+            return;
+        };
+        match &self.visible_foreign_file_creators {
+            None => self.visible_foreign_file_creators = Some(incoming),
+            Some(current) if *current == incoming => {}
+            Some(_) => self.visible_foreign_file_creators = None,
+        }
+    }
+}
+
 /// Merge a batch of watermark entries into the global merged state.
 ///
 /// Entries are merged per `(region, partition expression)` ([`WatermarkKey`]): an
@@ -530,7 +562,7 @@ fn merge_foreign_file_row_creators(
 /// checkpoint past rows that a competing MergeScan sub-stage has not yet
 /// scanned, causing Flow to skip data.
 fn merge_region_watermark_entries(
-    merged: &mut BTreeMap<WatermarkKey, MergeState>,
+    merged: &mut BTreeMap<WatermarkKey, MergedWatermarkSlice>,
     entries: impl IntoIterator<Item = RegionWatermarkEntry>,
 ) {
     for entry in entries {
@@ -538,10 +570,18 @@ fn merge_region_watermark_entries(
             region_id,
             partition_expr,
             watermark,
+            visible_foreign_file_creators,
         } = entry;
-        merged
-            .entry((region_id, partition_expr))
-            .and_modify(|existing| match watermark {
+        let slice = merged.entry((region_id, partition_expr)).or_default();
+        slice.merge_visible_foreign_file_creators(visible_foreign_file_creators);
+        match &mut slice.proof {
+            None => {
+                slice.proof = Some(match watermark {
+                    Some(seq) => MergeState::Proved(seq),
+                    None => MergeState::Unproved,
+                });
+            }
+            Some(existing) => match watermark {
                 None => match existing {
                     MergeState::Proved(_) => {
                         *existing = MergeState::Unproved;
@@ -563,16 +603,13 @@ fn merge_region_watermark_entries(
                         }
                     }
                 },
-            })
-            .or_insert(match watermark {
-                Some(seq) => MergeState::Proved(seq),
-                None => MergeState::Unproved,
-            });
+            },
+        }
     }
 }
 
 fn merge_merge_scan_region_watermarks(
-    merged: &mut BTreeMap<WatermarkKey, MergeState>,
+    merged: &mut BTreeMap<WatermarkKey, MergedWatermarkSlice>,
     regions: impl IntoIterator<Item = u64>,
     sub_stage_metrics: impl IntoIterator<Item = RecordBatchMetrics>,
 ) {
@@ -603,30 +640,35 @@ fn merge_merge_scan_region_watermarks(
                 region_id,
                 partition_expr: None,
                 watermark: None,
+                // No branch said anything about the region's file list.
+                visible_foreign_file_creators: None,
             }),
     );
 }
 
 fn finalize_region_watermarks(
-    merged: BTreeMap<WatermarkKey, MergeState>,
+    merged: BTreeMap<WatermarkKey, MergedWatermarkSlice>,
 ) -> Vec<RegionWatermarkEntry> {
     merged
         .into_iter()
-        .map(|((region_id, partition_expr), state)| RegionWatermarkEntry {
-            region_id,
-            watermark: match state {
-                MergeState::Unproved => None,
-                MergeState::Proved(seq) => Some(seq),
-                MergeState::Conflict { watermarks } => {
-                    warn!(
-                        "Conflicting proved watermarks for region {} expression {:?}: {:?}; degrading to unproved",
-                        region_id, partition_expr, watermarks
-                    );
-                    None
-                }
+        .map(
+            |((region_id, partition_expr), slice)| RegionWatermarkEntry {
+                region_id,
+                watermark: match slice.proof.unwrap_or(MergeState::Unproved) {
+                    MergeState::Unproved => None,
+                    MergeState::Proved(seq) => Some(seq),
+                    MergeState::Conflict { watermarks } => {
+                        warn!(
+                            "Conflicting proved watermarks for region {} expression {:?}: {:?}; degrading to unproved",
+                            region_id, partition_expr, watermarks
+                        );
+                        None
+                    }
+                },
+                partition_expr,
+                visible_foreign_file_creators: slice.visible_foreign_file_creators,
             },
-            partition_expr,
-        })
+        )
         .collect()
 }
 
@@ -698,6 +740,7 @@ mod tests {
                     region_id: *region_id,
                     partition_expr: None,
                     watermark: *watermark,
+                    visible_foreign_file_creators: None,
                 })
                 .collect(),
             ..Default::default()
@@ -715,6 +758,7 @@ mod tests {
                         region_id: *region_id,
                         partition_expr: partition_expr.map(|expr| expr.to_string()),
                         watermark: *watermark,
+                        visible_foreign_file_creators: None,
                     },
                 )
                 .collect(),
@@ -780,6 +824,7 @@ mod tests {
                 region_id: RegionId::new(43, 0).as_u64(),
                 partition_expr: None,
                 watermark: None,
+                visible_foreign_file_creators: None,
             }]
         );
     }
@@ -997,11 +1042,13 @@ mod tests {
                     region_id: 1,
                     partition_expr: None,
                     watermark: None,
+                    visible_foreign_file_creators: None,
                 },
                 RegionWatermarkEntry {
                     region_id: 2,
                     partition_expr: None,
                     watermark: None,
+                    visible_foreign_file_creators: None,
                 },
             ]
         );
@@ -1026,6 +1073,7 @@ mod tests {
                 region_id: 42,
                 partition_expr: None,
                 watermark: Some(7),
+                visible_foreign_file_creators: None,
             }]
         );
     }
@@ -1055,16 +1103,19 @@ mod tests {
                     region_id: 42,
                     partition_expr: None,
                     watermark: Some(9),
+                    visible_foreign_file_creators: None,
                 },
                 RegionWatermarkEntry {
                     region_id: 42,
                     partition_expr: Some("k0 < 10".to_string()),
                     watermark: Some(5),
+                    visible_foreign_file_creators: None,
                 },
                 RegionWatermarkEntry {
                     region_id: 42,
                     partition_expr: Some("k0 >= 10".to_string()),
                     watermark: Some(7),
+                    visible_foreign_file_creators: None,
                 },
             ]
         );
@@ -1091,6 +1142,7 @@ mod tests {
                 region_id: 42,
                 partition_expr: Some("k0 < 10".to_string()),
                 watermark: None,
+                visible_foreign_file_creators: None,
             }]
         );
     }
@@ -1114,6 +1166,7 @@ mod tests {
                 region_id: 7,
                 partition_expr: None,
                 watermark: None,
+                visible_foreign_file_creators: None,
             }]
         );
     }
@@ -1137,6 +1190,7 @@ mod tests {
                 region_id: 9,
                 partition_expr: None,
                 watermark: None,
+                visible_foreign_file_creators: None,
             }]
         );
     }
@@ -1160,6 +1214,7 @@ mod tests {
                 region_id: 9,
                 partition_expr: None,
                 watermark: None,
+                visible_foreign_file_creators: None,
             }]
         );
     }
@@ -1181,6 +1236,7 @@ mod tests {
                 region_id: 9,
                 partition_expr: None,
                 watermark: None,
+                visible_foreign_file_creators: None,
             }]
         );
     }
@@ -1202,6 +1258,7 @@ mod tests {
                 region_id: 9,
                 partition_expr: None,
                 watermark: None,
+                visible_foreign_file_creators: None,
             }]
         );
     }
