@@ -21,8 +21,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, sleep_until};
 
 use crate::election::object_store::authority::{
-    Access, AuthorityPrecondition, AuthorityStatus, CLOCK_GUARD, FencingToken, LEASE,
-    RENEW_INTERVAL, Shared, SnapshotFloor, TakeoverOutcome, closed, rejected, timeout,
+    Access, AuthorityMutation, AuthorityPrecondition, AuthorityStatus, CLOCK_GUARD, FencingToken,
+    LEASE, RENEW_INTERVAL, Shared, SnapshotFloor, TakeoverOutcome, closed, rejected, timeout,
 };
 use crate::election::object_store::{AuthorityHead, AuthorityState};
 use crate::error::{self, Error, Result};
@@ -34,8 +34,9 @@ const MAX_BACKOFF: Duration = Duration::from_millis(400);
 
 pub(crate) enum Request {
     Takeover(oneshot::Sender<Result<TakeoverOutcome>>),
-    Renew {
+    Mutate {
         epoch: u64,
+        mutation: AuthorityMutation,
         precondition: AuthorityPrecondition,
         reply: oneshot::Sender<Result<()>>,
     },
@@ -47,7 +48,7 @@ impl Request {
             Self::Takeover(reply) => {
                 let _ = reply.send(Err(error));
             }
-            Self::Renew { reply, .. } => {
+            Self::Mutate { reply, .. } => {
                 let _ = reply.send(Err(error));
             }
         }
@@ -56,7 +57,6 @@ impl Request {
 
 pub(crate) struct Resignation {
     pub(crate) epoch: u64,
-    pub(crate) precondition: AuthorityPrecondition,
     pub(crate) reply: oneshot::Sender<Result<()>>,
 }
 
@@ -89,7 +89,7 @@ impl Writer {
             }
             if let Some(request) = resignation {
                 self.drain_resigning(request.epoch);
-                let result = self.resign(request.epoch, request.precondition).await;
+                let result = self.resign(request.epoch).await;
                 let _ = request.reply.send(result);
                 continue;
             }
@@ -138,15 +138,29 @@ impl Writer {
             Request::Takeover(reply) => {
                 let _ = reply.send(self.takeover().await);
             }
-            Request::Renew {
+            Request::Mutate {
                 epoch,
+                mutation,
                 precondition,
                 reply,
             } => {
                 let result = loop {
-                    let put = self.prepare_renewal(epoch, precondition, false).await;
+                    let put = match mutation {
+                        AuthorityMutation::Renew => {
+                            self.prepare_renewal(epoch, precondition, false).await
+                        }
+                        AuthorityMutation::Resign => {
+                            self.prepare_term(Access::ConditionalResign(epoch), precondition, true)
+                                .await
+                        }
+                    };
                     match put {
-                        Ok(Some(put)) => break self.write(&put).await.map(|_| ()),
+                        Ok(Some(put)) => {
+                            if matches!(mutation, AuthorityMutation::Resign) {
+                                self.drain_resigning(epoch);
+                            }
+                            break self.write(&put).await.map(|_| ());
+                        }
                         Ok(None) => self.renew(epoch).await,
                         Err(error) => break Err(error),
                     }
@@ -260,9 +274,9 @@ impl Writer {
         result
     }
 
-    async fn resign(&self, epoch: u64, precondition: AuthorityPrecondition) -> Result<()> {
+    async fn resign(&self, epoch: u64) -> Result<()> {
         let result = match self
-            .prepare_term(Access::Resign(epoch), precondition, false)
+            .prepare_term(Access::Resign(epoch), AuthorityPrecondition::Any, false)
             .await
         {
             Ok(Some(put)) => self.write(&put).await.map(|_| ()),
@@ -287,7 +301,14 @@ impl Writer {
                 .term()
                 .ok_or_else(|| rejected("term is inactive"))
         })?;
-        let base = match self.shared.read(access, Some(deadline)).await {
+        let read = match access {
+            Access::Renew(_) => {
+                self.read_renewal_head(access, deadline, defer_for_renewal)
+                    .await
+            }
+            _ => self.shared.read(access, Some(deadline)).await,
+        };
+        let base = match read {
             Ok(base) => base,
             Err(error) => {
                 let renew_due = defer_for_renewal
@@ -298,7 +319,7 @@ impl Writer {
             }
         };
         let next = base.head().clone().with_next_write_seq().map(|mut next| {
-            if matches!(access, Access::Resign(_)) {
+            if matches!(access, Access::Resign(_) | Access::ConditionalResign(_)) {
                 next.owner = None;
                 next.lease_deadline_ms = 0;
             } else {
@@ -324,15 +345,73 @@ impl Writer {
                 floor.validate(&self.shared.store, &base)?;
             }
             precondition.check(base.head())?;
+            let next = next?;
+            let access = if matches!(access, Access::ConditionalResign(_)) {
+                // Close admission and authorize the CAS against this read under one lock.
+                control.status = AuthorityStatus::Resigning { epoch, deadline };
+                Access::Resign(epoch)
+            } else {
+                access
+            };
             Ok(Some(Put {
                 access,
                 base,
-                next: next?,
+                next,
                 sent_at: now,
                 deadline,
                 ambiguous: false,
             }))
         })
+    }
+
+    async fn read_renewal_head(
+        &self,
+        access: Access,
+        deadline: Instant,
+        defer_for_renewal: bool,
+    ) -> Result<AuthorityState> {
+        let prepare_deadline = deadline - READBACK_RESERVE;
+        // A queued renewal yields to the scheduled renewal during read backoff.
+        let retry_until = if defer_for_renewal {
+            prepare_deadline.min(renew_at(deadline))
+        } else {
+            prepare_deadline
+        };
+        let mut backoff = INITIAL_BACKOFF;
+        loop {
+            let error = match self.shared.read(access, Some(prepare_deadline)).await {
+                Ok(head) => return Ok(head),
+                Err(error) => error,
+            };
+            let retryable = matches!(
+                error,
+                Error::AuthorityTimeout {
+                    operation: "read",
+                    ..
+                }
+            ) || error.authority_storage_error().is_some_and(|source| {
+                source.is_temporary()
+                    && !matches!(
+                        source.kind(),
+                        ErrorKind::PermissionDenied | ErrorKind::NotFound
+                    )
+            });
+            let now = Instant::now();
+            if !retryable || now >= retry_until {
+                return Err(error);
+            }
+            tokio::select! {
+                biased;
+                _ = self.shared.wait_until(|status| access.check(status).is_err()) => {}
+                _ = sleep_until((now + backoff).min(retry_until)) => {}
+            }
+            self.shared
+                .update(|control, _| access.check(control.status))?;
+            if Instant::now() >= retry_until {
+                return Err(error);
+            }
+            backoff = (backoff * 2).min(MAX_BACKOFF);
+        }
     }
 
     async fn write(&self, put: &Put) -> Result<bool> {

@@ -65,17 +65,16 @@ pub enum TakeoverOutcome {
 /// The local lifecycle of the Authority writer.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum AuthorityStatus {
+    /// Has no active local term and can attempt takeover.
     #[default]
     Follower,
-    Leader {
-        epoch: u64,
-        deadline: Instant,
-    },
-    Resigning {
-        epoch: u64,
-        deadline: Instant,
-    },
+    /// Holds a local term that can admit writes before its deadline.
+    Leader { epoch: u64, deadline: Instant },
+    /// Stops admitting new writes for the term while resignation is resolved.
+    Resigning { epoch: u64, deadline: Instant },
+    /// The official Head is missing and requires operator recovery.
     RecoveryRequired,
+    /// Rejects new operations after shutdown begins.
     Closed,
 }
 
@@ -93,8 +92,10 @@ impl AuthorityStatus {
 /// Additional condition on the Head for a fenced mutation.
 #[derive(Debug, Default, Clone, Copy)]
 pub enum AuthorityPrecondition {
+    /// Accepts any current Head write sequence.
     #[default]
     Any,
+    /// Requires an exact match with the current Head write sequence.
     WriteSeq(u64),
 }
 
@@ -113,7 +114,9 @@ impl AuthorityPrecondition {
 /// Fenced Head updates supported by Head v1.
 #[derive(Debug, Clone, Copy)]
 pub enum AuthorityMutation {
+    /// Renews the current lease while preserving the owner and epoch.
     Renew,
+    /// Clears the current owner while preserving the epoch.
     Resign,
 }
 
@@ -191,31 +194,34 @@ impl Authority {
     ) -> Result<()> {
         let epoch = token.epoch;
         let (reply, result) = oneshot::channel();
-        match mutation {
-            AuthorityMutation::Renew => {
+        match (mutation, precondition) {
+            (AuthorityMutation::Resign, AuthorityPrecondition::Any) => {
+                self.shared.update(|control, _| {
+                    Access::Renew(epoch).check(control.status)?;
+                    let AuthorityStatus::Leader { deadline, .. } = control.status else {
+                        return Err(rejected("term is inactive"));
+                    };
+                    control.status = AuthorityStatus::Resigning { epoch, deadline };
+                    control.resignation = Some(Resignation { epoch, reply });
+                    Ok(())
+                })?;
+            }
+            (mutation, precondition) => {
+                let access = match mutation {
+                    AuthorityMutation::Renew => Access::Renew(epoch),
+                    AuthorityMutation::Resign => Access::ConditionalResign(epoch),
+                };
                 self.submit(
-                    Access::Renew(epoch),
-                    Request::Renew {
+                    access,
+                    Request::Mutate {
                         epoch,
+                        mutation,
                         precondition,
                         reply,
                     },
                 )
                 .await?;
             }
-            AuthorityMutation::Resign => self.shared.update(|control, _| {
-                Access::Renew(epoch).check(control.status)?;
-                let AuthorityStatus::Leader { deadline, .. } = control.status else {
-                    return Err(rejected("term is inactive"));
-                };
-                control.status = AuthorityStatus::Resigning { epoch, deadline };
-                control.resignation = Some(Resignation {
-                    epoch,
-                    precondition,
-                    reply,
-                });
-                Ok(())
-            })?,
         }
         result.await.unwrap_or_else(|_| Err(closed()))
     }
@@ -267,6 +273,7 @@ enum Access {
     Read,
     Takeover,
     Renew(u64),
+    ConditionalResign(u64),
     Resign(u64),
 }
 
@@ -276,7 +283,10 @@ impl Access {
             (_, AuthorityStatus::Closed) => Err(closed()),
             (_, AuthorityStatus::RecoveryRequired) => error::AuthorityRecoveryRequiredSnafu.fail(),
             (Self::Read, _) | (Self::Takeover, AuthorityStatus::Follower) => Ok(()),
-            (Self::Renew(expected), AuthorityStatus::Leader { epoch, .. })
+            (
+                Self::Renew(expected) | Self::ConditionalResign(expected),
+                AuthorityStatus::Leader { epoch, .. },
+            )
             | (Self::Resign(expected), AuthorityStatus::Resigning { epoch, .. })
                 if expected == epoch =>
             {

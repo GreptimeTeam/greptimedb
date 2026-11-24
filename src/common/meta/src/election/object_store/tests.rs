@@ -98,7 +98,7 @@ pub(crate) enum Request {
 enum ReadAction {
     Pause(DeferredRead),
     PauseResponse(DeferredRead),
-    Fail,
+    Fail(Error),
 }
 
 #[derive(Debug, Clone)]
@@ -161,11 +161,15 @@ impl Backend {
     }
 
     pub(crate) fn fail_next_read(&self) {
+        self.fail_next_read_with(denied());
+    }
+
+    pub(crate) fn fail_next_read_with(&self, error: Error) {
         self.data
             .lock()
             .unwrap()
             .read_actions
-            .push_back(ReadAction::Fail);
+            .push_back(ReadAction::Fail(error));
     }
 
     pub(crate) fn fail_next_write(&self, error: Error) {
@@ -300,7 +304,7 @@ impl oio::Read for TestReader {
                 None
             }
             Some(ReadAction::PauseResponse(gate)) => Some((gate.arrived, gate.release)),
-            Some(ReadAction::Fail) => return Err(denied()),
+            Some(ReadAction::Fail(error)) => return Err(error),
             None => None,
         };
         let data = self.data.lock().unwrap();

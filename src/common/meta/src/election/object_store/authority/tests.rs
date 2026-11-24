@@ -839,6 +839,214 @@ async fn failed_prepare_get_retires_both_renewal_paths_once() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn renewal_retries_a_timed_out_prepare_get_with_the_original_deadline() {
+    for scheduled in [false, true] {
+        let fixture = Fixture::new().await;
+        let node = fixture.node("a");
+        let token = acquire(&node).await;
+        let active = node.status();
+        let (epoch, original_deadline) = active.term().unwrap();
+        let mut status = node.shared.status.subscribe();
+        fixture.clear_requests();
+        let read = fixture.backend.pause_next_read();
+        let mut put = fixture.backend.defer_next_write();
+        let attempt = if scheduled {
+            advance(RENEW_INTERVAL).await;
+            None
+        } else {
+            Some(renew_task(&node, token))
+        };
+        read.arrived.notified().await;
+        let started_at = Instant::now();
+
+        // A regression that retires on the first timeout must fail in virtual time.
+        tokio::time::timeout(Duration::from_secs(2), put.arrived.notified())
+            .await
+            .unwrap();
+        assert!(started_at.elapsed() > GET_TIMEOUT);
+        assert_eq!(fixture.order(), ["GET", "GET", "PUT"]);
+        assert_eq!(node.status(), active);
+        assert_eq!(
+            (fixture.puts()[0].epoch(), fixture.puts()[0].write_seq()),
+            (epoch, 2)
+        );
+        assert!(put.commit(true).await);
+        assert!(put.respond());
+
+        status.changed().await.unwrap();
+        assert!(matches!(
+            *status.borrow_and_update(),
+            AuthorityStatus::Leader { epoch: renewed, deadline }
+                if renewed == epoch && deadline > original_deadline
+        ));
+        if let Some(attempt) = attempt {
+            attempt.await.unwrap().unwrap();
+        }
+        node.shutdown().await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn renewal_retries_a_temporary_prepare_get_error() {
+    let fixture = Fixture::new().await;
+    let node = fixture.node("a");
+    let token = acquire(&node).await;
+    fixture.clear_requests();
+    fixture.backend.fail_next_read_with(
+        StorageError::new(ErrorKind::Unexpected, "injected temporary read error").set_temporary(),
+    );
+
+    renew(&node, token, AuthorityPrecondition::Any)
+        .await
+        .unwrap();
+    assert_eq!(fixture.order(), ["GET", "GET", "PUT"]);
+    let head = &fixture.puts()[0];
+    assert_eq!((head.epoch(), head.write_seq()), (token.epoch(), 2));
+    node.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn renewal_prepare_timeouts_exhaust_the_budget_without_a_put() {
+    let fixture = Fixture::new().await;
+    let node = fixture.node("a");
+    let token = acquire(&node).await;
+    let (_, deadline) = node.status().term().unwrap();
+    let budget_end = deadline - Duration::from_secs(1);
+    let mut status = node.shared.status.subscribe();
+    fixture.clear_requests();
+    let first = fixture.backend.pause_next_read();
+    for _ in 0..10 {
+        fixture.backend.pause_next_read();
+    }
+    advance(RENEW_INTERVAL).await;
+    first.arrived.notified().await;
+    status.changed().await.unwrap();
+
+    assert_eq!(*status.borrow_and_update(), AuthorityStatus::Follower);
+    assert!(Instant::now() >= budget_end && Instant::now() < deadline);
+    assert_rejected(renew(&node, token, AuthorityPrecondition::Any).await);
+    let order = fixture.order();
+    assert!(order.len() > 1);
+    assert!(order.iter().all(|request| *request == "GET"));
+    assert!(
+        fixture
+            .backend
+            .data
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .all(|request| matches!(request, Request::Get(started_at) if *started_at < budget_end))
+    );
+    node.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn conditional_resign_rejects_mismatched_sequence_without_retiring_term() {
+    let fixture = Fixture::new().await;
+    let node = fixture.node("a");
+    let token = acquire(&node).await;
+    let active = node.status();
+    let before = node.head().await.unwrap();
+    fixture.clear_requests();
+
+    for expected in [0, 2] {
+        let result = node
+            .mutate(
+                &token,
+                AuthorityPrecondition::WriteSeq(expected),
+                AuthorityMutation::Resign,
+            )
+            .await;
+        assert_write_seq_mismatch(result, expected, 1);
+        assert_eq!(node.status(), active);
+    }
+    assert_eq!(fixture.order(), ["GET", "GET"]);
+    let after = node.head().await.unwrap();
+    assert_eq!(before.head(), after.head());
+    assert!(
+        fixture
+            .store
+            .same_version(before.metadata(), after.metadata())
+            .unwrap()
+    );
+    renew(&node, token, AuthorityPrecondition::WriteSeq(1))
+        .await
+        .unwrap();
+    assert_eq!(fixture.puts().len(), 1);
+    assert_eq!(fixture.puts()[0].epoch(), token.epoch());
+    node.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn conditional_resign_stops_admission_at_put_authorization() {
+    let fixture = Fixture::new().await;
+    let node = fixture.node("a");
+    let token = acquire(&node).await;
+    let active = node.status();
+    let (epoch, deadline) = active.term().unwrap();
+    fixture.clear_requests();
+    let read = fixture.backend.pause_next_read();
+    let mut put = fixture.backend.defer_next_write();
+    let mut resign = Box::pin(node.mutate(
+        &token,
+        AuthorityPrecondition::WriteSeq(1),
+        AuthorityMutation::Resign,
+    ));
+    assert!(futures::poll!(&mut resign).is_pending());
+    read.arrived.notified().await;
+    assert_eq!(node.status(), active);
+    let waiting = fill_queue(&node, token, AuthorityPrecondition::Any).await;
+
+    read.release.notify_one();
+    put.arrived.notified().await;
+    assert_eq!(
+        node.status(),
+        AuthorityStatus::Resigning { epoch, deadline }
+    );
+    assert_rejected(renew(&node, token, AuthorityPrecondition::Any).await);
+    for request in waiting {
+        assert_rejected(request.await);
+    }
+    assert_eq!(fixture.order(), ["GET", "PUT"]);
+    assert!(put.commit(true).await);
+    assert!(put.respond());
+    resign.await.unwrap();
+    assert_eq!(node.status(), AuthorityStatus::Follower);
+    let head = node.head().await.unwrap();
+    assert!(head.head().owner.is_none());
+    assert_eq!((head.head().epoch(), head.head().write_seq()), (epoch, 2));
+    node.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn conditional_resign_rechecks_sequence_after_a_due_renewal() {
+    let fixture = Fixture::new().await;
+    let node = fixture.node("a");
+    let token = acquire(&node).await;
+    fixture.clear_requests();
+    advance(RENEW_INTERVAL - Duration::from_millis(200)).await;
+    let read = fixture.backend.pause_next_read();
+    let mut resign = Box::pin(node.mutate(
+        &token,
+        AuthorityPrecondition::WriteSeq(1),
+        AuthorityMutation::Resign,
+    ));
+    assert!(futures::poll!(&mut resign).is_pending());
+    read.arrived.notified().await;
+
+    advance(Duration::from_millis(200)).await;
+    read.release.notify_one();
+    assert_write_seq_mismatch(resign.await, 1, 2);
+    assert_eq!(fixture.order(), ["GET", "GET", "PUT", "GET"]);
+    assert!(fixture.puts()[0].owner.is_some());
+    assert!(
+        matches!(node.status(), AuthorityStatus::Leader { epoch, .. } if epoch == token.epoch())
+    );
+    node.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn resign_cancels_a_preparing_get_before_authorization() {
     let fixture = Fixture::new().await;
     let node = fixture.node("a");
