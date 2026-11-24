@@ -235,7 +235,7 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   (`handle_leader_lease_wait_ended`) to schedule the flushes the wait deferred and, only if the
   region is then a writable leader, start a compaction. The missing indexes, the refused index
   build retries and the backfilled metadata wait in `deferred_lease_work`, which the worker sweeps
-  after each batch (`sweep_deferred_lease_work`). A catchup of a waiting
+  after each batch that may change a region's state (`sweep_deferred_lease_work`). A catchup of a waiting
   region catches it up again into an unregistered replacement while the region stays registered,
   demoted unless it is in a transient leader state. The replacement replaces it only if the replay
   succeeds and the region took no write and made no commit meanwhile; otherwise the region keeps

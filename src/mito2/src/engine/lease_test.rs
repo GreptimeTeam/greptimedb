@@ -1803,6 +1803,35 @@ async fn test_deferred_work_waits_for_next_leader_lease() {
     listener.wait_for_backfill_persists(1).await;
 }
 
+/// A kept retry, which the missing-index pass cannot replace, survives a catchup replacement.
+#[tokio::test]
+async fn test_kept_retry_survives_catchup_replacement() {
+    let mut env = TestEnv::with_prefix("kept-retry-replacement").await;
+    let (engine, listener, schema, mut files) =
+        create_index_region(&mut env, async_build_mode_config(false), &[0]).await;
+    mark_extension_index(&engine, &mut files).await;
+    let file_ids: Vec<_> = files.iter().map(|file| file.file_id).collect();
+    promote_to_await_leader_lease(&engine, REGION_ID).await;
+    submit_index_build_retry(&engine, files, Vec::new()).await;
+    enter_staging(&engine, REGION_ID).await;
+    grant_at(&engine, RegionRole::StagingLeader, Instant::now(), None);
+    listener.wait_for_end().await;
+    let old = engine.get_region(REGION_ID).unwrap();
+    // Rows in the memtable make the next catchup reopen the region.
+    let rows = Rows {
+        schema,
+        rows: build_rows(10, 13),
+    };
+    put_rows(&engine, REGION_ID, rows).await;
+    grant_at(&engine, RegionRole::Follower, Instant::now(), None);
+    catchup(&engine).await.unwrap();
+    assert!(!Arc::ptr_eq(&old, &engine.get_region(REGION_ID).unwrap()));
+    worker_barrier(&engine).await;
+    assert!(!has_inverted_index(&engine, &file_ids));
+    grant_at(&engine, RegionRole::Leader, Instant::now(), None);
+    wait_until(|| has_inverted_index(&engine, &file_ids)).await;
+}
+
 /// The replayed and new rows of a region that awaits its Leader lease stay in its memtable until
 /// the lease ends the wait. A write the engine's full buffer stalls completes after the lease
 /// with no other write; a write the region's own buffer would stall is rejected, since only the
