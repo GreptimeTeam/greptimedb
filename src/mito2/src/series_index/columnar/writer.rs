@@ -173,7 +173,7 @@ impl ColumnarWriter {
     /// series may share a `tsid`, and both keep their own row and labels. Rows carry
     /// their tags and are ordered by exact key, so the format can represent the pair
     /// without inventing a second identity.
-    async fn append_key(&mut self, key: &[u8]) -> Result<()> {
+    pub(crate) async fn append_key(&mut self, key: &[u8]) -> Result<()> {
         if self.current.is_some() && key == self.last_key.as_slice() {
             if let Some(row) = self.current.as_mut() {
                 row.count = row

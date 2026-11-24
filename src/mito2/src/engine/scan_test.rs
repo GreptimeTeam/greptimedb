@@ -230,27 +230,9 @@ async fn check_sparse_upsert_after_adding_nullable_tag(format: &str) -> Whatever
             .iter()
             .flat_map(|level| level.files.values().cloned())
             .collect();
-        let flat = crate::compaction::CompactionSstReaderBuilder {
-            narthex_format: true,
-            metadata: region.metadata(),
-            sst_layer: region.access_layer.clone(),
-            cache: engine.cache_manager(),
-            inputs: &sources,
-            append_mode: true,
-            filter_deleted: false,
-            time_range: None,
-            merge_mode: crate::region::options::MergeMode::LastRow,
-            read_parallelism: 1,
-        }
-        .build_flat_sst_reader()
-        .await?;
-        let index = crate::sst::narthex::write_series(
-            &region.access_layer,
-            region.metadata(),
-            &sources,
-            flat,
-        )
-        .await?;
+        let index =
+            crate::sst::narthex::write_series(&region.access_layer, region.metadata(), &sources)
+                .await?;
         let index_id = index.file_id;
         engine
             .edit_region(

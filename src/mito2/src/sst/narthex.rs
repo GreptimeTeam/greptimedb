@@ -159,17 +159,22 @@ pub(crate) async fn write_samples(
     }])
 }
 
-/// Explicit PoC builder: merge sample keys with the existing SeqScan before writing
-/// a durable series index. A separate manifest edit publishes the result.
+/// Merge the sorted sample key areas. A separate manifest edit publishes the index.
 #[cfg(test)]
 pub(crate) async fn write_series(
     layer: &AccessLayer,
     metadata: store_api::metadata::RegionMetadataRef,
     sources: &[crate::sst::file::FileHandle],
-    mut batches: crate::read::FlatSource,
 ) -> Result<crate::sst::file::FileMeta> {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+
+    use crate::series_index::artifact::SamplesFileHandle;
     use crate::series_index::columnar::{ColumnarSeriesFormat, require};
+    use crate::series_index::format::{FormatWriter, SamplesFormatReader};
+    use crate::series_index::samples::reader::SamplesReader;
     use crate::sst::file::{FileMeta, NarthexSeriesIndexMeta};
+    use futures::TryStreamExt;
     require(!sources.is_empty(), "narthex series index requires samples")?;
     require(
         sources
@@ -207,8 +212,30 @@ pub(crate) async fn write_series(
         prefix,
     )?;
     let write_result: Result<()> = async {
-        while let Some(batch) = batches.next_batch().await? {
-            writer.write(&batch).await?;
+        let mut streams = Vec::with_capacity(sources.len());
+        let mut heads = BinaryHeap::new();
+        for source in sources {
+            let handle = SamplesFileHandle::from_narthex(
+                source.clone(),
+                &layer.build_region_dir(source.region_id()),
+            )?;
+            let reader = SamplesReader::open(layer.object_store().clone(), handle).await?;
+            // Empty projection and no time predicate read only metadata and exact keys.
+            let mut stream = reader.read(Default::default())?;
+            if let Some(block) = stream.try_next().await? {
+                heads.push(Reverse((block.key, streams.len())));
+            }
+            streams.push(stream);
+        }
+        let mut previous = None;
+        while let Some(Reverse((key, index))) = heads.pop() {
+            if previous.as_ref() != Some(&key) {
+                writer.append_key(key.bytes()).await?;
+                previous = Some(key);
+            }
+            if let Some(block) = streams[index].try_next().await? {
+                heads.push(Reverse((block.key, index)));
+            }
         }
         Ok(())
     }

@@ -76,7 +76,7 @@ impl ColumnarSeriesFormat {
         store: ObjectStore,
         entry: &SeriesIndexEntry,
         prefix: String,
-    ) -> Result<Box<dyn FormatWriter>> {
+    ) -> Result<Box<writer::ColumnarWriter>> {
         Ok(Box::new(
             writer::ColumnarWriter::new(self.clone(), metadata, store, entry)?
                 .with_prefix(prefix)?,

@@ -2040,22 +2040,7 @@ async fn test_narthex_shared_samples_and_series_gc_after_owner_drop() {
         .flat_map(|level| level.files.values().cloned())
         .collect();
     assert_eq!(sources.len(), 2);
-    let flat = crate::compaction::CompactionSstReaderBuilder {
-        narthex_format: true,
-        metadata: region.metadata(),
-        sst_layer: layer.clone(),
-        cache: engine.cache_manager(),
-        inputs: &sources,
-        append_mode: true,
-        filter_deleted: false,
-        time_range: None,
-        merge_mode: crate::region::options::MergeMode::LastRow,
-        read_parallelism: 1,
-    }
-    .build_flat_sst_reader()
-    .await
-    .unwrap();
-    let index = crate::sst::narthex::write_series(&layer, region.metadata(), &sources, flat)
+    let index = crate::sst::narthex::write_series(&layer, region.metadata(), &sources)
         .await
         .unwrap();
     let index_id = index.file_id();

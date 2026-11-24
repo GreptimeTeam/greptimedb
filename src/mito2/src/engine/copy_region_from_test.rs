@@ -761,29 +761,10 @@ async fn test_narthex_copy_and_remap(
         .flat_map(|level| level.files.values().cloned())
         .collect();
     if with_index {
-        let batches = crate::compaction::CompactionSstReaderBuilder {
-            narthex_format: true,
-            metadata: owner.metadata(),
-            sst_layer: owner.access_layer.clone(),
-            cache: engine.cache_manager(),
-            inputs: &sources,
-            append_mode: true,
-            filter_deleted: false,
-            time_range: None,
-            merge_mode: crate::region::options::MergeMode::LastRow,
-            read_parallelism: 1,
-        }
-        .build_flat_sst_reader()
-        .await
-        .unwrap();
-        let index = crate::sst::narthex::write_series(
-            &owner.access_layer,
-            owner.metadata(),
-            &sources,
-            batches,
-        )
-        .await
-        .unwrap();
+        let index =
+            crate::sst::narthex::write_series(&owner.access_layer, owner.metadata(), &sources)
+                .await
+                .unwrap();
         engine
             .edit_region(
                 source,
