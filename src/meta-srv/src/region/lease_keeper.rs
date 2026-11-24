@@ -312,7 +312,10 @@ mod tests {
     use store_api::storage::RegionId;
     use table::metadata::TableInfo;
 
-    use super::{RegionLeaseKeeper, renew_region_lease_via_region_route};
+    use super::{
+        RegionLeaseKeeper, renew_region_lease_via_operating_regions,
+        renew_region_lease_via_region_route,
+    };
     use crate::region::lease_keeper::{RegionLeaseInfo, RenewRegionLeasesResponse};
 
     fn new_test_keeper() -> RegionLeaseKeeper {
@@ -322,6 +325,67 @@ mod tests {
 
         let opening_region_keeper = Arc::new(MemoryRegionKeeper::default());
         RegionLeaseKeeper::new(table_metadata_manager, opening_region_keeper)
+    }
+
+    /// Records the level of each event.
+    #[derive(Clone, Default)]
+    struct LevelCapture(Arc<std::sync::Mutex<Vec<tracing::Level>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for LevelCapture {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            self.0.lock().unwrap().push(*event.metadata().level());
+        }
+    }
+
+    /// The expected mismatch of a migration target that a catchup promoted logs at debug; every
+    /// other mismatch logs at info, and a matching role logs nothing.
+    #[test]
+    fn test_role_mismatch_log_level_of_operating_region() {
+        use tracing::Level;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let region_id = RegionId::new(1024, 1);
+        let log_level = |candidate_lease_id, reported_role, table_route_exists| {
+            let capture = LevelCapture::default();
+            let subscriber = tracing_subscriber::registry().with(capture.clone());
+            let operating_regions = HashMap::from([(
+                region_id,
+                OperatingRegion {
+                    role: RegionRole::Follower,
+                    candidate_lease_id,
+                },
+            )]);
+            tracing::subscriber::with_default(subscriber, || {
+                renew_region_lease_via_operating_regions(
+                    &operating_regions,
+                    1,
+                    region_id,
+                    reported_role,
+                    table_route_exists,
+                )
+                .unwrap();
+            });
+            capture.0.lock().unwrap().clone()
+        };
+
+        assert_eq!(
+            log_level(Some(7), RegionRole::Leader, true),
+            vec![Level::DEBUG]
+        );
+        assert_eq!(log_level(None, RegionRole::Leader, true), vec![Level::INFO]);
+        assert_eq!(
+            log_level(Some(7), RegionRole::Leader, false),
+            vec![Level::INFO]
+        );
+        assert_eq!(
+            log_level(Some(7), RegionRole::DowngradingLeader, true),
+            vec![Level::INFO]
+        );
+        assert!(log_level(Some(7), RegionRole::Follower, true).is_empty());
     }
 
     #[test]
