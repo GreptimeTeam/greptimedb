@@ -535,7 +535,8 @@ impl SharedSource {
     }
 
     /// Materialize only routing dependencies; merge and output retain encoded keys.
-    fn routing_batch(&self, batch: &RecordBatch) -> Result<RecordBatch> {
+    fn routing_batch(&self, batch: &RecordBatch) -> Result<(RecordBatch, usize)> {
+        let mut materialized_bytes = 0usize;
         let mut decoded = None;
         let mut fields = Vec::new();
         let mut arrays = Vec::new();
@@ -555,28 +556,33 @@ impl SharedSource {
                         batch,
                     )?);
                 }
-                decoded
+                let array = decoded
                     .as_mut()
                     .context(InvalidMultiRegionCompactionSnafu {
                         reason: "Missing decoded routing key",
                     })?
-                    .get_tag_column(column.column_id, None, &column.column_schema.data_type)?
+                    .get_tag_column(column.column_id, None, &column.column_schema.data_type)?;
+                materialized_bytes =
+                    materialized_bytes.saturating_add(array.get_array_memory_size());
+                array
             };
             fields.push(Field::new(name, array.data_type().clone(), true));
             arrays.push(array);
         }
         let options = datatypes::arrow::record_batch::RecordBatchOptions::new()
             .with_row_count(Some(batch.num_rows()));
-        RecordBatch::try_new_with_options(Arc::new(Schema::new(fields)), arrays, &options)
-            .context(NewRecordBatchSnafu)
+        let routing =
+            RecordBatch::try_new_with_options(Arc::new(Schema::new(fields)), arrays, &options)
+                .context(NewRecordBatchSnafu)?;
+        Ok((routing, materialized_bytes))
     }
 
-    fn row_owners(&self, batch: &RecordBatch) -> Result<Vec<RegionId>> {
-        let routing = self.routing_batch(batch)?;
+    pub(super) fn row_owners(&self, batch: &RecordBatch) -> Result<Vec<RegionId>> {
+        let (routing, materialized_bytes) = self.routing_batch(batch)?;
         ensure!(
             batch
                 .get_array_memory_size()
-                .saturating_add(routing.get_array_memory_size())
+                .saturating_add(materialized_bytes)
                 <= self.limits.batch,
             MultiRegionCompactionResourceSnafu {
                 reason: "Routing projection exceeds the task buffer budget"

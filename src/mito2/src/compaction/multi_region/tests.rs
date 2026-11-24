@@ -2673,6 +2673,39 @@ async fn test_missing_index_handler_does_not_block_routed_compaction() {
     }
 }
 
+#[rstest::rstest]
+#[case::borrowed(PrimaryKeyEncoding::Dense)]
+#[case::materialized(PrimaryKeyEncoding::Sparse)]
+#[tokio::test]
+async fn test_routing_at_source_batch_budget(#[case] encoding: PrimaryKeyEncoding) {
+    let fixture = Fixture::new(encoding, FormatType::Flat, 7).await;
+    let plan = fixture.plan(2);
+    let (context, _) = fixture.context(None);
+    let mut source = source::SharedSource::build(
+        &plan,
+        &context,
+        validate_plan(&plan).unwrap(),
+        Arc::new(SourceCounters::default()),
+    )
+    .await
+    .unwrap();
+    let source = Arc::get_mut(&mut source).unwrap();
+    let batch = source_batch(&fixture.metadata, 0, 7);
+    source.limits.batch = batch.get_array_memory_size();
+    let owners = source.row_owners(&batch);
+    if encoding == PrimaryKeyEncoding::Dense {
+        assert_eq!(
+            owners.unwrap(),
+            vec![fixture.metadata.region_id; batch.num_rows()]
+        );
+    } else {
+        assert!(matches!(
+            owners,
+            Err(crate::error::Error::MultiRegionCompactionResource { .. })
+        ));
+    }
+}
+
 // Exercise persisted sparse inputs, schema alignment, routing and output readback
 // together: unrelated nullable tags must never become merge columns.
 #[rstest::rstest]
@@ -2680,13 +2713,16 @@ async fn test_missing_index_handler_does_not_block_routed_compaction() {
 #[case(40)]
 #[case(3600)]
 #[tokio::test]
-async fn test_sparse_routing_with_wide_target_schema(#[case] tag_count: u32) {
+async fn test_sparse_routing_with_wide_target_schema(#[case] target_tag_count: u32) {
     let fixture = Fixture::new(PrimaryKeyEncoding::Sparse, FormatType::Flat, 7).await;
     let mut plan = fixture.plan(8);
     for target in plan.targets.values_mut() {
         let mut keys = target.metadata.primary_key.clone();
         let mut builder = RegionMetadataBuilder::from_existing((*target.metadata).clone());
-        for id in 4..tag_count + 2 {
+        // Sparse keys also contain the internal table ID and TSID.
+        let existing_tags = keys.len() as u32 - 2;
+        for offset in 0..target_tag_count - existing_tags {
+            let id = 4 + offset;
             builder.push_column_metadata(ColumnMetadata {
                 column_schema: datatypes::schema::ColumnSchema::new(
                     format!("tag_{id}"),
@@ -2698,6 +2734,7 @@ async fn test_sparse_routing_with_wide_target_schema(#[case] tag_count: u32) {
             });
             keys.push(id);
         }
+        assert_eq!(keys.len(), target_tag_count as usize + 2);
         builder.primary_key(keys);
         target.metadata = Arc::new(builder.build().unwrap());
     }

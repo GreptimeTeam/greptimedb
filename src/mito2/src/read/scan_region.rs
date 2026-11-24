@@ -1030,7 +1030,7 @@ pub struct ScanInput {
     pub(crate) compaction_read_parallelism: usize,
     /// Compaction-only JSON2 physical rewrite targets.
     json2_rewrite_targets: Json2RewriteTargets,
-    /// Optional override for complete-file maintenance scans.
+    /// Override for footer page-index loading. `None` uses the reader default.
     page_index_policy: Option<parquet::file::metadata::PageIndexPolicy>,
     /// Counters that should receive query-load metrics.
     pub(crate) query_stat_counters: Option<RegionQueryStatCounters>,

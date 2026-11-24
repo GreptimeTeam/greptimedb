@@ -56,6 +56,10 @@ immutable `Version` (`region/version.rs`) → scans memtables and Parquet SSTs
 (`sst/parquet.rs`) → merges (`read/`) and dedups by sequence → projected,
 filtered `RecordBatch` stream.
 
+Compaction SST scans share a read path. Multi-region compaction retains raw
+versions and routes each row before merging. Sparse routing temporarily
+materializes only the columns used by the partition rule.
+
 Internal series merges use the query runtime pool forwarded through
 `QueryScanContext`; reader and output-batch accounting uses the separate scan
 memory tracker. Direct scanner callers default to an unbounded operator pool.
@@ -236,5 +240,3 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
 
 Update this file when you add/rename a top-level module, change the write/read
 path entry points, or alter a persisted format (manifest, SST, WAL).
-
-Compaction SST scans share `ScanInput` range preparation and `scan_util::next_aligned_file_batch`. Multi-region compaction retains raw versions and annotates routing before merging; sparse routing materializes only partition dependencies temporarily.
