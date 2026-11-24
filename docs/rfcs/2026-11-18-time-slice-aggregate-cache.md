@@ -7,7 +7,7 @@ Author: "Dennis Zhuang <killme2008@gmail.com>"
 
 # Summary
 
-Cache the partial states of an aggregation over a region scan on the node that runs the scan, with one entry per aligned time slice. A repeated or sliding dashboard query reuses the slices whose data has not changed and recomputes only the rest. A cached slice is used only while the region reports the same data fingerprint for the slice's time range, so query results always reflect late writes, deletes, flushes, compactions, and TTL expiry.
+Cache the partial states of an aggregation over a region scan on the node that runs the scan, with one entry per aligned time slice. A repeated or sliding dashboard query reuses the slices whose data has not changed and recomputes only the rest. A cached slice is used only when the scan reports the same data fingerprint for the slice's time range as the entry was computed under, so query results always reflect late writes, deletes, flushes, compactions, and TTL expiry.
 
 # Motivation
 
@@ -43,7 +43,7 @@ This RFC follows the Druid and StarRocks approach, adapted to the GreptimeDB sto
 
 - Caching final results or raw rows. Only partial aggregation states are cached.
 - PromQL. Its range evaluation has a different plan shape. PromQL can reuse the fingerprint later; see [Future Work](#future-work).
-- Metric engine tables. The metric engine keeps the default `time_range_fingerprint`, which returns `None`, so the cache is off for its tables. These tables are queried mostly through PromQL and are handled together with it.
+- Metric engine tables. The rule does not rewrite scans of metric engine tables. These tables are queried mostly through PromQL and are handled together with it.
 - Sharing cache entries across nodes or persisting them. The cache is in memory and local to a node.
 - Caching slices that still have unflushed data. These slices are recomputed on every query.
 
@@ -53,47 +53,45 @@ This RFC follows the Druid and StarRocks approach, adapted to the GreptimeDB sto
 
 ```
 AggregateExec (Final)                     (unchanged)
-  └─ SliceAggregateExec                   replaces Partial AggregateExec
-       ├─ slice [00:00, 01:00) ── fingerprint matches ──> cached partial states
-       ├─ slice [01:00, 02:00) ── fingerprint matches ──> cached partial states
-       ├─ ...
-       └─ slice [23:00, 23:37) ── memtable overlaps ────> Partial AggregateExec
-                                                            └─ RegionScanExec(request + slice bounds)
+  └─ SliceAggregateExec                   emits cached states of slices whose fingerprint matches
+       └─ Partial AggregateExec           also groups by the slice of each row
+            └─ RegionScanExec             the original scan; cached slices are pruned
 ```
 
-A physical optimizer rule looks for a `Partial` aggregation that reads a region scan through row-wise operators only (filter and projection), where the scan request bounds the time index on both ends. The rule splits the time range into slices aligned to a fixed width and replaces the partial aggregation with `SliceAggregateExec`. For each slice, `SliceAggregateExec` either returns the cached partial states or runs the original partial aggregation over a new scan of that slice. It then emits the states of all slices. The final aggregation merges partial states regardless of how the input rows were split, so its output does not change.
+A physical optimizer rule looks for a `Partial` aggregation that reads a region scan through row-wise operators only (filter and projection), where the scan request bounds the time index on both ends. The rule splits the time range into slices aligned to a fixed width, adds the slice of each row as an extra grouping key of the partial aggregation, and places `SliceAggregateExec` above it.
+
+When the query runs, `SliceAggregateExec` asks the scan for the fingerprint of each slice. Slices whose cached entry has the same fingerprint are emitted from the cache, and a dynamic filter lets the scan skip their rows. The remaining slices are computed by the original scan in one pass; their states are split by the extra grouping key, which is then removed, and cached once every partition of the scan has finished. The final aggregation merges partial states regardless of how the input rows were split, so its output does not change.
 
 The rule runs where the partial aggregation reads the region scan: in-process in standalone mode, and on the datanode in distributed mode. In distributed mode, the aggregation above `SliceAggregateExec` produces the states that the frontend merges. Aggregations that the distributed planner keeps above `MergeScan`, such as those that cannot be split into steps, are not affected. The frontend plan and the region request protocol do not change.
 
-Results are not bit-identical to those of an uncached run. Merging states in a different order can change the last digits of a floating-point `sum` or `avg`, as a different partition count already does. Each slice reads the region version that is current when the slice runs, so a write that lands during the query can be visible in one slice but not in another. An uncached scan reads a single region version, so this guarantee is weaker. Requests that need a fixed snapshot carry a sequence bound and are never rewritten.
+Every slice, cached or computed, describes the data of the version the scan was built on, so a query reads a single region version, as an uncached query does. Results are not bit-identical to those of an uncached run: merging states in a different order can change the last digits of a floating-point `sum` or `avg`, as a different partition count already does.
 
 ## Data fingerprint
 
-The correctness of the cache depends entirely on invalidation, so the decision that this RFC pins down is an engine contract:
+The correctness of the cache depends entirely on invalidation, so the decision that this RFC pins down is a storage contract:
 
 ```rust
-trait RegionEngine {
-    /// Returns a fingerprint of the rows that a scan of `[start, end)` reads from
-    /// the region's current version, or `None` if the range cannot be fingerprinted.
-    fn time_range_fingerprint(&self, region_id: RegionId, start: Timestamp, end: Timestamp)
-        -> Option<u64>;
+trait RegionScanner {
+    /// Returns the identity of the rows this scanner reads in `[start, end)` of the
+    /// time index, or `None` if it cannot vouch for them.
+    fn time_range_fingerprint(&self, start: Timestamp, end: Timestamp)
+        -> Option<TimeRangeFingerprint>;
 }
 ```
 
-Equal fingerprints must imply that the same scan request, restricted to the range, returns the same rows. The contract covers only requests that read the current version. Requests bound to a sequence or a snapshot, such as those issued by Flow and by snapshot reads, are never rewritten. The engine returns `None` when it cannot vouch for the range. This includes scans that read rows from sources other than memtables and SST files, such as a follower region that reads unflushed rows from its leader. The default implementation returns `None`, which disables caching for that engine.
+Equal fingerprints from two scanners built from the same request must imply that they read the same rows in the range. `TimeRangeFingerprint` is opaque to the query engine and compared in full, so the engine can change what it contains, and a hash collision cannot make two fingerprints equal. The fingerprint describes the version the scanner was built on, not the state of the region when it is called. The states a scan computes therefore always match the fingerprint it reports. The contract covers only requests that read the current version. Requests bound to a sequence or a snapshot, such as those issued by Flow and by snapshot reads, are never rewritten. The scanner returns `None` when it cannot vouch for the range. This includes scans that read rows from sources other than memtables and SST files, such as a follower region that reads unflushed rows from its leader. The default implementation returns `None`, which disables caching for scanners that do not implement it.
 
-Mito implements the method from the region version:
+Mito implements the method from the version the scan was built on:
 
 - If any memtable overlaps the range, return `None`. Unflushed rows have no stable identity.
-- Otherwise, hash the region ID, the schema version, the partition expression version, and the sorted identities of all SSTs whose time ranges overlap the range. A file's identity is its file ID plus the per-file metadata that affects how its rows are read: index version, source region, and sequence. The range result cache already keys on the same fields.
+- Otherwise, list the region ID, the schema version, the partition expression version, the merge and append modes, and the identities of the scan's SSTs whose time ranges overlap the range. A file's identity is its file ID plus the per-file fields of the range result cache key that decide how its rows are read: source region, index version, sequence, and whether its row sequences are preserved. That key also includes the pre-filter mode and the snapshot sequence. The pre-filter mode changes the batches that one file range produces, which is what the range result cache stores, but not the rows a scan returns. Requests with a snapshot sequence are not rewritten.
 
 SST files are immutable. Every operation that changes the persisted rows of a range replaces the set of files that overlap it: flush, compaction, TTL expiry, truncation, region edits, and file ingestion. A write or a delete lands in a memtable first, which makes the range uncacheable until the memtable is flushed into a new file. The schema version covers altered columns. The partition expression version covers repartitioning, in which a region keeps files that it shares with other regions and filters them by its partition expression at read time.
 
-`SliceAggregateExec` checks the fingerprint before it uses an entry, and again after it computes a slice. It stores the result only if both fingerprints match. A flush or compaction that runs during the scan therefore cannot cause states computed from an outdated version to be stored.
-
 ## Cache key and entry
 
-- Key: a hash of the region ID, the partial aggregation and the operators below it, and the slice bounds. The hash leaves out only the time-index range predicates that the slice bounds provably imply, so two queries with different windows can share their interior slices. Any other predicate on the time index, such as `date_part('hour', ts) = 3`, stays in the key.
+- Key: the region ID, the partial aggregation and the operators below it, the scan request, the session settings, and the slice bounds. The key is kept in full and compared on lookup, so two plans never share an entry by a hash collision. It leaves out only the time-index range predicates that the slice bounds provably imply, so two queries with different windows can share their interior slices. Any other predicate on the time index, such as `date_part('hour', ts) = 3`, stays in the key. Session settings are in the key because functions read some of them, such as the time zone, at execution time.
+- Exclusions: dynamic filters change while a query runs, so the rule skips scans that hold one, such as a filter pushed down by a TopK or a join, and runs after filter pushdown to see them. Plans with volatile expressions are skipped too.
 - Entry: the fingerprint under which the entry was computed, and the partial state batches.
 - Capacity: one cache per node, bounded in bytes and weighted by batch size.
 
@@ -108,9 +106,9 @@ WHERE ts >= now() - INTERVAL '24 hours' AND ts < now()
 GROUP BY b, service;
 ```
 
-At 12:37, the range `[12:37 yesterday, 12:37 today)` splits into 25 one-hour slices: a partial slice `[12:37, 13:00)` yesterday, 23 whole hours, and a partial slice `[12:00, 12:37)` today. The first run computes all 25 slices and caches every slice without unflushed data. In this example, only the current hour has unflushed data.
+At 12:37, the range `[12:37 yesterday, 12:37 today)` splits into 25 one-hour slices: a partial slice `[12:37, 13:00)` yesterday, 23 whole hours, and a partial slice `[12:00, 12:37)` today. The first run computes all 25 slices in one scan and caches every slice without unflushed data. In this example, only the current hour has unflushed data.
 
-At 12:42, the range is `[12:42 yesterday, 12:42 today)`. The 23 whole hours from 13:00 yesterday to 12:00 today keep their keys and fingerprints, so they come from the cache. `SliceAggregateExec` recomputes only the two edge slices: `[12:42, 13:00)` yesterday and `[12:00, 12:42)` today.
+At 12:42, the range is `[12:42 yesterday, 12:42 today)`. The 23 whole hours from 13:00 yesterday to 12:00 today keep their keys and fingerprints, so they come from the cache. The scan skips them and computes only the two edge slices: `[12:42, 13:00)` yesterday and `[12:00, 12:42)` today.
 
 Suppose a late row for 03:10 today arrives between the two runs. The row lands in the memtable of today's time partition, which now spans 03:10 to 12:42. Every slice from 03:00 to 12:00 then returns `None` and is recomputed until the memtable is flushed. After the flush, the file sets of those slices include the new file, so their fingerprints differ from the cached ones. The slices are recomputed once more and cached again.
 
@@ -118,20 +116,28 @@ Suppose a late row for 03:10 today arrives between the two runs. The row lands i
 
 Benefits:
 
-- No stale results. The fingerprint changes whenever the rows of a slice change, so there is no staleness window to tune and nothing to clear manually.
+- Exact results. A query reads one region version, as an uncached query does, and the fingerprint changes whenever the rows of a slice change, so there is no staleness window to tune and nothing to clear manually.
 - No new protocol or persisted format. The engine contract is one method with a default implementation, and the cache is in memory.
 - The fingerprint is useful beyond this cache. Any result cache keyed by time range, such as one for PromQL range steps, can use it.
-- A prototype measured the effect on 24 million log rows (48 hourly SSTs, standalone mode, warm OS cache). Without the cache, a 24-hour dashboard aggregation took 37 ms. With the cache, a window that slid by 5 minutes took 13.5 ms, the same window again took 4.3 ms, and the window after a late write took 17 ms. All 72 results matched uncached execution.
+- A prototype measured the effect on a dashboard query (`date_bin`, `service`, `count(*)`, and `avg(latency_ms)`) in standalone mode, on local disk with a warm OS cache. The table shows median milliseconds. A first run is the first query after the server starts. All 288 results matched uncached execution.
+
+| Data | Window | Uncached, first run | Cached, first run | Uncached, later runs | Cached, window slid by 5 minutes | Cached, same window |
+|---|---|---|---|---|---|---|
+| 24M rows over 48 hours | 24 hours | 43.8 | 48.5 | 38.5 | 9.9 | 5.3 |
+| 74M rows over 31 days | 24 hours | 16.1 | 16.6 | 12.7 | 7.0 | 4.6 |
+| 74M rows over 31 days | 7 days | 52.0 | 56.4 | 51.3 | 7.7 | 5.0 |
+| 74M rows over 31 days | 30 days | 194.4 | 214.7 | 161.9 | 19.8 | 17.7 |
 
 Drawbacks:
 
-- The first execution of a query does more work: one scan per slice instead of one scan for the whole range. The prototype measured about 46.5 ms instead of 43 ms for a cold 24-hour query, and no difference for queries that never repeat.
+- The first execution of a query does more work. The partial aggregation also groups by slice, which multiplies its groups by the number of slices it covers. The prototype measured up to 11% more time on a first run. A query that never repeats pays this cost and gains nothing, so the cache is off by default.
 - Slices are not cached while a memtable overlaps them, and a memtable spans everything from its oldest row to its newest. A late write therefore disables the cache from its timestamp to the present until the next flush. A dashboard that only shows the last 15 minutes gains nothing.
-- Correctness depends on the fingerprint observing every change to the rows of a range. A new engine operation that changes rows without replacing files or bumping one of the hashed versions would make the cache return stale results. The engine contract and its tests must cover this requirement.
+- Only aggregations with a partial stage are rewritten. A query that groups by the whole primary key aggregates each series within one partition, and a `min` or `max` without grouping pushes its own dynamic filter into the scan; neither uses the cache.
+- Correctness depends on the fingerprint observing every change to the rows of a range. A new engine operation that changes rows without replacing files or bumping one of the versions in the fingerprint would make the cache return stale results. The engine contract and its tests must cover this requirement.
 
 # Implementation Plan
 
-1. Add `RegionEngine::time_range_fingerprint`, implement it for mito, and test every change path listed in [Data fingerprint](#data-fingerprint).
+1. Add `RegionScanner::time_range_fingerprint`, implement it for mito, and test every change path listed in [Data fingerprint](#data-fingerprint).
 2. Add the optimizer rule and `SliceAggregateExec`, disabled by default behind a query option, with a node-level cache bounded by its own size option.
 3. Report cache hits and misses, and the metrics of the slice scans, in `EXPLAIN ANALYZE`.
 
@@ -140,6 +146,7 @@ Drawbacks:
 - **Cache final results per query.** This approach is simpler, but only an identical query hits the cache. A window that slides by 5 minutes misses every time, and sliding windows are the main dashboard pattern.
 - **Invalidate by time, as VictoriaMetrics, Mimir, and OpenObserve do.** Data newer than a delay is not cached. This approach avoids the engine contract. However, late data inside a cached range is either missed until the entry expires or clears the whole cache, and the delay must be tuned against ingestion lag.
 - **Invalidate per region instead of per range,** as the Elasticsearch shard request cache does. The fingerprint would be the region's manifest version or committed sequence. This approach is simpler and needs no per-file reasoning. However, any write, flush, or compaction anywhere in the region invalidates every slice, so a region that receives writes continuously almost never hits the cache.
+- **Compute each missed slice with its own scan.** The partial aggregation stays unchanged. However, each slice then reads the version that is current when its scan starts, so a query no longer reads a single version, and a first run pays the setup of a scan once per slice.
 - **Cache per SST file,** as Druid caches per segment. Compaction replaces files, so every compaction drops the cache entries for its input files. In addition, a query window rarely covers whole files.
 - **Cache at the frontend.** The frontend would need to know which regions and files back each slice, which requires new information in the region protocol. The datanode already has the region version.
 - **Extend the range result cache.** The range result cache stores scanned rows, so a hit still pays for aggregation, and its key requires tag filters. The fingerprint is the part worth sharing.
@@ -148,8 +155,8 @@ Drawbacks:
 # Open Questions
 
 1. **Slice width.** A fixed one-hour width is simple. Deriving the width from the region's compaction window or from the query's bucket width could raise the hit rate.
-2. **Plan identity.** The prototype hashes the displayed form of the plan below the aggregation. The key must include everything that changes the partial states, including any session setting that an expression reads at execution time rather than at planning time.
-3. **Parallelism.** Each slice is computed on one partition. A query with few slices runs with less parallelism than the original plan unless a slice can be split across partitions.
+2. **Plan identity.** The prototype identifies the plan by the debug form of its expressions plus the session settings. This relies on the debug form of every expression covering everything that affects its result. A stable serialization of physical expressions would remove that reliance.
+3. **Cost of a full hit.** A 30-day window with hourly slices still takes about 18 ms when every slice hits. Where that time goes has not been measured.
 
 # Future Work
 
