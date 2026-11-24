@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
-use object_store::{FuturesAsyncWriter, ObjectStore, Service, ServiceInfo, Servicer};
+use object_store::{ObjectStore, Service, ServiceInfo, Servicer};
 use puffin::error::{self as puffin_error, Result as PuffinResult};
 use puffin::puffin_manager::file_accessor::PuffinFileAccessor;
 use puffin::puffin_manager::file_key::{PuffinFileKey, PuffinStorageScope};
@@ -34,10 +34,10 @@ use crate::metrics::{
     INDEX_PUFFIN_WRITE_BYTES_TOTAL, INDEX_PUFFIN_WRITE_OP_TOTAL, StagerMetrics,
 };
 use crate::sst::file::RegionIndexId;
-use crate::sst::index::store::{self, InstrumentedStore};
+use crate::sst::index::store::{self, IndexObjectWriter, IndexWriteBuffer, InstrumentedStore};
 
 type InstrumentedRangeReader = store::InstrumentedRangeReader<'static>;
-type InstrumentedAsyncWrite = store::InstrumentedAsyncWrite<'static, FuturesAsyncWriter>;
+type InstrumentedAsyncWrite = store::InstrumentedAsyncWrite<'static, IndexObjectWriter>;
 
 pub type SstPuffinManager =
     FsPuffinManager<Arc<BoundedStager<RegionIndexId>>, ObjectStorePuffinFileAccessor>;
@@ -97,8 +97,7 @@ pub struct PuffinManagerFactory {
     /// The stager used by the puffin manager.
     stager: Arc<BoundedStager<RegionIndexId>>,
 
-    /// The size of the write buffer used to create object store.
-    write_buffer_size: Option<usize>,
+    write_buffer: IndexWriteBuffer,
     backend_scopes: Arc<BackendScopes>,
 }
 
@@ -121,14 +120,15 @@ impl PuffinManagerFactory {
         .context(PuffinInitStagerSnafu)?;
         Ok(Self {
             stager: Arc::new(stager),
-            write_buffer_size,
+            write_buffer: write_buffer_size.into(),
             backend_scopes: Arc::default(),
         })
     }
 
     /// Overrides only this task's upload buffers, sharing the existing stager.
-    pub(crate) fn with_write_buffer_size(mut self, bytes: usize) -> Self {
-        self.write_buffer_size = Some(bytes);
+    #[cfg(feature = "enterprise")]
+    pub(crate) fn with_upload_limits(mut self, limits: crate::sst::upload::UploadLimits) -> Self {
+        self.write_buffer = IndexWriteBuffer::Bounded(limits);
         self
     }
 
@@ -138,7 +138,7 @@ impl PuffinManagerFactory {
         path_provider: impl FilePathProvider + 'static,
     ) -> SstPuffinManager {
         let scope = self.backend_scopes.get(&store);
-        let store = InstrumentedStore::new(store).with_write_buffer_size(self.write_buffer_size);
+        let store = InstrumentedStore::new(store).with_write_buffer(self.write_buffer);
         let puffin_file_accessor =
             ObjectStorePuffinFileAccessor::new(store, Arc::new(path_provider), scope);
         SstPuffinManager::new(self.stager.clone(), puffin_file_accessor)
@@ -157,8 +157,7 @@ impl PuffinManagerFactory {
     ) -> SstPuffinManager {
         let origin = origin.file_accessor();
         let accessor = ObjectStorePuffinFileAccessor {
-            object_store: InstrumentedStore::new(store)
-                .with_write_buffer_size(self.write_buffer_size),
+            object_store: InstrumentedStore::new(store).with_write_buffer(self.write_buffer),
             path_provider: Arc::new(path_provider),
             cache_path_provider: origin.cache_path_provider.clone(),
             cache_scope: origin.cache_scope.clone(),

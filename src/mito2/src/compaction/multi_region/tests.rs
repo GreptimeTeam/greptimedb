@@ -11,6 +11,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::num::NonZeroU64;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -33,14 +34,20 @@ use datatypes::value::Value;
 use datatypes::vectors::json::array::JsonArray;
 use datatypes::vectors::json::json2_physical_data_type;
 use futures::TryStreamExt;
+use futures::io::{self, AsyncReadExt};
+use object_store::layers::CapabilityOverrideLayer;
+use object_store::layers::mock::oio::Write as _;
 use object_store::layers::mock::{self, MockLayerBuilder, oio};
 use partition::expr::col;
 use partition::multi_dim::MultiDimPartitionRule;
+use puffin::puffin_manager::{PuffinManager, PuffinReader, PuffinWriter};
+use rand::{RngCore, SeedableRng, rngs::SmallRng};
 use serde_json::json;
 use store_api::codec::PrimaryKeyEncoding;
-use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
 use store_api::region_request::PathType;
 use store_api::storage::RegionId;
+use tokio::sync::Notify;
 
 use super::*;
 use crate::access_layer::{AccessLayer, Metrics, OperationType, SstWriteRequest, WriteType};
@@ -49,10 +56,15 @@ use crate::error::InvalidMultiRegionCompactionSnafu;
 use crate::read::FlatSource;
 use crate::sst::file::{FileHandle, RegionFileId};
 use crate::sst::file_purger::NoopFilePurger;
-use crate::sst::index::handler::{IndexKindHandler, IndexKindProvider, PlanContext, PlannedIndex};
+use crate::sst::index::CompletedEntry;
+use crate::sst::index::handler::{
+    BuildContext, IndexCreator, IndexKindHandler, IndexKindProvider, PlanContext, PlanEntry,
+    PlannedIndex,
+};
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::kind::{ExtensionIndexKind, IndexKind};
-use crate::sst::index::puffin_manager::PuffinManagerFactory;
+use crate::sst::index::puffin_manager::{PuffinManagerFactory, SstPuffinWriter};
+use crate::sst::location;
 use crate::sst::parquet::WriteOptions;
 use crate::sst::parquet::flat_format::{
     primary_key_column_index, sequence_column_index, time_index_column_index,
@@ -124,30 +136,8 @@ impl Fixture {
         format: FormatType,
         batches: impl FnOnce(&RegionMetadataRef) -> Vec<RecordBatch>,
     ) -> Self {
-        let env = SchedulerEnv::new().await;
-        let aux = env.path.path().join("table-index");
-        let layer = Arc::new(AccessLayer::new(
-            "table/",
-            if encoding == PrimaryKeyEncoding::Sparse {
-                PathType::Data
-            } else {
-                PathType::Bare
-            },
-            env.access_layer.object_store().clone(),
-            PuffinManagerFactory::new(&aux, 1024 * 1024, None, None)
-                .await
-                .unwrap(),
-            IntermediateManager::init_fs(aux.to_str().unwrap())
-                .await
-                .unwrap(),
-        ));
-        let mut metadata = sst_region_metadata_with_encoding(encoding);
-        metadata.region_id = RegionId::new(1, 0);
-        let metadata = Arc::new(metadata);
-        let mut config = MitoConfig::default();
-        config.index.aux_path = aux.display().to_string();
-        let config = Arc::new(config);
-        let mut batches = batches(&metadata);
+        let mut fixture = Self::empty(sst_region_metadata_with_encoding(encoding)).await;
+        let mut batches = batches(&fixture.metadata);
         batches.sort_by_cached_key(|batch| {
             let keys = cast(
                 batch.column(primary_key_column_index(batch.num_columns())),
@@ -160,18 +150,41 @@ impl Fixture {
                 .value(0)
                 .to_vec()
         });
-        let mut fixture = Self {
+        let info = fixture
+            .write_source(fixture.metadata.clone(), batches, format)
+            .await;
+        fixture.source = file_meta(info, fixture.metadata.region_id);
+        fixture
+    }
+
+    async fn empty(mut metadata: RegionMetadata) -> Self {
+        let env = SchedulerEnv::new().await;
+        let aux = env.path.path().join("table-index");
+        let layer = Arc::new(AccessLayer::new(
+            "table/",
+            if metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse {
+                PathType::Data
+            } else {
+                PathType::Bare
+            },
+            env.access_layer.object_store().clone(),
+            PuffinManagerFactory::new(&aux, 1024 * 1024, None, None)
+                .await
+                .unwrap(),
+            IntermediateManager::init_fs(aux.to_str().unwrap())
+                .await
+                .unwrap(),
+        ));
+        metadata.region_id = RegionId::new(1, 0);
+        let mut config = MitoConfig::default();
+        config.index.aux_path = aux.display().to_string();
+        Self {
             env,
             layer,
-            metadata: metadata.clone(),
+            metadata: Arc::new(metadata),
             source: FileMeta::default(),
-            config,
-        };
-        let info = fixture
-            .write_source(metadata.clone(), batches, format)
-            .await;
-        fixture.source = file_meta(info, metadata.region_id);
-        fixture
+            config: Arc::new(config),
+        }
     }
 
     async fn write_source(
@@ -179,6 +192,17 @@ impl Fixture {
         metadata: RegionMetadataRef,
         batches: Vec<RecordBatch>,
         format: FormatType,
+    ) -> SstInfo {
+        self.write_source_with_options(metadata, batches, format, &WriteOptions::default())
+            .await
+    }
+
+    async fn write_source_with_options(
+        &self,
+        metadata: RegionMetadataRef,
+        batches: Vec<RecordBatch>,
+        format: FormatType,
+        options: &WriteOptions,
     ) -> SstInfo {
         self.layer
             .write_sst(
@@ -188,7 +212,7 @@ impl Fixture {
                     &self.config,
                     format,
                 ),
-                &WriteOptions::default(),
+                options,
                 &mut Metrics::new(WriteType::Flush),
             )
             .await
@@ -204,6 +228,10 @@ impl Fixture {
     }
 
     fn plan(&self, regions: u32) -> MultiRegionCompactionPlan {
+        self.plan_with_sources(regions, vec![self.source.clone()])
+    }
+
+    fn plan_with_sources(&self, regions: u32, sources: Vec<FileMeta>) -> MultiRegionCompactionPlan {
         let mut targets = BTreeMap::new();
         for region in 0..regions {
             let id = RegionId::new(1, region);
@@ -218,8 +246,14 @@ impl Fixture {
                     .as_json_str()
                     .unwrap(),
             ));
-            let mut input = self.source.clone();
-            input.sequence = NonZeroU64::new(100 + region as u64);
+            let inputs = sources
+                .iter()
+                .cloned()
+                .map(|mut input| {
+                    input.sequence = NonZeroU64::new(100 + region as u64);
+                    (input.file_id(), input)
+                })
+                .collect();
             let options = RegionOptions {
                 append_mode: true,
                 preserve_row_sequence: true,
@@ -231,7 +265,7 @@ impl Fixture {
                 MultiRegionTarget {
                     metadata: Arc::new(metadata),
                     options,
-                    inputs: [(input.file_id(), input)].into_iter().collect(),
+                    inputs,
                 },
             );
         }
@@ -254,7 +288,7 @@ impl Fixture {
         );
         MultiRegionCompactionPlan {
             partition_rule,
-            sources: vec![self.source.clone()],
+            sources,
             targets,
             // Includes the fixed Parquet encoder allocations of every resident
             // target, unlike the old run-cache-only budget.
@@ -2271,6 +2305,486 @@ async fn test_all_resident_writers_are_admitted_before_creating_outputs() {
     assert!(protection.files.lock().unwrap().is_empty());
 }
 
+const MIB: usize = 1024 * 1024;
+const MULTIPART_CHUNK: usize = 5 * MIB;
+const MULTIPART_INPUTS: usize = 8;
+const ROWS_PER_INPUT_PER_TARGET: usize = 4096;
+const PAYLOAD_BYTES: usize = 640;
+const MULTIPART_TAGS: [&str; 2] = ["000", "020"];
+
+#[tokio::test]
+async fn test_small_arrow_batches_stream_multipart_outputs_with_lossless_readback() {
+    let metadata = build_test_binary_test_region_metadata();
+    let mut fixture = Fixture::empty((*metadata).clone()).await;
+    let row_group_size = 256;
+    let options = WriteOptions {
+        row_group_size,
+        ..Default::default()
+    };
+    // Each SST has both tags and a disjoint timestamp range: 40 MiB of
+    // incompressible payload overall, but only 40 KiB of payload per 64 rows.
+    let mut sources = Vec::new();
+    for input in 0..MULTIPART_INPUTS {
+        let info = fixture
+            .write_source_with_options(
+                fixture.metadata.clone(),
+                multipart_input_batches(input),
+                FormatType::Flat,
+                &options,
+            )
+            .await;
+        sources.push(file_meta(info, fixture.metadata.region_id));
+    }
+    let mut plan = fixture.plan_with_sources(2, sources);
+    // The old per-Arrow-buffer minimum rejected this even at 1 GiB. Each
+    // target now gets a separate upload chunk and writes one ~20 MiB SST.
+    let budget = 512 * MIB;
+    plan.memory_limit = budget;
+    plan.max_output_file_size = 32 * MIB;
+    for target in plan.targets.values_mut() {
+        target.options.max_row_group_row_count = Some(row_group_size);
+    }
+    let targets = plan.targets.clone();
+    let uploads = install_multipart_backend(&mut fixture, MULTIPART_CHUNK);
+    let (mut context, protection) = fixture.context(None);
+    context.index_kind_provider = Some(Arc::new(UploadProbeIndex));
+
+    // Use the production preparation/executor with counters so that a part
+    // sent only during close can't masquerade as online uploading.
+    let counters = Arc::new(SourceCounters::default());
+    let source = source::SharedSource::build(
+        &plan,
+        &context,
+        validate_plan(&plan).unwrap(),
+        counters.clone(),
+    )
+    .await
+    .unwrap();
+    assert!(source.limits.arrow_batch_bytes < MULTIPART_CHUNK);
+    let execution = worker::execute(plan, context, source, counters.clone());
+    tokio::pin!(execution);
+    tokio::select! {
+        _ = uploads.part_waiting.notified() => {}
+        result = &mut execution => match result {
+            Ok(_) => panic!("compaction completed without reaching a gated part"),
+            Err(error) => panic!("compaction failed before reaching a gated part: {error:?}"),
+        },
+        _ = tokio::time::sleep(Duration::from_secs(60)) => panic!("SST never began uploading its parts"),
+    }
+    let rows_per_target = MULTIPART_INPUTS * ROWS_PER_INPUT_PER_TARGET;
+    let total_rows = (rows_per_target * MULTIPART_TAGS.len()) as u64;
+    assert!(
+        counters.rows.load(Ordering::Relaxed) < rows_per_target as u64,
+        "the first part should reach storage before the first target's input is exhausted"
+    );
+    assert!(!protection.files.lock().unwrap().is_empty());
+    uploads.resume_part.notify_one();
+
+    let output = tokio::time::timeout(Duration::from_secs(60), execution)
+        .await
+        .expect("compaction did not finish after releasing the part")
+        .unwrap();
+    assert_eq!(MULTIPART_INPUTS as u64, output.stats.source_files);
+    assert_eq!(total_rows, output.stats.source_rows);
+    assert_eq!(total_rows, output.stats.output_rows);
+    assert!(output.stats.estimated_memory_bytes <= budget as u64);
+    assert_eq!(targets.len(), output.files.len());
+    let layer = &fixture.layer;
+    for (id, target) in targets {
+        let files = &output.files[&id];
+        assert_eq!(1, files.len());
+        let file = &files[0];
+        assert!(protection.files.lock().unwrap().contains(&file.file_id()));
+        let path = location::sst_file_path(layer.table_dir(), file.file_id(), layer.path_type());
+        uploads.assert_completed(&path, file.file_size);
+        let path = location::index_file_path(layer.table_dir(), file.index_id(), layer.path_type());
+        uploads.assert_completed(&path, file.index_file_size);
+        let puffin = layer
+            .build_puffin_manager()
+            .reader(&file.index_id())
+            .await
+            .unwrap();
+        assert!(puffin.metadata().await.unwrap().blobs.iter().any(|blob| {
+            blob.blob_type == UPLOAD_PROBE_BLOB && blob.length as u64 == UPLOAD_PROBE_BYTES
+        }));
+
+        let region = id.region_sequence() as usize;
+        check_multipart_rows(
+            fixture
+                .read_output(file.clone(), target.metadata.clone())
+                .await,
+            region,
+            rows_per_target,
+        );
+        check_multipart_rows(
+            fixture
+                .read_published_output(file.clone(), target.metadata)
+                .await,
+            region,
+            rows_per_target,
+        );
+    }
+}
+
+#[rstest::rstest]
+#[case::upload_reservation(MULTIPART_CHUNK, "Upload reservation")]
+#[case::zero_backend_cap(0, "No supported upload chunk size")]
+#[tokio::test]
+async fn test_multipart_admission_rejects_before_protection_or_write(
+    #[case] chunk: usize,
+    #[case] expected_reason: &str,
+) {
+    let mut fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
+    let mut plan = fixture.plan(2);
+    // Enough for one target's upload reservation but not both. Even the first
+    // target must not protect a path or open a writer on rejected admission.
+    plan.memory_limit = 32 * MIB;
+    let uploads = install_multipart_backend(&mut fixture, chunk);
+    let list_objects = async || {
+        fixture
+            .layer
+            .object_store()
+            .list_with(fixture.layer.table_dir())
+            .recursive(true)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|entry| entry.metadata().is_file())
+            .map(|entry| entry.path().to_string())
+            .collect::<HashSet<_>>()
+    };
+    let before = list_objects().await;
+    let (context, protection) = fixture.context(None);
+    let error = compact_regions(plan, context)
+        .await
+        .err()
+        .expect("must reject before writing");
+    assert!(
+        matches!(&error, crate::error::Error::MultiRegionCompactionResource { reason, .. }
+            if reason.contains(expected_reason)),
+        "{error:?}"
+    );
+    assert!(protection.files.lock().unwrap().is_empty());
+    assert!(uploads.files.lock().unwrap().is_empty());
+    assert_eq!(before, list_objects().await);
+}
+
+fn multipart_input_batches(input: usize) -> Vec<RecordBatch> {
+    let start = input * ROWS_PER_INPUT_PER_TARGET;
+    let end = start + ROWS_PER_INPUT_PER_TARGET;
+    MULTIPART_TAGS
+        .iter()
+        .enumerate()
+        .map(|(target, tag)| {
+            let values = (start..end)
+                .map(|timestamp| multipart_payload(target, timestamp).to_vec())
+                .collect::<Vec<_>>();
+            let batch = new_record_batch_with_binary_values(tag, &values);
+            let mut columns = batch.columns().to_vec();
+            let time_index = time_index_column_index(columns.len());
+            columns[time_index] = Arc::new(TimestampMillisecondArray::from_iter_values(
+                start as i64..end as i64,
+            ));
+            RecordBatch::try_new(batch.schema(), columns).unwrap()
+        })
+        .collect()
+}
+
+fn multipart_payload(target: usize, timestamp: usize) -> [u8; PAYLOAD_BYTES] {
+    let mut bytes = [0; PAYLOAD_BYTES];
+    SmallRng::seed_from_u64((timestamp * MULTIPART_TAGS.len() + target) as u64)
+        .fill_bytes(&mut bytes);
+    bytes
+}
+
+fn check_multipart_rows(batches: Vec<RecordBatch>, target: usize, rows: usize) {
+    let mut seen = vec![false; rows];
+    // The input owner keeps physical versions; the other region uses its
+    // admitted file version (see plan_with_sources).
+    let expected_sequence = if target == 0 { 1000 } else { 101 };
+    for batch in batches {
+        let tags = cast(batch.column_by_name("tag_0").unwrap(), &DataType::Utf8).unwrap();
+        let tags = tags.as_any().downcast_ref::<StringArray>().unwrap();
+        let values = cast(batch.column_by_name("field_0").unwrap(), &DataType::Binary).unwrap();
+        let values = values.as_any().downcast_ref::<BinaryArray>().unwrap();
+        let timestamps =
+            crate::read::timestamp_array_to_i64_slice(batch.column_by_name("ts").unwrap());
+        let sequences = batch
+            .column(sequence_column_index(batch.num_columns()))
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        for (row, &timestamp) in timestamps.iter().enumerate() {
+            assert_eq!(expected_sequence, sequences.value(row));
+            assert!(tags.is_valid(row) && tags.value(row) == MULTIPART_TAGS[target]);
+            let timestamp = timestamp as usize;
+            assert!(!seen[timestamp], "duplicate timestamp {timestamp}");
+            seen[timestamp] = true;
+            assert!(
+                values.is_valid(row)
+                    && values.value(row) == &multipart_payload(target, timestamp)[..],
+                "wrong payload for target {target}, timestamp {timestamp}"
+            );
+        }
+    }
+    assert!(
+        seen.into_iter().all(|row| row),
+        "missing rows in target {target}"
+    );
+}
+
+#[derive(Default)]
+struct MultipartUploads {
+    files: Mutex<BTreeMap<String, MultipartUpload>>,
+    gated: AtomicBool,
+    part_waiting: Notify,
+    resume_part: Notify,
+}
+
+#[derive(Default)]
+struct MultipartUpload {
+    parts: Vec<u64>,
+    completed: bool,
+}
+
+impl MultipartUploads {
+    fn assert_completed(&self, path: &str, size: u64) {
+        let uploads = self.files.lock().unwrap();
+        let upload = uploads
+            .get(path)
+            .unwrap_or_else(|| panic!("no upload for {path}"));
+        assert!(
+            upload.completed,
+            "multipart upload did not complete for {path}"
+        );
+        let (last, full) = upload.parts.split_last().unwrap();
+        assert!(
+            full.len() >= 2
+                && full.iter().all(|&part| part == MULTIPART_CHUNK as u64)
+                && (1..=MULTIPART_CHUNK as u64).contains(last),
+            "wrong multipart sizes for {path}: {:?}",
+            upload.parts
+        );
+        assert_eq!(size, upload.parts.iter().sum::<u64>(), "{path}");
+    }
+}
+
+/// Uses the same OpenDAL chunker and multipart state machine as S3. Only the
+/// service's part requests are replaced, appending to an FS writer with no
+/// whole-file buffer in the fake backend.
+fn install_multipart_backend(fixture: &mut Fixture, chunk: usize) -> Arc<MultipartUploads> {
+    let uploads = Arc::new(MultipartUploads::default());
+    let layer = &fixture.layer;
+    let store = layer.object_store().clone();
+    let executor = store.context().executor().clone();
+    let observed = uploads.clone();
+    let mock = MockLayerBuilder::default()
+        .writer_factory(Arc::new(move |path, args, inner| {
+            assert_eq!(1, args.concurrent(), "multipart concurrency for {path}");
+            let previous = observed
+                .files
+                .lock()
+                .unwrap()
+                .insert(path.to_string(), MultipartUpload::default());
+            assert!(previous.is_none(), "opened multiple writers for {path}");
+            Box::new(oio::MultipartWriter::new(
+                executor.clone(),
+                FsMultipartSink {
+                    inner: tokio::sync::Mutex::new(inner),
+                    path: path.to_string(),
+                    uploads: observed.clone(),
+                },
+                args.concurrent(),
+            )) as oio::Writer
+        }))
+        .build()
+        .unwrap();
+    let store = store
+        .layer(mock)
+        .layer(CapabilityOverrideLayer::new(move |mut caps| {
+            caps.write_multi_min_size = Some(chunk);
+            caps.write_multi_max_size = Some(chunk);
+            caps
+        }));
+    fixture.layer = Arc::new(AccessLayer::new(
+        layer.table_dir(),
+        layer.path_type(),
+        store,
+        layer.puffin_manager_factory().clone(),
+        layer.intermediate_manager().clone(),
+    ));
+    uploads
+}
+
+struct FsMultipartSink {
+    inner: tokio::sync::Mutex<oio::Writer>,
+    path: String,
+    uploads: Arc<MultipartUploads>,
+}
+
+impl oio::MultipartWrite for FsMultipartSink {
+    async fn write_once(&self, _size: u64, body: mock::Buffer) -> mock::Result<mock::Metadata> {
+        let mut writer = self.inner.lock().await;
+        writer.write(body).await?;
+        writer.close().await
+    }
+
+    async fn initiate_part(&self) -> mock::Result<String> {
+        Ok(self.path.clone())
+    }
+
+    async fn write_part(
+        &self,
+        _: &str,
+        part_number: usize,
+        size: u64,
+        body: mock::Buffer,
+    ) -> mock::Result<oio::MultipartPart> {
+        {
+            let mut files = self.uploads.files.lock().unwrap();
+            let parts = &mut files.get_mut(&self.path).unwrap().parts;
+            assert_eq!(
+                parts.len(),
+                part_number,
+                "out-of-order part for {}",
+                self.path
+            );
+            parts.push(size);
+        }
+        if part_number == 0
+            && self.path.ends_with(".parquet")
+            && !self.uploads.gated.swap(true, Ordering::Relaxed)
+        {
+            self.uploads.part_waiting.notify_one();
+            self.uploads.resume_part.notified().await;
+        }
+        self.inner.lock().await.write(body).await?;
+        Ok(oio::MultipartPart {
+            part_number,
+            size: Some(size),
+            etag: part_number.to_string(),
+            checksum: None,
+        })
+    }
+
+    async fn complete_part(
+        &self,
+        _: &str,
+        _: &[oio::MultipartPart],
+    ) -> mock::Result<mock::Metadata> {
+        let metadata = self.inner.lock().await.close().await?;
+        self.uploads
+            .files
+            .lock()
+            .unwrap()
+            .get_mut(&self.path)
+            .unwrap()
+            .completed = true;
+        Ok(metadata)
+    }
+
+    async fn abort_part(&self, _: &str) -> mock::Result<()> {
+        self.inner.lock().await.abort().await
+    }
+}
+
+const UPLOAD_PROBE_BLOB: &str = "test.upload-budget";
+const UPLOAD_PROBE_BYTES: u64 = (2 * MULTIPART_CHUNK + 123) as u64;
+const UPLOAD_PROBE_ENTRY: PlanEntry = PlanEntry {
+    column_id: 0,
+    kind: IndexKind::Extension(ExtensionIndexKind::Hll),
+    format_version: 1,
+};
+
+/// An uncompressed streaming blob drives the real Puffin writer across two
+/// parts without inflating a built-in index or retaining a large creator state.
+#[derive(Debug)]
+struct UploadProbeIndex;
+
+impl IndexKindProvider for UploadProbeIndex {
+    fn handlers(&self) -> Vec<Arc<dyn IndexKindHandler>> {
+        vec![Arc::new(Self)]
+    }
+}
+
+impl IndexKindHandler for UploadProbeIndex {
+    fn kinds(&self) -> &[IndexKind] {
+        &[UPLOAD_PROBE_ENTRY.kind]
+    }
+
+    fn validate(&self, _: &PlanContext<'_>) -> std::result::Result<(), BoxedError> {
+        Ok(())
+    }
+
+    fn plan(
+        &self,
+        _: &PlanContext<'_>,
+    ) -> std::result::Result<Option<Arc<dyn PlannedIndex>>, BoxedError> {
+        Ok(Some(Arc::new(Self)))
+    }
+}
+
+#[async_trait::async_trait]
+impl PlannedIndex for UploadProbeIndex {
+    fn kinds(&self) -> &[IndexKind] {
+        IndexKindHandler::kinds(self)
+    }
+
+    fn entries(&self) -> &[PlanEntry] {
+        &[UPLOAD_PROBE_ENTRY]
+    }
+
+    async fn build(
+        &self,
+        _: &BuildContext<'_>,
+    ) -> std::result::Result<Option<Box<dyn IndexCreator>>, BoxedError> {
+        Ok(Some(Box::new(Self)))
+    }
+
+    fn is_current(&self, _: &FileMeta, _: &PlanContext<'_>) -> bool {
+        false
+    }
+}
+
+#[async_trait::async_trait]
+impl IndexCreator for UploadProbeIndex {
+    async fn update(&mut self, _: &mut crate::read::Batch) -> std::result::Result<(), BoxedError> {
+        Ok(())
+    }
+
+    async fn update_flat(&mut self, _: &RecordBatch) -> std::result::Result<(), BoxedError> {
+        Ok(())
+    }
+
+    async fn finish(
+        &mut self,
+        writer: &mut SstPuffinWriter,
+    ) -> std::result::Result<Vec<CompletedEntry>, BoxedError> {
+        writer
+            .put_blob(
+                UPLOAD_PROBE_BLOB,
+                io::repeat(0x5a).take(UPLOAD_PROBE_BYTES),
+                Default::default(),
+                Default::default(),
+            )
+            .await
+            .map_err(BoxedError::new)?;
+        Ok(vec![CompletedEntry {
+            column_id: Some(UPLOAD_PROBE_ENTRY.column_id),
+            kind: UPLOAD_PROBE_ENTRY.kind,
+            format_version: UPLOAD_PROBE_ENTRY.format_version,
+        }])
+    }
+
+    async fn abort(&mut self) -> std::result::Result<(), BoxedError> {
+        Ok(())
+    }
+
+    fn memory_usage(&self) -> usize {
+        0
+    }
+}
+
 #[rstest::rstest]
 #[case::sync(crate::config::IndexBuildMode::Sync)]
 #[case::async_mode(crate::config::IndexBuildMode::Async)]
@@ -2323,7 +2837,8 @@ async fn test_target_writer_sizes_row_groups_from_source_size() {
     let plan = fixture.plan(1);
     let (context, _protection) = fixture.context(None);
     let source = new_flat_source_from_record_batches(vec![source_batch(&fixture.metadata, 0, 100)]);
-    let limits = memory::MemoryLimits::new(&plan, source.schema()).unwrap();
+    let upload = memory::UploadBudget::new(&plan, context.access_layer.object_store()).unwrap();
+    let limits = memory::MemoryLimits::new(&plan, source.schema(), upload).unwrap();
     // 64 decoded rows of 4 MiB: 32 rows fill the 128 MiB target. The target's `FileMeta` inputs
     // describe the narrow fixture rows, which would allow the full cap.
     let writer = writer::TargetWriter::new(
@@ -2368,7 +2883,8 @@ async fn test_limited_writer_fails_instead_of_publishing_over_budget(#[case] kin
     let plan = fixture.plan(1);
     let (context, protection) = fixture.context(None);
     let source = new_flat_source_from_record_batches(vec![source_batch(&fixture.metadata, 0, 100)]);
-    let mut limits = memory::MemoryLimits::new(&plan, source.schema()).unwrap();
+    let upload = memory::UploadBudget::new(&plan, context.access_layer.object_store()).unwrap();
+    let mut limits = memory::MemoryLimits::new(&plan, source.schema(), upload).unwrap();
     match kind {
         "encoder" => limits.writer.working_bytes = 1,
         "metadata" => limits.writer.metadata_bytes = 1,

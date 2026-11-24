@@ -211,6 +211,8 @@ impl<W: AsyncFileWriter> SstArrowWriter<W> {
 pub(crate) struct SstWriteLimits {
     pub(crate) working_bytes: usize,
     pub(crate) metadata_bytes: usize,
+    #[cfg(feature = "enterprise")]
+    pub(crate) upload_limits: upload::UploadLimits,
 }
 
 /// Tracks retained footer memory across rolled files as well as the current file.
@@ -308,6 +310,8 @@ pub struct ObjectStoreWriter {
     output_bytes: u64,
     write_buffer_size: usize,
     cancellation: Option<CancellationToken>,
+    #[cfg(feature = "enterprise")]
+    buffered_upload: Option<upload::UploadBuffer>,
 }
 
 impl ObjectStoreWriter {
@@ -321,6 +325,8 @@ impl ObjectStoreWriter {
             output_bytes: 0,
             write_buffer_size,
             cancellation,
+            #[cfg(feature = "enterprise")]
+            buffered_upload: None,
         }
     }
 
@@ -331,24 +337,33 @@ impl ObjectStoreWriter {
     pub(crate) fn into_inner(self) -> Writer {
         self.inner
     }
+
+    async fn write_bytes(&mut self, bytes: Bytes) -> parquet::errors::Result<u64> {
+        #[cfg(feature = "enterprise")]
+        if let Some(buffer) = &mut self.buffered_upload {
+            buffer
+                .check_size(bytes.len())
+                .map_err(|error| ParquetError::External(Box::new(error)))?;
+            return buffer
+                .write(&mut self.inner, bytes, self.cancellation.as_ref())
+                .await
+                .map_err(map_upload_error);
+        }
+        upload::write(
+            &mut self.inner,
+            bytes.into(),
+            self.write_buffer_size,
+            self.cancellation.as_ref(),
+        )
+        .await
+        .map_err(map_upload_error)
+    }
 }
 
 impl AsyncFileWriter for ObjectStoreWriter {
     fn write(&mut self, bytes: Bytes) -> BoxFuture<'_, parquet::errors::Result<()>> {
         Box::pin(async move {
-            let written = upload::write(
-                &mut self.inner,
-                bytes.into(),
-                self.write_buffer_size,
-                self.cancellation.as_ref(),
-            )
-            .await
-            .map_err(|error| match error {
-                UploadError::Cancelled => ParquetError::External(Box::new(Cancelled)),
-                UploadError::Read { source } | UploadError::Write { source } => {
-                    ParquetError::External(Box::new(source))
-                }
-            })?;
+            let written = self.write_bytes(bytes).await?;
             self.output_bytes += written;
             Ok(())
         })
@@ -356,6 +371,13 @@ impl AsyncFileWriter for ObjectStoreWriter {
 
     fn complete(&mut self) -> BoxFuture<'_, parquet::errors::Result<()>> {
         Box::pin(async move {
+            #[cfg(feature = "enterprise")]
+            if let Some(buffer) = &mut self.buffered_upload {
+                buffer
+                    .write_tail(&mut self.inner)
+                    .await
+                    .map_err(|error| ParquetError::External(Box::new(error)))?;
+            }
             self.inner
                 .close()
                 .await
@@ -365,9 +387,20 @@ impl AsyncFileWriter for ObjectStoreWriter {
     }
 }
 
+fn map_upload_error(error: UploadError) -> ParquetError {
+    match error {
+        UploadError::Cancelled => ParquetError::External(Box::new(Cancelled)),
+        UploadError::Read { source } | UploadError::Write { source } => {
+            ParquetError::External(Box::new(source))
+        }
+    }
+}
+
 pub struct ObjectStoreWriterFactory {
     object_store: ObjectStore,
     concurrency: usize,
+    #[cfg(feature = "enterprise")]
+    upload_limits: Option<upload::UploadLimits>,
 }
 
 impl WriterFactory for ObjectStoreWriterFactory {
@@ -379,12 +412,25 @@ impl WriterFactory for ObjectStoreWriterFactory {
         write_buffer_size: usize,
         cancellation: Option<&CancellationToken>,
     ) -> Result<Self::Writer> {
+        #[cfg(feature = "enterprise")]
+        let write_buffer_size = self
+            .upload_limits
+            .map_or(write_buffer_size, |limits| limits.chunk_bytes);
         self.object_store
             .writer_with(file_path)
             .chunk(write_buffer_size)
             .concurrent(self.concurrency)
             .await
-            .map(|writer| ObjectStoreWriter::new(writer, write_buffer_size, cancellation.cloned()))
+            .map(|writer| {
+                let writer =
+                    ObjectStoreWriter::new(writer, write_buffer_size, cancellation.cloned());
+                #[cfg(feature = "enterprise")]
+                let writer = ObjectStoreWriter {
+                    buffered_upload: self.upload_limits.map(upload::UploadBuffer::new),
+                    ..writer
+                };
+                writer
+            })
             .context(OpenDalSnafu)
     }
 
@@ -403,6 +449,14 @@ where
         self
     }
 
+    #[cfg(feature = "enterprise")]
+    pub(crate) fn with_upload_limits(mut self, limits: upload::UploadLimits) -> Self {
+        self.writer_factory.upload_limits = Some(limits);
+        // Upload admission accounts for the serial OpenDAL writer.
+        self.writer_factory.concurrency = 1;
+        self
+    }
+
     pub async fn new_with_object_store(
         object_store: ObjectStore,
         metadata: RegionMetadataRef,
@@ -415,6 +469,8 @@ where
             ObjectStoreWriterFactory {
                 object_store,
                 concurrency: DEFAULT_WRITE_CONCURRENCY,
+                #[cfg(feature = "enterprise")]
+                upload_limits: None,
             },
             metadata,
             index_config,
@@ -935,15 +991,21 @@ where
 
 /// Keeps cancellation inside the SST write error contract, including nested encoder errors.
 fn map_write_error(error: ParquetError) -> Error {
-    let cancelled = std::iter::successors(Some(&error as &(dyn StdError + 'static)), |source| {
+    for source in std::iter::successors(Some(&error as &(dyn StdError + 'static)), |source| {
         (*source).source()
-    })
-    .any(|source| source.is::<Cancelled>());
-    if cancelled {
-        crate::error::SstWriteCancelledSnafu.build()
-    } else {
-        WriteParquetSnafu.into_error(error)
+    }) {
+        if source.is::<Cancelled>() {
+            return crate::error::SstWriteCancelledSnafu.build();
+        }
+        #[cfg(feature = "enterprise")]
+        if let Some(error) = source.downcast_ref::<upload::UploadObjectLimit>() {
+            return crate::error::MultiRegionCompactionResourceSnafu {
+                reason: error.to_string(),
+            }
+            .build();
+        }
     }
+    WriteParquetSnafu.into_error(error)
 }
 
 #[derive(Default)]
@@ -1100,6 +1162,29 @@ mod tests {
     use crate::sst::parquet::tests::NoopIndexBuilder;
     use crate::test_util::TestEnv;
     use crate::test_util::sst_util::{new_record_batch_by_range, sst_region_metadata};
+
+    #[cfg(feature = "enterprise")]
+    #[tokio::test]
+    async fn test_oversized_sst_upload_reports_resource_limit() {
+        let store = ObjectStore::new(Memory::default()).unwrap();
+        let mut factory = ObjectStoreWriterFactory {
+            object_store: store.clone(),
+            concurrency: 1,
+            upload_limits: Some(upload::UploadLimits {
+                chunk_bytes: 4,
+                max_object_bytes: 8,
+            }),
+        };
+        let mut writer = factory.create("sst.parquet", 4, None).await.unwrap();
+        writer.write(Bytes::from_static(b"abcdefgh")).await.unwrap();
+        let error = writer.write(Bytes::from_static(b"i")).await.unwrap_err();
+        assert!(matches!(
+            map_write_error(ParquetError::External(Box::new(error))),
+            Error::MultiRegionCompactionResource { .. }
+        ));
+        ObjectStoreWriterFactory::abort(writer).await.unwrap();
+        assert!(!store.exists("sst.parquet").await.unwrap());
+    }
 
     struct GatedObjectStoreWriter {
         inner: oio::Writer,

@@ -35,7 +35,7 @@ use tokio_util::sync::CancellationToken;
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheStrategy;
 use crate::compaction::json2::collect_json2_rewrite_plans_from_parquet;
-use crate::compaction::multi_region::memory::{BATCH_SIZE, MemoryLimits};
+use crate::compaction::multi_region::memory::{BATCH_SIZE, MemoryLimits, UploadBudget};
 use crate::compaction::multi_region::{
     MultiRegionCompactionContext, MultiRegionCompactionPlan, MultiRegionTarget, SourceCounters,
 };
@@ -88,7 +88,7 @@ impl RoutedBatch {
         let batch = take_record_batch(&self.batch, &indices).context(ComputeArrowSnafu)?;
         let batch = compact_dictionaries(batch)?;
         ensure!(
-            batch.get_array_memory_size() <= source.limits.batch,
+            batch.get_array_memory_size() <= source.limits.arrow_batch_bytes,
             MultiRegionCompactionResourceSnafu {
                 reason: "Routed batch exceeds the task buffer budget"
             }
@@ -129,6 +129,7 @@ impl SharedSource {
         metadata: RegionMetadataRef,
         counters: Arc<SourceCounters>,
     ) -> Result<Arc<Self>> {
+        let upload = UploadBudget::new(plan, context.access_layer.object_store())?;
         let mut common = (*metadata).clone();
         common.set_partition_expr(None);
         let metadata = Arc::new(common);
@@ -159,9 +160,12 @@ impl SharedSource {
             let footer = sst.parquet_metadata();
             footer_bytes = footer_bytes.saturating_add(footer.memory_size());
             ensure!(
-                footer_bytes <= plan.memory_limit / 8,
+                footer_bytes <= upload.compute_bytes / 8,
                 MultiRegionCompactionResourceSnafu {
-                    reason: "Source footer metadata exceeds the task budget",
+                    reason: format!(
+                        "Source footer metadata needs {footer_bytes} bytes, budget after reserving uploads is {}",
+                        upload.compute_bytes / 8,
+                    ),
                 }
             );
             footers.push(footer);
@@ -213,7 +217,7 @@ impl SharedSource {
             &json2_targets,
         )?;
         let schema = mapper.input_arrow_schema(false);
-        let mut limits = MemoryLimits::new(plan, &schema)?;
+        let mut limits = MemoryLimits::new(plan, &schema, upload)?;
         let mut inverted = context.config.inverted_index.clone();
         inverted.mem_threshold_on_create =
             admitted_index_threshold(inverted.mem_threshold_on_create(), limits.index);
@@ -243,7 +247,7 @@ impl SharedSource {
             .collect::<BTreeMap<_, _>>();
         limits.admit(
             plan,
-            context,
+            &context.config,
             &footers,
             index_plans
                 .values()
@@ -392,12 +396,12 @@ impl SharedSource {
                         let batch = compact_dictionaries(batch)?;
                         let batch_bytes = batch.get_array_memory_size();
                         ensure!(
-                            batch_bytes <= preparing.limits.batch,
+                            batch_bytes <= preparing.limits.arrow_batch_bytes,
                             MultiRegionCompactionResourceSnafu {
                                 reason: format!(
                                     "Decoded source batch uses {} bytes, budget is {}",
                                     batch_bytes,
-                                    preparing.limits.batch,
+                                    preparing.limits.arrow_batch_bytes,
                                 ),
                             }
                         );
