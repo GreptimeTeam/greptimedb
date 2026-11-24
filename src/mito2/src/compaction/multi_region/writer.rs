@@ -142,7 +142,7 @@ impl<'a> TargetWriter<'a> {
 
     pub(super) fn options(&self) -> WriteOptions {
         WriteOptions {
-            write_buffer_size: ReadableSize(self.limits.batch as u64),
+            write_buffer_size: ReadableSize(self.limits.writer.upload_limits.chunk_bytes as u64),
             max_file_size: Some(self.max_file_size),
             // Capped so each admitted encoder stays within the task budget; see
             // [memory::MAX_ROW_GROUP_SIZE].
