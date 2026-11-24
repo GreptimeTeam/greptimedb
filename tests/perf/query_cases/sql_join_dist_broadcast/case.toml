@@ -2,11 +2,9 @@
 #
 # The case exercises the distributed broadcast join behind the experimental
 # `experimental_dist_join` opt-in: the join of a large probe (fact) table with a
-# small build (dimension) table. Both targets opt in through
-# `candidate_session_sql` / `base_session_sql`. The base build predates the
-# materialized broadcast: with the opt-in it keeps the frontend join. The
-# candidate materializes the small side once and dispatches it to the probe
-# regions.
+# small build (dimension) table. The base build predates the opt-in, so it runs
+# the plain frontend join; only the candidate opts in and materializes the small
+# side once before dispatching it to the probe regions.
 #
 # The heuristic compares `probe_regions * build_bytes` with `probe_bytes`, so a
 # single-region fact table with a much smaller dimension table already favors the
@@ -120,10 +118,9 @@ name = "join_dist_broadcast_aggregate_top"
 kind = "sql"
 query = "SELECT f.host, d.zone, avg(f.value * d.weight) AS score FROM sql_join_dist_fact f JOIN sql_join_dist_dim d ON f.host = d.host WHERE f.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND f.ts < '2024-01-05 00:00:00+0000'::TIMESTAMP AND d.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND d.ts < '2024-01-01 01:00:00+0000'::TIMESTAMP AND d.zone IN ('zone1', 'zone2') GROUP BY f.host, d.zone ORDER BY score DESC LIMIT 10"
 # Every request of `/v1/sql` gets its own session context, so the opt-in has to
-# travel with the query it should affect. Both targets opt in: the base build
-# keeps the frontend join and the candidate materializes the small side once.
+# travel with the query it should affect. Only the candidate opts in: the base
+# build predates the option and runs the frontend join.
 candidate_session_sql = ["SET experimental_dist_join = true"]
-base_session_sql = ["SET experimental_dist_join = true"]
 # Before it measures, the candidate target runs one separate EXPLAIN ANALYZE
 # request of this query and fails it without a timed sample unless the executed
 # plan keeps HashJoinExec out of the frontend stage and runs it in a later one.
@@ -139,9 +136,8 @@ max_candidate_latency_regression_pct = 50
 
 # Volatile variant: the dim side contains random(). The candidate materializes
 # it once on the frontend and dispatches the rows to the probe regions, so every
-# probe region sees the same values. The base predates the materialized
-# broadcast: with the opt-in it re-executes the volatile small side per probe
-# region, so the base row is a latency reference, not a correctness reference.
+# probe region sees the same values. The base predates the opt-in and runs the
+# plain frontend join, which is a latency reference.
 #
 # candidate_remote_operator is intentionally absent: the candidate decides at
 # execution time, so a separate EXPLAIN ANALYZE preflight would not observe the
@@ -152,7 +148,6 @@ name = "join_dist_broadcast_volatile"
 kind = "sql"
 query = "SELECT f.host, d.zone, avg(f.value * d.weight * d.rand_factor) AS score FROM sql_join_dist_fact f JOIN (SELECT host, zone, weight, random() AS rand_factor FROM sql_join_dist_dim WHERE ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND ts < '2024-01-01 01:00:00+0000'::TIMESTAMP AND zone IN ('zone1', 'zone2')) d ON f.host = d.host WHERE f.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND f.ts < '2024-01-05 00:00:00+0000'::TIMESTAMP GROUP BY f.host, d.zone ORDER BY score DESC LIMIT 10"
 candidate_session_sql = ["SET experimental_dist_join = true"]
-base_session_sql = ["SET experimental_dist_join = true"]
 require_region_statistics = true
 warmup = 1
 iterations = 3
