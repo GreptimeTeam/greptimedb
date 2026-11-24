@@ -1826,10 +1826,10 @@ impl RegionEngine for MitoEngine {
             self.inner
                 .notify_if_leader_lease_wait_ended(&region, ended_wait);
         }
-        // The metasrv attaches a candidate lease id only to the Follower leases of a migration's
-        // target. Such a lease leaves the state of a region that awaits its Leader lease unchanged
-        // instead of demoting it, so a writable one stays writable, and it still counts as
-        // applied. Do not fold this into `set_role`.
+        // A Follower lease carrying a candidate lease id goes to a migration's target. It leaves
+        // the state of a region that awaits its Leader lease unchanged instead of demoting it, and
+        // still counts as applied. Keep this out of `MitoRegion::set_role`, whose other callers
+        // must demote such a region.
         let previous = if role == RegionRole::Follower && candidate_lease_id.is_some() {
             region.manifest_ctx.demote_candidate(region_id)
         } else {

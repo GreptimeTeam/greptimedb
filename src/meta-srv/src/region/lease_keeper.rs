@@ -96,18 +96,21 @@ fn renew_region_lease_via_operating_regions(
         if table_route_exists {
             region_lease_info.candidate_lease_id = operating_region.candidate_lease_id;
         }
-        // A candidate lease id with a reported Leader means a migration target that a catchup
-        // promoted before the route switch, which is expected until the switch.
-        if region_lease_info.candidate_lease_id.is_some() && reported_role == RegionRole::Leader {
-            debug!(
-                "The candidate region {} on datanode {} is operating with role {:?}, but reported as {:?}",
-                region_id, datanode_id, role, reported_role
-            );
-        } else if role != reported_role {
-            info!(
-                "The region {} on datanode {} is operating with role {:?}, but reported as {:?}",
-                region_id, datanode_id, role, reported_role
-            );
+        if role != reported_role {
+            // A candidate lease id with a reported Leader means a migration target that a catchup
+            // promoted before the route switch, which is expected until the switch.
+            if region_lease_info.candidate_lease_id.is_some() && reported_role == RegionRole::Leader
+            {
+                debug!(
+                    "The candidate region {} on datanode {} is operating with role {:?}, but reported as {:?}",
+                    region_id, datanode_id, role, reported_role
+                );
+            } else {
+                info!(
+                    "The region {} on datanode {} is operating with role {:?}, but reported as {:?}",
+                    region_id, datanode_id, role, reported_role
+                );
+            }
         }
         return Some(region_lease_info);
     }
@@ -298,7 +301,7 @@ impl RegionLeaseKeeper {
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, HashSet};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use common_meta::DatanodeId;
     use common_meta::key::TableMetadataManager;
@@ -328,7 +331,7 @@ mod tests {
     }
 
     #[derive(Clone, Default)]
-    struct LevelCapture(Arc<std::sync::Mutex<Vec<tracing::Level>>>);
+    struct LevelCapture(Arc<Mutex<Vec<tracing::Level>>>);
 
     impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for LevelCapture {
         fn on_event(
@@ -348,7 +351,7 @@ mod tests {
         use tracing_subscriber::layer::SubscriberExt;
 
         let region_id = RegionId::new(1024, 1);
-        let log_level = |candidate_lease_id, reported_role, table_route_exists| {
+        let log_levels = |candidate_lease_id, reported_role, table_route_exists| {
             let capture = LevelCapture::default();
             let subscriber = tracing_subscriber::registry().with(capture.clone());
             let operating_regions = HashMap::from([(
@@ -372,19 +375,22 @@ mod tests {
         };
 
         assert_eq!(
-            log_level(Some(7), RegionRole::Leader, true),
+            log_levels(Some(7), RegionRole::Leader, true),
             vec![Level::DEBUG]
         );
-        assert_eq!(log_level(None, RegionRole::Leader, true), vec![Level::INFO]);
         assert_eq!(
-            log_level(Some(7), RegionRole::Leader, false),
+            log_levels(None, RegionRole::Leader, true),
             vec![Level::INFO]
         );
         assert_eq!(
-            log_level(Some(7), RegionRole::DowngradingLeader, true),
+            log_levels(Some(7), RegionRole::Leader, false),
             vec![Level::INFO]
         );
-        assert!(log_level(Some(7), RegionRole::Follower, true).is_empty());
+        assert_eq!(
+            log_levels(Some(7), RegionRole::DowngradingLeader, true),
+            vec![Level::INFO]
+        );
+        assert!(log_levels(Some(7), RegionRole::Follower, true).is_empty());
     }
 
     #[test]
