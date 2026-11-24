@@ -1216,8 +1216,8 @@ pub(crate) enum BackgroundNotify {
     },
     /// The catchup again of a region that awaited its Leader lease has finished.
     CaughtUpAgain(CaughtUpAgain),
-    /// The region became writable and may have pending tails to replay, or work its wait for
-    /// a Leader lease deferred.
+    /// The region became writable and may have pending tails to replay, or work due once it is a
+    /// writable leader with its Leader lease.
     RegionBecameWritable,
     /// A lease ended the region's wait for its Leader lease, so the work the wait deferred may
     /// start.

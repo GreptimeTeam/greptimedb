@@ -1453,8 +1453,8 @@ impl EngineInner {
     }
 
     /// Tells the worker that a role change outside it made `region` a writable leader from the
-    /// state `replaced`, so it replays the pending tails and runs the work the region's wait for
-    /// its Leader lease held back. The worker may already have started an ALTER or an edit of
+    /// state `replaced`, so it replays the pending tails and runs the work due once the region is
+    /// a writable leader with its Leader lease. The worker may already have started an ALTER or an edit of
     /// the region. Only a change that replaced a state that cannot replay tails (a staging,
     /// downgrading or follower region) sends it, so the Leader lease a writable leader receives
     /// with every heartbeat, which changes no state, sends none.

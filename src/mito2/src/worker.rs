@@ -1557,8 +1557,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     + bulk_insert_req_num,
             );
 
-            // Only background notifications, role changes and DDLs change a region's state.
-            let may_change_state = !general_req_buffer.is_empty() || !ddl_req_buffer.is_empty();
             self.handle_requests(
                 &mut write_req_buffer,
                 &mut ddl_req_buffer,
@@ -1566,9 +1564,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 &mut bulk_req_buffer,
             )
             .await;
-            if may_change_state {
-                self.sweep_deferred_lease_work().await;
-            }
+            self.sweep_deferred_lease_work().await;
 
             self.handle_periodical_tasks();
         }
@@ -2138,7 +2134,7 @@ impl WorkerListener {
         }
     }
 
-    /// The worker starts the work the region's wait for its Leader lease held back.
+    /// The worker starts the work due once the region is a writable leader with its Leader lease.
     pub(crate) async fn on_deferred_lease_work_begin(&self, _region_id: RegionId) {
         #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {

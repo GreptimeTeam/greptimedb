@@ -274,7 +274,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 }
 
 /// Tells the worker that a region became writable, so it replays the pending tails and runs the
-/// work the region's wait for its Leader lease held back, without waiting.
+/// work due once the region is a writable leader with its Leader lease, without waiting.
 pub(crate) fn notify_writable(sender: &Sender<WorkerRequestWithTime>, region: &MitoRegionRef) {
     #[cfg(test)]
     region

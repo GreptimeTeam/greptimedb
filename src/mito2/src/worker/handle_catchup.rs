@@ -402,8 +402,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 region.state()
             );
         }
-        // The sweep after the batch runs it, after what the batch dispatched, or once the region
-        // is a writable leader.
+        // The sweep after the batch runs it, after the requests the batch started, or once the
+        // region is a writable leader.
         let work = self.defer_lease_work(&region);
         work.missing_index_pass = true;
         work.backfill = true;
@@ -411,28 +411,31 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     }
 
     /// Finishes the deferred work of every region that is a writable leader with its Leader
-    /// lease. The worker loop calls it after a batch that may have changed a region's state, so
-    /// the work runs after whatever the batch dispatched.
+    /// lease. The worker loop calls it after each batch, so the work runs after the requests the
+    /// batch started; a DDL that the batch queued behind a flush or a compaction has not started.
+    /// It costs one `is_empty()` per batch and, per entry, which regions rarely have, one region
+    /// lookup (a read lock of the region map) and a few atomic loads, with no I/O, allocation or
+    /// await until a region qualifies.
     pub(crate) async fn sweep_deferred_lease_work(&mut self) {
         if self.deferred_lease_work.is_empty() {
             return;
         }
-        let region_ids: Vec<_> = self.deferred_lease_work.keys().copied().collect();
-        for region_id in region_ids {
-            self.finish_deferred_lease_work(region_id).await;
+        let regions: Vec<_> = self
+            .deferred_lease_work
+            .keys()
+            .filter_map(|region_id| self.regions.get_region(*region_id))
+            .filter(|region| region.may_finish_deferred_lease_work())
+            .collect();
+        for region in regions {
+            self.finish_deferred_lease_work(region).await;
         }
     }
 
-    /// Runs the deferred work of the region, if any, when it is a writable leader with its
-    /// Leader lease: builds the missing indexes, re-issues the kept index build retries and saves
-    /// the backfilled metadata. Otherwise the work stays due.
-    async fn finish_deferred_lease_work(&mut self, region_id: RegionId) {
-        let Some(region) = self.regions.get_region(region_id) else {
-            return;
-        };
-        if !region.may_finish_deferred_lease_work() {
-            return;
-        }
+    /// Runs the deferred work of a region that was a writable leader with its Leader lease:
+    /// builds the missing indexes, re-issues the kept index build retries and saves the
+    /// backfilled metadata. A role change since then makes each step keep its work due.
+    async fn finish_deferred_lease_work(&mut self, region: MitoRegionRef) {
+        let region_id = region.region_id;
         let Some(work) = self.deferred_lease_work.remove(&region_id) else {
             return;
         };

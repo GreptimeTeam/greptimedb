@@ -802,8 +802,8 @@ impl MitoRegion {
     /// Persists the metadata backfilled when the region was opened if the manifest lacks it.
     /// A catchup cannot do it for a region that [awaits its Leader
     /// lease](ManifestContext::awaits_leader_lease), so the worker does once the region is a
-    /// writable leader with its lease. Returns false if it found the region not a writable leader with its Leader lease, so it
-    /// could not tell whether the metadata needs persisting.
+    /// writable leader with its lease. Returns false if it found the region not a writable
+    /// leader with its Leader lease, so it could not tell whether the metadata needs persisting.
     pub(crate) async fn persist_backfilled_metadata(&self) -> bool {
         let mut manager = self.manifest_ctx.manifest_manager.write().await;
         if !self.may_finish_deferred_lease_work() {
@@ -820,7 +820,7 @@ impl MitoRegion {
     }
 
     /// Returns whether the region is a writable leader with its Leader lease, which may run the
-    /// work its wait for the lease held back.
+    /// work due once it is one.
     pub(crate) fn may_finish_deferred_lease_work(&self) -> bool {
         self.state() == RegionRoleState::Leader(RegionLeaderState::Writable)
             && !self.manifest_ctx.awaits_leader_lease()

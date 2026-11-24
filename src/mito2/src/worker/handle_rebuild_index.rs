@@ -246,14 +246,15 @@ impl<S> RegionWorkerLoop<S> {
         // refuses one keeps it until the region is a writable leader with its Leader lease.
         let Some(region) = self.regions.writable_region_or(region_id, &mut sender) else {
             if is_retry {
-                return self.keep_index_build_retry(request);
+                self.keep_index_build_retry(request);
             }
             return self.regions.get_region(region_id).is_some();
         };
         // Staging regions are writable but must not publish indexes.
         if region.should_abort_index() {
             if is_retry {
-                return self.keep_index_build_retry(request);
+                self.keep_index_build_retry(request);
+                return true;
             }
             sender.send(
                 RegionStateSnafu {
@@ -273,7 +274,8 @@ impl<S> RegionWorkerLoop<S> {
             .ensure_leader_lease_or_downgrading(region_id)
         {
             if is_retry {
-                return self.keep_index_build_retry(request);
+                self.keep_index_build_retry(request);
+                return true;
             }
             info!("Region {region_id} awaits its Leader lease, building no index");
             sender.send(Err(e));
@@ -490,23 +492,22 @@ impl<S> RegionWorkerLoop<S> {
     }
 
     /// Keeps an index build retry that the state of its region refused until the region is a
-    /// writable leader with its Leader lease. Returns whether the region is registered.
-    /// Its callers learn now that the build stopped, rather than wait for the region.
-    fn keep_index_build_retry(&mut self, mut request: BuildIndexRequest) -> bool {
+    /// writable leader with its Leader lease. Its callers learn now that the build stopped,
+    /// rather than wait for the region.
+    fn keep_index_build_retry(&mut self, mut request: BuildIndexRequest) {
         for sender in std::mem::take(&mut request.result_senders) {
             let reason = "the region's state refused the retry".to_string();
             let _ = sender.try_send(Ok(IndexBuildOutcome::Aborted(reason)));
         }
         let region_id = request.region_id;
         let Some(region) = self.regions.get_region(region_id) else {
-            return false;
+            return;
         };
         info!(
             "Region {region_id} is {:?} or awaits its Leader lease, keeping an index build retry",
             region.state()
         );
         self.defer_lease_work(&region).retries.push(request);
-        true
     }
 
     pub(crate) async fn handle_index_build_finished(

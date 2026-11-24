@@ -54,8 +54,8 @@ pub trait EventListener: Send + Sync {
     /// writable, before it runs the region's deferred work.
     fn on_region_became_writable(&self, _region_id: RegionId) {}
 
-    /// Notifies the listener when the worker starts the work the region's wait for its Leader
-    /// lease held back.
+    /// Notifies the listener when the worker starts the work due once the region is a writable
+    /// leader with its Leader lease.
     async fn on_deferred_lease_work_begin(&self, _region_id: RegionId) {}
 
     /// Notifies the listener when an index build request passed the worker's checks of the
