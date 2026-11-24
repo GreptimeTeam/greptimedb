@@ -164,9 +164,11 @@ pub fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Opti
         }
         // An aggregate reports the grouping labels its input carries: `by(...)` keeps exactly the
         // ones it names, and `without(...)` keeps the rest and drops the metric name, as Prometheus
-        // does. A grouping by `__name__` keeps the name where the input reports one; a named scan
-        // only reports it among the runtime labels, so the aggregate keeps it there and publishes no
-        // column for it, which is what `sum by (__name__)` over one metric reports.
+        // does. A grouping by `__name__` keeps the name where the input reports one - which is
+        // `source_tags`'s answer, not the schema's: a named input declares it when the statement
+        // reads more than one, so the groups two metrics form stay apart, and a statement reading
+        // one leaves the column to the rows layout's appended name, which is what `sum by
+        // (__name__)` over one metric reports.
         NativeExpr::Aggregate { input, op } => grouped_output_tags(input, op, source_tags),
         // Its parameter is a scalar, which carries no labels, so a fold that reads it per point
         // reports the same columns as the one that binds its `φ`.
@@ -589,9 +591,13 @@ pub fn binary_output_field_kind(
             // With no possible samples, retain the legacy float layout for an empty result.
             Some(kind.unwrap_or(FieldKind::Float))
         }
-        // Comparison and bool behavior is separate from arithmetic's empty-field layout.
+        // A comparison over one kind answers that kind's samples, which is what keeps a histogram
+        // column a histogram. A comparison over two kinds answers no sample at all: the kernel
+        // reports every mixed pair - `(Float, Histogram)` and `(Histogram, Float)` included - as
+        // unsupported and skips it without counting a match (`vector_match::elem_binop`), so the
+        // column is the same empty float layout arithmetic keeps for a pair that can emit nothing.
         _ if left == right => Some(left),
-        _ => None,
+        _ => Some(FieldKind::Float),
     }
 }
 
@@ -706,7 +712,32 @@ impl NativeNode {
             // A per-point parameter decides the `φ` the fold reads, not the layout it answers, so
             // the kind is the one the same aggregate's state carries.
             NativeExpr::ParameterizedAggregate { op, .. } => Some(aggregate_output_kind(op)),
-            _ => None,
+            // A whole-vector operation either hands on the series it selected - a ranking keeps the
+            // ones it ranked, `limit_ratio` the ones its hash kept, and `sort` the same series in
+            // another order - so the field keeps the kind it read, which is the rule the
+            // per-point `k` form above already states for the same `TopK`. The other three compute
+            // the value: `absent` writes `1.0` where the input held nothing, `histogram_quantile`
+            // and `histogram_fraction` reduce a classic histogram to one float, and `count_values`
+            // counts samples as floats.
+            NativeExpr::Vector { input, op } => Some(match op {
+                BoundVectorOp::TopK { .. }
+                | BoundVectorOp::LimitK { .. }
+                | BoundVectorOp::LimitRatio { .. }
+                | BoundVectorOp::Sort(_) => kind_of(input)?,
+                BoundVectorOp::Absent { .. }
+                | BoundVectorOp::Histogram(_)
+                | BoundVectorOp::CountValues { .. } => FieldKind::Float,
+            }),
+            // `info` answers the base series' own samples with the info series' data labels added,
+            // so the field is the base's field: natively it never reads the info series' values as
+            // the answer (`info` is selected as a timestamp, `InstantValue::InfoTimestamp`).
+            NativeExpr::Info { base, .. } => kind_of(base),
+            // A parameterized map is a math function over its input - `round` and the three
+            // `clamp`s - and math skips native histogram samples rather than converting them
+            // (`map::map_math`), so the field shape is unchanged and keeps the input's kind. The
+            // two scalar functions, `max_of` and `min_of`, take a scalar input, whose kind is a
+            // float whether or not the source carries histograms.
+            NativeExpr::ParameterizedMap { input, .. } => kind_of(input),
         }
     }
 }

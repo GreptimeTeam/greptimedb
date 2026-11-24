@@ -43,8 +43,7 @@ use crate::extension_plan::{
 };
 use crate::native::plan::native_tree_supported;
 use crate::native::plan::{
-    BoundAggregate, BoundInput, BoundVectorOp, Grouping, METRIC_NAME, NativeExpr, NativeNode,
-    NativeTree, NativeType, reads_across_series,
+    BoundInput, METRIC_NAME, NativeExpr, NativeNode, NativeTree, NativeType, reads_across_series,
 };
 use crate::vector_match::Cardinality;
 
@@ -145,72 +144,6 @@ pub fn independent_scan_pair(root: &NativeNode) -> bool {
 
 fn scan_operand(node: &NativeNode) -> bool {
     pointwise_operand(node) || independent_scan_pair(node)
-}
-
-/// Whether a grouping in `node` keeps a label the existing planner's column list cannot name.
-///
-/// An aggregate's `by(...)` keeps the labels it lists that its input carries, and `__name__` is one
-/// of them: the aggregate folds its groups by the metric name as by any other label. It is not a
-/// column of any scan, though - it is the name the raw frame carries - so the existing planner's
-/// `by(__name__)` finds no such column and reports no label at all. A schema taken from that list
-/// would drop the metric name the native aggregate kept, and two groups differing only in their
-/// metric would come out as two rows under one label set, which is a series identity lost rather
-/// than an answer given.
-///
-/// `without(...)` needs no such check: both routes drop `__name__` there. Nor does a tree with one
-/// source: a discovered selector's source declares `__name__` per metric, and a named one folds one
-/// metric whose name cannot merge two groups. What the check is for is the tree reading more than one
-/// source, where only a discovered source can report a name at all.
-pub fn groups_by_metric_name(node: &NativeNode) -> bool {
-    let grouping_names_metric = |op: &BoundAggregate| matches!(&op.group, Grouping::By(names) if names.iter().any(|name| name.as_ref() == METRIC_NAME));
-    match &node.expr {
-        NativeExpr::Input(_)
-        | NativeExpr::Scalar(_)
-        | NativeExpr::EvalTime { .. }
-        | NativeExpr::VectorOf { .. } => false,
-        // `scalar()` answers one value with no labels at all, so a grouping by the metric name
-        // below it cannot leave two groups under one label set: the walk stops there.
-        NativeExpr::ScalarOf { .. } => false,
-        NativeExpr::Instant { input, .. }
-        | NativeExpr::Merge { input }
-        | NativeExpr::Window { input, .. }
-        | NativeExpr::Map { input, .. }
-        | NativeExpr::Timestamp { input } => groups_by_metric_name(input),
-        NativeExpr::Aggregate { input, op } => {
-            grouping_names_metric(op) || groups_by_metric_name(input)
-        }
-        // A per-point argument does not change what the fold groups by, and the parameter is a
-        // scalar expression that can itself hold an aggregate.
-        NativeExpr::ParameterizedAggregate {
-            input,
-            op,
-            parameter,
-        } => {
-            grouping_names_metric(op)
-                || groups_by_metric_name(input)
-                || groups_by_metric_name(parameter)
-        }
-        NativeExpr::ParameterizedMap {
-            input, parameters, ..
-        } => groups_by_metric_name(input) || parameters.iter().any(groups_by_metric_name),
-        NativeExpr::ParameterizedTopK {
-            input, parameter, ..
-        } => groups_by_metric_name(input) || groups_by_metric_name(parameter),
-        NativeExpr::ParameterizedHistogram {
-            input, parameters, ..
-        } => groups_by_metric_name(input) || parameters.iter().any(groups_by_metric_name),
-        NativeExpr::Vector { input, op } => {
-            matches!(op, BoundVectorOp::CountValues { group: Grouping::By(names), .. }
-                if names.iter().any(|name| name.as_ref() == METRIC_NAME))
-                || groups_by_metric_name(input)
-        }
-        NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
-            groups_by_metric_name(left) || groups_by_metric_name(right)
-        }
-        NativeExpr::Info { base, info, .. } => {
-            groups_by_metric_name(base) || groups_by_metric_name(info)
-        }
-    }
 }
 
 /// Whether a segment can hand `node`'s values to another segment.
@@ -502,11 +435,12 @@ pub fn with_row_name_column(node: &NativeNode, mut tags: Vec<String>) -> Vec<Str
     if !matches!(&node.output, NativeType::Samples(_)) {
         return tags;
     }
-    // A layout can already report the name: a set operation takes it from its sides, and a
-    // discovered source sorts its tags for the union. Neither leaves that column last - `or` keeps
-    // the left operand's order and only appends the right side's unseen tags, and sorting puts the
-    // name wherever its bytes fall - so the existing one is removed and appended instead: every rows
-    // layout then answers one order, the time index, the value fields, the labels, and the name
+    // A layout can already report the name: a set operation takes it from its sides, a discovered
+    // source sorts its tags for the union, and a statement reading more than one metric-bound input
+    // declares the name each of those inputs reports. None of them leaves that column last - `or`
+    // keeps the left operand's order and only appends the right side's unseen tags, and sorting puts
+    // the name wherever its bytes fall - so the existing one is removed and appended instead: every
+    // rows layout then answers one order, the time index, the value fields, the labels, and the name
     // last.
     if let Some(index) = tags.iter().position(|tag| tag == METRIC_NAME) {
         tags.remove(index);
@@ -1054,13 +988,11 @@ pub fn segment_tree(
     // The window this tree may be rooted at is not one of those consumers, but it is no boundary
     // either: `cut_as_segment` never cuts one, and what keeps its input's partitions is the
     // per-series prefix below it, which the cuts below are admitted for.
-    // A grouping by `__name__` keeps that label while the fused node's declared columns cannot
-    // name it. With multiple sources, groups differing only by metric name would therefore be
-    // reported under one label set. A single-source tree cannot merge distinct metric-name groups
-    // this way, so this restriction is specific to multi-source segmentation.
-    if children.len() > 1 && groups_by_metric_name(tree.root()) {
-        return None;
-    }
+    //
+    // A grouping by `__name__` needs no refusal of its own here: `source_tags` is the authority on
+    // which labels an input declares, and the planner declares the metric name of every occurrence of
+    // a statement reading more than one input - so a segment's output tags name the label the grouping
+    // keeps, and two groups differing only by metric are published under their own label sets.
     let mut current_tree = tree.clone();
     let mut current_children = children.to_vec();
     let mut current_tags = source_tags.to_vec();
@@ -1299,7 +1231,8 @@ mod tests {
     use super::*;
     use crate::map::MathOp;
     use crate::native::plan::{
-        AggregateKind, AggregateStage, BoundInput, BoundInstant, BoundMap, InstantValue, MapOp,
+        AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap,
+        Grouping, InstantValue, MapOp,
     };
 
     fn grid() -> Arc<EvalGrid> {

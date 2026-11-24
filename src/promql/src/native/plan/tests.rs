@@ -546,8 +546,9 @@ fn binary_arithmetic_field_kind_accounts_for_fill() {
         );
     }
 
-    // The real mixed-kind operation and a fill may emit different kinds in one field. Neither
-    // silently claims homogeneity; mixed no-fill composition and comparisons keep their old kinds.
+    // The real mixed-kind operation and a fill may emit different kinds in one field, and neither
+    // silently claims homogeneity. A comparison over two kinds is a different question - it emits
+    // no sample whatever the fill says - and answers the empty float layout below.
     assert_eq!(
         binary_output_field_kind(Histogram, Float, BinaryOp::Mul, false, left),
         None
@@ -570,11 +571,260 @@ fn binary_arithmetic_field_kind_accounts_for_fill() {
     );
     assert_eq!(
         binary_output_field_kind(Histogram, Float, BinaryOp::Eq, false, both),
-        None
+        Some(Float)
     );
     assert_eq!(
         binary_output_field_kind(Histogram, Float, BinaryOp::Eq, true, both),
         Some(Float)
+    );
+}
+
+/// A comparison answers a float when its two sides carry different kinds.
+///
+/// The kernel skips every mixed pair without counting a match - `(Float, Histogram)` and
+/// `(Histogram, Float)` included (`vector_match::elem_binop`) - so no sample can end under either
+/// side's type. What is declared is the layout arithmetic keeps for a pair that emits nothing: one
+/// float. Two sides of one kind keep it, and a `bool` comparison answers `1`/`0` whatever it read.
+#[test]
+fn binary_comparison_names_a_mixed_pair_as_a_float() {
+    use super::binary_output_field_kind;
+    use crate::extension_plan::FieldKind::{Float, Histogram};
+
+    for op in [
+        BinaryOp::Eq,
+        BinaryOp::Ne,
+        BinaryOp::Gt,
+        BinaryOp::Lt,
+        BinaryOp::Ge,
+        BinaryOp::Le,
+    ] {
+        assert_eq!(
+            binary_output_field_kind(Histogram, Float, op, false, FillValues::default()),
+            Some(Float),
+            "{op:?} a histogram compared with a float"
+        );
+        assert_eq!(
+            binary_output_field_kind(Float, Histogram, op, false, FillValues::default()),
+            Some(Float),
+            "{op:?} a float compared with a histogram"
+        );
+        assert_eq!(
+            binary_output_field_kind(Histogram, Histogram, op, false, FillValues::default()),
+            Some(Histogram),
+            "{op:?} two histograms"
+        );
+        assert_eq!(
+            binary_output_field_kind(Float, Float, op, false, FillValues::default()),
+            Some(Float),
+            "{op:?} two floats"
+        );
+        assert_eq!(
+            binary_output_field_kind(Histogram, Float, op, true, FillValues::default()),
+            Some(Float),
+            "{op:?} with `bool`"
+        );
+    }
+
+    // The tree-level walk asks the same helper, so a mixed pair over two inputs answers the float
+    // layout there too, and the answer is the one the statement's column is declared with.
+    let histogram = input_on(grid(0, 60_000, 1));
+    let float = NativeNode {
+        expr: NativeExpr::Timestamp {
+            input: Box::new(histogram.clone()),
+        },
+        output: histogram.output.clone(),
+    };
+    for (left, right) in [(&histogram, &float), (&float, &histogram)] {
+        let node = NativeNode {
+            expr: NativeExpr::Binary {
+                left: Box::new(left.clone()),
+                right: Box::new(right.clone()),
+                matching: BinaryMatching {
+                    op: BinaryOp::Gt,
+                    ..add()
+                },
+            },
+            output: histogram.output.clone(),
+        };
+        assert_eq!(
+            node.output_field_kind(Some(FieldKind::Histogram)),
+            Some(FieldKind::Float)
+        );
+    }
+}
+
+/// A whole-vector operation answers either the series it selected or a value it computed.
+///
+/// `topk`, `bottomk`, `limitk`, `limit_ratio` and the `sort`s hand on the samples they read under
+/// the labels those samples carry, so a histogram stays a histogram - the same rule the per-point
+/// `k` form states for the same `TopK`. `absent` writes `1.0`, `histogram_quantile` and
+/// `histogram_fraction` reduce a classic histogram to one float, and `count_values` counts samples
+/// as floats: each answers a float whatever its input holds.
+#[test]
+fn vector_operation_field_kinds_follow_what_each_op_answers() {
+    use crate::extension_plan::FieldKind::{Float, Histogram};
+    use crate::histogram_eval::HistogramFunction;
+    use crate::select::SortOrder;
+
+    let out = grid(0, 60_000, 4);
+    let group = || Grouping::By(Arc::new([]));
+    let vector_of = |op| NativeNode {
+        expr: NativeExpr::Vector {
+            input: Box::new(window_fields(input_with_fields(1), Arc::clone(&out), 1)),
+            op,
+        },
+        output: evaluated(fields(1), Arc::clone(&out)),
+    };
+    for (op, expected) in [
+        (
+            BoundVectorOp::TopK {
+                k: 1.0,
+                top: true,
+                group: group(),
+            },
+            Histogram,
+        ),
+        (
+            BoundVectorOp::LimitK {
+                k: 1.0,
+                group: group(),
+            },
+            Histogram,
+        ),
+        (BoundVectorOp::LimitRatio { ratio: 0.5 }, Histogram),
+        (BoundVectorOp::Sort(SortOrder::Asc), Histogram),
+        (
+            BoundVectorOp::Sort(SortOrder::ByLabel(vec![Arc::from("job")])),
+            Histogram,
+        ),
+        (
+            BoundVectorOp::Absent {
+                labels: datatypes::series::SeriesLabels::try_new(None, Vec::new()).unwrap(),
+            },
+            Float,
+        ),
+        (
+            BoundVectorOp::Histogram(HistogramFunction::Quantile(0.5)),
+            Float,
+        ),
+        (
+            BoundVectorOp::Histogram(HistogramFunction::Fraction {
+                lower: 0.0,
+                upper: 1.0,
+            }),
+            Float,
+        ),
+        (
+            BoundVectorOp::CountValues {
+                label: Arc::from("v"),
+                group: group(),
+            },
+            Float,
+        ),
+    ] {
+        let node = vector_of(op);
+        node.validate().unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            node.output_field_kind(Some(Histogram)),
+            Some(expected),
+            "{:?}",
+            node.expr
+        );
+    }
+}
+
+/// `info` answers the base's samples, so its field is the base's field.
+///
+/// The info side is read as sample times (`InstantValue::InfoTimestamp`), which is a float the
+/// kernel compares rather than a value it answers with: a base carrying native histograms therefore
+/// keeps its histogram column.
+#[test]
+fn info_keeps_the_kind_of_its_base() {
+    let out = grid(0, 60_000, 4);
+    let info = NativeNode {
+        expr: NativeExpr::Instant {
+            input: Box::new(input_with_fields(1)),
+            op: BoundInstant {
+                lookback_ms: 300_000,
+                offset_ms: 0,
+                at_ms: None,
+                value: InstantValue::InfoTimestamp,
+                output_grid: Arc::clone(&out),
+            },
+        },
+        output: evaluated(fields(1), Arc::clone(&out)),
+    };
+    let node = NativeNode {
+        expr: NativeExpr::Info {
+            base: Box::new(window_fields(input_with_fields(1), Arc::clone(&out), 1)),
+            info: Box::new(info),
+            selector: InfoSelector {
+                name_matchers: Vec::new(),
+                data_labels: Vec::new(),
+                keep_unmatched: true,
+            },
+        },
+        output: evaluated(fields(1), out),
+    };
+    node.validate().unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        node.output_field_kind(Some(FieldKind::Histogram)),
+        Some(FieldKind::Histogram)
+    );
+    assert_eq!(
+        node.output_field_kind(Some(FieldKind::Float)),
+        Some(FieldKind::Float)
+    );
+}
+
+/// A parameterized map applies a math function, and math skips histograms rather than converting
+/// them, so the field shape is unchanged and keeps its input's kind.
+///
+/// `round` and the three `clamp`s map a vector onto the same fields; `max_of`/`min_of` answer one
+/// scalar from one, which is a float whatever the statement's sources hold.
+#[test]
+fn parameterized_map_keeps_the_kind_of_its_input() {
+    let out = grid(0, 60_000, 4);
+    let vector = window_fields(input_with_fields(1), Arc::clone(&out), 1);
+    for (op, parameters) in [
+        (
+            ParameterizedOp::Round,
+            vec![scalar_on(1.0, Arc::clone(&out))],
+        ),
+        (
+            ParameterizedOp::ClampMin,
+            vec![scalar_on(1.0, Arc::clone(&out))],
+        ),
+    ] {
+        let node = NativeNode {
+            expr: NativeExpr::ParameterizedMap {
+                input: Box::new(vector.clone()),
+                op,
+                parameters,
+            },
+            output: evaluated(fields(1), Arc::clone(&out)),
+        };
+        node.validate()
+            .unwrap_or_else(|error| panic!("{op:?}: {error}"));
+        assert_eq!(
+            node.output_field_kind(Some(FieldKind::Histogram)),
+            Some(FieldKind::Histogram),
+            "{op:?}"
+        );
+    }
+    // A function of two scalars answers a scalar, whose kind is a float either way.
+    let node = NativeNode {
+        expr: NativeExpr::ParameterizedMap {
+            input: Box::new(scalar_on(1.0, Arc::clone(&out))),
+            op: ParameterizedOp::MaxOf,
+            parameters: vec![scalar_on(2.0, Arc::clone(&out))],
+        },
+        output: NativeType::Scalar(out),
+    };
+    node.validate().unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        node.output_field_kind(Some(FieldKind::Histogram)),
+        Some(FieldKind::Float)
     );
 }
 
