@@ -227,7 +227,10 @@ wrapper around artifact download/extraction and this script.
 
 `downgrade_to_versions` optionally lists releases that CI restarts after the
 PR-built cluster. Those runs select only the `downgrade_compatibility` case in
-both distributed and standalone topologies.
+both distributed and standalone topologies. The oldest supported target is
+v1.2.0: SSTs written since #10528 can have inverted index segments that cross
+row group boundaries, and older readers return fewer rows for indexed queries
+on them without an error.
 
 ### `setup.sql` — Setup Phase (From Version)
 
