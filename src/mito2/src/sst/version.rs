@@ -136,8 +136,16 @@ impl SstVersion {
                         // same file meta or current file handle's index is up-to-date, skip adding
                         if f.meta_ref().owned_range != file.owned_range {
                             // Repartition may only change this reference's row
-                            // authorization; keep the current index view and lifetime.
-                            *f = f.with_updated_index(file.clone());
+                            // authorization. Install that one field on the current
+                            // metadata: taking the incoming metadata wholesale could
+                            // roll the index view back to an older generation, and a
+                            // fresh handle would also drop a running compaction's
+                            // reservation of this file.
+                            let mut updated = f.meta_ref().clone();
+                            updated.owned_range = file.owned_range.clone();
+                            let replaced = f.with_updated_index(FileMetaRef::from(updated));
+                            replaced.set_compacting(f.compacting());
+                            *f = replaced;
                         } else if f.index_id().version > new_index_version {
                             // what does it mean for us to see older index version?
                             common_telemetry::warn!(

@@ -698,10 +698,13 @@ fn output_matches_partition(
     partition_expr: Option<&PartitionExpr>,
 ) -> bool {
     partition_expr.is_none()
-        || output
-            .inputs
-            .iter()
-            .all(|input| input.meta_ref().partition_expr.as_deref() == partition_expr)
+        || output.inputs.iter().all(|input| {
+            // A ranged reference reads only part of its file, so whole-file
+            // summaries (row count, series count, pk range) do not describe the
+            // rows this region sees and must not be reused as the output's.
+            input.meta_ref().owned_range.is_none()
+                && input.meta_ref().partition_expr.as_deref() == partition_expr
+        })
 }
 
 fn reusable_index_inputs(
