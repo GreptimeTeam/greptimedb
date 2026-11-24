@@ -60,10 +60,18 @@ use crate::gc::GcConfig;
 use crate::sst::file::LEVEL_SHARED;
 use crate::test_util::{CreateRequestBuilder, TestEnv, build_rows, put_rows, rows_schema};
 
-fn range_expr(col_name: &str, start: i64, end: i64) -> PartitionExpr {
-    col(col_name)
-        .gt_eq(Value::Int64(start))
-        .and(col(col_name).lt(Value::Int64(end)))
+/// A tag domain `[start, end)`; `None` for the upper bound means "no upper bound".
+///
+/// The builder creates `tag_0` as a *string* column, so the split has to be written
+/// with string literals. Writing it with `Value::Int64` would not partition anything:
+/// the predicate cannot be evaluated against a string column, so both halves would
+/// read every row and the "one row per side" premise below would silently be false.
+fn str_range_expr(col_name: &str, start: &str, end: Option<&str>) -> PartitionExpr {
+    let lower = col(col_name).gt_eq(Value::String(start.into()));
+    match end {
+        Some(end) => lower.and(col(col_name).lt(Value::String(end.into()))),
+        None => lower,
+    }
 }
 
 /// The file ids a live region's persisted manifest holds.
@@ -82,33 +90,38 @@ async fn manifest_files(
         .collect()
 }
 
-/// A plain region scan: `(row count, sum(field_0))`.
-async fn scan_rows_and_sum(
-    engine: &crate::engine::MitoEngine,
-    region_id: RegionId,
-) -> (usize, f64) {
+/// A plain region scan as a sorted multiset of `(tag_0, field_0)`.
+///
+/// A multiset, not a count and not a sum, is the point: the invariant under test is
+/// "every committed write event is visible exactly once", so a duplicated row must
+/// show up as an extra element even when its field value is zero (a sum would stay
+/// unchanged for the row used here).
+async fn scan_rows(engine: &crate::engine::MitoEngine, region_id: RegionId) -> Vec<(String, f64)> {
     let stream = engine
         .scan_to_stream(region_id, ScanRequest::default())
         .await
         .unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
-    let rows = batches.iter().map(|batch| batch.num_rows()).sum::<usize>();
-    let mut sum = 0.0;
+    let mut rows = Vec::new();
     for batch in batches.iter() {
-        let values = batch
+        let tags = batch.column_by_name("tag_0").unwrap().as_string::<i32>();
+        let fields = batch
             .column_by_name("field_0")
             .unwrap()
             .as_primitive::<Float64Type>();
-        sum += values.values().iter().sum::<f64>();
+        for i in 0..batch.num_rows() {
+            rows.push((tags.value(i).to_string(), fields.value(i)));
+        }
     }
+    // `f64` is not `Ord`, so sort by tag first and then by the field value.
+    rows.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.total_cmp(&b.1)));
     common_telemetry::info!(
-        "Scan of region {} returned {} rows with sum(field_0) = {}: {}",
+        "Scan of region {} returned {} rows: {:?}",
         region_id,
-        rows,
-        sum,
-        batches.pretty_print().unwrap()
+        rows.len(),
+        rows
     );
-    (rows, sum)
+    rows
 }
 
 /// Copies `manifest_paths[&region_id]` from the central region's staging storage into a
@@ -173,7 +186,7 @@ async fn test_split_shared_file_single_side_compaction_double_counts_after_merge
     let right = RegionId::new(1, 3);
     let merged = RegionId::new(1, 4);
 
-    let whole = range_expr("tag_0", 0, 100).as_json_str().unwrap();
+    let whole = str_range_expr("tag_0", "0", None).as_json_str().unwrap();
     let request = CreateRequestBuilder::new()
         // Append-only: the scan returns every visible row instead of deduping the two
         // copies away. The gap is in storage either way; dedup only hides it.
@@ -210,8 +223,10 @@ async fn test_split_shared_file_single_side_compaction_double_counts_after_merge
         .set_region_role_state_gracefully(source, SettableRegionRoleState::StagingLeader)
         .await
         .unwrap();
-    let left_expr = range_expr("tag_0", 0, 50).as_json_str().unwrap();
-    let right_expr = range_expr("tag_0", 50, 100).as_json_str().unwrap();
+    let left_expr = str_range_expr("tag_0", "0", Some("1"))
+        .as_json_str()
+        .unwrap();
+    let right_expr = str_range_expr("tag_0", "1", None).as_json_str().unwrap();
     let split = engine
         .remap_manifests(RemapManifestsRequest {
             region_id: source,
@@ -251,11 +266,17 @@ async fn test_split_shared_file_single_side_compaction_double_counts_after_merge
         "both live halves must hold the same file_id after the split"
     );
 
-    let before = scan_rows_and_sum(&engine, left).await;
+    // One row per side, so this is a real check that the split domain filters rows.
+    // `build_rows(0, 2)` writes `tag_0 = "0"` (field 0.0) and `tag_0 = "1"` (field 1.0).
     assert_eq!(
-        (2, 1.0),
-        before,
-        "before any compaction each half reads the shared file's rows"
+        vec![("0".to_string(), 0.0)],
+        scan_rows(&engine, left).await,
+        "the left half must read only the row in its own domain"
+    );
+    assert_eq!(
+        vec![("1".to_string(), 1.0)],
+        scan_rows(&engine, right).await,
+        "the right half must read only the row in its own domain"
     );
 
     // ---- Step 2: one holder runs region compaction over the shared SST. ----
@@ -334,17 +355,17 @@ async fn test_split_shared_file_single_side_compaction_double_counts_after_merge
     );
 
     // ---- Step 4: a plain read of the merged region. ----
-    let (rows, sum) = scan_rows_and_sum(&engine, merged).await;
+    let expected = vec![("0".to_string(), 0.0), ("1".to_string(), 1.0)];
+    let observed = scan_rows(&engine, merged).await;
     assert_eq!(
-        (2, 1.0),
-        (rows, sum),
-        "each logical row must be visible once, but the merged region holds both the \
-         original SST and the single-side compaction's copy, so the same logical row is \
-         visible twice (original + materialized copy) and is counted twice by any read \
-         that sums all visible rows: got {} rows with sum(field_0) = {}. \
+        expected,
+        observed,
+        "each logical row must be visible exactly once, but the merged region holds both \
+         the original SST and the single-side compaction's copy, so one logical row is \
+         visible twice (original + materialized copy): got {} rows {:?}. \
          同一逻辑行在 merge 后的 region 内可见两次（原件 + 单侧 compaction 的实体副本）。",
-        rows,
-        sum
+        observed.len(),
+        observed
     );
 }
 
