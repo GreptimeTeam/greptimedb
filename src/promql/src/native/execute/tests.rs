@@ -43,11 +43,10 @@ fn is_resources_exhausted(error: &DataFusionError) -> bool {
 }
 
 use super::{
-    BinaryRuntime, Emitted, InputId, InputSlot, InstantRuntime, NativeChunk, NativeExecutionState,
+    BinaryRuntime, InputId, InputSlot, InstantRuntime, NativeChunk, NativeExecutionState,
     NativeExecutor, NodeBuffer, NodeState, PairKernel, Reader, RetainedInput, RuntimeNode,
-    RuntimeOp, SourceFacts, absorb_rebuilds, buffered_fields, buffered_time, evaluated_bytes,
-    grid_chunk_bytes, grid_end_ms, grid_position, map_chunk, map_workspace_bytes, raw_bytes,
-    vector_series_with_k,
+    RuntimeOp, SourceFacts, buffered_fields, buffered_time, evaluated_bytes, grid_chunk_bytes,
+    grid_end_ms, grid_position, map_chunk, map_workspace_bytes, raw_bytes, vector_series_with_k,
     vector_workspace_bytes,
 };
 use crate::evaluated::EvaluatedChunk;

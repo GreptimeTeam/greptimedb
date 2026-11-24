@@ -855,7 +855,6 @@ impl MemoryPool for MetricsMemoryPool {
 mod tests {
     mod factorized_join_agg_tests;
 
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use common_base::Plugins;
@@ -1331,16 +1330,18 @@ mod tests {
     /// Serialises the tests in this module that move the process-wide usage gauge, so a test that
     /// grows a pool cannot move the figure under another one's assertion.
     ///
-    /// `cargo nextest` runs every test in its own process, where nothing is shared and this guard
-    /// is a no-op; it is here for `cargo test`, which runs them as threads of one process.
-    fn gauge_guard() -> std::sync::MutexGuard<'static, ()> {
-        static GAUGE: Mutex<()> = Mutex::new(());
-        GAUGE.lock().unwrap_or_else(|poison| poison.into_inner())
+    /// `cargo nextest` runs every test in its own process, where nothing is shared; the guard is
+    /// here for `cargo test`, which runs them as threads of one process. It is a tokio mutex
+    /// because one of these tests is async and has to hold it across an await: a `std` guard there
+    /// is `clippy::await_holding_lock`, and releasing it early reopens the race it prevents.
+    fn gauge_guard() -> &'static tokio::sync::Mutex<()> {
+        static GAUGE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        &GAUGE
     }
 
     #[test]
     fn test_metrics_memory_pool_does_not_refuse_or_record_zero_bytes() {
-        let _gauge = gauge_guard();
+        let _gauge = gauge_guard().blocking_lock();
         let baseline = QUERY_MEMORY_POOL_USAGE_BYTES.get();
         let metrics_pool = Arc::new(MetricsMemoryPool::new(100, QueryMemoryPoolPolicy::Greedy));
         let pool: Arc<dyn MemoryPool> = metrics_pool.clone();
@@ -1396,7 +1397,7 @@ mod tests {
 
     #[test]
     fn test_metrics_memory_pool_moves_the_gauge_by_the_granted_delta() {
-        let _gauge = gauge_guard();
+        let _gauge = gauge_guard().blocking_lock();
         let baseline = QUERY_MEMORY_POOL_USAGE_BYTES.get();
         let metrics_pool = Arc::new(MetricsMemoryPool::new(1000, QueryMemoryPoolPolicy::Greedy));
         let pool: Arc<dyn MemoryPool> = metrics_pool.clone();
@@ -1408,14 +1409,20 @@ mod tests {
         assert_eq!(QUERY_MEMORY_POOL_USAGE_BYTES.get(), baseline + 500);
         reservation.try_shrink(100).unwrap();
         assert_eq!(QUERY_MEMORY_POOL_USAGE_BYTES.get(), baseline + 400);
-        reservation.try_shrink(400).unwrap();
+        // `try_resize` reaches the pool as a growth or a release of the difference, so the gauge
+        // follows it in both directions.
+        reservation.try_resize(700).unwrap();
+        assert_eq!(QUERY_MEMORY_POOL_USAGE_BYTES.get(), baseline + 700);
+        reservation.try_resize(150).unwrap();
+        assert_eq!(QUERY_MEMORY_POOL_USAGE_BYTES.get(), baseline + 150);
+        reservation.try_shrink(150).unwrap();
         assert_eq!(pool.reserved(), 0);
         assert_eq!(QUERY_MEMORY_POOL_USAGE_BYTES.get(), baseline);
     }
 
     #[test]
     fn test_metrics_memory_pool_gauge_survives_concurrent_reservations() {
-        let _gauge = gauge_guard();
+        let _gauge = gauge_guard().blocking_lock();
         let baseline = QUERY_MEMORY_POOL_USAGE_BYTES.get();
         let pool: Arc<dyn MemoryPool> = Arc::new(MetricsMemoryPool::new(
             1 << 20,
@@ -1447,7 +1454,7 @@ mod tests {
 
     #[test]
     fn test_metrics_memory_pool_policy_differs_with_multiple_spillable_consumers() {
-        let _gauge = gauge_guard();
+        let _gauge = gauge_guard().blocking_lock();
         for (policy, greedy) in [
             (QueryMemoryPoolPolicy::Greedy, true),
             (QueryMemoryPoolPolicy::Fair, false),
@@ -1480,7 +1487,7 @@ mod tests {
     ///   `spilled_bytes` on `SortExec` nodes.  All three must be > 0.
     #[tokio::test]
     async fn test_sort_spill_smoke_with_custom_runtime() {
-        let _gauge = gauge_guard();
+        let _gauge = gauge_guard().lock().await;
         use arrow::array::Int32Array;
         use arrow::datatypes::{DataType, Field, Schema};
         use arrow::record_batch::RecordBatch;
