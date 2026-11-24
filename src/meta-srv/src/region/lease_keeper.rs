@@ -351,13 +351,13 @@ mod tests {
         use tracing_subscriber::layer::SubscriberExt;
 
         let region_id = RegionId::new(1024, 1);
-        let log_levels = |candidate_lease_id, reported_role, table_route_exists| {
+        let log_levels = |role, candidate_lease_id, reported_role, table_route_exists| {
             let capture = LevelCapture::default();
             let subscriber = tracing_subscriber::registry().with(capture.clone());
             let operating_regions = HashMap::from([(
                 region_id,
                 OperatingRegion {
-                    role: RegionRole::Follower,
+                    role,
                     candidate_lease_id,
                 },
             )]);
@@ -373,24 +373,24 @@ mod tests {
             });
             capture.0.lock().unwrap().clone()
         };
+        let follower = RegionRole::Follower;
+        let leader = RegionRole::Leader;
 
         assert_eq!(
-            log_levels(Some(7), RegionRole::Leader, true),
+            log_levels(follower, Some(7), leader, true),
             vec![Level::DEBUG]
         );
+        assert_eq!(log_levels(follower, None, leader, true), vec![Level::INFO]);
         assert_eq!(
-            log_levels(None, RegionRole::Leader, true),
+            log_levels(follower, Some(7), leader, false),
             vec![Level::INFO]
         );
         assert_eq!(
-            log_levels(Some(7), RegionRole::Leader, false),
+            log_levels(follower, Some(7), RegionRole::DowngradingLeader, true),
             vec![Level::INFO]
         );
-        assert_eq!(
-            log_levels(Some(7), RegionRole::DowngradingLeader, true),
-            vec![Level::INFO]
-        );
-        assert!(log_levels(Some(7), RegionRole::Follower, true).is_empty());
+        assert!(log_levels(follower, Some(7), follower, true).is_empty());
+        assert!(log_levels(leader, Some(7), leader, true).is_empty());
     }
 
     #[test]
