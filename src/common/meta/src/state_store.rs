@@ -34,7 +34,7 @@ use crate::kv_backend::KvBackendRef;
 use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp};
 use crate::range_stream::PaginationStream;
 use crate::rpc::KeyValue;
-use crate::rpc::store::{BatchDeleteRequest, PutRequest, RangeRequest};
+use crate::rpc::store::{BatchDeleteRequest, BatchPutRequest, PutRequest, RangeRequest};
 
 const DELIMITER: &str = "/";
 
@@ -130,38 +130,35 @@ impl StateStore for KvStateStore {
                 Ok(())
             }
             SplitValue::Multiple(values) => {
-                // Note:
-                // The length of values can be up to usize::MAX.
-                // The KeySet::with_segment_suffix method uses a 10-digit number to store the segment number,
-                // which is large enough for the usize type.
+                let segments = values.into_iter().enumerate().map(|(idx, value)| {
+                    let segment_key = if idx == 0 {
+                        key.clone()
+                    } else {
+                        KeySet::with_segment_suffix(&key, idx)
+                    };
+                    KeyValue {
+                        key: segment_key.into_bytes(),
+                        value,
+                    }
+                });
 
-                // The first segment key: "0b00001111"
-                // The 2nd segment key: "0b00001111/0000000001"
-                // The 3rd segment key: "0b00001111/0000000002"
-                let operations = values
-                    .into_iter()
-                    .enumerate()
-                    .map(|(idx, value)| {
-                        let key = if idx > 0 {
-                            KeySet::with_segment_suffix(&key, idx)
-                        } else {
-                            key.clone()
-                        };
-                        let kv_backend = self.kv_backend.clone();
-                        async move {
-                            kv_backend
-                                .put(
-                                    PutRequest::new()
-                                        .with_key(key.into_bytes())
-                                        .with_value(value),
-                                )
-                                .await
-                        }
-                    })
-                    .collect::<Vec<_>>();
-
-                try_join_all(operations)
+                let result = if self.kv_backend.capabilities().atomic_batch_put {
+                    self.kv_backend
+                        .batch_put(BatchPutRequest {
+                            kvs: segments.collect(),
+                            prev_kv: false,
+                        })
+                        .await
+                        .map(|_| ())
+                } else {
+                    try_join_all(segments.map(|kv| {
+                        self.kv_backend
+                            .put(PutRequest::new().with_key(kv.key).with_value(kv.value))
+                    }))
                     .await
+                    .map(|_| ())
+                };
+                result
                     .map_err(BoxedError::new)
                     .context(PutStateSnafu { key })?;
 
@@ -394,6 +391,51 @@ mod tests {
     use crate::kv_backend::chroot::ChrootKvBackend;
     use crate::kv_backend::etcd::EtcdStore;
     use crate::kv_backend::memory::MemoryKvBackend;
+
+    #[tokio::test]
+    async fn test_atomic_segmented_put() {
+        use crate::kv_backend::KvBackendCapabilities;
+        use crate::kv_backend::test_util::MockKvBackendBuilder;
+
+        let backend = MockKvBackendBuilder::default()
+            .capabilities(KvBackendCapabilities {
+                atomic_batch_put: true,
+            })
+            .put_fn(Arc::new(|req| {
+                assert_eq!(req.key, b"root/__procedure__/step");
+                assert_eq!(req.value, b"ab");
+                Ok(Default::default())
+            }))
+            .batch_put_fn(Arc::new(|req| {
+                assert!(!req.prev_kv);
+                let keys = req
+                    .kvs
+                    .into_iter()
+                    .map(|kv| (kv.key, kv.value))
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    keys,
+                    [
+                        (b"root/__procedure__/step".to_vec(), b"ab".to_vec()),
+                        (
+                            b"root/__procedure__/step/0000000001".to_vec(),
+                            b"cd".to_vec()
+                        ),
+                        (
+                            b"root/__procedure__/step/0000000002".to_vec(),
+                            b"e".to_vec()
+                        ),
+                    ]
+                );
+                Ok(Default::default())
+            }))
+            .build()
+            .unwrap();
+        let backend = ChrootKvBackend::new(b"root".to_vec(), Arc::new(backend));
+        let store = KvStateStore::new(Arc::new(backend)).with_max_value_size(Some(2));
+        store.put("step", b"ab".to_vec()).await.unwrap();
+        store.put("step", b"abcde".to_vec()).await.unwrap();
+    }
 
     #[tokio::test]
     async fn test_meta_state_store() {

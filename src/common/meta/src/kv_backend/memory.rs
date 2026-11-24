@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 
 use crate::kv_backend::txn::{Txn, TxnOp, TxnOpResponse, TxnRequest, TxnResponse};
-use crate::kv_backend::{KvBackend, KvBackendRef, ResettableKvBackend, TxnService};
+use crate::kv_backend::{KvBackend, KvBackendRef, ResettableKvBackend, TxnCapability, TxnService};
 use crate::metrics::METRIC_META_TXN_REQUEST;
 use crate::rpc::KeyValue;
 use crate::rpc::store::{
@@ -286,8 +286,10 @@ impl<T: ErrorExt + Send + Sync> TxnService for MemoryKvBackend<T> {
         })
     }
 
-    fn max_txn_ops(&self) -> usize {
-        usize::MAX
+    fn txn_capability(&self) -> Option<TxnCapability> {
+        Some(TxnCapability {
+            max_ops: usize::MAX,
+        })
     }
 }
 

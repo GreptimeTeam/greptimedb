@@ -1528,6 +1528,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_pg_segmented_checkpoint() {
+        maybe_skip_postgres_integration_test!();
+        let table = format!("checkpoint_{}", uuid::Uuid::new_v4().simple());
+        let backend = build_pg_kv_backend(&table).await.unwrap();
+        let reader = build_pg_kv_backend(&table).await.unwrap();
+        let client = backend.executor_factory.pool.get().await.unwrap();
+        client
+            .batch_execute(&format!(
+                "ALTER TABLE {table} ADD CHECK (v <> convert_to('fail', 'UTF8'))"
+            ))
+            .await
+            .unwrap();
+        crate::kv_backend::test::check_segmented_checkpoint(Arc::new(backend), Arc::new(reader))
+            .await;
+        client
+            .batch_execute(&format!("DROP TABLE {table}"))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn test_pg_later_write_chunk_failure_rolls_back() {
         maybe_skip_postgres_integration_test!();
         let backend = build_pg_kv_backend("write_chunk_rollback").await.unwrap();

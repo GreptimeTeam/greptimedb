@@ -907,10 +907,10 @@ impl TableMetadataManager {
         Ok(())
     }
 
-    pub fn create_logical_tables_metadata_chunk_size(&self) -> usize {
+    pub fn create_logical_tables_metadata_chunk_size(&self) -> Result<usize> {
         // The batch size is max_txn_size / 3 because the size of the `tables_data`
         // is 3 times the size of the `tables_data`.
-        self.kv_backend.max_txn_ops() / 3
+        Ok(self.max_txn_ops()? / 3)
     }
 
     /// Creates metadata for multiple logical tables and return an error if different metadata exists.
@@ -1338,7 +1338,10 @@ impl TableMetadataManager {
         &self,
         tables: &[(TableId, TableName)],
     ) -> Result<()> {
-        let max_ops = self.kv_backend.max_txn_ops().max(1);
+        let max_ops = self
+            .kv_backend
+            .txn_capability()
+            .map_or(1, |txn| txn.max_ops.max(1));
         let tables_per_request = (max_ops / Self::TABLE_IDENTITY_KEYS).max(1);
         // Keep a table's keys together whenever they fit in one backend request. A backend
         // limit smaller than a single table still requires splitting, as with single-table drop.
@@ -1677,8 +1680,12 @@ impl TableMetadataManager {
         Ok(())
     }
 
-    pub fn batch_update_table_info_value_chunk_size(&self) -> usize {
-        self.kv_backend.max_txn_ops()
+    pub fn max_txn_ops(&self) -> Result<usize> {
+        Ok(self
+            .kv_backend
+            .txn_capability()
+            .context(error::UnsupportedSnafu { operation: "txn" })?
+            .max_ops)
     }
 
     pub async fn batch_update_table_info_values(
@@ -3415,6 +3422,7 @@ mod tests {
         let range_calls = Arc::new(AtomicUsize::new(0));
         let batch_get_calls = Arc::new(AtomicUsize::new(0));
         let mock = MockKvBackend {
+            capabilities: Default::default(),
             range_fn: Some({
                 let all_tombstones = all_tombstones.clone();
                 let range_calls = range_calls.clone();

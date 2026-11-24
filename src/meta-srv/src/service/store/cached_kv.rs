@@ -22,7 +22,8 @@ use common_meta::key::CACHE_KEY_PREFIXES;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::txn::{Txn, TxnOp, TxnRequest, TxnResponse};
 use common_meta::kv_backend::{
-    KvBackend, KvBackendRef, ResettableKvBackend, ResettableKvBackendRef, TxnService,
+    KvBackend, KvBackendCapabilities, KvBackendRef, ResettableKvBackend, ResettableKvBackendRef,
+    TxnCapability, TxnService,
 };
 use common_meta::range_stream::{DEFAULT_PAGE_SIZE, PaginationStream};
 use common_meta::rpc::KeyValue;
@@ -166,6 +167,10 @@ impl LeaderCachedKvBackend {
 
 #[async_trait::async_trait]
 impl KvBackend for LeaderCachedKvBackend {
+    fn capabilities(&self) -> KvBackendCapabilities {
+        self.store.capabilities()
+    }
+
     fn name(&self) -> &str {
         &self.name
     }
@@ -376,8 +381,8 @@ impl TxnService for LeaderCachedKvBackend {
         Ok(res)
     }
 
-    fn max_txn_ops(&self) -> usize {
-        self.store.max_txn_ops()
+    fn txn_capability(&self) -> Option<TxnCapability> {
+        self.store.txn_capability()
     }
 }
 
@@ -463,8 +468,8 @@ mod tests {
             res
         }
 
-        fn max_txn_ops(&self) -> usize {
-            self.inner.max_txn_ops()
+        fn txn_capability(&self) -> Option<TxnCapability> {
+            self.inner.txn_capability()
         }
     }
 

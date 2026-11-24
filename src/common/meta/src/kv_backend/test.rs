@@ -23,6 +23,54 @@ use crate::rpc::KeyValue;
 use crate::rpc::store::{BatchGetRequest, PutRequest};
 use crate::util;
 
+/// Exercises the procedure path against a table configured to reject the value "fail".
+#[cfg(all(test, any(feature = "pg_kvbackend", feature = "mysql_kvbackend")))]
+pub(crate) async fn check_segmented_checkpoint(writer: KvBackendRef, reader: KvBackendRef) {
+    use common_procedure::store::state_store::StateStore;
+    use futures::TryStreamExt;
+
+    use crate::state_store::KvStateStore;
+
+    let store = KvStateStore::new(writer.clone()).with_max_value_size(Some(4));
+    assert!(store.put("step", b"11112222fail".to_vec()).await.is_err());
+    let req = RangeRequest::new().with_prefix(b"/__procedure__/step".to_vec());
+    assert!(reader.range(req.clone()).await.unwrap().kvs.is_empty());
+
+    store.put("step", b"aaaabbbbcccc".to_vec()).await.unwrap();
+    let original = reader.range(req.clone()).await.unwrap().kvs;
+    assert_eq!(original.len(), 3);
+    assert!(store.put("step", b"11112222fail".to_vec()).await.is_err());
+    assert_eq!(reader.range(req).await.unwrap().kvs, original);
+    store.put("step", b"111122223333".to_vec()).await.unwrap();
+
+    let read_store = KvStateStore::new(reader);
+    let checkpoints: Vec<_> = read_store
+        .walk_top_down("step")
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(checkpoints.len(), 1);
+    assert_eq!(checkpoints[0].1, b"111122223333");
+
+    let large = vec![42; 2 * 1024 * 1024 + 1];
+    KvStateStore::new(writer)
+        .with_max_value_size(Some(1024 * 1024))
+        .put("large", large.clone())
+        .await
+        .unwrap();
+    let checkpoints: Vec<_> = read_store
+        .walk_top_down("large")
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(checkpoints.len(), 1);
+    assert_eq!(checkpoints[0].1, large);
+}
+
 pub fn mock_kvs(prefix: Vec<u8>) -> Vec<KeyValue> {
     vec![
         KeyValue {

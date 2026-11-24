@@ -23,7 +23,7 @@ use common_config::KvBackendConfig;
 use common_error::ext::BoxedError;
 use common_meta::error as meta_error;
 use common_meta::kv_backend::txn::{Txn, TxnOp, TxnOpResponse, TxnRequest, TxnResponse};
-use common_meta::kv_backend::{ClosableKvBackend, KvBackend, TxnService};
+use common_meta::kv_backend::{ClosableKvBackend, KvBackend, TxnCapability, TxnService};
 use common_meta::rpc::KeyValue;
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
@@ -208,8 +208,10 @@ impl TxnService for RaftEngineBackend {
         })
     }
 
-    fn max_txn_ops(&self) -> usize {
-        usize::MAX
+    fn txn_capability(&self) -> Option<TxnCapability> {
+        Some(TxnCapability {
+            max_ops: usize::MAX,
+        })
     }
 }
 

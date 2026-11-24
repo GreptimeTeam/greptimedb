@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;
-pub use txn::TxnService;
+pub use txn::{TxnCapability, TxnService};
 
 use crate::error::Error;
 use crate::kv_backend::txn::{Txn, TxnOpResponse};
@@ -63,11 +63,22 @@ pub const DEFAULT_META_TABLE_NAME: &str = "greptime_metakv";
 // The default lock id for election, default is 1.
 pub const DEFAULT_META_ELECTION_LOCK_ID: u64 = 1;
 
+/// Guarantees provided by a key-value backend.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct KvBackendCapabilities {
+    /// All writes in one batch_put commit atomically, even across SQL statements.
+    pub atomic_batch_put: bool,
+}
+
 #[async_trait]
 pub trait KvBackend: TxnService
 where
     Self::Error: ErrorExt,
 {
+    fn capabilities(&self) -> KvBackendCapabilities {
+        KvBackendCapabilities::default()
+    }
+
     fn name(&self) -> &str;
 
     fn as_any(&self) -> &dyn Any;
