@@ -1,0 +1,23 @@
+src/common/procedure/src/error.rs
+  s_17057bba187655::t_46b79b219b8c68 214-219,285
+src/common/procedure/src/store.rs
+  s_17057bba187655::t_3eb277424f9901 19,23,206-214,219,222,245,249-258,278-279,775-852
+src/common/procedure/src/store/util.rs
+  s_17057bba187655::t_f9e4013c07c7ad 17-18,28-33,36-41,43-60,62-65,67,82-90,101,103-110,113,120,127,185-200
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9b8e793ebdbf3f6a0efe2dd88c684dc4df64eee2",
+  "prompts": {},
+  "sessions": {
+    "s_17057bba187655": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c56d-fbcd-75c2-86d2-c4b3f17c03dc",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
