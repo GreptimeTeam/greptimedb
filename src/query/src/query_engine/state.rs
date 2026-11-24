@@ -56,8 +56,8 @@ use table::table::adapter::DfTableProviderAdapter;
 
 use crate::QueryEngineContext;
 use crate::dist_plan::{
-    DistExtensionPlanner, DistJoinPlanner, DistPlannerAnalyzer, DistPlannerOptions,
-    DynFilterRegistryManager, MergeSortExtensionPlanner, RemoteDynFilterReceiverExtensionPlanner,
+    DistExtensionPlanner, DistPlannerAnalyzer, DistPlannerOptions, DynFilterRegistryManager,
+    MergeSortExtensionPlanner, RemoteDynFilterReceiverExtensionPlanner,
     RemoteDynFilterRegistryLease,
 };
 use crate::error::InvalidQueryContextExtensionSnafu;
@@ -242,7 +242,6 @@ impl QueryEngineState {
                 .push(Arc::new(DistPlannerAnalyzer::default()));
             // Runs after `DistPlannerAnalyzer`, which wraps the remote scans in
             // `MergeScan`: the nested broadcast join shape is only visible then.
-            analyzer.rules.push(Arc::new(DistJoinPlanner));
             analyzer.rules.push(Arc::new(JsonSchemaConcretizeRule));
         }
         analyzer.rules.push(Arc::new(FixStateUdafOrderingAnalyzer));

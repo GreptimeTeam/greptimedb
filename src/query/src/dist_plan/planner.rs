@@ -49,7 +49,7 @@ use table::table_name::TableName;
 
 use crate::dist_plan::MaterializedBroadcastNode;
 use crate::dist_plan::PredicateExtractor;
-use crate::dist_plan::dist_join_planner::{expected_region_ids, nested_broadcast_join_probe_input};
+use crate::dist_plan::dist_join_planner::expected_region_ids;
 use crate::dist_plan::merge_scan::{MergeScanExec, MergeScanLogicalPlan};
 use crate::dist_plan::merge_sort::{MergeSortExec, MergeSortLogicalPlan};
 use crate::dist_plan::region_pruner::ConstraintPruner;
@@ -249,11 +249,7 @@ impl ExtensionPlanner for DistExtensionPlanner {
         let optimized_plan = input_plan;
         let direct_raw = matches!(input_plan, LogicalPlan::Extension(extension)
             if extension.node.as_any().is::<promql::extension_plan::RawSeriesSource>());
-        // Region pruning clears the collected predicates at a node with several inputs,
-        // so the payload of a nested broadcast join would be routed by the join itself
-        // and read every probe region. The local probe input keeps the probe predicate
-        // pruning; the full payload is still dispatched to the selected regions.
-        let routing_plan = nested_broadcast_join_probe_input(input_plan).unwrap_or(input_plan);
+        let routing_plan = input_plan;
         let Some(table_name) = Self::extract_full_table_name(routing_plan)? else {
             if direct_raw {
                 return Err(DataFusionError::Plan(
@@ -824,9 +820,7 @@ mod tests {
     use common_query::request::QueryRequest;
     use common_recordbatch::SendableRecordBatchStream;
     use datafusion::datasource::DefaultTableSource;
-    use datafusion_expr::{
-        JoinType, LogicalPlan, LogicalPlanBuilder, Projection, col as df_col, lit,
-    };
+    use datafusion_expr::{LogicalPlan, LogicalPlanBuilder, col as df_col, lit};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::value::Value;
@@ -842,11 +836,7 @@ mod tests {
     use table::table_name::TableName;
     use table::test_util::EmptyTable;
 
-    use super::{
-        DistExtensionPlanner, aggregate_region_rows, nested_broadcast_join_probe_input,
-        physical_regions_disjoint,
-    };
-    use crate::dist_plan::merge_scan::MergeScanLogicalPlan;
+    use super::{DistExtensionPlanner, aggregate_region_rows, physical_regions_disjoint};
     use crate::region_query::{RegionQueryHandler, RegionQueryTarget};
 
     const LOGICAL_TABLE_ID: u32 = 1024;
@@ -1072,79 +1062,6 @@ mod tests {
 
         let (regions, _) = planner.get_regions(&table_name, &plan).await.unwrap();
         assert_eq!(vec![RegionId::new(LOGICAL_TABLE_ID, 1)], regions);
-    }
-
-    /// Region pruning clears the collected predicates at a node with several inputs, so a
-    /// nested broadcast join must be routed by its local large-side input: its predicate
-    /// prunes the large-table regions, while routing by the whole payload scans all regions.
-    #[tokio::test]
-    async fn nested_broadcast_join_routes_by_large_input() {
-        let (planner, large_plan, table_name) =
-            planner_and_plan(vec![0, 1], physical_partition_expressions()).await;
-        // The small build side can use the same table under another qualifier; only the
-        // large-side predicate must decide which regions are selected.
-        let build_plan =
-            MergeScanLogicalPlan::new(build_side_plan(&large_plan), false).into_logical_plan();
-        let join_plan = LogicalPlanBuilder::from(build_plan)
-            .join(
-                large_plan.clone(),
-                JoinType::Inner,
-                (vec!["host"], vec!["host"]),
-                None,
-            )
-            .unwrap()
-            .build()
-            .unwrap();
-        assert!(
-            planner
-                .ordinary_scan_row_estimate(&join_plan, &[RegionId::new(LOGICAL_TABLE_ID, 1)])
-                .await
-                .is_none(),
-            "a join payload must not inherit a base table's row count"
-        );
-
-        // The whole payload clears the large-side predicate at the join and reads all regions.
-        let (all_regions, _) = planner.get_regions(&table_name, &join_plan).await.unwrap();
-        assert_all_logical_regions(all_regions);
-
-        // The local large input keeps its predicate pruning: one of three regions.
-        let routing_plan = nested_broadcast_join_probe_input(&join_plan)
-            .expect("the supported nested shape must route by its large-side input");
-        assert_eq!(large_plan.to_string(), routing_plan.to_string());
-        assert_eq!(
-            vec![RegionId::new(LOGICAL_TABLE_ID, 1)],
-            planner
-                .get_regions(&table_name, routing_plan)
-                .await
-                .unwrap()
-                .0
-        );
-
-        let mut full_payload = join_plan.clone();
-        for _ in 0..4 {
-            let schema = full_payload.schema().clone();
-            full_payload = LogicalPlan::Projection(Projection::new_from_schema(
-                Arc::new(full_payload),
-                schema,
-            ));
-        }
-        assert!(
-            planner
-                .ordinary_scan_row_estimate(&full_payload, &[RegionId::new(LOGICAL_TABLE_ID, 1)],)
-                .await
-                .is_none(),
-            "a join under projection wrappers is not an ordinary scan"
-        );
-        let large_input = nested_broadcast_join_probe_input(&full_payload)
-            .expect("projection-wrapped join should retain its large-side routing input");
-        assert_eq!(
-            vec![RegionId::new(LOGICAL_TABLE_ID, 1)],
-            planner
-                .get_regions(&table_name, large_input)
-                .await
-                .unwrap()
-                .0
-        );
     }
 
     /// Scans the table of `plan` under the qualifier `build` with the same probe predicate,

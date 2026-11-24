@@ -31,12 +31,11 @@ pub use analyzer::{DistPlannerAnalyzer, DistPlannerOptions};
 pub(crate) use commutativity::region_local_node;
 #[cfg(test)]
 pub(crate) use commutativity::{Categorizer, Commutativity};
-pub use dist_join_planner::DistJoinPlanner;
 #[cfg(test)]
 pub(crate) use dist_join_planner::DistJoinTableStats;
 pub(crate) use dist_join_planner::{
-    DIST_JOIN_PLANNER_RULE_NAME, DistJoinStats, aggregate_region_stats, candidate_joins,
-    expected_region_ids, restore_join_schema, side_base_table_id,
+    DistJoinStats, aggregate_region_stats, candidate_joins, expected_region_ids,
+    restore_join_schema, side_base_table_id,
 };
 pub use filter_id::{FilterFingerprint, FilterId, ParseFilterIdError, RemoteDynFilterProducerId};
 pub(crate) use materialized_broadcast::MaterializedBroadcastNode;

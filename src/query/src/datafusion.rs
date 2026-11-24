@@ -59,9 +59,9 @@ use tracing::Span;
 use crate::analyze::DistAnalyzeExec;
 pub use crate::datafusion::planner::DfContextProviderAdapter;
 use crate::dist_plan::{
-    DIST_JOIN_PLANNER_RULE_NAME, DistJoinStats, MaterializedBroadcastExecution,
-    MergeScanLogicalPlan, RemoteDynFilterReceiverInjectorRef, aggregate_region_stats,
-    candidate_joins, expected_region_ids,
+    DistJoinStats, MaterializedBroadcastExecution, MergeScanLogicalPlan,
+    RemoteDynFilterReceiverInjectorRef, aggregate_region_stats, candidate_joins,
+    expected_region_ids,
 };
 use crate::error::{
     CatalogSnafu, CreateRecordBatchSnafu, MissingTableMutationHandlerSnafu,
@@ -420,15 +420,6 @@ impl DatafusionQueryEngine {
             return None;
         }
 
-        let state = ctx.state();
-        if !state
-            .analyzer()
-            .rules
-            .iter()
-            .any(|rule| rule.name() == DIST_JOIN_PLANNER_RULE_NAME)
-        {
-            return None;
-        }
         let candidates = candidate_joins(logical_plan);
         if candidates.is_empty() {
             return None;
@@ -486,7 +477,6 @@ impl DatafusionQueryEngine {
         };
 
         let mut stats = DistJoinStats {
-            prefer_materialized_broadcast: true,
             ..Default::default()
         };
         for (table_id, regions) in routes {
@@ -2660,19 +2650,6 @@ mod tests {
         let plan = dist_join_test_plan();
         let ctx = query_engine
             .engine_context(dist_join_query_ctx(false))
-            .unwrap();
-        assert!(query_engine.dist_join_stats(&ctx, &plan).await.is_none());
-        assert_eq!(0, calls.load(Ordering::SeqCst));
-
-        // Without the distributed rules.
-        let calls = Arc::new(AtomicUsize::new(0));
-        let engine = dist_join_engine(dist_join_reports(), calls.clone(), false).await;
-        let query_engine = engine
-            .as_any()
-            .downcast_ref::<DatafusionQueryEngine>()
-            .unwrap();
-        let ctx = query_engine
-            .engine_context(dist_join_query_ctx(true))
             .unwrap();
         assert!(query_engine.dist_join_stats(&ctx, &plan).await.is_none());
         assert_eq!(0, calls.load(Ordering::SeqCst));
