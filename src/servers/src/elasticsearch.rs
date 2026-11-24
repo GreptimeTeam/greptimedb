@@ -494,11 +494,11 @@ mod tests {
     }
 
     impl MockPipelineHandler {
-        fn new(insert_failure: Option<&str>) -> PipelineHandlerRef {
-            Arc::new(Self {
+        fn new(insert_failure: Option<&str>) -> Self {
+            Self {
                 options: PipelineOptions::default(),
                 insert_failure: insert_failure.map(|reason| reason.to_string()),
-            })
+            }
         }
     }
 
@@ -625,7 +625,9 @@ mod tests {
     async fn test_bulk_insert_failure_is_reported() {
         let payload = "{\"create\":{\"_index\":\"test\",\"_id\":\"1\"}}\n{\"age\":\"adult\"}";
         let (status, body) = bulk_request(
-            MockPipelineHandler::new(Some("column age expect type Int64, given: STRING")),
+            Arc::new(MockPipelineHandler::new(Some(
+                "column age expect type Int64, given: STRING",
+            ))),
             payload,
         )
         .await;
@@ -645,7 +647,7 @@ mod tests {
     #[tokio::test]
     async fn test_bulk_insert_success_is_unchanged() {
         let payload = "{\"create\":{\"_index\":\"test\",\"_id\":\"1\"}}\n{\"age\":30}\n{\"create\":{\"_index\":\"test\",\"_id\":\"2\"}}\n{\"age\":31}";
-        let (status, body) = bulk_request(MockPipelineHandler::new(None), payload).await;
+        let (status, body) = bulk_request(Arc::new(MockPipelineHandler::new(None)), payload).await;
 
         assert_eq!(StatusCode::OK, status);
         assert_eq!(Some(false), body["errors"].as_bool());
