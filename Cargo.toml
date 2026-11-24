@@ -278,7 +278,7 @@ tokio-rustls = { version = "0.26.2", default-features = false }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["io-util", "compat"] }
 toml = "0.8.8"
-url = "2.3"
+url = "2.5.9"
 # Pin below 0.14.5 to avoid the `connection_timeout_future` "async fn resumed after
 # completion" panic (greptimedb#8265 / grpc-rust#2522). Remove once tonic ships a fix.
 tonic = { version = "0.14, <0.14.5", features = ["tls-aws-lc", "gzip", "zstd"] }
