@@ -102,6 +102,8 @@ mod remap_manifests_test;
 mod repartition_dup_row_test;
 #[cfg(test)]
 mod repartition_mbt_test;
+#[cfg(test)]
+mod repartition_merge_matrix_test;
 
 #[cfg(test)]
 mod apply_staging_manifest_test;
