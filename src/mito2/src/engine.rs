@@ -1454,10 +1454,10 @@ impl EngineInner {
 
     /// Tells the worker that a role change outside it made `region` a writable leader from the
     /// state `replaced`, so it replays the pending tails and runs the work due once the region is
-    /// a writable leader with its Leader lease. The worker may already have started an ALTER or an edit of
-    /// the region. Only a change that replaced a state that cannot replay tails (a staging,
-    /// downgrading or follower region) sends it, so the Leader lease a writable leader receives
-    /// with every heartbeat, which changes no state, sends none.
+    /// a writable leader with its Leader lease. The worker may already have started an ALTER or
+    /// an edit of the region. Only a change that replaced a state that cannot replay tails (a
+    /// staging, downgrading or follower region) sends it, so the Leader lease a writable leader
+    /// receives with every heartbeat, which changes no state, sends none.
     fn notify_if_became_writable(&self, region: &MitoRegionRef, replaced: Option<RegionRoleState>) {
         if replaced.is_some_and(|state| !state.can_replay_tails()) && region.can_replay_tails() {
             self.workers.notify_writable(region);
