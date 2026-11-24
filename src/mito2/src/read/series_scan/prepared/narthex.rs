@@ -94,21 +94,37 @@ pub(crate) async fn open_sources(
         let FileFormat::NarthexSeriesIndex(index) = &file.meta_ref().format else {
             continue;
         };
-        // Never borrow candidates from an index whose source coverage is outside this
-        // snapshot. Uncovered samples remain prepared through metadata discovery.
-        if !index.sources.iter().all(|source| {
-            context
-                .input
-                .files
+        let region = context.input.region_metadata().region_id;
+        let selected: Vec<_> = if let Some(proof) = &index.coverage {
+            if proof.region_id != region
+                || proof.truncated_entry_id != context.input.truncated_entry_id
+            {
+                continue;
+            }
+            indices
                 .iter()
-                .any(|file| file.file_id() == *source)
-        }) || !indices
-            .iter()
-            .any(|i| index.sources.contains(&context.input.files[*i].file_id()))
-        {
+                .map(|i| &context.input.files[*i])
+                .filter(|sample| proof.covers(sample.meta_ref()))
+                .map(|sample| sample.file_id())
+                .collect()
+        } else {
+            if !index
+                .sources
+                .iter()
+                .all(|id| context.input.files.iter().any(|f| f.file_id() == *id))
+            {
+                continue;
+            }
+            indices
+                .iter()
+                .map(|i| context.input.files[*i].file_id())
+                .filter(|id| index.sources.contains(id))
+                .collect()
+        };
+        if selected.is_empty() {
             continue;
         }
-        let reader = crate::series_index::columnar::reader::ColumnarReader::open_cached(
+        let reader = match crate::series_index::columnar::reader::ColumnarReader::open_cached(
             context.input.access_layer.object_store().clone(),
             crate::series_index::SeriesIndexFileHandle::from_narthex(
                 file.clone(),
@@ -122,7 +138,12 @@ pub(crate) async fn open_sources(
                 .cache_strategy
                 .columnar_metadata(file.meta_ref().file_id),
         )
-        .await?;
+        .await
+        {
+            Ok(reader) => reader,
+            Err(error) if error.is_object_not_found() => continue,
+            Err(error) => return Err(error),
+        };
         // Indexes built before a schema extension need sample-key discovery until
         // they can supply the current tag schema, including newly nullable tags.
         if crate::series_index::format::validate_series_schema(
@@ -133,7 +154,7 @@ pub(crate) async fn open_sources(
         {
             continue;
         }
-        covered.extend(index.sources.iter().copied());
+        covered.extend(selected);
         series.push(Box::new(reader));
     }
     for i in indices {

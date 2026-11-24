@@ -198,6 +198,7 @@ pub(crate) async fn write_series(
             manifest_size: 0,
             parts: Default::default(),
             sources: sources.iter().map(|file| file.file_id()).collect(),
+            coverage: None,
         })),
         ..Default::default()
     };

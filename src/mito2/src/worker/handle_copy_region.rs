@@ -328,6 +328,11 @@ impl<S> RegionWorkerLoop<S> {
             .collect();
         let mut new_series_indexes = Vec::new();
         for (id, index) in &source_region_manifest.series_indexes {
+            if matches!(&index.format, file::FileFormat::NarthexSeriesIndex(meta) if meta.coverage.is_some())
+            {
+                // Destination imports have their own admission sequences.
+                continue;
+            }
             if target_region_manifest.series_indexes.contains_key(id) {
                 continue;
             }

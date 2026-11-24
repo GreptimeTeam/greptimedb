@@ -275,6 +275,45 @@ pub struct NarthexSamplesMeta {
     pub parts: SmallVec<[NarthexPartMeta; 1]>,
 }
 
+/// A closed durable sequence boundary for one half-open time window.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CertifiedWindow {
+    pub start: Timestamp,
+    pub end: Timestamp,
+    pub frontier: u64,
+}
+
+/// Logical coverage in the sequence domain of a pinned region version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NarthexCoverage {
+    pub region_id: RegionId,
+    pub truncated_entry_id: Option<crate::wal::EntryId>,
+    /// Windows in ascending start order. Gaps are allowed.
+    pub windows: Vec<CertifiedWindow>,
+}
+
+impl NarthexCoverage {
+    pub(crate) fn covers(&self, file: &FileMeta) -> bool {
+        let Some(sequence) = file.sequence else {
+            return false;
+        };
+        let (mut cursor, last) = file.time_range;
+        for window in &self.windows {
+            if window.start > cursor {
+                return false;
+            }
+            if window.frontier >= sequence.get() && cursor < window.end {
+                // File bounds are inclusive, while window ends are exclusive.
+                if last < window.end {
+                    return true;
+                }
+                cursor = window.end;
+            }
+        }
+        false
+    }
+}
+
 /// Immutable narthex series index. Coverage identifies samples; it does not own them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NarthexSeriesIndexMeta {
@@ -287,6 +326,8 @@ pub struct NarthexSeriesIndexMeta {
     /// policies depend on how production series files will be organized and
     /// maintained across compaction.
     pub sources: Vec<RegionFileId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<NarthexCoverage>,
 }
 
 /// Metadata of a SST file.
@@ -1434,6 +1475,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn spanning_file_requires_contiguous_sufficient_frontiers() {
+        let ts = Timestamp::new_millisecond;
+        let window = |start, end, frontier| CertifiedWindow {
+            start: ts(start),
+            end: ts(end),
+            frontier,
+        };
+        let mut coverage = NarthexCoverage {
+            region_id: RegionId::new(1, 0),
+            truncated_entry_id: None,
+            windows: vec![window(0, 10, 100), window(10, 20, 80)],
+        };
+        let mut file = FileMeta {
+            time_range: (ts(5), ts(10)),
+            sequence: NonZeroU64::new(90),
+            ..Default::default()
+        };
+        assert!(!coverage.covers(&file));
+        file.sequence = NonZeroU64::new(80);
+        assert!(coverage.covers(&file));
+        coverage.windows[1].start = ts(11);
+        assert!(!coverage.covers(&file));
+    }
+
+    #[test]
     fn test_narthex_part_paths_follow_inventory_order() {
         let samples = FileFormat::NarthexSamples(Box::new(NarthexSamplesMeta {
             manifest_size: 5,
@@ -1444,6 +1510,7 @@ mod tests {
         }));
         let series = FileFormat::NarthexSeriesIndex(Box::new(NarthexSeriesIndexMeta {
             sources: vec![],
+            coverage: None,
             manifest_size: 5,
             parts: smallvec::smallvec![
                 NarthexPartMeta { file_size: 11 },

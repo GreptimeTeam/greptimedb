@@ -1283,6 +1283,7 @@ async fn test_region_storage_format_admission(
             manifest_size: 1,
             parts: Default::default(),
             sources: Vec::new(),
+            coverage: None,
         }))
     };
     let error = engine

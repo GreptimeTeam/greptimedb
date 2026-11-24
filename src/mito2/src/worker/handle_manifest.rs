@@ -117,6 +117,8 @@ impl RegionEditQueue {
             // be noticed for editing region.
             edit.files_to_add.iter().all(|f| f.sequence.is_none())
                 && edit.files_to_remove.is_empty()
+                && edit.series_indexes_to_add.is_empty()
+                && edit.series_indexes_to_remove.is_empty()
                 && edit.timestamp_ms.is_none()
                 && edit.compaction_time_window.is_none()
                 && edit.flushed_entry_id.is_none()
