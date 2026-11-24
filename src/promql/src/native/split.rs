@@ -229,6 +229,10 @@ pub(crate) fn split(
             op: BoundVectorOp::TopK { .. },
             ..
         } => Err(declined("a whole-vector operation above a split aggregate")),
+        // A per-point `φ` does not make the fold splittable: `check_cut` declines every `quantile`,
+        // whose state is its group's samples however its argument is read. A `ParameterizedAggregate`
+        // is only ever that fold, so there is nothing here to admit.
+        NativeExpr::ParameterizedAggregate { .. } => Err(declined("a `quantile` aggregate")),
         // A canonical merge answers one series per canonical label set from every piece of that set,
         // and the pieces of one set are not in one partition: a label rewrite created them after the
         // scan split the rows. A split keeps that merge in the prefix, where it sees one partition's

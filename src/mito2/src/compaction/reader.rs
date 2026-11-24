@@ -52,6 +52,7 @@ pub(crate) struct CompactionSstReaderBuilder<'a> {
     pub(crate) cache: CacheManagerRef,
     pub(crate) inputs: &'a [FileHandle],
     pub(crate) append_mode: bool,
+    pub(crate) narthex_format: bool,
     pub(crate) filter_deleted: bool,
     pub(crate) time_range: Option<TimestampRange>,
     pub(crate) merge_mode: MergeMode,
@@ -151,6 +152,7 @@ impl CompactionSstReaderBuilder<'_> {
             .with_json2_rewrite_targets(targets)
             .with_files(self.inputs.to_vec())
             .with_compaction(true)
+            .with_narthex_format(self.narthex_format)
             .with_compaction_read_parallelism(self.read_parallelism)
             .with_batch_size(batch_size)
             .with_append_mode(self.append_mode)
@@ -161,6 +163,13 @@ impl CompactionSstReaderBuilder<'_> {
             .with_ignore_file_not_found(true)
             .with_merge_mode(self.merge_mode);
 
+        // Narthex prepared reads take sample time bounds from ScanInput::time_range;
+        // setting only the predicate below does not populate those bounds. Pass the
+        // half-open compaction window explicitly so an SST spanning multiple windows
+        // contributes only rows belonging to this output window.
+        if self.narthex_format {
+            scan_input = scan_input.with_time_range(self.time_range);
+        }
         // This serves as a workaround of https://github.com/GreptimeTeam/greptimedb/issues/3944
         // by converting time ranges into predicate.
         if let Some(time_range) = self.time_range {
@@ -173,6 +182,9 @@ impl CompactionSstReaderBuilder<'_> {
 
     /// Reads the footers of all inputs concurrently, keeping the input order.
     async fn collect_parquet_metadata(&self) -> Result<Vec<Arc<ParquetMetaData>>> {
+        if self.narthex_format {
+            return Ok(Vec::new());
+        }
         let reads: Vec<_> = self
             .inputs
             .iter()
@@ -351,6 +363,7 @@ mod tests {
             time_range: None,
             merge_mode: MergeMode::LastRow,
             read_parallelism: 1,
+            narthex_format: false,
         }
         .build_flat_sst_reader()
         .await
@@ -441,6 +454,7 @@ mod tests {
             time_range: None,
             merge_mode: MergeMode::LastRow,
             read_parallelism: 1,
+            narthex_format: false,
         }
         .build_flat_sst_reader_and_row_group_size(102_400)
         .await

@@ -101,9 +101,18 @@ enum Fold {
 /// would have. Nothing here is grouped: the kernel groups, and it groups the same way for a chunk as
 /// for a series of its own.
 struct QuantileInput {
-    /// The φ the query wrote. The kernel reads it as Prometheus does, so a value outside `[0, 1]`
-    /// answers `-Infinity` or `+Infinity` rather than being refused here.
-    quantile: f64,
+    /// The φ the query wrote, when the query wrote it: a fold that bound its argument folds with
+    /// this one number at every point. The kernel reads it as Prometheus does, so a value outside
+    /// `[0, 1]` answers `-Infinity` or `+Infinity` rather than being refused here. `None` for a fold
+    /// whose φ is read per point, which is what `parameter` holds instead.
+    quantile: Option<f64>,
+    /// The φ read per point, when the query left it to the statement's own evaluation: the one
+    /// unlabelled scalar series the node held from its parameter child, on this node's grid.
+    ///
+    /// It is kept beside the retained input because the kernel reads it per point, exactly as the
+    /// parameter a bound φ is turned into is read: `q` with no sample at a point leaves the point
+    /// unanswered, as it does for the built one.
+    parameter: Option<Series>,
     /// One entry per series this node was handed.
     series: Vec<Series>,
     /// The histogram tables the retained chunks index into, by the address of the allocation behind
@@ -152,6 +161,17 @@ impl QuantileInput {
     /// capacity here counts every slot the vector owns, occupied or not. Counting the struct in both
     /// would charge each occupied slot twice; counting it in neither would leave every slot the
     /// vector holds uncovered.
+    ///
+    /// The parameter is the third figure: a φ read per point is one series this node holds from the
+    /// moment its parameter child hands it over until the kernel reads it, so it is counted from
+    /// [`series_bytes`] however long it stays. A φ the query bound is not held at all - it is
+    /// rebuilt from the binding's one number when the fold answers.
+    ///
+    /// That series sits inline, in the `Option<Series>` slot of this struct, so the descriptor is
+    /// what `size_of::<Self>()` above already counts: the parameter adds the heap beside it and not
+    /// a second descriptor. [`series_bytes`] measures a series it takes by reference, so it counts
+    /// the struct as well; the subtraction here is what keeps one held series from being billed one
+    /// descriptor twice.
     fn bytes(&self) -> usize {
         std::mem::size_of::<Self>()
             .saturating_add(
@@ -159,6 +179,9 @@ impl QuantileInput {
                     .capacity()
                     .saturating_mul(std::mem::size_of::<Series>()),
             )
+            .saturating_add(self.parameter.as_ref().map_or(0, |parameter| {
+                series_bytes(parameter).saturating_sub(std::mem::size_of::<Series>())
+            }))
             .saturating_add(self.held)
     }
 }
@@ -245,7 +268,7 @@ impl AggregateRuntime {
             // own and is built by [`Self::new_quantile`]. The φ is the only parameter an aggregate
             // carries, and the arm that names the kind is the one place it is read.
             AggregateKind::Quantile { quantile } => {
-                return Self::new_quantile(op, quantile, schema, buffer);
+                return Self::new_quantile(op, Some(quantile), schema, buffer);
             }
         };
         let (state_kind, state_components) = aggregate_state_binding(op.kind, op.field_kind)
@@ -325,12 +348,13 @@ impl AggregateRuntime {
     /// so the grid the kernel reads its parameter on is there before this runs.
     fn new_quantile(
         op: BoundAggregate,
-        quantile: f64,
+        quantile: Option<f64>,
         schema: Arc<SeriesSchema>,
         buffer: &mut NodeBuffer,
     ) -> Result<Self> {
         let retained = QuantileInput {
             quantile,
+            parameter: None,
             series: Vec::new(),
             tables: HashSet::new(),
             buffers: HashSet::new(),
@@ -348,6 +372,53 @@ impl AggregateRuntime {
             state_schema: None,
             computed: false,
         })
+    }
+
+    /// The states of a `Complete` aggregate whose one argument is read at every grid point.
+    ///
+    /// Only `quantile` has such an argument, and its fold keeps no number of its own: the φ arrives
+    /// as a series from the node's parameter child ([`Self::hold_parameter`]), so the binding's
+    /// constant is not read here at all. Everything else about the fold is the bound one's -- the
+    /// stage, the layout, and the sample set it keeps until the input ends -- which is why this is
+    /// [`Self::new_quantile`] with no constant to fall back on rather than a second kind of state.
+    pub(crate) fn new_parameterized(
+        op: BoundAggregate,
+        schema: Arc<SeriesSchema>,
+        buffer: &mut NodeBuffer,
+    ) -> Result<Self> {
+        if !matches!(op.kind, AggregateKind::Quantile { .. }) {
+            return Err(DataFusionError::NotImplemented(format!(
+                "the runtime reads a per-point argument only for `quantile`, not for {:?}",
+                op.kind
+            )));
+        }
+        Self::new_quantile(op, None, schema, buffer)
+    }
+
+    /// Keeps the φ this node reads at every grid point, in the one unlabelled scalar series its
+    /// parameter child handed over.
+    ///
+    /// The series is already reserved: it arrives through the driver's `hold_scalar`, which grows the
+    /// same reservation by [`series_bytes`] before the chunk is kept, exactly as it does for a
+    /// broadcast scalar or a `topk` parameter. Adopting it therefore only settles on what the node
+    /// holds -- which counts it once, from [`QuantileInput::bytes`] -- rather than growing for a
+    /// second allocation that was never made: a pool that holds the handoff must not refuse a
+    /// handoff that allocates nothing.
+    pub(crate) fn hold_parameter(
+        &mut self,
+        parameter: Series,
+        buffer: &mut NodeBuffer,
+    ) -> Result<()> {
+        let Some(retained) = self.retained.as_mut() else {
+            return Err(no_fold(&self.describe()));
+        };
+        if retained.parameter.is_some() {
+            return Err(DataFusionError::Execution(
+                "a `quantile` aggregate reads one parameter, and it already holds one".into(),
+            ));
+        }
+        retained.parameter = Some(parameter);
+        buffer.resize(retained.bytes())
     }
 
     /// What consuming `chunk` reserves while it is consumed.
@@ -709,17 +780,22 @@ impl AggregateRuntime {
     }
     /// Answers a `quantile` from the input it kept, and hands the series over.
     ///
-    /// The parameter is the number the query wrote, so every point it covers carries it: the kernel
-    /// reads `q` per point from an unlabelled single-field scalar on the aggregate's own grid, and a
-    /// point that scalar has no value at is a point with no result. That case cannot arise from a
-    /// constant, but the kernel keeps the rule for the parameter it is written for.
+    /// The kernel reads `q` per point from an unlabelled single-field scalar on the aggregate's own
+    /// grid, and a point that scalar has no value at is a point with no result. Which scalar that is
+    /// depends on what the query wrote: the φ the node held from its parameter child, or -- for a
+    /// number bound on the tree -- one built over the points the input holds, so that every point it
+    /// covers carries it. (A point the held series has no sample at is unanswered, exactly as a
+    /// missing `q` is in the kernel; `scalar(...)`, the shape that produces one per point, answers
+    /// NaN rather than no sample, so a statement whose `foo` holds nothing answers NaN there.)
     ///
-    /// The parameter covers the points the input holds and not the window they sit in: the kernel
-    /// reads `q` only where a member has a sample, so a sparse input's parameter is as wide as its
-    /// rows. A parameter over the envelope would instead allocate every position between two
+    /// A built parameter covers the points the input holds and not the window they sit in: the
+    /// kernel reads `q` only where a member has a sample, so a sparse input's parameter is as wide
+    /// as its rows. A parameter over the envelope would instead allocate every position between two
     /// far-apart points -- a span sized by the statement's range rather than by the data it reads,
     /// which the pool never admitted. The parameter is booked from the bound its rows give before it
-    /// exists, and settles on its exact figure once it is built.
+    /// exists, and settles on its exact figure once it is built. A held parameter is not built here
+    /// and needs no such bound: it was reserved when the node adopted it, which is what
+    /// [`QuantileInput::bytes`] counts ever since.
     ///
     /// The reservation covers what is held while the kernel runs -- the input, that parameter, and
     /// the kernel's workspace -- and then settles on the series the kernel answered, exactly as a
@@ -738,25 +814,57 @@ impl AggregateRuntime {
                 "a `quantile` aggregate needs an evaluated grid to read its parameter on".into(),
             )
         })?;
-        let workspace = quantile_workspace_bytes(&self.schema, &input);
-        // Admitted before the parameter exists, because building it is what makes this node hold
-        // it: the bound is what a parameter over the input's points can take, and the resize below
-        // settles on what it did take.
+        // The points the kernel copies the parameter over. A held `φ` covers the grid the statement
+        // evaluated it on, which the input's rows say nothing about: one row of input beside a
+        // `time()` over a million grid points is a million pairs, not one. A built one covers the
+        // points the input holds, and the input's rows bound those.
+        let parameter_points = match &input.parameter {
+            Some(parameter) => parameter.time.len(),
+            None => input.series.iter().map(|series| series.time.len()).sum(),
+        };
+        let workspace = quantile_workspace_bytes(&self.schema, &input, parameter_points);
+        // A built parameter is admitted before it exists, because building it is what makes this
+        // node hold it: the bound is what a parameter over the input's points can take, and the
+        // resize below settles on what it did take. A held one is already counted by
+        // `input.bytes()`, so reserving for it again would charge the same series twice.
+        let built_bound = match (&input.parameter, input.quantile) {
+            (None, Some(_)) => quantile_parameter_bound_bytes(&input),
+            _ => 0,
+        };
         buffer.resize(
             input
                 .bytes()
-                .saturating_add(quantile_parameter_bound_bytes(&input))
+                .saturating_add(built_bound)
                 .saturating_add(workspace)
                 .saturating_add(queue_bytes),
         )?;
-        let positions = quantile_positions(&input);
-        let parameter = quantile_parameter(&grid, input.quantile, &positions)?;
-        // The collected positions are what the bound above covered and what this node no longer
-        // holds, so they go before the figure settles.
-        drop(positions);
+        // The φ the kernel reads: the series this node held from its parameter child, or -- when the
+        // query bound the number -- one built over the points the input holds.
+        let mut built = None;
+        if input.parameter.is_none() {
+            let Some(quantile) = input.quantile else {
+                return Err(DataFusionError::Internal(
+                    "a per-point `quantile` parameter was never handed over".into(),
+                ));
+            };
+            let positions = quantile_positions(&input);
+            built = Some(quantile_parameter(&grid, quantile, &positions)?);
+            // The collected positions are what the bound above covered and what this node no longer
+            // holds, so they go before the figure settles.
+            drop(positions);
+        }
+        let parameter = input
+            .parameter
+            .as_ref()
+            .or(built.as_ref())
+            .expect("a parameter is either held or built just above");
         let held = input
             .bytes()
-            .saturating_add(series_bytes(&parameter))
+            .saturating_add(if input.parameter.is_some() {
+                0
+            } else {
+                series_bytes(parameter)
+            })
             .saturating_add(workspace);
         buffer.resize(held.saturating_add(queue_bytes))?;
         let names: Vec<&str> = match &self.op.group {
@@ -768,10 +876,13 @@ impl AggregateRuntime {
             BoundGrouping::By(_) => Grouping::By(&names),
             BoundGrouping::Without(_) => Grouping::Without(&names),
         };
-        let output = aggregate_quantile(&self.schema, &input.series, &parameter, grouping)
+        let output = aggregate_quantile(&self.schema, &input.series, parameter, grouping)
             .map_err(|error| folded_chunk(&self.describe(), error))?;
         drop(names);
-        drop(parameter);
+        // The parameter's use ends with the kernel call, and a built one is dropped here for the
+        // same reason the input is: the settle below names what the node holds from then on. A
+        // held one goes with the input it is part of.
+        drop(built);
         // The input is what this node held until the kernel answered, and it is given back before
         // the reservation settles on the answer: the settle below is what the node holds from then
         // on, so it must be read from the set that is really alive -- the answer and the queue --
@@ -857,13 +968,22 @@ fn quantile_parameter_bound_bytes(input: &QuantileInput) -> usize {
 /// [`aggregate_quantile`] reports no workspace as it allocates, so this is an estimate reserved once
 /// before it runs, in the same spirit as the whole-vector kernels'. What it covers: the state it
 /// keeps per member (one position list, one heap entry and one cursor per field), its own copy of the
-/// parameter (one `(position, φ)` pair per point the parameter covers, which the input's rows bound
-/// because the parameter is only built over the points the input holds), the temporaries of one grid
-/// point (its members' values, the copy the kernel sorts, and one row of the width it folds), and the
-/// rows it builds -- the group being built and the groups it has already handed over. The row count is
-/// the input's own: a group's rows are the points at least one of its members holds a sample at, so
-/// the input's rows bound every group's rows and their sum.
-fn quantile_workspace_bytes(schema: &SeriesSchema, input: &QuantileInput) -> usize {
+/// parameter, the temporaries of one grid point (its members' values, the copy the kernel sorts, and
+/// one row of the width it folds), and the rows it builds -- the group being built and the groups it
+/// has already handed over. The row count is the input's own: a group's rows are the points at least
+/// one of its members holds a sample at, so the input's rows bound every group's rows and their sum.
+///
+/// The parameter copy is `parameter_points` pairs and not the input's rows: the kernel reads the
+/// whole parameter into one `(position, φ)` per point it covers before it folds anything, so a dense
+/// `time()` read against one row of input copies every point of the grid, and sizing that copy from
+/// the input's one row would reserve a pair for a million points. What the kernel iterates are the
+/// parameter's own positions -- the points a bound `φ` was built over and the points a held one
+/// covers -- so the caller reports that count rather than this reading the input for it.
+fn quantile_workspace_bytes(
+    schema: &SeriesSchema,
+    input: &QuantileInput,
+    parameter_points: usize,
+) -> usize {
     let width = schema.fields.len();
     let members = input.series.len();
     let rows: usize = input.series.iter().map(|series| series.time.len()).sum();
@@ -880,7 +1000,7 @@ fn quantile_workspace_bytes(schema: &SeriesSchema, input: &QuantileInput) -> usi
         .saturating_add(2 * std::mem::size_of::<usize>())
         .saturating_add(1);
     // The parameter copy, charged twice for the capacity a growing vector keeps over its length.
-    let parameter_copy = 2 * rows.saturating_mul(std::mem::size_of::<(usize, f64)>());
+    let parameter_copy = 2 * parameter_points.saturating_mul(std::mem::size_of::<(usize, f64)>());
     members
         .saturating_mul(per_member)
         .saturating_add(per_point)
@@ -979,6 +1099,71 @@ mod tests {
             &mut buffer,
         )
         .unwrap()
+    }
+
+    /// The φ this node folds is a series over `points` grid points, as `time()` or `scalar()`
+    /// hands one over.
+    fn parameter_series(points: usize) -> Series {
+        let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 1, 4).unwrap()).unwrap());
+        let schema = Arc::new(SeriesSchema {
+            fields: vec![FieldSpec {
+                name: Arc::from("scalar"),
+            }]
+            .into(),
+            eval_grid: Some(Arc::clone(&grid)),
+        });
+        constant_series(&schema, GridRange::try_new(grid, 0, points).unwrap(), 0.5).unwrap()
+    }
+
+    /// Adopting the parameter transfers the charge it arrived with, and bills it once.
+    ///
+    /// The series is grown onto this node's reservation before it is handed over, because it
+    /// outlives the child that produced it; `hold_scalar` is what does that, and it does it on this
+    /// node's buffer. Adopting it allocates nothing, so the node settles on what it holds -- the
+    /// series once, its descriptor counted by the state that holds it inline -- and a pool of
+    /// exactly that figure admits the handoff. Growing for the same series again would ask for the
+    /// double of what arrived, and a pool that holds the handoff would refuse it.
+    #[test]
+    fn adopting_a_parameter_charges_it_once() {
+        let parameter = parameter_series(4);
+        let held = series_bytes(&parameter);
+        // What the node holds once the series arrived and was grown onto it, and what it holds with
+        // the same series adopted: the second is the first less the descriptor the state carries
+        // inline, because a series held in a slot costs the slot and the heap and not the slot
+        // twice. The pool holds exactly the handoff, so an admission that asks for the series a
+        // second time has nowhere to put it.
+        let handoff = std::mem::size_of::<QuantileInput>() + held;
+        let adopted = handoff - std::mem::size_of::<Series>();
+        let pool: Arc<dyn datafusion::execution::memory_pool::MemoryPool> = Arc::new(
+            datafusion::execution::memory_pool::GreedyMemoryPool::new(handoff),
+        );
+        let mut buffer = NodeBuffer::new(
+            "test quantile",
+            Arc::new(crate::native::metrics::NodeMetrics::default()),
+            &pool,
+        );
+        let mut runtime = AggregateRuntime::new_parameterized(
+            BoundAggregate {
+                kind: AggregateKind::Quantile { quantile: 0.0 },
+                group: BoundGrouping::By(Arc::new([])),
+                stage: AggregateStage::Complete,
+                field_kind: crate::extension_plan::FieldKind::Float,
+            },
+            schema(),
+            &mut buffer,
+        )
+        .unwrap();
+        // The handoff the parameter child makes: the series is reserved on this node's buffer
+        // before it is kept, exactly as `hold_scalar` does for every scalar operand.
+        buffer.grow(held).unwrap();
+        runtime
+            .hold_parameter(parameter, &mut buffer)
+            .expect("a pool that holds the handoff refused the adoption");
+        assert_eq!(
+            pool.reserved(),
+            adopted,
+            "the adopted parameter is billed once, descriptor included"
+        );
     }
 
     fn collected(collector: &PromqlAnnotationCollector) -> (Vec<String>, Vec<String>) {

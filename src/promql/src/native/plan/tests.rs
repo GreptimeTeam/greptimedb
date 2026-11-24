@@ -24,8 +24,8 @@ use super::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
     BoundVectorOp, BoundWindow, Grouping, InstantValue, MapOp, NativeExpr, NativeNode, NativeTree,
     NativeType, ParameterizedOp, aggregate_state_binding, duplicates_canonical_labels,
-    fused_output_tags, leaves_a_drop_to_the_storage_keys, reads_across_series,
-    unifies_its_own_contributions,
+    fused_output_tags, leaves_a_drop_to_the_storage_keys, native_node_supported,
+    reads_across_series, unifies_its_own_contributions,
 };
 use crate::extension_plan::FieldKind;
 use crate::extension_plan::{FusedSeries, FusedSeriesBinding};
@@ -358,6 +358,54 @@ fn parameterized_topk_validates_scalar_and_grid() {
         )
         .validate()
         .is_err()
+    );
+}
+
+/// A per-point `quantile` whose argument is a literal is refused by the tree's own check.
+///
+/// A literal is one value on a binding, not a series a node hands over: the fold reads its `φ` per
+/// point from the series its parameter child hands over, so a literal leaves it waiting for a chunk
+/// that never arrives. It would run to the end of its input and only then refuse the run, after
+/// every chunk was retained and folded. `validate` is where a tree says what it is, so the shape is
+/// refused there, and the admission predicate agrees so a decoded tree never reaches that wait.
+#[test]
+fn a_literal_quantile_parameter_is_refused() {
+    let out = grid(0, 60_000, 4);
+    let vector = map_over(window_on(input(), None, Arc::clone(&out)));
+    let node = |parameter: NativeNode| NativeNode {
+        expr: NativeExpr::ParameterizedAggregate {
+            input: Box::new(vector.clone()),
+            op: BoundAggregate {
+                kind: AggregateKind::Quantile { quantile: 0.0 },
+                group: Grouping::By(Arc::from([])),
+                stage: AggregateStage::Complete,
+                field_kind: FieldKind::Float,
+            },
+            parameter: Box::new(parameter),
+        },
+        output: vector.output.clone(),
+    };
+    let literal = node(scalar_on(0.5, Arc::clone(&out)));
+    let error = literal
+        .validate()
+        .expect_err("a fold that can never read its parameter was admitted");
+    assert!(
+        error.to_string().contains("not a literal"),
+        "the literal parameter was refused for another reason: {error}"
+    );
+    assert!(
+        !native_node_supported(&literal),
+        "the admission predicate admits a tree `validate` refuses"
+    );
+    // A parameter that hands over a series is what the fold reads, so the check is the literal and
+    // not a scalar output.
+    assert!(
+        node(NativeNode {
+            expr: NativeExpr::EvalTime { date: None },
+            output: NativeType::Scalar(Arc::clone(&out)),
+        })
+        .validate()
+        .is_ok()
     );
 }
 
@@ -3125,7 +3173,7 @@ fn native_expr_variant_indices_are_a_wire_contract() {
             10,
             "Aggregate",
         ),
-        // The dynamic forms are the last three, which is what keeps every index above them.
+        // The dynamic forms are the last four, which is what keeps every index above them.
         (
             NativeExpr::ScalarOf {
                 input: Box::new(vector()),
@@ -3154,6 +3202,20 @@ fn native_expr_variant_indices_are_a_wire_contract() {
             },
             17,
             "ParameterizedHistogram",
+        ),
+        (
+            NativeExpr::ParameterizedAggregate {
+                input: Box::new(vector()),
+                op: BoundAggregate {
+                    kind: AggregateKind::Quantile { quantile: 0.0 },
+                    group: Grouping::By(Arc::new(["job".into()])),
+                    stage: AggregateStage::Complete,
+                    field_kind: FieldKind::Float,
+                },
+                parameter: Box::new(scalar()),
+            },
+            18,
+            "ParameterizedAggregate",
         ),
     ];
     for (expr, index, variant) in cases {

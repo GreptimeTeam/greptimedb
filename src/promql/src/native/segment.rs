@@ -104,7 +104,8 @@ pub fn pointwise_operand(node: &NativeNode) -> bool {
         }
         // An aggregate folds a group, a vector operation reads the whole vector, and a bare input or
         // scalar is not a per-series evaluation. A parameterized topk or histogram reads the whole
-        // vector, and `scalar()` answers from it.
+        // vector, `scalar()` answers from it, and a per-point `φ` is read beside the fold over the
+        // whole group.
         NativeExpr::Input(_)
         | NativeExpr::Scalar(_)
         | NativeExpr::EvalTime { .. }
@@ -112,6 +113,7 @@ pub fn pointwise_operand(node: &NativeNode) -> bool {
         | NativeExpr::ScalarOf { .. }
         | NativeExpr::ParameterizedTopK { .. }
         | NativeExpr::ParameterizedHistogram { .. }
+        | NativeExpr::ParameterizedAggregate { .. }
         | NativeExpr::Aggregate { .. }
         | NativeExpr::Vector { .. }
         | NativeExpr::Set { .. }
@@ -176,6 +178,17 @@ pub fn groups_by_metric_name(node: &NativeNode) -> bool {
         | NativeExpr::Timestamp { input } => groups_by_metric_name(input),
         NativeExpr::Aggregate { input, op } => {
             grouping_names_metric(op) || groups_by_metric_name(input)
+        }
+        // A per-point argument does not change what the fold groups by, and the parameter is a
+        // scalar expression that can itself hold an aggregate.
+        NativeExpr::ParameterizedAggregate {
+            input,
+            op,
+            parameter,
+        } => {
+            grouping_names_metric(op)
+                || groups_by_metric_name(input)
+                || groups_by_metric_name(parameter)
         }
         NativeExpr::ParameterizedMap {
             input, parameters, ..
@@ -299,10 +312,18 @@ pub fn contains_global_consumer(node: &NativeNode) -> bool {
 
 /// Whole-vector consumers remain global, but can be cut out as evaluated segments so a pointwise
 /// parent does not inherit their single-partition placement.
+///
+/// A per-point `φ` does not make the fold it reads any less of a whole-vector consumer: a
+/// `quantile` answers from every series of its group whichever node its argument comes from, so the
+/// parameterized variant is admitted here exactly as the bound one is. Leaving it out would read a
+/// fold that requires one partition as a node that does not, and the cut below it would be chosen
+/// as though its parent could run per partition.
 fn is_global_consumer(node: &NativeNode) -> bool {
     matches!(
         node.expr,
-        NativeExpr::Aggregate { .. } | NativeExpr::Vector { .. }
+        NativeExpr::Aggregate { .. }
+            | NativeExpr::ParameterizedAggregate { .. }
+            | NativeExpr::Vector { .. }
     ) && matches!(input_locality(node), InputLocality::SinglePartition)
 }
 
@@ -1255,4 +1276,126 @@ pub fn segment_tree(
     Some(LogicalPlan::Extension(Extension {
         node: Arc::new(plan),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use datatypes::series::SeriesOrdering;
+    use datatypes::series::samples::{FieldSpec, SeriesSchema};
+    use datatypes::series::time::{EvalGrid, GridSpec};
+
+    use super::*;
+    use crate::map::MathOp;
+    use crate::native::plan::{
+        AggregateKind, AggregateStage, BoundInput, BoundInstant, BoundMap, InstantValue, MapOp,
+    };
+
+    fn grid() -> Arc<EvalGrid> {
+        Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 1, 4).unwrap()).unwrap())
+    }
+
+    /// The evaluated layout of the only field these trees carry.
+    fn evaluated(grid: &Arc<EvalGrid>) -> NativeType {
+        NativeType::Samples(Arc::new(SeriesSchema {
+            fields: vec![FieldSpec {
+                name: Arc::from("value"),
+            }]
+            .into(),
+            eval_grid: Some(Arc::clone(grid)),
+        }))
+    }
+
+    /// `abs(…)` over `inner`, as a pointwise rewrite above a cut would be.
+    fn map_over(inner: NativeNode) -> NativeNode {
+        let output = inner
+            .output
+            .grid()
+            .expect("a map reads an evaluated vector")
+            .clone();
+        NativeNode {
+            expr: NativeExpr::Map {
+                input: Box::new(inner),
+                op: BoundMap {
+                    ops: vec![MapOp::Math(MathOp::Abs)].into(),
+                },
+            },
+            output: evaluated(&output),
+        }
+    }
+
+    /// `inner` selected at every grid point.
+    fn selection(inner: NativeNode, output: NativeType) -> NativeNode {
+        let grid = output
+            .grid()
+            .expect("a selection answers on a grid")
+            .clone();
+        NativeNode {
+            expr: NativeExpr::Instant {
+                input: Box::new(inner),
+                op: BoundInstant {
+                    lookback_ms: 300_000,
+                    offset_ms: 0,
+                    at_ms: None,
+                    value: InstantValue::Sample,
+                    output_grid: grid,
+                },
+            },
+            output,
+        }
+    }
+
+    /// A fold that reads its argument at every step is a whole-vector consumer.
+    ///
+    /// A `quantile` answers from its group's whole sample set wherever its `φ` comes from, so a
+    /// fold that reads that `φ` per point needs every series of the vector in one place exactly as
+    /// the fold that binds the number does. [`segment_tree`] asks [`contains_global_consumer`]
+    /// where a tree may be cut and whether a cut it cannot build has to be declined, and a parent
+    /// that answers one series at a time -- the `abs` below, as a canonical label rewrite would be
+    /// -- must not hide the gather under it: read as a per-partition node, the cut beneath would be
+    /// chosen for a parent that cannot run there.
+    #[test]
+    fn a_fold_that_reads_its_parameter_is_a_global_consumer() {
+        let grid = grid();
+        let output = evaluated(&grid);
+        let source = NativeNode {
+            expr: NativeExpr::Input(BoundInput {
+                output: output.clone(),
+                source_index: 0,
+                ordering: SeriesOrdering::Contiguous,
+            }),
+            output: output.clone(),
+        };
+        let fold = NativeNode {
+            expr: NativeExpr::ParameterizedAggregate {
+                input: Box::new(selection(source.clone(), output.clone())),
+                op: BoundAggregate {
+                    kind: AggregateKind::Quantile { quantile: 0.0 },
+                    group: Grouping::By(Arc::from([])),
+                    stage: AggregateStage::Complete,
+                    field_kind: FieldKind::Float,
+                },
+                parameter: Box::new(NativeNode {
+                    expr: NativeExpr::EvalTime { date: None },
+                    output: NativeType::Scalar(Arc::clone(&grid)),
+                }),
+            },
+            output: output.clone(),
+        };
+        assert!(
+            contains_global_consumer(&fold),
+            "a fold that reads its `φ` per point reads the whole vector"
+        );
+        assert!(
+            contains_global_consumer(&map_over(fold)),
+            "a pointwise parent must not hide the fold's gather"
+        );
+        // The predicate is about that fold and not about every subtree: a pointwise rewrite of a
+        // selection answers each series on its own, so it stays cuttable where it stands.
+        assert!(
+            !contains_global_consumer(&map_over(selection(source, output))),
+            "a selection is not a whole-vector consumer"
+        );
+    }
 }

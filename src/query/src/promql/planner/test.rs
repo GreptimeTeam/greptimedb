@@ -2606,6 +2606,455 @@ async fn native_zero_match_discovery_with_real_selector_binds_both_inputs() {
     }
 }
 
+/// A fixture whose `x` and `exists` tables exist, so any other metric a selector names has no table
+/// to bind.
+async fn named_missing_table_provider() -> DfTableSourceProvider {
+    build_test_table_provider_with_options(
+        &[
+            (DEFAULT_SCHEMA_NAME.to_string(), "x".to_string()),
+            (DEFAULT_SCHEMA_NAME.to_string(), "exists".to_string()),
+        ],
+        1,
+        1,
+        vec![],
+        ConcreteDataType::timestamp_millisecond_datatype(),
+        false,
+        ConcreteDataType::float64_datatype(),
+        NATIVE_ENGINE,
+    )
+    .await
+}
+
+/// Whether `plan` holds the typed empty input a selector that read no table is planned as.
+fn contains_typed_empty_input(plan: &LogicalPlan) -> bool {
+    super::native::is_empty_discovered_input(plan)
+        || plan
+            .inputs()
+            .iter()
+            .any(|child| contains_typed_empty_input(child))
+}
+
+/// A selector that names a metric whose table does not exist is planned natively, as the typed
+/// empty input a nameless selector that matches nothing is.
+///
+/// Prometheus answers each statement below over an empty input, so handing the statement back to
+/// the existing planner - which has no table to bind and raises `TableNameNotFound` - is not an
+/// answer. `x` and `exists` do exist, and the statements reading them keep the plan they had: an
+/// existing table is read through its scan whether or not it holds rows.
+#[tokio::test]
+async fn native_named_selector_over_a_missing_table_plans_as_an_empty_input() {
+    // `(query, reads an existing table)`.
+    for (query, reads_existing) in [
+        // The selection itself.
+        ("nonexistent_metric", false),
+        ("nonexistent_metric @ 300", false),
+        ("nonexistent offset 5m", false),
+        // An operator over the empty input keeps its own answer for zero series.
+        ("rate(nonexistent[5m])", false),
+        ("sum(nonexistent)", false),
+        ("count(nonexistent)", false),
+        ("topk(3, nonexistent)", false),
+        ("sum by (__name__) (nonexistent)", false),
+        // The two shapes whose answer over zero series is a row rather than none.
+        ("absent(nonexistent_metric)", false),
+        (r#"absent(nonexistent_metric{job="x"})"#, false),
+        (r#"absent_over_time(nonexistent{job="x"}[5m])"#, false),
+        // A set operation pairs the empty input with a real one, on either side and in either
+        // position, and a statement whose selectors are all missing has no real side at all.
+        ("nonexistent or exists", true),
+        ("nonexistent and exists", true),
+        ("nonexistent unless exists", true),
+        ("exists or nonexistent", true),
+        ("a1 or a2", false),
+        // A table that exists is read through its scan, with and without rows.
+        ("x", true),
+        ("sum(x)", true),
+        ("x or nonexistent", true),
+    ] {
+        let plan = build_native_fused_plan_with_provider(
+            query,
+            true,
+            named_missing_table_provider().await,
+        )
+        .await;
+        assert!(
+            find_fused_series(&plan).is_some(),
+            "`{query}` did not take the native route: {plan:?}"
+        );
+        let display = plan.display_indent().to_string();
+        if reads_existing {
+            assert!(display.contains("TableScan"), "{query}: {display}");
+        } else {
+            assert!(
+                contains_typed_empty_input(&plan),
+                "`{query}` is not planned over the typed empty input: {plan:?}"
+            );
+            assert!(
+                !display.contains("TableScan"),
+                "`{query}` reads a table it has none of: {display}"
+            );
+        }
+    }
+
+    // A `__field__` matcher still declines over a table this route can read: the matcher narrows the
+    // field set of the scan below the node, and the raw series scan reports every field the scan
+    // carries. That refusal is about the scan, not about the table existing - a missing table has no
+    // field set to narrow and is admitted as the empty input, which
+    // `native_missing_table_with_a_field_matcher_answers_the_empty_vector` asserts beside its rows.
+    let query = r#"x{__field__="field_0"}"#;
+    let plan =
+        build_native_fused_plan_with_provider(query, true, named_missing_table_provider().await)
+            .await;
+    assert!(
+        find_fused_series(&plan).is_none(),
+        "`{query}` claimed a field layout its scan does not report: {plan:?}"
+    );
+}
+
+/// The same statements plan natively when the engine plans distributed statements.
+///
+/// Such a planner reads every input above the regions, so each occurrence is source-backed and the
+/// typed empty input is the one input that stays itself. The route is the same one the statements
+/// above take; what changes is only where the node is placed.
+#[tokio::test]
+async fn native_named_missing_table_plans_with_the_distributed_planner() {
+    let state = QueryEngineState::new(
+        new_memory_catalog_manager().unwrap(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        true,
+        Plugins::default(),
+        QueryOptions::default(),
+    );
+    for query in [
+        "nonexistent_metric",
+        "absent(nonexistent_metric)",
+        "nonexistent or exists",
+        "exists or nonexistent",
+    ] {
+        let stmt = build_eval_stmt(query);
+        let plan = PromPlanner::stmt_to_plan_with_annotations(
+            named_missing_table_provider().await,
+            &stmt,
+            &state,
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(
+            find_fused_series(&plan).is_some(),
+            "`{query}` did not take the native route with the distributed planner: {plan:?}"
+        );
+    }
+}
+
+/// A named selector over a missing table answers what Prometheus answers, executed.
+///
+/// Prometheus answers the empty vector for a selector that names a metric it holds no samples for,
+/// and the operators above it report their own answer for zero series: `sum` and `count` report no
+/// group, `absent` reports one series holding 1 named by the selector's equality matchers, and an
+/// `or`, `and` or `unless` against an empty side keeps, drops or ignores what the other side holds.
+///
+/// The rows layout is asserted beside the rows: the answer names no series, so the nullable
+/// `__name__` column the native rows root declares stays null rather than naming the metric the
+/// selector wrote.
+#[tokio::test]
+async fn native_named_selector_over_a_missing_table_answers_what_prometheus_answers() {
+    /// Runs `query` on the native route over the fixture whose only tables are `x` and `exists`.
+    ///
+    /// `steps` is the number of five-second steps after the first, so zero is one evaluation
+    /// instant and two is a three-point range.
+    async fn execute_missing(query: &str, steps: u64) -> (LogicalPlan, Vec<RecordBatch>) {
+        let stmt = EvalStmt {
+            expr: parser::parse(query).unwrap(),
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(5 * steps))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+        let plan = PromPlanner::stmt_to_plan_with_annotations(
+            named_missing_table_provider().await,
+            &stmt,
+            &build_query_engine_state(),
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(
+            find_fused_series(&plan).is_some(),
+            "`{query}` did not take the native route: {plan:?}"
+        );
+        execute(plan, &build_query_engine_state()).await
+    }
+
+    // A selection over a table that does not exist answers no rows, and its declared layout still
+    // names the time index, one value column and the nullable name column.
+    for query in [
+        "nonexistent_metric",
+        "rate(nonexistent[5m])",
+        "sum(nonexistent)",
+        "topk(3, nonexistent)",
+        "count(nonexistent)",
+        "sum by (__name__) (nonexistent)",
+        // Two missing tables in one statement: neither side has a table to read.
+        "a1 or a2",
+        // A set operation against an empty side keeps, drops or ignores the other side's series,
+        // and the empty side has none to contribute.
+        "nonexistent and vector(7)",
+        "nonexistent unless vector(7)",
+    ] {
+        let (plan, batches) = execute_missing(query, 0).await;
+        assert_eq!(
+            0,
+            batch_rows(&batches),
+            "`{query}` answered rows over a table that does not exist: {plan:?}"
+        );
+    }
+
+    /// The column a native rows answer names its value after: the statement it answers.
+    fn value_column(query: &str) -> String {
+        parser::parse(query).unwrap().to_string()
+    }
+
+    // The rows layout of the empty answer: the time index, one value column and the name column
+    // the rows root declares, which is nullable because a row that names no series leaves it null.
+    // The value column is named after the statement, as it is for every native rows answer: the
+    // empty input's own field name is internal to the tree.
+    let (plan, _) = execute_missing("nonexistent_metric", 0).await;
+    let columns = plan
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().as_str())
+        .collect::<Vec<_>>();
+    let value = value_column("nonexistent_metric");
+    assert_eq!(
+        vec![DEFAULT_TIME_INDEX_COLUMN, value.as_str(), METRIC_NAME],
+        columns,
+        "{plan:?}"
+    );
+    assert!(
+        plan.schema()
+            .field_with_name(None, METRIC_NAME)
+            .expect("the rows root declares the name column")
+            .is_nullable(),
+        "{plan:?}"
+    );
+
+    // `absent` reports the absence of what it read as one series holding 1. The selector names no
+    // equality label, so the row names nothing - not even the metric the selector wrote.
+    let (plan, batches) = execute_missing("absent(nonexistent_metric)", 0).await;
+    assert_eq!(1, batch_rows(&batches), "{plan:?}");
+    assert_eq!(
+        vec![1.0],
+        numeric_values(&batches, &value_column("absent(nonexistent_metric)")),
+        "{plan:?}"
+    );
+    for batch in &batches {
+        let name = batch
+            .column_by_name(METRIC_NAME)
+            .expect("the rows root declares the name column")
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("the name column is Utf8");
+        assert_eq!(1, name.len(), "{batch:?}");
+        assert!(name.is_null(0), "`absent` names no series: {batch:?}");
+    }
+
+    // A matcher that must be set is a label of the answer, as in Prometheus.
+    let (plan, batches) = execute_missing(r#"absent(nonexistent_metric{job="x"})"#, 0).await;
+    assert_eq!(1, batch_rows(&batches), "{plan:?}");
+    assert_eq!(
+        vec![1.0],
+        numeric_values(
+            &batches,
+            &value_column(r#"absent(nonexistent_metric{job="x"})"#)
+        ),
+        "{plan:?}"
+    );
+    for batch in &batches {
+        let job = batch
+            .column_by_name("job")
+            .expect("absent reports the selector's equality labels")
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(Some("x"), job.iter().next().flatten(), "{batch:?}");
+    }
+
+    // `absent_over_time` answers the same way over a missing table.
+    let (plan, batches) = execute_missing(r#"absent_over_time(nonexistent{job="x"}[5m])"#, 0).await;
+    assert_eq!(1, batch_rows(&batches), "{plan:?}");
+    assert_eq!(
+        vec![1.0],
+        numeric_values(
+            &batches,
+            &value_column(r#"absent_over_time(nonexistent{job="x"}[5m])"#)
+        ),
+        "{plan:?}"
+    );
+    for batch in &batches {
+        let job = batch
+            .column_by_name("job")
+            .expect("absent_over_time reports the selector's equality labels")
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(Some("x"), job.iter().next().flatten(), "{batch:?}");
+    }
+
+    // A range statement evaluates the same empty input on a grid of its own: three points, each
+    // answering the absence of what the selector named.
+    let (plan, batches) = execute_missing(r#"absent(nonexistent_metric{job="x"})"#, 2).await;
+    assert_eq!(3, batch_rows(&batches), "{plan:?}");
+    assert_eq!(
+        vec![1.0, 1.0, 1.0],
+        numeric_values(
+            &batches,
+            &value_column(r#"absent(nonexistent_metric{job="x"})"#)
+        ),
+        "{plan:?}"
+    );
+
+    // An `or` keeps the side that holds a series, in either position.
+    for query in ["nonexistent or vector(7)", "vector(7) or nonexistent"] {
+        let (plan, batches) = execute_missing(query, 0).await;
+        assert_eq!(1, batch_rows(&batches), "`{query}`: {plan:?}");
+        assert_eq!(
+            vec![7.0],
+            numeric_values(&batches, &value_column(query)),
+            "`{query}`: {plan:?}"
+        );
+    }
+}
+
+/// A matcher named after the grid column does not make a missing table fall back.
+///
+/// `absent(missing{time="x"})` publishes a label named `time` while the route would name its grid
+/// column `time` too, so the synthetic name has to be chosen before the segmented root is built -
+/// otherwise schema construction fails first and the statement leaves the route. The answer is the
+/// one Prometheus gives for an absent selector: one sample of 1 carrying the matcher's label.
+#[tokio::test]
+async fn native_absent_over_a_missing_table_names_its_grid_beside_a_time_label() {
+    let query = r#"absent(missing{time="x"})"#;
+    // One evaluation instant, so the answer is one sample rather than one per step of a range.
+    let stmt = EvalStmt {
+        expr: parser::parse(query).unwrap(),
+        start: UNIX_EPOCH,
+        end: UNIX_EPOCH,
+        interval: Duration::from_secs(5),
+        lookback_delta: Duration::from_secs(1),
+    };
+    let plan = PromPlanner::stmt_to_plan_with_annotations(
+        named_missing_table_provider().await,
+        &stmt,
+        &build_query_engine_state(),
+        None,
+        true,
+    )
+    .await
+    .unwrap();
+    assert!(
+        find_fused_series(&plan).is_some(),
+        "`{query}` did not take the native route: {plan:?}"
+    );
+    let value = parser::parse(query).unwrap().to_string();
+    let columns = plan
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        vec!["native_time_0", value.as_str(), "time", METRIC_NAME],
+        columns,
+        "`{query}`: the grid takes a free name beside the matcher's label: {plan:?}"
+    );
+    let (_, batches) = execute(plan, &build_query_engine_state()).await;
+    assert_eq!(1, batch_rows(&batches), "`{query}`: {batches:?}");
+    assert_eq!(vec![1.0], numeric_values(&batches, &value), "`{query}`");
+}
+
+/// A field selection over a missing table is empty, so a `__field__` matcher answers the empty
+/// vector on the native route.
+///
+/// A `__field__` matcher narrows the field set of the table its selector reads. A missing table has
+/// no field set to narrow, so every field selection over it is empty whichever field the matcher
+/// names: the answer does not depend on whether the table happens to exist. The existing planner
+/// answers these statements with the empty vector for the same reason - a missing table is planned
+/// as `EmptyMetric` before the projection a `__field__` matcher builds, so the matcher is never
+/// resolved against a fabricated layout.
+///
+/// The rows layout is the one every empty native answer publishes: the synthetic `time` grid, one
+/// value column named after the statement and the nullable `__name__` column. The placeholder field
+/// of the typed empty input is internal to the tree, so neither it nor the field the matcher names
+/// is ever published.
+#[tokio::test]
+async fn native_missing_table_with_a_field_matcher_answers_the_empty_vector() {
+    for query in [
+        // The placeholder field the empty input declares, a field no fabricated layout holds, a
+        // regex that would select several fields of a real table, and a negative matcher.
+        r#"nonexistent_metric{__field__="value"}"#,
+        r#"nonexistent_metric{__field__="field_0"}"#,
+        r#"nonexistent{__field__=~"field_.*"}"#,
+        r#"nonexistent_metric{__field__!="value"}"#,
+        // The same empty answer through the nameless spelling: it reaches the zero-match branch
+        // rather than the named one, and a field selection over a table with no rows is empty
+        // either way.
+        r#"{__name__="nonexistent", __field__="v"}"#,
+    ] {
+        let plan = build_native_fused_plan_with_provider(
+            query,
+            true,
+            named_missing_table_provider().await,
+        )
+        .await;
+        assert!(
+            find_fused_series(&plan).is_some(),
+            "`{query}` did not take the native route: {plan:?}"
+        );
+        assert!(
+            contains_typed_empty_input(&plan),
+            "`{query}` is not planned over the typed empty input: {plan:?}"
+        );
+        // No row names a field, so the published layout is the empty answer's: the grid, one value
+        // column named after the statement, and the nullable name column.
+        let columns = plan
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect::<Vec<_>>();
+        let value = parser::parse(query).unwrap().to_string();
+        assert_eq!(
+            vec![DEFAULT_TIME_INDEX_COLUMN, value.as_str(), METRIC_NAME],
+            columns,
+            "`{query}`: {plan:?}"
+        );
+        assert!(
+            plan.schema()
+                .field_with_name(None, METRIC_NAME)
+                .expect("the rows root declares the name column")
+                .is_nullable(),
+            "`{query}`: {plan:?}"
+        );
+        let state = build_query_engine_state();
+        let (_, batches) = execute(plan, &state).await;
+        assert_eq!(
+            0,
+            batch_rows(&batches),
+            "`{query}` answered rows over a table that does not exist: {batches:?}"
+        );
+    }
+}
+
 /// A zero-match selector is laid out by the operand of the set operation it is compared against.
 ///
 /// `wide_total` carries two fields and `narrow_total` one, and the empty branch is the left operand
@@ -5730,6 +6179,9 @@ async fn native_fused_binary_keeps_independent_scan_occurrences() {
                 }
                 NativeExpr::ParameterizedTopK {
                     input, parameter, ..
+                }
+                | NativeExpr::ParameterizedAggregate {
+                    input, parameter, ..
                 } => {
                     sources(input, out);
                     sources(parameter, out);
@@ -6510,6 +6962,9 @@ async fn native_fused_three_selector_trees_bind_every_occurrence() {
                     }
                 }
                 NativeExpr::ParameterizedTopK {
+                    input, parameter, ..
+                }
+                | NativeExpr::ParameterizedAggregate {
                     input, parameter, ..
                 } => {
                     child(input);
@@ -7749,6 +8204,256 @@ async fn native_fused_quantile_is_a_complete_aggregate() {
         );
         // The quantile answers a float per group, under the fields and labels it read.
         assert_eq!(columns, sorted_column_names(&plan), "`{query}`");
+    }
+}
+
+/// A `quantile` whose argument the query evaluates binds that argument beside the fold, and answers
+/// per point.
+///
+/// Prometheus reads the parameter at every step, so `quantile(scalar(foo), m)` is not the quantile of
+/// a number bound before the query ran: the tree holds one `Complete` fold with its argument as a
+/// second operand, the fold's input first. Neither route splits it - a quantile exports no state to
+/// combine and a partition's quantile is not part of the group's - and a constant written as an
+/// expression stays the number it folds to, exactly as it was.
+#[tokio::test]
+async fn native_fused_quantile_reads_a_per_point_parameter() {
+    // A constant the statement decides - a literal or arithmetic over literals - is bound on the
+    // fold, so the tree keeps the constant path it always had.
+    for (query, quantile) in [
+        (
+            "quantile(0.25 + 0.1 + 0.15, some_metric)",
+            0.25 + 0.1 + 0.15,
+        ),
+        (
+            "quantile(pi() / 4, some_metric)",
+            std::f64::consts::PI / 4.0,
+        ),
+    ] {
+        let plan = build_native_fused_plan(query, true).await;
+        let display = plan.display_indent().to_string();
+        let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("`{query}`: {display}"));
+        let NativeExpr::Aggregate { op, .. } = &fused.tree().root().expr else {
+            panic!("`{query}`: the folded constant left the constant path: {display}");
+        };
+        assert!(
+            matches!(
+                op.kind,
+                AggregateKind::Quantile { quantile: value } if value.to_bits() == quantile.to_bits()
+            ),
+            "`{query}`: {:?}",
+            op.kind
+        );
+    }
+
+    // An argument the statement evaluates: the fold reads it once per grid point. The columns are
+    // the grouping's either way, which is why the ungrouped statements publish no tag at all.
+    for (query, tags, grouped) in [
+        (
+            "quantile(scalar(some_metric), some_metric)",
+            &["__name__"][..],
+            false,
+        ),
+        (
+            "quantile(time() / 150 + 0.5, some_metric)",
+            &["__name__"][..],
+            false,
+        ),
+        (
+            "quantile(scalar(some_metric), some_metric) by (tag_0)",
+            &["__name__", "tag_0"][..],
+            true,
+        ),
+    ] {
+        let plan = build_native_fused_plan(query, true).await;
+        let display = plan.display_indent().to_string();
+        let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("`{query}`: {display}"));
+        // A quantile exports no state, so there is no split half for it, with an argument or without.
+        assert!(find_final_split(&plan).is_none(), "`{query}`: {display}");
+        let NativeExpr::ParameterizedAggregate {
+            input,
+            op,
+            parameter,
+        } = &fused.tree().root().expr
+        else {
+            panic!("`{query}`: the root is not a per-point fold: {display}");
+        };
+        assert!(
+            matches!(op.kind, AggregateKind::Quantile { .. })
+                && op.stage == AggregateStage::Complete,
+            "`{query}`: {display}"
+        );
+        assert_eq!(
+            grouped,
+            matches!(&op.group, Grouping::By(labels) if !labels.is_empty()),
+            "`{query}`: {display}"
+        );
+        // The fold reads the vector, the argument the scalar expression beside it.
+        assert!(
+            matches!(
+                input.expr,
+                NativeExpr::Instant { .. } | NativeExpr::Input(_)
+            ),
+            "`{query}`: {display}"
+        );
+        assert!(
+            matches!(parameter.output, NativeType::Scalar(_)),
+            "`{query}`: the argument is not a scalar: {display}"
+        );
+        assert_eq!(
+            // The value column the statement publishes is the expression it wrote, and the argument
+            // adds no column of its own: a scalar carries no labels.
+            expected_native_column_names(query, tags),
+            sorted_column_names(&plan),
+            "`{query}`"
+        );
+    }
+}
+
+/// A fold that reads its argument per point keeps the canonical boundary below it.
+///
+/// `label_replace` rewrites the label set two series can share, so the fragments it produces meet
+/// at a canonical merge before anything folds them. The fold above that merge reads the whole
+/// vector - a `quantile` answers from its group's whole sample set, with a `φ` the statement
+/// evaluates or with a number bound on it - so it is a global consumer of the same kind the bound
+/// fold is, and the segmentation has to read it as one: the fold is cut out as its own segment and
+/// the merge below it keeps its own boundary. Read as a per-partition node instead, the whole
+/// subtree would be cut over the scans in one go, and the label-set merge would run once per
+/// partition with nothing above it to collect the pieces.
+#[tokio::test]
+async fn native_fused_nested_per_point_quantile_keeps_its_canonical_boundary() {
+    let query = r#"quantile(time() / 2400, label_replace(some_metric, "tag_0", "same", "tag_0", ".*")) + 0"#;
+    let plan = build_native_fused_plan(query, true).await;
+    let display = plan.display_indent().to_string();
+    fn segment_of(plan: &LogicalPlan) -> &FusedSeries {
+        let LogicalPlan::Extension(Extension { node }) = plan else {
+            panic!("a segment is an extension node");
+        };
+        node.as_any()
+            .downcast_ref::<FusedSeries>()
+            .expect("the extension is not a fused segment")
+    }
+    // The root is the pointwise rewrite, and what it reads is the fold as a segment of its own.
+    let root = find_fused_series(&plan).unwrap_or_else(|| panic!("`{query}`: {display}"));
+    let [fold] = root.children() else {
+        panic!("`{query}`: the rewrite must read the fold and nothing else: {display}");
+    };
+    let fold = segment_of(fold);
+    assert!(
+        matches!(
+            fold.tree().root().expr,
+            NativeExpr::ParameterizedAggregate { .. }
+        ),
+        "`{query}`: the fold is not a segment of its own: {display}"
+    );
+    // Below the fold is the canonical boundary the label rewrite needs, as its own segment over the
+    // scan it reads.
+    let [producer] = fold.children() else {
+        panic!("`{query}`: the fold must read the canonical boundary: {display}");
+    };
+    let producer = segment_of(producer);
+    assert!(
+        producer.is_canonical_producer()
+            && matches!(producer.tree().root().expr, NativeExpr::Merge { .. }),
+        "`{query}`: the label-set merge is not a boundary below the fold: {display}"
+    );
+    let [source] = producer.children() else {
+        panic!("`{query}`: the producer must read the scan it merges: {display}");
+    };
+    assert!(
+        find_fused_series(source).is_none(),
+        "`{query}`: the producer reads the scan itself, not another segment: {display}"
+    );
+    assert!(find_final_split(&plan).is_none(), "`{query}`: {display}");
+}
+
+/// A `quantile` whose argument reads a second table still runs as one native execution.
+///
+/// The argument is a scalar expression over another metric, so the statement reads two tables: the
+/// fold reads one and its argument the other, and one execution above both is what folds them.
+#[tokio::test]
+async fn native_fused_quantile_parameter_over_a_second_table() {
+    let tables = [
+        (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+        (DEFAULT_SCHEMA_NAME.to_string(), "other_metric".to_string()),
+    ];
+    let provider = || build_test_table_provider_with_tsid(&tables, 1, 1);
+    let query = "quantile(scalar(some_metric), other_metric)";
+    let plan = build_native_fused_plan_with_provider(query, true, provider().await).await;
+    let display = plan.display_indent().to_string();
+    let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("`{query}`: {display}"));
+    assert_eq!(None, fused.binding().metric_name, "`{query}`: {display}");
+    assert!(
+        matches!(
+            fused.tree().root().expr,
+            NativeExpr::ParameterizedAggregate { .. }
+        ),
+        "`{query}`: {display}"
+    );
+    // The fold's input is bound first and its argument second, which is the order the sources are
+    // read in, and the statement still reads both tables.
+    assert_eq!(
+        vec!["other_metric", "some_metric"],
+        fused_input_metrics(&plan),
+        "`{query}`: {display}"
+    );
+    assert!(find_final_split(&plan).is_none(), "`{query}`: {display}");
+}
+
+/// An argument that ranks its series in input order is refused by the native route.
+///
+/// `scalar()` hands the fold one value per grid point, so the `limitk` inside the argument ranks the
+/// argument's own source, and a tree over more than one input reads its inputs in whichever order the
+/// gather finishes them: which series the ranking keeps would be the schedule's answer rather than the
+/// statement's. The gate that refuses such a tree reads the fold's argument as well as the vector it
+/// folds, and the argument is the only place an order-dependent selection sits here - the same
+/// statement with an order-independent argument plans natively in
+/// [`native_fused_quantile_parameter_over_a_second_table`].
+///
+/// The refusal is asserted on the native attempt alone rather than on the plan the statement gets: the
+/// existing planner binds a `quantile` argument only as a literal and answers a per-point one with
+/// `Invalid function argument for quantile`, so a tree this gate refuses has no other route - the
+/// statement is answered natively or not at all.
+#[tokio::test]
+async fn native_fused_declines_an_order_dependent_quantile_argument() {
+    let state = build_query_engine_state();
+    for (query, native) in [
+        // The argument keeps the first series `limitk` is handed, so which one survives two gathered
+        // inputs is the schedule's answer.
+        (
+            "quantile(scalar(limitk(1, some_metric)), other_metric)",
+            false,
+        ),
+        // Neither fold reads its source in arrival order, so the argument is what the refusal turns
+        // on rather than the two-table shape or a per-point argument as such.
+        (
+            "quantile(scalar(max by (tag_0) (some_metric)), other_metric)",
+            true,
+        ),
+    ] {
+        let tables = [
+            (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+            (DEFAULT_SCHEMA_NAME.to_string(), "other_metric".to_string()),
+        ];
+        let stmt = build_eval_stmt(query);
+        let mut planner = PromPlanner {
+            table_provider: build_test_table_provider_with_tsid(&tables, 1, 1).await,
+            ctx: PromPlannerContext::from_eval_stmt(&stmt).unwrap(),
+            promql_annotations: None,
+            native_fused: true,
+            native_binary_offer: true,
+        };
+        let planned = planner
+            .try_plan_native_fused(&stmt.expr, &state)
+            .await
+            .unwrap();
+        assert_eq!(
+            native,
+            planned.is_some(),
+            "`{query}`: the gate must read the fold's argument as well as its vector: {}",
+            planned
+                .map(|plan| plan.display_indent().to_string())
+                .unwrap_or_default()
+        );
     }
 }
 
@@ -17105,5 +17810,56 @@ async fn a_float_tree_still_segments_next_to_the_histogram_gates() {
             "{query} left the native route: {}",
             plan.display_indent_schema()
         );
+    }
+}
+
+/// A statement named after the column its own layout publishes keeps the answer it owes.
+///
+/// A table that does not exist has no column of its own to name the grid after, so the planner
+/// fabricates the existing planner's synthetic `time` column for it. `time` is therefore both the
+/// metric's name - which names the value column - and that grid, and `__name__` is both a metric
+/// name and the row-name column every samples layout publishes. Prometheus answers both statements
+/// with the empty vector: the first publishes its grid under a free synthetic name, and the second
+/// is a layout the rows contract cannot name, so it keeps the existing plan, which answers empty.
+#[tokio::test]
+async fn native_missing_table_named_after_its_own_columns_answers_the_empty_vector() {
+    for (query, native) in [("time", true), ("__name__", false)] {
+        let plan = build_native_fused_plan_with_provider(
+            query,
+            true,
+            named_missing_table_provider().await,
+        )
+        .await;
+        assert_eq!(
+            native,
+            find_fused_series(&plan).is_some(),
+            "`{query}`: {plan:?}"
+        );
+        let columns = plan
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect::<Vec<_>>();
+        if native {
+            assert_eq!(
+                vec!["native_time_0", query, METRIC_NAME],
+                columns,
+                "`{query}`: the grid takes a free synthetic name"
+            );
+        }
+        let stmt = build_eval_stmt(query);
+        let state = build_query_engine_state();
+        let plan = PromPlanner::stmt_to_plan_with_annotations(
+            named_missing_table_provider().await,
+            &stmt,
+            &state,
+            None,
+            true,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("`{query}` is not planned at all: {error}"));
+        let (_, batches) = execute(plan, &state).await;
+        assert_eq!(0, batch_rows(&batches), "`{query}`: {batches:?}");
     }
 }

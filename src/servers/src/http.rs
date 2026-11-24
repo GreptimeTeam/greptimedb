@@ -1113,8 +1113,10 @@ impl HttpServer {
             );
 
         // Debug handlers are part of the complete router; the API listener hides
-        // them through the outer namespace guard applied below.
-        let router = router.nest(
+        // them through the outer namespace guard applied below. They are added
+        // after the middleware stack above, so they need their own auth layer,
+        // applied outside `nest` so that it sees the full `/debug/...` path.
+        let debug_router = Router::new().nest(
             "/debug",
             Router::new()
                 // handler for changing log level dynamically
@@ -1157,6 +1159,14 @@ impl HttpServer {
                         ),
                 ),
         );
+        // `merge` keeps the fallback of its argument, so merge the main router into
+        // the debug router to keep the middleware stack on unmatched paths.
+        let router = debug_router
+            .layer(middleware::from_fn_with_state(
+                AuthState::new(self.user_provider.clone()),
+                authorize::check_http_auth,
+            ))
+            .merge(router);
 
         // Seal the API listener last: this is the outermost layer, applied after
         // all middleware, debug routes and any caller/plugin routes, so that only
@@ -1995,6 +2005,65 @@ mod test {
         assert!(!is_api_listener_path("/metrics"));
         assert!(!is_api_listener_path("/status/plugin"));
         assert!(!is_api_listener_path("/health"));
+    }
+
+    #[tokio::test]
+    async fn debug_routes_require_auth_when_provider_is_configured() {
+        let server = HttpServerBuilder::new(HttpOptions::default()).build();
+        let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+        assert_eq!(
+            client
+                .get("/debug/workload_scheduler")
+                .send()
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let response = client
+            .get("/no_such_path")
+            .header("Origin", "https://example.com")
+            .send()
+            .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(
+            response
+                .headers()
+                .contains_key(http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+        );
+
+        let provider =
+            auth::static_user_provider_from_option("static_user_provider:cmd:user=password")
+                .unwrap();
+        let server = HttpServerBuilder::new(HttpOptions::default())
+            .with_user_provider(Arc::new(provider))
+            .build();
+        let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+        assert_eq!(
+            client
+                .get("/debug/workload_scheduler")
+                .send()
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            client
+                .post("/debug/log_level")
+                .body("info")
+                .send()
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            client
+                .get("/debug/workload_scheduler")
+                .header("Authorization", "Basic dXNlcjpwYXNzd29yZA==")
+                .send()
+                .await
+                .status(),
+            StatusCode::OK
+        );
     }
 
     #[tokio::test]

@@ -117,6 +117,18 @@ impl Outputs {
                 first_error.get_or_insert_with(|| OpenDalSnafu.into_error(error));
             }
         }
+        if first_error.is_none() {
+            let dirs: std::collections::BTreeSet<_> = self
+                .paths
+                .iter()
+                .filter_map(|path| crate::sst::location::parent_dir(path))
+                .collect();
+            for dir in dirs {
+                if let Err(error) = self.store.delete(dir).await {
+                    first_error.get_or_insert_with(|| OpenDalSnafu.into_error(error));
+                }
+            }
+        }
         if let Some(error) = first_error {
             Err(error)
         } else {
@@ -140,5 +152,33 @@ impl Drop for Outputs {
                 }
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_abort_removes_narthex_directory() {
+        let root = common_test_util::temp_dir::create_temp_dir("narthex-abort");
+        let store = ObjectStore::new(
+            object_store::services::Fs::default().root(root.path().to_str().unwrap()),
+        )
+        .unwrap();
+        let dir =
+            crate::sst::location::narthex_file_dir("region/", store_api::storage::FileId::random());
+        let mut outputs = Outputs {
+            store: store.clone(),
+            active: None,
+            paths: Vec::new(),
+            committed: false,
+        };
+        outputs.open(format!("{dir}part-0.samples")).await.unwrap();
+        outputs.write(vec![1, 2, 3]).await.unwrap();
+        outputs.close().await.unwrap();
+        assert!(root.path().join(&dir).is_dir());
+        outputs.cleanup().await.unwrap();
+        assert!(!root.path().join(&dir).exists());
     }
 }

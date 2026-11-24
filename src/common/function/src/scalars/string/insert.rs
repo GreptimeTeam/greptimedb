@@ -170,6 +170,7 @@ fn cast_to_int64(array: &ArrayRef, name: &str) -> datafusion_common::Result<Arra
 
 /// Perform the INSERT string operation.
 /// pos is 1-based. If pos < 1 or pos > len(str) + 1, returns original string.
+/// if replace_len is negative or past the end of the string, replace to the end.
 fn insert_string(original: &str, pos: i64, replace_len: i64, new_str: &str) -> String {
     let char_count = original.chars().count();
 
@@ -180,13 +181,9 @@ fn insert_string(original: &str, pos: i64, replace_len: i64, new_str: &str) -> S
 
     let start_idx = (pos - 1) as usize; // Convert to 0-based
 
-    // Calculate end index for replacement
-    let replace_len = if replace_len < 0 {
-        0
-    } else {
-        replace_len as usize
-    };
-    let end_idx = (start_idx + replace_len).min(char_count);
+    let end_idx = usize::try_from(replace_len).map_or(char_count, |replace_len| {
+        start_idx.saturating_add(replace_len).min(char_count)
+    });
 
     let start_byte = char_to_byte_idx(original, start_idx);
     let end_byte = char_to_byte_idx(original, end_idx);
@@ -298,6 +295,39 @@ mod tests {
             assert_eq!(str_array.value(0), "QuWhat");
         } else {
             panic!("Expected array result");
+        }
+    }
+
+    #[test]
+    fn test_insert_negative_replace_len() {
+        let cases = [
+            // INSERT('Quadratic', 3, -1, 'What') => 'QuWhat'
+            (("Quadratic", 3, -1, "What"), "QuWhat"),
+            // INSERT('Quadratic', 1, -1, 'What') => 'What'
+            (("Quadratic", 1, -1, "What"), "What"),
+            (("Quadratic", 9, -1, "What"), "QuadratiWhat"),
+        ];
+        let function = InsertFunction::default();
+
+        for ((curr_str, pos, len, new_str), expected) in cases {
+            let curr_str_arg = Arc::new(StringArray::from(vec![curr_str]));
+            let pos_arg = Arc::new(Int64Array::from(vec![pos]));
+            let len_arg = Arc::new(Int64Array::from(vec![len]));
+            let new_str_arg = Arc::new(StringArray::from(vec![new_str]));
+            let args = create_args(vec![curr_str_arg, pos_arg, len_arg, new_str_arg]);
+
+            let result = function.invoke_with_args(args).unwrap();
+
+            if let ColumnarValue::Array(array) = result {
+                let str_array = array.as_string::<i64>();
+                assert_eq!(
+                    str_array.value(0),
+                    expected,
+                    "INSERT({curr_str:?}, {pos}, {len}, {new_str:?}) = {expected}"
+                );
+            } else {
+                panic!("Expected array result");
+            }
         }
     }
 

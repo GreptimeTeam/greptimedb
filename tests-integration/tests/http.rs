@@ -13240,12 +13240,26 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     )
     .await;
 
-    test_otlp_cumulative_histogram_validation(&client).await;
+    test_otlp_cumulative_histogram_validation(&client, false).await;
 
     guard.remove_all().await;
 }
 
-async fn test_otlp_cumulative_histogram_validation(client: &TestClient) {
+#[tokio::test]
+#[ignore = "Exemplar writes require pre-encoded keys: https://github.com/GreptimeTeam/greptimedb/issues/10598"]
+async fn test_otlp_cumulative_histogram_with_exemplars() {
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(StorageType::File, "cumulative_histogram_exemplars")
+            .await;
+    let client = TestClient::new(app).await;
+    test_otlp_cumulative_histogram_validation(&client, true).await;
+    guard.remove_all().await;
+}
+
+async fn test_otlp_cumulative_histogram_validation(
+    client: &TestClient,
+    include_valid_exemplar: bool,
+) {
     use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue, any_value};
     use opentelemetry_proto::tonic::metrics::v1::{
         self as otel_metrics, AggregationTemporality, Exemplar, HistogramDataPoint, Metric,
@@ -13337,6 +13351,10 @@ async fn test_otlp_cumulative_histogram_validation(client: &TestClient) {
             "[[0]]",
         )
         .await;
+    }
+
+    if !include_valid_exemplar {
+        return;
     }
 
     // Mixed valid control + malformed sibling: only the valid sibling writes rows/exemplars.

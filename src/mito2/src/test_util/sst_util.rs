@@ -300,20 +300,23 @@ pub fn new_sparse_primary_key(
     table_id: u32,
     tsid: u64,
 ) -> Vec<u8> {
-    use mito_codec::row_converter::PrimaryKeyCodec;
-
     let codec = mito_codec::row_converter::SparsePrimaryKeyCodec::new(metadata);
 
     // Sparse encoding requires internal columns first, then user tags
-    let values = vec![
-        (ReservedColumnId::table_id(), ValueRef::UInt32(table_id)),
-        (ReservedColumnId::tsid(), ValueRef::UInt64(tsid)),
-        (0, ValueRef::String(tags[0])), // tag_0
-        (1, ValueRef::String(tags[1])), // tag_1
-    ];
-
     let mut buffer = Vec::new();
-    codec.encode_value_refs(&values, &mut buffer).unwrap();
+    codec.encode_internal(table_id, tsid, &mut buffer).unwrap();
+    codec
+        .encode_to_vec(
+            tags.iter().enumerate().map(|(i, tag)| {
+                let id = metadata
+                    .column_by_name(&format!("tag_{i}"))
+                    .unwrap()
+                    .column_id;
+                (id, ValueRef::String(tag))
+            }),
+            &mut buffer,
+        )
+        .unwrap();
     buffer
 }
 

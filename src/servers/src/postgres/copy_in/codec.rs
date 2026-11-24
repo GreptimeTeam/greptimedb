@@ -51,13 +51,18 @@
 //! format-specific shapes) and rejects the rest with
 //! `reject_leftovers`.
 
+use datatypes::data_type::DataType;
+use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::ColumnSchema;
 use pgwire::error::PgWireResult;
 
 use crate::postgres::copy_in::arrow::ArrowOptions;
 use crate::postgres::copy_in::csv::CsvCodec;
 use crate::postgres::copy_in::influxdb::InfluxdbOptions;
+use crate::postgres::copy_in::jsonl::JsonlCodec;
 use crate::postgres::copy_in::otlp::OtlpOptions;
 use crate::postgres::copy_in::prom_write::PromWriteOptions;
+use crate::postgres::copy_in::unsupported;
 
 /// A resolved COPY FROM STDIN format with its validated options.
 #[derive(Debug, Clone)]
@@ -65,6 +70,10 @@ pub(super) enum CopyFormat {
     /// Table-bound CSV: records are parsed incrementally against the
     /// targeted table's columns and inserted in batches.
     Csv(CsvCodec),
+    /// Table-bound newline-delimited JSON: objects decode against the
+    /// targeted table's columns through arrow-json, the engine behind
+    /// file-based `COPY ... FROM 'file.json'`.
+    Jsonl(JsonlCodec),
     /// Table-bound Arrow IPC stream, completed batch-by-batch through Flight's
     /// bulk ingestion handler. Advertises binary wire format code 1.
     Arrow(ArrowOptions),
@@ -85,6 +94,73 @@ pub(super) enum CopyFormat {
     /// through the same ingestion core the `/v1/prometheus/write`
     /// endpoint runs. Advertises wire format code 1.
     PromWrite(PromWriteOptions),
+}
+
+impl CopyFormat {
+    /// The canonical format name, used in error messages.
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            CopyFormat::Csv(_) => "csv",
+            CopyFormat::Jsonl(_) => "jsonl",
+            CopyFormat::Arrow(_) => "arrow",
+            CopyFormat::Influxdb(_) => "influxdb",
+            CopyFormat::Otlp(_) => "otlp",
+            CopyFormat::PromWrite(_) => "promwrite",
+        }
+    }
+}
+
+/// A table-bound COPY format: records decode against the targeted
+/// table's columns into insertable rows (csv, jsonl). Implemented by
+/// the codec config structs; the copy lifecycle treats these row-based
+/// formats identically through it. Arrow IPC uses a separate bulk-ingestion path.
+pub(crate) trait TableBoundCodec: Send + Sync {
+    /// The canonical format name, for logs.
+    fn name(&self) -> &'static str;
+    /// Validates that a column of `data_type` can be ingested.
+    fn check_column_type(&self, data_type: &ConcreteDataType) -> PgWireResult<()>;
+    /// Creates the stateful parser for one copy stream over the
+    /// targeted columns (in COPY field order). `timezone` is the
+    /// session timezone for offset-free timestamp strings.
+    fn create_parser(
+        &self,
+        columns: &[ColumnSchema],
+        timezone: &str,
+    ) -> PgWireResult<Box<dyn RecordParser + Send>>;
+}
+
+/// The column types the arrow-based decoders (csv, jsonl) can decode
+/// against; shared by both codecs' [`TableBoundCodec::check_column_type`].
+/// `format` names the codec in the error.
+pub(super) fn check_arrow_column_type(
+    data_type: &ConcreteDataType,
+    format: &str,
+) -> PgWireResult<()> {
+    let supported = matches!(
+        data_type,
+        ConcreteDataType::Boolean(_)
+            | ConcreteDataType::Int8(_)
+            | ConcreteDataType::Int16(_)
+            | ConcreteDataType::Int32(_)
+            | ConcreteDataType::Int64(_)
+            | ConcreteDataType::UInt8(_)
+            | ConcreteDataType::UInt16(_)
+            | ConcreteDataType::UInt32(_)
+            | ConcreteDataType::UInt64(_)
+            | ConcreteDataType::Float32(_)
+            | ConcreteDataType::Float64(_)
+            | ConcreteDataType::String(_)
+            | ConcreteDataType::Date(_)
+            | ConcreteDataType::Timestamp(_)
+            | ConcreteDataType::Decimal128(_)
+    );
+    if !supported {
+        return Err(unsupported(format!(
+            "column type \"{}\" is not supported by format {format}",
+            data_type.name()
+        )));
+    }
+    Ok(())
 }
 
 /// A parsed, insertable row: one gRPC value per targeted column, in COPY
