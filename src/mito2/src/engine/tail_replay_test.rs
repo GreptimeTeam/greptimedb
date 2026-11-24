@@ -106,7 +106,9 @@ struct TailReplayListener {
     compactions_scheduled: AtomicUsize,
     leader_lease_wait_ends: AtomicUsize,
     became_writable: AtomicUsize,
+    backfill_saves: AtomicUsize,
     park_deferred_work: Gate,
+    park_rebuild_admitted: Gate,
     park_backfill: Gate,
 }
 
@@ -149,6 +151,14 @@ impl EventListener for TailReplayListener {
 
     async fn on_persist_backfilled_metadata_lock_begin(&self, _region_id: RegionId) {
         self.park_backfill.pass().await;
+    }
+
+    fn on_persist_backfilled_metadata_begin(&self, _region_id: RegionId) {
+        self.backfill_saves.fetch_add(1, Ordering::Relaxed);
+    }
+
+    async fn on_rebuild_index_admitted(&self, _region_id: RegionId) {
+        self.park_rebuild_admitted.pass().await;
     }
 
     fn on_tail_fence_begin(&self, _region_id: RegionId) {
@@ -1979,9 +1989,13 @@ async fn test_replayed_ssts_build_index_as_flushed(
 }
 
 /// A role change outside the worker that stops the pass building the index the replay could not
-/// publish, and is undone before the save the work ends with, leaves the pass due.
+/// publish, before it starts or after it admitted the build, and is undone before the save the
+/// work ends with, leaves the pass due.
+#[rstest]
+#[case::before_pass(false)]
+#[case::at_admission(true)]
 #[tokio::test]
-async fn test_missing_index_pass_stopped_by_role_change_stays_due() {
+async fn test_missing_index_pass_stopped_by_role_change_stays_due(#[case] at_admission: bool) {
     let region = TestRegion::build(
         "tail-replay-index-role-change",
         true,
@@ -2022,7 +2036,12 @@ async fn test_missing_index_pass_stopped_by_role_change_stays_due() {
     let listener = &region.listener;
 
     // The lease starts the work, and a demotion lands before the pass.
-    listener.park_deferred_work.arm();
+    let park = if at_admission {
+        &listener.park_rebuild_admitted
+    } else {
+        &listener.park_deferred_work
+    };
+    park.arm();
     listener.park_backfill.arm();
     let now = Instant::now();
     region
@@ -2035,14 +2054,16 @@ async fn test_missing_index_pass_stopped_by_role_change_stays_due() {
             None,
         )
         .unwrap();
-    listener.park_deferred_work.wait_entered().await;
+    park.wait_entered().await;
     region
         .engine
         .set_region_role(region_id, RegionRole::Follower)
         .unwrap();
-    listener.park_deferred_work.release();
-    // The worker reports the end of the wait once it ran what it could.
+    park.release();
+    // The worker reports the end of the wait once it ran what it could: no build, no save.
     wait_until(|| listener.leader_lease_wait_ends.load(Ordering::Acquire) == 1).await;
+    assert_eq!(listener.index_builds_stopped(), 0);
+    assert_eq!(listener.backfill_saves.load(Ordering::Relaxed), 0);
     // A promotion before any save checks the region.
     let notified = listener.became_writable.load(Ordering::Acquire);
     region
@@ -2052,10 +2073,12 @@ async fn test_missing_index_pass_stopped_by_role_change_stays_due() {
     wait_until(|| listener.became_writable.load(Ordering::Acquire) > notified).await;
     listener.park_backfill.release();
 
+    // The work runs once.
     wait_until(|| listener.index_builds_stopped() == 1).await;
     let version = replayed.version();
     let files = &version.ssts.levels()[0].files;
     assert!(files.values().any(|file| file.meta_ref().exists_index()));
+    assert_eq!(listener.backfill_saves.load(Ordering::Relaxed), 1);
 }
 
 #[tokio::test]

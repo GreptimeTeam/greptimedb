@@ -51,7 +51,7 @@ pub trait EventListener: Send + Sync {
     async fn on_persist_backfilled_metadata_lock_begin(&self, _region_id: RegionId) {}
 
     /// Notifies the listener after the worker handled a notification that the region became
-    /// writable.
+    /// writable, before it runs the region's deferred work.
     fn on_region_became_writable(&self, _region_id: RegionId) {}
 
     /// Notifies the listener when the worker starts the work the region's wait for its Leader

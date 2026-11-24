@@ -801,8 +801,8 @@ impl MitoRegion {
 
     /// Persists the metadata backfilled when the region was opened if the manifest lacks it.
     /// A catchup cannot do it for a region that [awaits its Leader
-    /// lease](ManifestContext::awaits_leader_lease), so the lease that ends the wait does.
-    /// Returns false if it found the region not a writable leader with its Leader lease, so it
+    /// lease](ManifestContext::awaits_leader_lease), so the worker does once the region is a
+    /// writable leader with its lease. Returns false if it found the region not a writable leader with its Leader lease, so it
     /// could not tell whether the metadata needs persisting.
     pub(crate) async fn persist_backfilled_metadata(&self) -> bool {
         let mut manager = self.manifest_ctx.manifest_manager.write().await;
@@ -1480,6 +1480,14 @@ pub(crate) struct LeaderLeasePromotion {
     pub(crate) ended_wait: Option<Duration>,
     /// The state the promotion replaced, None if it left the state unchanged.
     pub(crate) replaced: Option<RegionRoleState>,
+}
+
+/// What [ManifestContext::promote_unless_reload_pending] did.
+struct Promotion {
+    /// Whether it promoted the region; see the function.
+    promoted: bool,
+    /// The state the promotion replaced, as [ManifestContext::set_role] returns it.
+    replaced: Option<RegionRoleState>,
 }
 
 /// Context to update the region manifest.
@@ -2277,9 +2285,9 @@ impl ManifestContext {
         let ended_wait = self.record_leader_lease(issued_at);
         let promotion = self.promote_unless_reload_pending(&fence, region_id, false);
         LeaderLeasePromotion {
-            promoted: promotion.is_some(),
+            promoted: promotion.promoted,
             ended_wait,
-            replaced: promotion.flatten(),
+            replaced: promotion.replaced,
         }
     }
 
@@ -2289,7 +2297,7 @@ impl ManifestContext {
         let mut fence = self.promotion_fence.lock().unwrap();
         fence.catching_up = false;
         self.promote_unless_reload_pending(&fence, region_id, true)
-            .is_some()
+            .promoted
     }
 
     /// Returns whether the region was stopped, so no catchup promotes it.
@@ -2365,23 +2373,28 @@ impl ManifestContext {
     }
 
     /// Promotes the region unless it waits for a reload or was stopped. The caller holds the fence
-    /// lock. Returns None if it does not promote the region, otherwise the state the role change
-    /// replaced, as [Self::set_role] returns it.
+    /// lock.
     fn promote_unless_reload_pending(
         &self,
         fence: &PromotionFence,
         region_id: RegionId,
         by_catchup: bool,
-    ) -> Option<Option<RegionRoleState>> {
+    ) -> Promotion {
         if fence.reload_pending || fence.stopped {
-            return None;
+            return Promotion {
+                promoted: false,
+                replaced: None,
+            };
         }
         if by_catchup {
             // Before the role, so a lease that finds the region writable compares with it.
             self.catchup_promoted_at
                 .store(lease_nanos(Instant::now()).max(1), Ordering::Relaxed);
         }
-        Some(self.set_role(RegionRole::Leader, region_id))
+        Promotion {
+            promoted: true,
+            replaced: self.set_role(RegionRole::Leader, region_id),
+        }
     }
 
     /// Counts an applied Leader lease (or StagingLeader lease, on a node whose writes need a lease)

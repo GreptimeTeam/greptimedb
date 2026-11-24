@@ -64,7 +64,7 @@ use crate::metrics::{FLUSH_FAILURE_TOTAL, FLUSH_REQUESTS_TOTAL};
 use crate::region::{RegionLeaderState, RegionRoleState};
 use crate::request::{BackgroundNotify, BuildIndexRequest, WorkerRequest};
 use crate::sst::file::{FileMeta, IndexType};
-use crate::sst::index::IndexBuildType;
+use crate::sst::index::{IndexBuildOutcome, IndexBuildType, ResultMpscSender};
 use crate::test_util::{
     CreateRequestBuilder, DeltaFaults, Gate, LogStoreFactory, TestEnv, build_rows,
     fail_next_write_to, flush_region, kafka_log_store_factory, multiple_log_store_factories,
@@ -1010,6 +1010,7 @@ struct LeaseWaitEndedListener {
     backfill_persists: AtomicUsize,
     became_writable: AtomicUsize,
     backfill_deferrals: AtomicUsize,
+    rebuilds_admitted: AtomicUsize,
     park_backfill: Gate,
     park_enter_staging_result: Gate,
     park_deferred_work: Gate,
@@ -1044,6 +1045,7 @@ impl EventListener for LeaseWaitEndedListener {
     }
 
     async fn on_rebuild_index_admitted(&self, _region_id: RegionId) {
+        self.rebuilds_admitted.fetch_add(1, Ordering::Relaxed);
         self.park_rebuild_admitted.pass().await;
     }
 
@@ -1065,15 +1067,13 @@ impl LeaseWaitEndedListener {
         self.backfill_persists.load(Ordering::Relaxed)
     }
 
+    async fn wait_for_backfill_deferrals(&self, deferrals: usize) {
+        wait_until(|| self.backfill_deferrals.load(Ordering::Acquire) >= deferrals).await;
+    }
+
     async fn wait_for_backfill_persists(&self, persists: usize) {
         wait_until(|| self.backfill_persists() >= persists).await;
         assert_eq!(self.backfill_persists(), persists);
-    }
-}
-
-impl LeaseWaitEndedListener {
-    async fn wait_for_backfill_deferrals(&self, deferrals: usize) {
-        wait_until(|| self.backfill_deferrals.load(Ordering::Acquire) >= deferrals).await;
     }
 }
 
@@ -1221,6 +1221,7 @@ async fn test_lease_during_change_defers_work_to_its_end(#[case] change: HeldCha
         change.fails(),
         "{change:?}"
     );
+    // The save is the check: an ALTER persists the backfilled expression itself.
     listener.wait_for_backfill_persists(1).await;
     assert_eq!(wait_persisted_partition_expr(&engine).await, expr_json);
 }
@@ -1424,7 +1425,8 @@ async fn test_duplicate_backfill_deferrals_run_work_once() {
     drop(manager);
     alter.await.unwrap().unwrap();
     listener.wait_for_backfill_persists(1).await;
-    // A later change finds no work due; the flush after it orders the check.
+    // A later change finds no work due; the flush, handled after the truncate's batch and its
+    // sweep, orders the check.
     HeldChange::Truncate.send(&engine).await.unwrap();
     flush(&engine).await.unwrap();
     assert_eq!(listener.backfill_persists(), 1);
@@ -1471,6 +1473,7 @@ async fn test_deferred_work_removed_with_region(#[case] close: bool) {
             .set_region_role(REGION_ID, RegionRole::Leader)
             .unwrap();
         wait_until(|| listener.became_writable.load(Ordering::Acquire) > notified).await;
+        worker_barrier(&engine).await;
     } else {
         let request = RegionRequest::Drop(drop_request());
         engine.handle_request(REGION_ID, request).await.unwrap();
@@ -1488,21 +1491,22 @@ async fn test_deferred_work_removed_with_region(#[case] close: bool) {
     assert_eq!(listener.backfill_persists(), 0);
 }
 
-/// A role change outside the worker while it runs the deferred work keeps what is left due, here
-/// the retry of a file that the missing-index pass leaves since its writer built an extension
-/// index.
-#[tokio::test]
-async fn test_deferred_work_kept_across_role_change_while_it_runs() {
-    common_telemetry::init_default_ut_logging();
-    let mut env = TestEnv::with_prefix("deferred-work-role-change").await;
+/// Creates [REGION_ID] with an inverted index on an engine of `config` whose writes need a lease
+/// and flushes a file of three rows for each of `starts`, with the region's Leader lease. Returns
+/// the engine, its listener, the schema and the files sorted by time.
+async fn create_index_region(
+    env: &mut TestEnv,
+    config: MitoConfig,
+    starts: &[usize],
+) -> (
+    MitoEngine,
+    Arc<LeaseWaitEndedListener>,
+    Vec<ColumnSchema>,
+    Vec<FileMeta>,
+) {
     let listener = Arc::new(LeaseWaitEndedListener::default());
     let engine = env
-        .create_engine_with(
-            async_build_mode_config(false),
-            None,
-            Some(listener.clone()),
-            None,
-        )
+        .create_engine_with(config, None, Some(listener.clone()), None)
         .await;
     engine.require_write_lease();
     engine.freeze_lease_clock(Instant::now());
@@ -1513,26 +1517,42 @@ async fn test_deferred_work_kept_across_role_change_while_it_runs() {
         .await
         .unwrap();
     grant(&engine, RegionRole::Leader, Instant::now() + LEASE);
-    let rows = Rows {
-        schema,
-        rows: build_rows(0, 3),
-    };
-    put_rows(&engine, REGION_ID, rows).await;
-    flush_region(&engine, REGION_ID, None).await;
+    for &start in starts {
+        let rows = Rows {
+            schema: schema.clone(),
+            rows: build_rows(start, start + 3),
+        };
+        put_rows(&engine, REGION_ID, rows).await;
+        flush_region(&engine, REGION_ID, None).await;
+    }
     let region = engine.get_region(REGION_ID).unwrap();
     let mut files = region.all_manifest_files().await.0;
+    files.sort_by_key(|file| file.time_range.0);
+    (engine, listener, schema, files)
+}
+
+/// Marks the first of `files` as carrying an extension index, which the missing-index pass
+/// leaves to its writer.
+async fn mark_extension_index(engine: &MitoEngine, files: &mut [FileMeta]) {
     files[0].available_indexes.push(IndexType::HllIndex);
     let edit = RegionEdit {
-        files_to_add: files.clone(),
+        files_to_add: files.to_vec(),
         ..Default::default()
     };
     engine.edit_region(REGION_ID, edit).await.unwrap();
-    promote_to_await_leader_lease(&engine, REGION_ID).await;
+}
+
+/// Sends the worker the retry a publication that found the schema changed sends.
+async fn submit_index_build_retry(
+    engine: &MitoEngine,
+    files: Vec<FileMeta>,
+    result_senders: Vec<ResultMpscSender>,
+) {
     let notify = BackgroundNotify::IndexBuildRetry(BuildIndexRequest {
         region_id: REGION_ID,
         build_type: IndexBuildType::Manual,
         file_metas: files,
-        result_senders: Vec::new(),
+        result_senders,
     });
     let request = WorkerRequest::Background {
         region_id: REGION_ID,
@@ -1540,24 +1560,49 @@ async fn test_deferred_work_kept_across_role_change_while_it_runs() {
     };
     let workers = &engine.inner.workers;
     workers.submit_to_worker(REGION_ID, request).await.unwrap();
+}
+
+/// Returns whether each of `files` has an inverted index.
+fn has_inverted_index(engine: &MitoEngine, files: &[FileId]) -> bool {
+    let version = engine.get_region(REGION_ID).unwrap().version();
+    let ssts = &version.ssts.levels()[0].files;
+    files.iter().all(|file_id| {
+        ssts[file_id]
+            .meta_ref()
+            .available_indexes
+            .contains(&IndexType::InvertedIndex)
+    })
+}
+
+/// Sends the worker a request it handles after everything sent before, which `engine`'s region
+/// refuses unless it is a writable leader with its lease.
+async fn worker_barrier(engine: &MitoEngine) {
+    let build = RegionRequest::BuildIndex(RegionBuildIndexRequest::default());
+    let _ = engine.handle_request(REGION_ID, build).await;
+}
+
+/// A role change outside the worker while it runs the deferred work keeps what is left due, here
+/// the retry of a file that the missing-index pass leaves since its writer built an extension
+/// index.
+#[tokio::test]
+async fn test_deferred_work_kept_across_role_change_while_it_runs() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("deferred-work-role-change").await;
+    let (engine, listener, _, mut files) =
+        create_index_region(&mut env, async_build_mode_config(false), &[0]).await;
+    mark_extension_index(&engine, &mut files).await;
+    let file_ids: Vec<_> = files.iter().map(|file| file.file_id).collect();
+    promote_to_await_leader_lease(&engine, REGION_ID).await;
+    submit_index_build_retry(&engine, files, Vec::new()).await;
     let request = RegionRequest::EnterStaging(EnterStagingRequest {
         partition_directive: StagingPartitionDirective::RejectAllWrites,
     });
     engine.handle_request(REGION_ID, request).await.unwrap();
     grant_at(&engine, RegionRole::StagingLeader, Instant::now(), None);
     listener.wait_for_end().await;
-    let has_inverted_index = || {
-        let version = engine.get_region(REGION_ID).unwrap().version();
-        version.ssts.levels()[0].files.values().all(|file| {
-            file.meta_ref()
-                .available_indexes
-                .contains(&IndexType::InvertedIndex)
-        })
-    };
 
     // Leaving staging starts the work, and a demotion lands before it builds.
     listener.park_deferred_work.arm();
-    let notified = listener.became_writable.load(Ordering::Acquire);
     engine
         .set_region_role(REGION_ID, RegionRole::Leader)
         .unwrap();
@@ -1566,14 +1611,14 @@ async fn test_deferred_work_kept_across_role_change_while_it_runs() {
         .set_region_role(REGION_ID, RegionRole::Follower)
         .unwrap();
     listener.park_deferred_work.release();
-    wait_until(|| listener.became_writable.load(Ordering::Acquire) > notified).await;
+    worker_barrier(&engine).await;
     assert_eq!(listener.backfill_persists(), 0);
-    assert!(!has_inverted_index());
+    assert!(!has_inverted_index(&engine, &file_ids));
 
     engine
         .set_region_role(REGION_ID, RegionRole::Leader)
         .unwrap();
-    wait_until(has_inverted_index).await;
+    wait_until(|| has_inverted_index(&engine, &file_ids)).await;
 }
 
 /// Where the state of the region refuses an index build retry.
@@ -1585,57 +1630,26 @@ enum RetryRefusal {
     Follower,
     /// The region is already staging.
     Staging,
+    /// The region awaits its Leader lease.
+    AwaitingLease,
 }
 
 /// The state of the region that refuses an index build retry keeps the retry until the region is
-/// a writable leader again, whether it refuses it before or after admitting it.
+/// a writable leader with its lease, whether it refuses it before or after admitting it, and the
+/// retry's caller learns at once that the build stopped. Only the wait for the lease also defers
+/// the missing-index pass and the backfill save.
 #[rstest]
 #[case::after_admission(RetryRefusal::AfterAdmission)]
 #[case::follower(RetryRefusal::Follower)]
 #[case::staging(RetryRefusal::Staging)]
+#[case::awaiting_lease(RetryRefusal::AwaitingLease)]
 #[tokio::test]
 async fn test_refused_index_build_retry_is_kept(#[case] refusal: RetryRefusal) {
     common_telemetry::init_default_ut_logging();
-    let mut env = TestEnv::with_prefix("retry-stopped-after-admission").await;
-    let listener = Arc::new(LeaseWaitEndedListener::default());
-    let engine = env
-        .create_engine_with(
-            async_build_mode_config(false),
-            None,
-            Some(listener.clone()),
-            None,
-        )
-        .await;
-    engine.require_write_lease();
-    engine.freeze_lease_clock(Instant::now());
-    let request = CreateRequestBuilder::new().build_with_index();
-    let schema = rows_schema(&request);
-    engine
-        .handle_request(REGION_ID, RegionRequest::Create(request))
-        .await
-        .unwrap();
-    grant(&engine, RegionRole::Leader, Instant::now() + LEASE);
-    let rows = Rows {
-        schema,
-        rows: build_rows(0, 3),
-    };
-    put_rows(&engine, REGION_ID, rows).await;
-    flush_region(&engine, REGION_ID, None).await;
-    let files = engine
-        .get_region(REGION_ID)
-        .unwrap()
-        .all_manifest_files()
-        .await
-        .0;
-    let has_inverted_index = || {
-        let version = engine.get_region(REGION_ID).unwrap().version();
-        version.ssts.levels()[0].files.values().all(|file| {
-            file.meta_ref()
-                .available_indexes
-                .contains(&IndexType::InvertedIndex)
-        })
-    };
-
+    let mut env = TestEnv::with_prefix("refused-index-retry-kept").await;
+    let (engine, listener, _, files) =
+        create_index_region(&mut env, async_build_mode_config(false), &[0]).await;
+    let file_ids: Vec<_> = files.iter().map(|file| file.file_id).collect();
     match refusal {
         RetryRefusal::AfterAdmission => listener.park_rebuild_admitted.arm(),
         RetryRefusal::Follower => engine
@@ -1647,19 +1661,10 @@ async fn test_refused_index_build_retry_is_kept(#[case] refusal: RetryRefusal) {
             });
             engine.handle_request(REGION_ID, request).await.unwrap();
         }
+        RetryRefusal::AwaitingLease => promote_to_await_leader_lease(&engine, REGION_ID).await,
     }
-    let notify = BackgroundNotify::IndexBuildRetry(BuildIndexRequest {
-        region_id: REGION_ID,
-        build_type: IndexBuildType::Manual,
-        file_metas: files,
-        result_senders: Vec::new(),
-    });
-    let request = WorkerRequest::Background {
-        region_id: REGION_ID,
-        notify,
-    };
-    let workers = &engine.inner.workers;
-    workers.submit_to_worker(REGION_ID, request).await.unwrap();
+    let (caller, mut result) = tokio::sync::mpsc::channel(1);
+    submit_index_build_retry(&engine, files, vec![caller]).await;
     if matches!(refusal, RetryRefusal::AfterAdmission) {
         listener.park_rebuild_admitted.wait_entered().await;
         engine
@@ -1667,15 +1672,23 @@ async fn test_refused_index_build_retry_is_kept(#[case] refusal: RetryRefusal) {
             .unwrap();
         listener.park_rebuild_admitted.release();
     }
-    // A request the worker handles after the retry, which the region refuses.
-    let build = RegionRequest::BuildIndex(RegionBuildIndexRequest::default());
-    engine.handle_request(REGION_ID, build).await.unwrap_err();
-    assert!(!has_inverted_index());
+    worker_barrier(&engine).await;
+    assert!(matches!(
+        result.try_recv(),
+        Ok(Ok(IndexBuildOutcome::Aborted(_)))
+    ));
+    assert!(!has_inverted_index(&engine, &file_ids));
 
-    engine
-        .set_region_role(REGION_ID, RegionRole::Leader)
-        .unwrap();
-    wait_until(has_inverted_index).await;
+    let admitted = listener.rebuilds_admitted.load(Ordering::Relaxed);
+    grant_at(&engine, RegionRole::Leader, Instant::now(), None);
+    wait_until(|| has_inverted_index(&engine, &file_ids)).await;
+    let lease_wait = usize::from(matches!(refusal, RetryRefusal::AwaitingLease));
+    // The retry, after the missing-index pass when the wait deferred one.
+    assert_eq!(
+        listener.rebuilds_admitted.load(Ordering::Relaxed) - admitted,
+        1 + lease_wait
+    );
+    assert_eq!(listener.backfill_persists(), lease_wait);
 }
 
 /// A save that a closed instance spawned reports its deferral late, which does not give the
@@ -1706,6 +1719,7 @@ async fn test_late_backfill_deferral_of_closed_region_adds_no_work() {
         .set_region_role(REGION_ID, RegionRole::Leader)
         .unwrap();
     wait_until(|| listener.became_writable.load(Ordering::Acquire) > notified).await;
+    worker_barrier(&engine).await;
     assert_eq!(listener.backfill_persists(), 1);
 }
 
@@ -1741,8 +1755,8 @@ async fn test_failed_close_flush_runs_deferred_work() {
     assert_eq!(wait_persisted_partition_expr(&engine).await, expr_json);
 }
 
-/// Work deferred past the end of one wait stays due across a catchup that reopens the region and
-/// through its next wait, which no change ends, and runs when that wait ends.
+/// Work deferred past the end of one wait stays due through the region's next wait, which no
+/// change ends, and runs when that wait ends.
 #[tokio::test]
 async fn test_deferred_work_waits_for_next_leader_lease() {
     common_telemetry::init_default_ut_logging();
@@ -1910,83 +1924,28 @@ async fn test_index_build_retry_refused_awaiting_leader_lease_runs_after_it(
 ) {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::with_prefix("index-retry-awaiting-lease").await;
-    let listener = Arc::new(LeaseWaitEndedListener::default());
     let mut config = async_build_mode_config(false);
-    if change.is_some() {
-        config.max_background_index_builds = 1;
-    }
-    let engine = env
-        .create_engine_with(config, None, Some(listener.clone()), None)
-        .await;
-    engine.require_write_lease();
-    engine.freeze_lease_clock(Instant::now());
-    let request = CreateRequestBuilder::new().build_with_index();
-    let schema = rows_schema(&request);
-    engine
-        .handle_request(REGION_ID, RegionRequest::Create(request))
-        .await
-        .unwrap();
-    grant(&engine, RegionRole::Leader, Instant::now() + LEASE);
-    let rows = Rows {
-        schema: schema.clone(),
-        rows: build_rows(0, 3),
-    };
-    put_rows(&engine, REGION_ID, rows).await;
-    flush_region(&engine, REGION_ID, None).await;
-    if change.is_some() {
-        // A second file to retry, and a third one for the truncate to remove.
-        for start in [10, 100] {
-            let rows = Rows {
-                schema: schema.clone(),
-                rows: build_rows(start, start + 3),
-            };
-            put_rows(&engine, REGION_ID, rows).await;
-            flush_region(&engine, REGION_ID, None).await;
+    // With one build at a time, a second file to retry, and a third one for the truncate.
+    let starts: &[usize] = match change {
+        Some(_) => {
+            config.max_background_index_builds = 1;
+            &[0, 10, 100]
         }
-    }
-    let region = engine.get_region(REGION_ID).unwrap();
-    let mut files = region.all_manifest_files().await.0;
-    files.sort_by_key(|file| file.time_range.0);
-    files[0].available_indexes.push(IndexType::HllIndex);
-    let edit = RegionEdit {
-        files_to_add: files.clone(),
-        ..Default::default()
+        None => &[0],
     };
+    let (engine, listener, schema, mut files) = create_index_region(&mut env, config, starts).await;
+    mark_extension_index(&engine, &mut files).await;
     files.truncate(2);
     let retried: Vec<_> = files.iter().map(|file| file.file_id).collect();
-    engine.edit_region(REGION_ID, edit).await.unwrap();
     promote_to_await_leader_lease(&engine, REGION_ID).await;
-
-    // What a publication that found the schema changed sends.
-    let notify = BackgroundNotify::IndexBuildRetry(BuildIndexRequest {
-        region_id: REGION_ID,
-        build_type: IndexBuildType::Manual,
-        file_metas: files,
-        result_senders: Vec::new(),
-    });
-    let request = WorkerRequest::Background {
-        region_id: REGION_ID,
-        notify,
-    };
-    let workers = &engine.inner.workers;
-    workers.submit_to_worker(REGION_ID, request).await.unwrap();
+    submit_index_build_retry(&engine, files, Vec::new()).await;
     // The worker handled the retry before this request.
     let build = RegionRequest::BuildIndex(RegionBuildIndexRequest::default());
     assert_retryable(
         engine.handle_request(REGION_ID, build).await,
         lease_not_received,
     );
-    let has_inverted_index = || {
-        let version = engine.get_region(REGION_ID).unwrap().version();
-        let files = &version.ssts.levels()[0].files;
-        retried.iter().all(|file_id| {
-            files[file_id]
-                .meta_ref()
-                .available_indexes
-                .contains(&IndexType::InvertedIndex)
-        })
-    };
-    assert!(!has_inverted_index());
+    assert!(!has_inverted_index(&engine, &retried));
 
     if let Some(change) = change {
         if change == HeldChange::Discard {
@@ -2006,11 +1965,11 @@ async fn test_index_build_retry_refused_awaiting_leader_lease_runs_after_it(
             .await;
         grant_at(&engine, RegionRole::Leader, Instant::now(), None);
         listener.wait_for_end().await;
-        assert!(!has_inverted_index());
+        assert!(!has_inverted_index(&engine, &retried));
         drop(manager);
         request.await.unwrap().unwrap();
     } else {
         grant_at(&engine, RegionRole::Leader, Instant::now(), None);
     }
-    wait_until(has_inverted_index).await;
+    wait_until(|| has_inverted_index(&engine, &retried)).await;
 }

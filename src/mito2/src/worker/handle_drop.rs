@@ -97,21 +97,19 @@ where
         let path_type = region.access_layer.path_type();
         let table_dir = region.access_layer.table_dir().to_string();
         let marker_path = join_path(&region_dir, DROPPING_MARKER_FILE);
-        if let Err(e) = region
+        region
             .access_layer
             .object_store()
             .write(&marker_path, Bytes::new())
             .await
             .context(OpenDalSnafu)
-        {
-            error!(e; "Failed to write the drop marker file for region {}", region_id);
+            .inspect_err(|e| {
+                error!(e; "Failed to write the drop marker file for region {}", region_id);
 
-            // Sets the state back to writable. It's possible that the marker file has been written.
-            // We set the state back to writable so we can retry the drop operation.
-            region.switch_state_to_writable(RegionLeaderState::Dropping);
-            self.finish_deferred_lease_work(region_id).await;
-            return Err(e);
-        }
+                // Sets the state back to writable. It's possible that the marker file has been written.
+                // We set the state back to writable so we can retry the drop operation.
+                region.switch_state_to_writable(RegionLeaderState::Dropping);
+            })?;
 
         region.stop().await;
         // Removes this region from region map to prevent other requests from accessing this region

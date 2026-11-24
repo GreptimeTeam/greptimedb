@@ -41,7 +41,8 @@ use crate::tail_replay::notify_worker;
 use crate::temp_file_sweeper;
 use crate::wal::entry_distributor::WalEntryReceiver;
 use crate::worker::{
-    RegionWorkerLoop, WorkerListener, drain_ended_staging, handle_reload, handle_tail_replay,
+    DeferredLeaseWork, RegionWorkerLoop, WorkerListener, drain_ended_staging, handle_reload,
+    handle_tail_replay,
 };
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -402,55 +403,77 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             );
         }
         // A region in another state does the work when it becomes a writable leader.
-        self.defer_lease_work(&region);
+        let work = self.defer_lease_work(&region);
+        work.missing_index_pass = true;
+        work.backfill = true;
         self.finish_deferred_lease_work(region_id).await;
         self.listener.on_leader_lease_wait_ended(region_id);
     }
 
-    /// Runs the work the wait of the region for its Leader lease held back, if any is due and
-    /// the region is a writable leader with its Leader lease: builds the missing indexes,
-    /// re-issues the kept index build retries and saves the backfilled metadata. Otherwise the
-    /// work stays due. Every path that makes a region a writable leader calls it.
-    pub(crate) async fn finish_deferred_lease_work(&mut self, region_id: RegionId) {
+    /// Finishes the deferred work of every region that is a writable leader with its Leader
+    /// lease. The worker loop calls it after a batch that may have changed a region's state, so
+    /// the work runs after whatever the batch dispatched.
+    pub(crate) async fn sweep_deferred_lease_work(&mut self) {
+        if self.deferred_lease_work.is_empty() {
+            return;
+        }
+        let ready: Vec<_> = self
+            .deferred_lease_work
+            .keys()
+            .copied()
+            .filter(|region_id| {
+                self.regions
+                    .get_region(*region_id)
+                    .is_some_and(|region| region.may_finish_deferred_lease_work())
+            })
+            .collect();
+        for region_id in ready {
+            self.finish_deferred_lease_work(region_id).await;
+        }
+    }
+
+    /// Runs the deferred work of the region, if any, when it is a writable leader with its
+    /// Leader lease: builds the missing indexes, re-issues the kept index build retries and saves
+    /// the backfilled metadata. Otherwise the work stays due.
+    async fn finish_deferred_lease_work(&mut self, region_id: RegionId) {
         let Some(region) = self.regions.get_region(region_id) else {
             return;
         };
         if !region.may_finish_deferred_lease_work() {
             return;
         }
-        let Some(retries) = self.deferred_lease_work.remove(&region_id) else {
+        let Some(work) = self.deferred_lease_work.remove(&region_id) else {
             return;
         };
         self.listener.on_deferred_lease_work_begin(region_id).await;
-        if self.build_missing_indexes(&region).await {
+        if work.missing_index_pass && self.build_missing_indexes(&region).await {
             // A role change outside the worker stopped the pass, so the region does the work
             // once it is a writable leader again.
-            self.defer_lease_work(&region).extend(retries);
+            self.deferred_lease_work.insert(region_id, work);
             return;
         }
-        // A retry the region cannot run after a role change outside the worker stays due, and so
-        // does the rest once the save below finds that change.
-        for request in retries {
+        // A retry that the region refuses again keeps itself.
+        for request in work.retries {
             self.handle_rebuild_index_inner(request, OptionOutputTx::new(None), true)
                 .await;
         }
-        spawn_persist_backfilled_metadata(&self.listener, &self.sender, region);
+        if work.backfill {
+            spawn_persist_backfilled_metadata(&self.listener, &self.sender, region);
+        }
     }
 
     /// Defers the save of the backfilled metadata that found `source` not a writable leader with
-    /// its Leader lease. The region may be one again by now. A close or a drop stopped a source
-    /// whose work it removed, so a later instance does not take it over.
-    pub(crate) async fn handle_backfill_deferred(&mut self, source: MitoRegionRef) {
+    /// its Leader lease. A close or a drop stopped a source whose work it removed, so a later
+    /// instance does not take it over.
+    pub(crate) fn handle_backfill_deferred(&mut self, source: MitoRegionRef) {
         let region_id = source.region_id;
         self.listener.on_backfill_deferred(region_id);
         if source.manifest_ctx.is_stopped() {
             return;
         }
-        let Some(region) = self.regions.get_region(region_id) else {
-            return;
-        };
-        self.defer_lease_work(&region);
-        self.finish_deferred_lease_work(region_id).await;
+        if let Some(region) = self.regions.get_region(region_id) {
+            self.defer_lease_work(&region).backfill = true;
+        }
     }
 
     /// Builds the indexes of the region's files that lack them, which a region that waits does
@@ -471,21 +494,18 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 }
 
 impl<S> RegionWorkerLoop<S> {
-    /// Returns the index build retries of the work `region` has due once it is a writable leader
-    /// with its Leader lease, recording that the work is due.
-    pub(crate) fn defer_lease_work(
-        &mut self,
-        region: &MitoRegionRef,
-    ) -> &mut Vec<BuildIndexRequest> {
+    /// Returns the work `region` has due once it is a writable leader with its Leader lease,
+    /// recording that some is due.
+    pub(crate) fn defer_lease_work(&mut self, region: &MitoRegionRef) -> &mut DeferredLeaseWork {
         let region_id = region.region_id;
         self.deferred_lease_work.entry(region_id).or_insert_with(|| {
             if !region.may_finish_deferred_lease_work() {
                 info!(
-                    "Region {region_id} is {:?}, deferring the index builds and the backfilled metadata save its Leader lease wait held back",
+                    "Region {region_id} is {:?}, deferring work until it is a writable leader with its Leader lease",
                     region.state()
                 );
             }
-            Vec::new()
+            DeferredLeaseWork::default()
         })
     }
 }

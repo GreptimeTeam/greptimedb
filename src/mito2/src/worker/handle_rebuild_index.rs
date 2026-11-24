@@ -266,8 +266,8 @@ impl<S> RegionWorkerLoop<S> {
             return true;
         }
         // A region that awaits its Leader lease could not publish the index. In async build
-        // mode the end of the wait builds the missing indexes if the region is then a writable
-        // leader.
+        // mode it builds the missing indexes once it is a writable leader with its lease (see
+        // `DeferredLeaseWork`).
         if let Err(e) = region
             .manifest_ctx
             .ensure_leader_lease_or_downgrading(region_id)
@@ -491,7 +491,12 @@ impl<S> RegionWorkerLoop<S> {
 
     /// Keeps an index build retry that the state of its region refused until the region is a
     /// writable leader with its Leader lease. Returns whether the region is registered.
-    fn keep_index_build_retry(&mut self, request: BuildIndexRequest) -> bool {
+    /// Its callers learn now that the build stopped, rather than wait for the region.
+    fn keep_index_build_retry(&mut self, mut request: BuildIndexRequest) -> bool {
+        for sender in std::mem::take(&mut request.result_senders) {
+            let reason = "the region's state refused the retry".to_string();
+            let _ = sender.try_send(Ok(IndexBuildOutcome::Aborted(reason)));
+        }
         let region_id = request.region_id;
         let Some(region) = self.regions.get_region(region_id) else {
             return false;
@@ -500,7 +505,7 @@ impl<S> RegionWorkerLoop<S> {
             "Region {region_id} is {:?} or awaits its Leader lease, keeping an index build retry",
             region.state()
         );
-        self.defer_lease_work(&region).push(request);
+        self.defer_lease_work(&region).retries.push(request);
         true
     }
 

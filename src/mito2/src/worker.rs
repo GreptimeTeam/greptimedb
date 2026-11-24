@@ -1378,12 +1378,22 @@ struct RegionWorkerLoop<S> {
     staging_regions: StagingRegionsRef,
     /// Running tail replays, which stay here until they report their end.
     tail_replays: HashMap<RegionId, CancellableTaskState>,
-    /// Work held back by a region's wait for its Leader lease: the missing-index pass, the index
-    /// build retries listed here and the save of the backfilled metadata. An entry means the work
-    /// is due; it runs once the region is a writable leader with its Leader lease (see
-    /// `finish_deferred_lease_work`) and is removed then, or when the region is closed or
-    /// dropped. A catchup that reopens or replaces the region keeps it.
-    deferred_lease_work: HashMap<RegionId, Vec<BuildIndexRequest>>,
+    /// Work due once a region is a writable leader with its Leader lease, which
+    /// `sweep_deferred_lease_work` runs then. Close and drop remove it; a catchup that reopens or
+    /// replaces the region keeps it.
+    deferred_lease_work: HashMap<RegionId, DeferredLeaseWork>,
+}
+
+/// Work a region runs once it is a writable leader with its Leader lease.
+#[derive(Default)]
+pub(crate) struct DeferredLeaseWork {
+    /// Whether to build the indexes of the region's files that lack them, as the wait for the
+    /// Leader lease refused them.
+    pub(crate) missing_index_pass: bool,
+    /// Whether to save the metadata the opener backfilled.
+    pub(crate) backfill: bool,
+    /// Index build retries the region's state refused, without their result senders.
+    pub(crate) retries: Vec<BuildIndexRequest>,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -1547,6 +1557,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     + bulk_insert_req_num,
             );
 
+            // Only background notifications, role changes and DDLs change a region's state.
+            let may_change_state = !general_req_buffer.is_empty() || !ddl_req_buffer.is_empty();
             self.handle_requests(
                 &mut write_req_buffer,
                 &mut ddl_req_buffer,
@@ -1554,6 +1566,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 &mut bulk_req_buffer,
             )
             .await;
+            if may_change_state {
+                self.sweep_deferred_lease_work().await;
+            }
 
             self.handle_periodical_tasks();
         }
@@ -1873,7 +1888,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 self.stalled_requests.remove_staging_drain(&region_id);
                 self.handle_region_stalled_requests(&region_id, true).await;
                 let _ = drained.send(());
-                self.finish_deferred_lease_work(region_id).await;
             }
             BackgroundNotify::RegionEdit(req) => self.handle_region_edit_result(req).await,
             BackgroundNotify::CopyRegionFromFinished(req) => {
@@ -1886,17 +1900,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             BackgroundNotify::CaughtUpAgain(caught_up) => {
                 self.handle_caught_up_again(region_id, caught_up).await
             }
+            // The sweep after the batch runs the region's deferred work.
             BackgroundNotify::RegionBecameWritable => {
                 self.maybe_replay_tails(region_id);
-                self.finish_deferred_lease_work(region_id).await;
                 self.listener.on_region_became_writable(region_id);
             }
             BackgroundNotify::LeaderLeaseWaitEnded => {
                 self.handle_leader_lease_wait_ended(region_id).await
             }
-            BackgroundNotify::BackfillDeferred { region } => {
-                self.handle_backfill_deferred(region).await
-            }
+            BackgroundNotify::BackfillDeferred { region } => self.handle_backfill_deferred(region),
             BackgroundNotify::RegionCannotReplay { region } => {
                 self.handle_region_cannot_replay(region_id, region)
             }

@@ -233,11 +233,9 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   before `commit_staged_locked`. No flush or compaction trigger starts work for a waiting region except
   a downgrade's flush. The lease that ends the wait wakes the worker
   (`handle_leader_lease_wait_ended`) to schedule the flushes the wait deferred and, only if the
-  region is then a writable leader, start a compaction. Building missing indexes, re-issuing the
-  index build retries the wait refused and persisting backfilled metadata are kept per region in
-  the worker (`deferred_lease_work`) until the region is a writable leader with its lease: every
-  path that makes it one, in the worker or outside it (`notify_if_became_writable`), must call
-  `finish_deferred_lease_work`, and a backfill save that finds it otherwise reports back. A catchup of a waiting
+  region is then a writable leader, start a compaction. The missing indexes, the refused index
+  build retries and the backfilled metadata wait in `deferred_lease_work`, which the worker sweeps
+  after each batch (`sweep_deferred_lease_work`). A catchup of a waiting
   region catches it up again into an unregistered replacement while the region stays registered,
   demoted unless it is in a transient leader state. The replacement replaces it only if the replay
   succeeds and the region took no write and made no commit meanwhile; otherwise the region keeps
