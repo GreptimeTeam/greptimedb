@@ -417,17 +417,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         if self.deferred_lease_work.is_empty() {
             return;
         }
-        let ready: Vec<_> = self
-            .deferred_lease_work
-            .keys()
-            .copied()
-            .filter(|region_id| {
-                self.regions
-                    .get_region(*region_id)
-                    .is_some_and(|region| region.may_finish_deferred_lease_work())
-            })
-            .collect();
-        for region_id in ready {
+        let region_ids: Vec<_> = self.deferred_lease_work.keys().copied().collect();
+        for region_id in region_ids {
             self.finish_deferred_lease_work(region_id).await;
         }
     }

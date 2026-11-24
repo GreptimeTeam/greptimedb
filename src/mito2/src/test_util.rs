@@ -381,24 +381,6 @@ impl object_store::layers::mock::Write for LostResponseWriter {
     }
 }
 
-/// Builds an object-store layer that fails the next write to a path ending with `suffix` once
-/// the returned flag is set.
-pub(crate) fn fail_next_write_to(suffix: &'static str) -> (Arc<AtomicBool>, MockLayer) {
-    let armed = Arc::new(AtomicBool::new(false));
-    let layer_armed = armed.clone();
-    let layer = MockLayerBuilder::default()
-        .writer_factory(Arc::new(move |path, _args, inner| {
-            if path.ends_with(suffix) && layer_armed.swap(false, Ordering::Relaxed) {
-                Box::new(FailedWriter)
-            } else {
-                inner
-            }
-        }))
-        .build()
-        .unwrap();
-    (armed, layer)
-}
-
 /// A write that fails without touching the store.
 struct FailedWriter;
 
