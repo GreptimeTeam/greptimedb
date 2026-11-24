@@ -390,8 +390,10 @@ fn rebuild_labels(
         .any(|label| label.value.is_empty() || !keep(&label.name))
     {
         // Nothing to drop: the shared label array already is the result, so hand it on
-        // instead of cloning it into a vector that the caller would then discard.
-        let mut unchanged = metric.clone();
+        // instead of copying it into a vector that the caller would then discard. A group key
+        // outlives the scan, so it takes the materialized array rather than the batch view that
+        // would keep the whole scan alive.
+        let mut unchanged = metric.detached();
         match (name, metric.name()) {
             (Some(name), current) if current != Some(name) => {
                 unchanged

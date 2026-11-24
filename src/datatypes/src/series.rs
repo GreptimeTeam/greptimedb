@@ -196,6 +196,25 @@ struct BatchLabels {
     materialized: OnceLock<Arc<[Label]>>,
 }
 
+impl BatchLabels {
+    /// The label array this row materializes to, shared by every reader that needs owned labels.
+    fn materialized(&self) -> &Arc<[Label]> {
+        self.materialized.get_or_init(|| {
+            self.batch
+                .columns
+                .iter()
+                .filter_map(|(name, column)| {
+                    self.batch.value(*column, self.row).map(|value| Label {
+                        name: name.clone(),
+                        value: Arc::from(value),
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into()
+        })
+    }
+}
+
 impl PartialEq for SeriesLabels {
     fn eq(&self, other: &Self) -> bool {
         if self.name != other.name {
@@ -243,20 +262,24 @@ impl SeriesLabels {
     pub fn tags(&self) -> &[Label] {
         match &self.tags {
             LabelStorage::Owned(tags) => tags,
-            LabelStorage::Batch(labels) => labels.materialized.get_or_init(|| {
-                labels
-                    .batch
-                    .columns
-                    .iter()
-                    .filter_map(|(name, column)| {
-                        labels.batch.value(*column, labels.row).map(|value| Label {
-                            name: name.clone(),
-                            value: Arc::from(value),
-                        })
-                    })
-                    .collect::<Vec<_>>()
-                    .into()
-            }),
+            LabelStorage::Batch(labels) => labels.materialized(),
+        }
+    }
+
+    /// Returns these labels with their label array shared rather than borrowed from a scan batch.
+    ///
+    /// A [`SeriesLabels::from_batch`] view keeps the whole [`SeriesLabelBatch`] alive for as long
+    /// as the view is. A value that outlives the scan that produced it - a group key, a series an
+    /// operator retains - should hold the materialized label array instead, so the batch can be
+    /// released while the value is still alive. Owned labels share their array either way.
+    pub fn detached(&self) -> Self {
+        let tags = match &self.tags {
+            LabelStorage::Owned(tags) => Arc::clone(tags),
+            LabelStorage::Batch(labels) => Arc::clone(labels.materialized()),
+        };
+        Self {
+            name: self.name.clone(),
+            tags: LabelStorage::Owned(tags),
         }
     }
 

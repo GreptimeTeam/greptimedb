@@ -836,11 +836,7 @@ impl MemoryPool for MetricsMemoryPool {
         }
         let result = self.inner.try_grow(reservation, additional);
         match &result {
-            Ok(()) => {
-                if additional > 0 {
-                    QUERY_MEMORY_POOL_USAGE_BYTES.add(additional as i64);
-                }
-            }
+            Ok(()) => QUERY_MEMORY_POOL_USAGE_BYTES.add(additional as i64),
             Err(_) => QUERY_MEMORY_POOL_REJECTED_TOTAL.inc(),
         }
         result
@@ -1332,8 +1328,11 @@ mod tests {
         }
     }
 
-    /// Serialises the tests that read the process-wide usage gauge, so a concurrent test that
-    /// happens to grow a pool cannot move the figure under the assertion.
+    /// Serialises the tests in this module that move the process-wide usage gauge, so a test that
+    /// grows a pool cannot move the figure under another one's assertion.
+    ///
+    /// `cargo nextest` runs every test in its own process, where nothing is shared and this guard
+    /// is a no-op; it is here for `cargo test`, which runs them as threads of one process.
     fn gauge_guard() -> std::sync::MutexGuard<'static, ()> {
         static GAUGE: Mutex<()> = Mutex::new(());
         GAUGE.lock().unwrap_or_else(|poison| poison.into_inner())
@@ -1448,6 +1447,7 @@ mod tests {
 
     #[test]
     fn test_metrics_memory_pool_policy_differs_with_multiple_spillable_consumers() {
+        let _gauge = gauge_guard();
         for (policy, greedy) in [
             (QueryMemoryPoolPolicy::Greedy, true),
             (QueryMemoryPoolPolicy::Fair, false),
@@ -1480,6 +1480,7 @@ mod tests {
     ///   `spilled_bytes` on `SortExec` nodes.  All three must be > 0.
     #[tokio::test]
     async fn test_sort_spill_smoke_with_custom_runtime() {
+        let _gauge = gauge_guard();
         use arrow::array::Int32Array;
         use arrow::datatypes::{DataType, Field, Schema};
         use arrow::record_batch::RecordBatch;

@@ -5941,9 +5941,22 @@ impl NodeState {
             0
         };
         // The chunk is held from here on -- a selection keeps every chunk of a series until the one
-        // that closes it, so what this node reserves for is the series it has buffered -- and the
-        // gather's workspace is admitted with it, in one request.
-        self.buffer.grow_held(raw_bytes(&chunk), scratch)?;
+        // that closes it, so what this node reserves for is the series it has buffered. It is
+        // admitted before the gather is estimated: estimating walks the buffered samples and
+        // allocates a workspace of its own, which is work a chunk the pool cannot take should not
+        // pay for.
+        self.buffer.grow(raw_bytes(&chunk))?;
+        // The chunk that closes the series gathers it in one go, and the gather allocates a
+        // workspace of its own beside the buffered chunks: the axis it concatenates, the
+        // descriptors that read it, the two arrays the selection returns and the rows the builder
+        // keeps. It is reserved here, before it exists, so a pool too small for it refuses the
+        // gather instead of learning about it afterwards. This site does not merge the two
+        // requests the way the map sites do: the estimate is the expensive part, so the chunk is
+        // admitted first and the workspace second.
+        if closing {
+            let scratch = instant.gather_bytes(&chunk);
+            self.buffer.grow(scratch)?;
+        }
         let metrics = Arc::clone(&self.buffer.metrics);
         let outcome = {
             // The timer covers this node's own work only: it is dropped before the driver polls

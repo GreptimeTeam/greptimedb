@@ -296,3 +296,45 @@ fn batch_labels_borrow_values_and_retain_owner() {
     drop(empty);
     assert!(weak.upgrade().is_none());
 }
+
+#[test]
+fn detached_batch_labels_release_the_batch() {
+    use super::{LabelStorage, SeriesLabelBatch};
+    use arrow::array::{ArrayRef, StringArray};
+    use arrow::record_batch::RecordBatch;
+    let owner = Arc::new(());
+    let weak = Arc::downgrade(&owner);
+    let batch = RecordBatch::try_from_iter(vec![(
+        "host",
+        Arc::new(StringArray::from(vec![Some("node")])) as ArrayRef,
+    )])
+    .unwrap();
+    let batch =
+        Arc::new(SeriesLabelBatch::try_new(batch, vec![(Arc::from("host"), 0)], owner).unwrap());
+    let view = SeriesLabels::from_batch(Some(Arc::from("cpu")), batch.clone(), 0).unwrap();
+    assert!(matches!(view.tags, LabelStorage::Batch(_)));
+
+    let detached = view.detached();
+    let LabelStorage::Owned(tags) = &detached.tags else {
+        panic!("expected owned labels")
+    };
+    assert_eq!(view.tags(), &tags[..]);
+
+    // The view keeps the batch alive; the detached value holds the materialized array instead,
+    // so dropping both the view and the batch handle releases the owner.
+    drop(view);
+    assert!(weak.upgrade().is_some(), "the batch handle still owns it");
+    drop(batch);
+    assert!(
+        weak.upgrade().is_none(),
+        "a detached value must not keep the scan batch alive"
+    );
+
+    // Owned labels keep sharing their array rather than copying it.
+    let owned = SeriesLabels::try_new(Some(Arc::from("cpu")), vec![label("host", "node")]).unwrap();
+    let again = owned.detached();
+    let (LabelStorage::Owned(a), LabelStorage::Owned(b)) = (&owned.tags, &again.tags) else {
+        panic!("expected owned labels")
+    };
+    assert!(Arc::ptr_eq(a, b));
+}
