@@ -454,16 +454,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(
-        "Unsupported remote read depth {}, the supported nested broadcast join rewrite reads at most two remote levels",
-        depth
-    ))]
-    UnsupportedRemoteReadDepth {
-        depth: u64,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Cache not found in registry"))]
     MissingCache {
         #[snafu(implicit)]
@@ -567,9 +557,7 @@ impl ErrorExt for Error {
 
             OpenLogStore { source, .. } => source.status_code(),
             MetaClientInit { source, .. } => source.status_code(),
-            UnsupportedOutput { .. }
-            | NotYetImplemented { .. }
-            | UnsupportedRemoteReadDepth { .. } => StatusCode::Unsupported,
+            UnsupportedOutput { .. } | NotYetImplemented { .. } => StatusCode::Unsupported,
             HandleRegionRequest { source, .. }
             | GetRegionMetadata { source, .. }
             | HandleBatchOpenRequest { source, .. }
