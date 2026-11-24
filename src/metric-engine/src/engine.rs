@@ -1137,7 +1137,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_physical_region_is_confirmed_leader_only_with_both_regions() {
+    async fn test_physical_region_is_confirmed_leader_only_after_both_leader_leases() {
         let env = TestEnv::new().await;
         env.init_metric_region().await;
         let (engine, mito) = (env.metric(), env.mito());
@@ -1173,8 +1173,30 @@ mod test {
         assert_eq!(engine.role(physical_region_id), Some(RegionRole::Leader));
         assert_eq!(engine.is_confirmed_leader(physical_region_id), Some(false));
 
-        // The data region still waits after the metadata region received its lease.
+        // A candidate lease leaves both waiting regions writable, and the physical region
+        // unconfirmed, so an upgrade still catches it up.
         let sent_at = Instant::now();
+        assert!(
+            engine
+                .set_region_role_with_lease(
+                    physical_region_id,
+                    RegionRole::Follower,
+                    sent_at,
+                    sent_at + LEASE,
+                    Some(7),
+                )
+                .unwrap()
+        );
+        for region_id in [
+            metadata_region_id,
+            utils::to_data_region_id(physical_region_id),
+        ] {
+            assert_eq!(mito.role(region_id), Some(RegionRole::Leader));
+        }
+        assert_eq!(engine.role(physical_region_id), Some(RegionRole::Leader));
+        assert_eq!(engine.is_confirmed_leader(physical_region_id), Some(false));
+
+        // The data region still waits after the metadata region received its lease.
         mito.set_region_role_with_lease(
             metadata_region_id,
             RegionRole::Leader,

@@ -181,6 +181,18 @@ fn rewrite(node: &NativeNode, source_tags: &[Vec<String>]) -> DfResult<NativeNod
             input: Box::new(canonical(rewrite(input, source_tags)?, source_tags)),
             op: op.clone(),
         },
+        // The same fold with its argument read per point: the pieces of one series in a group are
+        // as much a problem for a quantile as for a sum, and its parameter is a scalar, rewritten
+        // but never collected - a scalar carries no label set.
+        NativeExpr::ParameterizedAggregate {
+            input,
+            op,
+            parameter,
+        } => NativeExpr::ParameterizedAggregate {
+            input: Box::new(canonical(rewrite(input, source_tags)?, source_tags)),
+            op: op.clone(),
+            parameter: Box::new(rewrite(parameter, source_tags)?),
+        },
         // Vector operations consume canonical series: ranking counts them, and presence checks and
         // folds must not silently consume overlapping fragments that a merge would reject.
         NativeExpr::Vector { input, op } => NativeExpr::Vector {

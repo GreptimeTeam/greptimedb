@@ -49,12 +49,20 @@ of one request to several regions (one message per worker) → worker loop
 writes SSTs via `access_layer.rs` and appends a `RegionEdit` to the manifest
 (`manifest/manager.rs`).
 
+When reconstructing primary key bytes, follow the writer's ordering. Mito encodes
+raw tags in declared primary key order. Metric-engine sparse keys encode table ID
+and TSID first, then non-null labels in label-name order.
+
 ## Read path
 
 `MitoEngine::handle_query` (`engine.rs`) → `read/scan_region.rs` takes an
 immutable `Version` (`region/version.rs`) → scans memtables and Parquet SSTs
 (`sst/parquet.rs`) → merges (`read/`) and dedups by sequence → projected,
 filtered `RecordBatch` stream.
+
+Compaction SST scans share a read path. Multi-region compaction retains raw
+versions and routes each row before merging. Sparse routing temporarily
+materializes only the columns used by the partition rule.
 
 Internal series merges use the query runtime pool forwarded through
 `QueryScanContext`; reader and output-batch accounting uses the separate scan
@@ -118,9 +126,21 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
 
 ## Gotchas
 
+- Parquet versus Narthex storage is fixed at region creation. ALTER cannot cross
+  that boundary; COPY, remap, and imported edits must reject mismatches before
+  publication. Readers and compaction select storage from region options, not
+  by inspecting individual files. Parquet flat/primary-key layouts may coexist.
+
 - Parquet row groups have uniform row counts except for the final group
   (`sst/parquet/row_selection.rs`). Memory-pressure flushing must not create
   arbitrary partial groups: readers and index row IDs rely on this layout.
+- Append-mode Narthex raw-series reads apply LastRow dedup after merging;
+  non-append reads use the configured merge mode, and batch reads retain append
+  semantics. Physical COPY follows Parquet's
+  untrusted source-sequence semantics; repartition still assigns admission sequences.
+  The region worker owns COPY locks; task guards hold them through publication and
+  installation so retries cannot race failure cleanup, including across region reopen.
+  The last active or queued task removes its lock entry, including on cancellation.
 - Sequence numbers are strictly increasing per region; dedup and snapshot reads
   depend on this. Do not change assignment lightly.
 - Manifest version is monotonic — never reset or skip it. Staging takes no version:
@@ -225,7 +245,8 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   its memtable for the next Leader lease (`catch_up_again`, `handle_caught_up_again`); the datanode
   upgrade handler sends that catchup unless `RegionEngine::is_confirmed_leader` is true, so an
   engine wrapping mito must implement that method from mito's answers (the metric engine requires
-  both regions of the pair).
+  both regions of the pair). A Follower lease that carries a `candidate_lease_id` leaves a waiting
+  region alone (`ManifestContext::demote_candidate`); other Follower leases demote it.
 - The latest lease each region received (`GrantedLeases` in `lease.rs`) lives outside the
   region instance, so a reopen during catchup keeps it. Every path that removes a region from
   a worker's region map must also remove its record and its kept index build retries:

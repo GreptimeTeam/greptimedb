@@ -23,7 +23,9 @@ use common_config::KvBackendConfig;
 use common_error::ext::BoxedError;
 use common_meta::error as meta_error;
 use common_meta::kv_backend::txn::{Txn, TxnOp, TxnOpResponse, TxnRequest, TxnResponse};
-use common_meta::kv_backend::{ClosableKvBackend, KvBackend, TxnService};
+use common_meta::kv_backend::{
+    ClosableKvBackend, KvBackend, KvBackendCapabilities, TxnCapability, TxnService,
+};
 use common_meta::rpc::KeyValue;
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
@@ -208,13 +210,21 @@ impl TxnService for RaftEngineBackend {
         })
     }
 
-    fn max_txn_ops(&self) -> usize {
-        usize::MAX
+    fn txn_capability(&self) -> Option<TxnCapability> {
+        Some(TxnCapability {
+            max_ops: usize::MAX,
+        })
     }
 }
 
 #[async_trait::async_trait]
 impl KvBackend for RaftEngineBackend {
+    fn capabilities(&self) -> KvBackendCapabilities {
+        KvBackendCapabilities {
+            atomic_batch_put: true,
+        }
+    }
+
     fn name(&self) -> &str {
         "RaftEngineBackend"
     }
@@ -476,6 +486,15 @@ mod tests {
 
     fn build_kv_backend(dir: String) -> RaftEngineBackend {
         RaftEngineBackend::try_open_with_cfg(dir, &KvBackendConfig::default()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_atomic_checkpoint_round_trip() {
+        let dir = create_temp_dir("raft-atomic-checkpoint");
+        common_meta::kv_backend::test::check_atomic_checkpoint_round_trip(Arc::new(
+            build_kv_backend(dir.path().to_str().unwrap().to_string()),
+        ))
+        .await;
     }
 
     #[tokio::test]

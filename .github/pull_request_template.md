@@ -28,11 +28,11 @@ Please convert it to a draft if some of the following conditions are not met.
 
 ## Merge timing
 
-- [x] Merge during the nightly window <!-- nightly-merge -->
+- [ ] Skip nightly merge
 
 <!--
 Eligible PRs enter the merge queue hourly from 02:10 through 08:10 Beijing time (UTC+8), up to five per run.
-Uncheck to opt out and remove the `merge nightly` label; this does not enable immediate merging.
+Check to opt out. To resume, uncheck the box and remove any manually applied `skip nightly merge` label.
 Maintainers can use **Merge when ready** to merge earlier.
 Changing this checkbox does not cancel an existing queue entry or manually enabled auto-merge.
 -->

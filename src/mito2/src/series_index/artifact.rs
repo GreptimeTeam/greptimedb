@@ -128,7 +128,13 @@ struct SamplesFileInner {
     file_id: RegionFileId,
     entry: SamplesEntry,
     retired: AtomicBool,
-    purger: IndexFilePurger,
+    lifetime: SamplesLifetime,
+}
+
+#[derive(Debug)]
+enum SamplesLifetime {
+    Sidecar(IndexFilePurger),
+    Narthex(crate::sst::file::FileHandle),
 }
 
 impl SamplesFileHandle {
@@ -137,12 +143,72 @@ impl SamplesFileHandle {
             file_id,
             entry,
             retired: AtomicBool::new(false),
-            purger,
+            lifetime: SamplesLifetime::Sidecar(purger),
         }))
     }
 
+    /// Pins an authoritative SST instead of giving the sidecar purger ownership.
+    pub(crate) fn from_narthex(
+        file: crate::sst::file::FileHandle,
+        region_dir: &str,
+    ) -> crate::error::Result<Self> {
+        let crate::sst::file::FileFormat::NarthexSamples(_) = &file.meta_ref().format else {
+            return crate::error::UnsupportedOperationSnafu {
+                err_msg: "Expected narthex samples file",
+            }
+            .fail();
+        };
+        let objects = file
+            .meta_ref()
+            .narthex_objects(region_dir)
+            .expect("matched Narthex samples");
+        let file_size = file.meta_ref().file_size;
+        let file_id = file.file_id();
+        Ok(Self(Arc::new(SamplesFileInner {
+            file_id,
+            entry: SamplesEntry {
+                file_id: file_id.file_id(),
+                artifact: ArtifactMetadata {
+                    format: ArtifactFormat::ColumnarSamples,
+                    generation: file_id.file_id(),
+                    objects,
+                    file_size,
+                },
+                source_file_ids: Vec::new(),
+                window: None,
+                source_windows: Default::default(),
+            },
+            retired: AtomicBool::new(false),
+            lifetime: SamplesLifetime::Narthex(file),
+        })))
+    }
+
     pub(crate) fn file_id(&self) -> RegionFileId {
-        self.0.file_id
+        match &self.0.lifetime {
+            SamplesLifetime::Sidecar(_) => self.0.file_id,
+            SamplesLifetime::Narthex(file) => file.file_id(),
+        }
+    }
+
+    pub(crate) fn manifest_path(&self) -> String {
+        if matches!(self.0.lifetime, SamplesLifetime::Narthex(_)) {
+            return self
+                .0
+                .entry
+                .artifact
+                .objects
+                .last()
+                .expect("Narthex manifest")
+                .path
+                .clone();
+        }
+        format!(
+            "{}manifest.json",
+            crate::series_index::samples::samples_prefix(
+                self.file_id().region_id().as_u64(),
+                self.entry().artifact.generation
+            )
+        )
     }
 
     pub(crate) fn entry(&self) -> &SamplesEntry {
@@ -156,8 +222,10 @@ impl SamplesFileHandle {
 
 impl Drop for SamplesFileInner {
     fn drop(&mut self) {
-        if self.retired.load(Ordering::Acquire) {
-            self.purger.purge_objects(
+        if self.retired.load(Ordering::Acquire)
+            && let SamplesLifetime::Sidecar(purger) = &self.lifetime
+        {
+            purger.purge_objects(
                 self.file_id,
                 self.entry
                     .artifact
