@@ -34,6 +34,7 @@ use crate::sst::version::SstVersionRef;
 pub struct SketchReadFiles {
     snapshot: SstVersionRef,
     time_range: SketchTimeRange,
+    max_level: u8,
 }
 
 impl SketchReadFiles {
@@ -41,7 +42,13 @@ impl SketchReadFiles {
         Self {
             snapshot,
             time_range,
+            max_level: u8::MAX,
         }
+    }
+
+    pub(crate) fn with_max_level(mut self, max_level: u8) -> Self {
+        self.max_level = max_level;
+        self
     }
 
     /// Visits intersecting files without cloning handles or allocating a selection.
@@ -52,6 +59,7 @@ impl SketchReadFiles {
         self.snapshot
             .levels()
             .iter()
+            .filter(move |level| level.level <= self.max_level)
             .flat_map(|level| level.files())
             .filter(move |file| {
                 file.meta_ref().time_range.0 < end && file.meta_ref().time_range.1 >= start
@@ -178,6 +186,41 @@ mod tests {
         actual.sort_unstable_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
         expected.sort_unstable_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn level_scoped_selection_preserves_unfiltered_reads() {
+        let millis = Timestamp::new_millisecond;
+        let mut version = SstVersion::new(metadata_for_test());
+        version.add_files(
+            new_noop_file_purger(),
+            [0, 1, crate::sst::file::LEVEL_SHARED]
+                .map(|level| {
+                    let mut meta = file(millis(0), millis(2));
+                    meta.level = level;
+                    meta
+                })
+                .into_iter(),
+        );
+        let selected = SketchReadFiles::new(
+            Arc::new(version),
+            SketchTimeRange {
+                start: millis(0),
+                end: millis(3),
+            },
+        );
+        assert_eq!(
+            selected.iter().map(|f| f.level()).collect::<Vec<_>>(),
+            [0, 1, crate::sst::file::LEVEL_SHARED]
+        );
+        assert_eq!(
+            selected
+                .with_max_level(1)
+                .iter()
+                .map(|f| f.level())
+                .collect::<Vec<_>>(),
+            [0, 1]
+        );
     }
 
     #[test]

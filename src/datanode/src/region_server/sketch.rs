@@ -105,9 +105,10 @@ impl crate::region_server::RegionServer {
         &self,
         request: api::v1::region::SketchRequest,
         query: bool,
+        max_level: Option<u8>,
     ) -> servers::error::Result<api::v1::region::RegionResponse> {
         let response = self
-            .handle_sketch_request(request, query)
+            .handle_sketch_request(request, query, max_level)
             .await
             .context(servers::error::ExecuteGrpcRequestSnafu)?;
         Ok(api::v1::region::RegionResponse {
@@ -118,6 +119,15 @@ impl crate::region_server::RegionServer {
                 }),
             }),
             sketch: response.sketch,
+            extensions: max_level
+                .map(|level| {
+                    (
+                        api::region::SKETCH_MAX_SST_LEVEL.to_string(),
+                        level.to_string().into_bytes(),
+                    )
+                })
+                .into_iter()
+                .collect(),
             ..Default::default()
         })
     }
@@ -126,6 +136,7 @@ impl crate::region_server::RegionServer {
         &self,
         request: api::v1::region::SketchRequest,
         query: bool,
+        max_level: Option<u8>,
     ) -> std::result::Result<api::region::RegionResponse, BoxedError> {
         let region_id = RegionId::from_u64(request.region_id);
         let request = SketchRequest::try_from(request)?;
@@ -134,7 +145,12 @@ impl crate::region_server::RegionServer {
             .map_err(BoxedError::new)?
             .context(SketchReaderUnavailableSnafu { region_id })
             .map_err(BoxedError::new)?;
-        let response = if query {
+        let response = if let Some(level) = max_level {
+            reader
+                .reader()?
+                .query_with_max_level(region_id, request, level)
+                .await?
+        } else if query {
             reader.query(request).await?
         } else {
             reader.stat(request).await?

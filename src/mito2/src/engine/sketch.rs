@@ -51,6 +51,18 @@ impl SketchReader for MitoEngine {
         prepared.handler.query(&prepared.context(), &request).await
     }
 
+    async fn query_with_max_level(
+        &self,
+        region_id: RegionId,
+        request: SketchRequest,
+        max_level: u8,
+    ) -> Result<SketchResponse, BoxedError> {
+        request.validate()?;
+        let mut prepared = self.build_sketch_read(region_id, request.time_range)?;
+        prepared.files = prepared.files.with_max_level(max_level);
+        prepared.handler.query(&prepared.context(), &request).await
+    }
+
     async fn split(
         &self,
         region_id: RegionId,

@@ -1117,20 +1117,37 @@ impl RegionServerHandler for RegionServer {
         &self,
         request: RegionRequestV1,
     ) -> ServerResult<RegionResponseV1> {
-        let accept_partial_result = request
+        let query_context = request
             .header
             .as_ref()
-            .and_then(|header| header.query_context.as_ref())
+            .and_then(|header| header.query_context.as_ref());
+        let accept_partial_result = query_context
             .and_then(|context| context.extensions.get(api::region::ACCEPT_PARTIAL_RESULT))
             .is_some_and(|value| value == "true");
         let body = request.body.context(servers_error::InvalidQuerySnafu {
             reason: "Expecting non-empty region request body.",
         })?;
-        self.handle_inner(body, accept_partial_result).await
+        let max_level = if matches!(body, region_request::Body::SketchQuery(_)) {
+            query_context
+                .and_then(|context| context.extensions.get(api::region::SKETCH_MAX_SST_LEVEL))
+                .map(|value| {
+                    value.parse::<u8>().map_err(|_| {
+                        servers_error::InvalidQuerySnafu {
+                            reason: format!("Invalid sketch maximum SST level: {value}"),
+                        }
+                        .build()
+                    })
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        self.handle_inner(body, accept_partial_result, max_level)
+            .await
     }
 
     async fn handle(&self, request: region_request::Body) -> ServerResult<RegionResponseV1> {
-        self.handle_inner(request, false).await
+        self.handle_inner(request, false, None).await
     }
 }
 
@@ -1139,6 +1156,7 @@ impl RegionServer {
         &self,
         request: region_request::Body,
         accept_partial_result: bool,
+        max_sketch_level: Option<u8>,
     ) -> ServerResult<RegionResponseV1> {
         let request_count = match &request {
             region_request::Body::Inserts(requests) => Some(requests.requests.len()),
@@ -1161,13 +1179,13 @@ impl RegionServer {
             }
             region_request::Body::SketchStat(request) => {
                 return self
-                    .handle_sketch_rpc(request, false)
+                    .handle_sketch_rpc(request, false, None)
                     .await
                     .inspect_err(|_| failed_requests_cnt.inc());
             }
             region_request::Body::SketchQuery(request) => {
                 return self
-                    .handle_sketch_rpc(request, true)
+                    .handle_sketch_rpc(request, true, max_sketch_level)
                     .await
                     .inspect_err(|_| failed_requests_cnt.inc());
             }

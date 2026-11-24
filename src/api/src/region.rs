@@ -20,6 +20,10 @@ use greptime_proto::v1::region::{RegionRequestHeader, RegionResponse as RegionRe
 /// Request extension advertising support for per-entry write failures.
 pub const ACCEPT_PARTIAL_RESULT: &str = "accept_partial_result";
 
+/// Inclusive maximum SST level for a sketch query. The server echoes the applied
+/// decimal value in response extensions so a caller can detect older servers.
+pub const SKETCH_MAX_SST_LEVEL: &str = "sketch_max_sst_level";
+
 /// Advertises support for per-entry write failures in the request header.
 pub fn set_accept_partial_result(header: &mut RegionRequestHeader) {
     header

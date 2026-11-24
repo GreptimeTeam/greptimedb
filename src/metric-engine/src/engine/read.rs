@@ -59,6 +59,17 @@ impl SketchReader for MetricEngine {
             .await
     }
 
+    async fn query_with_max_level(
+        &self,
+        region_id: RegionId,
+        request: SketchRequest,
+        max_level: u8,
+    ) -> std::result::Result<SketchResponse, BoxedError> {
+        self.physical_sketch_reader(region_id)?
+            .query_with_max_level(utils::to_data_region_id(region_id), request, max_level)
+            .await
+    }
+
     async fn split(
         &self,
         region_id: RegionId,

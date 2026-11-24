@@ -324,6 +324,19 @@ pub trait SketchReader: Send + Sync {
         request: SketchRequest,
     ) -> Result<SketchResponse, BoxedError>;
 
+    /// Queries only SSTs at or below the inclusive level ceiling.
+    async fn query_with_max_level(
+        &self,
+        _region_id: RegionId,
+        _request: SketchRequest,
+        _max_level: u8,
+    ) -> Result<SketchResponse, BoxedError> {
+        Err(BoxedError::new(PlainError::new(
+            "level-scoped sketch query is unsupported".to_string(),
+            StatusCode::Unsupported,
+        )))
+    }
+
     /// Proposes and validates split points without changing snapshots between rounds.
     async fn split(
         &self,
