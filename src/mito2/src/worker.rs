@@ -1633,6 +1633,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 WorkerRequest::EditRegion(request) => {
                     self.handle_incoming_region_edit(request);
                 }
+                WorkerRequest::PauseCompaction { region_id, sender } => {
+                    self.compaction_scheduler
+                        .pause_compaction(region_id, sender);
+                }
                 WorkerRequest::CancelCompaction {
                     region_id,
                     task_id,
@@ -1870,6 +1874,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             BackgroundNotify::RegionFenced => {}
             BackgroundNotify::RegionReloaded { old, result } => {
                 self.handle_region_reloaded(region_id, old, result).await
+            }
+            BackgroundNotify::CaughtUpAgain(caught_up) => {
+                self.handle_caught_up_again(region_id, caught_up).await
             }
             BackgroundNotify::RegionBecameWritable => self.maybe_replay_tails(region_id),
             BackgroundNotify::LeaderLeaseWaitEnded => {

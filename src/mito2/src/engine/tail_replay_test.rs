@@ -1391,6 +1391,37 @@ async fn test_cancelled_replay_does_not_publish_after_promotion() {
     assert_eq!(2, region.listener.commits());
 }
 
+/// A catchup of a writable region that awaits its Leader lease demotes it and cancels the tail
+/// replay the first catchup started; the replay of the instance the catchup again replaced it
+/// with commits instead.
+#[tokio::test]
+async fn test_catchup_again_cancels_replay_of_demoted_region() {
+    let region = TestRegion::new("tail-replay-catchup-again", true, None).await;
+    let last = region.write_remote_rows(region.region_id, 6, 9).await;
+    // The catchups replay nothing into the memtable, which stays empty.
+    flush_region(&region.engine, region.region_id, None).await;
+    region
+        .reopen_with_tails(vec![remote_tail(0, last, UptoKind::Reported)])
+        .await;
+    region
+        .engine
+        .renew_node_lease(Instant::now() + Duration::from_secs(10));
+    region.listener.hold_from(1);
+    region.catchup().await;
+    wait_until(|| region.listener.commits() == 1).await;
+    let first = region.engine.get_region(region.region_id).unwrap();
+    assert!(first.manifest_ctx.awaits_leader_lease());
+
+    region.catchup().await;
+
+    let caught_up = region.engine.get_region(region.region_id).unwrap();
+    assert!(!Arc::ptr_eq(&first, &caught_up));
+    region.listener.hold_from(0);
+    region.wait_until_replayed().await;
+    // The cancelled replay committed nothing, so the replay that the catchup again started did.
+    assert_eq!(2, region.listener.commits());
+}
+
 #[rstest]
 #[case::demoted(true)]
 #[case::tails_changed(false)]

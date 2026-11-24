@@ -172,6 +172,8 @@ impl SstReplaceCommand {
         new_file.num_rows = new_num_rows;
         new_file.num_row_groups = new_num_row_groups;
         new_file.max_row_group_uncompressed_size = max_row_group_uncompressed_size(&parquet_meta);
+        // The old file's decoded size does not describe the replacement.
+        new_file.max_row_group_decoded_size = 0;
 
         println!("{} Region: {}", "[ok]".green(), region_id);
         println!("{} Target SST: {}", "[ok]".green(), target_path.cyan());

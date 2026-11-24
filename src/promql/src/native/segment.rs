@@ -730,6 +730,19 @@ fn is_raw_series_source(plan: &LogicalPlan) -> bool {
     }
 }
 
+/// Whether `plan` already answers raw series frames of its own.
+///
+/// A selector naming no metric is prepared as one [`RawSeriesSource`] per discovered metric, or as
+/// the `Union` of them when it discovered several, and each source names the metric it reads. So
+/// such a plan is a frame producer in its own right: a segment hands it to the node it builds
+/// instead of binding it again. Binding it again nests a source in a source, and the physical
+/// planner reads a source's child as the region scan that source binds - a union is no such child
+/// either - so the nested input is refused after the statement has already been committed to this
+/// route.
+fn is_sourced_plan(plan: &LogicalPlan) -> bool {
+    matches!(plan, LogicalPlan::Union(_)) || is_raw_series_source(plan)
+}
+
 fn find_input_node(node: &NativeNode, source_index: usize) -> Option<&BoundInput> {
     node.inputs()
         .into_iter()
@@ -918,11 +931,16 @@ fn build_inner_segment(
         let source_fields = tree_source_fields(&tree).ok()?;
         let mut children = Vec::with_capacity(sources.len());
         for (local_index, &source_index) in sources.iter().enumerate() {
-            let (Some((Some(metric), _, source_tags)), Some(fields), Some(scan)) = (
-                per_source.get(source_index),
-                source_fields.get(local_index),
-                scans.get(local_index),
-            ) else {
+            let scan = scans.get(local_index)?;
+            // A scan that is already a source - one metric of a discovery, or the union of several -
+            // is the frame producer this segment reads, so it stays as it is; see [`is_sourced_plan`].
+            if is_sourced_plan(scan) {
+                children.push(scan.clone());
+                continue;
+            }
+            let (Some((Some(metric), _, source_tags)), Some(fields)) =
+                (per_source.get(source_index), source_fields.get(local_index))
+            else {
                 return None;
             };
             children.push(LogicalPlan::Extension(Extension {

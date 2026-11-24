@@ -6635,10 +6635,11 @@ async fn promql_output(
 /// `absent_over_time` answers with the labels its selector's matchers fix at every point no series
 /// of the selector has a sample at, and with nothing at the points one does. Three metric tables
 /// make the shapes reachable: `absent_probe` carries `probe_label`, which no row's value matches, so
-/// a nameless selector narrows to it; `absent_a` and `absent_b` carry the same ordinary labels, so a
-/// nameless selector over them is one discovery expands into several metrics; and no table carries
-/// `no_such_label`, which is the reported query - the one whose selector matches no metric table and
-/// whose labels therefore have to come from the matchers alone.
+/// a nameless selector narrows to it; `absent_a` and `absent_b` carry the same ordinary labels, so
+/// a nameless selector covers both and is one discovery expanding into several metrics, each
+/// answering through its own raw source; and no table carries `no_such_label`, which is the reported
+/// query - the one whose selector matches no metric table and whose labels therefore have to come
+/// from the matchers alone.
 ///
 /// The existing plan answers the call per series with a UDF, which needs a metric name to read a
 /// table from: such a selector writes none, and the labels still have to reach the answer at every
@@ -6748,33 +6749,131 @@ async fn native_promql_absent_over_time_answers_like_prometheus() {
         );
     }
 
-    // A nameless selector that discovery expands into more than one metric declines. The presence
-    // read keeps the metric name, and no single name is bound for the segment that hands it over; a
-    // fold that dropped the name would plan, and would read two metrics sharing their ordinary
-    // labels as one series. Neither tree is planned, so the query keeps the existing plan's answer
-    // for a selector that names no metric - an error - rather than answering wrongly.
+    // A nameless selector that discovery expands into more than one metric answers. `absent_a`,
+    // `absent_b` and `absent_probe` all carry `job`, and the first two carry the same ordinary
+    // labels, so `{job="api"}` is one discovery expanding into several metrics whose series would
+    // collapse into one if the presence read dropped the metric name. It does not, so the node
+    // reads a frame per metric - its child is the union of their raw sources - rather than one scan
+    // bound to one name.
+    //
+    // Both metrics holding samples in the window answer nothing: neither may be read as the other.
     observer.clear();
-    let declined = servers::prometheus_handler::PrometheusHandler::do_query(
-        instance.as_ref(),
-        &PromQuery {
-            query: r#"absent_over_time({job="api"}[5m])"#.to_string(),
-            start: "120".to_string(),
-            end: "120".to_string(),
-            step: "1s".to_string(),
-            ..PromQuery::default()
-        },
-        native_query_context(true, 4),
+    let (columns, rows) = native_labelled_rows(
+        promql_output(
+            &instance,
+            r#"absent_over_time({job="api"}[5m])"#,
+            "120",
+            "120",
+            "1s",
+        )
+        .await,
     )
     .await;
     assert!(
-        declined.is_err(),
-        "a nameless selector over several metrics must not be answered natively yet"
-    );
-    assert!(
-        !observed_physical_nodes(&observer)
+        observed_physical_nodes(&observer)
             .iter()
             .any(|node| node.name() == "FusedSeriesExec"),
-        "the declining shape must not run a fused node"
+        "a nameless selector over several metrics must run a fused node: {columns:?}"
+    );
+    assert!(
+        rows.is_empty(),
+        "two metrics with equal labels holding samples in the window: {columns:?} {rows:?}"
+    );
+
+    // The same selector where the window holds no sample of any of them answers once, with the
+    // selector's equality labels alone: the name the presence read kept is not a label of the
+    // answer, and neither is `probe_label`, which no matcher fixes.
+    let (columns, rows) = native_labelled_rows(
+        promql_output(
+            &instance,
+            r#"absent_over_time({job="api"}[5m])"#,
+            "400",
+            "400",
+            "1s",
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        vec![(400000, labels(&[("job", "api")]), 1.0)],
+        rows,
+        "{columns:?}"
+    );
+
+    // A range answers every step whose window holds nothing.
+    let (columns, rows) = native_labelled_rows(
+        promql_output(
+            &instance,
+            r#"absent_over_time({job="api"}[5m])"#,
+            "400",
+            "470",
+            "70s",
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        vec![
+            (400000, labels(&[("job", "api")]), 1.0),
+            (470000, labels(&[("job", "api")]), 1.0),
+        ],
+        rows,
+        "{columns:?}"
+    );
+
+    // A statement that compares a discovery over several metrics with one over a single metric cuts
+    // both occurrences into one segment. `{job="api"}` is a union of one raw source per discovered
+    // metric and `{probe_label="y"}` is a single raw source, and each is already the frame producer
+    // it reads through, so the segment hands them on rather than binding them again: a second
+    // binding nests a source in a source, and the physical planner refuses that, because a source's
+    // child has to be the region scan it binds.
+    //
+    // Both metrics hold a sample in the window at 120s, so the absent side reports nothing, and the
+    // addition answers alone. One-to-one matching under `on(job)` narrows the result to the labels
+    // the two operands are matched by, as Prometheus does: the probe's `probe_label` is not one of
+    // them, so it leaves the result. The value is the sum of the matched samples, 5 + 2.
+    observer.clear();
+    let (columns, rows) = native_labelled_rows(
+        promql_output(
+            &instance,
+            r#"absent_over_time({job="api"}[5m]) or ({probe_label="y"} + on(job) absent_a)"#,
+            "120",
+            "120",
+            "1s",
+        )
+        .await,
+    )
+    .await;
+    assert!(
+        observed_physical_nodes(&observer)
+            .iter()
+            .any(|node| node.name() == "FusedSeriesExec"),
+        "the mixed discovery statement must run a fused node: {columns:?}"
+    );
+    assert_eq!(
+        vec![(120000, labels(&[("job", "api")]), 7.0)],
+        rows,
+        "{columns:?}"
+    );
+
+    // At 400s the window holds no sample of either metric and both right-hand operands are older
+    // than the lookback, so the absent side answers alone: one series, labelled by the matcher it
+    // fixes, and nothing here supplies `probe_label`.
+    let (columns, rows) = native_labelled_rows(
+        promql_output(
+            &instance,
+            r#"absent_over_time({job="api"}[5m]) or ({probe_label="y"} + on(job) absent_a)"#,
+            "400",
+            "400",
+            "1s",
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        vec![(400000, labels(&[("job", "api")]), 1.0)],
+        rows,
+        "{columns:?}"
     );
 }
 

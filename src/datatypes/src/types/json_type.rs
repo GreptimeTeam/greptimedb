@@ -443,6 +443,21 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_json_rejects_integers_out_of_range() {
+        for input in [
+            "18446744073709551616",
+            "-9223372036854775809",
+            r#"{"n": 123456789012345678901234567890}"#,
+        ] {
+            assert!(parse_string_to_jsonb(input).is_err(), "{input}");
+        }
+        for input in ["18446744073709551615", "-9223372036854775808"] {
+            let jsonb = parse_string_to_jsonb(input).unwrap();
+            assert_eq!(jsonb_to_string(&jsonb).unwrap(), input);
+        }
+    }
+
+    #[test]
     fn test_v2_jsonb_to_serde_json_escaped_keys()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let expected = serde_json::json!({"": 9, "a\"b": {"a\\b": "\u{1f600}\n"}});

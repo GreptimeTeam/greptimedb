@@ -7622,7 +7622,7 @@ dependencies = [
 [[package]]
 name = "jsonb"
 version = "0.5.6"
-source = "git+https://github.com/GreptimeTeam/jsonb?rev=5a6472858d860ac034075c17253f41617bdfa956#5a6472858d860ac034075c17253f41617bdfa956"
+source = "git+https://github.com/GreptimeTeam/jsonb?rev=ae1ca9a26c65902dac9b53864bf502843c312ea5#ae1ca9a26c65902dac9b53864bf502843c312ea5"
 dependencies = [
  "byteorder",
  "ethnum",
@@ -14287,7 +14287,6 @@ version = "1.4.0-alpha.0"
 dependencies = [
  "api",
  "arrow-buffer 59.2.0",
- "arrow-schema 59.2.0",
  "chrono",
  "common-base",
  "common-catalog",

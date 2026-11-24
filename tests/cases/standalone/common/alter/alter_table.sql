@@ -29,14 +29,17 @@ INSERT INTO test_alt_table (h, i, j, m, dt) VALUES (42, 42, 0, 11, 0);
 
 ALTER TABLE test_alt_table MODIFY COLUMN m Float64;
 
+-- SQLNESS SORT_RESULT 3 1
 SELECT * FROM test_alt_table;
 
 ALTER TABLE test_alt_table MODIFY COLUMN m INTEGER;
 
+-- SQLNESS SORT_RESULT 3 1
 SELECT * FROM test_alt_table;
 
 ALTER TABLE test_alt_table MODIFY COLUMN m BOOLEAN;
 
+-- SQLNESS SORT_RESULT 3 1
 SELECT * FROM test_alt_table;
 
 DESC TABLE test_alt_table;

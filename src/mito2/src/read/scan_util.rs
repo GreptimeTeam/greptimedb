@@ -195,8 +195,8 @@ pub(crate) struct ScanMetricsSet {
     pruner_cache_miss: usize,
     /// Duration spent waiting for pruner to build file ranges.
     pruner_prune_cost: Duration,
-    /// Number of files filtered by manifest time-range pruning.
-    files_time_range_pruned: usize,
+    /// Number of files pruned by their manifest time range or primary key range.
+    files_manifest_pruned: usize,
     /// Number of record batches read from SST.
     num_sst_record_batches: usize,
     /// Number of batches decoded from SST.
@@ -323,7 +323,7 @@ impl fmt::Debug for ScanMetricsSet {
             pruner_cache_hit,
             pruner_cache_miss,
             pruner_prune_cost,
-            files_time_range_pruned,
+            files_manifest_pruned,
             num_sst_record_batches,
             num_sst_batches,
             num_sst_rows,
@@ -387,8 +387,8 @@ impl fmt::Debug for ScanMetricsSet {
         }
 
         // Write non-zero filter counters
-        if *files_time_range_pruned > 0 {
-            write!(f, ", \"files_time_range_pruned\":{files_time_range_pruned}")?;
+        if *files_manifest_pruned > 0 {
+            write!(f, ", \"files_manifest_pruned\":{files_manifest_pruned}")?;
         }
         if *rg_fulltext_filtered > 0 {
             write!(f, ", \"rg_fulltext_filtered\":{rg_fulltext_filtered}")?;
@@ -674,7 +674,7 @@ impl ScanMetricsSet {
                     pruner_cache_hit,
                     pruner_cache_miss,
                     pruner_prune_cost,
-                    files_time_range_pruned,
+                    files_manifest_pruned,
                     inverted_index_apply_metrics,
                     bloom_filter_apply_metrics,
                     fulltext_index_apply_metrics,
@@ -692,7 +692,7 @@ impl ScanMetricsSet {
         self.build_parts_cost += *build_cost;
         self.sst_scan_cost += *scan_cost;
 
-        self.files_time_range_pruned += *files_time_range_pruned;
+        self.files_manifest_pruned += *files_manifest_pruned;
 
         self.rg_total += *rg_total;
         self.rg_fulltext_filtered += *rg_fulltext_filtered;
@@ -1580,7 +1580,7 @@ pub fn build_flat_file_range_scan_stream(
     ranges: SmallVec<[FileRange; 2]>,
     mut per_file_metrics: Option<HashMap<RegionFileId, FileScanMetrics>>,
 ) -> impl Stream<Item = Result<RecordBatch>> {
-    try_stream! {
+    Box::pin(try_stream! {
         let fetch_metrics = if part_metrics.explain_verbose() {
             Some(Arc::new(ParquetFetchMetrics::default()))
         } else {
@@ -1654,7 +1654,7 @@ pub fn build_flat_file_range_scan_stream(
         // Reports metrics.
         reader_metrics.observe_rows(read_type);
         part_metrics.merge_reader_metrics(reader_metrics, per_file_metrics.as_ref());
-    }
+    })
 }
 
 /// Build the stream of scanning the extension range in flat format denoted by the [`RowGroupIndex`].

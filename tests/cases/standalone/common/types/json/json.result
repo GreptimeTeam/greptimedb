@@ -129,6 +129,14 @@ INSERT INTO jsons VALUES(parse_json('Morning my friends, have a nice day :)'), 5
 
 Error: 3001(EngineExecuteQuery), Execution error: cannot parse 'Morning my friends, have a nice day :)': expected value, pos 1
 
+INSERT INTO jsons VALUES(parse_json('{"n": 18446744073709551616}'), 6);
+
+Error: 3001(EngineExecuteQuery), Execution error: cannot parse '{"n": 18446744073709551616}': invalid number, pos 26
+
+INSERT INTO jsons VALUES('{"n": -9223372036854775809}', 7);
+
+Error: 1004(InvalidArguments), Invalid JSON: {"n": -9223372036854775809}
+
 SELECT json_to_string(j), t FROM jsons;
 
 +-------------------------+---+

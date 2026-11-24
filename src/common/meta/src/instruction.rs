@@ -1036,6 +1036,17 @@ impl Display for ApplyStagingManifest {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum MetadataCompaction {
+    /// Wait for compaction to drain, then hold the pause for the remaining sync budget.
+    Pause {
+        region_id: RegionId,
+        remaining: Duration,
+    },
+    /// Resume compaction on the source metadata region.
+    Release { region_id: RegionId },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Display, PartialEq)]
 pub enum Instruction {
     /// Opens regions.
@@ -1069,6 +1080,8 @@ pub enum Instruction {
     Suspend,
     /// Makes regions enter staging state.
     EnterStagingRegions(Vec<EnterStagingRegion>),
+    /// Controls source metadata compaction during repartition.
+    MetadataCompaction(MetadataCompaction),
     /// Syncs regions.
     SyncRegions(Vec<SyncRegion>),
     /// Remaps manifests for a region.
@@ -1350,6 +1363,7 @@ pub enum InstructionReply {
     GetPackedFileRefs(GetPackedFileRefsReply),
     GcRegions(GcRegionsReply),
     EnterStagingRegions(EnterStagingRegionsReply),
+    MetadataCompaction(SimpleReply),
     SyncRegions(SyncRegionsReply),
     RemapManifest(RemapManifestReply),
     ApplyStagingManifests(ApplyStagingManifestsReply),
@@ -1378,6 +1392,9 @@ impl Display for InstructionReply {
                     "InstructionReply::EnterStagingRegions({:?})",
                     reply.replies
                 )
+            }
+            Self::MetadataCompaction(reply) => {
+                write!(f, "InstructionReply::MetadataCompaction({reply})")
             }
             Self::SyncRegions(reply) => {
                 write!(f, "InstructionReply::SyncRegions({:?})", reply.replies)
@@ -1468,6 +1485,32 @@ mod tests {
     use store_api::storage::{FileId, FileRef};
 
     use super::*;
+
+    #[test]
+    fn test_metadata_compaction_mailbox_wire() {
+        let wire = serde_json::json!([
+            {"MetadataCompaction": {"Pause": {
+                "region_id": 4294967298_u64,
+                "remaining": {"secs": 19, "nanos": 500000000}
+            }}},
+            {"MetadataCompaction": {"Release": {
+                "region_id": 4294967298_u64
+            }}}
+        ]);
+        let region_id = RegionId::new(1, 2);
+        let expected = vec![
+            Instruction::MetadataCompaction(MetadataCompaction::Pause {
+                region_id,
+                remaining: Duration::from_millis(19_500),
+            }),
+            Instruction::MetadataCompaction(MetadataCompaction::Release { region_id }),
+        ];
+        assert_eq!(
+            expected,
+            serde_json::from_value::<Vec<Instruction>>(wire.clone()).unwrap()
+        );
+        assert_eq!(wire, serde_json::to_value(expected).unwrap());
+    }
 
     #[test]
     fn test_instruction_error_serde() {
