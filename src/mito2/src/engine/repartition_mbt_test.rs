@@ -58,13 +58,54 @@
 //! separate views. Only immutable snapshots ([`SstRef`]) cross a layer boundary; no layer
 //! ever receives a `FileMeta` that another layer mutates.
 //!
+//! # Invariants beyond the oracle
+//!
+//! The oracle above is the visible-row statement of the bug. This module also checks four
+//! storage-side invariant categories after *every* published step, each reported under its
+//! own name so a trace can fail on one without hiding the others:
+//!
+//! | category | what it checks |
+//! | --- | --- |
+//! | `manifest-consistency` | a holder's persisted manifest file set equals its live version file set (id, level, admission sequence, row count), and the published routing equals the regions that actually applied it (writable, applied partition expr, demoted when retired) |
+//! | `reference-bounds` | every reference a live holder shows authorizes only rows inside that holder's domain |
+//! | `sequence-monotonicity` | per region the committed sequence never decreases across steps, and the persisted committed sequence never moves backwards |
+//! | `physical-liveness` | every object still referenced by a live holder still reads back as a complete Parquet object, with the object id, the holding set and the step that dropped it reported when it does not |
+//!
+//! `reference-bounds` is reported but never fatal here: on this branch one *legal* split
+//! already makes both halves reference an SST whose creator domain is the whole table, so
+//! the category fires on every split by construction. See the `FileMeta::owned_range` TODO
+//! on [`SstRef::creator_domain`] for the field that narrows that authorization.
+//!
+//! # Operations
+//!
+//! Besides writes, flushes, splits, merges and per-region compaction, the traces also drive
+//! the two paths that publish an SST the write path never produced for the target region:
+//!
+//! - `import`: a byte copy of one of the target's own flushed SSTs is re-registered under a
+//!   new `FileId` at [`LEVEL_SHARED`] with `sequence: None`, so admission is the only place
+//!   that can turn `None` into a stored admission sequence. Both observations are recorded:
+//!   the fresh `None` admission and the repeat admission that keeps the existing sequence.
+//! - table-level (multi-region) compaction: `table_compaction_snapshot` on that admitted
+//!   shared input, rewritten into region-local outputs, published through
+//!   `publish_table_compaction`. This is the region-side half of
+//!   `compaction/multi_region.rs`; it is an *additional* op and never replaces the L0
+//!   multi-holder case the traces exist for.
+//!
 //! # Waiting for publication
 //!
 //! Nothing here sleeps. `put_rows`, `Flush`, `Compact`, `set_region_role_state_gracefully`,
-//! `remap_manifests`, `Create` and `ApplyStagingManifest` are all synchronous worker
-//! requests: when they return, the change is applied to that region's manifest and
-//! version. A split/merge step publishes every target region (create -> enter staging ->
-//! apply staging manifest) before the routing switches and the oracle runs.
+//! `remap_manifests`, `edit_region`, `publish_table_compaction`, `Create` and
+//! `ApplyStagingManifest` are all synchronous worker requests: when they return, the change
+//! is applied to that region's manifest and version. A split/merge step publishes every
+//! target region (create -> enter staging -> apply staging manifest) before the routing
+//! switches and the oracle runs.
+//!
+//! # Seed space
+//!
+//! `MITO_MBT_SEED=<seed>` replays exactly one seed. `MITO_MBT_SEEDS=<list>` takes a comma
+//! list whose items are a seed or an inclusive `start:end` range, decimal or `0x` hex (for
+//! example `0x5EED0001:0x5EED0003,42`). Without either variable the three default seeds
+//! below run.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -78,7 +119,8 @@ use datatypes::arrow::datatypes::Int64Type;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use datatypes::value::Value;
-use partition::expr::{PartitionExpr, col};
+use object_store::ObjectStore;
+use partition::expr::{Operand, PartitionExpr, RestrictedOp, col};
 use store_api::metadata::ColumnMetadata;
 use store_api::region_engine::{RegionEngine, RemapManifestsRequest, SettableRegionRoleState};
 use store_api::region_request::{
@@ -87,9 +129,15 @@ use store_api::region_request::{
 };
 use store_api::storage::{FileId, RegionId, ScanRequest};
 
+#[cfg(feature = "enterprise")]
+use super::table_compaction::PublicationOutcome;
 use crate::config::MitoConfig;
 use crate::engine::{MITO_ENGINE_NAME, MitoEngine};
 use crate::gc::GcConfig;
+use crate::manifest::action::RegionEdit;
+use crate::region::{RegionLeaderState, RegionRoleState};
+use crate::sst::file::{LEVEL_SHARED, RegionFileId, SHARED_LEVEL_SLOT};
+use crate::sst::location;
 use crate::test_util::{TestEnv, put_rows, rows_schema};
 
 /// Number of distinct partition-key values (`k00..k09`).
@@ -97,9 +145,11 @@ const KEY_COUNT: usize = 10;
 /// Wide enough to cover every timestamp the traces write.
 const COMPACTION_WINDOW_SECONDS: i64 = 3600;
 /// Length of one random trace.
-const PLAN_LEN: usize = 12;
+const PLAN_LEN: usize = 14;
 /// Fixed seeds; each seed is one independently reproducible trace.
-const RANDOM_SEEDS: [u64; 3] = [0x5EED_0001, 0x5EED_0002, 0x5EED_0003];
+const DEFAULT_SEEDS: [u64; 3] = [0x5EED_0001, 0x5EED_0002, 0x5EED_0003];
+/// Upper bound on the number of seeds one `start:end` range may expand to.
+const MAX_RANGE_SEEDS: u64 = 64;
 
 /// Canonical name of the partition key value `idx`.
 fn key_name(idx: usize) -> String {
@@ -142,6 +192,81 @@ impl Domain {
     fn contains_key(&self, key: usize) -> bool {
         self.lo <= key && key < self.hi
     }
+
+    /// Whether every key of `other` is also a key of `self`.
+    fn contains_domain(&self, other: &Domain) -> bool {
+        self.lo <= other.lo && other.hi <= self.hi
+    }
+}
+
+/// The key index encoded by a partition key value; `"k10"` (the upper bound of the full
+/// domain) is index [`KEY_COUNT`].
+fn key_index(name: &str) -> Option<usize> {
+    name.strip_prefix('k')?.parse().ok()
+}
+
+/// Accumulates the two half bounds of the harness' restricted partition grammar.
+///
+/// `None` means "unbounded on that side", which is what an unpartitioned region means.
+#[derive(Debug, Default)]
+struct DecodedBounds {
+    lo: Option<usize>,
+    hi: Option<usize>,
+}
+
+fn accumulate_bounds(expr: &PartitionExpr, bounds: &mut DecodedBounds) -> bool {
+    match (&*expr.lhs, &expr.op, &*expr.rhs) {
+        (Operand::Expr(left), RestrictedOp::And, Operand::Expr(right)) => {
+            accumulate_bounds(left, bounds) && accumulate_bounds(right, bounds)
+        }
+        (Operand::Column(column), RestrictedOp::GtEq, Operand::Value(Value::String(value)))
+            if column == "k" =>
+        {
+            bounds.lo = key_index(value.as_utf8());
+            bounds.lo.is_some()
+        }
+        (Operand::Column(column), RestrictedOp::Lt, Operand::Value(Value::String(value)))
+            if column == "k" =>
+        {
+            bounds.hi = key_index(value.as_utf8());
+            bounds.hi.is_some()
+        }
+        _ => false,
+    }
+}
+
+/// Decodes `k >= key(lo) AND k < key(hi)` back into a [`Domain`].
+///
+/// Returns `None` for every expression this harness does not generate, so a mismatch is
+/// reported instead of silently passing a boundary check.
+fn decode_domain(expr: &PartitionExpr) -> Option<Domain> {
+    let mut bounds = DecodedBounds::default();
+    if !accumulate_bounds(expr, &mut bounds) {
+        return None;
+    }
+    Some(Domain::new(
+        bounds.lo.unwrap_or(0),
+        bounds.hi.unwrap_or(KEY_COUNT),
+    ))
+}
+
+/// The domain expressed by a region's or a file's partition expression JSON.
+///
+/// A missing expression imposes nothing, and so does the explicit single-region designation
+/// (the empty string), so both decode to [`Domain::FULL`].
+fn domain_of_json(json: &str) -> Domain {
+    if json.is_empty() {
+        return Domain::FULL;
+    }
+    let expr = PartitionExpr::from_json_str(json)
+        .unwrap_or_else(|err| panic!("harness cannot parse partition expr {json:?}: {err}"))
+        .unwrap_or_else(|| panic!("harness got an empty partition bound from {json:?}"));
+    decode_domain(&expr).unwrap_or_else(|| {
+        panic!(
+            "harness cannot decode partition expr {json:?}; it only generates \
+             `k >= key(lo) AND k < key(hi)`"
+        )
+    })
 }
 
 /// One committed write event. The ledger's unit of truth.
@@ -230,13 +355,54 @@ struct SstRef {
     /// The region that physically wrote the object (not necessarily its holder).
     owner: RegionId,
     level: u8,
+    /// The storage slot the reference sits in: `0`, `1` or [`SHARED_LEVEL_SLOT`].
+    slot_level: u8,
     num_rows: u64,
+    /// The reference's admission sequence (`FileMeta::sequence`).
+    sequence: Option<u64>,
+    /// The domain of the region that created the object (`FileMeta::partition_expr`).
+    ///
+    /// This is the range of rows the reference let a reader see for as long as a reference
+    /// carried no row authorization of its own.
+    ///
+    /// TODO(repart-mbt): this branch has no `FileMeta::owned_range`, so the authorized range
+    /// is reported as the creator domain. Once `FileMeta::owned_range` exists, the
+    /// authorized range is `creator_domain ∩ owned_range`, and `owned_range` itself must be
+    /// inside `creator_domain`.
+    creator_domain: Domain,
 }
 
 /// Layer 2: one region's own manifest view of the objects it references.
 #[derive(Debug, Default, Clone)]
 struct HolderView {
+    /// The live version's file set (`Version::ssts`).
     files: BTreeMap<FileId, SstRef>,
+    /// The persisted manifest's file set (`RegionManifest::files`), for the
+    /// manifest/version consistency check.
+    manifest: BTreeMap<FileId, ManifestRef>,
+}
+
+/// The persisted manifest's view of one reference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ManifestRef {
+    level: u8,
+    sequence: Option<u64>,
+    num_rows: u64,
+}
+
+/// What one region actually applied, captured per step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AppliedState {
+    /// The partition domain the region applied (`RegionMetadata::partition_expr`).
+    domain: Domain,
+    /// `VersionControlData::committed_sequence`.
+    committed: u64,
+    /// `VersionControlData::last_sequence`.
+    last_sequence: u64,
+    /// `RegionManifest::committed_sequence`, the persisted committed sequence.
+    manifest_committed: Option<u64>,
+    /// The region currently accepts writes, i.e. it is the region that serves its domain.
+    writable: bool,
 }
 
 /// Layer 1 aggregate: which holders reference each physical object.
@@ -246,6 +412,64 @@ struct HolderView {
 #[derive(Debug, Default, Clone)]
 struct PhysicalView {
     holders_of: BTreeMap<FileId, BTreeSet<RegionId>>,
+}
+
+/// What one region had already reached, so a later step can only move forward.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SequenceHighWater {
+    /// The highest `VersionControlData::committed_sequence` observed.
+    committed: u64,
+    /// The highest `VersionControlData::last_sequence` observed.
+    last: u64,
+    /// The highest `RegionManifest::committed_sequence` observed.
+    persisted: u64,
+}
+
+/// One invariant category. Each is reported separately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Category {
+    /// The visible-row oracle (not an invariant below, reported for context).
+    Visibility,
+    ManifestConsistency,
+    ReferenceBounds,
+    SequenceMonotonicity,
+    PhysicalLiveness,
+}
+
+impl Category {
+    fn name(self) -> &'static str {
+        match self {
+            Category::Visibility => "visibility",
+            Category::ManifestConsistency => "manifest-consistency",
+            Category::ReferenceBounds => "reference-bounds",
+            Category::SequenceMonotonicity => "sequence-monotonicity",
+            Category::PhysicalLiveness => "physical-liveness",
+        }
+    }
+
+    /// Whether a violation of this category fails a trace.
+    ///
+    /// `reference-bounds` cannot: on this branch one legal split already makes both halves
+    /// reference an object whose creator domain is the whole table, so the category fires on
+    /// every split by construction. It is still checked and reported after every step.
+    fn fatal(self) -> bool {
+        !matches!(self, Category::ReferenceBounds)
+    }
+}
+
+/// One violation, tagged with its category.
+#[derive(Debug, Clone)]
+struct Violation {
+    category: Category,
+    detail: String,
+}
+
+fn format_violations(violations: &[Violation]) -> String {
+    violations
+        .iter()
+        .map(|violation| format!("  [{}] {}", violation.category.name(), violation.detail))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// One operation of a trace. Generated up front so a seed replays identically.
@@ -261,6 +485,11 @@ enum Op {
     Merge,
     /// Region compaction on one live region with a wide strict window.
     Compact { choice: usize },
+    /// Publish an SST object the write path never produced into one live region's shared
+    /// level, then observe its `sequence = None` admission.
+    Import { choice: usize },
+    /// Table-level (multi-region) compaction of one live region's admitted shared inputs.
+    TableCompaction { choice: usize },
 }
 
 impl Op {
@@ -274,6 +503,10 @@ impl Op {
             Op::Split { choice } => format!("split (choice {choice})"),
             Op::Merge => "merge".to_string(),
             Op::Compact { choice } => format!("region compaction (choice {choice})"),
+            Op::Import { choice } => format!("import (choice {choice})"),
+            Op::TableCompaction { choice } => {
+                format!("multi-region compaction (choice {choice})")
+            }
         }
     }
 }
@@ -320,6 +553,25 @@ struct StorageModel {
     /// Live regions with unflushed rows in their memtable.
     dirty: BTreeSet<RegionId>,
 
+    /// The object store the SSTs live in, so "readable" is a real read of that store.
+    store: ObjectStore,
+    /// The table directory and path type the engine resolves SST paths against.
+    table_dir: String,
+    path_type: PathType,
+    /// Per-region applied state, refreshed every step.
+    applied: BTreeMap<RegionId, AppliedState>,
+    /// The highest committed and last-allocated sequences observed per region (sequence
+    /// monotonicity). The two are tracked apart: a region that inherits files without
+    /// committing writes legitimately starts with `last_sequence` above `committed_sequence`.
+    seq_high_water: BTreeMap<RegionId, SequenceHighWater>,
+    /// The live-holder set of every object at the previous step.
+    prev_objects: BTreeMap<(RegionId, FileId), BTreeSet<RegionId>>,
+    /// The step at which an object stopped being referenced by a live holder, with the
+    /// holder set before and after.
+    dropped_at: BTreeMap<(RegionId, FileId), (usize, BTreeSet<RegionId>, BTreeSet<RegionId>)>,
+    /// The index of the step being applied, quoted by the physical liveness report.
+    step: usize,
+
     /// Keeps the temporary data directory alive for the whole model.
     _env: TestEnv,
 }
@@ -344,26 +596,43 @@ impl StorageModel {
             .await;
         let request = create_request(Domain::FULL);
         let schema = rows_schema(&request);
+        let region_id = RegionId::new(1, 1);
+        engine
+            .handle_request(region_id, RegionRequest::Create(request.clone()))
+            .await
+            .unwrap();
+        // The first region tells us the table directory, the path type and the object store
+        // every SST path below is resolved against.
+        let (store, table_dir, path_type) = {
+            let region = engine.get_region(region_id).unwrap();
+            (
+                region.access_layer.object_store().clone(),
+                region.access_layer.table_dir().to_string(),
+                region.access_layer.path_type(),
+            )
+        };
         let mut model = StorageModel {
             engine,
             request,
             schema,
             ledger: Ledger::default(),
-            next_region_seq: 1,
+            next_region_seq: 2,
             routing: BTreeMap::new(),
             holders: BTreeMap::new(),
             physical: PhysicalView::default(),
             tracked: BTreeSet::new(),
             dirty: BTreeSet::new(),
+            store,
+            table_dir,
+            path_type,
+            applied: BTreeMap::new(),
+            seq_high_water: BTreeMap::new(),
+            prev_objects: BTreeMap::new(),
+            dropped_at: BTreeMap::new(),
+            step: 0,
             _env: env,
         };
 
-        let region_id = model.alloc_region_id();
-        model
-            .engine
-            .handle_request(region_id, RegionRequest::Create(model.request.clone()))
-            .await
-            .unwrap();
         model.tracked.insert(region_id);
         model.routing.insert(region_id, Domain::FULL);
         model.refresh_views().await;
@@ -402,29 +671,75 @@ impl StorageModel {
             .unwrap_or_else(|| panic!("region {region_id} does not reference {file_id:?}"))
     }
 
-    /// Refreshes layer 2 from the regions' persisted manifests, then rebuilds layer 1 from
-    /// layer 2. Values are copied into [`SstRef`] snapshots, never shared.
+    /// Refreshes layer 2 (each holder's live version and persisted manifest) and each
+    /// region's applied state, then rebuilds layer 1 from layer 2. Values are copied into
+    /// [`SstRef`] snapshots, never shared.
     async fn refresh_views(&mut self) {
         let mut holders = BTreeMap::new();
+        let mut applied = BTreeMap::new();
         for region_id in self.tracked.clone() {
             let region = self
                 .engine
                 .get_region(region_id)
                 .unwrap_or_else(|| panic!("region {region_id} disappeared"));
             let manifest = region.manifest_ctx.manifest().await;
+            let data = region.version_control.current();
+
             let mut view = HolderView::default();
+            for level in data.version.ssts.levels() {
+                for (file_id, handle) in &level.files {
+                    let meta = handle.meta_ref();
+                    view.files.insert(
+                        *file_id,
+                        SstRef {
+                            file_id: *file_id,
+                            owner: meta.region_id,
+                            level: meta.level,
+                            slot_level: level.level,
+                            num_rows: meta.num_rows,
+                            sequence: meta.sequence.map(|sequence| sequence.get()),
+                            creator_domain: meta
+                                .partition_expr
+                                .as_ref()
+                                .map(|expr| {
+                                    decode_domain(expr).unwrap_or_else(|| {
+                                        panic!("harness cannot decode a file's creator domain")
+                                    })
+                                })
+                                .unwrap_or(Domain::FULL),
+                        },
+                    );
+                }
+            }
             for (file_id, meta) in &manifest.files {
-                view.files.insert(
+                view.manifest.insert(
                     *file_id,
-                    SstRef {
-                        file_id: *file_id,
-                        owner: meta.region_id,
+                    ManifestRef {
                         level: meta.level,
+                        sequence: meta.sequence.map(|sequence| sequence.get()),
                         num_rows: meta.num_rows,
                     },
                 );
             }
+
             holders.insert(region_id, view);
+            applied.insert(
+                region_id,
+                AppliedState {
+                    domain: data
+                        .version
+                        .metadata
+                        .partition_expr
+                        .as_deref()
+                        .map(domain_of_json)
+                        .unwrap_or(Domain::FULL),
+                    committed: data.committed_sequence,
+                    last_sequence: data.last_sequence,
+                    manifest_committed: manifest.committed_sequence,
+                    writable: region.state()
+                        == RegionRoleState::Leader(RegionLeaderState::Writable),
+                },
+            );
         }
 
         let mut physical = PhysicalView::default();
@@ -440,6 +755,32 @@ impl StorageModel {
 
         self.holders = holders;
         self.physical = physical;
+        self.applied = applied;
+    }
+
+    /// The object-store path of one physical object, resolved through its creator region.
+    fn sst_path(&self, creator: RegionId, file_id: FileId) -> String {
+        location::sst_file_path(
+            &self.table_dir,
+            RegionFileId::new(creator, file_id),
+            self.path_type,
+        )
+    }
+
+    /// The live `FileMeta` of one reference, as the region's version holds it.
+    fn file_meta(&self, region_id: RegionId, file_id: FileId) -> crate::sst::file::FileMeta {
+        let region = self
+            .engine
+            .get_region(region_id)
+            .unwrap_or_else(|| panic!("region {region_id} disappeared"));
+        let version = region.version();
+        version
+            .ssts
+            .levels()
+            .iter()
+            .find_map(|level| level.files.get(&file_id))
+            .map(|handle| handle.meta_ref().clone())
+            .unwrap_or_else(|| panic!("region {region_id} does not reference {file_id:?}"))
     }
 
     /// A plain region scan, as a multiset of visible `event_id`s.
@@ -561,6 +902,348 @@ impl StorageModel {
         if let Some(report) = self.check(ctx).await {
             panic!("{report}");
         }
+    }
+
+    /// Checks every invariant category and returns the violations in category order.
+    ///
+    /// This never relaxes the oracle above: [`StorageModel::check`] keeps its meaning, and
+    /// the categories below are additional statements about the same step.
+    async fn check_invariants(&mut self, ctx: &str) -> Vec<Violation> {
+        self.refresh_views().await;
+
+        let mut violations = Vec::new();
+        self.check_manifest_consistency(ctx, &mut violations);
+        self.check_routing_applied(ctx, &mut violations);
+        self.check_reference_bounds(ctx, &mut violations);
+        self.check_sequence_monotonicity(ctx, &mut violations);
+        self.check_physical_liveness(ctx, &mut violations).await;
+        violations
+    }
+
+    /// Asserts every invariant category except the non-fatal `reference-bounds` one.
+    async fn assert_invariants(&mut self, ctx: &str) {
+        let violations: Vec<Violation> = self
+            .check_invariants(ctx)
+            .await
+            .into_iter()
+            .filter(|violation| violation.category.fatal())
+            .collect();
+        if !violations.is_empty() {
+            panic!(
+                "STORAGE INVARIANT VIOLATED\n{}",
+                format_violations(&violations)
+            );
+        }
+    }
+
+    /// Manifest consistency: a holder's persisted manifest file set and its live version
+    /// file set must describe the same references.
+    fn check_manifest_consistency(&self, ctx: &str, violations: &mut Vec<Violation>) {
+        for (region_id, view) in &self.holders {
+            // The level a reference declares must be the level slot the version keeps it in.
+            let version: BTreeMap<FileId, (u8, Option<u64>, u64)> = view
+                .files
+                .iter()
+                .map(|(file_id, sst)| {
+                    let slot_level = if sst.slot_level as usize == SHARED_LEVEL_SLOT {
+                        LEVEL_SHARED
+                    } else {
+                        sst.slot_level
+                    };
+                    (*file_id, (slot_level, sst.sequence, sst.num_rows))
+                })
+                .collect();
+            let manifest: BTreeMap<FileId, (u8, Option<u64>, u64)> = view
+                .manifest
+                .iter()
+                .map(|(file_id, reference)| {
+                    (
+                        *file_id,
+                        (reference.level, reference.sequence, reference.num_rows),
+                    )
+                })
+                .collect();
+            if version == manifest {
+                continue;
+            }
+            let only_version: Vec<FileId> = version
+                .keys()
+                .filter(|file_id| !manifest.contains_key(file_id))
+                .copied()
+                .collect();
+            let only_manifest: Vec<FileId> = manifest
+                .keys()
+                .filter(|file_id| !version.contains_key(file_id))
+                .copied()
+                .collect();
+            let differing: Vec<String> = version
+                .iter()
+                .filter_map(|(file_id, live)| {
+                    manifest.get(file_id).and_then(|persisted| {
+                        (live != persisted).then(|| {
+                            format!(
+                                "{file_id:?} version (L{}, sequence {:?}, rows {}) vs manifest \
+                                 (L{}, sequence {:?}, rows {})",
+                                live.0, live.1, live.2, persisted.0, persisted.1, persisted.2
+                            )
+                        })
+                    })
+                })
+                .collect();
+            violations.push(Violation {
+                category: Category::ManifestConsistency,
+                detail: format!(
+                    "[{ctx}] region {region_id}: the live version and the persisted manifest \
+                     disagree; only in version: {only_version:?}; only in manifest: \
+                     {only_manifest:?}; differing: {differing:?}"
+                ),
+            });
+        }
+    }
+
+    /// Manifest consistency, routing half: the published routing must equal the regions that
+    /// actually applied it, and a retired region must no longer accept writes.
+    fn check_routing_applied(&self, ctx: &str, violations: &mut Vec<Violation>) {
+        for (region_id, domain) in &self.routing {
+            let Some(state) = self.applied.get(region_id) else {
+                violations.push(Violation {
+                    category: Category::ManifestConsistency,
+                    detail: format!(
+                        "[{ctx}] published region {region_id} is not a region the harness \
+                         created"
+                    ),
+                });
+                continue;
+            };
+            if state.domain != *domain {
+                violations.push(Violation {
+                    category: Category::ManifestConsistency,
+                    detail: format!(
+                        "[{ctx}] region {region_id} is published as [{}, {}) but applied [{}, \
+                         {})",
+                        key_name(domain.lo),
+                        key_name(domain.hi),
+                        key_name(state.domain.lo),
+                        key_name(state.domain.hi)
+                    ),
+                });
+            }
+            if !state.writable {
+                violations.push(Violation {
+                    category: Category::ManifestConsistency,
+                    detail: format!(
+                        "[{ctx}] region {region_id} is published for [{}, {}) but does not \
+                         accept writes, so no region serves that domain",
+                        key_name(domain.lo),
+                        key_name(domain.hi)
+                    ),
+                });
+            }
+        }
+        for (region_id, state) in &self.applied {
+            if self.routing.contains_key(region_id) || !state.writable {
+                continue;
+            }
+            violations.push(Violation {
+                category: Category::ManifestConsistency,
+                detail: format!(
+                    "[{ctx}] region {region_id} is no longer published but still accepts \
+                     writes for [{}, {})",
+                    key_name(state.domain.lo),
+                    key_name(state.domain.hi)
+                ),
+            });
+        }
+    }
+
+    /// Reference bounds: a reference must not authorize rows outside its own region's
+    /// domain.
+    ///
+    /// See the `FileMeta::owned_range` TODO on [`SstRef::creator_domain`]: without that
+    /// field the authorized range is the creator's domain, which a repartition hands to
+    /// every target region unchanged.
+    fn check_reference_bounds(&self, ctx: &str, violations: &mut Vec<Violation>) {
+        for region_id in self.live_regions() {
+            let holder_domain = self.domain_of(region_id);
+            let Some(view) = self.holders.get(&region_id) else {
+                continue;
+            };
+            for (file_id, sst) in &view.files {
+                if holder_domain.contains_domain(&sst.creator_domain) {
+                    continue;
+                }
+                let holders = self
+                    .physical
+                    .holders_of
+                    .get(file_id)
+                    .map(|holders| holders.iter().copied().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                violations.push(Violation {
+                    category: Category::ReferenceBounds,
+                    detail: format!(
+                        "[{ctx}] region {region_id} (domain [{}, {})) references {file_id:?} \
+                         whose creator domain is [{}, {}) (creator {}, L{}, sequence {:?}); the \
+                         reference authorizes rows outside the holder's domain; holders: \
+                         {holders:?}",
+                        key_name(holder_domain.lo),
+                        key_name(holder_domain.hi),
+                        key_name(sst.creator_domain.lo),
+                        key_name(sst.creator_domain.hi),
+                        sst.owner,
+                        sst.level,
+                        sst.sequence
+                    ),
+                });
+            }
+        }
+    }
+
+    /// Sequence monotonicity: per region the committed sequence never decreases across
+    /// steps, the allocated and persisted sequences never decrease either, and the allocated
+    /// sequence stays at or above the committed one.
+    fn check_sequence_monotonicity(&mut self, ctx: &str, violations: &mut Vec<Violation>) {
+        for (region_id, state) in &self.applied {
+            let high = self
+                .seq_high_water
+                .get(region_id)
+                .copied()
+                .unwrap_or_default();
+            if state.committed < high.committed {
+                violations.push(Violation {
+                    category: Category::SequenceMonotonicity,
+                    detail: format!(
+                        "[{ctx}] region {region_id}: committed sequence went back from {} to {}",
+                        high.committed, state.committed
+                    ),
+                });
+            }
+            if state.last_sequence < high.last {
+                violations.push(Violation {
+                    category: Category::SequenceMonotonicity,
+                    detail: format!(
+                        "[{ctx}] region {region_id}: last allocated sequence went back from {} \
+                         to {}",
+                        high.last, state.last_sequence
+                    ),
+                });
+            }
+            if state.last_sequence < state.committed {
+                violations.push(Violation {
+                    category: Category::SequenceMonotonicity,
+                    detail: format!(
+                        "[{ctx}] region {region_id}: last allocated sequence {} is below the \
+                         committed sequence {}",
+                        state.last_sequence, state.committed
+                    ),
+                });
+            }
+            match state.manifest_committed {
+                Some(persisted) if persisted < high.persisted => violations.push(Violation {
+                    category: Category::SequenceMonotonicity,
+                    detail: format!(
+                        "[{ctx}] region {region_id}: the persisted committed sequence went back \
+                         from {} to {persisted}",
+                        high.persisted
+                    ),
+                }),
+                _ => {}
+            }
+        }
+        // Only a decrease from the highest sequence already observed is a violation, so the
+        // high-water marks advance after the checks above.
+        for (region_id, state) in &self.applied {
+            let high = self.seq_high_water.entry(*region_id).or_default();
+            high.committed = high.committed.max(state.committed);
+            high.last = high.last.max(state.last_sequence);
+            high.persisted = high
+                .persisted
+                .max(state.manifest_committed.unwrap_or_default());
+        }
+    }
+
+    /// Physical liveness: every object still referenced by a live holder must stay readable
+    /// for that holder.
+    async fn check_physical_liveness(&mut self, ctx: &str, violations: &mut Vec<Violation>) {
+        let mut objects: BTreeMap<(RegionId, FileId), BTreeSet<RegionId>> = BTreeMap::new();
+        for region_id in self.live_regions() {
+            let Some(view) = self.holders.get(&region_id) else {
+                continue;
+            };
+            for (file_id, sst) in &view.files {
+                objects
+                    .entry((sst.owner, *file_id))
+                    .or_default()
+                    .insert(region_id);
+            }
+        }
+
+        // Records the handover step first, so a failed read can name who dropped the object.
+        for (object, holders) in &objects {
+            if let Some(previous) = self.prev_objects.get(object)
+                && previous != holders
+                && !previous.is_subset(holders)
+            {
+                self.dropped_at
+                    .insert(*object, (self.step, previous.clone(), holders.clone()));
+            }
+        }
+        // An object that lost every live holder keeps the step that dropped it as well.
+        for (object, previous) in &self.prev_objects {
+            if objects.contains_key(object) {
+                continue;
+            }
+            self.dropped_at
+                .insert(*object, (self.step, previous.clone(), BTreeSet::new()));
+        }
+
+        for (object, holders) in &objects {
+            let (creator, file_id) = *object;
+            let path = self.sst_path(creator, file_id);
+            let Err(reason) = self.read_object(&path).await else {
+                continue;
+            };
+            let drop = match self.dropped_at.get(object) {
+                Some((step, before, after)) => format!(
+                    "dropped by {} at step {step} (holders before {before:?}, after {after:?})",
+                    before
+                        .difference(after)
+                        .map(|region_id| region_id.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                None => "never dropped by a live holder".to_string(),
+            };
+            violations.push(Violation {
+                category: Category::PhysicalLiveness,
+                detail: format!(
+                    "[{ctx}] object {file_id:?} (creator {creator}) at {path} is not readable \
+                     although it is still referenced by {holders:?}: {reason}; {drop}"
+                ),
+            });
+        }
+
+        self.prev_objects = objects;
+    }
+
+    /// Reads one physical object, i.e. what a holder of that reference needs to scan it.
+    ///
+    /// Reading the bytes (not just stat-ing them) is what makes this a liveness check: a
+    /// deleted, truncated or foreign object fails here even though a stale metadata entry
+    /// still lists it.
+    async fn read_object(&self, path: &str) -> Result<u64, String> {
+        let bytes = self
+            .store
+            .read(path)
+            .await
+            .map_err(|err| format!("object-store read failed: {err}"))?
+            .to_vec();
+        if bytes.len() < 8 || &bytes[..4] != b"PAR1" || &bytes[bytes.len() - 4..] != b"PAR1" {
+            return Err(format!(
+                "{} bytes that are not a complete Parquet object",
+                bytes.len()
+            ));
+        }
+        Ok(bytes.len() as u64)
     }
 
     /// Appends rows to the live region that owns each row's partition key.
@@ -754,8 +1437,10 @@ impl StorageModel {
 
     /// Merges every published region into one new whole-domain region.
     ///
-    /// Publication: the merged region is created, consumes the coordinator's staging
-    /// manifest (a synchronous request) and only then becomes the sole published region.
+    /// Publication: every input stops serving (a synchronous role-state request, exactly
+    /// like the split source), then the merged region is created, consumes the coordinator's
+    /// staging manifest (a synchronous request) and only then becomes the sole published
+    /// region.
     async fn merge_all(&mut self) -> RegionId {
         let inputs = self.live_regions();
         assert!(
@@ -763,6 +1448,13 @@ impl StorageModel {
             "a merge needs at least two live regions, got {inputs:?}"
         );
         self.flush_dirty().await;
+        // A retired region must not keep writing for a domain another region now serves.
+        for input in &inputs {
+            self.engine
+                .set_region_role_state_gracefully(*input, SettableRegionRoleState::StagingLeader)
+                .await
+                .unwrap();
+        }
 
         let merged = self.alloc_region_id();
         // The merged region is the coordinator's staging owner, so it has to exist and be
@@ -811,6 +1503,277 @@ impl StorageModel {
             .await
             .unwrap();
         self.refresh_views().await;
+    }
+
+    /// Publishes an SST object the write path never produced into `target`'s shared level.
+    ///
+    /// The object is a byte copy of one SST `target` flushed itself, re-registered under a
+    /// brand-new `FileId` at [`LEVEL_SHARED`] with `sequence: None`, and the target's own L0
+    /// reference is handed over in the same edit, so the visible row multiset does not move.
+    /// Admission is the only place that can turn `sequence: None` into a stored admission
+    /// sequence, so both outcomes are recorded: the fresh admission that assigns one, and
+    /// the repeat admission of a still-visible import that keeps it.
+    ///
+    /// Publication: `MitoEngine::edit_region` is a synchronous worker request; when it
+    /// returns, the reference is in the manifest and the version.
+    async fn import_sst(&mut self, target: RegionId) -> String {
+        self.flush_region(target).await;
+        // The flush may have produced the SST this op republishes, so re-read the views.
+        self.refresh_views().await;
+        let original_id = self.holders.get(&target).and_then(|view| {
+            view.files
+                .iter()
+                .find(|(_, sst)| sst.level == 0 && sst.owner == target)
+                .map(|(file_id, _)| *file_id)
+        });
+        let Some(original_id) = original_id else {
+            return format!(
+                "import into {target} (no self-flushed L0 SST to republish, nothing imported)"
+            );
+        };
+
+        // A brand-new physical object: the copy exists only because of this op.
+        let original = self.file_meta(target, original_id);
+        let copy_id = FileId::random();
+        let source_path = self.sst_path(original.region_id, original.file_id);
+        let target_path = self.sst_path(target, copy_id);
+        if let Err(err) = self.store.copy(&source_path, &target_path).await {
+            return format!(
+                "import into {target} (copying {source_path} -> {target_path} failed: {err})"
+            );
+        }
+
+        let mut published = original.clone();
+        published.file_id = copy_id;
+        published.region_id = target;
+        published.level = LEVEL_SHARED;
+        // The caller does not know an admission sequence: this is the `None` admission.
+        published.sequence = None;
+        let committed_before = self.committed_sequence(target);
+        let admitted = self
+            .engine
+            .edit_region(
+                target,
+                RegionEdit {
+                    files_to_add: vec![published],
+                    files_to_remove: vec![original],
+                    ..Default::default()
+                },
+            )
+            .await;
+        if let Err(err) = admitted {
+            // The copy is orphaned (nothing references it) and is left to the sweeper: the
+            // liveness check only speaks about objects a live holder still references.
+            // The cause (not just the "failed to edit region" header) is what tells an
+            // unsupported shared level from a real rejection here.
+            return format!("import {copy_id:?} into {target}: rejected at admission ({err:?})");
+        }
+        self.refresh_views().await;
+        let assigned = self
+            .holders
+            .get(&target)
+            .and_then(|view| view.files.get(&copy_id))
+            .map(|sst| sst.sequence);
+        let committed_after = self.committed_sequence(target);
+        let mut outcome = format!(
+            "import {copy_id:?} into {target}: admitted with sequence None -> {:?} (committed \
+             sequence {committed_before} -> {committed_after})",
+            assigned.unwrap_or_default()
+        );
+
+        // Second observation: a repeat of a still-visible import is not a new admission.
+        let visible = self.file_meta(target, copy_id);
+        let repeat = self
+            .engine
+            .edit_region(
+                target,
+                RegionEdit {
+                    files_to_add: vec![visible],
+                    ..Default::default()
+                },
+            )
+            .await;
+        match repeat {
+            Ok(()) => {
+                self.refresh_views().await;
+                let kept = self
+                    .holders
+                    .get(&target)
+                    .and_then(|view| view.files.get(&copy_id))
+                    .map(|sst| sst.sequence);
+                outcome.push_str(&format!(
+                    "; repeat import: no new admission, sequence kept {:?}, committed sequence \
+                     {committed_after} -> {}",
+                    kept.unwrap_or_default(),
+                    self.committed_sequence(target)
+                ));
+            }
+            Err(err) => outcome.push_str(&format!("; repeat import rejected ({err})")),
+        }
+        outcome
+    }
+
+    /// A live region whose own flush produced an L0 SST, so an import has an object to
+    /// republish. Falls back to any live region (a flush inside the import may produce one).
+    fn import_target(&self, choice: usize) -> Option<RegionId> {
+        let own_flush: Vec<RegionId> = self
+            .live_regions()
+            .into_iter()
+            .filter(|region_id| {
+                self.holders.get(region_id).is_some_and(|view| {
+                    view.files
+                        .values()
+                        .any(|sst| sst.level == 0 && sst.owner == *region_id)
+                })
+            })
+            .collect();
+        let candidates = if own_flush.is_empty() {
+            self.live_regions()
+        } else {
+            own_flush
+        };
+        if candidates.is_empty() {
+            return None;
+        }
+        Some(candidates[choice % candidates.len()])
+    }
+
+    /// The region's committed sequence, as the latest refresh observed it.
+    fn committed_sequence(&self, region_id: RegionId) -> u64 {
+        self.applied
+            .get(&region_id)
+            .map(|state| state.committed)
+            .unwrap_or_default()
+    }
+
+    /// Table-level (multi-region) compaction of one published region.
+    ///
+    /// This is the region-side half of `compaction/multi_region.rs`: the coordinator's
+    /// admitted shared inputs are rewritten into region-local objects and published through
+    /// `engine/table_compaction.rs`. It is an *additional* path, never a replacement for the
+    /// per-region compaction above.
+    ///
+    /// Publication: `publish_table_compaction` is a synchronous worker request that reports
+    /// `Applied` only after the region's version and manifest hold the outputs.
+    ///
+    /// `engine/table_compaction.rs` is only compiled with the `enterprise` feature, so a
+    /// default build reports the path as not compiled in instead of silently skipping it.
+    async fn table_compact(&mut self, target: RegionId) -> String {
+        #[cfg(feature = "enterprise")]
+        {
+            let snapshot = match self.engine.table_compaction_snapshot(target) {
+                Ok(snapshot) => snapshot,
+                Err(err) => {
+                    return format!("multi-region compaction on {target}: no snapshot ({err})");
+                }
+            };
+            if snapshot.inputs.is_empty() {
+                return format!(
+                    "multi-region compaction on {target}: no admitted shared input (an import \
+                     must run first)"
+                );
+            }
+
+            let inputs: Vec<FileId> = snapshot.inputs.iter().map(|input| input.file_id).collect();
+            let applied_partition_expr = snapshot.metadata.partition_expr.clone();
+            // A reference created by another region keeps that creator's partition expr, and a
+            // byte copy cannot rewrite it: only a real rewrite (`compaction/multi_region.rs`)
+            // produces a region-local output. Report it instead of publishing an invalid one.
+            let foreign: Vec<String> = snapshot
+                .inputs
+                .iter()
+                .filter(|input| input.region_id != target)
+                .map(|input| format!("{:?} created by {}", input.file_id, input.region_id))
+                .collect();
+            if !foreign.is_empty() {
+                return format!(
+                    "multi-region compaction on {target}: cannot republish {foreign:?}; a shared \
+                     reference created by another region keeps that creator's partition expr, so \
+                     only a real multi-region rewrite can produce this region's output"
+                );
+            }
+            let applied_expr =
+                crate::region::parse_partition_expr(snapshot.metadata.partition_expr.as_deref())
+                    .ok()
+                    .flatten();
+            // The publication validator compares each output against the region's current
+            // metadata, so the inputs (which the outputs mirror) are the interesting diff if
+            // it rejects one.
+            let describe = |file: &crate::sst::file::FileMeta| {
+                format!(
+                    "{:?}(creator={}, L{}, seq={:?}, expr={:?}, preserve_row_sequence={})",
+                    file.file_id,
+                    file.region_id,
+                    file.level,
+                    file.sequence,
+                    file.partition_expr
+                        .as_ref()
+                        .map(|expr| expr.as_json_str().unwrap_or_default()),
+                    file.preserve_row_sequence
+                )
+            };
+            let inputs_desc: Vec<String> = snapshot.inputs.iter().map(describe).collect();
+            // A publication output inherits the maximum admission bound of its inputs (the
+            // publication validator compares every output against that single bound), and it
+            // is never a new import, so its sequence is not re-assigned here.
+            let max_sequence = snapshot
+                .inputs
+                .iter()
+                .map(|input| input.sequence)
+                .collect::<Option<Vec<_>>>()
+                .and_then(|sequences| sequences.into_iter().max());
+            let mut outputs = Vec::with_capacity(snapshot.inputs.len());
+            for input in &snapshot.inputs {
+                let output_id = FileId::random();
+                let source_path = self.sst_path(input.region_id, input.file_id);
+                let output_path = self.sst_path(target, output_id);
+                if let Err(err) = self.store.copy(&source_path, &output_path).await {
+                    return format!(
+                        "multi-region compaction on {target}: rewriting {input:?} failed ({err})"
+                    );
+                }
+                let mut output = input.clone();
+                output.file_id = output_id;
+                output.region_id = target;
+                output.level = 0;
+                // A rewrite emits the target's current partition expr, and the publication
+                // validator requires exactly that.
+                output.partition_expr = applied_expr.clone().map(Into::into);
+                output.sequence = max_sequence;
+                outputs.push(output);
+            }
+
+            match self
+                .engine
+                .publish_table_compaction(target, snapshot, outputs)
+                .await
+            {
+                Ok(PublicationOutcome::Applied) => {
+                    self.refresh_views().await;
+                    format!(
+                        "multi-region compaction on {target}: published, shared inputs \
+                         {inputs:?} rewritten into region-local L0 outputs"
+                    )
+                }
+                Ok(PublicationOutcome::StaleInputs) => format!(
+                    "multi-region compaction on {target}: inputs {inputs:?} went stale, nothing \
+                     published"
+                ),
+                Err(err) => {
+                    format!(
+                        "multi-region compaction on {target}: publication rejected ({err:?}); \
+                         inputs {inputs_desc:?}, applied partition expr {applied_partition_expr:?}"
+                    )
+                }
+            }
+        }
+        #[cfg(not(feature = "enterprise"))]
+        {
+            format!(
+                "multi-region compaction on {target}: MitoEngine::table_compaction_snapshot / \
+                 publish_table_compaction are compiled only with the `enterprise` feature"
+            )
+        }
     }
 
     /// The largest cut strictly between two adjacent distinct ledger keys inside `domain`.
@@ -909,6 +1872,39 @@ impl StorageModel {
                     .collect();
                 format!("region compaction on {target} -> {files:?}")
             }
+            Op::Import { choice } => {
+                let Some(target) = self.import_target(*choice) else {
+                    return "import (no live region)".to_string();
+                };
+                self.import_sst(target).await
+            }
+            Op::TableCompaction { choice } => {
+                // Prefer a region whose admitted shared input it created itself: this harness
+                // publishes byte copies, so only a self-created admission can be republished
+                // as a region-local output (see `table_compact`).
+                let self_created: Vec<RegionId> = self
+                    .live_regions()
+                    .into_iter()
+                    .filter(|region_id| {
+                        self.holders.get(region_id).is_some_and(|view| {
+                            view.files
+                                .values()
+                                .any(|sst| sst.level == LEVEL_SHARED && sst.owner == *region_id)
+                        })
+                    })
+                    .collect();
+                if !self_created.is_empty() {
+                    let target = self_created[*choice % self_created.len()];
+                    return self.table_compact(target).await;
+                }
+                let Some(target) = self.import_target(*choice) else {
+                    return "multi-region compaction (no live region)".to_string();
+                };
+                // The table-level path consumes admitted shared inputs, so admit one when
+                // this target has none yet: that keeps the op reachable on every trace.
+                let import = format!("{}; ", self.import_sst(target).await);
+                format!("{import}{}", self.table_compact(target).await)
+            }
         }
     }
 }
@@ -975,27 +1971,68 @@ fn event_row(event_id: i64, planned: PlannedRow) -> api::v1::Row {
     ])
 }
 
-/// One invariant violation found while replaying a trace.
+/// One failing step of a trace, with every category that fired there.
 struct Failure {
     seed: u64,
     step: usize,
     op: String,
-    report: String,
+    /// `(category, diff)` pairs, all categories violated at that step.
+    violations: Vec<(Category, String)>,
 }
 
 impl Failure {
     fn describe(&self) -> String {
+        let categories: Vec<&'static str> = self
+            .violations
+            .iter()
+            .map(|(category, _)| category.name())
+            .collect();
+        let details: Vec<String> = self
+            .violations
+            .iter()
+            .map(|(category, detail)| format!("  [{}] {detail}", category.name()))
+            .collect();
         format!(
             "=== model-based trace failure ===\n\
              seed: {seed} ({seed:#018x})\n\
              first violating step: {step}\n\
              operation: {op}\n\
-             {report}",
+             invariant categories: {categories:?}\n\
+             {details}",
             seed = self.seed,
             step = self.step,
             op = self.op,
-            report = self.report,
+            categories = categories,
+            details = details.join("\n"),
         )
+    }
+}
+
+/// Everything one trace replay observed.
+struct TraceReport {
+    /// The first step that violated a fatal category, if any.
+    failure: Option<Failure>,
+    /// Non-fatal observations (`reference-bounds`), which every legal split produces here.
+    observations: Vec<(usize, Category, String)>,
+}
+
+impl TraceReport {
+    fn observations_summary(&self) -> String {
+        let mut seen: BTreeMap<Category, (usize, usize, String)> = BTreeMap::new();
+        for (step, category, detail) in &self.observations {
+            seen.entry(*category)
+                .and_modify(|entry| entry.1 += 1)
+                .or_insert((*step, 1, detail.clone()));
+        }
+        seen.into_iter()
+            .map(|(category, (step, count, detail))| {
+                format!(
+                    "[{}] first at step {step}, {count} step(s): {detail}",
+                    category.name()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n  ")
     }
 }
 
@@ -1050,7 +2087,7 @@ fn prologue_op(rng: &mut Rng) -> Op {
 }
 
 fn random_op(rng: &mut Rng) -> Op {
-    match rng.below(5) {
+    match rng.below(7) {
         0 => {
             let count = 1 + rng.below(3);
             Op::Write {
@@ -1062,7 +2099,13 @@ fn random_op(rng: &mut Rng) -> Op {
             choice: rng.below(4),
         },
         3 => Op::Merge,
-        _ => Op::Compact {
+        4 => Op::Compact {
+            choice: rng.below(4),
+        },
+        5 => Op::Import {
+            choice: rng.below(4),
+        },
+        _ => Op::TableCompaction {
             choice: rng.below(4),
         },
     }
@@ -1072,8 +2115,10 @@ fn random_op(rng: &mut Rng) -> Op {
 ///
 /// The prologue guarantees the trace reaches the bug class (one flush, a split that makes
 /// two holders share an SST, a single-holder region compaction, then a merge) instead of
-/// hoping random ops line up; the ops in between and after are random, so distinct seeds
-/// reach that class with different states.
+/// hoping random ops line up. The import and the table-level compaction follow the
+/// single-holder compaction deterministically, so every seed exercises the widened
+/// instrument, while the ops in between and after stay random: distinct seeds reach the
+/// class, and the two new paths, with different states.
 fn generate_plan(seed: u64, len: usize) -> Vec<Op> {
     let mut rng = Rng::new(seed);
     let first_count = 2 + rng.below(2);
@@ -1097,6 +2142,12 @@ fn generate_plan(seed: u64, len: usize) -> Vec<Op> {
     for _ in 0..extra_after {
         ops.push(prologue_op(&mut rng));
     }
+    ops.push(Op::Import {
+        choice: rng.below(4),
+    });
+    ops.push(Op::TableCompaction {
+        choice: rng.below(4),
+    });
     ops.push(Op::Merge);
     while ops.len() < len {
         ops.push(random_op(&mut rng));
@@ -1104,45 +2155,135 @@ fn generate_plan(seed: u64, len: usize) -> Vec<Op> {
     ops
 }
 
-/// Replays `ops` on a fresh engine and stops at the first step that violates the oracle.
-async fn run_trace(prefix: &str, seed: u64, ops: &[Op]) -> Result<(), Failure> {
+/// Replays `ops` on a fresh engine.
+///
+/// Every step is checked against the oracle and against all invariant categories. The first
+/// step that violates a fatal category is recorded as the trace's failure; non-fatal
+/// observations are collected along the whole trace, so a category that fires on every legal
+/// split never hides the categories that fire later.
+async fn run_trace(prefix: &str, seed: u64, ops: &[Op]) -> TraceReport {
     let mut model = StorageModel::new(prefix).await;
+    let mut observations = Vec::new();
     for (step, op) in ops.iter().enumerate() {
+        model.step = step;
         let outcome = model.apply(op).await;
         let ctx = format!("step {step}: {} => {outcome}", op.describe());
         common_telemetry::info!("[{prefix}] seed {seed} {ctx}");
+
+        let mut violations: Vec<(Category, String)> = Vec::new();
         if let Some(report) = model.check(&ctx).await {
-            return Err(Failure {
-                seed,
-                step,
-                op: op.describe(),
-                report,
-            });
+            violations.push((Category::Visibility, report));
+        }
+        violations.extend(
+            model
+                .check_invariants(&ctx)
+                .await
+                .into_iter()
+                .map(|violation| (violation.category, violation.detail)),
+        );
+
+        for (category, detail) in &violations {
+            if !category.fatal() {
+                observations.push((step, *category, detail.clone()));
+            }
+        }
+        if violations.iter().any(|(category, _)| category.fatal()) {
+            return TraceReport {
+                failure: Some(Failure {
+                    seed,
+                    step,
+                    op: op.describe(),
+                    violations,
+                }),
+                observations,
+            };
         }
     }
-    Ok(())
+    TraceReport {
+        failure: None,
+        observations,
+    }
 }
 
 /// Shortest failing prefix: replay only `ops[..=first.step]` and confirm it reproduces.
 async fn shrink(seed: u64, ops: &[Op], first: Failure) -> String {
     let prefix = &ops[..=first.step];
     let replay = run_trace(&format!("mbt-shrink-{seed}"), seed, prefix).await;
-    let note = match replay {
-        Err(failure) if failure.step == first.step => format!(
+    let note = match replay.failure {
+        Some(failure) if failure.step == first.step => format!(
             "shortest failing prefix: ops[0..={}] ({} of {} ops) reproduces the same \
-             violation at step {}",
+             violation at step {} in categories {:?}",
             first.step,
             prefix.len(),
             ops.len(),
-            first.step
+            first.step,
+            failure
+                .violations
+                .iter()
+                .map(|(category, _)| category.name())
+                .collect::<Vec<_>>()
         ),
-        Err(failure) => format!(
+        Some(failure) => format!(
             "replaying the prefix failed at step {} instead of {}",
             failure.step, first.step
         ),
-        Ok(()) => "replaying the prefix passed, the failure is not reproducible".to_string(),
+        None => "replaying the prefix passed, the failure is not reproducible".to_string(),
     };
     format!("{}\n{note}", first.describe())
+}
+
+/// The seed space to replay, from the environment.
+///
+/// `MITO_MBT_SEED` replays exactly one seed and wins over `MITO_MBT_SEEDS`. `MITO_MBT_SEEDS`
+/// takes a comma list whose items are a seed or an inclusive `start:end` range, decimal or
+/// `0x` hex. Without either variable the default seeds run.
+fn seeds_from_env() -> Vec<u64> {
+    if let Ok(single) = std::env::var("MITO_MBT_SEED") {
+        let seed =
+            parse_seed(&single).unwrap_or_else(|| panic!("MITO_MBT_SEED={single:?} is not a seed"));
+        return vec![seed];
+    }
+    match std::env::var("MITO_MBT_SEEDS") {
+        Ok(spec) => parse_seed_spec(&spec),
+        Err(_) => DEFAULT_SEEDS.to_vec(),
+    }
+}
+
+fn parse_seed(text: &str) -> Option<u64> {
+    let text = text.trim();
+    match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        Some(hex) => u64::from_str_radix(hex, 16).ok(),
+        None => text.parse().ok(),
+    }
+}
+
+fn parse_seed_spec(spec: &str) -> Vec<u64> {
+    let mut seeds = Vec::new();
+    for item in spec.split(',') {
+        let item = item.trim();
+        if item.is_empty() {
+            continue;
+        }
+        match item.split_once(':') {
+            Some((start, end)) => {
+                let start = parse_seed(start)
+                    .unwrap_or_else(|| panic!("MITO_MBT_SEEDS: bad range start {start:?}"));
+                let end = parse_seed(end)
+                    .unwrap_or_else(|| panic!("MITO_MBT_SEEDS: bad range end {end:?}"));
+                assert!(start <= end, "MITO_MBT_SEEDS: empty range {start}:{end}");
+                assert!(
+                    end - start < MAX_RANGE_SEEDS,
+                    "MITO_MBT_SEEDS: range {start}:{end} is wider than {MAX_RANGE_SEEDS} seeds"
+                );
+                seeds.extend(start..=end);
+            }
+            None => seeds.push(
+                parse_seed(item).unwrap_or_else(|| panic!("MITO_MBT_SEEDS: bad seed {item:?}")),
+            ),
+        }
+    }
+    assert!(!seeds.is_empty(), "MITO_MBT_SEEDS={spec:?} selects no seed");
+    seeds
 }
 
 /// Milestone 1: the fixed trace, expressed through the model.
@@ -1178,6 +2319,10 @@ async fn test_mbt_split_shared_sst_single_side_compaction_duplicates_after_merge
     let (a, b) = (committed[0].event_id, committed[1].event_id);
     model.flush_dirty().await;
     model.assert_visible("after flush").await;
+    // Every category holds on a single-holder, single-domain step, so this pins that the
+    // widened instrument is not vacuous and does not move the failure point below.
+    model.assert_invariants("after flush").await;
+    let mut observed: Vec<Violation> = Vec::new();
 
     let source_files = model.holder_files(source);
     assert_eq!(
@@ -1189,7 +2334,10 @@ async fn test_mbt_split_shared_sst_single_side_compaction_duplicates_after_merge
 
     // ---- Step 1: split into P: k < k05 and R: k05 <= k < k10. ----
     let (left, right) = model.split(source, 5).await;
+    model.step = 1;
     model.assert_visible("after split").await;
+    // Collected, not asserted: `reference-bounds` reports on every legal split here.
+    observed.extend(model.check_invariants("after split").await);
     assert_eq!(
         BTreeSet::from([shared]),
         model.holder_files(left),
@@ -1213,9 +2361,15 @@ async fn test_mbt_split_shared_sst_single_side_compaction_duplicates_after_merge
 
     // ---- Step 2: region compaction on the right half only. ----
     model.compact(right).await;
+    model.step = 2;
     model
         .assert_visible("after compacting only the right half")
         .await;
+    observed.extend(
+        model
+            .check_invariants("after compacting only the right half")
+            .await,
+    );
 
     let right_files = model.holder_files(right);
     assert_eq!(
@@ -1255,50 +2409,76 @@ async fn test_mbt_split_shared_sst_single_side_compaction_duplicates_after_merge
 
     // ---- Step 3: merge both halves back into one whole-domain survivor. ----
     let merged = model.merge_all().await;
-    let violation = model
-        .check(&format!("after merging into survivor {merged}"))
-        .await;
+    model.step = 3;
+    let ctx = format!("after merging into survivor {merged}");
+    let violation = model.check(&ctx).await;
+    observed.extend(model.check_invariants(&ctx).await);
+    common_telemetry::info!(
+        "[mbt-dup-row-mvp] invariant observations over this fixed trace:\n{}",
+        format_violations(&observed)
+    );
     assert!(
         violation.is_none(),
         "every committed event must stay visible exactly once after the merge, but the merge \
-         keeps both the shared SST and the single-side compaction's copy.\n{}",
-        violation.unwrap_or_default()
+         keeps both the shared SST and the single-side compaction's copy.\n{}\ninvariant \
+         observations over this fixed trace:\n{}",
+        violation.unwrap_or_default(),
+        format_violations(&observed)
     );
 }
 
 /// Milestone 2: fixed-seed random traces over the same table.
 ///
 /// Ops: `write` (routed by partition key), `flush`, `split` (data-aware domain cut),
-/// `merge` (all live regions into one) and `region compaction` on one live region. The
-/// oracle runs after every published step. On failure the trace is shrunk to the shortest
-/// failing prefix, which is reported with the seed, the step index, the operation and the
-/// visible-vs-ledger diff.
+/// `merge` (all live regions into one), `region compaction`, `import` (publish an SST the
+/// write path never produced) and table-level (multi-region) compaction. The oracle and all
+/// four invariant categories run after every published step. On a fatal failure the trace is
+/// shrunk to the shortest failing prefix, which is reported with the seed, the step index,
+/// the operation, the violated categories and the diff.
+///
+/// The seed space comes from the environment (`MITO_MBT_SEED`, `MITO_MBT_SEEDS`) and falls
+/// back to the three default seeds.
 #[tokio::test]
 async fn test_mbt_random_traces() {
     common_telemetry::init_default_ut_logging();
+    let seeds = seeds_from_env();
+    let seed_count = seeds.len();
     let mut all_ok = true;
+    let mut failing = 0;
     let mut reports = Vec::new();
-    for seed in RANDOM_SEEDS {
+    for seed in seeds {
         let ops = generate_plan(seed, PLAN_LEN);
-        match run_trace(&format!("mbt-{seed}"), seed, &ops).await {
-            Ok(()) => reports.push(format!(
-                "seed {seed} ({seed:#018x}): no violation in {} steps",
+        let report = run_trace(&format!("mbt-{seed}"), seed, &ops).await;
+        let observations = if report.observations.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n  non-fatal observations:\n  {}",
+                report.observations_summary()
+            )
+        };
+        match report.failure {
+            None => reports.push(format!(
+                "seed {seed} ({seed:#018x}): no fatal violation in {} steps{observations}",
                 ops.len()
             )),
-            Err(failure) => {
+            Some(failure) => {
                 all_ok = false;
-                reports.push(shrink(seed, &ops, failure).await);
+                failing += 1;
+                reports.push(format!(
+                    "{}{observations}",
+                    shrink(seed, &ops, failure).await
+                ));
             }
+        }
+        // Every category is data, so the per-trace report is logged even when it passes.
+        if let Some(report) = reports.last() {
+            common_telemetry::info!("[mbt] {report}");
         }
     }
     assert!(
         all_ok,
-        "the storage model invariant was violated ({} of {} seeds):\n\n{}",
-        reports
-            .iter()
-            .filter(|report| report.contains("VISIBILITY INVARIANT VIOLATED"))
-            .count(),
-        RANDOM_SEEDS.len(),
+        "the storage model invariants were violated ({failing} of {seed_count} seeds):\n\n{}",
         reports.join("\n\n")
     );
 }
