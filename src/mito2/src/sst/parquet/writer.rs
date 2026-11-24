@@ -304,7 +304,8 @@ pub trait WriterFactory {
 }
 
 /// Bridges an OpenDAL [`Writer`] with Parquet's [`AsyncFileWriter`] and tracks
-/// the number of bytes successfully submitted to the object store.
+/// the number of bytes accepted for upload. Bounded uploads stage bytes in a
+/// local part buffer before submitting them to the object store.
 pub struct ObjectStoreWriter {
     inner: Writer,
     output_bytes: u64,
