@@ -254,56 +254,7 @@ struct UploadGeometry {
 
 impl UploadBudget {
     pub(crate) fn new(plan: &MultiRegionCompactionPlan, store: &ObjectStore) -> Result<Self> {
-        let store_info = store.info();
-        let scheme = store_info.scheme();
-        let caps = store_info.capability();
-        let (max_parts, protocol_part_max) = match scheme {
-            "s3" | "gcs" | "oss" => (Some(10_000), usize::MAX),
-            // OpenDAL 0.59 does not advertise Azure's Put Block limit.
-            "azblob" => (Some(50_000), 4000 << 20),
-            "fs" => (None, usize::MAX),
-            // Writers that spool a whole object or have their own transfer queues
-            // need different admission rules (e.g. MySQL and HDFS).
-            _ => {
-                return MultiRegionCompactionResourceSnafu {
-                    reason: format!(
-                        "Cannot bound table compaction uploads for storage backend {scheme}"
-                    ),
-                }
-                .fail();
-            }
-        };
-        let min_part_bytes = caps.write_multi_min_size.unwrap_or(1).max(1);
-        let max_part_bytes = caps
-            .write_multi_max_size
-            .unwrap_or(protocol_part_max)
-            .min(protocol_part_max);
-        let max_object_bytes = caps
-            .write_total_max_size
-            .map_or(u64::MAX, |size| size as u64);
-        ensure!(
-            caps.write
-                && caps.write_can_multi
-                && min_part_bytes <= max_part_bytes
-                && max_object_bytes > 0,
-            MultiRegionCompactionResourceSnafu {
-                reason: format!(
-                    "No supported upload chunk size for {scheme}: minimum {min_part_bytes}, maximum {max_part_bytes}, object limit {max_object_bytes}"
-                ),
-            }
-        );
-        Self::reserve(
-            plan,
-            UploadGeometry {
-                min_part_bytes,
-                max_part_bytes,
-                max_parts,
-                max_object_bytes,
-            },
-        )
-    }
-
-    fn reserve(plan: &MultiRegionCompactionPlan, geometry: UploadGeometry) -> Result<Self> {
+        let geometry = UploadGeometry::from_store(store)?;
         let targets = plan.targets.len();
         let chunk_bytes = geometry.choose_chunk_bytes(plan);
         let fixed_bytes =
@@ -322,18 +273,8 @@ impl UploadBudget {
                     plan.memory_limit,
                 ),
             })?;
-        let max_object_bytes = geometry
-            .max_parts
-            .map_or(geometry.max_object_bytes, |parts| {
-                geometry
-                    .max_object_bytes
-                    .min((chunk_bytes as u64).saturating_mul(parts as u64))
-            });
         Ok(Self {
-            limits: UploadLimits {
-                chunk_bytes,
-                max_object_bytes,
-            },
+            limits: geometry.limits(chunk_bytes),
             reserved_bytes,
             compute_bytes,
         })
@@ -341,6 +282,68 @@ impl UploadBudget {
 }
 
 impl UploadGeometry {
+    fn from_store(store: &ObjectStore) -> Result<Self> {
+        let store_info = store.info();
+        let scheme = store_info.scheme();
+        let caps = store_info.capability();
+        let (max_parts, protocol_part_max, protocol_object_max) = match scheme {
+            "s3" | "oss" => (Some(10_000), usize::MAX, u64::MAX),
+            // GCS caps even multipart objects at 5 TiB: https://cloud.google.com/storage/quotas#objects
+            "gcs" => (Some(10_000), usize::MAX, 5_u64 << 40),
+            // OpenDAL 0.59 does not advertise Azure's Put Block limit.
+            "azblob" => (Some(50_000), 4000 << 20, u64::MAX),
+            "fs" => (None, usize::MAX, u64::MAX),
+            // Writers that spool a whole object or have their own transfer queues
+            // need different admission rules (e.g. MySQL and HDFS).
+            _ => {
+                return MultiRegionCompactionResourceSnafu {
+                    reason: format!(
+                        "Cannot bound table compaction uploads for storage backend {scheme}"
+                    ),
+                }
+                .fail();
+            }
+        };
+        let min_part_bytes = caps.write_multi_min_size.unwrap_or(1).max(1);
+        let max_part_bytes = caps
+            .write_multi_max_size
+            .unwrap_or(protocol_part_max)
+            .min(protocol_part_max);
+        let max_object_bytes = caps
+            .write_total_max_size
+            .map_or(protocol_object_max, |size| {
+                protocol_object_max.min(size as u64)
+            });
+        ensure!(
+            caps.write
+                && caps.write_can_multi
+                && min_part_bytes <= max_part_bytes
+                && max_object_bytes > 0,
+            MultiRegionCompactionResourceSnafu {
+                reason: format!(
+                    "No supported upload chunk size for {scheme}: minimum {min_part_bytes}, maximum {max_part_bytes}, object limit {max_object_bytes}"
+                ),
+            }
+        );
+        Ok(Self {
+            min_part_bytes,
+            max_part_bytes,
+            max_parts,
+            max_object_bytes,
+        })
+    }
+
+    fn limits(&self, chunk_bytes: usize) -> UploadLimits {
+        let max_object_bytes = self.max_parts.map_or(self.max_object_bytes, |parts| {
+            self.max_object_bytes
+                .min((chunk_bytes as u64).saturating_mul(parts as u64))
+        });
+        UploadLimits {
+            chunk_bytes,
+            max_object_bytes,
+        }
+    }
+
     fn choose_chunk_bytes(&self, plan: &MultiRegionCompactionPlan) -> usize {
         let preferred = self.max_parts.map_or(LOCAL_CHUNK_BYTES, |parts| {
             // Leave room for a final part near the soft rollover target. The
@@ -432,7 +435,30 @@ fn admit_extension_indexes(
 
 #[cfg(test)]
 mod tests {
-    use super::{ExtensionIndexAdmission, admit_extension_indexes};
+    use object_store::ObjectStore;
+    use object_store::layers::CapabilityOverrideLayer;
+    use object_store::services::Gcs;
+
+    use super::{ExtensionIndexAdmission, UploadGeometry, admit_extension_indexes};
+
+    #[rstest::rstest]
+    #[case::service_limit(1 << 30, None, 5_u64 << 40)]
+    #[case::advertised_limit(1 << 30, Some(2 << 30), 2 << 30)]
+    #[case::part_count_limit(5 << 20, None, 10_000 * (5_u64 << 20))]
+    fn test_gcs_multipart_object_limit(
+        #[case] chunk_bytes: usize,
+        #[case] advertised: Option<usize>,
+        #[case] expected: u64,
+    ) {
+        let store = ObjectStore::new(Gcs::default().bucket("test"))
+            .unwrap()
+            .layer(CapabilityOverrideLayer::new(move |mut caps| {
+                caps.write_total_max_size = advertised;
+                caps
+            }));
+        let geometry = UploadGeometry::from_store(&store).unwrap();
+        assert_eq!(expected, geometry.limits(chunk_bytes).max_object_bytes);
+    }
 
     #[test]
     fn test_extension_indexes_do_not_reject_admitted_data() {
