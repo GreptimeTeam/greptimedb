@@ -923,7 +923,12 @@ async fn test_candidate_lease_after_catchup(
     }
     let region = engine.get_region(REGION_ID).unwrap();
 
-    grant_at(&engine, RegionRole::Follower, Instant::now(), Some(7));
+    assert!(grant_at(
+        &engine,
+        RegionRole::Follower,
+        Instant::now(),
+        Some(7)
+    ));
     assert_eq!(region.is_writable(), !leader_lease_received);
     assert_eq!(
         region.manifest_ctx.awaits_leader_lease(),

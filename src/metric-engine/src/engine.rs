@@ -1176,15 +1176,17 @@ mod test {
         // A candidate lease leaves both waiting regions writable, and the physical region
         // unconfirmed, so an upgrade still catches it up.
         let sent_at = Instant::now();
-        engine
-            .set_region_role_with_lease(
-                physical_region_id,
-                RegionRole::Follower,
-                sent_at,
-                sent_at + LEASE,
-                Some(7),
-            )
-            .unwrap();
+        assert!(
+            engine
+                .set_region_role_with_lease(
+                    physical_region_id,
+                    RegionRole::Follower,
+                    sent_at,
+                    sent_at + LEASE,
+                    Some(7),
+                )
+                .unwrap()
+        );
         for region_id in [
             metadata_region_id,
             utils::to_data_region_id(physical_region_id),
