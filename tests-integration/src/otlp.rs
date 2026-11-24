@@ -2338,6 +2338,7 @@ WITH(
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "Exemplar writes require pre-encoded keys: https://github.com/GreptimeTeam/greptimedb/issues/10598"]
     async fn test_exemplar_otlp_source_identity() {
         use otel_arrow_rust::proto::opentelemetry::metrics::v1::{Exemplar, exemplar};
 
