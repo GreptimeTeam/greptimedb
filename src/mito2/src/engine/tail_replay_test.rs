@@ -2060,8 +2060,14 @@ async fn test_missing_index_pass_stopped_by_role_change_stays_due(#[case] at_adm
         .set_region_role(region_id, RegionRole::Follower)
         .unwrap();
     park.release();
-    // The worker reports the end of the wait once it ran what it could: no build, no save.
-    wait_until(|| listener.leader_lease_wait_ends.load(Ordering::Acquire) == 1).await;
+    // A request the worker handles after the stopped pass, which a follower refuses: no build,
+    // no save.
+    let build = RegionRequest::BuildIndex(RegionBuildIndexRequest::default());
+    region
+        .engine
+        .handle_request(region_id, build)
+        .await
+        .unwrap_err();
     assert_eq!(listener.index_builds_stopped(), 0);
     assert_eq!(listener.backfill_saves.load(Ordering::Relaxed), 0);
     // A promotion before any save checks the region.
