@@ -136,7 +136,7 @@ impl Fixture {
         format: FormatType,
         batches: impl FnOnce(&RegionMetadataRef) -> Vec<RecordBatch>,
     ) -> Self {
-        let mut fixture = Self::empty(sst_region_metadata_with_encoding(encoding)).await;
+        let mut fixture = Self::without_source(sst_region_metadata_with_encoding(encoding)).await;
         let mut batches = batches(&fixture.metadata);
         batches.sort_by_cached_key(|batch| {
             let keys = cast(
@@ -157,7 +157,7 @@ impl Fixture {
         fixture
     }
 
-    async fn empty(mut metadata: RegionMetadata) -> Self {
+    async fn without_source(mut metadata: RegionMetadata) -> Self {
         let env = SchedulerEnv::new().await;
         let aux = env.path.path().join("table-index");
         let layer = Arc::new(AccessLayer::new(
@@ -2300,7 +2300,7 @@ const MULTIPART_TAGS: [&str; 2] = ["000", "020"];
 #[tokio::test]
 async fn test_table_budget_below_legacy_floor_writes_multipart_outputs_losslessly() {
     let metadata = build_test_binary_test_region_metadata();
-    let mut fixture = Fixture::empty((*metadata).clone()).await;
+    let mut fixture = Fixture::without_source((*metadata).clone()).await;
     let row_group_size = 256;
     let options = WriteOptions {
         row_group_size,
