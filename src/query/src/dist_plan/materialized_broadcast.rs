@@ -27,9 +27,12 @@ pub struct MaterializedBroadcastNode {
     batches: Vec<RecordBatch>,
     row_count: usize,
     /// A schema-only node inserted while analyzing a plan that is not executed
-    /// yet (plain `EXPLAIN`). It keeps the materialization visible in the plan
-    /// without evaluating the small side, and is never executed as is.
+    /// yet. It keeps the materialization visible in the plan without evaluating
+    /// the small side; the build plan runs when the query executes.
     placeholder: bool,
+    /// For a placeholder, the build-side logical plan to evaluate at execution
+    /// time. `None` for a materialized node.
+    build_plan: Option<Arc<LogicalPlan>>,
 }
 
 impl PartialEq for MaterializedBroadcastNode {
@@ -82,17 +85,19 @@ impl MaterializedBroadcastNode {
             batches,
             row_count,
             placeholder: false,
+            build_plan: None,
         }
     }
 
     /// A schema-only stand-in used when planning must stay side-effect free,
     /// e.g. for plain `EXPLAIN`.
-    pub fn new_placeholder(schema: DFSchemaRef) -> Self {
+    pub fn new_placeholder(schema: DFSchemaRef, build_plan: Arc<LogicalPlan>) -> Self {
         Self {
             schema,
             batches: Vec::new(),
             row_count: 0,
             placeholder: true,
+            build_plan: Some(build_plan),
         }
     }
 
@@ -100,13 +105,13 @@ impl MaterializedBroadcastNode {
         self.placeholder
     }
 
+    pub fn build_plan(&self) -> Option<&LogicalPlan> {
+        self.build_plan.as_deref()
+    }
+
     pub fn batches(&self) -> &[RecordBatch] {
         &self.batches
     }
-    pub fn within_cap(&self) -> bool {
-        self.row_count <= Self::MAX_ROWS
-    }
-
     pub fn arrow_schema(&self) -> arrow_schema::SchemaRef {
         Arc::new(self.schema.as_arrow().clone())
     }
@@ -144,6 +149,68 @@ impl MaterializedBroadcastNode {
             node: Arc::new(self),
         })
     }
+}
+
+/// Find the schema-only placeholder of a plan, if any.
+pub fn find_placeholder(plan: &LogicalPlan) -> Option<&MaterializedBroadcastNode> {
+    if let LogicalPlan::Extension(ext) = plan {
+        if let Some(node) = ext
+            .node
+            .as_any()
+            .downcast_ref::<MaterializedBroadcastNode>()
+            && node.is_placeholder()
+        {
+            return Some(node);
+        }
+        // A `MergeScan` hides its remote input from the generic tree walk.
+        if let Some(merge_scan) = ext
+            .node
+            .as_any()
+            .downcast_ref::<crate::dist_plan::MergeScanLogicalPlan>()
+        {
+            return find_placeholder(merge_scan.input());
+        }
+    }
+    plan.inputs().into_iter().find_map(find_placeholder)
+}
+
+/// Replace the schema-only placeholder with a materialized node holding `batches`.
+pub fn materialize_placeholder(
+    plan: LogicalPlan,
+    batches: Vec<RecordBatch>,
+) -> Result<LogicalPlan> {
+    fn replace(plan: LogicalPlan, batches: &[RecordBatch]) -> Result<LogicalPlan> {
+        if let LogicalPlan::Extension(ext) = &plan {
+            if let Some(placeholder) = ext
+                .node
+                .as_any()
+                .downcast_ref::<MaterializedBroadcastNode>()
+                && placeholder.is_placeholder()
+            {
+                let materialized =
+                    MaterializedBroadcastNode::new(placeholder.schema().clone(), batches.to_vec());
+                return Ok(materialized.into_logical_plan());
+            }
+            // A `MergeScan` hides its remote input from the generic tree walk.
+            if let Some(merge_scan) = ext
+                .node
+                .as_any()
+                .downcast_ref::<crate::dist_plan::MergeScanLogicalPlan>()
+            {
+                let input = replace(merge_scan.input().clone(), batches)?;
+                return Ok(LogicalPlan::Extension(Extension {
+                    node: Arc::new(merge_scan.with_input(input)),
+                }));
+            }
+        }
+        let exprs = plan.expressions();
+        let mut inputs = Vec::with_capacity(plan.inputs().len());
+        for input in plan.inputs() {
+            inputs.push(replace(input.clone(), batches)?);
+        }
+        plan.with_new_exprs(exprs, inputs)
+    }
+    replace(plan, &batches)
 }
 
 impl UserDefinedLogicalNodeCore for MaterializedBroadcastNode {

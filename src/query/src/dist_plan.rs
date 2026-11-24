@@ -18,6 +18,7 @@ mod dist_join_planner;
 mod dyn_filter_bridge;
 mod filter_id;
 mod materialized_broadcast;
+mod materialized_execution;
 mod merge_scan;
 mod merge_sort;
 mod planner;
@@ -39,6 +40,7 @@ pub(crate) use dist_join_planner::{
 };
 pub use filter_id::{FilterFingerprint, FilterId, ParseFilterIdError, RemoteDynFilterProducerId};
 pub(crate) use materialized_broadcast::MaterializedBroadcastNode;
+pub(crate) use materialized_execution::MaterializedBroadcastExecution;
 pub use merge_scan::{MergeScanExec, MergeScanLogicalPlan};
 pub(crate) use merge_sort::{MergeSortExec, MergeSortLogicalPlan};
 pub use planner::{DistExtensionPlanner, MergeSortExtensionPlanner};

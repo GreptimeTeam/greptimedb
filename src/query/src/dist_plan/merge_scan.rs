@@ -513,6 +513,17 @@ impl MergeScanLogicalPlan {
         &self.input
     }
 
+    /// Rebuilds the node with another remote input, keeping the local schema and
+    /// the placeholder flag.
+    pub fn with_input(&self, input: LogicalPlan) -> Self {
+        Self {
+            input,
+            output_schema: self.output_schema.clone(),
+            is_placeholder: self.is_placeholder,
+            remote_dyn_filter_producer_id: self.remote_dyn_filter_producer_id,
+        }
+    }
+
     pub fn remote_dyn_filter_producer_id(&self) -> Option<RemoteDynFilterProducerId> {
         self.remote_dyn_filter_producer_id
     }

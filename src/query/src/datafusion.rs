@@ -59,9 +59,9 @@ use tracing::Span;
 use crate::analyze::DistAnalyzeExec;
 pub use crate::datafusion::planner::DfContextProviderAdapter;
 use crate::dist_plan::{
-    DIST_JOIN_PLANNER_RULE_NAME, DistJoinStats, MergeScanLogicalPlan,
-    RemoteDynFilterReceiverInjectorRef, aggregate_region_stats, candidate_joins,
-    expected_region_ids,
+    DIST_JOIN_PLANNER_RULE_NAME, DistJoinStats, MaterializedBroadcastExecution,
+    MergeScanLogicalPlan, RemoteDynFilterReceiverInjectorRef, aggregate_region_stats,
+    candidate_joins, expected_region_ids,
 };
 use crate::error::{
     CatalogSnafu, CreateRecordBatchSnafu, MissingTableMutationHandlerSnafu,
@@ -195,7 +195,6 @@ impl DatafusionQueryEngine {
         &self,
         analyzed_plan: &LogicalPlan,
         ctx: &QueryEngineContext,
-        placeholder_only: bool,
     ) -> Result<LogicalPlan> {
         use crate::dist_plan::{
             DistJoinStats, MaterializedBroadcastNode, MergeScanLogicalPlan, restore_join_schema,
@@ -333,73 +332,13 @@ impl DatafusionQueryEngine {
         } else {
             (large_plan, large, small_plan, small_scan)
         };
-        let batches = if placeholder_only {
-            // Plain `EXPLAIN` must not evaluate the small side: insert a schema-only
-            // stand-in so the plan shows the materialization path without running it.
-            Vec::new()
-        } else {
-            let small_output = self
-                .execute(small_plan.clone(), ctx.query_ctx().clone())
-                .await?;
-            match small_output.data {
-                common_query::OutputData::RecordBatches(batches) => {
-                    let mut rows = 0usize;
-                    let mut bytes = 0usize;
-                    let mut collected = Vec::new();
-                    for batch in batches.iter() {
-                        let batch = batch.df_record_batch().clone();
-                        rows += batch.num_rows();
-                        bytes += batch.get_array_memory_size();
-                        if rows > MaterializedBroadcastNode::MAX_ROWS
-                            || bytes > MaterializedBroadcastNode::MAX_BYTES
-                        {
-                            return Ok(analyzed_plan.clone());
-                        }
-                        collected.push(batch);
-                    }
-                    collected
-                }
-                common_query::OutputData::Stream(mut stream) => {
-                    // Enforce the row and memory budgets while consuming the stream: the
-                    // small side can be large even when the disk-size heuristic favors it,
-                    // and collecting it first would let one query exhaust frontend memory
-                    // before the cap is checked.
-                    let mut rows = 0usize;
-                    let mut bytes = 0usize;
-                    let mut collected = Vec::new();
-                    while let Some(batch) = stream.next().await {
-                        let batch = batch.map_err(|e| {
-                            datafusion_common::DataFusionError::External(Box::new(e))
-                        })?;
-                        let batch = batch.df_record_batch().clone();
-                        rows += batch.num_rows();
-                        bytes += batch.get_array_memory_size();
-                        if rows > MaterializedBroadcastNode::MAX_ROWS
-                            || bytes > MaterializedBroadcastNode::MAX_BYTES
-                        {
-                            return Ok(analyzed_plan.clone());
-                        }
-                        collected.push(batch);
-                    }
-                    collected
-                }
-                common_query::OutputData::AffectedRows(_) => {
-                    return Err(datafusion_common::DataFusionError::Internal(
-                        "small side materialization must produce record batches".to_string(),
-                    )
-                    .into());
-                }
-            }
-        };
-        let node = if placeholder_only {
-            MaterializedBroadcastNode::new_placeholder(small_plan.schema().clone())
-        } else {
-            let node = MaterializedBroadcastNode::new(small_plan.schema().clone(), batches);
-            if !node.within_cap() {
-                return Ok(analyzed_plan.clone());
-            }
-            node
-        };
+        // The build side runs when the query executes: a plan-only pass (e.g. plain
+        // `EXPLAIN`) must not evaluate it, and the execution-time decision node owns
+        // the row/byte budget.
+        let node = MaterializedBroadcastNode::new_placeholder(
+            small_plan.schema().clone(),
+            Arc::new(small_plan),
+        );
         // The materialized side becomes the join's left input so DataFusion hashes it as
         // the build side. When the materialized side is the original right input, the
         // join keys swap with it; when it is the original left input, they keep their
@@ -859,7 +798,7 @@ impl DatafusionQueryEngine {
                     |_, _| {},
                 )?;
                 let inner = self
-                    .maybe_materialize_volatile_broadcast(&analyzed, ctx, true)
+                    .maybe_materialize_volatile_broadcast(&analyzed, ctx)
                     .await?;
                 let explained = DfLogicalPlan::Explain(datafusion_expr::Explain {
                     plan: Arc::new(inner),
@@ -882,9 +821,18 @@ impl DatafusionQueryEngine {
             state.config_options(),
             |_, _| {},
         )?;
+        // The plan before inserting the materialization placeholder: the
+        // execution-time decision falls back to it when the build side is too
+        // large to materialize.
+        let fallback_plan = analyzed_plan.clone();
         let analyzed_plan = self
-            .maybe_materialize_volatile_broadcast(&analyzed_plan, ctx, false)
+            .maybe_materialize_volatile_broadcast(&analyzed_plan, ctx)
             .await?;
+        let materialized_plan = MaterializedBroadcastExecution::has_placeholder(&analyzed_plan)
+            .then(|| {
+                let placeholder_plan = analyzed_plan.clone();
+                (placeholder_plan, fallback_plan)
+            });
 
         expr_depth::validate_plan(&analyzed_plan)?;
         logger.after_analyze = Some(analyzed_plan.clone());
@@ -913,6 +861,13 @@ impl DatafusionQueryEngine {
 
         logger.phy_plan = Some(physical_plan.clone());
         drop(logger);
+        if let Some((placeholder_plan, fallback_plan)) = materialized_plan {
+            return Ok(Arc::new(MaterializedBroadcastExecution::new(
+                (*state).clone(),
+                placeholder_plan,
+                fallback_plan,
+            )));
+        }
         Ok(physical_plan)
     }
 
