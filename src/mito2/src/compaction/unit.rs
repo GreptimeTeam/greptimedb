@@ -195,27 +195,6 @@ fn output_memory_bytes(inputs: &[FileHandle], read_parallelism: usize) -> u64 {
     let batch_rows =
         estimate_batch_size(shapes.iter().map(|shape| (shape.rows, shape.bytes))) as u64;
     let merges = inputs.len() > 1;
-    let total_rows = shapes.iter().fold(0u64, |total, shape| {
-        total.saturating_add(shape.rows.saturating_mul(shape.num_row_groups))
-    });
-    let total_bytes = shapes.iter().fold(0u64, |total, shape| {
-        total.saturating_add(shape.bytes.saturating_mul(shape.num_row_groups))
-    });
-    // The merge emits batches of `batch_rows`, but never more rows than the inputs have; a
-    // single input passes its batches through, and those never span row groups.
-    let output_batch_bytes = shapes
-        .iter()
-        .map(|shape| {
-            let rows = if merges {
-                batch_rows.min(total_rows)
-            } else {
-                batch_rows.min(shape.rows)
-            };
-            rows.saturating_mul(shape.row_width())
-        })
-        .max()
-        .unwrap_or(0);
-
     // Matches the condition under which `SeqScan` spawns a task per input.
     let batches_per_input = if read_parallelism > 1 && merges {
         compaction_input_channel_size() as u64 + 2
@@ -231,15 +210,40 @@ fn output_memory_bytes(inputs: &[FileHandle], read_parallelism: usize) -> u64 {
                 .min(file_bytes),
         )
     });
-    let merge_bytes = if merges { output_batch_bytes } else { 0 };
-    let output_bytes = (MERGED_BATCH_CHANNEL_SIZE as u64 + 2).saturating_mul(output_batch_bytes);
-
-    // Batches past the readers hold distinct rows, so together they never exceed the inputs.
-    let downstream_bytes = merge_bytes.saturating_add(output_bytes).min(total_bytes);
+    // The merge holds one output batch when it merges, and the channel to the writer holds the
+    // rest. A merged batch has `batch_rows` rows; a single input passes its batches through, and
+    // those never span row groups.
+    let output_batches = MERGED_BATCH_CHANNEL_SIZE as u64 + 2 + u64::from(merges);
+    let rows_per_batch = if merges {
+        batch_rows
+    } else {
+        batch_rows.min(shapes[0].rows)
+    };
+    let downstream_bytes =
+        widest_rows_bytes(&shapes, output_batches.saturating_mul(rows_per_batch));
 
     row_group_bytes
         .saturating_add(input_batch_bytes)
         .saturating_add(downstream_bytes)
+}
+
+/// Bounds the bytes of `rows` distinct rows drawn from the inputs: the widest rows first, and no
+/// input gives more rows than it has. Batches past the readers hold distinct rows, so one wide
+/// row does not make every row of those batches wide.
+fn widest_rows_bytes(shapes: &[RowGroupShape], rows: u64) -> u64 {
+    let mut by_width: Vec<_> = shapes.iter().collect();
+    by_width.sort_unstable_by_key(|shape| std::cmp::Reverse(shape.row_width()));
+    let mut remaining = rows;
+    let mut bytes = 0u64;
+    for shape in by_width {
+        let taken = remaining.min(shape.rows.saturating_mul(shape.num_row_groups));
+        bytes = bytes.saturating_add(taken.saturating_mul(shape.row_width()));
+        remaining -= taken;
+        if remaining == 0 {
+            break;
+        }
+    }
+    bytes
 }
 
 /// Finds a dependency group's representative while shortening the parent chain.
@@ -430,6 +434,14 @@ mod tests {
         assert_eq!(
             4 * MIB + 4 * MIB + 4 * 4 * MIB,
             unit(vec![output(vec![d])]).estimated_memory_bytes(4)
+        );
+
+        // One 1 MiB row merged with 1 KiB rows: of the 320 rows past the readers, only one is
+        // wide.
+        let (wide_row, narrow_rows) = (file(MIB, 1, 1), file(MIB, 1024, 512));
+        assert_eq!(
+            2 * MIB + MIB + 64 * 1024 + MIB + 319 * 1024,
+            unit(vec![output(vec![wide_row, narrow_rows])]).estimated_memory_bytes(1)
         );
 
         // Two one-row files of 8 KiB: a batch holds both rows at most, and the batches past
