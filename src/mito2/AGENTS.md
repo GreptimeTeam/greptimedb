@@ -151,7 +151,9 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   it until the worker swaps in an instance reloaded from the new manifest
   (`worker/handle_reload.rs`). A tail replay round that fails while the storage holds a newer
   manifest fences a writable leader the same way. Never await a worker sender while holding a
-  manifest guard.
+  manifest guard. The catchup commit (`ManifestContext::commit_catchup`) is the exception: it
+  commits as a Follower without the deadline check, and a conflict fails the catchup retryably
+  without fencing the region; a retry reopens it from the newer manifest.
 - Pending tails (`RegionManifest::pending_tails`) are WAL ranges a region still has
   to recover; the flushed entry id never prunes them. Opening a region replays its
   WAL after `RegionManifest::wal_replay_start`. The WAL releases at open, after
