@@ -555,3 +555,20 @@ ttl = "90d"
 ## Set to an empty array to disable event recording.
 ## @toml2docs:none-default="All"
 #+ event_types = ["admin_function"]
+
+## The frontend-local cache of PromQL range-query chunks. It is disabled by default; enabling it does not change instant queries or expressions outside the window allowlist.
+[rollup_cache]
+## Whether range queries may be served from the cache.
+enable = false
+## The total memory budget for cached chunks and their annotations.
+max_bytes = "256MiB"
+## The target chunk duration. It is global while the step belongs to the query, so planning
+## aligns it down to a whole number of the query's steps, at least one: any step is
+## cacheable, and the actual chunk stays fixed for that step.
+chunk = "5m"
+## Output points this close to wall-clock now may still be receiving data, so they are executed directly and never cached.
+tail = "10m"
+## How long a cached chunk is served, counted from the read that produced it. Nothing probes
+## the source, so this age is the cache's whole freshness rule: a write reaches a served chunk
+## within it, and a late write can stay invisible for that long.
+ttl = "1h"
