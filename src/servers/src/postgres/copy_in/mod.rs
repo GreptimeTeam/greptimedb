@@ -108,6 +108,8 @@ type FormatBuilder = fn(options::CopyOptionSet) -> PgWireResult<CopyFormat>;
 const REGISTERED_FORMATS: &[(&str, FormatBuilder)] = &[
     ("csv", csv::build_csv_codec),
     ("jsonl", jsonl::build_jsonl_codec),
+    // Alias matching the file-based format's name; it still means
+    // newline-delimited objects, not a top-level JSON array.
     ("json", jsonl::build_jsonl_codec),
     ("arrow", arrow::build_arrow_codec),
     ("influxdb", influxdb::build_influxdb_codec),
@@ -370,7 +372,7 @@ impl CopyInState {
             },
             memory_guards: Vec::new(),
             granted_bytes: 0,
-            codec_name: "csv",
+            codec_name: codec.name(),
             codec_format_code: 0,
             rows_written: 0,
         })
@@ -704,8 +706,14 @@ impl PostgresServerHandlerInner {
         let state = match &stmt.format {
             // Row-based table-bound formats parse records against the
             // target columns and insert them in batches.
-            CopyFormat::Csv(codec) => self.table_bound_state(&stmt, codec).await?,
-            CopyFormat::Jsonl(codec) => self.table_bound_state(&stmt, codec).await?,
+            CopyFormat::Csv(codec) => {
+                self.table_bound_state(&stmt, codec, query_ctx.clone())
+                    .await?
+            }
+            CopyFormat::Jsonl(codec) => {
+                self.table_bound_state(&stmt, codec, query_ctx.clone())
+                    .await?
+            }
             CopyFormat::Arrow(options) => {
                 if stmt.table.is_empty() {
                     return Err(unsupported("format arrow requires a target table"));
@@ -843,13 +851,15 @@ impl PostgresServerHandlerInner {
     }
 
     /// Resolves the target table and builds the table-bound copy state
-    /// shared by csv and jsonl.
+    /// shared by csv and jsonl. `query_ctx` is the connection's context
+    /// `begin_copy_in` created, so every format arm works from the same
+    /// snapshot of the session.
     async fn table_bound_state(
         &self,
         stmt: &CopyFromStdin,
         codec: &dyn TableBoundCodec,
+        query_ctx: QueryContextRef,
     ) -> PgWireResult<CopyInState> {
-        let query_ctx = self.new_query_context();
         if stmt.table.is_empty() {
             return Err(unsupported(format!(
                 "format {} requires a table: COPY tbl [(cols)] FROM STDIN WITH (FORMAT {})",
@@ -1455,6 +1465,34 @@ mod tests {
         .unwrap();
         assert_eq!(copy.columns, vec!["a", "b"]);
         assert!(matches!(copy.format, CopyFormat::Csv(_)));
+    }
+
+    #[test]
+    fn test_parse_copy_from_stdin_jsonl_and_json_alias() {
+        for sql in [
+            "COPY t FROM STDIN WITH (FORMAT jsonl)",
+            "COPY t FROM STDIN WITH (FORMAT json)",
+        ] {
+            let copy = copy_from_stdin_from_sql(sql).unwrap().unwrap();
+            assert!(matches!(copy.format, CopyFormat::Jsonl(_)), "{sql}");
+            assert_eq!(copy.format.name(), "jsonl", "{sql}");
+        }
+    }
+
+    #[test]
+    fn test_table_bound_codec_names() {
+        // The codec names `CopyInState` logs come from the codecs
+        // themselves, not a literal per match arm.
+        let csv = match csv::build_csv_codec(options::CopyOptionSet::default()).unwrap() {
+            CopyFormat::Csv(codec) => codec,
+            other => panic!("expected csv, got {other:?}"),
+        };
+        let jsonl = match jsonl::build_jsonl_codec(options::CopyOptionSet::default()).unwrap() {
+            CopyFormat::Jsonl(codec) => codec,
+            other => panic!("expected jsonl, got {other:?}"),
+        };
+        assert_eq!(csv.name(), "csv");
+        assert_eq!(jsonl.name(), "jsonl");
     }
 
     #[test]
