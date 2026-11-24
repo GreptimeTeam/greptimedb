@@ -286,6 +286,7 @@ pub struct CertifiedWindow {
 /// Logical coverage in the sequence domain of a pinned region version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NarthexCoverage {
+    pub schema_version: u64,
     pub region_id: RegionId,
     pub truncated_entry_id: Option<crate::wal::EntryId>,
     /// Windows in ascending start order. Gaps are allowed.
@@ -1483,6 +1484,7 @@ mod tests {
             frontier,
         };
         let mut coverage = NarthexCoverage {
+            schema_version: 0,
             region_id: RegionId::new(1, 0),
             truncated_entry_id: None,
             windows: vec![window(0, 10, 100), window(10, 20, 80)],

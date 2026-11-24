@@ -761,10 +761,14 @@ async fn test_narthex_copy_and_remap(
         .flat_map(|level| level.files.values().cloned())
         .collect();
     if with_index {
-        let index =
-            crate::sst::narthex::write_series(&owner.access_layer, owner.metadata(), &sources)
-                .await
-                .unwrap();
+        let index = crate::sst::narthex::write_series(
+            &owner.access_layer,
+            owner.metadata(),
+            &sources,
+            None,
+        )
+        .await
+        .unwrap();
         engine
             .edit_region(
                 source,

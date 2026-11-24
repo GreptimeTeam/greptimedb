@@ -160,11 +160,11 @@ pub(crate) async fn write_samples(
 }
 
 /// Merge the sorted sample key areas. A separate manifest edit publishes the index.
-#[cfg(test)]
 pub(crate) async fn write_series(
     layer: &AccessLayer,
     metadata: store_api::metadata::RegionMetadataRef,
     sources: &[crate::sst::file::FileHandle],
+    coverage: Option<crate::sst::file::NarthexCoverage>,
 ) -> Result<crate::sst::file::FileMeta> {
     use std::cmp::Reverse;
     use std::collections::BinaryHeap;
@@ -197,8 +197,12 @@ pub(crate) async fn write_series(
         format: FileFormat::NarthexSeriesIndex(Box::new(NarthexSeriesIndexMeta {
             manifest_size: 0,
             parts: Default::default(),
-            sources: sources.iter().map(|file| file.file_id()).collect(),
-            coverage: None,
+            sources: if coverage.is_some() {
+                Vec::new()
+            } else {
+                sources.iter().map(|file| file.file_id()).collect()
+            },
+            coverage,
         })),
         ..Default::default()
     };

@@ -433,6 +433,24 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             waiters.reply_with(|| RegionBusySnafu { region_id }.fail());
             return RegionEditDispatch::Rejected;
         }
+        if let RegionEditKind::NativeSeries(origin, snapshot) = &kind {
+            let current = region.version();
+            if !Arc::ptr_eq(origin, &region)
+                || region.is_staging()
+                || current.metadata.schema_version != snapshot.metadata.schema_version
+                || current.truncated_entry_id != snapshot.truncated_entry_id
+                || !current.pending_tails.is_empty()
+                || current
+                    .ssts
+                    .series_indexes()
+                    .keys()
+                    .collect::<std::collections::HashSet<_>>()
+                    != snapshot.ssts.series_indexes().keys().collect()
+            {
+                waiters.reply_with(|| RegionBusySnafu { region_id }.fail());
+                return RegionEditDispatch::Rejected;
+            }
+        }
         if matches!(kind, RegionEditKind::Import)
             && let Err(error) = prepare_region_edit(&region, &mut edit)
         {
@@ -465,7 +483,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Updates manifest in background.
         common_runtime::spawn_global(async move {
             let result = match kind {
-                RegionEditKind::Import => {
+                RegionEditKind::Import | RegionEditKind::NativeSeries(_, _) => {
                     edit_region(
                         &region,
                         edit.clone(),

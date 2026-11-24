@@ -96,7 +96,8 @@ pub(crate) async fn open_sources(
         };
         let region = context.input.region_metadata().region_id;
         let selected: Vec<_> = if let Some(proof) = &index.coverage {
-            if proof.region_id != region
+            if proof.schema_version != context.input.region_metadata().schema_version
+                || proof.region_id != region
                 || proof.truncated_entry_id != context.input.truncated_entry_id
             {
                 continue;

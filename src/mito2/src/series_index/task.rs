@@ -53,6 +53,7 @@ pub(crate) struct SeriesIndexTaskState {
     worker_id: u32,
     running: AtomicBool,
     sender: Sender<SeriesIndexCommand>,
+    pub(crate) worker: Option<Sender<crate::request::WorkerRequestWithTime>>,
 }
 
 impl SeriesIndexTaskState {
@@ -63,6 +64,7 @@ impl SeriesIndexTaskState {
                 worker_id,
                 running: AtomicBool::new(true),
                 sender,
+                worker: None,
             },
             receiver,
         )
@@ -255,6 +257,14 @@ impl SeriesIndexTask {
         if !allow_builds {
             SERIES_INDEX_CAPACITY_DEFERRED.inc();
         }
+        if region.version().options.sst_format == Some(crate::sst::FormatType::Narthex) {
+            if !allow_builds
+                || region.state() != RegionRoleState::Leader(RegionLeaderState::Writable)
+            {
+                return Ok(ReconcileStats::default());
+            }
+            return self.reconcile_native(region, manual).await;
+        }
         let result = reconcile_series_indexes_with_mode(
             self.worker_id,
             self.store.clone(),
@@ -273,6 +283,141 @@ impl SeriesIndexTask {
                 .inc();
         }
         result
+    }
+
+    async fn reconcile_native(
+        &self,
+        region: MitoRegionRef,
+        manual: bool,
+    ) -> Result<ReconcileStats> {
+        use crate::request::{
+            RegionEditKind, RegionEditRequest, WorkerRequest, WorkerRequestWithTime,
+        };
+        use crate::series_index::bucket::{group_files_into_series_buckets, rounded_bucket_width};
+        use crate::sst::file::{CertifiedWindow, FileFormat, NarthexCoverage};
+
+        let mut stats = ReconcileStats::default();
+        let current = region.version_control.current();
+        let version = current.version;
+        // A completed flush published its inputs and committed boundary together.
+        // Defer during in-flight admissions, unflushed writes and WAL recovery.
+        if current.last_sequence != version.flushed_sequence
+            || current.committed_sequence != version.flushed_sequence
+            || !version.memtables.is_empty()
+            || !version.pending_tails.is_empty()
+        {
+            return Ok(stats);
+        }
+        let Some(window) = version
+            .compaction_time_window
+            .or(manual.then_some(self.bucket_width))
+        else {
+            return Ok(stats);
+        };
+        let Some(width) = rounded_bucket_width(self.bucket_width, window) else {
+            return Ok(stats);
+        };
+        let files: Vec<_> = version
+            .ssts
+            .levels()
+            .iter()
+            .flat_map(|l| l.files.values().cloned())
+            .collect();
+        let buckets =
+            group_files_into_series_buckets(&files, width, (window.as_secs() as i64).max(1));
+        let indexes = version.ssts.series_indexes();
+        let worker = self
+            .state
+            .worker
+            .as_ref()
+            .ok_or_else(|| WorkerStoppedSnafu { id: self.worker_id }.build())?;
+        for bucket in buckets {
+            if bucket.files.iter().all(|f| f.meta_ref().sequence.is_none()) {
+                continue;
+            }
+            let existing: Vec<_> = indexes
+                .values()
+                .filter_map(|file| {
+                    let FileFormat::NarthexSeriesIndex(index) = &file.meta_ref().format else {
+                        return None;
+                    };
+                    let proof = index.coverage.as_ref()?;
+                    (proof.region_id == region.region_id
+                        && proof.truncated_entry_id == version.truncated_entry_id
+                        && proof
+                            .windows
+                            .iter()
+                            .all(|w| bucket.start <= w.start && w.end <= bucket.end))
+                    .then_some((file, proof))
+                })
+                .collect();
+            if bucket
+                .files
+                .iter()
+                .filter(|f| f.meta_ref().sequence.is_some())
+                .all(|f| {
+                    existing.iter().any(|(_, p)| {
+                        p.schema_version == version.metadata.schema_version
+                            && p.covers(f.meta_ref())
+                    })
+                })
+            {
+                continue;
+            }
+
+            let coverage = NarthexCoverage {
+                region_id: region.region_id,
+                schema_version: version.metadata.schema_version,
+                truncated_entry_id: version.truncated_entry_id,
+                windows: vec![CertifiedWindow {
+                    start: bucket.start,
+                    end: bucket.end,
+                    frontier: version.flushed_sequence,
+                }],
+            };
+            let output = crate::sst::narthex::write_series(
+                &region.access_layer,
+                version.metadata.clone(),
+                &bucket.files,
+                Some(coverage),
+            )
+            .await?;
+            let handle =
+                crate::sst::file::FileHandle::new(output.clone(), region.file_purger.clone());
+            let edit = crate::manifest::action::RegionEdit {
+                series_indexes_to_add: vec![output],
+                series_indexes_to_remove: existing.iter().map(|(file, _)| file.file_id()).collect(),
+                ..Default::default()
+            };
+            let (tx, rx) = oneshot::channel();
+            let mut request = RegionEditRequest::new(region.region_id, edit, false, tx);
+            request.kind = RegionEditKind::NativeSeries(region.clone(), version.clone());
+            if worker
+                .send(WorkerRequestWithTime::new(WorkerRequest::EditRegion(
+                    request,
+                )))
+                .await
+                .is_err()
+            {
+                handle.mark_deleted();
+                return WorkerStoppedSnafu { id: self.worker_id }.fail();
+            }
+            if let Err(error) = rx
+                .await
+                .map_err(|_| WorkerStoppedSnafu { id: self.worker_id }.build())?
+            {
+                if !error.may_have_persisted_manifest_update() {
+                    handle.mark_deleted();
+                }
+                return Err(error);
+            }
+            stats.built_series += 1;
+            stats.source_files += bucket.files.len();
+            stats.removed_series += existing.len();
+            // The index set changed. Capture a fresh snapshot for the next publication.
+            break;
+        }
+        Ok(stats)
     }
 
     /// Each worker contributes only its open regions, refreshed at maintenance boundaries.

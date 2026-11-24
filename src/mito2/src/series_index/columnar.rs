@@ -68,7 +68,6 @@ impl Default for ColumnarSeriesFormat {
     }
 }
 
-#[cfg(test)]
 impl ColumnarSeriesFormat {
     pub(crate) fn narthex_writer(
         &self,

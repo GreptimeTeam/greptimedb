@@ -1532,6 +1532,8 @@ impl Waiters {
 #[derive(Debug)]
 pub(crate) enum RegionEditKind {
     Import,
+    /// Conditional series publication from this live region and pinned index set.
+    NativeSeries(MitoRegionRef, crate::region::version::VersionRef),
     #[cfg(feature = "enterprise")]
     Compaction(Box<crate::engine::table_compaction::PublicationContext>),
 }
