@@ -15,14 +15,14 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use partition::expr::PartitionExpr;
+use partition::expr::{Operand, PartitionExpr, RestrictedOp};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::RegionId;
 
 use crate::error;
 pub use crate::error::{Error, Result};
 use crate::manifest::action::{RegionManifest, RemovedFilesRecord};
-use crate::sst::file::FileFormat;
+use crate::sst::file::{FileFormat, FileMetaRef, PartitionExprRef};
 
 /// Remaps file references from old region manifests to new region manifests.
 pub struct RemapManifest {
@@ -169,6 +169,14 @@ impl RemapManifest {
                 reason: "Cannot remap between Parquet and Narthex regions",
             }
         );
+        // Rows outside these domains never reach the target, so the target reference
+        // only needs to authorize what both domains admit.
+        let source_domain = crate::region::parse_partition_expr(
+            source_manifest.metadata.partition_expr.as_deref(),
+        )?;
+        let target_domain = crate::region::parse_partition_expr(
+            target_manifest.metadata.partition_expr.as_deref(),
+        )?;
         for (file_id, file_meta) in &source_manifest.files {
             if let Some(existing) = target_manifest.files.get(file_id)
                 && source_manifest.sst_format == crate::sst::FormatType::Narthex
@@ -189,7 +197,19 @@ impl RemapManifest {
                     }
                 );
             }
-            let file_meta_clone = file_meta.clone();
+            let owned_range = Self::narrowed_owned_range(
+                file_meta,
+                source_domain.as_ref(),
+                target_domain.as_ref(),
+            );
+            // Keep sharing the source reference when the authorization is unchanged.
+            let file_meta_clone = if owned_range.as_ref() == file_meta.owned_range.as_deref() {
+                file_meta.clone()
+            } else {
+                let mut meta = (**file_meta).clone();
+                meta.owned_range = owned_range.map(PartitionExprRef::from);
+                FileMetaRef::from(meta)
+            };
 
             // Insert or merge into target manifest
             // Same file might be added from multiple overlapping old regions
@@ -198,13 +218,24 @@ impl RemapManifest {
                 Entry::Vacant(e) => {
                     e.insert(file_meta_clone);
                 }
-                #[cfg(debug_assertions)]
-                Entry::Occupied(e) => {
-                    // File already exists - verify it's the same physical file
-                    Self::verify_file_consistency(e.get(), &file_meta_clone)?;
+                Entry::Occupied(mut e) => {
+                    #[cfg(debug_assertions)]
+                    {
+                        // File already exists - verify it's the same physical file
+                        Self::verify_file_consistency(e.get(), &file_meta_clone)?;
+                    }
+                    // One physical file, several references: the target may read the
+                    // union of what each reference was allowed to read.
+                    let union = Self::union_owned_range(
+                        e.get().owned_range.as_deref(),
+                        file_meta_clone.owned_range.as_deref(),
+                    );
+                    if union.as_ref() != e.get().owned_range.as_deref() {
+                        let mut meta = (**e.get()).clone();
+                        meta.owned_range = union.map(PartitionExprRef::from);
+                        *e.get_mut() = FileMetaRef::from(meta);
+                    }
                 }
-                #[cfg(not(debug_assertions))]
-                Entry::Occupied(_) => {}
             }
         }
 
@@ -224,6 +255,62 @@ impl RemapManifest {
             }
         }
         Ok(())
+    }
+
+    /// Computes the `owned_range` for a reference to `file_meta` in a target region.
+    ///
+    /// A row is readable through the new reference only if the old reference allowed
+    /// it (`file_meta.owned_range`), the source region's domain admitted it and the
+    /// target region's domain admits it, so the three are intersected. Operands that
+    /// cannot remove a row are dropped: `None` (every physical row), the file creator's
+    /// own `partition_expr` and literal repeats. That keeps repeated repartitions from
+    /// growing the expression. `None` in the result means "every physical row".
+    fn narrowed_owned_range(
+        file_meta: &crate::sst::file::FileMeta,
+        source_domain: Option<&PartitionExpr>,
+        target_domain: Option<&PartitionExpr>,
+    ) -> Option<PartitionExpr> {
+        let creator = file_meta.partition_expr.as_deref();
+        let mut operands: Vec<&PartitionExpr> = Vec::with_capacity(3);
+        for operand in [
+            file_meta.owned_range.as_deref(),
+            source_domain,
+            target_domain,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if Some(operand) == creator || operands.contains(&operand) {
+                continue;
+            }
+            operands.push(operand);
+        }
+
+        operands.into_iter().cloned().reduce(PartitionExpr::and)
+    }
+
+    /// Unions the row authorizations of two references to the same physical file that
+    /// both reach the same target. `None` authorizes every physical row, so it absorbs
+    /// the union; otherwise the authorized sets are joined with `Or`.
+    fn union_owned_range(
+        existing: Option<&PartitionExpr>,
+        incoming: Option<&PartitionExpr>,
+    ) -> Option<PartitionExpr> {
+        match (existing, incoming) {
+            // Two holders of the same physical file publish the *union* of their
+            // authorizations: the target region may read either range. `None`
+            // means "every physical row", so it absorbs the union.
+            (Some(existing), Some(incoming)) => Some(if existing == incoming {
+                existing.clone()
+            } else {
+                PartitionExpr::new(
+                    Operand::Expr(existing.clone()),
+                    RestrictedOp::Or,
+                    Operand::Expr(incoming.clone()),
+                )
+            }),
+            _ => None,
+        }
     }
 
     /// Verifies that two file metadata entries are consistent.
@@ -828,5 +915,98 @@ mod tests {
         assert_eq!(result.new_manifests[&new_region_3].files.len(), 4);
         assert_eq!(result.stats.total_file_refs, 14); // 3 + 7 + 4
         assert_eq!(result.stats.unique_files, 7); // 3 + 4 unique
+    }
+
+    /// Sets the region domain recorded in a manifest's metadata.
+    fn set_manifest_domain(manifest: &mut RegionManifest, domain: Option<PartitionExpr>) {
+        let mut metadata = (*manifest.metadata).clone();
+        metadata.set_partition_expr(domain.map(|expr| expr.as_json_str().unwrap()));
+        manifest.metadata = Arc::new(metadata);
+    }
+
+    /// Remaps a single source manifest into a single target domain.
+    fn remap_into(
+        source: RegionId,
+        source_manifest: RegionManifest,
+        target: RegionId,
+        target_domain: PartitionExpr,
+    ) -> RegionManifest {
+        let mut remapper = RemapManifest::new(
+            HashMap::from([(source, source_manifest)]),
+            HashMap::from([(target, target_domain)]),
+            HashMap::from([(source, vec![target])]),
+        );
+        remapper.remap_manifests().unwrap().new_manifests[&target].clone()
+    }
+
+    #[test]
+    fn test_remap_owned_range_narrows_and_unions() {
+        let source = RegionId::new(1, 1);
+        let other = RegionId::new(1, 2);
+        let target = RegionId::new(1, 3);
+
+        // Creator expression of the shared file: the region that flushed it.
+        let file_domain = range_expr("u", 0, 100);
+        let left = range_expr("u", 0, 50);
+        let right = range_expr("u", 50, 100);
+
+        let mut owning = create_manifest(source, 1, Some(file_domain.clone()), 100, 200);
+        set_manifest_domain(&mut owning, Some(file_domain.clone()));
+        let file_id = *owning.files.keys().next().unwrap();
+
+        // The target domain equals the creator expression, which cannot remove a row,
+        // so the reference stays unrestricted instead of carrying a useless range.
+        let remapped = remap_into(source, owning.clone(), target, file_domain.clone());
+        assert!(remapped.files[&file_id].owned_range.is_none());
+
+        // Narrowing by the target domain; the source domain is dropped because it is
+        // the creator expression.
+        let remapped = remap_into(source, owning.clone(), target, left.clone());
+        assert_eq!(Some(&left), remapped.files[&file_id].owned_range.as_deref());
+
+        // An unpartitioned source narrows too: `None` imposes nothing, it does not
+        // authorize the rows the target domain excludes.
+        let mut unpartitioned = create_manifest(source, 1, None, 100, 200);
+        set_manifest_domain(&mut unpartitioned, None);
+        let file_id = *unpartitioned.files.keys().next().unwrap();
+        let remapped = remap_into(source, unpartitioned, target, left.clone());
+        assert_eq!(Some(&left), remapped.files[&file_id].owned_range.as_deref());
+
+        // The same physical file reaches the target from two source regions, so the
+        // target may read the union of both ranges.
+        let mut left_manifest = create_manifest(source, 1, Some(file_domain.clone()), 100, 200);
+        set_manifest_domain(&mut left_manifest, Some(left.clone()));
+        let file_id = *left_manifest.files.keys().next().unwrap();
+        let mut right_manifest = create_manifest(other, 0, Some(file_domain.clone()), 100, 200);
+        set_manifest_domain(&mut right_manifest, Some(right.clone()));
+        right_manifest
+            .files
+            .insert(file_id, left_manifest.files[&file_id].clone());
+        let mut remapper = RemapManifest::new(
+            HashMap::from([(source, left_manifest), (other, right_manifest)]),
+            HashMap::from([(target, file_domain.clone())]),
+            HashMap::from([(source, vec![target]), (other, vec![target])]),
+        );
+        let remapped = remapper.remap_manifests().unwrap().new_manifests[&target].clone();
+        let owned = remapped.files[&file_id]
+            .owned_range
+            .as_deref()
+            .expect("the union must authorize rows");
+        // The two source regions are visited in hash order, so either operand order is
+        // correct for the `Or` chain.
+        let forward = PartitionExpr::new(
+            Operand::Expr(left.clone()),
+            RestrictedOp::Or,
+            Operand::Expr(right.clone()),
+        );
+        let backward = PartitionExpr::new(
+            Operand::Expr(right.clone()),
+            RestrictedOp::Or,
+            Operand::Expr(left.clone()),
+        );
+        assert!(
+            owned == &forward || owned == &backward,
+            "unexpected union: {owned:?}"
+        );
     }
 }

@@ -354,6 +354,7 @@ impl ParquetbenchCommand {
                 num_row_groups: parquet_meta.num_row_groups() as u64,
                 sequence: None,
                 partition_expr: None,
+                owned_range: None,
                 num_series: 0,
                 primary_key_min: None,
                 primary_key_max: None,

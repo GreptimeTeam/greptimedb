@@ -768,6 +768,20 @@ impl ScanRegion {
             expr.collect_column_names(&mut extra_col_names);
         }
 
+        // A reference's `owned_range` filters rows of the SST too, so its columns must
+        // be read even when the projection does not select them.
+        for file in self
+            .version
+            .ssts
+            .levels()
+            .iter()
+            .flat_map(|level| level.files.values())
+        {
+            if let Some(owned_range) = file.meta_ref().owned_range.as_deref() {
+                owned_range.collect_column_names(&mut extra_col_names);
+            }
+        }
+
         if !extra_col_names.is_empty() {
             for col in &metadata.column_metadatas {
                 if extra_col_names.remove(&col.column_schema.name) && !seen.contains(&col.column_id)
@@ -1894,6 +1908,16 @@ impl ScanInput {
     pub(crate) fn total_rows_is_exact(&self) -> bool {
         // Legacy SST metadata uses zero for unknown row counts.
         if self.files.iter().any(|file| file.num_rows() == 0) {
+            return false;
+        }
+
+        // A reference's `owned_range` can hide physical rows of the file from this
+        // region, so physical row counts no longer equal the visible rows.
+        if self
+            .files
+            .iter()
+            .any(|file| file.meta_ref().owned_range.is_some())
+        {
             return false;
         }
 

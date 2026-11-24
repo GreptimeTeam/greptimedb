@@ -134,7 +134,11 @@ impl SstVersion {
                 .and_modify(|f| {
                     if f.meta_ref() == file.as_ref() || f.meta_ref().is_index_up_to_date(&file) {
                         // same file meta or current file handle's index is up-to-date, skip adding
-                        if f.index_id().version > new_index_version {
+                        if f.meta_ref().owned_range != file.owned_range {
+                            // Repartition may only change this reference's row
+                            // authorization; keep the current index view and lifetime.
+                            *f = f.with_updated_index(file.clone());
+                        } else if f.index_id().version > new_index_version {
                             // what does it mean for us to see older index version?
                             common_telemetry::warn!(
                                 "Adding file with older index version, existing: {:?}, new: {:?}, ignoring new file",

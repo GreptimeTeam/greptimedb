@@ -362,6 +362,20 @@ pub struct FileMeta {
         deserialize_with = "deserialize_partition_expr"
     )]
     pub partition_expr: Option<PartitionExprRef>,
+    /// Range of rows this reference may read, or `None` for every physical row.
+    ///
+    /// This is a row authorization for one reference only, not ownership and not a
+    /// deletion right: the file stays readable through every other reference that
+    /// authorizes the row. `partition_expr` keeps its meaning, the expression of the
+    /// region that created the file. Repartition narrows the range to what both the
+    /// source and the target region admit.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_partition_expr",
+        deserialize_with = "deserialize_partition_expr"
+    )]
+    pub owned_range: Option<PartitionExprRef>,
     /// Number of series in the file.
     ///
     /// The number is 0 if the series number is not available.

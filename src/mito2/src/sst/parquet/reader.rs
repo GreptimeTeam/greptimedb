@@ -715,7 +715,8 @@ impl ParquetReaderBuilder {
     /// Its indices are independent of both Parquet and converted batch projections;
     /// precise filtering gathers these columns temporarily before compatibility.
     /// Compare partition expressions from expected metadata and file metadata,
-    /// and build a partition filter if they differ.
+    /// and build a partition filter if they differ. The file's `owned_range`, when
+    /// present, is conjoined because it authorizes rows for this reference only.
     fn build_partition_filter(
         &self,
         read_format: &FlatReadFormat,
@@ -730,17 +731,27 @@ impl ParquetReaderBuilder {
         let (region_partition_expr, is_same_region_partition) =
             Self::is_same_region_partition(region_partition_expr_str, file_partition_expr_ref)?;
 
-        if is_same_region_partition {
-            return Ok(None);
+        // The region expression can be skipped only when it is the creator's own
+        // expression; `owned_range` is narrower in general and still applies.
+        let mut partition_expr = if is_same_region_partition {
+            None
+        } else {
+            region_partition_expr
+        };
+        if let Some(owned_range) = self.file_handle.meta_ref().owned_range.as_deref() {
+            partition_expr = Some(match partition_expr {
+                Some(region_partition_expr) => region_partition_expr.and(owned_range.clone()),
+                None => owned_range.clone(),
+            });
         }
 
-        let Some(region_partition_expr) = region_partition_expr else {
+        let Some(partition_expr) = partition_expr else {
             return Ok(None);
         };
 
         // Collect columns referenced by the partition expression.
         let mut referenced_columns = HashSet::new();
-        region_partition_expr.collect_column_names(&mut referenced_columns);
+        partition_expr.collect_column_names(&mut referenced_columns);
 
         // Build a partition_schema containing only referenced columns.
         let partition_schema = Arc::new(datatypes::schema::Schema::new(
@@ -770,7 +781,7 @@ impl ParquetReaderBuilder {
                 .collect::<Vec<_>>(),
         ));
 
-        let region_partition_physical_expr = region_partition_expr
+        let region_partition_physical_expr = partition_expr
             .try_as_physical_expr(partition_schema.arrow_schema())
             .context(SerializePartitionExprSnafu)?;
 
@@ -3041,6 +3052,86 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A reference scoped by `owned_range` must not read rows outside its range even
+    /// when the region expression equals the file's creator expression: that shortcut
+    /// skips the region filter, so only `owned_range` can still hide rows.
+    #[rstest::rstest]
+    #[case::unscoped(None, vec![0, 1, 2, 3, 4, 5])]
+    #[case::scoped(Some("a"), vec![0, 1, 2, 3, 5])]
+    #[tokio::test]
+    async fn test_owned_range_filters_rows_when_region_matches_file_expr(
+        #[case] owned_range: Option<&str>,
+        #[case] expected: Vec<u64>,
+    ) {
+        let store = ObjectStore::new(Memory::default()).unwrap();
+        let source = crate::test_util::sst_util::sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        );
+        let props = WriterProperties::builder()
+            .set_key_value_metadata(Some(vec![parquet::file::metadata::KeyValue::new(
+                crate::sst::parquet::PARQUET_METADATA_KEY.to_string(),
+                source.to_json().unwrap(),
+            )]))
+            .build();
+        let predicate = Predicate::new(vec![col("field_0").gt_eq(lit(0_u64))]);
+        let (mut fixture, metadata) = prefilter_test_builder_with(
+            store.clone(),
+            3,
+            2,
+            PageIndexPolicy::Skip,
+            Some(props),
+            predicate,
+            CacheStrategy::Disabled,
+        )
+        .await;
+
+        // `tag_0` is "a" for every row but the one with field 4, so the creator
+        // expression keeps every row while a "a" scope hides exactly one of them.
+        let creator = partition::expr::col("tag_0")
+            .gt_eq(datatypes::value::Value::String("a".to_string().into()));
+        let creator_json = creator.as_json_str().unwrap();
+        let mut file_meta = (*fixture.file_handle.meta_ref()).clone();
+        file_meta.partition_expr = Some(
+            PartitionExpr::from_json_str(&creator_json)
+                .unwrap()
+                .unwrap()
+                .into(),
+        );
+        file_meta.owned_range = owned_range.map(|tag| {
+            partition::expr::col("tag_0")
+                .eq(datatypes::value::Value::String(tag.to_string().into()))
+                .into()
+        });
+        fixture.file_handle = FileHandle::new(file_meta, crate::test_util::new_noop_file_purger());
+
+        let mut expected_metadata = (*metadata).clone();
+        expected_metadata.set_partition_expr(Some(creator_json));
+        let builder = ParquetReaderBuilder::new(
+            "prefilter_test".to_string(),
+            PathType::Bare,
+            fixture.file_handle.clone(),
+            store.clone(),
+        )
+        .expected_metadata(Some(Arc::new(expected_metadata)));
+        let mut reader = builder.build().await.unwrap().unwrap();
+
+        let mut rows = Vec::new();
+        while let Some(batch) = reader.next_record_batch().await.unwrap() {
+            let index = batch.schema().index_of("field_0").unwrap();
+            let fields = batch
+                .column(index)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap();
+            rows.extend((0..batch.num_rows()).map(|i| fields.value(i)));
+        }
+        rows.sort_unstable();
+        assert_eq!(
+            expected, rows,
+            "rows outside the owned range must be filtered out"
+        );
     }
 
     async fn prefilter_test_builder(
