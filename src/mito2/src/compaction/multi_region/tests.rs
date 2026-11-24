@@ -47,7 +47,7 @@ use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
 use store_api::region_request::PathType;
 use store_api::storage::RegionId;
-use tokio::sync::Notify;
+use tokio::sync::watch;
 
 use super::*;
 use crate::access_layer::{AccessLayer, Metrics, OperationType, SstWriteRequest, WriteType};
@@ -2318,8 +2318,18 @@ async fn test_table_budget_below_legacy_floor_writes_multipart_outputs_losslessl
                 &options,
             )
             .await;
-        sources.push(file_meta(info, fixture.metadata.region_id));
+        sources.push(info);
     }
+    // The final source row group contains the last batches for the second target.
+    let tail = Arc::new(InputTailGate::new(
+        &fixture,
+        sources.last().unwrap(),
+        RegionId::new(1, 1),
+    ));
+    let sources = sources
+        .into_iter()
+        .map(|info| file_meta(info, fixture.metadata.region_id))
+        .collect();
     let mut plan = fixture.plan_with_sources(2, sources);
     // The old per-Arrow-buffer minimum rejected this even at 1 GiB. Each
     // target now gets a separate upload chunk and writes one ~20 MiB SST.
@@ -2330,26 +2340,18 @@ async fn test_table_budget_below_legacy_floor_writes_multipart_outputs_losslessl
         target.options.max_row_group_row_count = Some(row_group_size);
     }
     let targets = plan.targets.clone();
-    let uploads = install_multipart_backend(&mut fixture, MULTIPART_CHUNK);
+    let uploads = install_multipart_backend(&mut fixture, MULTIPART_CHUNK, Some(tail.clone()));
     let (mut context, _) = fixture.context(None);
     context.index_kind_provider = Some(Arc::new(UploadProbeIndex));
 
-    let execution = compact_regions(plan, context);
-    tokio::pin!(execution);
-    tokio::select! {
-        _ = uploads.part_waiting.notified() => {}
-        result = &mut execution => match result {
-            Ok(_) => panic!("compaction completed without reaching a gated part"),
-            Err(error) => panic!("compaction failed before reaching a gated part: {error:?}"),
-        },
-        _ = tokio::time::sleep(Duration::from_secs(60)) => panic!("SST never began uploading its parts"),
-    }
-    uploads.resume_part.notify_one();
-
-    let output = tokio::time::timeout(Duration::from_secs(60), execution)
+    let output = tokio::time::timeout(Duration::from_secs(60), compact_regions(plan, context))
         .await
-        .expect("compaction did not finish after releasing the part")
+        .expect("the target must upload a part before reading its final input group")
         .unwrap();
+    assert!(
+        tail.requested.load(Ordering::Relaxed),
+        "input never reached the gated row group"
+    );
     assert!(output.stats.estimated_memory_bytes <= budget as u64);
     assert_eq!(targets.len(), output.files.len());
     let layer = &fixture.layer;
@@ -2391,7 +2393,7 @@ async fn test_multipart_admission_rejects_before_protection_or_write(
     let mut fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
     let mut plan = fixture.plan(2);
     plan.memory_limit = budget;
-    let uploads = install_multipart_backend(&mut fixture, chunk);
+    let uploads = install_multipart_backend(&mut fixture, chunk, None);
     let (context, protection) = fixture.context(None);
     let error = compact_regions(plan, context)
         .await
@@ -2472,12 +2474,85 @@ fn check_multipart_rows(batches: Vec<RecordBatch>, target: usize, rows: usize) {
     );
 }
 
-#[derive(Default)]
+/// Withholds the payload of the last input row group until its target's SST starts uploading.
+struct InputTailGate {
+    source_path: String,
+    source_size: usize,
+    payload_offset: usize,
+    target_dir: String,
+    first_part: watch::Sender<bool>,
+    requested: AtomicBool,
+}
+
+impl InputTailGate {
+    fn new(fixture: &Fixture, source: &SstInfo, target: RegionId) -> Self {
+        let footer = source.file_metadata.as_ref().unwrap();
+        let payload = footer
+            .row_groups()
+            .last()
+            .unwrap()
+            .columns()
+            .iter()
+            .find(|column| column.column_path().string() == "field_0")
+            .unwrap();
+        let layer = &fixture.layer;
+        Self {
+            source_path: location::sst_file_path(
+                layer.table_dir(),
+                RegionFileId::new(fixture.metadata.region_id, source.file_id),
+                layer.path_type(),
+            ),
+            source_size: source.file_size as usize,
+            payload_offset: payload.byte_range().0 as usize,
+            target_dir: location::region_dir_from_table_dir(
+                layer.table_dir(),
+                target,
+                layer.path_type(),
+            ),
+            first_part: watch::channel(false).0,
+            requested: AtomicBool::new(false),
+        }
+    }
+
+    async fn wait_for_part(&self, range: mock::BytesRange) -> mock::Result<()> {
+        if range
+            .to_content_range(self.source_size)?
+            .contains(&self.payload_offset)
+        {
+            self.requested.store(true, Ordering::Relaxed);
+            self.first_part
+                .subscribe()
+                .wait_for(|&started| started)
+                .await
+                .unwrap();
+        }
+        Ok(())
+    }
+}
+
+struct TailReader {
+    inner: oio::Reader,
+    gate: Arc<InputTailGate>,
+}
+
+impl oio::Read for TailReader {
+    async fn open(
+        &self,
+        range: mock::BytesRange,
+    ) -> mock::Result<(mock::RpRead, Box<dyn oio::ReadStreamDyn>)> {
+        self.gate.wait_for_part(range).await?;
+        self.inner.open(range).await
+    }
+
+    async fn read(&self, range: mock::BytesRange) -> mock::Result<(mock::RpRead, mock::Buffer)> {
+        self.gate.wait_for_part(range).await?;
+        self.inner.read(range).await
+    }
+}
+
 struct MultipartUploads {
     files: Mutex<BTreeMap<String, MultipartUpload>>,
-    gated: AtomicBool,
-    part_waiting: Notify,
-    resume_part: Notify,
+    tail: Option<Arc<InputTailGate>>,
 }
 
 #[derive(Default)]
@@ -2511,13 +2586,33 @@ impl MultipartUploads {
 /// Uses the same OpenDAL chunker and multipart state machine as S3. Only the
 /// service's part requests are replaced, appending to an FS writer with no
 /// whole-file buffer in the fake backend.
-fn install_multipart_backend(fixture: &mut Fixture, chunk: usize) -> Arc<MultipartUploads> {
-    let uploads = Arc::new(MultipartUploads::default());
+fn install_multipart_backend(
+    fixture: &mut Fixture,
+    chunk: usize,
+    tail: Option<Arc<InputTailGate>>,
+) -> Arc<MultipartUploads> {
+    let mut mock = MockLayerBuilder::default();
+    if let Some(gate) = tail.clone() {
+        mock.reader_factory(Arc::new(move |path, _, inner| {
+            if path == gate.source_path {
+                Box::new(TailReader {
+                    inner,
+                    gate: gate.clone(),
+                })
+            } else {
+                inner
+            }
+        }));
+    }
+    let uploads = Arc::new(MultipartUploads {
+        files: Mutex::default(),
+        tail,
+    });
     let layer = &fixture.layer;
     let store = layer.object_store().clone();
     let executor = store.context().executor().clone();
     let observed = uploads.clone();
-    let mock = MockLayerBuilder::default()
+    let mock = mock
         .writer_factory(Arc::new(move |path, args, inner| {
             assert_eq!(1, args.concurrent(), "multipart concurrency for {path}");
             let previous = observed
@@ -2591,11 +2686,14 @@ impl oio::MultipartWrite for FsMultipartSink {
             parts.push(size);
         }
         if part_number == 0
+            && let Some(tail) = &self.uploads.tail
+            && self.path.starts_with(&tail.target_dir)
             && self.path.ends_with(".parquet")
-            && !self.uploads.gated.swap(true, Ordering::Relaxed)
         {
-            self.uploads.part_waiting.notify_one();
-            self.uploads.resume_part.notified().await;
+            assert!(
+                !tail.first_part.send_replace(true),
+                "multiple SSTs released the same input tail"
+            );
         }
         self.inner.lock().await.write(body).await?;
         Ok(oio::MultipartPart {
