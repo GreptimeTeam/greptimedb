@@ -2490,6 +2490,455 @@ async fn native_zero_match_discovery_with_real_selector_binds_both_inputs() {
     }
 }
 
+/// A fixture whose `x` and `exists` tables exist, so any other metric a selector names has no table
+/// to bind.
+async fn named_missing_table_provider() -> DfTableSourceProvider {
+    build_test_table_provider_with_options(
+        &[
+            (DEFAULT_SCHEMA_NAME.to_string(), "x".to_string()),
+            (DEFAULT_SCHEMA_NAME.to_string(), "exists".to_string()),
+        ],
+        1,
+        1,
+        vec![],
+        ConcreteDataType::timestamp_millisecond_datatype(),
+        false,
+        ConcreteDataType::float64_datatype(),
+        NATIVE_ENGINE,
+    )
+    .await
+}
+
+/// Whether `plan` holds the typed empty input a selector that read no table is planned as.
+fn contains_typed_empty_input(plan: &LogicalPlan) -> bool {
+    super::native::is_empty_discovered_input(plan)
+        || plan
+            .inputs()
+            .iter()
+            .any(|child| contains_typed_empty_input(child))
+}
+
+/// A selector that names a metric whose table does not exist is planned natively, as the typed
+/// empty input a nameless selector that matches nothing is.
+///
+/// Prometheus answers each statement below over an empty input, so handing the statement back to
+/// the existing planner - which has no table to bind and raises `TableNameNotFound` - is not an
+/// answer. `x` and `exists` do exist, and the statements reading them keep the plan they had: an
+/// existing table is read through its scan whether or not it holds rows.
+#[tokio::test]
+async fn native_named_selector_over_a_missing_table_plans_as_an_empty_input() {
+    // `(query, reads an existing table)`.
+    for (query, reads_existing) in [
+        // The selection itself.
+        ("nonexistent_metric", false),
+        ("nonexistent_metric @ 300", false),
+        ("nonexistent offset 5m", false),
+        // An operator over the empty input keeps its own answer for zero series.
+        ("rate(nonexistent[5m])", false),
+        ("sum(nonexistent)", false),
+        ("count(nonexistent)", false),
+        ("topk(3, nonexistent)", false),
+        ("sum by (__name__) (nonexistent)", false),
+        // The two shapes whose answer over zero series is a row rather than none.
+        ("absent(nonexistent_metric)", false),
+        (r#"absent(nonexistent_metric{job="x"})"#, false),
+        (r#"absent_over_time(nonexistent{job="x"}[5m])"#, false),
+        // A set operation pairs the empty input with a real one, on either side and in either
+        // position, and a statement whose selectors are all missing has no real side at all.
+        ("nonexistent or exists", true),
+        ("nonexistent and exists", true),
+        ("nonexistent unless exists", true),
+        ("exists or nonexistent", true),
+        ("a1 or a2", false),
+        // A table that exists is read through its scan, with and without rows.
+        ("x", true),
+        ("sum(x)", true),
+        ("x or nonexistent", true),
+    ] {
+        let plan = build_native_fused_plan_with_provider(
+            query,
+            true,
+            named_missing_table_provider().await,
+        )
+        .await;
+        assert!(
+            find_fused_series(&plan).is_some(),
+            "`{query}` did not take the native route: {plan:?}"
+        );
+        let display = plan.display_indent().to_string();
+        if reads_existing {
+            assert!(display.contains("TableScan"), "{query}: {display}");
+        } else {
+            assert!(
+                contains_typed_empty_input(&plan),
+                "`{query}` is not planned over the typed empty input: {plan:?}"
+            );
+            assert!(
+                !display.contains("TableScan"),
+                "`{query}` reads a table it has none of: {display}"
+            );
+        }
+    }
+
+    // A `__field__` matcher still declines over a table this route can read: the matcher narrows the
+    // field set of the scan below the node, and the raw series scan reports every field the scan
+    // carries. That refusal is about the scan, not about the table existing - a missing table has no
+    // field set to narrow and is admitted as the empty input, which
+    // `native_missing_table_with_a_field_matcher_answers_the_empty_vector` asserts beside its rows.
+    let query = r#"x{__field__="field_0"}"#;
+    let plan =
+        build_native_fused_plan_with_provider(query, true, named_missing_table_provider().await)
+            .await;
+    assert!(
+        find_fused_series(&plan).is_none(),
+        "`{query}` claimed a field layout its scan does not report: {plan:?}"
+    );
+}
+
+/// The same statements plan natively when the engine plans distributed statements.
+///
+/// Such a planner reads every input above the regions, so each occurrence is source-backed and the
+/// typed empty input is the one input that stays itself. The route is the same one the statements
+/// above take; what changes is only where the node is placed.
+#[tokio::test]
+async fn native_named_missing_table_plans_with_the_distributed_planner() {
+    let state = QueryEngineState::new(
+        new_memory_catalog_manager().unwrap(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        true,
+        Plugins::default(),
+        QueryOptions::default(),
+    );
+    for query in [
+        "nonexistent_metric",
+        "absent(nonexistent_metric)",
+        "nonexistent or exists",
+        "exists or nonexistent",
+    ] {
+        let stmt = build_eval_stmt(query);
+        let plan = PromPlanner::stmt_to_plan_with_annotations(
+            named_missing_table_provider().await,
+            &stmt,
+            &state,
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(
+            find_fused_series(&plan).is_some(),
+            "`{query}` did not take the native route with the distributed planner: {plan:?}"
+        );
+    }
+}
+
+/// A named selector over a missing table answers what Prometheus answers, executed.
+///
+/// Prometheus answers the empty vector for a selector that names a metric it holds no samples for,
+/// and the operators above it report their own answer for zero series: `sum` and `count` report no
+/// group, `absent` reports one series holding 1 named by the selector's equality matchers, and an
+/// `or`, `and` or `unless` against an empty side keeps, drops or ignores what the other side holds.
+///
+/// The rows layout is asserted beside the rows: the answer names no series, so the nullable
+/// `__name__` column the native rows root declares stays null rather than naming the metric the
+/// selector wrote.
+#[tokio::test]
+async fn native_named_selector_over_a_missing_table_answers_what_prometheus_answers() {
+    /// Runs `query` on the native route over the fixture whose only tables are `x` and `exists`.
+    ///
+    /// `steps` is the number of five-second steps after the first, so zero is one evaluation
+    /// instant and two is a three-point range.
+    async fn execute_missing(query: &str, steps: u64) -> (LogicalPlan, Vec<RecordBatch>) {
+        let stmt = EvalStmt {
+            expr: parser::parse(query).unwrap(),
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(5 * steps))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+        let plan = PromPlanner::stmt_to_plan_with_annotations(
+            named_missing_table_provider().await,
+            &stmt,
+            &build_query_engine_state(),
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(
+            find_fused_series(&plan).is_some(),
+            "`{query}` did not take the native route: {plan:?}"
+        );
+        execute(plan, &build_query_engine_state()).await
+    }
+
+    // A selection over a table that does not exist answers no rows, and its declared layout still
+    // names the time index, one value column and the nullable name column.
+    for query in [
+        "nonexistent_metric",
+        "rate(nonexistent[5m])",
+        "sum(nonexistent)",
+        "topk(3, nonexistent)",
+        "count(nonexistent)",
+        "sum by (__name__) (nonexistent)",
+        // Two missing tables in one statement: neither side has a table to read.
+        "a1 or a2",
+        // A set operation against an empty side keeps, drops or ignores the other side's series,
+        // and the empty side has none to contribute.
+        "nonexistent and vector(7)",
+        "nonexistent unless vector(7)",
+    ] {
+        let (plan, batches) = execute_missing(query, 0).await;
+        assert_eq!(
+            0,
+            batch_rows(&batches),
+            "`{query}` answered rows over a table that does not exist: {plan:?}"
+        );
+    }
+
+    /// The column a native rows answer names its value after: the statement it answers.
+    fn value_column(query: &str) -> String {
+        parser::parse(query).unwrap().to_string()
+    }
+
+    // The rows layout of the empty answer: the time index, one value column and the name column
+    // the rows root declares, which is nullable because a row that names no series leaves it null.
+    // The value column is named after the statement, as it is for every native rows answer: the
+    // empty input's own field name is internal to the tree.
+    let (plan, _) = execute_missing("nonexistent_metric", 0).await;
+    let columns = plan
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().as_str())
+        .collect::<Vec<_>>();
+    let value = value_column("nonexistent_metric");
+    assert_eq!(
+        vec![DEFAULT_TIME_INDEX_COLUMN, value.as_str(), METRIC_NAME],
+        columns,
+        "{plan:?}"
+    );
+    assert!(
+        plan.schema()
+            .field_with_name(None, METRIC_NAME)
+            .expect("the rows root declares the name column")
+            .is_nullable(),
+        "{plan:?}"
+    );
+
+    // `absent` reports the absence of what it read as one series holding 1. The selector names no
+    // equality label, so the row names nothing - not even the metric the selector wrote.
+    let (plan, batches) = execute_missing("absent(nonexistent_metric)", 0).await;
+    assert_eq!(1, batch_rows(&batches), "{plan:?}");
+    assert_eq!(
+        vec![1.0],
+        numeric_values(&batches, &value_column("absent(nonexistent_metric)")),
+        "{plan:?}"
+    );
+    for batch in &batches {
+        let name = batch
+            .column_by_name(METRIC_NAME)
+            .expect("the rows root declares the name column")
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("the name column is Utf8");
+        assert_eq!(1, name.len(), "{batch:?}");
+        assert!(name.is_null(0), "`absent` names no series: {batch:?}");
+    }
+
+    // A matcher that must be set is a label of the answer, as in Prometheus.
+    let (plan, batches) = execute_missing(r#"absent(nonexistent_metric{job="x"})"#, 0).await;
+    assert_eq!(1, batch_rows(&batches), "{plan:?}");
+    assert_eq!(
+        vec![1.0],
+        numeric_values(
+            &batches,
+            &value_column(r#"absent(nonexistent_metric{job="x"})"#)
+        ),
+        "{plan:?}"
+    );
+    for batch in &batches {
+        let job = batch
+            .column_by_name("job")
+            .expect("absent reports the selector's equality labels")
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(Some("x"), job.iter().next().flatten(), "{batch:?}");
+    }
+
+    // `absent_over_time` answers the same way over a missing table.
+    let (plan, batches) = execute_missing(r#"absent_over_time(nonexistent{job="x"}[5m])"#, 0).await;
+    assert_eq!(1, batch_rows(&batches), "{plan:?}");
+    assert_eq!(
+        vec![1.0],
+        numeric_values(
+            &batches,
+            &value_column(r#"absent_over_time(nonexistent{job="x"}[5m])"#)
+        ),
+        "{plan:?}"
+    );
+    for batch in &batches {
+        let job = batch
+            .column_by_name("job")
+            .expect("absent_over_time reports the selector's equality labels")
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(Some("x"), job.iter().next().flatten(), "{batch:?}");
+    }
+
+    // A range statement evaluates the same empty input on a grid of its own: three points, each
+    // answering the absence of what the selector named.
+    let (plan, batches) = execute_missing(r#"absent(nonexistent_metric{job="x"})"#, 2).await;
+    assert_eq!(3, batch_rows(&batches), "{plan:?}");
+    assert_eq!(
+        vec![1.0, 1.0, 1.0],
+        numeric_values(
+            &batches,
+            &value_column(r#"absent(nonexistent_metric{job="x"})"#)
+        ),
+        "{plan:?}"
+    );
+
+    // An `or` keeps the side that holds a series, in either position.
+    for query in ["nonexistent or vector(7)", "vector(7) or nonexistent"] {
+        let (plan, batches) = execute_missing(query, 0).await;
+        assert_eq!(1, batch_rows(&batches), "`{query}`: {plan:?}");
+        assert_eq!(
+            vec![7.0],
+            numeric_values(&batches, &value_column(query)),
+            "`{query}`: {plan:?}"
+        );
+    }
+}
+
+/// A matcher named after the grid column does not make a missing table fall back.
+///
+/// `absent(missing{time="x"})` publishes a label named `time` while the route would name its grid
+/// column `time` too, so the synthetic name has to be chosen before the segmented root is built -
+/// otherwise schema construction fails first and the statement leaves the route. The answer is the
+/// one Prometheus gives for an absent selector: one sample of 1 carrying the matcher's label.
+#[tokio::test]
+async fn native_absent_over_a_missing_table_names_its_grid_beside_a_time_label() {
+    let query = r#"absent(missing{time="x"})"#;
+    // One evaluation instant, so the answer is one sample rather than one per step of a range.
+    let stmt = EvalStmt {
+        expr: parser::parse(query).unwrap(),
+        start: UNIX_EPOCH,
+        end: UNIX_EPOCH,
+        interval: Duration::from_secs(5),
+        lookback_delta: Duration::from_secs(1),
+    };
+    let plan = PromPlanner::stmt_to_plan_with_annotations(
+        named_missing_table_provider().await,
+        &stmt,
+        &build_query_engine_state(),
+        None,
+        true,
+    )
+    .await
+    .unwrap();
+    assert!(
+        find_fused_series(&plan).is_some(),
+        "`{query}` did not take the native route: {plan:?}"
+    );
+    let value = parser::parse(query).unwrap().to_string();
+    let columns = plan
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        vec!["native_time_0", value.as_str(), "time", METRIC_NAME],
+        columns,
+        "`{query}`: the grid takes a free name beside the matcher's label: {plan:?}"
+    );
+    let (_, batches) = execute(plan, &build_query_engine_state()).await;
+    assert_eq!(1, batch_rows(&batches), "`{query}`: {batches:?}");
+    assert_eq!(vec![1.0], numeric_values(&batches, &value), "`{query}`");
+}
+
+/// A field selection over a missing table is empty, so a `__field__` matcher answers the empty
+/// vector on the native route.
+///
+/// A `__field__` matcher narrows the field set of the table its selector reads. A missing table has
+/// no field set to narrow, so every field selection over it is empty whichever field the matcher
+/// names: the answer does not depend on whether the table happens to exist. The existing planner
+/// answers these statements with the empty vector for the same reason - a missing table is planned
+/// as `EmptyMetric` before the projection a `__field__` matcher builds, so the matcher is never
+/// resolved against a fabricated layout.
+///
+/// The rows layout is the one every empty native answer publishes: the synthetic `time` grid, one
+/// value column named after the statement and the nullable `__name__` column. The placeholder field
+/// of the typed empty input is internal to the tree, so neither it nor the field the matcher names
+/// is ever published.
+#[tokio::test]
+async fn native_missing_table_with_a_field_matcher_answers_the_empty_vector() {
+    for query in [
+        // The placeholder field the empty input declares, a field no fabricated layout holds, a
+        // regex that would select several fields of a real table, and a negative matcher.
+        r#"nonexistent_metric{__field__="value"}"#,
+        r#"nonexistent_metric{__field__="field_0"}"#,
+        r#"nonexistent{__field__=~"field_.*"}"#,
+        r#"nonexistent_metric{__field__!="value"}"#,
+        // The same empty answer through the nameless spelling: it reaches the zero-match branch
+        // rather than the named one, and a field selection over a table with no rows is empty
+        // either way.
+        r#"{__name__="nonexistent", __field__="v"}"#,
+    ] {
+        let plan = build_native_fused_plan_with_provider(
+            query,
+            true,
+            named_missing_table_provider().await,
+        )
+        .await;
+        assert!(
+            find_fused_series(&plan).is_some(),
+            "`{query}` did not take the native route: {plan:?}"
+        );
+        assert!(
+            contains_typed_empty_input(&plan),
+            "`{query}` is not planned over the typed empty input: {plan:?}"
+        );
+        // No row names a field, so the published layout is the empty answer's: the grid, one value
+        // column named after the statement, and the nullable name column.
+        let columns = plan
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect::<Vec<_>>();
+        let value = parser::parse(query).unwrap().to_string();
+        assert_eq!(
+            vec![DEFAULT_TIME_INDEX_COLUMN, value.as_str(), METRIC_NAME],
+            columns,
+            "`{query}`: {plan:?}"
+        );
+        assert!(
+            plan.schema()
+                .field_with_name(None, METRIC_NAME)
+                .expect("the rows root declares the name column")
+                .is_nullable(),
+            "`{query}`: {plan:?}"
+        );
+        let state = build_query_engine_state();
+        let (_, batches) = execute(plan, &state).await;
+        assert_eq!(
+            0,
+            batch_rows(&batches),
+            "`{query}` answered rows over a table that does not exist: {batches:?}"
+        );
+    }
+}
+
 /// A zero-match selector is laid out by the operand of the set operation it is compared against.
 ///
 /// `wide_total` carries two fields and `narrow_total` one, and the empty branch is the left operand
@@ -16200,5 +16649,56 @@ async fn a_float_tree_still_segments_next_to_the_histogram_gates() {
             "{query} left the native route: {}",
             plan.display_indent_schema()
         );
+    }
+}
+
+/// A statement named after the column its own layout publishes keeps the answer it owes.
+///
+/// A table that does not exist has no column of its own to name the grid after, so the planner
+/// fabricates the existing planner's synthetic `time` column for it. `time` is therefore both the
+/// metric's name - which names the value column - and that grid, and `__name__` is both a metric
+/// name and the row-name column every samples layout publishes. Prometheus answers both statements
+/// with the empty vector: the first publishes its grid under a free synthetic name, and the second
+/// is a layout the rows contract cannot name, so it keeps the existing plan, which answers empty.
+#[tokio::test]
+async fn native_missing_table_named_after_its_own_columns_answers_the_empty_vector() {
+    for (query, native) in [("time", true), ("__name__", false)] {
+        let plan = build_native_fused_plan_with_provider(
+            query,
+            true,
+            named_missing_table_provider().await,
+        )
+        .await;
+        assert_eq!(
+            native,
+            find_fused_series(&plan).is_some(),
+            "`{query}`: {plan:?}"
+        );
+        let columns = plan
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect::<Vec<_>>();
+        if native {
+            assert_eq!(
+                vec!["native_time_0", query, METRIC_NAME],
+                columns,
+                "`{query}`: the grid takes a free synthetic name"
+            );
+        }
+        let stmt = build_eval_stmt(query);
+        let state = build_query_engine_state();
+        let plan = PromPlanner::stmt_to_plan_with_annotations(
+            named_missing_table_provider().await,
+            &stmt,
+            &state,
+            None,
+            true,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("`{query}` is not planned at all: {error}"));
+        let (_, batches) = execute(plan, &state).await;
+        assert_eq!(0, batch_rows(&batches), "`{query}`: {batches:?}");
     }
 }

@@ -728,29 +728,8 @@ impl PromPlanner {
             let Some(values) = native_root_fields(tree.root()) else {
                 return Ok(None);
             };
-            // A label named `time` is the one collision the default time column can have: the
-            // value columns are named after the expression, so they never take that name. The
-            // time column is this route's own synthetic name - no label or value is renamed - so
-            // a statement whose output already holds a `time` column publishes its grid under the
-            // first free `native_time_N` instead of dropping or renaming the label.
             let value_names = expression_field_names(&expression, &values);
-            let time_index = if value_names
-                .iter()
-                .chain(&output_tags)
-                .any(|name| name == DEFAULT_TIME_INDEX_COLUMN)
-            {
-                (0usize..)
-                    .map(|index| format!("native_time_{index}"))
-                    .find(|candidate| {
-                        !value_names
-                            .iter()
-                            .chain(&output_tags)
-                            .any(|name| name == candidate)
-                    })
-                    .expect("the time column candidate sequence is unbounded")
-            } else {
-                DEFAULT_TIME_INDEX_COLUMN.to_string()
-            };
+            let time_index = free_time_index(DEFAULT_TIME_INDEX_COLUMN, &value_names, &output_tags);
             // The metadata a consumer of a frame operand reads: the evaluated layout this tree's
             // root declares on the statement grid, and the labels a `vector(s)` reports.
             let metadata = match format {
@@ -909,11 +888,9 @@ impl PromPlanner {
                         //
                         // An empty raw series frame is an ordinary input to the node; multi-input placement
                         // and partition normalization are decided after compilation. A `__field__` matcher
-                        // is declined for a scan this route can read, and the same refusal keeps the empty
-                        // input from claiming a field layout the matcher would have decided.
-                        if self.ctx.field_column_matcher.is_some() {
-                            return Ok(None);
-                        }
+                        // narrows the field set of a scan this route can read, and a selector that matched
+                        // no table has no scan to narrow: the answer is the empty vector either way, exactly
+                        // as the named branch below answers a missing table.
                         prepared.push(empty_discovered_input(
                             self.ctx
                                 .time_index_column
@@ -1047,7 +1024,25 @@ impl PromPlanner {
                         Err(_) => return Ok(None),
                     };
                 if self.setup_context().await?.is_some() {
-                    return Ok(None);
+                    // The selector names a metric whose table does not exist, so the query still has an
+                    // answer: the empty vector, planned from the same typed empty input a nameless selector
+                    // that matched no table is. Planning it here keeps `TableNameNotFound` out of the
+                    // existing planner, which has no table to bind.
+                    //
+                    // A `__field__` matcher does not decline here, though one over a scan this route can
+                    // read does: it narrows the field set of the table its selector reads, and this table has
+                    // no field set to narrow, so every field selection over it is empty. The existing planner
+                    // answers the same way, because a missing table is planned as `EmptyMetric` before the
+                    // projection a `__field__` matcher builds (`setup_context` returns it, and
+                    // `selector_to_series_normalize_plan` never runs). The empty input's own placeholder
+                    // field is internal to the tree; no answer publishes it.
+                    prepared.push(empty_discovered_input(
+                        self.ctx
+                            .time_index_column
+                            .clone()
+                            .unwrap_or_else(|| DEFAULT_TIME_INDEX_COLUMN.to_string()),
+                    )?);
+                    continue;
                 }
                 let Some(one) = self
                     .prepare_one_scan(
@@ -1130,6 +1125,9 @@ impl PromPlanner {
             prepared[index].1 = Arc::clone(&schema);
         }
         // A real input names the output's time index and, on one table, binds every scan.
+        let named_by_a_real_input = prepared
+            .iter()
+            .any(|(scan, ..)| !is_empty_discovered_input(scan));
         let Some((_, _, metric, time, tags, _, _)) = prepared
             .iter()
             .find(|(scan, ..)| !is_empty_discovered_input(scan))
@@ -1612,6 +1610,43 @@ impl PromPlanner {
                 return Ok(None);
             }
         }
+        // The tags are asked for before the fields, because the walk answers for a tree the
+        // compiler produced: a scalar root has no labels at all, and a sample root's are the ones
+        // the walk derives. If it cannot derive them, this route declines.
+        let output_tags = match &tree.root().output {
+            // A scalar has no labels, and its value is named as a bare literal's is.
+            NativeType::Scalar(_) => Vec::new(),
+            NativeType::Samples(_) => match fused_output_tags(tree.root(), &source_tags) {
+                Some(output_tags) => with_row_name_column(tree.root(), output_tags),
+                None => return Ok(None),
+            },
+            NativeType::AggregateState(_) => return Ok(None),
+        };
+        let Some(root_fields) = native_root_fields(tree.root()) else {
+            return Ok(None);
+        };
+        // A statement whose every input matched no table has no column of its own to name its grid
+        // after: the empty input carries the synthetic `time` column the existing planner names an
+        // empty metric's grid with (`setup_context_for_empty_metric`), and nothing supersedes it. A
+        // statement named after that column - the metric `time` - would then publish its value and
+        // its grid under one name, so the grid takes the first free `native_time_N`, exactly as the
+        // data-free route above resolves the same collision. A value named after the row-name column
+        // is not a collision this route can name its way out of: the name column is the series'
+        // identity rather than a label of its own, so that statement keeps the existing plan, which
+        // answers the empty vector for a table it has none of.
+        let time = if named_by_a_real_input {
+            time
+        } else {
+            let value_names = expression_field_names(&expression, &root_fields);
+            if value_names
+                .iter()
+                .any(|name| output_tags.iter().any(|tag| tag == name))
+            {
+                return Ok(None);
+            }
+            free_time_index(&time, &value_names, &output_tags)
+        };
+
         // A segment of a plan split over regions keeps the raw source as its input rather than a
         // bare scan: the segment's prefixes run on the frontend above the regions, so the raw series
         // source is what each of them reads.
@@ -1657,21 +1692,6 @@ impl PromPlanner {
                 return Ok(None);
             }
         }
-        // The tags are asked for before the fields, because the walk answers for a tree the
-        // compiler produced: a scalar root has no labels at all, and a sample root's are the ones
-        // the walk derives. If it cannot derive them, this route declines.
-        let output_tags = match &tree.root().output {
-            // A scalar has no labels, and its value is named as a bare literal's is.
-            NativeType::Scalar(_) => Vec::new(),
-            NativeType::Samples(_) => match fused_output_tags(tree.root(), &source_tags) {
-                Some(output_tags) => with_row_name_column(tree.root(), output_tags),
-                None => return Ok(None),
-            },
-            NativeType::AggregateState(_) => return Ok(None),
-        };
-        let Some(root_fields) = native_root_fields(tree.root()) else {
-            return Ok(None);
-        };
         let output_schema = match format {
             FusedOutputFormat::PlainRows => {
                 fused_output_schema(&expression, &root_fields, &output_tags, &time, root_kind)?
@@ -1924,6 +1944,29 @@ fn expression_field_names(expression: &str, fields: &[String]) -> Vec<String> {
             }
         })
         .collect()
+}
+
+/// The column a rows layout publishes its grid under, moved off any column it would collide with.
+///
+/// A label or value named `time` is the one collision the default time column can have: the value
+/// columns are named after the expression and the tags are the labels a series reports, so nothing
+/// but the grid itself is renamed. The time column is this route's own synthetic name, so a layout
+/// that already holds one publishes its grid under the first free `native_time_N` instead of
+/// dropping or renaming the column it collides with.
+///
+/// Two callers ask this: a data-free tree, whose grid is the only column it could collide with, and
+/// a statement whose every input matched no table, whose grid is named after the synthetic column
+/// the existing planner names an empty metric after (`setup_context_for_empty_metric`). A statement
+/// that reads a table keeps that table's own time column, which is the name its scan declares.
+fn free_time_index(time_index: &str, value_names: &[String], tags: &[String]) -> String {
+    let taken = |candidate: &str| value_names.iter().chain(tags).any(|name| name == candidate);
+    if !taken(time_index) {
+        return time_index.to_string();
+    }
+    (0usize..)
+        .map(|index| format!("native_time_{index}"))
+        .find(|candidate| !taken(candidate))
+        .expect("the time column candidate sequence is unbounded")
 }
 
 /// The columns a [`FusedSeries`] node produces: its time index, one column per value, then its tags.
