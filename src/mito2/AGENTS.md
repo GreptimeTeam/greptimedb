@@ -155,7 +155,9 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   it until the worker swaps in an instance reloaded from the new manifest
   (`worker/handle_reload.rs`). A tail replay round that fails while the storage holds a newer
   manifest fences a writable leader the same way. Never await a worker sender while holding a
-  manifest guard.
+  manifest guard. The catchup commit (`ManifestContext::commit_catchup`) is the exception: it
+  commits as a Follower without the deadline check, and a conflict fails the catchup retryably
+  without fencing the region; a retry reopens it from the newer manifest.
 - Pending tails (`RegionManifest::pending_tails`) are WAL ranges a region still has
   to recover; the flushed entry id never prunes them. Opening a region replays its
   WAL after `RegionManifest::wal_replay_start`. The WAL releases at open, after
@@ -234,15 +236,18 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   `ManifestContext::update_locked` refuses its commits unless they are staged or the region is
   downgrading (a close that must flush downgrades first); only a replay of tails
   (`TailsEditor::Replay`) skips the check, a discard does not, and ending staging checks it
-  before `commit_staged_locked`. No flush or compaction trigger starts work for a waiting region except
-  a downgrade's flush. The lease that ends the wait wakes the worker
+  before `commit_staged_locked`. `ManifestContext::commit_catchup` commits an empty edit as a
+  Follower; fire its hook only after every manifest guard is dropped, including the old instance's
+  read guard held by `handle_caught_up_again`. No flush or compaction trigger starts work for a
+  waiting region except a downgrade's flush. The lease that ends the wait wakes the worker
   (`handle_leader_lease_wait_ended`) to schedule the flushes the wait deferred and, only if the
   region is then a writable leader, start a compaction, build missing indexes, re-issue the
   index build retries the wait refused and persist backfilled metadata. A catchup of a waiting
   region catches it up again into an unregistered replacement while the region stays registered,
-  demoted unless it is in a transient leader state. The replacement replaces it only if the replay
-  succeeds and the region took no write and made no commit meanwhile; otherwise the region keeps
-  its memtable for the next Leader lease (`catch_up_again`, `handle_caught_up_again`); the datanode
+  demoted unless it is in a transient leader state. The replacement replaces it only if the
+  replay succeeds, the region took no write and made no commit meanwhile and, for a catchup that
+  makes it writable, the replacement's catchup commit succeeds; otherwise the region keeps its
+  memtable for the next Leader lease (`catch_up_again`, `handle_caught_up_again`); the datanode
   upgrade handler sends that catchup unless `RegionEngine::is_confirmed_leader` is true, so an
   engine wrapping mito must implement that method from mito's answers (the metric engine requires
   both regions of the pair). A Follower lease that carries a `candidate_lease_id` leaves a waiting

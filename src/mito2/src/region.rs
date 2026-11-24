@@ -59,12 +59,12 @@ use crate::engine::region_hook::{PendingManifestHook, RegionHookRef};
 use crate::error::{
     EndStagingSnafu, Error, FlushableRegionStateSnafu, InvalidPartitionExprSnafu,
     InvalidRequestSnafu, RegionBusySnafu, RegionLeaseExpiredSnafu, RegionLeaseNotReceivedSnafu,
-    RegionNotFoundSnafu, RegionStateSnafu, RegionTruncatedSnafu, Result, UnexpectedSnafu,
-    UpdateManifestSnafu,
+    RegionNotFoundSnafu, RegionStateSnafu, RegionStoppedSnafu, RegionTruncatedSnafu, Result,
+    UnexpectedSnafu, UpdateManifestSnafu,
 };
 use crate::lease::{Deadline, NodeLease, lease_nanos};
 use crate::manifest::action::{
-    PendingTail, RegionChange, RegionManifest, RegionMetaAction, RegionMetaActionList,
+    PendingTail, RegionChange, RegionEdit, RegionManifest, RegionMetaAction, RegionMetaActionList,
 };
 use crate::manifest::manager::RegionManifestManager;
 use crate::metrics::manifest_size::RegionManifestSizeMetric;
@@ -768,7 +768,7 @@ impl MitoRegion {
         };
 
         // The checkpoint task is taken under the lock after the state change, so every commit
-        // that could start a checkpoint has registered it: a follower takes no commit, and a
+        // that could start a checkpoint has registered it: a follower's commit starts none, and a
         // commit of a downgrading leader starts no checkpoint. The wait holds no lock, so the
         // worker and other users of the manifest are not blocked while the checkpoint finishes.
         if wait_for_checkpoint {
@@ -1928,6 +1928,54 @@ impl ManifestContext {
         Ok(TailPublication::Committed(result?))
     }
 
+    /// Commits the empty edit a catchup makes before the region becomes writable, as the version
+    /// after the manifest the region holds when it commits. A writer that committed other content
+    /// at that version conflicts with it. Two catchups that start from the same manifest version
+    /// commit the same content, so they are not told apart. Only a manifest published
+    /// conditionally detects a conflict, so without conditional publication it commits nothing.
+    ///
+    /// The region commits as a Follower, which needs no valid Leader deadline, so the commit
+    /// skips the deadline check. Like a commit of a region that awaits its Leader lease, it
+    /// starts no checkpoint and applies only if no checkpoint covers its version. A conflict
+    /// leaves the region and its manifest manager as they are: the next catchup reopens the
+    /// region from the newer manifest. A stopped region commits nothing.
+    ///
+    /// Returns the receipt of the manifest hook, which the caller fires once it holds no manifest
+    /// lock, or None if it committed nothing.
+    pub(crate) async fn commit_catchup(&self) -> Result<Option<PendingManifestHook>> {
+        let mut manager = self.manifest_manager.write().await;
+        if !manager.is_conditional_publication() {
+            return Ok(None);
+        }
+        let region_id = manager.manifest().metadata.region_id;
+        let state = self.state.load();
+        ensure!(
+            state == RegionRoleState::Follower,
+            RegionStateSnafu {
+                region_id,
+                state,
+                expect: RegionRoleState::Follower,
+            }
+        );
+        ensure!(!self.is_reload_pending(), RegionBusySnafu { region_id });
+        // A stop marks the region before it waits for this lock to stop the manager.
+        ensure!(!self.is_stopped(), RegionStoppedSnafu { region_id });
+        let action_list =
+            RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit::default()));
+        let action_list_for_hook = self.hook.as_ref().map(|_| action_list.clone());
+        let version = manager
+            .update_with_verification(action_list, false, false, || true)
+            .await?;
+        let pending = PendingManifestHook::new(
+            region_id,
+            action_list_for_hook,
+            version,
+            self.hook.clone(),
+            false,
+        );
+        Ok(Some(pending))
+    }
+
     /// Performs a manifest write under a caller-held write lock and returns a
     /// [`PendingManifestHook`] to [`fire`](PendingManifestHook::fire) after
     /// dropping the lock. It is the checked entry of the shared write
@@ -2329,6 +2377,12 @@ impl ManifestContext {
             .extend(Instant::now() + Duration::from_secs(60));
         assert!(self.promote_after_catchup(region_id));
         assert!(self.awaits_leader_lease());
+    }
+
+    /// Marks the region stopped as [MitoRegion::stop] does before it stops the manifest manager.
+    #[cfg(test)]
+    pub(crate) fn mark_stopped_for_test(&self) {
+        self.promotion_fence.lock().unwrap().stopped = true;
     }
 
     /// Promotes the region unless it waits for a reload or was stopped. The caller holds the fence

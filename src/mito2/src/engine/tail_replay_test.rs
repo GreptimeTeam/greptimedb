@@ -395,8 +395,15 @@ impl TestRegion {
     }
 
     async fn catchup(&self) {
+        self.catchup_with_entry_id(None).await;
+    }
+
+    /// Makes the region writable through a catchup that carries `entry_id` as the last entry id
+    /// its source reported.
+    async fn catchup_with_entry_id(&self, entry_id: Option<EntryId>) {
         let catchup = RegionRequest::Catchup(RegionCatchupRequest {
             set_writable: true,
+            entry_id,
             ..Default::default()
         });
         self.engine
@@ -496,9 +503,10 @@ impl TestRegion {
     }
 
     /// Flushes this node's rows, records a listed tail of [REMOTE_NODE_ID] whose bound lies
-    /// above every entry of both nodes, loses that node's WAL and makes the region writable, so
-    /// the replay keeps failing. Returns the bound.
-    async fn start_lost_listed_tail(&self) -> EntryId {
+    /// above every entry of both nodes, loses that node's WAL and makes the region writable
+    /// through a catchup that carries `reported_entry_id`, so the replay keeps failing. Returns
+    /// the bound.
+    async fn start_lost_listed_tail(&self, reported_entry_id: Option<EntryId>) -> EntryId {
         // Rows of the region stay readable after a reopen from a flushed entry id at the bound.
         flush_region(&self.engine, self.region_id, None).await;
         self.write_remote_rows(self.region_id, 6, 9).await;
@@ -508,7 +516,7 @@ impl TestRegion {
         self.reopen_with_tails(vec![remote_tail(0, upto, UptoKind::Listed)])
             .await;
         self.delete_remote_objects().await;
-        self.catchup().await;
+        self.catchup_with_entry_id(reported_entry_id).await;
         wait_until(|| self.listener.failed()).await;
         upto
     }
@@ -2378,7 +2386,7 @@ async fn test_discard_awaiting_leader_lease_succeeds_after_it() {
 #[tokio::test]
 async fn test_discard_listed_tail_raises_flushed_entry_id_to_its_bound() {
     let region = TestRegion::new("tail-discard-listed", false, None).await;
-    let upto = region.start_lost_listed_tail().await;
+    let upto = region.start_lost_listed_tail(None).await;
 
     assert_eq!(
         1,
@@ -2723,17 +2731,19 @@ async fn test_conditional_discard_over_uncertain_replay_reloads_region() {
 /// A discard raises the flushed entry id to a listed tail's bound. After a crash, the
 /// object-store WAL, which by default does not accept missing history, checks history, so the
 /// region opens only if this node's WAL durably holds history through the bound, as whoever
-/// records the tail ensures.
+/// records the tail ensures: a later write past the bound, or a catchup that carries the last
+/// entry id the source reported and so hands the region over to this node's WAL.
 #[rstest]
-#[case::history_past_bound(true)]
-#[case::history_below_bound(false)]
+#[case::history_past_bound(BoundHistory::Written)]
+#[case::history_below_bound(BoundHistory::Below)]
+#[case::history_handed_over_past_bound(BoundHistory::HandedOver)]
 #[tokio::test]
-async fn test_discard_reopens_after_crash_with_history_past_bound(
-    #[case] history_past_bound: bool,
-) {
+async fn test_discard_reopens_after_crash_with_history_past_bound(#[case] history: BoundHistory) {
     let region = TestRegion::new("tail-discard-crash", false, None).await;
-    let upto = region.start_lost_listed_tail().await;
-    if history_past_bound {
+    let reported_entry_id =
+        (history == BoundHistory::HandedOver).then(|| region.version().flushed_entry_id);
+    let upto = region.start_lost_listed_tail(reported_entry_id).await;
+    if history == BoundHistory::Written {
         // Moves this node's next entry id past the bound and makes an entry there durable.
         let provider = region
             .engine
@@ -2756,12 +2766,20 @@ async fn test_discard_reopens_after_crash_with_history_past_bound(
 
     let opened = region.crash_and_open().await;
 
-    if history_past_bound {
-        opened.unwrap();
-    } else {
+    if history == BoundHistory::Below {
         let error = format!("{:?}", opened.unwrap_err());
         assert!(error.contains("does not hold the history"), "{error}");
+    } else {
+        opened.unwrap();
     }
+}
+
+/// How this node's WAL comes to hold history past a tail's bound before the tail is discarded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BoundHistory {
+    Below,
+    Written,
+    HandedOver,
 }
 
 #[tokio::test]

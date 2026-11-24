@@ -40,7 +40,7 @@ use store_api::storage::RegionId;
 use tokio::sync::watch;
 
 use crate::error::{
-    BuildEntrySnafu, CheckWalHistorySnafu, DeleteWalSnafu, ReadNodeWalSnafu,
+    BuildEntrySnafu, CheckWalHistorySnafu, DeleteWalSnafu, HandoffWalSnafu, ReadNodeWalSnafu,
     RemoteWalUnsupportedSnafu, ResolveWalProviderSnafu, Result, WaitWalDurableSnafu, WriteWalSnafu,
 };
 use crate::wal::entry_reader::{LogStoreEntryReader, WalEntryReader, decode_raw_entry};
@@ -219,6 +219,24 @@ impl<S: LogStore> Wal<S> {
             .await
             .map_err(BoxedError::new)
             .context(CheckWalHistorySnafu { region_id })
+    }
+
+    /// Hands the region over to the log store before it becomes writable on
+    /// this node and returns the bound, see [LogStore::handoff].
+    pub(crate) async fn handoff(
+        &self,
+        region_id: RegionId,
+        provider: &Provider,
+        entry_id: EntryId,
+    ) -> Result<EntryId> {
+        if let Provider::Noop = provider {
+            return Ok(entry_id);
+        }
+        self.store
+            .handoff(provider, entry_id)
+            .await
+            .map_err(BoxedError::new)
+            .context(HandoffWalSnafu { region_id })
     }
 
     /// Records that the WAL history of the region starts in the log store,
