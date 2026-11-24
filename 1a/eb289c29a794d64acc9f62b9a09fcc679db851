@@ -1,0 +1,19 @@
+src/common/meta/src/kv_backend/rds/mysql.rs
+  s_a0c2d0c6dc573d::t_0ebe5b5d1b75fc 44-45,371,373-382,384-385,781,808-816,928
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1aeb289c29a794d64acc9f62b9a09fcc679db851",
+  "prompts": {},
+  "sessions": {
+    "s_a0c2d0c6dc573d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a20b9d-b770-7281-8e87-0cf727e380a3",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
