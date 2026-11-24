@@ -41,11 +41,21 @@ pub(crate) struct InstrumentedStore {
     write_buffer: IndexWriteBuffer,
 }
 
+/// Upload policy of the Puffin index writer opened by [`InstrumentedStore::writer`].
+///
+/// Each variant selects a different object-store writer, not only a buffer size.
 #[derive(Clone, Copy, Default)]
 pub(crate) enum IndexWriteBuffer {
+    /// Opens the store's default writer: no explicit chunk size or concurrency,
+    /// so the backend's own limits apply.
     #[default]
     Default,
+    /// Requests exact parts of the given size, clamped to the backend's limits,
+    /// with the store's default concurrency.
     Chunk(usize),
+    /// Requests parts sized by the given limits with one upload at a time, and
+    /// buffers writes through [`crate::sst::upload::buffered::writer`], which
+    /// assembles whole parts and rejects writes beyond the object size limit.
     #[cfg(feature = "enterprise")]
     Bounded(crate::sst::upload::buffered::UploadLimits),
 }
@@ -239,8 +249,14 @@ impl<R: AsyncSeek + Unpin + Send> AsyncSeek for InstrumentedAsyncRead<'_, R> {
     }
 }
 
+/// The [`AsyncWrite`] sink of a Puffin index file.
+///
+/// The bounded side is boxed because [`crate::sst::upload::buffered::writer`]
+/// returns an opaque `impl AsyncWrite`, which keeps that private adapter out of
+/// this alias; the plain side stays concrete.
 #[cfg(feature = "enterprise")]
 pub type IndexObjectWriter = Either<FuturesAsyncWriter, Box<dyn AsyncWrite + Send + Sync + Unpin>>;
+/// The [`AsyncWrite`] sink of a Puffin index file.
 #[cfg(not(feature = "enterprise"))]
 pub type IndexObjectWriter = FuturesAsyncWriter;
 
