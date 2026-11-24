@@ -20,7 +20,7 @@ use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::region_keeper::{MemoryRegionKeeperRef, OperatingRegion};
 use common_meta::rpc::router::RegionRoute;
-use common_telemetry::{info, warn};
+use common_telemetry::{debug, info, warn};
 use snafu::ResultExt;
 use store_api::region_engine::{GrantedRegion, RegionRole};
 use store_api::storage::{RegionId, TableId};
@@ -96,7 +96,14 @@ fn renew_region_lease_via_operating_regions(
         if table_route_exists {
             region_lease_info.candidate_lease_id = operating_region.candidate_lease_id;
         }
-        if role != reported_role {
+        // A candidate lease id with a reported Leader means a migration target that a catchup
+        // promoted before the route switch, which is expected until the switch.
+        if region_lease_info.candidate_lease_id.is_some() && reported_role == RegionRole::Leader {
+            debug!(
+                "The candidate region {} on datanode {} is operating with role {:?}, but reported as {:?}",
+                region_id, datanode_id, role, reported_role
+            );
+        } else if role != reported_role {
             info!(
                 "The region {} on datanode {} is operating with role {:?}, but reported as {:?}",
                 region_id, datanode_id, role, reported_role
