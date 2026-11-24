@@ -111,13 +111,13 @@ impl MemoryLimits {
             extra_delta = extra_delta.max(extra_delta_encoder_bytes(target)?);
         }
         self.writer.working_bytes = self.writer.working_bytes.saturating_add(extra_delta);
-        let bytes = self.compute_bytes(plan, config, footers)?;
+        let estimate = self.estimate_compute_bytes(plan, config, footers)?;
         let upload = self.writer.upload_limits;
         ensure!(
-            bytes <= self.compute_budget as u64,
+            estimate <= self.compute_budget as u64,
             MultiRegionCompactionResourceSnafu {
                 reason: format!(
-                    "Reader/writer/index minimum working set needs {bytes} bytes, compute budget is {} ({} bytes reserved for {}-byte upload chunks out of {} total)",
+                    "Reader/writer/index minimum working set needs {estimate} bytes, compute budget is {} ({} bytes reserved for {}-byte upload chunks out of {} total)",
                     self.compute_budget,
                     self.upload_reserved_bytes,
                     upload.chunk_bytes,
@@ -128,7 +128,7 @@ impl MemoryLimits {
         // Optional indexes must not turn an admitted data compaction into a
         // resource failure. Reserve all resident target states together or skip.
         let admission =
-            admit_extension_indexes(bytes, self.compute_budget, self.index, extension_targets);
+            admit_extension_indexes(estimate, self.compute_budget, self.index, extension_targets);
         self.extension_index_memory_limit = admission.limit;
         self.estimated = admission.estimated + self.upload_reserved_bytes as u64;
         common_telemetry::debug!(
@@ -144,7 +144,8 @@ impl MemoryLimits {
         Ok(())
     }
 
-    fn compute_bytes(
+    /// Estimates the compute working set to compare against the compute budget.
+    fn estimate_compute_bytes(
         &self,
         plan: &MultiRegionCompactionPlan,
         config: &MitoConfig,
