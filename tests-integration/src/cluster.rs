@@ -1099,15 +1099,7 @@ mod tests {
 
         let builder = GreptimeDbClusterBuilder::new("corrupt_checkpoint_recovery")
             .await
-            .with_datanodes(1)
-            .with_datanode_gc_config(GcConfig {
-                enable: true,
-                ..Default::default()
-            })
-            .with_metasrv_gc_config(GcSchedulerOptions {
-                enable: true,
-                ..Default::default()
-            });
+            .with_datanodes(1);
         let kv = builder.kv_backend.clone();
         let store = KvStateStore::new(kv.clone()).with_max_value_size(Some(32));
         let replayed_id = ProcedureId::random();

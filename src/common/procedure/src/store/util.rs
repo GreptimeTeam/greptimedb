@@ -29,10 +29,7 @@ struct CollectingState {
 impl CollectingState {
     fn new(key: String, value: Vec<u8>) -> Self {
         // A surviving suffix may be the first key in a damaged checkpoint.
-        let base = key
-            .rsplit_once('/')
-            .map(|(parent, _)| parent)
-            .filter(|parent| super::ParsedKey::parse_str("", parent).is_some())
+        let base = super::ParsedKey::checkpoint_base_of_segment(&key)
             .unwrap_or(&key)
             .to_owned();
         Self {

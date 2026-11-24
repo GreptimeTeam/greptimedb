@@ -72,9 +72,6 @@ pub struct ProcedureMessages {
     pub rollback_messages: HashMap<ProcedureId, ProcedureMessage>,
     /// A list of finished procedures' ids
     pub finished_ids: Vec<ProcedureId>,
-    /// Procedures with surviving keys but no usable checkpoint.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub unreadable_ids: Vec<ProcedureId>,
 }
 
 /// Procedure storage layer.
@@ -296,7 +293,6 @@ impl ProcedureStore {
             if let Some(bad) = bad.filter(|bad| (bad.step, bad.key_type) > (step, kind)) {
                 let Some(next) = bad.step.checked_add(1) else {
                     error!("Cannot allocate a checkpoint after {bad}, skipping procedure {id}");
-                    damaged.insert(id, bad);
                     continue;
                 };
                 warn!(
@@ -306,6 +302,9 @@ impl ProcedureStore {
                 // must advance past every damaged checkpoint.
                 message.step = next;
             }
+            // Replay the last readable state. An incomplete rollback write cannot
+            // authorize compensation: the runner persists it before calling rollback().
+            // Re-executing an earlier forward step relies on Procedure::execute being idempotent.
             match kind {
                 KeyType::Step => {
                     messages.insert(id, message);
@@ -316,12 +315,10 @@ impl ProcedureStore {
                 KeyType::Commit => unreachable!(),
             }
         }
-        let unreadable_ids = damaged.into_keys().collect();
         Ok(ProcedureMessages {
             messages,
             rollback_messages,
             finished_ids,
-            unreadable_ids,
         })
     }
 }
@@ -376,6 +373,12 @@ impl fmt::Display for ParsedKey<'_> {
 }
 
 impl<'a> ParsedKey<'a> {
+    /// Recognizes a segment's checkpoint parent without knowing the store's root prefix.
+    fn checkpoint_base_of_segment(key: &str) -> Option<&str> {
+        let (parent, _) = key.rsplit_once('/')?;
+        ParsedKey::parse_str("", parent).map(|_| parent)
+    }
+
     /// Try to parse the key from specific `input`.
     fn parse_str(prefix: &'a str, input: &str) -> Option<ParsedKey<'a>> {
         let input = input.strip_prefix(prefix)?;
@@ -633,7 +636,6 @@ mod tests {
             messages,
             rollback_messages,
             finished_ids,
-            ..
         } = store.load_messages().await.unwrap();
         assert_eq!(1, messages.len());
         assert!(rollback_messages.is_empty());
@@ -670,7 +672,6 @@ mod tests {
             messages,
             rollback_messages,
             finished_ids,
-            ..
         } = store.load_messages().await.unwrap();
         assert!(messages.is_empty());
         assert!(rollback_messages.is_empty());
@@ -708,7 +709,6 @@ mod tests {
             messages,
             rollback_messages,
             finished_ids,
-            ..
         } = store.load_messages().await.unwrap();
         assert!(messages.is_empty());
         assert_eq!(1, rollback_messages.len());
@@ -742,7 +742,6 @@ mod tests {
             messages,
             rollback_messages,
             finished_ids,
-            ..
         } = store.load_messages().await.unwrap();
         assert!(messages.is_empty());
         assert!(rollback_messages.is_empty());
@@ -778,7 +777,6 @@ mod tests {
             messages,
             rollback_messages,
             finished_ids,
-            ..
         } = store.load_messages().await.unwrap();
         assert!(messages.is_empty());
         assert!(rollback_messages.is_empty());
@@ -899,7 +897,6 @@ mod tests {
             messages,
             rollback_messages,
             finished_ids,
-            ..
         } = store.load_messages().await.unwrap();
         assert_eq!(2, messages.len());
         assert!(rollback_messages.is_empty());

@@ -738,8 +738,6 @@ pub trait ProcedureManager: Send + Sync + 'static {
     /// Returns whether persisted unfinished procedures contain any requested type.
     ///
     /// This inspects durable state without submitting procedures for execution.
-    /// If no known type matches and some procedures have no readable checkpoint,
-    /// returns [Error::UnknownProcedureTypes].
     async fn has_unfinished_procedure(&self, type_names: &[&str]) -> Result<bool>;
 }
 

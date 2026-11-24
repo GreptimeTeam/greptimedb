@@ -219,9 +219,6 @@ pub enum Error {
         reason: String,
     },
 
-    #[snafu(display("Unknown procedure type for unreadable checkpoints: {ids:?}"))]
-    UnknownProcedureTypes { ids: Vec<ProcedureId> },
-
     #[snafu(display("Failed to parse segment key: {key}"))]
     ParseSegmentKey {
         #[snafu(implicit)]
@@ -293,7 +290,6 @@ impl ErrorExt for Error {
             }
             Error::ProcedurePanic { .. }
             | Error::CorruptCheckpoint { .. }
-            | Error::UnknownProcedureTypes { .. }
             | Error::ParseSegmentKey { .. }
             | Error::Unexpected { .. }
             | &Error::ProcedureNotFound { .. }
