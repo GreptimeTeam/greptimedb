@@ -1594,3 +1594,481 @@ async fn test_apply_staging_manifest_retries_failed_commit(#[case] landed: bool)
         reopened.metadata.partition_expr
     );
 }
+/// A staging manifest is supplied by the request, so every entry it installs is
+/// checked against the target partition expression the request names.
+///
+/// A remap conjoins that expression into every entry it produces, so an entry
+/// without a range, or one that reaches outside the target, did not come from a
+/// remap and must not be installed. The ordinary-edit guard never sees a whole
+/// manifest installed through this path.
+#[tokio::test]
+async fn test_apply_staging_manifest_refuses_entries_outside_the_target() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("apply-entries-outside-target").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let source_region_id = RegionId::new(1, 1);
+    let target_region_id = RegionId::new(1, 2);
+    let narrow = range_expr("tag_0", 0, 50);
+    let narrow_json = narrow.as_json_str().unwrap();
+
+    let request = CreateRequestBuilder::new().build();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(source_region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        source_region_id,
+        Rows {
+            schema: schema.clone(),
+            rows: build_rows(0, 10),
+        },
+    )
+    .await;
+    engine
+        .handle_request(
+            source_region_id,
+            RegionRequest::Flush(RegionFlushRequest::default()),
+        )
+        .await
+        .unwrap();
+
+    engine
+        .set_region_role_state_gracefully(source_region_id, SettableRegionRoleState::StagingLeader)
+        .await
+        .unwrap();
+    let remapped = engine
+        .remap_manifests(RemapManifestsRequest {
+            region_id: source_region_id,
+            input_regions: vec![source_region_id],
+            region_mapping: [(source_region_id, vec![target_region_id])]
+                .into_iter()
+                .collect(),
+            new_partition_exprs: [(target_region_id, narrow_json.clone())]
+                .into_iter()
+                .collect(),
+        })
+        .await
+        .unwrap();
+    let manifest_path = remapped.manifest_paths[&target_region_id].clone();
+
+    // Keep the staged bytes so the manifest can be replayed with a forged entry.
+    let region = engine.get_region(source_region_id).unwrap();
+    let manager = region.manifest_ctx.manifest_manager.write().await;
+    let manifest_storage = manager.store();
+    let blob_store = manifest_storage.staging_storage().blob_storage().clone();
+    let staged_bytes = blob_store.get(&manifest_path).await.unwrap();
+    drop(manager);
+    let staged = serde_json::from_slice::<RegionManifest>(&staged_bytes).unwrap();
+    let file_id = *staged.files.keys().next().expect("the remap names a file");
+
+    /// Rewrites the staged manifest of `region_id` in place.
+    async fn forge(
+        engine: &crate::engine::MitoEngine,
+        region_id: RegionId,
+        manifest_path: &str,
+        mutate: impl FnOnce(&mut RegionManifest),
+    ) {
+        let region = engine.get_region(region_id).unwrap();
+        let manager = region.manifest_ctx.manifest_manager.write().await;
+        let manifest_storage = manager.store();
+        let blob_store = manifest_storage.staging_storage().blob_storage();
+        let bytes = blob_store.get(manifest_path).await.unwrap();
+        let mut manifest = serde_json::from_slice::<RegionManifest>(&bytes).unwrap();
+        mutate(&mut manifest);
+        blob_store
+            .put(manifest_path, serde_json::to_vec(&manifest).unwrap())
+            .await
+            .unwrap();
+    }
+
+    engine
+        .handle_request(target_region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    engine
+        .handle_request(
+            target_region_id,
+            RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                    narrow_json.clone(),
+                ),
+            }),
+        )
+        .await
+        .unwrap();
+    engine
+        .handle_request(
+            target_region_id,
+            RegionRequest::ApplyStagingManifest(ApplyStagingManifestRequest {
+                partition_expr: narrow_json.clone(),
+                central_region_id: source_region_id,
+                manifest_path: manifest_path.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+    let held = engine
+        .get_region(target_region_id)
+        .unwrap()
+        .manifest_ctx
+        .manifest()
+        .await;
+    assert_eq!(Some(&narrow), held.files[&file_id].owned_range.as_deref());
+
+    // Second round: the same manifest, but the entry claims every physical row.
+    engine
+        .handle_request(
+            target_region_id,
+            RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                    narrow_json.clone(),
+                ),
+            }),
+        )
+        .await
+        .unwrap();
+    forge(&engine, source_region_id, &manifest_path, |manifest| {
+        let mut widened = (**manifest.files.get(&file_id).unwrap()).clone();
+        widened.owned_range = None;
+        manifest
+            .files
+            .insert(file_id, crate::sst::file::FileMetaRef::from(widened));
+    })
+    .await;
+    let err = engine
+        .handle_request(
+            target_region_id,
+            RegionRequest::ApplyStagingManifest(ApplyStagingManifestRequest {
+                partition_expr: narrow_json.clone(),
+                central_region_id: source_region_id,
+                manifest_path: manifest_path.clone(),
+            }),
+        )
+        .await
+        .unwrap_err();
+    let inner = err.into_inner();
+    let error = inner.as_any().downcast_ref::<Error>().unwrap();
+    let Error::InvalidRequest { reason, .. } = error else {
+        panic!("unexpected error: {error}");
+    };
+    assert!(reason.contains("without an owned range"), "{reason}");
+    assert!(reason.contains(&format!("{file_id:?}")), "{reason}");
+
+    // Third round: a range that reaches outside the target.
+    let outside = range_expr("tag_0", 0, 200);
+    forge(&engine, source_region_id, &manifest_path, |manifest| {
+        let mut wider = (**manifest.files.get(&file_id).unwrap()).clone();
+        wider.owned_range = Some(crate::sst::file::PartitionExprRef::from(outside.clone()));
+        manifest
+            .files
+            .insert(file_id, crate::sst::file::FileMetaRef::from(wider));
+    })
+    .await;
+    let err = engine
+        .handle_request(
+            target_region_id,
+            RegionRequest::ApplyStagingManifest(ApplyStagingManifestRequest {
+                partition_expr: narrow_json,
+                central_region_id: source_region_id,
+                manifest_path,
+            }),
+        )
+        .await
+        .unwrap_err();
+    let inner = err.into_inner();
+    let error = inner.as_any().downcast_ref::<Error>().unwrap();
+    let Error::InvalidRequest { reason, .. } = error else {
+        panic!("unexpected error: {error}");
+    };
+    assert!(reason.contains("does not imply the target"), "{reason}");
+    assert!(reason.contains(&format!("{file_id:?}")), "{reason}");
+
+    // The target keeps what the first (legitimate) install gave it.
+    let after = engine
+        .get_region(target_region_id)
+        .unwrap()
+        .manifest_ctx
+        .manifest()
+        .await;
+    assert_eq!(Some(&narrow), after.files[&file_id].owned_range.as_deref());
+    assert_eq!(held.files, after.files);
+}
+
+/// One shared reference, one instant, two spellings.
+///
+/// `t > TIME 1 second` and `t > TIME 1000 milliseconds` compare equal as
+/// `PartitionExpr`s but admit different rows, so a repartition may legitimately
+/// replace one with the other. Every placement of the reference - the live
+/// version, the manifest entry it persists and the engine metadata interner that
+/// shares it - must install the range the staging proof validated instead of
+/// keeping the previous one as "unchanged".
+#[cfg(feature = "enterprise")]
+#[tokio::test]
+async fn test_apply_staging_manifest_installs_a_respelled_owned_range() {
+    use common_time::Timestamp;
+
+    use crate::sst::file::{LEVEL_SHARED, PartitionExprRef};
+
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("apply-respelled-owned-range").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let source_region_id = RegionId::new(1, 1);
+    let target_region_id = RegionId::new(1, 2);
+    // The same predicate in two physical types.
+    let seconds = col("tag_0").gt(Value::Timestamp(Timestamp::new_second(1)));
+    let millis = col("tag_0").gt(Value::Timestamp(Timestamp::new_millisecond(1000)));
+    assert_eq!(
+        seconds, millis,
+        "the two spellings are equal as expressions, which is the trap"
+    );
+    let seconds_json = seconds.as_json_str().unwrap();
+    assert_ne!(
+        seconds_json,
+        millis.as_json_str().unwrap(),
+        "the two spellings are different physical predicates"
+    );
+    // The reference's range is the target expression plus a repeated conjunct, so
+    // the install guard can prove it implies the target however the repeat is
+    // spelled. Respelling the repeat is what the reuse decisions used to miss.
+    let held = seconds.clone().and(seconds.clone());
+    let respelled = seconds.clone().and(millis.clone());
+    assert_eq!(
+        held, respelled,
+        "the two ranges are equal as expressions, which is the trap"
+    );
+    let held_json = held.as_json_str().unwrap();
+    let respelled_json = respelled.as_json_str().unwrap();
+    assert_ne!(
+        held_json, respelled_json,
+        "the two ranges are different physical predicates"
+    );
+
+    let request = CreateRequestBuilder::new().build();
+    let table_dir = request.table_dir.clone();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(source_region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        source_region_id,
+        Rows {
+            schema,
+            rows: build_rows(0, 10),
+        },
+    )
+    .await;
+    engine
+        .handle_request(
+            source_region_id,
+            RegionRequest::Flush(RegionFlushRequest::default()),
+        )
+        .await
+        .unwrap();
+    engine
+        .handle_request(target_region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // The reference the target already holds: the same physical SST, admitted as
+    // a shared reference restricted to `held`.
+    let source_file = engine
+        .get_region(source_region_id)
+        .unwrap()
+        .manifest_ctx
+        .manifest()
+        .await
+        .files
+        .values()
+        .next()
+        .cloned()
+        .expect("the flush wrote one file");
+    let file_id = source_file.file_id;
+    let mut shared = (*source_file).clone();
+    shared.level = LEVEL_SHARED;
+    shared.owned_range = Some(PartitionExprRef::from(held.clone()));
+    engine
+        .edit_region(
+            target_region_id,
+            RegionEdit {
+                files_to_add: vec![shared],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    /// Serialized form of the reference's range, as the live version and as the
+    /// region's manifest describe it.
+    async fn installed_range(
+        engine: &crate::engine::MitoEngine,
+        region_id: RegionId,
+        file_id: FileId,
+    ) -> (Option<String>, Option<String>) {
+        let region = engine.get_region(region_id).unwrap();
+        let live = region
+            .version()
+            .ssts
+            .levels()
+            .iter()
+            .find_map(|level| level.files.get(&file_id))
+            .map(|handle| handle.meta_ref().owned_range_key())
+            .expect("the target holds the reference");
+        let manifest = region.manifest_ctx.manifest().await;
+        let held = manifest
+            .files
+            .get(&file_id)
+            .map(|meta| meta.owned_range_key())
+            .expect("the target manifest holds the reference");
+        (live, held)
+    }
+
+    /// One install round: restate the staged proof `manifest_path` as a shared
+    /// reference restricted to `owned_range` - the classification the target uses
+    /// for a foreign reference and the range this round validates - then install
+    /// it through the validated apply path.
+    ///
+    /// `request_expr` is the target partition expression the staged proof was
+    /// produced for, so it stays fixed across rounds; only the row authorization
+    /// of the entry moves.
+    async fn install(
+        engine: &crate::engine::MitoEngine,
+        source_region_id: RegionId,
+        target_region_id: RegionId,
+        manifest_path: &str,
+        request_expr: &str,
+        owned_range: &PartitionExpr,
+    ) {
+        let source_region = engine.get_region(source_region_id).unwrap();
+        let manager = source_region.manifest_ctx.manifest_manager.write().await;
+        let store = manager.store();
+        let blob_store = store.staging_storage().blob_storage();
+        let bytes = blob_store.get(manifest_path).await.unwrap();
+        let mut manifest = serde_json::from_slice::<RegionManifest>(&bytes).unwrap();
+        for meta in manifest.files.values_mut() {
+            let mut entry = (**meta).clone();
+            entry.level = LEVEL_SHARED;
+            entry.owned_range = Some(PartitionExprRef::from(owned_range.clone()));
+            *meta = crate::sst::file::FileMetaRef::from(entry);
+        }
+        blob_store
+            .put(manifest_path, serde_json::to_vec(&manifest).unwrap())
+            .await
+            .unwrap();
+        drop(manager);
+
+        engine
+            .handle_request(
+                target_region_id,
+                RegionRequest::EnterStaging(EnterStagingRequest {
+                    partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                        request_expr.to_string(),
+                    ),
+                }),
+            )
+            .await
+            .unwrap();
+        engine
+            .handle_request(
+                target_region_id,
+                RegionRequest::ApplyStagingManifest(ApplyStagingManifestRequest {
+                    partition_expr: request_expr.to_string(),
+                    central_region_id: source_region_id,
+                    manifest_path: manifest_path.to_string(),
+                }),
+            )
+            .await
+            .unwrap();
+    }
+
+    // One real repartition hands the file to the target and stages its manifest.
+    engine
+        .set_region_role_state_gracefully(source_region_id, SettableRegionRoleState::StagingLeader)
+        .await
+        .unwrap();
+    let remapped = engine
+        .remap_manifests(RemapManifestsRequest {
+            region_id: source_region_id,
+            input_regions: vec![source_region_id],
+            region_mapping: [(source_region_id, vec![target_region_id])]
+                .into_iter()
+                .collect(),
+            new_partition_exprs: [(target_region_id, seconds_json.clone())]
+                .into_iter()
+                .collect(),
+        })
+        .await
+        .unwrap();
+    let manifest_path = remapped.manifest_paths[&target_region_id].clone();
+
+    let held_key = Some(held_json.clone());
+    let respelled_key = Some(respelled_json.clone());
+    assert_eq!(
+        installed_range(&engine, target_region_id, file_id).await,
+        (held_key.clone(), held_key.clone())
+    );
+
+    // The staged proof is restated with the repeated conjunct spelled in
+    // milliseconds. It admits no row the target expression excludes, so the apply
+    // path validates it, and the reuse decisions must then install it.
+    install(
+        &engine,
+        source_region_id,
+        target_region_id,
+        &manifest_path,
+        &seconds_json,
+        &respelled,
+    )
+    .await;
+    assert_eq!(
+        installed_range(&engine, target_region_id, file_id).await,
+        (respelled_key.clone(), respelled_key.clone()),
+        "a validated re-authorization must replace the range, not reuse the old one"
+    );
+    reopen_region(
+        &engine,
+        target_region_id,
+        table_dir.clone(),
+        true,
+        Default::default(),
+    )
+    .await;
+    assert_eq!(
+        installed_range(&engine, target_region_id, file_id).await,
+        (respelled_key.clone(), respelled_key.clone()),
+        "a reopen must publish what the install published"
+    );
+
+    // The reverse direction must not be skipped either.
+    install(
+        &engine,
+        source_region_id,
+        target_region_id,
+        &manifest_path,
+        &seconds_json,
+        &held,
+    )
+    .await;
+    assert_eq!(
+        installed_range(&engine, target_region_id, file_id).await,
+        (held_key.clone(), held_key.clone())
+    );
+    reopen_region(
+        &engine,
+        target_region_id,
+        table_dir,
+        true,
+        Default::default(),
+    )
+    .await;
+    assert_eq!(
+        installed_range(&engine, target_region_id, file_id).await,
+        (held_key.clone(), held_key.clone()),
+        "a reopen must publish what the install published"
+    );
+}

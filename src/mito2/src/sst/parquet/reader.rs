@@ -220,6 +220,20 @@ pub struct ParquetReaderBuilder {
     enable_predicate_prefilter: bool,
     /// Whether to apply simple time index filters during the normal precise-filter pass.
     postpone_time_index_filter: bool,
+    /// Whether this reference's `owned_range` authorizes rows for the read.
+    ///
+    /// Physical scans that rebuild a file-wide artifact (the index) must see every
+    /// physical row, so they disable this. Query reads keep it.
+    enforce_owned_range: bool,
+    /// Whether the region's own partition predicate filters rows for the read.
+    ///
+    /// A reference that was repartitioned into a foreign destination carries that
+    /// destination's domain in `expected_metadata`, so the region predicate would
+    /// describe the destination instead of the file. Physical scans disable it for
+    /// the same reason they disable `owned_range`: an index records file-wide
+    /// offsets, so a filtered scan indexes fewer rows than the SST has. Query reads
+    /// keep it, because there the region predicate is exactly what routes the rows.
+    enforce_partition_filter: bool,
     /// Whether to decode primary key values eagerly when reading primary key format SSTs.
     decode_primary_key_values: bool,
     page_index_policy: PageIndexPolicy,
@@ -263,6 +277,8 @@ impl ParquetReaderBuilder {
             pre_filter_mode: PreFilterMode::All,
             enable_predicate_prefilter: true,
             postpone_time_index_filter: false,
+            enforce_owned_range: true,
+            enforce_partition_filter: true,
             decode_primary_key_values: false,
             page_index_policy: Default::default(),
             defer_optional_page_index: false,
@@ -376,6 +392,21 @@ impl ParquetReaderBuilder {
     #[must_use]
     pub(crate) fn postpone_time_index_filter(mut self, postpone: bool) -> Self {
         self.postpone_time_index_filter = postpone;
+        self
+    }
+
+    /// Reads the complete physical SST: every row the object holds.
+    ///
+    /// Both row filters of a reference are disabled. Index construction records
+    /// file-wide row offsets, so filtering rows out would renumber the later rows
+    /// and describe the physical file wrongly; and the region partition predicate
+    /// compares against the *current* region metadata, which a repartitioned
+    /// reference only shares partially, so it would index a slice of the file.
+    /// Query reads keep both filters.
+    #[must_use]
+    pub(crate) fn complete_physical_scan(mut self) -> Self {
+        self.enforce_owned_range = false;
+        self.enforce_partition_filter = false;
         self
     }
 
@@ -722,6 +753,9 @@ impl ParquetReaderBuilder {
         read_format: &FlatReadFormat,
         prune_schema: &Arc<datatypes::schema::Schema>,
     ) -> Result<Option<PartitionFilterContext>> {
+        if !self.enforce_partition_filter {
+            return Ok(None);
+        }
         let region_partition_expr_str = self
             .expected_metadata
             .as_ref()
@@ -738,7 +772,10 @@ impl ParquetReaderBuilder {
         } else {
             region_partition_expr
         };
-        if let Some(owned_range) = self.file_handle.meta_ref().owned_range.as_deref() {
+        // `owned_range` authorizes rows of this reference, not of the physical file.
+        if self.enforce_owned_range
+            && let Some(owned_range) = self.file_handle.meta_ref().owned_range.as_deref()
+        {
             partition_expr = Some(match partition_expr {
                 Some(region_partition_expr) => region_partition_expr.and(owned_range.clone()),
                 None => owned_range.clone(),
@@ -3131,6 +3168,106 @@ mod tests {
         assert_eq!(
             expected, rows,
             "rows outside the owned range must be filtered out"
+        );
+    }
+
+    /// A rebuilt index records file-wide offsets, so its scan must cover every
+    /// physical row group and every physical row. Two things hide rows from a
+    /// reference: its own `owned_range`, and the region predicate that fires when
+    /// the destination's domain differs from the creator's. Reading through either
+    /// would feed `update_flat` rows numbered from zero, and an indexed query would
+    /// then prune the segment that really contains the match.
+    #[rstest::rstest]
+    #[case::query_reader(false, false, vec![4])]
+    #[case::query_reader_foreign_destination(false, true, vec![4])]
+    #[case::index_scan(true, false, vec![0, 1, 2, 3, 4, 5])]
+    #[case::index_scan_foreign_destination(true, true, vec![0, 1, 2, 3, 4, 5])]
+    #[tokio::test]
+    async fn test_complete_physical_scan_ignores_both_row_filters(
+        #[case] complete_physical_scan: bool,
+        #[case] foreign_destination: bool,
+        #[case] expected: Vec<u64>,
+    ) {
+        let store = ObjectStore::new(Memory::default()).unwrap();
+        let source = crate::test_util::sst_util::sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        );
+        let props = WriterProperties::builder()
+            .set_key_value_metadata(Some(vec![parquet::file::metadata::KeyValue::new(
+                crate::sst::parquet::PARQUET_METADATA_KEY.to_string(),
+                source.to_json().unwrap(),
+            )]))
+            .build();
+        // A pushed-down predicate is what makes the reduced-column pass run; it
+        // keeps every row of this file.
+        let predicate = Predicate::new(vec![col("field_0").gt_eq(lit(0_u64))]);
+        let (fixture, metadata) = prefilter_test_builder_with(
+            store.clone(),
+            3,
+            2,
+            PageIndexPolicy::Skip,
+            Some(props),
+            predicate,
+            CacheStrategy::Disabled,
+        )
+        .await;
+        assert_eq!(2, fixture.parquet_meta.num_row_groups());
+
+        // `tag_0` is "b" only for field 4, which lives in the second row group.
+        let creator = partition::expr::col("tag_0")
+            .gt_eq(datatypes::value::Value::String("a".to_string().into()));
+        let creator_json = creator.as_json_str().unwrap();
+        let mut file_meta = (*fixture.file_handle.meta_ref()).clone();
+        file_meta.partition_expr = Some(
+            PartitionExpr::from_json_str(&creator_json)
+                .unwrap()
+                .unwrap()
+                .into(),
+        );
+        file_meta.owned_range = Some(
+            partition::expr::col("tag_0")
+                .eq(datatypes::value::Value::String("b".to_string().into()))
+                .into(),
+        );
+        let mut expected_metadata = (*metadata).clone();
+        // A repartitioned reference lives in a destination whose domain is narrower
+        // than the creator's, so the reader would apply that domain as a predicate.
+        let destination = if foreign_destination {
+            partition::expr::col("tag_0")
+                .eq(datatypes::value::Value::String("b".to_string().into()))
+                .as_json_str()
+                .unwrap()
+        } else {
+            creator_json
+        };
+        expected_metadata.set_partition_expr(Some(destination));
+        let builder = ParquetReaderBuilder::new(
+            "prefilter_test".to_string(),
+            PathType::Bare,
+            FileHandle::new(file_meta, crate::test_util::new_noop_file_purger()),
+            store.clone(),
+        )
+        .expected_metadata(Some(Arc::new(expected_metadata)));
+        let builder = if complete_physical_scan {
+            builder.complete_physical_scan()
+        } else {
+            builder
+        };
+        let mut reader = builder.build().await.unwrap().unwrap();
+
+        let mut rows = Vec::new();
+        while let Some(batch) = reader.next_record_batch().await.unwrap() {
+            let index = batch.schema().index_of("field_0").unwrap();
+            let fields = batch
+                .column(index)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap();
+            rows.extend((0..batch.num_rows()).map(|i| fields.value(i)));
+        }
+        assert_eq!(
+            expected, rows,
+            "a physical index scan must start at the first physical row group and keep every row"
         );
     }
 

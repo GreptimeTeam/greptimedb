@@ -125,13 +125,18 @@ pub(crate) async fn execute(
         }
     }
     output.stats.source_files = counters.files.load(Ordering::Relaxed);
+    output.stats.source_physical_rows = counters.physical_rows.load(Ordering::Relaxed);
     output.stats.source_rows = counters.rows.load(Ordering::Relaxed);
     output.stats.source_store_page_bytes = counters.store_page_bytes.load(Ordering::Relaxed);
     output.stats.estimated_memory_bytes = source.limits.estimated;
     output.stats.peak_group_bytes = source.peak_group_bytes();
+    // Admitted rows must all reach an output, and every physical row read must be
+    // either admitted or dropped by its owner's reference. Both halves are checked
+    // explicitly so an equal admitted/output counter cannot hide a dropped row.
     ensure!(
         output.stats.source_files == plan.sources.len() as u64
-            && output.stats.output_rows == output.stats.source_rows,
+            && output.stats.output_rows == output.stats.source_rows
+            && output.stats.source_physical_rows >= output.stats.source_rows,
         InvalidMultiRegionCompactionSnafu {
             reason: "Multi-region compaction did not account for every source row"
         }

@@ -3226,6 +3226,198 @@ async fn test_rebuild_column_only_index_advances_zero_generation() {
     engine.stop().await.unwrap();
 }
 
+/// A finished index build names the reference it planned against. A reference
+/// re-authorized while the build ran is a different authorization even when the two
+/// ranges are equal as Rust `Value`s (`t > TIME 1 second` and `t > TIME 1000
+/// milliseconds`): they admit different rows, so the completion must be dropped
+/// instead of installed live over the current range.
+#[tokio::test]
+async fn test_index_build_finish_does_not_install_a_stale_reference() {
+    use crate::manifest::action::{RegionMetaAction, RegionMetaActionList};
+    use crate::region::RegionLeaderState;
+    use crate::request::{BackgroundNotify, IndexBuildFinished, WorkerRequest};
+    use crate::sst::file::PartitionExprRef;
+    use crate::sst::index::IndexBuildOutcome;
+
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            schedule_compaction_after_edit: false,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: rows_schema(&request),
+            rows: build_rows(0, 3),
+        },
+    )
+    .await;
+    flush_region(&engine, region_id, None).await;
+
+    let held = partition::expr::col("tag_0").gt(datatypes::value::Value::Timestamp(
+        common_time::Timestamp::new_second(1),
+    ));
+    let respelled = partition::expr::col("tag_0").gt(datatypes::value::Value::Timestamp(
+        common_time::Timestamp::new_millisecond(1000),
+    ));
+    assert_eq!(
+        held, respelled,
+        "the two spellings are equal as expressions, which is the trap"
+    );
+    let held_key = Some(held.clone().canonicalize().as_json_str().unwrap());
+    let respelled_key = Some(respelled.clone().canonicalize().as_json_str().unwrap());
+    assert_ne!(held_key, respelled_key);
+
+    let region = engine.get_region(region_id).unwrap();
+    let file_id = region
+        .all_manifest_files()
+        .await
+        .0
+        .into_iter()
+        .next()
+        .expect("the flush wrote one file")
+        .file_id;
+
+    // The reference is authorized by the `held` spelling when the build starts.
+    let mut held_meta = (*region.manifest_ctx.manifest().await.files[&file_id]).clone();
+    held_meta.owned_range = Some(PartitionExprRef::from(held));
+    engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                files_to_add: vec![held_meta],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let authorized = (*region.manifest_ctx.manifest().await.files[&file_id]).clone();
+    assert_eq!(held_key, authorized.owned_range_key());
+
+    // The build publishes the index view of that reference.
+    let mut completed = authorized.clone();
+    completed.index_version = 1;
+    completed.index_file_size = 128;
+    engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                files_to_add: vec![completed],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    // What the finished build reports: the current entry, index view included.
+    let captured = (*region.manifest_ctx.manifest().await.files[&file_id]).clone();
+    assert_eq!(held_key, captured.owned_range_key());
+
+    // Meanwhile the reference is re-authorized to the respelled range, the way the
+    // staging apply of a remap installs a validated one. Only the range moves, so
+    // the completed result is still equal to the current entry as `FileMeta`.
+    let mut reauthorized = captured.clone();
+    reauthorized.owned_range = Some(PartitionExprRef::from(respelled));
+    assert_eq!(
+        captured, reauthorized,
+        "the two descriptions are equal as `FileMeta`, which is the trap"
+    );
+    region
+        .manifest_ctx
+        .update_manifest(
+            RegionLeaderState::Writable,
+            RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit {
+                files_to_add: vec![reauthorized.clone()],
+                ..Default::default()
+            })),
+            true,
+        )
+        .await
+        .unwrap();
+    let mut manager = region.manifest_ctx.manifest_manager.write().await;
+    let (pending, _) = region
+        .manifest_ctx
+        .commit_staged_locked(&mut manager)
+        .await
+        .unwrap();
+    drop(manager);
+    pending.fire().await;
+    region.version_control.apply_edit(
+        Some(RegionEdit {
+            files_to_add: vec![reauthorized.clone()],
+            ..Default::default()
+        }),
+        &[],
+        region.file_purger.clone(),
+    );
+    assert_eq!(
+        respelled_key,
+        region.manifest_ctx.manifest().await.files[&file_id].owned_range_key()
+    );
+
+    // The worker applies the completion.
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let manifest_version = region.manifest_ctx.manifest_version().await;
+    engine
+        .inner
+        .workers
+        .submit_to_worker(
+            region_id,
+            WorkerRequest::Background {
+                region_id,
+                notify: BackgroundNotify::IndexBuildFinished(IndexBuildFinished {
+                    manifest_version,
+                    file_meta: captured,
+                    result_senders: vec![tx],
+                }),
+            },
+        )
+        .await
+        .unwrap();
+    let outcome = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+        .await
+        .expect("the worker did not apply the index build result")
+        .expect("the worker dropped the result sender")
+        .unwrap();
+    assert!(
+        matches!(&outcome, IndexBuildOutcome::Aborted(reason) if reason.contains("superseded")),
+        "a re-authorized reference makes the completion stale: {outcome:?}"
+    );
+
+    // The re-authorized range survives in both the manifest and the live version.
+    let manifest = region.manifest_ctx.manifest().await;
+    assert_eq!(
+        respelled_key,
+        manifest.files[&file_id].owned_range_key(),
+        "the stale completion must not supersede the re-authorized range"
+    );
+    assert_eq!(
+        reauthorized.index_version,
+        manifest.files[&file_id].index_version
+    );
+    let version = region.version();
+    let live = version.ssts.levels()[0]
+        .files()
+        .find(|file| file.meta_ref().file_id == file_id)
+        .expect("the reference stays visible");
+    assert_eq!(
+        respelled_key,
+        live.meta_ref().owned_range_key(),
+        "the stale completion must not be installed live"
+    );
+    assert_eq!(reauthorized.index_version, live.meta_ref().index_version);
+    drop(version);
+}
+
 #[tokio::test]
 async fn test_compaction_without_provider_drops_historical_sketch_indexes() {
     use crate::sst::file::{ColumnIndexMetadata, IndexType};

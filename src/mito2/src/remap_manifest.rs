@@ -24,6 +24,19 @@ pub use crate::error::{Error, Result};
 use crate::manifest::action::{RegionManifest, RemovedFilesRecord};
 use crate::sst::file::{FileFormat, FileMetaRef, PartitionExprRef};
 
+/// Nesting depth a persisted ownership expression may reach before it is
+/// published as a canonical operand list instead of one level deeper per hop.
+/// The JSON decoder rejects deeply nested input, so the shape has to stay small
+/// however often a reference is re-authorized.
+const OWNED_RANGE_MAX_DEPTH: usize = 8;
+
+/// Upper bound on the number of disjuncts an ownership expression may expand to
+/// before it is persisted. A conjunction of `n` disjunctions has `n^k` disjuncts,
+/// so the count is computed on the tree and rejected before anything is
+/// allocated: expanding first and deduplicating later can allocate an
+/// astronomical number of terms from a tiny input.
+const OWNED_RANGE_MAX_TERMS: usize = 64;
+
 /// Remaps file references from old region manifests to new region manifests.
 pub struct RemapManifest {
     /// Old region manifests indexed by region ID
@@ -177,6 +190,8 @@ impl RemapManifest {
         let target_domain = crate::region::parse_partition_expr(
             target_manifest.metadata.partition_expr.as_deref(),
         )?;
+        // The target region names every reference this remap creates or widens.
+        let target_region_id = target_manifest.metadata.region_id;
         for (file_id, file_meta) in &source_manifest.files {
             if let Some(existing) = target_manifest.files.get(file_id)
                 && source_manifest.sst_format == crate::sst::FormatType::Narthex
@@ -198,18 +213,20 @@ impl RemapManifest {
                 );
             }
             let owned_range = Self::narrowed_owned_range(
+                target_region_id,
                 file_meta,
                 source_domain.as_ref(),
                 target_domain.as_ref(),
-            );
+            )?;
             // Keep sharing the source reference when the authorization is unchanged.
-            let file_meta_clone = if owned_range.as_ref() == file_meta.owned_range.as_deref() {
-                file_meta.clone()
-            } else {
-                let mut meta = (**file_meta).clone();
-                meta.owned_range = owned_range.map(PartitionExprRef::from);
-                FileMetaRef::from(meta)
-            };
+            let file_meta_clone =
+                if Self::exact_eq(owned_range.as_ref(), file_meta.owned_range.as_deref())? {
+                    file_meta.clone()
+                } else {
+                    let mut meta = (**file_meta).clone();
+                    meta.owned_range = owned_range.map(PartitionExprRef::from);
+                    FileMetaRef::from(meta)
+                };
 
             // Insert or merge into target manifest
             // Same file might be added from multiple overlapping old regions
@@ -227,10 +244,11 @@ impl RemapManifest {
                     // One physical file, several references: the target may read the
                     // union of what each reference was allowed to read.
                     let union = Self::union_owned_range(
+                        target_region_id,
                         e.get().owned_range.as_deref(),
                         file_meta_clone.owned_range.as_deref(),
-                    );
-                    if union.as_ref() != e.get().owned_range.as_deref() {
+                    )?;
+                    if !Self::exact_eq(union.as_ref(), e.get().owned_range.as_deref())? {
                         let mut meta = (**e.get()).clone();
                         meta.owned_range = union.map(PartitionExprRef::from);
                         *e.get_mut() = FileMetaRef::from(meta);
@@ -262,24 +280,24 @@ impl RemapManifest {
     /// A row is readable through the new reference only if the old reference allowed
     /// it (`file_meta.owned_range`), the source region's domain admitted it and the
     /// target region's domain admits it, so the three are intersected. Operands that
-    /// cannot remove a row are dropped: `None` (every physical row), the file creator's
-    /// own `partition_expr` and literal repeats. That keeps repeated repartitions from
-    /// growing the expression. `None` in the result means "every physical row".
+    /// cannot remove a row are dropped: `None` (every physical row) and the file
+    /// creator's own `partition_expr`; `combine` then flattens and deduplicates the
+    /// result so repeated repartitions cannot grow the expression. `None` in the
+    /// result means "every physical row".
     fn narrowed_owned_range(
+        region_id: RegionId,
         file_meta: &crate::sst::file::FileMeta,
         source_domain: Option<&PartitionExpr>,
         target_domain: Option<&PartitionExpr>,
-    ) -> Option<PartitionExpr> {
-        fn push<'a>(operands: &mut Vec<&'a PartitionExpr>, candidate: Option<&'a PartitionExpr>) {
-            if let Some(candidate) = candidate
-                && !operands.contains(&candidate)
-            {
-                operands.push(candidate);
+    ) -> Result<Option<PartitionExpr>> {
+        fn push(operands: &mut Vec<PartitionExpr>, candidate: Option<&PartitionExpr>) {
+            if let Some(candidate) = candidate {
+                operands.push(candidate.clone());
             }
         }
 
         let creator = file_meta.partition_expr.as_deref();
-        let mut operands: Vec<&PartitionExpr> = Vec::with_capacity(3);
+        let mut operands: Vec<PartitionExpr> = Vec::with_capacity(3);
 
         // An explicit range is enforced even when it equals the creator: the
         // source may have been narrowed for reasons the creator expression does
@@ -289,8 +307,12 @@ impl RemapManifest {
         // The source's *effective* filter is the region expression, except that
         // the reader skips the region predicate when it equals the creator's
         // expression. In that case the source saw every physical row, so the
-        // source term is TRUE and must not be added back as a restriction.
-        if source_domain != creator {
+        // source term is TRUE and must not be added back as a restriction. Only
+        // an exact key match may drop it: two predicates that merely compare
+        // equal as Rust `Value`s (`TIME 1 second` and `TIME 1000 milliseconds`)
+        // are different physical filters, and the source never admitted the rows
+        // the second one excludes.
+        if !Self::exact_eq(source_domain, creator)? {
             push(&mut operands, source_domain);
         }
 
@@ -299,27 +321,241 @@ impl RemapManifest {
         // two targets both keep a row the creator expression does not match.
         push(&mut operands, target_domain);
 
-        operands.into_iter().cloned().reduce(PartitionExpr::and)
+        Self::combine(region_id, RestrictedOp::And, operands)
     }
 
     fn union_owned_range(
+        region_id: RegionId,
         existing: Option<&PartitionExpr>,
         incoming: Option<&PartitionExpr>,
-    ) -> Option<PartitionExpr> {
+    ) -> Result<Option<PartitionExpr>> {
         match (existing, incoming) {
             // Two holders of the same physical file publish the *union* of their
             // authorizations: the target region may read either range. `None`
             // means "every physical row", so it absorbs the union.
-            (Some(existing), Some(incoming)) => Some(if existing == incoming {
-                existing.clone()
-            } else {
-                PartitionExpr::new(
-                    Operand::Expr(existing.clone()),
-                    RestrictedOp::Or,
-                    Operand::Expr(incoming.clone()),
-                )
-            }),
-            _ => None,
+            (Some(existing), Some(incoming)) => Ok(Self::combine(
+                region_id,
+                RestrictedOp::Or,
+                [existing.clone(), incoming.clone()],
+            )?),
+            _ => Ok(None),
+        }
+    }
+
+    /// Exact, persistable identity of one predicate.
+    ///
+    /// [PartitionExpr]'s own equality compares literals as Rust `Value`s, where
+    /// two coercible literals (`TIME 1 second` and `TIME 1000 milliseconds`) are
+    /// equal although they are different physical predicates. Deduplicating those
+    /// would widen a reference, so every leaf is keyed by its serialized form,
+    /// which keeps the literal's type tag. It is also the form that gets persisted,
+    /// so the key and the decoder agree on what "the same predicate" means; the
+    /// expression is canonicalized first because decoding canonicalizes, and a
+    /// predicate built in memory must compare equal to the one that was stored.
+    fn exact_key(expr: &PartitionExpr) -> Result<String> {
+        expr.clone()
+            .canonicalize()
+            .as_json_str()
+            .context(error::SerializePartitionExprSnafu)
+    }
+
+    /// Compares two optional predicates by [Self::exact_key].
+    ///
+    /// Every decision that drops or replaces a term goes through this instead of
+    /// `PartitionExpr` equality, which cannot tell two literals of different
+    /// physical types apart.
+    fn exact_eq(left: Option<&PartitionExpr>, right: Option<&PartitionExpr>) -> Result<bool> {
+        match (left, right) {
+            (None, None) => Ok(true),
+            (Some(left), Some(right)) => Ok(Self::exact_key(left)? == Self::exact_key(right)?),
+            _ => Ok(false),
+        }
+    }
+
+    /// Folds `terms` into one expression of `op` with a bounded shape.
+    ///
+    /// Every remap intersects or unions the tree it produced last time, so a
+    /// naive `reduce` duplicates the ownership tree on each hop and builds a
+    /// left-deep chain whose persisted JSON eventually exceeds the decoder's
+    /// recursion limit. Exact duplicates are dropped and the remaining terms
+    /// combined pairwise, so the depth grows with `log2(terms)` instead of with
+    /// the number of hops; past [OWNED_RANGE_MAX_DEPTH] the expression is
+    /// rewritten into one canonical operand list, which keeps the persisted shape
+    /// small however often the reference is re-authorized. Neither rewrite can
+    /// widen what a reference authorizes: they use only `A AND A = A`,
+    /// `A OR A = A`, associativity and distributivity.
+    ///
+    /// The canonical rewrite multiplies disjuncts, so its size is computed on the
+    /// tree and rejected past [OWNED_RANGE_MAX_TERMS] *before* anything is
+    /// allocated. A shape that cannot be published exactly within that budget is
+    /// an error, never a widened or truncated range.
+    fn combine(
+        region_id: RegionId,
+        op: RestrictedOp,
+        terms: impl IntoIterator<Item = PartitionExpr>,
+    ) -> Result<Option<PartitionExpr>> {
+        let mut keys = HashSet::new();
+        let mut flat: Vec<PartitionExpr> = Vec::new();
+        for term in terms {
+            if keys.insert(Self::exact_key(&term)?) {
+                flat.push(term);
+            }
+        }
+        let Some(combined) = Self::nest(op, flat) else {
+            return Ok(None);
+        };
+        if Self::depth(&combined) <= OWNED_RANGE_MAX_DEPTH {
+            return Ok(Some(combined));
+        }
+        // Every hop re-applies the same intersection and union, so nesting one
+        // level deeper per hop would grow without bound. Past a small depth the
+        // operands are published as one canonical list instead: distributing the
+        // tree into disjuncts of conjuncts, dropping duplicated and subsumed
+        // terms, and re-nesting that list into a balanced tree.
+        let disjuncts = Self::disjunct_count(&combined);
+        ensure!(
+            disjuncts <= OWNED_RANGE_MAX_TERMS,
+            error::InvalidRequestSnafu {
+                region_id,
+                reason: format!(
+                    "An ownership range would expand to {disjuncts} disjuncts, the budget is {OWNED_RANGE_MAX_TERMS}"
+                ),
+            }
+        );
+        let mut dnf = Vec::with_capacity(disjuncts);
+        Self::to_dnf(&combined, &mut dnf);
+        Self::from_dnf(region_id, dnf)
+    }
+
+    /// Number of disjuncts `expr` expands to, saturated.
+    ///
+    /// Computed without allocating, so a tiny pathological input cannot expand
+    /// into an astronomical term list before it is rejected.
+    fn disjunct_count(expr: &PartitionExpr) -> usize {
+        match (expr.op(), expr.lhs(), expr.rhs()) {
+            (RestrictedOp::Or, Operand::Expr(lhs), Operand::Expr(rhs)) => {
+                Self::disjunct_count(lhs).saturating_add(Self::disjunct_count(rhs))
+            }
+            (RestrictedOp::And, Operand::Expr(lhs), Operand::Expr(rhs)) => {
+                Self::disjunct_count(lhs).saturating_mul(Self::disjunct_count(rhs))
+            }
+            _ => 1,
+        }
+    }
+
+    /// Nests `terms` with `op` into a balanced tree, so the depth grows with
+    /// `log2(terms)` instead of with the number of hops.
+    fn nest(op: RestrictedOp, mut terms: Vec<PartitionExpr>) -> Option<PartitionExpr> {
+        while terms.len() > 1 {
+            let mut combined = Vec::with_capacity(terms.len().div_ceil(2));
+            let mut iter = terms.into_iter();
+            while let Some(lhs) = iter.next() {
+                combined.push(match iter.next() {
+                    Some(rhs) => {
+                        PartitionExpr::new(Operand::Expr(lhs), op.clone(), Operand::Expr(rhs))
+                    }
+                    None => lhs,
+                });
+            }
+            terms = combined;
+        }
+        terms.pop()
+    }
+
+    /// Rewrites `expr` as disjuncts of conjuncts. `AND` and `OR` are associative
+    /// and distributive, so this is an exact logical rewrite, never a widening.
+    /// Callers bound the result with [Self::disjunct_count] first.
+    fn to_dnf(expr: &PartitionExpr, terms: &mut Vec<Vec<PartitionExpr>>) {
+        match (expr.op(), expr.lhs(), expr.rhs()) {
+            (RestrictedOp::Or, Operand::Expr(lhs), Operand::Expr(rhs)) => {
+                Self::to_dnf(lhs, terms);
+                Self::to_dnf(rhs, terms);
+            }
+            (RestrictedOp::And, Operand::Expr(lhs), Operand::Expr(rhs)) => {
+                let (mut left, mut right) = (Vec::new(), Vec::new());
+                Self::to_dnf(lhs, &mut left);
+                Self::to_dnf(rhs, &mut right);
+                for left in &left {
+                    for right in &right {
+                        let term = left.iter().chain(right).cloned().collect();
+                        terms.push(term);
+                    }
+                }
+            }
+            // A comparison (or a node this form cannot decompose) is one conjunct.
+            _ => terms.push(vec![expr.clone()]),
+        }
+    }
+
+    /// Rebuilds one expression from `terms` (`OR` of `AND`s), dropping duplicated
+    /// conjuncts and terms subsumed by a shorter one: `A OR (A AND B) = A`.
+    ///
+    /// Everything is ordered and compared by [Self::exact_key]: `PartitionExpr`
+    /// ordering reaches `Value::cmp`, which panics on mixed numeric widths and
+    /// treats coercible literals of different physical types as equal.
+    fn from_dnf(
+        region_id: RegionId,
+        terms: Vec<Vec<PartitionExpr>>,
+    ) -> Result<Option<PartitionExpr>> {
+        let mut keyed: Vec<(Vec<String>, Vec<PartitionExpr>)> = Vec::with_capacity(terms.len());
+        for term in terms {
+            let mut conjuncts: Vec<(String, PartitionExpr)> = term
+                .into_iter()
+                .map(|expr| Ok((Self::exact_key(&expr)?, expr)))
+                .collect::<Result<_>>()?;
+            conjuncts.sort_by(|left, right| left.0.cmp(&right.0));
+            conjuncts.dedup_by(|left, right| left.0 == right.0);
+            let (keys, exprs) = conjuncts.into_iter().unzip();
+            keyed.push((keys, exprs));
+        }
+        // Shorter terms first, so a term can only be subsumed by an earlier one.
+        keyed.sort_by(|left, right| {
+            left.0
+                .len()
+                .cmp(&right.0.len())
+                .then_with(|| left.0.cmp(&right.0))
+        });
+        let mut kept: Vec<(Vec<String>, Vec<PartitionExpr>)> = Vec::with_capacity(keyed.len());
+        for (keys, exprs) in keyed {
+            if kept
+                .iter()
+                .any(|(kept_keys, _)| kept_keys.iter().all(|key| keys.binary_search(key).is_ok()))
+            {
+                continue;
+            }
+            kept.push((keys, exprs));
+        }
+        let operands = kept
+            .into_iter()
+            .map(|(_, term)| Self::nest(RestrictedOp::And, term))
+            .collect::<Option<Vec<_>>>();
+        let Some(operands) = operands else {
+            return Ok(None);
+        };
+        let Some(rebuilt) = Self::nest(RestrictedOp::Or, operands) else {
+            return Ok(None);
+        };
+        ensure!(
+            Self::depth(&rebuilt) <= OWNED_RANGE_MAX_DEPTH,
+            error::InvalidRequestSnafu {
+                region_id,
+                reason: format!(
+                    "An ownership range cannot be published within depth {OWNED_RANGE_MAX_DEPTH}"
+                ),
+            }
+        );
+        Ok(Some(rebuilt))
+    }
+
+    /// Operator nesting of `expr`, used only to decide when to publish it flat.
+    fn depth(expr: &PartitionExpr) -> usize {
+        1 + Self::operand_depth(expr.lhs()).max(Self::operand_depth(expr.rhs()))
+    }
+
+    fn operand_depth(operand: &Operand) -> usize {
+        match operand {
+            Operand::Expr(expr) => Self::depth(expr),
+            _ => 0,
         }
     }
 
@@ -1028,6 +1264,255 @@ mod tests {
             owned == &forward || owned == &backward,
             "unexpected union: {owned:?}"
         );
+    }
+
+    /// Nesting depth of an ownership expression.
+    fn owned_range_depth(expr: &PartitionExpr) -> usize {
+        RemapManifest::depth(expr)
+    }
+
+    #[test]
+    fn test_repeated_split_and_merge_keeps_the_owned_range_shallow() {
+        let source = RegionId::new(1, 1);
+        let left_region = RegionId::new(1, 2);
+        let right_region = RegionId::new(1, 3);
+        let merged_region = RegionId::new(1, 4);
+        let whole = range_expr("k", 0, 100);
+        let left = range_expr("k", 0, 50);
+        let right = range_expr("k", 50, 100);
+
+        let mut manifest = create_manifest(source, 1, Some(whole.clone()), 1, 1);
+        set_manifest_domain(&mut manifest, Some(whole.clone()));
+        let file_id = *manifest.files.keys().next().unwrap();
+
+        for cycle in 0..10 {
+            // Split the current domain in half...
+            let mut halves = HashMap::new();
+            for (region, domain) in [(left_region, &left), (right_region, &right)] {
+                let remapped = remap_into(source, manifest.clone(), region, domain.clone());
+                halves.insert(region, remapped);
+            }
+            // ...and merge both halves back, which re-applies the same range.
+            manifest = RemapManifest::new(
+                halves,
+                HashMap::from([(merged_region, whole.clone())]),
+                HashMap::from([
+                    (left_region, vec![merged_region]),
+                    (right_region, vec![merged_region]),
+                ]),
+            )
+            .remap_manifests()
+            .unwrap()
+            .new_manifests[&merged_region]
+                .clone();
+            let owned_range = manifest.files[&file_id]
+                .owned_range
+                .as_deref()
+                .expect("the merged reference must be restricted to its domain");
+            assert!(
+                owned_range_depth(owned_range) <= OWNED_RANGE_MAX_DEPTH + 4,
+                "cycle {cycle} grew the ownership expression to depth {}",
+                owned_range_depth(owned_range)
+            );
+        }
+    }
+
+    #[test]
+    fn test_wide_merge_round_trips_through_the_manifest_json() {
+        let source = RegionId::new(1, 1);
+        let target = RegionId::new(1, 100);
+        let whole = range_expr("k", 0, 1000);
+
+        // 32 overlapping holders of the same physical file merge into one region.
+        let mut old_manifests = HashMap::new();
+        let mut region_mapping = HashMap::new();
+        let mut template = create_manifest(source, 1, Some(whole.clone()), 1, 1);
+        set_manifest_domain(&mut template, Some(whole.clone()));
+        let file_id = *template.files.keys().next().unwrap();
+        let mut targets = Vec::new();
+        for hop in 0..32i64 {
+            let region = RegionId::new(1, hop as u32 + 1);
+            let mut manifest = template.clone();
+            set_manifest_domain(&mut manifest, Some(range_expr("k", hop, hop + 100)));
+            old_manifests.insert(region, manifest);
+            region_mapping.insert(region, vec![target]);
+            targets.push(region);
+        }
+
+        let remapped = RemapManifest::new(
+            old_manifests,
+            HashMap::from([(target, whole)]),
+            region_mapping,
+        )
+        .remap_manifests()
+        .unwrap()
+        .new_manifests[&target]
+            .clone();
+        let owned_range = remapped.files[&file_id]
+            .owned_range
+            .clone()
+            .expect("the merged reference must be restricted to its domain");
+        assert!(owned_range_depth(&owned_range) <= OWNED_RANGE_MAX_DEPTH + 4);
+
+        // The persisted form is the one a reopen decodes.
+        let encoded = serde_json::to_vec(&remapped).unwrap();
+        let decoded = RegionManifest::decode(&encoded).unwrap();
+        assert_eq!(
+            Some(owned_range.as_ref()),
+            decoded.files[&file_id].owned_range.as_deref()
+        );
+        assert!(owned_range_depth(owned_range.as_ref()) <= OWNED_RANGE_MAX_DEPTH + 4);
+    }
+
+    /// Two literals that are equal as Rust `Value`s are still different physical
+    /// predicates, so an exact dedupe must keep both: dropping one would widen what
+    /// the reference authorizes.
+    #[test]
+    fn test_ownership_dedupe_keeps_coercible_literals_of_different_types() {
+        use common_time::time::Time;
+
+        let region_id = RegionId::new(1, 1);
+        let seconds = PartitionExpr::new(
+            Operand::Column("t".to_string()),
+            RestrictedOp::Gt,
+            Operand::Value(Value::Time(Time::new_second(1))),
+        );
+        let millis = PartitionExpr::new(
+            Operand::Column("t".to_string()),
+            RestrictedOp::Gt,
+            Operand::Value(Value::Time(Time::new_millisecond(1000))),
+        );
+        // Rust equality treats these as the same predicate.
+        assert_eq!(seconds, millis);
+
+        let combined = RemapManifest::combine(
+            region_id,
+            RestrictedOp::And,
+            [seconds.clone(), millis.clone()],
+        )
+        .unwrap()
+        .unwrap();
+        let json = combined.as_json_str().unwrap();
+        assert!(json.contains("\"Second\""), "{json}");
+        assert!(json.contains("\"Millisecond\""), "{json}");
+    }
+
+    /// A source domain that is only expression-equal to the creator's own
+    /// expression is still applied as a restriction.
+    ///
+    /// The source term may only be dropped when it *is* the creator expression,
+    /// because that is when the reader skips the region predicate and the source
+    /// saw every physical row. Expression equality is not enough to decide that:
+    /// `TIME 1 second` and `TIME 1000 milliseconds` compare equal as Rust
+    /// `Value`s but are different physical filters, so dropping the source term
+    /// would hand back rows the source never admitted.
+    #[test]
+    fn test_expression_equal_but_distinct_source_domain_still_restricts() {
+        use common_time::time::Time;
+
+        let source = RegionId::new(1, 1);
+        let target = RegionId::new(1, 2);
+        let creator = PartitionExpr::new(
+            Operand::Column("t".to_string()),
+            RestrictedOp::Gt,
+            Operand::Value(Value::Time(Time::new_second(1))),
+        );
+        let source_domain = PartitionExpr::new(
+            Operand::Column("t".to_string()),
+            RestrictedOp::Gt,
+            Operand::Value(Value::Time(Time::new_millisecond(1000))),
+        );
+        // Rust equality cannot tell the two predicates apart.
+        assert_eq!(creator, source_domain);
+
+        let mut manifest = create_manifest(source, 1, Some(creator.clone()), 1, 1);
+        set_manifest_domain(&mut manifest, Some(source_domain.clone()));
+        let file_id = *manifest.files.keys().next().unwrap();
+
+        // The target domain equals the creator expression, so only the exact-key
+        // decision on the source domain is left to keep it out of the result.
+        let remapped = remap_into(source, manifest, target, creator.clone());
+        let owned_range = remapped.files[&file_id]
+            .owned_range
+            .as_deref()
+            .expect("a distinct source term must survive as a restriction");
+        let expected = PartitionExpr::new(
+            Operand::Expr(source_domain),
+            RestrictedOp::And,
+            Operand::Expr(creator),
+        );
+        assert_eq!(&expected, owned_range);
+        let json = owned_range.as_json_str().unwrap();
+        assert!(json.contains("\"Second\""), "{json}");
+        assert!(json.contains("\"Millisecond\""), "{json}");
+    }
+
+    /// A tiny pathological input expands to an astronomical number of disjuncts.
+    /// The budget is computed on the tree, so the input is refused instead of
+    /// allocating it.
+    #[test]
+    fn test_ownership_expansion_budget_fails_closed() {
+        let region_id = RegionId::new(1, 1);
+        let disjunction = |base: i64| {
+            let mut expr = PartitionExpr::new(
+                Operand::Column("k".to_string()),
+                RestrictedOp::Eq,
+                Operand::Value(Value::Int64(base)),
+            );
+            for offset in 1..32 {
+                expr = PartitionExpr::new(
+                    Operand::Expr(expr),
+                    RestrictedOp::Or,
+                    Operand::Expr(PartitionExpr::new(
+                        Operand::Column("k".to_string()),
+                        RestrictedOp::Eq,
+                        Operand::Value(Value::Int64(base + offset)),
+                    )),
+                );
+            }
+            expr
+        };
+        // 32 disjuncts, intersected nine times: 32^9 disjuncts.
+        let mut pathological = disjunction(0);
+        for step in 1..9 {
+            pathological = PartitionExpr::new(
+                Operand::Expr(pathological),
+                RestrictedOp::And,
+                Operand::Expr(disjunction(step * 100)),
+            );
+        }
+        assert!(RemapManifest::depth(&pathological) > OWNED_RANGE_MAX_DEPTH);
+        let leaf = PartitionExpr::new(
+            Operand::Column("k".to_string()),
+            RestrictedOp::GtEq,
+            Operand::Value(Value::Int64(0)),
+        );
+        let error = RemapManifest::combine(region_id, RestrictedOp::And, [leaf, pathological])
+            .expect_err("an unexpandable ownership range must fail closed");
+        assert!(error.to_string().contains("disjuncts"), "{error}");
+
+        // A deep but small input still becomes publishable within the depth budget.
+        let mut chain = PartitionExpr::new(
+            Operand::Column("k".to_string()),
+            RestrictedOp::GtEq,
+            Operand::Value(Value::Int64(0)),
+        );
+        for step in 1..12 {
+            chain = PartitionExpr::new(
+                Operand::Expr(chain),
+                RestrictedOp::And,
+                Operand::Expr(PartitionExpr::new(
+                    Operand::Column("k".to_string()),
+                    RestrictedOp::NotEq,
+                    Operand::Value(Value::Int64(step)),
+                )),
+            );
+        }
+        assert!(RemapManifest::depth(&chain) > OWNED_RANGE_MAX_DEPTH);
+        let combined = RemapManifest::combine(region_id, RestrictedOp::And, [chain])
+            .unwrap()
+            .unwrap();
+        assert!(RemapManifest::depth(&combined) <= OWNED_RANGE_MAX_DEPTH);
     }
 
     #[test]

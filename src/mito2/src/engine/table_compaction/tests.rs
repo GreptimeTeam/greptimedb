@@ -20,6 +20,7 @@ use common_recordbatch::RecordBatches;
 use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
 use parquet::file::metadata::ParquetMetaData;
+use partition::expr::PartitionExpr;
 use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{RegionRequest, RegionTruncateRequest};
 use store_api::storage::{FileId, RegionId};
@@ -32,7 +33,9 @@ use crate::engine::region_hook::{RegionHook, RegionHookRef, VerifiedSstFileInfo}
 use crate::error::Error;
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::region::MitoRegionRef;
-use crate::sst::file::{ColumnIndexMetadata, FileMeta, IndexType, LEVEL_SHARED, SHARED_LEVEL_SLOT};
+use crate::sst::file::{
+    ColumnIndexMetadata, FileMeta, IndexType, LEVEL_SHARED, PartitionExprRef, SHARED_LEVEL_SLOT,
+};
 use crate::sst::location;
 use crate::test_util::{
     CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows, reopen_region, rows_schema,
@@ -264,6 +267,134 @@ async fn test_duplicate_publication_and_later_replacement_do_not_readmit_inputs(
     assert!(!manifest.files.contains_key(&output.file_id));
     reopen_region(&engine, region_id, "test".into(), true, Default::default()).await;
     assert_eq!(3, row_count(&engine, region_id).await);
+}
+
+/// One shared reference, one instant, two spellings, and a result that planned
+/// against the older one.
+///
+/// `t > TIME 1 second` and `t > TIME 1000 milliseconds` compare equal as
+/// `PartitionExpr`s but admit different rows. A result whose captured input carries
+/// the old spelling is therefore stale once the reference was re-authorized to the
+/// new one, and publishing it would retire a reference it never planned against.
+#[tokio::test]
+async fn test_reauthorized_input_is_stale_not_a_repeat() {
+    use crate::region::RegionLeaderState;
+
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("table-compaction-reauthorized-input").await;
+    let engine = env.create_engine(config()).await;
+    let region_id = RegionId::new(1, 1);
+    let (snapshot, output) = seed(&engine, region_id).await;
+    let region = engine.get_region(region_id).unwrap();
+    let input_id = snapshot.inputs[0].file_id;
+
+    let held = partition::expr::col("tag_0")
+        .gt(datatypes::value::Value::Timestamp(Timestamp::new_second(1)));
+    let respelled = partition::expr::col("tag_0").gt(datatypes::value::Value::Timestamp(
+        Timestamp::new_millisecond(1000),
+    ));
+    assert_eq!(
+        held, respelled,
+        "the two spellings are equal as expressions, which is the trap"
+    );
+    assert_ne!(
+        held.as_json_str().unwrap(),
+        respelled.as_json_str().unwrap(),
+        "the two spellings are different physical predicates"
+    );
+    let held_key = Some(held.clone().canonicalize().as_json_str().unwrap());
+    let respelled_key = Some(respelled.clone().canonicalize().as_json_str().unwrap());
+
+    /// Re-authorizes the reference `file_id` the way the staging apply of a remap
+    /// does: the validated range commits to the manifest, and - for a live
+    /// re-authorization - the version applies the same edit afterwards.
+    async fn reauthorize(
+        region: &MitoRegionRef,
+        file_id: FileId,
+        range: &PartitionExpr,
+        to_live: bool,
+    ) {
+        let manifest = region.manifest_ctx.manifest().await;
+        let mut updated = (**manifest.files.get(&file_id).expect("reference")).clone();
+        updated.owned_range = Some(PartitionExprRef::from(range.clone()));
+        region
+            .manifest_ctx
+            .update_manifest(
+                RegionLeaderState::Writable,
+                RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit {
+                    files_to_add: vec![updated.clone()],
+                    ..Default::default()
+                })),
+                true,
+            )
+            .await
+            .unwrap();
+        // Staged edits carry no version until the staging apply commits them.
+        let mut manager = region.manifest_ctx.manifest_manager.write().await;
+        let (pending, _) = region
+            .manifest_ctx
+            .commit_staged_locked(&mut manager)
+            .await
+            .unwrap();
+        drop(manager);
+        pending.fire().await;
+        if to_live {
+            region.version_control.apply_edit(
+                Some(RegionEdit {
+                    files_to_add: vec![updated],
+                    ..Default::default()
+                }),
+                &[],
+                region.file_purger.clone(),
+            );
+        }
+    }
+
+    // The compaction plans against a reference authorized by the `held` spelling.
+    reauthorize(&region, input_id, &held, true).await;
+    let captured = engine.table_compaction_snapshot(region_id).unwrap();
+    assert_eq!(held_key, captured.inputs[0].owned_range_key());
+
+    // A staging apply re-authorizes the same reference to the respelled range.
+    reauthorize(&region, input_id, &respelled, false).await;
+    assert_eq!(
+        respelled_key,
+        region
+            .manifest_ctx
+            .manifest()
+            .await
+            .files
+            .get(&input_id)
+            .map(|meta| meta.owned_range_key())
+            .expect("the region holds the reference")
+    );
+
+    // The captured inputs no longer describe the current reference.
+    assert_eq!(
+        PublicationOutcome::StaleInputs,
+        engine
+            .publish_table_compaction(region_id, captured, vec![output.clone()])
+            .await
+            .unwrap(),
+        "a re-authorized input is stale, not a repeat"
+    );
+
+    let manifest = region.manifest_ctx.manifest().await;
+    assert_eq!(
+        Some(respelled_key),
+        manifest
+            .files
+            .get(&input_id)
+            .map(|meta| meta.owned_range_key()),
+        "the stale publication must not supersede the re-authorized range"
+    );
+    assert!(!manifest.files.contains_key(&output.file_id));
+    assert!(
+        region.version().ssts.levels()[SHARED_LEVEL_SLOT]
+            .files
+            .contains_key(&input_id),
+        "the refused publication must not retire the live reference"
+    );
 }
 
 #[tokio::test]

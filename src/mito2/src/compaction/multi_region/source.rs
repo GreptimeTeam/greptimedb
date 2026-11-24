@@ -16,10 +16,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use common_base::readable_size::ReadableSize;
 use common_time::Timestamp;
+use datafusion::physical_plan::PhysicalExpr;
 use datatypes::arrow::array::{
-    Array, ArrayRef, BinaryArray, GenericByteArray, GenericByteDictionaryBuilder, UInt64Array,
+    Array, ArrayRef, BinaryArray, BooleanArray, GenericByteArray, GenericByteDictionaryBuilder,
+    UInt64Array,
 };
-use datatypes::arrow::compute::{cast, concat_batches, take_record_batch};
+use datatypes::arrow::compute::{cast, concat_batches, filter_record_batch, take_record_batch};
 use datatypes::arrow::datatypes::{
     BinaryType, ByteArrayType, DataType, Field, Schema, SchemaRef, UInt32Type, Utf8Type,
 };
@@ -40,7 +42,7 @@ use crate::compaction::multi_region::{
 use crate::config::MemoryThreshold;
 use crate::error::{
     ComputeArrowSnafu, ExternalSnafu, InvalidMultiRegionCompactionSnafu,
-    MultiRegionCompactionResourceSnafu, NewRecordBatchSnafu, Result,
+    MultiRegionCompactionResourceSnafu, NewRecordBatchSnafu, Result, SerializePartitionExprSnafu,
 };
 use crate::read::flat_merge::FlatMergeReader;
 use crate::read::flat_projection::FlatProjectionMapper;
@@ -100,6 +102,13 @@ impl RoutedBatch {
 
 pub(crate) struct SharedSource {
     sources: Vec<FileMeta>,
+    /// Per source, the physical row filter of each holding target's *own*
+    /// reference; `None` means that reference authorizes every physical row.
+    ///
+    /// The scan reads the complete SST, so this is where ownership is enforced.
+    /// Keeping the unrestricted holders too is what lets `authorize` prove that a
+    /// dropped row is invisible through *every* departing reference.
+    authorizations: Vec<BTreeMap<RegionId, Option<Arc<dyn PhysicalExpr>>>>,
     legacy_overrides: Vec<bool>,
     expected_rows: Vec<i64>,
     targets: BTreeMap<RegionId, MultiRegionTarget>,
@@ -240,6 +249,32 @@ impl SharedSource {
                 Arc::make_mut(work).omit_extensions_for_budget(*region_id);
             }
         }
+        // Each target authorizes its rows through its own reference. The source
+        // scan reads one physical file for all holders, so a reference's
+        // `owned_range` cannot be pushed into the scan: it would hide rows that
+        // another holder of the same file must still receive.
+        let mut authorizations = Vec::with_capacity(plan.sources.len());
+        for file in &plan.sources {
+            let id = file.file_id();
+            let mut per_target = BTreeMap::new();
+            for (region_id, target) in &plan.targets {
+                let Some(input) = target.inputs.get(&id) else {
+                    continue;
+                };
+                // `None` is the whole file, not "no opinion": it must stay visible
+                // here so a row is never dropped while a holder still reads it.
+                let expr = match input.owned_range.as_deref() {
+                    Some(owned_range) => Some(
+                        owned_range
+                            .try_as_physical_expr(&schema)
+                            .context(SerializePartitionExprSnafu)?,
+                    ),
+                    None => None,
+                };
+                per_target.insert(*region_id, expr);
+            }
+            authorizations.push(per_target);
+        }
         // Compute routing/version annotations on bounded reader batches, but
         // keep physical __sequence as the merge key. The annotations are not
         // persisted and fixed-position time/PK/sequence/op columns stay last.
@@ -251,6 +286,7 @@ impl SharedSource {
         let merge_schema = Arc::new(Schema::new(fields));
         Ok(Arc::new(Self {
             sources: plan.sources.clone(),
+            authorizations,
             legacy_overrides,
             expected_rows,
             targets: plan.targets.clone(),
@@ -344,6 +380,13 @@ impl SharedSource {
             let mut raw_meta = file.clone();
             raw_meta.sequence = None;
             raw_meta.preserve_row_sequence = true;
+            // A source is one physical file for every holder, and a reference's
+            // `owned_range` authorizes rows for that holder only. This scan carries no
+            // range and its expected metadata carries no partition expression, so the
+            // reader builds no row filter at all: every physical row is visited exactly
+            // once and keeps its physical position. `authorize` applies each target's
+            // own reference afterwards.
+            raw_meta.owned_range = None;
             let handle = FileHandle::new(raw_meta, Arc::new(NoopFilePurger));
             let input = self.scan_input.prune_file(
                 &handle, PreFilterMode::All, &mut ReaderMetrics::default(),
@@ -351,7 +394,7 @@ impl SharedSource {
             let mut ranges = smallvec::SmallVec::new();
             input.build_ranges(-1, &mut ranges);
             let fetch_metrics = ParquetFetchMetrics::default();
-            let mut rows = 0u64;
+            let mut read_rows = 0u64;
             let mut last_key = None;
             for range in ranges {
                 let Some(mut reader) = range.flat_reader(None, Some(&fetch_metrics)).await? else {
@@ -362,9 +405,10 @@ impl SharedSource {
                 ).await? {
                     self.check_cancelled()?;
                     let preparing = self.clone();
-                    let (batch, previous) = common_runtime::spawn_blocking_compact(move || {
+                    let (batch, previous, read) = common_runtime::spawn_blocking_compact(move || {
                         preparing.check_cancelled()?;
                         let batch = compact_dictionaries(batch)?;
+                        let read = batch.num_rows() as u64;
                         let batch_bytes = batch.get_array_memory_size();
                         ensure!(
                             batch_bytes <= preparing.limits.arrow_batch_bytes,
@@ -378,22 +422,31 @@ impl SharedSource {
                         );
                         preparing.validate_batch(&batch, &mut last_key)?;
                         let batch = preparing.annotate(batch, index)?;
-                        Ok::<_, crate::error::Error>((batch, last_key))
+                        Ok::<_, crate::error::Error>((batch, last_key, read))
                     }).await.context(crate::error::JoinSnafu)??;
                     last_key = previous;
-                    rows += batch.num_rows() as u64;
+                    read_rows += read;
                     self.counters.rows.fetch_add(batch.num_rows() as u64, Ordering::Relaxed);
                     yield batch;
                 }
             }
+            // Rows this scan read before any owner's reference drops a row. The footer
+            // bounds what the object holds, so this is the counter that must match; an
+            // admitted-row counter that equals the output would hide a silently
+            // dropped row.
+            self.counters
+                .physical_rows
+                .fetch_add(read_rows, Ordering::Relaxed);
             let store_bytes = fetch_metrics.data.lock()
                 .map(|metrics| metrics.page_size_to_fetch_store)
                 .map_err(|_| crate::error::UnexpectedSnafu {
                     reason: "Source fetch metrics lock poisoned",
                 }.build())?;
             self.counters.store_page_bytes.fetch_add(store_bytes, Ordering::Relaxed);
+            // The scan is physical, so it must cover the footer even when the
+            // holders authorize only part of it; ownership is applied per target.
             let expected = self.expected_rows[index];
-            if expected < 0 || rows != expected as u64 {
+            if expected < 0 || read_rows != expected as u64 {
                 Err(InvalidMultiRegionCompactionSnafu {
                     reason: "Shared source scan did not cover its complete footer row count",
                 }
@@ -462,6 +515,7 @@ impl SharedSource {
         // Evaluate masks before adding private columns, avoiding name collisions
         // and N-target masks over a potentially much larger equal-key group.
         let owners = self.row_owners(&batch)?;
+        let (batch, owners) = self.authorize(batch, index, owners)?;
         let physical = batch
             .column(sequence_column_index(batch.num_columns()))
             .as_any()
@@ -470,19 +524,27 @@ impl SharedSource {
                 reason: "Invalid sequence column",
             })?;
         let source = &self.sources[index];
-        let sequences = owners.iter().enumerate().map(|(row, region)| {
-            let input = &self.targets[region].inputs[&source.file_id()];
-            if input.region_id != *region
-                || (!input.preserve_row_sequence && self.legacy_overrides[index])
-            {
-                input
-                    .sequence
-                    .map(|value| value.get())
-                    .unwrap_or_else(|| physical.value(row))
-            } else {
-                physical.value(row)
-            }
-        });
+        let mut sequences = Vec::with_capacity(owners.len());
+        for (row, region) in owners.iter().enumerate() {
+            // A routed row is only meaningful for a target that holds this source.
+            let input = self.targets[region].inputs.get(&source.file_id()).context(
+                InvalidMultiRegionCompactionSnafu {
+                    reason: "A routed row belongs to a target that does not hold its source",
+                },
+            )?;
+            sequences.push(
+                if input.region_id != *region
+                    || (!input.preserve_row_sequence && self.legacy_overrides[index])
+                {
+                    input
+                        .sequence
+                        .map(|value| value.get())
+                        .unwrap_or_else(|| physical.value(row))
+                } else {
+                    physical.value(row)
+                },
+            );
+        }
         let columns = [
             Arc::new(UInt64Array::from_iter_values(
                 owners.iter().map(RegionId::as_u64),
@@ -629,6 +691,102 @@ impl SharedSource {
                 )
             })
             .collect()
+    }
+
+    /// Drops the rows the owning target does not authorize.
+    ///
+    /// The scan reads the complete physical SST, so a row routed to a target may
+    /// still be outside that target's own reference. Dropping it is only sound if
+    /// it is invisible through *every* departing reference of the file: otherwise
+    /// the compaction would retire a row that another holder - or the region this
+    /// one replaces - can still read. Each dropped row is therefore checked against
+    /// every holder, and a readable one fails the compaction instead of vanishing.
+    fn authorize(
+        &self,
+        batch: RecordBatch,
+        index: usize,
+        owners: Vec<RegionId>,
+    ) -> Result<(RecordBatch, Vec<RegionId>)> {
+        let authorizations = &self.authorizations[index];
+        if authorizations.is_empty() {
+            return Ok((batch, owners));
+        }
+        let rows = batch.num_rows();
+        // `None` records a reference that authorizes every physical row.
+        let mut masks = Vec::with_capacity(authorizations.len());
+        for (region, expr) in authorizations {
+            let mask = match expr {
+                None => None,
+                Some(expr) => {
+                    let value = expr.evaluate(&batch).map_err(|err| {
+                        InvalidMultiRegionCompactionSnafu {
+                            reason: format!("Failed to evaluate an owned range: {err}"),
+                        }
+                        .build()
+                    })?;
+                    let array = value.into_array(rows).map_err(|err| {
+                        InvalidMultiRegionCompactionSnafu {
+                            reason: format!("Failed to materialize an owned range: {err}"),
+                        }
+                        .build()
+                    })?;
+                    let admitted = array.as_any().downcast_ref::<BooleanArray>().context(
+                        InvalidMultiRegionCompactionSnafu {
+                            reason: "An owned range did not evaluate to a boolean",
+                        },
+                    )?;
+                    Some(admitted.clone())
+                }
+            };
+            masks.push((*region, mask));
+        }
+        let mut keep = vec![true; rows];
+        let mut dropped = false;
+        for (row, owner) in owners.iter().enumerate() {
+            let mask = masks
+                .iter()
+                .find(|(region, _)| region == owner)
+                .map(|(_, mask)| mask)
+                .context(InvalidMultiRegionCompactionSnafu {
+                    reason: "A routed row's target does not describe the source file",
+                })?;
+            // A null comparison admits nothing, exactly like a region filter.
+            if mask
+                .as_ref()
+                .is_none_or(|mask| mask.is_valid(row) && mask.value(row))
+            {
+                continue;
+            }
+            for (holder, other) in &masks {
+                if holder == owner {
+                    continue;
+                }
+                let visible = other
+                    .as_ref()
+                    .is_none_or(|other| other.is_valid(row) && other.value(row));
+                ensure!(
+                    !visible,
+                    InvalidMultiRegionCompactionSnafu {
+                        reason: format!(
+                            "Row routed to region {owner} is outside its own reference but still readable through the departing reference of region {holder}"
+                        ),
+                    }
+                );
+            }
+            keep[row] = false;
+            dropped = true;
+        }
+        if !dropped {
+            return Ok((batch, owners));
+        }
+        let owners = owners
+            .into_iter()
+            .zip(&keep)
+            .filter_map(|(owner, keep)| keep.then_some(owner))
+            .collect();
+        let batch =
+            filter_record_batch(&batch, &BooleanArray::from(keep)).context(ComputeArrowSnafu)?;
+        Ok((batch, owners))
     }
 
     fn resolve_unassigned(

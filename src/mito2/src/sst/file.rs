@@ -644,6 +644,139 @@ impl FileMeta {
         }
     }
 
+    /// Exact, persistable identity of this reference's row authorization.
+    ///
+    /// [`PartitionExpr`]'s own equality compares literals as Rust `Value`s, where
+    /// two coercible literals (`TIME 1 second` and `TIME 1000 milliseconds`) are
+    /// equal although they admit different rows. Every decision that asks whether
+    /// a reference's range changed compares this key instead: it is the serialized
+    /// form, which keeps the literal's physical type, and it is what a manifest
+    /// stores, so a range built in memory compares equal to the same range decoded.
+    /// Canonicalizing first matches the decoder, which canonicalizes on read.
+    ///
+    /// [`PartitionExpr`] holds only column names, operators and values, so
+    /// serialization does not fail in practice; a range that somehow did would be
+    /// keyed by its `Display` form rather than compared equal to everything.
+    pub(crate) fn owned_range_key(&self) -> Option<String> {
+        self.owned_range.as_deref().map(|expr| {
+            expr.clone()
+                .canonicalize()
+                .as_json_str()
+                .unwrap_or_else(|_| expr.to_string())
+        })
+    }
+
+    /// Whether both references authorize exactly the same rows.
+    ///
+    /// `FileMeta`'s own equality cannot answer this: it compares `owned_range`
+    /// with [`PartitionExpr`] equality, which treats two literals of different
+    /// physical types as equal.
+    pub(crate) fn same_owned_range(&self, other: &FileMeta) -> bool {
+        self.owned_range_key() == other.owned_range_key()
+    }
+
+    /// Whether `other` describes the same reference as this one: structurally
+    /// equal metadata with the range compared exactly.
+    ///
+    /// Every metadata-reuse decision - a live version fast path, a manifest entry,
+    /// an interned value - must use this instead of `==`, so a re-authorized range
+    /// is never kept as "unchanged".
+    pub(crate) fn same_reference(&self, other: &FileMeta) -> bool {
+        self == other && self.same_owned_range(other)
+    }
+
+    /// Whether `updated` only re-authorizes this reference.
+    ///
+    /// Repartition republishes an existing physical SST with a new `owned_range`.
+    /// Every other field must agree, including the index view: an entry that also
+    /// carries a different index view is a replacement to validate, never an
+    /// ownership-only change. Callers must additionally require that the change
+    /// cannot widen the reference (see `prepare_region_edit`).
+    pub(crate) fn reauthorizes_owned_range(&self, updated: &FileMeta) -> bool {
+        // The range is compared exactly: two literals that only compare equal as
+        // Rust `Value`s still authorize different rows, so moving between them is
+        // a real re-authorization, not "no change".
+        if self.same_owned_range(updated) {
+            return false;
+        }
+        let mut reauthorized = updated.clone();
+        reauthorized.owned_range = self.owned_range.clone();
+        &reauthorized == self
+    }
+
+    /// Whether both entries name the same physical object.
+    ///
+    /// The creator region, the file id and the format together derive the object
+    /// path (see [Self::file_path]), so two entries that disagree on any of them
+    /// are different files that merely collide on a file id.
+    pub(crate) fn is_same_physical_object(&self, other: &FileMeta) -> bool {
+        self.region_id == other.region_id
+            && self.file_id == other.file_id
+            && self.format == other.format
+    }
+
+    /// Whether `incoming` publishes a newer index view of this physical SST.
+    ///
+    /// Live version updates and a manifest reopen both go through
+    /// [Self::reconcile_reference], so this rule must be the whole definition of
+    /// "newer":
+    /// - two present index views compare by generation, and the incoming
+    ///   descriptors win at the same generation because a generation names the
+    ///   index file, not the columns described inside it;
+    /// - an index beats a missing one at the same generation, including at
+    ///   generation 0, because a missing index may be a description taken before
+    ///   a rebuild;
+    /// - a missing index at a generation past 0 is a removal watermark: it keeps
+    ///   that generation and never resurrects the index it retired, so an index
+    ///   that is not strictly newer than a watermark is refused.
+    pub(crate) fn supersedes_index_view(&self, incoming: &FileMeta) -> bool {
+        match (self.exists_index(), incoming.exists_index()) {
+            // A description without an index retires one only at or above the
+            // current generation; below it, it is a stale snapshot of the same file.
+            // Between two indexless descriptions only the generation watermark
+            // moves, and a watermark never goes back.
+            //
+            // At generation 0 the tie belongs to the index: nothing had been
+            // retired there, so the missing descriptor is a snapshot taken before
+            // the first build published in place. Letting it win would drop the
+            // index and queue its file for removal.
+            (true, false) if incoming.index_version == 0 && self.index_version == 0 => false,
+            (_, false) => incoming.index_version >= self.index_version,
+            // A missing index at a non-zero generation retired index files, so an
+            // index that is not strictly newer would resurrect them. Nothing was
+            // retired at generation 0, where a first build publishes in place.
+            (false, true) => incoming.index_version > self.index_version || self.index_version == 0,
+            // Two index views compare by generation. At the same generation the
+            // incoming descriptors win: a generation names the index file, and a
+            // rebuild may describe more (or fewer) columns inside it without
+            // producing a new one.
+            (true, true) => incoming.index_version >= self.index_version,
+        }
+    }
+
+    /// Reconciles this reference with `incoming`, another description of the same
+    /// physical SST.
+    ///
+    /// The row authorization belongs to one reference, so it always comes from
+    /// `incoming`; the index view follows [Self::supersedes_index_view] so that a
+    /// live update and a reopen publish the same thing.
+    ///
+    /// Only a description of the same physical object may inherit this one's index
+    /// descriptors: version maps are keyed by the bare file id, so a foreign
+    /// creator region (or another on-disk format) that collides on an id would
+    /// otherwise advertise index files that belong to another object, and a reopen
+    /// would publish descriptors the live version never owned.
+    pub(crate) fn reconcile_reference(&self, incoming: &FileMeta) -> FileMeta {
+        let mut reconciled = incoming.clone();
+        if self.is_same_physical_object(incoming) && !self.supersedes_index_view(incoming) {
+            reconciled.available_indexes = self.available_indexes.clone();
+            reconciled.indexes = self.indexes.clone();
+            reconciled.index_file_size = self.index_file_size;
+            reconciled.index_version = self.index_version;
+        }
+        reconciled
+    }
+
     /// Whether the index file is up-to-date comparing to another file meta.
     pub fn is_index_up_to_date(&self, other: &FileMeta) -> bool {
         self.exists_index() && other.exists_index() && self.index_version >= other.index_version
@@ -810,18 +943,40 @@ impl FileHandle {
     }
 
     /// Replaces an index metadata view without splitting the underlying SST lifetime.
+    ///
+    /// The compaction reservation is part of the SST lifetime, not of one metadata
+    /// view: a guard taken from the replaced handle must release the file the
+    /// version now publishes, otherwise a range-only replacement leaks
+    /// `compacting = true` and skips the file forever.
+    ///
+    /// The lifetime, the reservation and the purger belong to one physical object,
+    /// and version maps are keyed by the bare file id. A metadata view that names a
+    /// different object (another creator region or another on-disk format, both of
+    /// which change the path) must therefore not inherit them in any build profile:
+    /// it becomes a new logical reference instead, so a purger can never delete a
+    /// path this handle never owned.
     pub(crate) fn with_updated_index(&self, meta: impl Into<FileMetaRef>) -> Self {
         let meta = meta.into();
-        debug_assert_eq!(self.file_id(), meta.file_id());
+        if !self.meta_ref().is_same_physical_object(&meta) {
+            warn!(
+                "File id {} names a different physical object, {} instead of {}; treating it as a new file",
+                meta.file_id,
+                meta.region_id,
+                self.region_id()
+            );
+            return Self::new(meta, self.inner.lifetime.file_purger.clone());
+        }
         let primary_key_range = meta
             .primary_key_range()
             .or_else(|| self.raw_primary_key_range());
         let lifetime = self.inner.lifetime.clone();
+        let compacting = self.inner.compacting.clone();
         Self {
             inner: Arc::new(FileHandleInner::with_lifetime(
                 meta,
                 lifetime,
                 primary_key_range,
+                compacting,
             )),
         }
     }
@@ -1026,7 +1181,9 @@ impl PrimaryKeyRange {
 /// Contains meta of the file, and other mutable info like whether the file is compacting.
 struct FileHandleInner {
     meta: FileMetaRef,
-    compacting: AtomicBool,
+    /// Shared with every replacement view of the same SST lifetime, so a
+    /// compaction reservation survives an index or range-only replacement.
+    compacting: Arc<AtomicBool>,
     /// Allocated only for derived bounds; boxing keeps handles without a cache small.
     primary_key_range: RwLock<Option<Box<PrimaryKeyRange>>>,
     lifetime: Arc<SstLifetime>,
@@ -1055,17 +1212,23 @@ impl FileHandleInner {
             file_purger,
             file_ref_manager,
         });
-        Self::from_registered_metadata(meta, lifetime, primary_key_range)
+        Self::from_registered_metadata(
+            meta,
+            lifetime,
+            primary_key_range,
+            Arc::new(AtomicBool::new(false)),
+        )
     }
 
     fn with_lifetime(
         meta: FileMetaRef,
         lifetime: Arc<SstLifetime>,
         primary_key_range: Option<(Bytes, Bytes)>,
+        compacting: Arc<AtomicBool>,
     ) -> Self {
         let meta = Self::register_metadata(meta, lifetime.file_ref_manager.as_deref());
         *lifetime.meta.lock().unwrap() = meta.clone();
-        Self::from_registered_metadata(meta, lifetime, primary_key_range)
+        Self::from_registered_metadata(meta, lifetime, primary_key_range, compacting)
     }
 
     /// Every runtime view is interned before it enters the reference registry.
@@ -1083,6 +1246,7 @@ impl FileHandleInner {
         meta: FileMetaRef,
         lifetime: Arc<SstLifetime>,
         primary_key_range: Option<(Bytes, Bytes)>,
+        compacting: Arc<AtomicBool>,
     ) -> Self {
         // Raw bounds already in metadata need no per-handle cache until alignment.
         let primary_key_range = primary_key_range
@@ -1090,7 +1254,7 @@ impl FileHandleInner {
             .map(|range| Box::new(PrimaryKeyRange::Raw(range)));
         Self {
             meta,
-            compacting: AtomicBool::new(false),
+            compacting,
             primary_key_range: RwLock::new(primary_key_range),
             lifetime,
         }
@@ -1517,6 +1681,216 @@ mod tests {
                 assert_eq!(&serde_json::from_value::<FileMeta>(json).unwrap(), file);
             }
         }
+    }
+
+    fn test_indexed_meta() -> FileMeta {
+        FileMeta {
+            region_id: RegionId::new(1, 1),
+            file_id: FileId::random(),
+            level: 1,
+            index_version: 7,
+            index_file_size: 1024,
+            available_indexes: [IndexType::InvertedIndex].into_iter().collect(),
+            indexes: vec![ColumnIndexMetadata {
+                column_id: 1,
+                created_indexes: [IndexType::InvertedIndex].into_iter().collect(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_ownership_only_change_never_exempts_the_index_view() {
+        let existing = test_indexed_meta();
+        let range = PartitionExpr::new(
+            col("tag"),
+            partition::expr::RestrictedOp::Lt,
+            Value::UInt32(10).into(),
+        );
+
+        // Only the row authorization moved: this is the one admissible change.
+        let mut reauthorized = existing.clone();
+        reauthorized.owned_range = Some(PartitionExprRef::from(range.clone()));
+        assert!(existing.reauthorizes_owned_range(&reauthorized));
+        assert!(reauthorized.reauthorizes_owned_range(&existing));
+
+        // An edit that also moves the index view is a replacement to validate, not
+        // an ownership-only change: publishing an unverified index with a range
+        // would advertise index files nobody checked.
+        for mutate in [
+            |meta: &mut FileMeta| meta.index_version = 3,
+            |meta: &mut FileMeta| meta.index_file_size = 0,
+            |meta: &mut FileMeta| meta.available_indexes.clear(),
+            |meta: &mut FileMeta| meta.indexes.clear(),
+        ] {
+            let mut with_view = reauthorized.clone();
+            mutate(&mut with_view);
+            assert!(
+                !existing.reauthorizes_owned_range(&with_view),
+                "an index view change must not be treated as an ownership-only change"
+            );
+        }
+    }
+
+    #[test]
+    fn test_index_view_reconciliation_keeps_the_newer_description() {
+        // (a) An indexed reference beats a stale indexless snapshot.
+        let existing = test_indexed_meta();
+        let mut stale = existing.clone();
+        stale.index_version = 3;
+        stale.index_file_size = 0;
+        stale.available_indexes.clear();
+        stale.indexes.clear();
+        assert!(!existing.supersedes_index_view(&stale));
+        let reconciled = existing.reconcile_reference(&stale);
+        assert_eq!(7, reconciled.index_version);
+        assert_eq!(1024, reconciled.index_file_size);
+        assert!(reconciled.inverted_index_available());
+
+        // (b) A removal watermark keeps its generation and is never resurrected:
+        // the index it retired was reserved and GCed.
+        let mut watermark = existing.clone();
+        watermark.index_version = 9;
+        watermark.index_file_size = 0;
+        watermark.available_indexes.clear();
+        watermark.indexes.clear();
+        assert!(!watermark.supersedes_index_view(&stale));
+        let reconciled = watermark.reconcile_reference(&stale);
+        assert!(!reconciled.exists_index());
+        assert_eq!(9, reconciled.index_version);
+
+        // A rebuild past the watermark is newer and does publish.
+        let mut rebuilt = stale.clone();
+        rebuilt.index_version = 10;
+        rebuilt.available_indexes = [IndexType::InvertedIndex].into_iter().collect();
+        rebuilt.index_file_size = 2048;
+        assert!(watermark.supersedes_index_view(&rebuilt));
+
+        // (c) An index at generation 0 is still newer than no index at generation 0.
+        let fresh = FileMeta {
+            region_id: existing.region_id,
+            file_id: existing.file_id,
+            level: 1,
+            ..Default::default()
+        };
+        let mut first_build = fresh.clone();
+        first_build.available_indexes = [IndexType::InvertedIndex].into_iter().collect();
+        assert!(fresh.supersedes_index_view(&first_build));
+        // An indexless description at or past the current generation retires the
+        // index; case (a) is the stale, lower-generation direction.
+        assert!(first_build.supersedes_index_view(&stale));
+        // A retirement published past the current generation wins: the index file
+        // it retires is reserved for GC, so the descriptor must go with it.
+        let mut retired = first_build.clone();
+        retired.index_version = 1;
+        retired.available_indexes.clear();
+        assert!(first_build.supersedes_index_view(&retired));
+        // At generation 0 the tie belongs to the index instead: nothing was
+        // retired there, so the indexless description is a snapshot taken before
+        // the in-place first build. Letting it win would drop the index.
+        let mut stale_at_zero = first_build.clone();
+        stale_at_zero.available_indexes.clear();
+        assert!(!first_build.supersedes_index_view(&stale_at_zero));
+        let reconciled = first_build.reconcile_reference(&stale_at_zero);
+        assert!(reconciled.inverted_index_available());
+        assert_eq!(0, reconciled.index_version);
+        // The incoming row authorization always survives, whichever description
+        // wins the index view.
+        let range = PartitionExprRef::from(PartitionExpr::new(
+            col("tag"),
+            partition::expr::RestrictedOp::Lt,
+            Value::UInt32(1).into(),
+        ));
+        let mut ranged_build = first_build.clone();
+        ranged_build.owned_range = Some(range.clone());
+        let reconciled = fresh.reconcile_reference(&ranged_build);
+        assert!(reconciled.inverted_index_available());
+        assert_eq!(0, reconciled.index_version);
+        assert_eq!(Some(&range), reconciled.owned_range.as_ref());
+    }
+
+    #[test]
+    fn test_index_view_is_not_inherited_by_a_different_creator() {
+        // Version maps are keyed by the bare file id, so an entry from another
+        // creator region collides on the id without naming this object (the path
+        // comes from the creator). It must not inherit this entry's descriptors.
+        let existing = test_indexed_meta();
+        let mut foreign = existing.clone();
+        foreign.region_id = RegionId::new(1, 2);
+        foreign.index_version = 0;
+        foreign.index_file_size = 0;
+        foreign.available_indexes.clear();
+        foreign.indexes.clear();
+        assert!(!existing.is_same_physical_object(&foreign));
+
+        let reconciled = existing.reconcile_reference(&foreign);
+        assert!(!reconciled.exists_index());
+        assert_eq!(0, reconciled.index_version);
+        assert_eq!(0, reconciled.index_file_size);
+        assert_eq!(foreign.region_id, reconciled.region_id);
+
+        // Another on-disk format is another object too.
+        let mut other_format = existing.clone();
+        other_format.format = FileFormat::NarthexSamples(Box::new(NarthexSamplesMeta {
+            manifest_size: 1,
+            parts: smallvec::smallvec![NarthexPartMeta { file_size: 1 }],
+        }));
+        other_format.index_version = 0;
+        other_format.available_indexes.clear();
+        other_format.indexes.clear();
+        assert!(!existing.reconcile_reference(&other_format).exists_index());
+
+        // The same object still inherits the newer view.
+        let mut stale = existing.clone();
+        stale.index_version = 3;
+        stale.available_indexes.clear();
+        stale.indexes.clear();
+        let reconciled = existing.reconcile_reference(&stale);
+        assert!(reconciled.inverted_index_available());
+        assert_eq!(7, reconciled.index_version);
+    }
+
+    #[test]
+    fn test_replacement_reuses_a_lifetime_only_for_the_same_physical_object() {
+        let meta = test_indexed_meta();
+        let purger = Arc::new(crate::sst::file_purger::NoopFilePurger);
+        let handle = FileHandle::new(FileMetaRef::from(meta.clone()), purger.clone());
+        handle.try_set_compacting();
+
+        // Same creator, id and format: one physical object, one lifetime.
+        let mut same = meta.clone();
+        same.index_version = 8;
+        let replacement = handle.with_updated_index(FileMetaRef::from(same.clone()));
+        assert!(Arc::ptr_eq(
+            &replacement.inner.lifetime,
+            &handle.inner.lifetime
+        ));
+        assert!(replacement.compacting(), "the reservation is shared");
+
+        // Another creator region derives another object path. Reusing the lifetime
+        // would let its purger delete a file this handle never owned, so the
+        // replacement starts a new reference in every build profile.
+        let mut foreign = meta.clone();
+        foreign.region_id = RegionId::new(1, 2);
+        let isolated = handle.with_updated_index(FileMetaRef::from(foreign.clone()));
+        assert!(!Arc::ptr_eq(
+            &isolated.inner.lifetime,
+            &handle.inner.lifetime
+        ));
+        assert_eq!(foreign.index_version, isolated.meta_ref().index_version);
+        assert!(!isolated.compacting());
+        assert!(!isolated.is_deleted());
+
+        // A Narthex inventory lives under another directory than a Parquet file.
+        let mut other_format = meta.clone();
+        other_format.format = FileFormat::NarthexSamples(Box::new(NarthexSamplesMeta {
+            manifest_size: 1,
+            parts: smallvec::smallvec![NarthexPartMeta { file_size: 1 }],
+        }));
+        assert!(!meta.is_same_physical_object(&other_format));
+        assert!(!meta.is_same_physical_object(&foreign));
+        assert!(meta.is_same_physical_object(&same));
     }
 
     #[test]

@@ -1326,6 +1326,168 @@ async fn wide_source_fixture() -> (Fixture, MultiRegionCompactionPlan) {
     (fixture, plan)
 }
 
+/// Two holders own different halves of one physical SST, and the plan's source
+/// comes from one of them. The scan is physical (it must cover the footer), and
+/// each target admits only the rows its own reference authorizes.
+#[tokio::test]
+async fn test_shared_source_scans_the_complete_file_and_authorizes_each_target() {
+    let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
+    let left = RegionId::new(1, 0);
+    let right = RegionId::new(1, 1);
+    let file_id = fixture.source.file_id();
+    let holder_plan = || {
+        let mut plan = fixture.plan(2);
+        // Each holder authorizes its own half through its own reference.
+        for target in plan.targets.values_mut() {
+            let domain =
+                crate::region::parse_partition_expr(target.metadata.partition_expr.as_deref())
+                    .unwrap()
+                    .unwrap();
+            target.inputs.get_mut(&file_id).unwrap().owned_range = Some(domain.into());
+        }
+        // The captured source is one holder's reference, so it authorizes one half.
+        let left_domain = crate::region::parse_partition_expr(
+            plan.targets[&left].metadata.partition_expr.as_deref(),
+        )
+        .unwrap()
+        .unwrap();
+        plan.sources[0].owned_range = Some(left_domain.into());
+        plan
+    };
+
+    let plan = holder_plan();
+    let (context, _) = fixture.context(None);
+    let counters = Arc::new(SourceCounters::default());
+    let source = source::SharedSource::build(
+        &plan,
+        &context,
+        validate_plan(&plan).unwrap(),
+        counters.clone(),
+    )
+    .await
+    .unwrap();
+    // Both halves of the physical file are compacted, each into its own target.
+    let mut per_region = HashMap::new();
+    let mut delivered = 0usize;
+    let mut stream = source.batches();
+    while let Some(source::SourceEvent { region_id, batch }) = stream.try_next().await.unwrap() {
+        let tags = cast(batch.column_by_name("tag_0").unwrap(), &DataType::Utf8).unwrap();
+        let tags = tags.as_any().downcast_ref::<StringArray>().unwrap();
+        for row in 0..batch.num_rows() {
+            let tag = tags.value(row);
+            let expected = if tag < "016" { left } else { right };
+            assert_eq!(expected, region_id, "wrong target for tag {tag}");
+            *per_region.entry(region_id).or_insert(0usize) += 1;
+            delivered += 1;
+        }
+    }
+    // 31 series of 4 rows each, split at the plan's "016" boundary.
+    assert_eq!(124, delivered);
+    assert_eq!(
+        124,
+        counters.rows.load(std::sync::atomic::Ordering::Relaxed)
+    );
+    assert_eq!(
+        124,
+        counters
+            .physical_rows
+            .load(std::sync::atomic::Ordering::Relaxed),
+        "every physical row was read exactly once"
+    );
+    assert_eq!(1, counters.files.load(std::sync::atomic::Ordering::Relaxed));
+    assert_eq!(Some(&64), per_region.get(&left));
+    assert_eq!(Some(&60), per_region.get(&right));
+
+    // A target whose own reference is narrower than its domain does not
+    // materialize the rest: those rows belong to another reference of the file.
+    let mut narrowed = holder_plan();
+    narrowed
+        .targets
+        .get_mut(&left)
+        .unwrap()
+        .inputs
+        .get_mut(&file_id)
+        .unwrap()
+        .owned_range = Some(col("tag_0").lt(Value::String("008".into())).into());
+    let narrowed_counters = Arc::new(SourceCounters::default());
+    let source = source::SharedSource::build(
+        &narrowed,
+        &context,
+        validate_plan(&narrowed).unwrap(),
+        narrowed_counters.clone(),
+    )
+    .await
+    .unwrap();
+    let mut rows = HashMap::new();
+    let mut stream = source.batches();
+    while let Some(source::SourceEvent { region_id, batch }) = stream.try_next().await.unwrap() {
+        *rows.entry(region_id).or_insert(0usize) += batch.num_rows();
+    }
+    assert_eq!(Some(&32), rows.get(&left));
+    assert_eq!(Some(&60), rows.get(&right));
+    // The two counters must not be equal: the scan still read every physical row
+    // while 32 of them were dropped as invisible through every departing reference.
+    assert_eq!(
+        124,
+        narrowed_counters
+            .physical_rows
+            .load(std::sync::atomic::Ordering::Relaxed)
+    );
+    assert_eq!(
+        92,
+        narrowed_counters
+            .rows
+            .load(std::sync::atomic::Ordering::Relaxed)
+    );
+}
+
+/// The counterexample the routing validation exists for: the physical file holds
+/// rows above the creator's `k < 016` bound. The left holder is unrestricted and
+/// can read them, the right holder routes them but only authorizes the tail, so
+/// routing them to the right holder would retire rows the left holder still reads.
+#[tokio::test]
+async fn test_plan_refuses_a_routed_row_a_departing_reference_can_still_read() {
+    let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
+    let left = RegionId::new(1, 0);
+    let right = RegionId::new(1, 1);
+    let file_id = fixture.source.file_id();
+    let mut plan = fixture.plan(2);
+    // The creator bound is `k < 016`, but the object contains `k >= 016` too, and
+    // the left holder's reference authorizes every physical row.
+    plan.sources[0].owned_range = None;
+    plan.targets
+        .get_mut(&left)
+        .unwrap()
+        .inputs
+        .get_mut(&file_id)
+        .unwrap()
+        .owned_range = None;
+    plan.targets
+        .get_mut(&right)
+        .unwrap()
+        .inputs
+        .get_mut(&file_id)
+        .unwrap()
+        .owned_range = Some(col("tag_0").gt_eq(Value::String("024".into())).into());
+
+    let error = validate_plan(&plan).expect_err("the plan must be refused");
+    assert!(
+        error.to_string().contains("could be retired"),
+        "unexpected error: {error}"
+    );
+
+    // The whole plan is refused before any output is produced.
+    let (context, protection) = fixture.context(None);
+    let Err(error) = compact_regions(plan, context).await else {
+        panic!("a plan that can lose a row must be refused");
+    };
+    assert!(
+        error.to_string().contains("could be retired"),
+        "unexpected error: {error}"
+    );
+    assert!(protection.files.lock().unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn test_wide_version_group_routes_lazily_without_retaining_fragment_dictionaries() {
     let (fixture, plan) = wide_source_fixture().await;

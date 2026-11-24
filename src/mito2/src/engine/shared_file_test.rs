@@ -129,6 +129,126 @@ async fn test_shared_import_preserves_visible_sequence_and_rejects_overwrite() {
     assert_eq!(1, region.version_control.current().last_sequence);
 }
 
+/// A repartition re-authorizes part of an already visible shared reference, and
+/// only the staging apply of a remap may do it: that path computed the new range
+/// from both domains. An ordinary import or edit only carries whatever range it
+/// was handed, so replaying one could restore rows the region already gave up.
+#[cfg(feature = "enterprise")]
+#[tokio::test]
+async fn test_shared_reimport_refuses_an_ownership_only_change() {
+    use std::num::NonZeroU64;
+
+    use crate::sst::file::PartitionExprRef;
+
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            schedule_compaction_after_edit: false,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Create(CreateRequestBuilder::new().build()),
+        )
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let source = FileMeta {
+        region_id: RegionId::new(1, 0),
+        file_id: FileId::random(),
+        level: LEVEL_SHARED,
+        file_size: 1024,
+        ..Default::default()
+    };
+    engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                files_to_add: vec![source.clone()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let visible = region.version().ssts.levels()[SHARED_LEVEL_SLOT].files[&source.file_id]
+        .meta_ref()
+        .clone();
+    assert_eq!(Some(1), visible.sequence.map(NonZeroU64::get));
+    assert!(visible.owned_range.is_none());
+
+    let range = partition::expr::col("tag_0").lt(datatypes::value::Value::String("1".into()));
+    let narrowed = FileMeta {
+        owned_range: Some(PartitionExprRef::from(range.clone())),
+        ..visible.clone()
+    };
+    // An ordinary import may not move the reference. `Some(range) -> None` through
+    // an ordinary edit is refused by the same rule; only a region that already holds
+    // a range can show that direction, see
+    // `test_ownership_only_shared_edit_requires_the_staging_publication`.
+    let error = engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                files_to_add: vec![narrowed.clone()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:?}").contains("ownership-only change is only admitted"),
+        "unexpected error: {error:?}"
+    );
+    assert!(
+        region.version().ssts.levels()[SHARED_LEVEL_SLOT].files[&source.file_id]
+            .meta_ref()
+            .owned_range
+            .is_none(),
+        "a refused import must not move the visible authorization"
+    );
+
+    // Any change to the physical object is still a conflict.
+    let resized = FileMeta {
+        file_size: 2048,
+        ..visible.clone()
+    };
+    let error = engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                files_to_add: vec![resized],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(format!("{error:?}").contains("conflicts with a visible reference"));
+    let mut foreign_creator = visible.clone();
+    foreign_creator.partition_expr = Some(PartitionExprRef::from(range));
+    assert!(
+        engine
+            .edit_region(
+                region_id,
+                RegionEdit {
+                    files_to_add: vec![foreign_creator],
+                    ..Default::default()
+                }
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        Some(1),
+        region.version().ssts.levels()[SHARED_LEVEL_SLOT].files[&source.file_id]
+            .meta_ref()
+            .sequence
+            .map(NonZeroU64::get)
+    );
+}
+
 #[cfg(feature = "enterprise")]
 #[tokio::test]
 async fn test_shared_reclassification_requires_add_only() {

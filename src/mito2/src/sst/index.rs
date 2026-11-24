@@ -1103,7 +1103,11 @@ impl IndexBuildTask {
         let reader_builder = self
             .access_layer
             .read_sst(self.file.clone())
-            .expected_metadata(Some(self.target_region_metadata.clone()));
+            .expected_metadata(Some(self.target_region_metadata.clone()))
+            // The replacement index describes the whole physical file. A ranged
+            // reference that hides the leading row groups would renumber every
+            // later row, so the positional update must see all of them.
+            .complete_physical_scan();
         // Creators decide input reuse without opening the Parquet file.
         let mut indexer = self
             .indexer_builder
@@ -3525,7 +3529,11 @@ mod tests {
                 .await
                 .unwrap();
         assert!(index_metadata.metas.contains_key("2"));
-        assert_eq!(index_metadata.total_row_count, 100);
+        // The destination's domain (`field_0` in [100, 200)) selects half of the
+        // fixture's 200 physical rows, but a replacement index describes the whole
+        // file: indexing only the destination's half would prune every row the file
+        // still holds.
+        assert_eq!(index_metadata.total_row_count, 200);
     }
 
     async fn schedule_index_build_task_with_mode(build_mode: IndexBuildMode) {
@@ -3819,6 +3827,108 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The replacement index describes the whole physical file, not the rows the
+    /// destination region's own predicate selects.
+    ///
+    /// `tag_1 = "h"` selects 100 of the fixture's 200 physical rows. An index built
+    /// through that predicate would publish 100 entries and every later query would
+    /// prune the segments that hold the other rows, so the build must read the file
+    /// physically: both row filters are disabled for it.
+    #[tokio::test]
+    async fn test_rebuilt_index_covers_rows_outside_the_destination_domain() {
+        let env = SchedulerEnv::new().await;
+        let mut metadata = sst_region_metadata();
+        for column in &mut metadata.column_metadatas {
+            if column.column_schema.name != "tag_0" {
+                column.column_schema.set_inverted_index(false);
+                column.column_schema.unset_skipping_options().unwrap();
+            }
+        }
+        let metadata = Arc::new(metadata);
+        let mut target_builder = RegionMetadataBuilder::from_existing((*metadata).clone());
+        target_builder
+            .partition_expr_json(Some(
+                col("tag_1")
+                    .eq(Value::String("h".into()))
+                    .as_json_str()
+                    .unwrap(),
+            ))
+            .bump_version();
+        let target_metadata = Arc::new(target_builder.build().unwrap());
+        let manifest_ctx = env.mock_manifest_context(target_metadata.clone()).await;
+        let file_purger = Arc::new(NoopFilePurger {});
+        let info = mock_sst_file(metadata.clone(), &env, IndexBuildMode::Async).await;
+        // The file is restricted to nothing here; only the *destination* differs
+        // from the creator, which is what used to filter the scan.
+        let file_meta = FileMeta {
+            region_id: metadata.region_id,
+            file_id: info.file_id,
+            file_size: info.file_size,
+            max_row_group_uncompressed_size: info.max_row_group_uncompressed_size,
+            num_rows: info.num_rows as u64,
+            num_row_groups: info.num_row_groups,
+            ..Default::default()
+        };
+        assert_eq!(200, file_meta.num_rows);
+        seed_manifest_file(&manifest_ctx, &file_meta).await;
+        let version = mock_version_control(
+            target_metadata.clone(),
+            file_purger.clone(),
+            HashMap::from([(file_meta.file_id, file_meta.clone())]),
+        )
+        .await;
+        let indexer_builder = mock_indexer_builder(target_metadata.clone(), &env).await;
+        let (tx, _rx) = mpsc::channel(4);
+        let mut task = IndexBuildTask {
+            region_id: target_metadata.region_id,
+            file: FileHandle::new(file_meta.clone(), file_purger.clone()),
+            target_region_metadata: version.current().version.metadata.clone(),
+            source: IndexBuildSource::new(
+                file_meta.clone(),
+                version.current().version.metadata.schema_version,
+            ),
+            reason: IndexBuildType::Flush,
+            access_layer: env.access_layer.clone(),
+            listener: WorkerListener::default(),
+            manifest_ctx: manifest_ctx.clone(),
+            write_cache: None,
+            cache_manager: None,
+            file_purger,
+            indexer_builder,
+            request_sender: tx,
+            index_options: IndexOptions::default(),
+            result_senders: Vec::new(),
+        };
+        task.index_build(version).await.unwrap();
+
+        let published = manifest_ctx.manifest().await.files[&file_meta.file_id].clone();
+        assert!(
+            published
+                .available_indexes
+                .contains(&IndexType::InvertedIndex)
+        );
+        let reader = env
+            .access_layer
+            .build_puffin_manager()
+            .reader(&RegionIndexId::new(
+                RegionFileId::new(metadata.region_id, file_meta.file_id),
+                published.index_version,
+            ))
+            .await
+            .unwrap();
+        let blob = reader.blob(inverted_index::INDEX_BLOB_TYPE).await.unwrap();
+        let index_metadata = index::inverted_index::format::reader::InvertedIndexBlobReader::new(
+            blob.reader().await.unwrap(),
+        )
+        .metadata(None)
+        .await
+        .unwrap();
+        assert_eq!(
+            file_meta.num_rows, index_metadata.total_row_count as u64,
+            "the index must describe every physical row, not the destination's slice"
+        );
     }
 
     #[tokio::test]

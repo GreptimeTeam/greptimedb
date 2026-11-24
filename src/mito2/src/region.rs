@@ -1819,12 +1819,16 @@ impl ManifestContext {
             ));
         }
 
-        if manifest
+        // "Still current" compares the row authorization by its serialized form: a
+        // reference re-authorized after the build captured it (a repartition that
+        // respells the range, e.g. `TIME 1 second` -> `TIME 1000 milliseconds`)
+        // still admits different rows, so the captured source no longer describes
+        // the entry this publication would install over.
+        let source_is_current = manifest
             .files
             .get(&source.file_meta.file_id)
-            .map(AsRef::as_ref)
-            != Some(&source.file_meta)
-        {
+            .is_some_and(|current| current.same_reference(&source.file_meta));
+        if !source_is_current {
             return Ok(IndexPublication::Stale(
                 IndexPublicationStale::SourceChanged,
             ));
@@ -2190,7 +2194,11 @@ impl ManifestContext {
 
             edit.validate_shared_reclassification(manifest.metadata.region_id)?;
             // Imports may add shared references, but ordinary edits must not retire
-            // or overwrite them. Table publication performs its own locked input check.
+            // or overwrite them. A repartition that re-authorizes a reference stays
+            // publishable, and only the staging apply of a remap may do that: it
+            // computed the new range from both domains, so it cannot widen, whereas
+            // an ordinary edit only carries whatever range it was handed.
+            // Table publication performs its own locked input check.
             ensure!(
                 edit.files_to_remove.iter().all(|file| {
                     file.level != file::LEVEL_SHARED
@@ -2200,7 +2208,13 @@ impl ManifestContext {
                             .is_none_or(|current| current.level != file::LEVEL_SHARED)
                 }) && edit.files_to_add.iter().all(|file| {
                     manifest.files.get(&file.file_id).is_none_or(|current| {
-                        current.level != file::LEVEL_SHARED || current.as_ref() == file
+                        current.level != file::LEVEL_SHARED
+                            // "Unchanged" compares the row authorization by its
+                            // serialized form: two literals that only compare equal
+                            // as Rust `Value`s still authorize different rows, so a
+                            // respelled range is a re-authorization, not a repeat.
+                            || current.same_reference(file)
+                            || (is_staging && current.reauthorizes_owned_range(file))
                     })
                 }),
                 InvalidRequestSnafu {
@@ -3699,6 +3713,116 @@ mod tests {
         );
     }
 
+    /// A shared reference may only change its row authorization where the change
+    /// cannot widen it: the staging apply of a remap, which computed the range from
+    /// both domains. Replaying an ordinary edit or import must not move it, because
+    /// `Some(range) -> None` restores rows the region already gave up.
+    #[cfg(feature = "enterprise")]
+    #[tokio::test]
+    async fn test_ownership_only_shared_edit_requires_the_staging_publication() {
+        use crate::sst::file::{FileMeta, IndexType, LEVEL_SHARED, PartitionExprRef};
+
+        let env = SchedulerEnv::new().await;
+        let region = build_test_region(&env).await;
+        let region_id = region.region_id;
+        let file_id = FileId::random();
+        let range = |bound: &str| {
+            Some(PartitionExprRef::from(partition::expr::col("tag_0").lt(
+                datatypes::value::Value::String(bound.to_string().into()),
+            )))
+        };
+        let shared = FileMeta {
+            region_id,
+            file_id,
+            level: LEVEL_SHARED,
+            index_version: 3,
+            index_file_size: 512,
+            available_indexes: [IndexType::InvertedIndex].into_iter().collect(),
+            owned_range: range("010"),
+            ..Default::default()
+        };
+        let edit = |meta: FileMeta| {
+            RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit {
+                files_to_add: vec![meta],
+                ..empty_edit()
+            }))
+        };
+        // Commits whatever the staging apply staged into the live manifest.
+        async fn commit(region: &MitoRegion) {
+            let mut manager = region.manifest_ctx.manifest_manager.write().await;
+            let (pending, _) = region
+                .manifest_ctx
+                .commit_staged_locked(&mut manager)
+                .await
+                .unwrap();
+            drop(manager);
+            pending.fire().await;
+        }
+
+        // The remap publishes the narrowed reference through the staging apply.
+        region
+            .manifest_ctx
+            .update_manifest(RegionLeaderState::Writable, edit(shared.clone()), true)
+            .await
+            .unwrap();
+        commit(&region).await;
+        assert_eq!(
+            range("010").as_ref(),
+            region.manifest_ctx.manifest().await.files[&file_id]
+                .owned_range
+                .as_ref()
+        );
+
+        // A later remap may narrow the same reference again.
+        let mut narrower = shared.clone();
+        narrower.owned_range = range("008");
+        region
+            .manifest_ctx
+            .update_manifest(RegionLeaderState::Writable, edit(narrower.clone()), true)
+            .await
+            .unwrap();
+        commit(&region).await;
+        assert_eq!(
+            range("008").as_ref(),
+            region.manifest_ctx.manifest().await.files[&file_id]
+                .owned_range
+                .as_ref()
+        );
+
+        // The reverse, `Some(range) -> None`, arrives as an ordinary edit (a replay of
+        // the original import) and must be refused: it widens the reference.
+        let error = region
+            .manifest_ctx
+            .update_manifest(RegionLeaderState::Writable, edit(shared.clone()), false)
+            .await
+            .expect_err("an ordinary edit must not widen a shared reference");
+        assert!(
+            error.to_string().contains("cannot modify shared SSTs"),
+            "unexpected error: {error}"
+        );
+
+        // An edit that also carries a different index view is a replacement to
+        // validate, never an ownership-only change, even on the staging path.
+        let mut both = narrower;
+        both.owned_range = None;
+        both.index_version = 9;
+        let error = region
+            .manifest_ctx
+            .update_manifest(RegionLeaderState::Writable, edit(both), true)
+            .await
+            .expect_err("a range change with a new index view is a replacement");
+        assert!(
+            error.to_string().contains("cannot modify shared SSTs"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            range("008").as_ref(),
+            region.manifest_ctx.manifest().await.files[&file_id]
+                .owned_range
+                .as_ref()
+        );
+    }
+
     #[rstest::rstest]
     #[case::writable(false)]
     #[case::downgrading(true)]
@@ -3845,6 +3969,92 @@ mod tests {
                 .get(&source.file_id)
                 .map(AsRef::as_ref),
             Some(&newer_committed)
+        );
+    }
+
+    /// A build captures the reference it plans against. A reference re-authorized
+    /// while the build ran is not that source any more, even when the two ranges
+    /// are equal as Rust `Value`s (`t > TIME 1 second` and `t > TIME 1000
+    /// milliseconds`): they admit different rows, and publishing the captured one
+    /// would install the old range over the current one.
+    #[tokio::test]
+    async fn test_index_publication_rejects_reauthorized_source_range() {
+        use crate::sst::file::PartitionExprRef;
+
+        let env = SchedulerEnv::new().await;
+        let region = build_test_region(&env).await;
+        let held = partition::expr::col("tag_0").gt(datatypes::value::Value::Timestamp(
+            common_time::Timestamp::new_second(1),
+        ));
+        let respelled = partition::expr::col("tag_0").gt(datatypes::value::Value::Timestamp(
+            common_time::Timestamp::new_millisecond(1000),
+        ));
+        assert_eq!(
+            held, respelled,
+            "the two spellings are equal as expressions, which is the trap"
+        );
+        let held_key = Some(held.clone().canonicalize().as_json_str().unwrap());
+        let respelled_key = Some(respelled.clone().canonicalize().as_json_str().unwrap());
+        assert_ne!(held_key, respelled_key);
+
+        let source = crate::sst::file::FileMeta {
+            region_id: region.region_id,
+            file_id: FileId::random(),
+            level: 1,
+            file_size: 1024,
+            owned_range: Some(PartitionExprRef::from(held)),
+            ..Default::default()
+        };
+        let edit = |meta: crate::sst::file::FileMeta| {
+            RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit {
+                files_to_add: vec![meta],
+                ..empty_edit()
+            }))
+        };
+        region
+            .manifest_ctx
+            .update_manifest(RegionLeaderState::Writable, edit(source.clone()), false)
+            .await
+            .unwrap();
+
+        // The build captures `source` and starts.
+        let source_generation = region.version().metadata.schema_version;
+        let captured = IndexBuildSource::new(source.clone(), source_generation);
+
+        // Meanwhile the reference is re-authorized.
+        let mut reauthorized = source.clone();
+        reauthorized.owned_range = Some(PartitionExprRef::from(respelled));
+        region
+            .manifest_ctx
+            .update_manifest(RegionLeaderState::Writable, edit(reauthorized), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            respelled_key,
+            region.manifest_ctx.manifest().await.files[&source.file_id].owned_range_key()
+        );
+
+        let mut updated = source.clone();
+        updated.index_version = 1;
+        updated.index_file_size = 128;
+        assert!(matches!(
+            region
+                .manifest_ctx
+                .update_manifest_for_index(&captured, updated)
+                .await
+                .unwrap(),
+            IndexPublication::Stale(IndexPublicationStale::SourceChanged)
+        ));
+
+        let manifest = region.manifest_ctx.manifest().await;
+        assert_eq!(
+            respelled_key,
+            manifest.files[&source.file_id].owned_range_key(),
+            "the stale build must not supersede the re-authorized range"
+        );
+        assert_eq!(
+            0, manifest.files[&source.file_id].index_version,
+            "the stale build must not install its index view"
         );
     }
 
