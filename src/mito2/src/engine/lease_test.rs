@@ -1555,11 +1555,25 @@ async fn test_deferred_work_kept_across_role_change_while_it_runs() {
     wait_until(has_inverted_index).await;
 }
 
-/// A role change outside the worker after it admitted an index build retry, while the retry
-/// reads the manifest, stops the retry, which the region keeps until it is a writable leader
-/// again.
+/// Where the state of the region refuses an index build retry.
+#[derive(Clone, Copy, Debug)]
+enum RetryRefusal {
+    /// A demotion after the worker admitted the retry, while it reads the manifest.
+    AfterAdmission,
+    /// The region is already a follower.
+    Follower,
+    /// The region is already staging.
+    Staging,
+}
+
+/// The state of the region that refuses an index build retry keeps the retry until the region is
+/// a writable leader again, whether it refuses it before or after admitting it.
+#[rstest]
+#[case::after_admission(RetryRefusal::AfterAdmission)]
+#[case::follower(RetryRefusal::Follower)]
+#[case::staging(RetryRefusal::Staging)]
 #[tokio::test]
-async fn test_retry_stopped_by_role_change_after_admission_is_kept() {
+async fn test_refused_index_build_retry_is_kept(#[case] refusal: RetryRefusal) {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::with_prefix("retry-stopped-after-admission").await;
     let listener = Arc::new(LeaseWaitEndedListener::default());
@@ -1601,7 +1615,18 @@ async fn test_retry_stopped_by_role_change_after_admission_is_kept() {
         })
     };
 
-    listener.park_rebuild_admitted.arm();
+    match refusal {
+        RetryRefusal::AfterAdmission => listener.park_rebuild_admitted.arm(),
+        RetryRefusal::Follower => engine
+            .set_region_role(REGION_ID, RegionRole::Follower)
+            .unwrap(),
+        RetryRefusal::Staging => {
+            let request = RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_directive: StagingPartitionDirective::RejectAllWrites,
+            });
+            engine.handle_request(REGION_ID, request).await.unwrap();
+        }
+    }
     let notify = BackgroundNotify::IndexBuildRetry(BuildIndexRequest {
         region_id: REGION_ID,
         build_type: IndexBuildType::Manual,
@@ -1614,12 +1639,14 @@ async fn test_retry_stopped_by_role_change_after_admission_is_kept() {
     };
     let workers = &engine.inner.workers;
     workers.submit_to_worker(REGION_ID, request).await.unwrap();
-    listener.park_rebuild_admitted.wait_entered().await;
-    engine
-        .set_region_role(REGION_ID, RegionRole::Follower)
-        .unwrap();
-    listener.park_rebuild_admitted.release();
-    // A request the worker handles after the retry, which a follower refuses.
+    if matches!(refusal, RetryRefusal::AfterAdmission) {
+        listener.park_rebuild_admitted.wait_entered().await;
+        engine
+            .set_region_role(REGION_ID, RegionRole::Follower)
+            .unwrap();
+        listener.park_rebuild_admitted.release();
+    }
+    // A request the worker handles after the retry, which the region refuses.
     let build = RegionRequest::BuildIndex(RegionBuildIndexRequest::default());
     engine.handle_request(REGION_ID, build).await.unwrap_err();
     assert!(!has_inverted_index());
