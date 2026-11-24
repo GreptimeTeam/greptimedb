@@ -383,6 +383,20 @@ pub(super) fn get_schema_columns(table_name: &str) -> (SchemaRef, Vec<VectorRef>
             vec![],
         ),
 
+        // FIXME(#2931): `session_variables` always returns zero rows. Real
+        // values live on the query context, but `SystemTable::to_stream` only
+        // receives a `ScanRequest`, and the `information_schema` provider is
+        // cached per catalog, so it cannot hold per-session state. Populating
+        // it requires rebuilding the provider per query, the way
+        // `SemanticGraphTableProvider` captures its context.
+        SESSION_VARIABLES => (
+            vec![
+                string_column("VARIABLE_NAME"),
+                string_column("VARIABLE_VALUE"),
+            ],
+            vec![],
+        ),
+
         // GreptimeDB has no pluggable components.
         PLUGINS => (
             string_columns(&[
