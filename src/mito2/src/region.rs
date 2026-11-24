@@ -23,9 +23,9 @@ pub(crate) mod version;
 use std::cell::OnceCell;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use common_base::hash::partition_expr_version;
 use common_recordbatch::adapter::RegionQueryStatCounters;
@@ -58,8 +58,9 @@ use crate::compaction::CompactionStateRef;
 use crate::engine::region_hook::{PendingManifestHook, RegionHookRef};
 use crate::error::{
     EndStagingSnafu, Error, FlushableRegionStateSnafu, InvalidPartitionExprSnafu,
-    InvalidRequestSnafu, RegionBusySnafu, RegionLeaseExpiredSnafu, RegionNotFoundSnafu,
-    RegionStateSnafu, RegionTruncatedSnafu, Result, UnexpectedSnafu, UpdateManifestSnafu,
+    InvalidRequestSnafu, RegionBusySnafu, RegionLeaseExpiredSnafu, RegionLeaseNotReceivedSnafu,
+    RegionNotFoundSnafu, RegionStateSnafu, RegionTruncatedSnafu, Result, UnexpectedSnafu,
+    UpdateManifestSnafu,
 };
 use crate::lease::{Deadline, NodeLease, lease_nanos};
 use crate::manifest::action::{
@@ -321,8 +322,9 @@ impl MitoRegion {
         let _ = REGION_QUERY_SCANNED_BYTES.remove_label_values(labels);
     }
 
-    /// Stop background managers for this region.
+    /// Stops background managers for this region and fences off further promotions.
     pub(crate) async fn stop(&self) {
+        self.manifest_ctx.promotion_fence.lock().unwrap().stopped = true;
         self.manifest_ctx
             .manifest_manager
             .write()
@@ -437,6 +439,13 @@ impl MitoRegion {
         self.manifest_ctx.state.load() == RegionRoleState::Leader(RegionLeaderState::Staging)
     }
 
+    /// Returns whether background flush triggers must skip the region: a staging region keeps
+    /// its rows in the WAL until staging ends, and a region that awaits its Leader lease cannot
+    /// commit a flush yet.
+    pub(crate) fn defers_background_flush(&self) -> bool {
+        self.is_staging() || self.manifest_ctx.awaits_leader_lease()
+    }
+
     /// Returns whether the region is in a staging session: staging, ending staging, or in a
     /// staged edit.
     pub(crate) fn in_staging_session(&self) -> bool {
@@ -508,6 +517,12 @@ impl MitoRegion {
             }
             RegionRoleState::Leader(_) => RegionRole::Leader,
         }
+    }
+
+    /// Returns whether the region is a leader that no longer awaits its Leader lease, see
+    /// [ManifestContext::is_confirmed_leader].
+    pub(crate) fn is_confirmed_leader(&self) -> bool {
+        self.manifest_ctx.is_confirmed_leader()
     }
 
     /// Sets the altering state.
@@ -764,38 +779,7 @@ impl MitoRegion {
         }
 
         // Hack(zhongzc): If we have just become leader (writable), persist any backfilled metadata.
-        let mut backfill_hook_payload: Option<PendingManifestHook> = None;
-        if self.state() == RegionRoleState::Leader(RegionLeaderState::Writable) {
-            // Persist backfilled metadata if manifest is missing fields (e.g., partition_expr)
-            let manifest_meta = &manager.manifest().metadata;
-            let current_version = self.version();
-            let current_meta = &current_version.metadata;
-            if manifest_meta.partition_expr.is_none() && current_meta.partition_expr.is_some() {
-                let action = RegionMetaAction::Change(RegionChange {
-                    metadata: current_meta.clone(),
-                    sst_format: current_version.options.sst_format.unwrap_or_default(),
-                    append_mode: None,
-                });
-                let action_list = RegionMetaActionList::with_action(action);
-                match self
-                    .manifest_ctx
-                    .update_locked(&mut manager, action_list, false)
-                    .await
-                {
-                    Ok(pending) => {
-                        info!(
-                            "Successfully persisted backfilled metadata for region {}, version: {}",
-                            self.region_id,
-                            pending.version()
-                        );
-                        backfill_hook_payload = Some(pending);
-                    }
-                    Err(e) => {
-                        warn!(e; "Failed to persist backfilled metadata for region {}", self.region_id);
-                    }
-                }
-            }
-        }
+        let backfill_hook_payload = self.persist_backfilled_metadata_locked(&mut manager).await;
 
         drop(manager);
 
@@ -813,6 +797,71 @@ impl MitoRegion {
         }
 
         Ok(())
+    }
+
+    /// Persists the metadata backfilled when the region was opened if the manifest lacks it.
+    /// A catchup cannot do it for a region that [awaits its Leader
+    /// lease](ManifestContext::awaits_leader_lease), so the lease that ends the wait does.
+    pub(crate) async fn persist_backfilled_metadata(&self) {
+        let mut manager = self.manifest_ctx.manifest_manager.write().await;
+        let pending = self.persist_backfilled_metadata_locked(&mut manager).await;
+        // The hook may read the manifest.
+        drop(manager);
+        if let Some(pending) = pending {
+            pending.fire().await;
+        }
+    }
+
+    /// Persists the backfilled metadata of a writable leader that may commit, under the
+    /// caller's manifest lock. Returns the hook to fire after the lock is dropped.
+    async fn persist_backfilled_metadata_locked(
+        &self,
+        manager: &mut RwLockWriteGuard<'_, RegionManifestManager>,
+    ) -> Option<PendingManifestHook> {
+        if self.state() != RegionRoleState::Leader(RegionLeaderState::Writable)
+            || self.manifest_ctx.awaits_leader_lease()
+        {
+            return None;
+        }
+        // Persist backfilled metadata if manifest is missing fields (e.g., partition_expr).
+        // Only the metadata and the format are kept, so the memtables of the version are not
+        // pinned across the write below.
+        let (current_meta, sst_format) = {
+            let current_version = self.version();
+            (
+                current_version.metadata.clone(),
+                current_version.options.sst_format.unwrap_or_default(),
+            )
+        };
+        if manager.manifest().metadata.partition_expr.is_some()
+            || current_meta.partition_expr.is_none()
+        {
+            return None;
+        }
+        let action = RegionMetaAction::Change(RegionChange {
+            metadata: current_meta,
+            sst_format,
+            append_mode: None,
+        });
+        let action_list = RegionMetaActionList::with_action(action);
+        match self
+            .manifest_ctx
+            .update_locked(manager, action_list, false)
+            .await
+        {
+            Ok(pending) => {
+                info!(
+                    "Successfully persisted backfilled metadata for region {}, version: {}",
+                    self.region_id,
+                    pending.version()
+                );
+                Some(pending)
+            }
+            Err(e) => {
+                warn!(e; "Failed to persist backfilled metadata for region {}", self.region_id);
+                None
+            }
+        }
     }
 
     /// Switches the region state to `RegionRoleState::Leader(RegionLeaderState::Writable)` if the current state is `expect`.
@@ -896,6 +945,7 @@ impl MitoRegion {
             query_scanned_bytes,
             min_timestamp: time_range.map(|(min, _)| min),
             max_timestamp: time_range.map(|(_, max)| max),
+            has_pending_tails: version.has_pending_tails(),
         }
     }
 
@@ -1084,6 +1134,15 @@ impl MitoRegion {
         })
     }
 
+    /// Returns whether the current read version contains any SSTs.
+    pub fn has_ssts(&self) -> bool {
+        self.version()
+            .ssts
+            .levels()
+            .iter()
+            .any(|level| !level.files.is_empty())
+    }
+
     /// Returns the file metas of the region by file ids.
     pub async fn file_metas(&self, file_ids: &[FileId]) -> Vec<Option<FileMeta>> {
         let manifest_files = self.manifest_ctx.manifest().await.files.clone();
@@ -1245,6 +1304,8 @@ impl MitoRegion {
             );
         }
 
+        self.manifest_ctx
+            .ensure_leader_lease_or_downgrading(self.region_id)?;
         let ending_started_at = self.manifest_ctx.begin_ending_staging(self.region_id)?;
         let mut result = self.manifest_ctx.commit_staged_locked(manager).await;
         if let Ok((pending, committed)) = &mut result {
@@ -1336,15 +1397,27 @@ pub(crate) enum IndexPublication {
     Stale(IndexPublicationStale),
 }
 
-/// Result of publishing the result of a pending tail replay to the manifest.
+/// Result of publishing an edit of the pending tails, a replay's result or a discard, to the
+/// manifest.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum TailPublication {
-    /// The result was committed.
+    /// The edit was committed.
     Committed(ManifestVersion),
-    /// The region is altering or applying an edit, so the result waits.
+    /// The region is altering or applying an edit, or, without conditional publication, a
+    /// replay's earlier update may be saved without being applied.
     Busy,
-    /// The region is no longer a writable leader with the replayed tails.
+    /// The region is no longer a writable leader, or its manifest no longer records the
+    /// expected tails.
     Stale,
+}
+
+/// Who publishes an edit of the pending tails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TailsEditor {
+    /// A tail replay, which commits its own uncertain update again.
+    Replay,
+    /// A discard of one node's tails.
+    Discard,
 }
 
 /// Why an index publication became stale.
@@ -1376,12 +1449,23 @@ impl IndexBuildSource {
     }
 }
 
+/// What [ManifestContext::promote_unless_downgrade_started_after] did with a Leader lease.
+pub(crate) struct LeaderLeasePromotion {
+    /// Whether the promotion applied; see the function.
+    pub(crate) promoted: bool,
+    /// How long the region awaited its Leader lease, if this lease ended the wait, as
+    /// [ManifestContext::record_leader_lease] returns it.
+    pub(crate) ended_wait: Option<Duration>,
+}
+
 /// Context to update the region manifest.
 #[derive(Debug)]
 pub(crate) struct ManifestContext {
     /// Manager to maintain manifest for this region. Logical writes go through
     /// [`update_locked`](Self::update_locked) (or an [`update_manifest`](Self::update_manifest)
-    /// variant) so they produce a [`PendingManifestHook`].
+    /// variant; a replay of pending tails makes the same write unchecked, and the end of staging
+    /// commits through [`commit_staged_locked`](Self::commit_staged_locked)) so they produce a
+    /// [`PendingManifestHook`].
     pub(crate) manifest_manager: tokio::sync::RwLock<RegionManifestManager>,
     /// The state of the region. The region checks the state before updating
     /// manifest.
@@ -1390,9 +1474,16 @@ pub(crate) struct ManifestContext {
     /// the role change.
     promotion_fence: Mutex<PromotionFence>,
     /// When a catchup last made the region writable, in the unit of [Deadline], until a Leader
-    /// lease of a heartbeat sent after it applies; 0 otherwise. While it is set, the region keeps
+    /// lease of a heartbeat sent after it applies (or a StagingLeader lease, on a node whose
+    /// writes need a lease); 0 otherwise. While it is set, the region keeps
     /// the unread part of another node's listed tails.
     catchup_promoted_at: AtomicU64,
+    /// Whether a tail replay's manifest update has an uncertain result: it may be saved in
+    /// storage without being applied to this instance's manifest. Tracked only without
+    /// conditional publication, where a later update takes a new version instead of
+    /// conflicting with a saved one. A value left by an ended replay task keeps discards busy
+    /// until a replay of this instance publishes or the region is reopened.
+    replay_publication_uncertain: AtomicBool,
     /// Deadline of the region's latest Leader or StagingLeader lease from the metasrv, which is how
     /// long the Leader role stays valid. The engine extends it from those leases, and writes check
     /// it.
@@ -1421,8 +1512,11 @@ impl ManifestContext {
             promotion_fence: Mutex::new(PromotionFence {
                 downgrade_started_at: Instant::now(),
                 reload_pending: false,
+                catching_up: false,
+                stopped: false,
             }),
             catchup_promoted_at: AtomicU64::new(0),
+            replay_publication_uncertain: AtomicBool::new(false),
             leader_deadline: Deadline::default(),
             node_lease,
             staging_partition_info: Mutex::new(None),
@@ -1756,7 +1850,7 @@ impl ManifestContext {
             flushed_entry_id: None,
             committed_sequence: None,
             compaction_time_window: None,
-            wal_recovery: Default::default(),
+            ..Default::default()
         };
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
         let manifest_version = self.update_and_fire(manager, action_list, false).await?;
@@ -1767,14 +1861,22 @@ impl ManifestContext {
         })
     }
 
-    /// Publishes the result of a replay of the pending tails `replayed`, if the region is
-    /// still a writable leader whose manifest records exactly those tails.
+    /// Publishes an edit of the pending tails `expected` by `editor`, if the region is still a
+    /// writable leader whose manifest records exactly those tails.
+    ///
+    /// Without conditional publication, a discard is busy while a replay's earlier update has an
+    /// uncertain result, since it may be in storage and the discard would record the replayed
+    /// tails again. A replay's update is uncertain from before its write until it commits; an
+    /// attempt that fails without saving anything keeps the uncertainty of the attempts before
+    /// it. With conditional publication the next update reuses the version of an uncertain
+    /// one, so a discard over a saved update conflicts and the region reloads instead.
     pub(crate) async fn update_manifest_for_tails(
         &self,
-        replayed: &[PendingTail],
+        expected: &[PendingTail],
         action_list: RegionMetaActionList,
+        editor: TailsEditor,
     ) -> Result<TailPublication> {
-        let manager = self.manifest_manager.write().await;
+        let mut manager = self.manifest_manager.write().await;
         match self.state.load() {
             RegionRoleState::Leader(RegionLeaderState::Writable) => {}
             RegionRoleState::Leader(RegionLeaderState::Altering | RegionLeaderState::Editing) => {
@@ -1782,23 +1884,74 @@ impl ManifestContext {
             }
             _ => return Ok(TailPublication::Stale),
         }
-        if manager.manifest().pending_tails != replayed {
+        if manager.manifest().pending_tails != expected {
             return Ok(TailPublication::Stale);
         }
-        let manifest_version = self.update_and_fire(manager, action_list, false).await?;
-        Ok(TailPublication::Committed(manifest_version))
+        let tracks_uncertainty = !manager.is_conditional_publication();
+        let was_uncertain = match editor {
+            // Set under the lock before the write, so no discard commits between a saved write
+            // and its error.
+            TailsEditor::Replay if tracks_uncertainty => self
+                .replay_publication_uncertain
+                .swap(true, Ordering::Relaxed),
+            TailsEditor::Discard
+                if tracks_uncertainty
+                    && self.replay_publication_uncertain.load(Ordering::Relaxed) =>
+            {
+                return Ok(TailPublication::Busy);
+            }
+            _ => false,
+        };
+        // A region that awaits its Leader lease commits a replay of its tails, not a discard.
+        let result = match editor {
+            TailsEditor::Replay => {
+                match self.write_locked(&mut manager, action_list, false).await {
+                    Ok(pending) => Ok(self.unlock_and_fire(manager, pending).await),
+                    Err(e) => Err(e),
+                }
+            }
+            TailsEditor::Discard => self.update_and_fire(manager, action_list, false).await,
+        };
+        if editor == TailsEditor::Replay && tracks_uncertainty {
+            match &result {
+                Ok(_) => self
+                    .replay_publication_uncertain
+                    .store(false, Ordering::Relaxed),
+                // This attempt saved nothing, but an earlier one may have.
+                Err(e) if !e.may_have_persisted_manifest_update() => self
+                    .replay_publication_uncertain
+                    .store(was_uncertain, Ordering::Relaxed),
+                Err(_) => {}
+            }
+        }
+        Ok(TailPublication::Committed(result?))
     }
 
     /// Performs a manifest write under a caller-held write lock and returns a
     /// [`PendingManifestHook`] to [`fire`](PendingManifestHook::fire) after
-    /// dropping the lock. It calls
-    /// [`RegionManifestManager::update_with_verification`] and is the funnel
-    /// through which all logical manifest writes notify the hook.
+    /// dropping the lock. It is the checked entry of the shared write
+    /// `write_locked`, which a replay of pending tails calls without the check;
+    /// the end of staging commits through [`Self::commit_staged_locked`] instead.
     ///
-    /// Does not validate state or edit applicability — the caller must do so
-    /// while still holding the lock (see `update_manifest_with_state_check`
-    /// and `MitoRegion::end_staging_locked`).
+    /// Fails an update that is not staged while the region [awaits its Leader
+    /// lease](Self::awaits_leader_lease) and is not downgrading. Does not
+    /// validate state or edit applicability — the caller must do so while still
+    /// holding the lock (see `update_manifest_with_state_check` and
+    /// `MitoRegion::persist_backfilled_metadata_locked`).
     pub(crate) async fn update_locked(
+        &self,
+        manager: &mut RegionManifestManager,
+        action_list: RegionMetaActionList,
+        is_staging: bool,
+    ) -> Result<PendingManifestHook> {
+        if !is_staging {
+            self.ensure_leader_lease_or_downgrading(manager.manifest().metadata.region_id)?;
+        }
+        self.write_locked(manager, action_list, is_staging).await
+    }
+
+    /// Performs the manifest write of [Self::update_locked] without its Leader lease check.
+    async fn write_locked(
         &self,
         manager: &mut RegionManifestManager,
         action_list: RegionMetaActionList,
@@ -1808,15 +1961,19 @@ impl ManifestContext {
         // Clone before `action_list` is moved into `update_with_verification`
         // so the hook still sees what was written.
         let action_list_for_hook = self.hook.as_ref().map(|_| action_list.clone());
+        // A lease that ends the wait during the write does not lift the checks below.
+        let awaited_leader_lease = self.awaits_leader_lease();
         // The final flush of a downgrading leader must not start cleanup after the downgrade
-        // checkpoint barrier.
+        // checkpoint barrier, nor may a region that awaits its Leader lease and may not own the
+        // region yet.
         let allow_checkpoint = !is_staging
-            && self.state.load() != RegionRoleState::Leader(RegionLeaderState::Downgrading);
+            && self.state.load() != RegionRoleState::Leader(RegionLeaderState::Downgrading)
+            && !awaited_leader_lease;
         let version = self
             .commit_locked(manager, async |manager| {
                 manager
                     .update_with_verification(action_list, is_staging, allow_checkpoint, || {
-                        self.is_leader_lease_expired()
+                        awaited_leader_lease || self.must_verify_commit()
                     })
                     .await
             })
@@ -1841,9 +1998,7 @@ impl ManifestContext {
         let region_id = manager.manifest().metadata.region_id;
         let (version, committed) = self
             .commit_locked(manager, async |manager| {
-                manager
-                    .commit_staged(|| self.is_leader_lease_expired())
-                    .await
+                manager.commit_staged(|| self.must_verify_commit()).await
             })
             .await?;
         let actions_for_hook = self.hook.as_ref().map(|_| committed.clone());
@@ -1882,6 +2037,14 @@ impl ManifestContext {
         result
     }
 
+    /// Returns whether a commit, once written, checks that no checkpoint covers its version: a
+    /// region past its Leader deadline may no longer hold the region, and one that [awaits its
+    /// Leader lease](Self::awaits_leader_lease) may not hold it yet, so either may have written a
+    /// version name that checkpoint cleanup freed.
+    fn must_verify_commit(&self) -> bool {
+        self.is_leader_lease_expired() || self.awaits_leader_lease()
+    }
+
     /// Returns whether the region's Leader deadline has passed. No deadline counts as passed.
     fn is_leader_lease_expired(&self) -> bool {
         self.node_lease.now() >= self.leader_deadline.get()
@@ -1907,8 +2070,9 @@ impl ManifestContext {
         self.promotion_fence.lock().unwrap().reload_pending
     }
 
-    /// Ignores the promotions issued before now. The worker calls it on a reloaded instance when
-    /// it replaces the old one, whose time a downgrade during the reload raised instead.
+    /// Ignores the promotions issued before now. The worker calls it on a reloaded instance, and
+    /// on the replacement of a catchup again, when it replaces the old one, whose time a downgrade
+    /// meanwhile raised instead.
     pub(crate) fn ignore_earlier_promotions(&self) {
         self.promotion_fence.lock().unwrap().downgrade_started_at = Instant::now();
     }
@@ -1924,10 +2088,19 @@ impl ManifestContext {
         action_list: RegionMetaActionList,
         is_staging: bool,
     ) -> Result<ManifestVersion> {
-        let region_id = manager.manifest().metadata.region_id;
         let pending = self
             .update_locked(&mut manager, action_list, is_staging)
             .await?;
+        Ok(self.unlock_and_fire(manager, pending).await)
+    }
+
+    /// Releases the lock of the write that returned `pending`, then fires its hook.
+    async fn unlock_and_fire(
+        &self,
+        manager: RwLockWriteGuard<'_, RegionManifestManager>,
+        pending: PendingManifestHook,
+    ) -> ManifestVersion {
+        let region_id = manager.manifest().metadata.region_id;
         let version = pending.version();
 
         // Hook implementations may read the manifest or send region requests
@@ -1942,7 +2115,7 @@ impl ManifestContext {
         }
 
         pending.fire().await;
-        Ok(version)
+        version
     }
 
     async fn update_manifest_with_state_check(
@@ -2041,42 +2214,116 @@ impl ManifestContext {
         self.set_role(RegionRole::DowngradingLeader, region_id);
     }
 
-    /// Promotes the region to a writable leader unless a downgrade started after `issued_at` or
-    /// the region waits for a reload. Returns false if the promotion is ignored for one of these
-    /// reasons; otherwise the role changes as [`Self::set_role`] allows.
+    /// Promotes the region to a writable leader unless a downgrade started after `issued_at`, a
+    /// catchup runs on it, it waits for a reload or it was stopped. `promoted` is false if the
+    /// promotion is ignored for one of these reasons; otherwise the role changes as
+    /// [`Self::set_role`] allows.
+    /// `ended_wait` tells whether this lease ended the region's wait for its Leader lease. A lease
+    /// ignored for a downgrade or a catchup ends no wait.
     pub(crate) fn promote_unless_downgrade_started_after(
         &self,
         issued_at: Instant,
         region_id: RegionId,
-    ) -> bool {
-        // A writable leader needs no change; a staging leader is promoted below.
-        if self.state.load() == RegionRoleState::Leader(RegionLeaderState::Writable) {
-            self.record_leader_lease(issued_at);
-            return true;
+    ) -> LeaderLeasePromotion {
+        // A writable leader that received its Leader lease needs no change and takes no lock. One
+        // that awaits it takes the lock, so a catchup either demotes it first or finds the wait
+        // ended, see `begin_catchup`; a staging leader is promoted below.
+        if self.state.load() == RegionRoleState::Leader(RegionLeaderState::Writable)
+            && self.leader_lease_received()
+        {
+            return LeaderLeasePromotion {
+                promoted: true,
+                ended_wait: None,
+            };
         }
         let fence = self.promotion_fence.lock().unwrap();
-        if issued_at < fence.downgrade_started_at {
-            return false;
+        if issued_at < fence.downgrade_started_at || fence.catching_up {
+            return LeaderLeasePromotion {
+                promoted: false,
+                ended_wait: None,
+            };
         }
-        self.record_leader_lease(issued_at);
-        self.promote_unless_reload_pending(&fence, region_id, false)
+        let ended_wait = self.record_leader_lease(issued_at);
+        LeaderLeasePromotion {
+            promoted: self.promote_unless_reload_pending(&fence, region_id, false),
+            ended_wait,
+        }
     }
 
-    /// Promotes a region that caught up to a writable leader. Returns false if the region waits
-    /// for a reload.
+    /// Promotes a region that caught up to a writable leader and ends its catchup. Returns false
+    /// if the region waits for a reload or was stopped.
     pub(crate) fn promote_after_catchup(&self, region_id: RegionId) -> bool {
-        let fence = self.promotion_fence.lock().unwrap();
+        let mut fence = self.promotion_fence.lock().unwrap();
+        fence.catching_up = false;
         self.promote_unless_reload_pending(&fence, region_id, true)
     }
 
-    /// Promotes the region unless it waits for a reload. The caller holds the fence lock.
+    /// Returns whether the region was stopped, so no catchup promotes it.
+    pub(crate) fn is_stopped(&self) -> bool {
+        self.promotion_fence.lock().unwrap().stopped
+    }
+
+    /// Begins a catchup unless the region is writable (a writable or staging leader, as
+    /// [MitoRegion::is_writable]) and does not [await its Leader lease](Self::awaits_leader_lease),
+    /// and returns whether the region awaits its Leader lease, None if it begins none. Until the
+    /// catchup ends, Leader leases do not promote the region and end no wait, see
+    /// [Self::promote_after_catchup] and [Self::end_catchup]; the caller ends it on every path. A
+    /// writable region is demoted to Follower and ignores the Leader leases sent before. A lease
+    /// that ends the wait of a writable region holds the same lock.
+    pub(crate) fn begin_catchup(&self, region_id: RegionId) -> Option<bool> {
+        let mut fence = self.promotion_fence.lock().unwrap();
+        let writable = matches!(
+            self.state.load(),
+            RegionRoleState::Leader(RegionLeaderState::Writable | RegionLeaderState::Staging)
+        );
+        let awaits_leader_lease = self.awaits_leader_lease();
+        if writable && !awaits_leader_lease {
+            return None;
+        }
+        fence.catching_up = true;
+        if writable {
+            fence.downgrade_started_at = Instant::now();
+            self.set_role(RegionRole::Follower, region_id);
+        }
+        Some(awaits_leader_lease)
+    }
+
+    /// Records a StagingLeader lease as [Self::record_leader_lease] does, unless a catchup runs on
+    /// the region.
+    pub(crate) fn record_staging_leader_lease(&self, issued_at: Instant) -> Option<Duration> {
+        let fence = self.promotion_fence.lock().unwrap();
+        if fence.catching_up {
+            return None;
+        }
+        self.record_leader_lease(issued_at)
+    }
+
+    /// Ends a catchup that does not promote the region, so the next Leader lease promotes it.
+    pub(crate) fn end_catchup(&self) {
+        self.promotion_fence.lock().unwrap().catching_up = false;
+    }
+
+    /// Makes the region wait for its Leader lease as a catchup on a node whose writes need a lease
+    /// does, without a catchup: it keeps the memtable and enables the node lease the engine
+    /// shares.
+    #[cfg(test)]
+    pub(crate) fn start_leader_lease_wait_for_test(&self, region_id: RegionId) {
+        self.node_lease.enable();
+        self.leader_deadline
+            .extend(Instant::now() + Duration::from_secs(60));
+        assert!(self.promote_after_catchup(region_id));
+        assert!(self.awaits_leader_lease());
+    }
+
+    /// Promotes the region unless it waits for a reload or was stopped. The caller holds the fence
+    /// lock.
     fn promote_unless_reload_pending(
         &self,
         fence: &PromotionFence,
         region_id: RegionId,
         by_catchup: bool,
     ) -> bool {
-        if fence.reload_pending {
+        if fence.reload_pending || fence.stopped {
             return false;
         }
         if by_catchup {
@@ -2088,28 +2335,76 @@ impl ManifestContext {
         true
     }
 
-    /// Counts an applied Leader lease of a heartbeat sent at `issued_at` as received since the
+    /// Counts an applied Leader lease (or StagingLeader lease, on a node whose writes need a lease)
+    /// of a heartbeat sent at `issued_at` as received since the
     /// last catchup promotion. A heartbeat sent before the promotion does not count: its lease
-    /// may have been granted before an earlier downgrade of this node, which the fast path of
-    /// [Self::promote_unless_downgrade_started_after] does not check, and the lease of the next
-    /// heartbeat counts instead. It reads one atomic, since every lease of a writable leader
-    /// comes here.
-    pub(crate) fn record_leader_lease(&self, issued_at: Instant) {
+    /// may have been granted before an earlier downgrade of this node, which
+    /// [Self::record_staging_leader_lease] does not check, and the lease of the next heartbeat
+    /// counts instead. On a node whose writes need a lease, returns how long the region
+    /// [awaited](Self::awaits_leader_lease) its Leader lease if this lease ended the wait: of the
+    /// leases that apply together, only the one that ends it returns it.
+    pub(crate) fn record_leader_lease(&self, issued_at: Instant) -> Option<Duration> {
         let promoted_at = self.catchup_promoted_at.load(Ordering::Relaxed);
-        if promoted_at != 0 && lease_nanos(issued_at) >= promoted_at {
-            let _ = self.catchup_promoted_at.compare_exchange(
-                promoted_at,
-                0,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            );
+        if promoted_at == 0 || lease_nanos(issued_at) < promoted_at {
+            return None;
         }
+        self.end_leader_lease_wait(promoted_at)
     }
 
-    /// Returns whether a Leader lease of a heartbeat sent after the last catchup promotion applied,
-    /// or no catchup promoted the region.
+    /// Ends the wait of the catchup promotion at `promoted_at` if no other lease ended it since
+    /// it was read, and returns what [Self::record_leader_lease] returns for the lease that ends it.
+    fn end_leader_lease_wait(&self, promoted_at: u64) -> Option<Duration> {
+        self.catchup_promoted_at
+            .compare_exchange(promoted_at, 0, Ordering::Relaxed, Ordering::Relaxed)
+            .ok()?;
+        self.node_lease
+            .is_enabled()
+            .then(|| Duration::from_nanos(lease_nanos(Instant::now()).saturating_sub(promoted_at)))
+    }
+
+    /// Returns whether the region is a leader that no longer awaits its Leader lease. It reads both
+    /// under the fence lock, under which a catchup demotes and promotes the region and a lease ends
+    /// its wait. The changes made without the lock only demote the region, move it between leader
+    /// states, skip a leader whose lease came, or promote it directly before ending its wait, so no
+    /// read sees an instance a catchup touched as confirmed before a lease confirms it.
+    pub(crate) fn is_confirmed_leader(&self) -> bool {
+        let _fence = self.promotion_fence.lock().unwrap();
+        self.state.load() != RegionRoleState::Follower && !self.awaits_leader_lease()
+    }
+
+    /// Returns whether a Leader lease (or a StagingLeader lease, on a node whose writes need a
+    /// lease) of a heartbeat sent after the last catchup promotion applied, or no catchup promoted
+    /// the region.
     pub(crate) fn leader_lease_received(&self) -> bool {
         self.catchup_promoted_at.load(Ordering::Relaxed) == 0
+    }
+
+    /// Returns whether the region, on a node whose writes need a lease, still waits for the
+    /// Leader or StagingLeader lease that follows its catchup promotion, whatever its role is
+    /// now. Until that lease nothing confirms that it owns the region, even if the route already
+    /// points to it, so it commits nothing but replayed tails and what it commits while
+    /// downgrading, and starts no work that only such a commit could finish.
+    pub(crate) fn awaits_leader_lease(&self) -> bool {
+        self.node_lease.is_enabled() && !self.leader_lease_received()
+    }
+
+    /// Fails a manifest commit of a region that [awaits its Leader lease](Self::awaits_leader_lease),
+    /// unless the region is downgrading: a downgrade is asked only of the leader in the route.
+    /// A commit calls it under the manifest lock before it sends anything; a request that would
+    /// flush first calls it before it schedules the flush, and an index build before it starts.
+    /// It reads atomics only.
+    pub(crate) fn ensure_leader_lease_or_downgrading(&self, region_id: RegionId) -> Result<()> {
+        ensure!(
+            !self.refuses_commits_awaiting_leader_lease(),
+            RegionLeaseNotReceivedSnafu { region_id }
+        );
+        Ok(())
+    }
+
+    /// Returns whether [Self::ensure_leader_lease_or_downgrading] fails.
+    pub(crate) fn refuses_commits_awaiting_leader_lease(&self) -> bool {
+        self.awaits_leader_lease()
+            && self.state.load() != RegionRoleState::Leader(RegionLeaderState::Downgrading)
     }
 
     /// Sets the [`RegionRole`].
@@ -2329,6 +2624,12 @@ struct PromotionFence {
     /// Whether another writer advanced the manifest, so this instance stays a Follower until a
     /// reload replaces it.
     reload_pending: bool,
+    /// Whether a catchup runs on this instance. Until it ends, a Leader lease does not promote
+    /// the region: only the catchup's own promotion does.
+    catching_up: bool,
+    /// Whether the region was stopped (closed, dropped or its worker cleaned up), so no promotion
+    /// applies. The manifest manager also knows it, but a promotion decides under this lock only.
+    stopped: bool,
 }
 
 /// Regions indexed by ids.
@@ -2703,6 +3004,7 @@ fn manifest_file_matches(meta: &FileMeta, filters: &MetadataFilter) -> bool {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::Ordering;
 
     use common_datasource::compression::CompressionType;
     use common_test_util::temp_dir::create_temp_dir;
@@ -2724,7 +3026,8 @@ mod tests {
     use crate::manifest::storage::staging::staging_manifest_path;
     use crate::region::{
         IndexBuildSource, IndexPublication, IndexPublicationStale, ManifestContext, ManifestStats,
-        MitoRegion, RegionLeaderState, RegionRoleState, RegionStats, StagingPartitionInfo,
+        MitoRegion, PromotionFence, RegionLeaderState, RegionRoleState, RegionStats,
+        StagingPartitionInfo, TailPublication, TailsEditor,
     };
     use crate::sst::FormatType;
     use crate::sst::index::intermediate::IntermediateManager;
@@ -2816,6 +3119,13 @@ mod tests {
     }
 
     async fn build_test_region(env: &SchedulerEnv) -> MitoRegion {
+        build_test_region_with_checkpoint_distance(env, 10).await
+    }
+
+    async fn build_test_region_with_checkpoint_distance(
+        env: &SchedulerEnv,
+        checkpoint_distance: u64,
+    ) -> MitoRegion {
         let builder = VersionControlBuilder::new();
         let version_control = Arc::new(builder.build());
         let metadata = version_control.current().version.metadata.clone();
@@ -2828,7 +3138,7 @@ mod tests {
                 manifest_dir: "".to_string(),
                 object_store: env.access_layer.object_store().clone(),
                 compress_type: CompressionType::Uncompressed,
-                checkpoint_distance: 10,
+                checkpoint_distance,
                 remove_file_options: Default::default(),
                 manifest_cache: None,
                 conditional_publication: false,
@@ -2973,7 +3283,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
-            wal_recovery: Default::default(),
+            ..Default::default()
         }
     }
 
@@ -2988,11 +3298,142 @@ mod tests {
             let manifest_ctx = &promoted.manifest_ctx;
             let issued_at = std::time::Instant::now();
             tx.send(
-                manifest_ctx.promote_unless_downgrade_started_after(issued_at, promoted.region_id),
+                manifest_ctx
+                    .promote_unless_downgrade_started_after(issued_at, promoted.region_id)
+                    .promoted,
             )
             .unwrap();
         });
         assert!(rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap());
+    }
+
+    /// Makes the test region a writable leader that awaits its Leader lease.
+    fn await_leader_lease(region: &MitoRegion) {
+        let manifest_ctx = &region.manifest_ctx;
+        manifest_ctx.node_lease.enable();
+        manifest_ctx
+            .leader_deadline
+            .extend(std::time::Instant::now() + std::time::Duration::from_secs(60));
+        region.set_role(RegionRole::Follower);
+        assert!(manifest_ctx.promote_after_catchup(region.region_id));
+        assert!(region.is_writable());
+        assert!(manifest_ctx.awaits_leader_lease());
+    }
+
+    /// Runs `f` on another thread while this thread holds the fence lock, checks that `f` waits
+    /// for the lock, then runs `under_lock` before it releases the lock and returns what `f` returns.
+    fn run_blocked_on_fence<T: Send + 'static>(
+        region: &Arc<MitoRegion>,
+        f: impl FnOnce(&MitoRegion) -> T + Send + 'static,
+        under_lock: impl FnOnce(&mut PromotionFence),
+    ) -> T {
+        let mut fence = region.manifest_ctx.promotion_fence.lock().unwrap();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let blocked = region.clone();
+        std::thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            tx.send(f(&blocked)).unwrap();
+        });
+        ready_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(200))
+                .is_err()
+        );
+        under_lock(&mut fence);
+        drop(fence);
+        rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap()
+    }
+
+    /// A Leader lease of a writable leader that awaits it takes the fence lock, so it cannot end
+    /// the wait between a catchup's flag and its demotion.
+    #[tokio::test]
+    async fn test_lease_awaited_by_writable_leader_waits_for_catchup_demotion() {
+        let env = SchedulerEnv::new().await;
+        let region = Arc::new(build_test_region(&env).await);
+        await_leader_lease(&region);
+        let issued_at = std::time::Instant::now();
+        let promotion = run_blocked_on_fence(
+            &region,
+            move |r| {
+                r.manifest_ctx
+                    .promote_unless_downgrade_started_after(issued_at, r.region_id)
+            },
+            // What a catchup does under the lock.
+            |fence| {
+                fence.catching_up = true;
+                region
+                    .manifest_ctx
+                    .set_role(RegionRole::Follower, region.region_id);
+            },
+        );
+        assert!(!promotion.promoted);
+        assert!(promotion.ended_wait.is_none());
+        assert!(region.manifest_ctx.awaits_leader_lease());
+    }
+
+    /// The readiness of an upgrade reads the role and the wait for a Leader lease under the fence
+    /// lock, so it sees a change of both made under that lock as a whole.
+    #[tokio::test]
+    async fn test_confirmed_leader_read_waits_for_fence_lock() {
+        let env = SchedulerEnv::new().await;
+        let region = Arc::new(build_test_region(&env).await);
+        await_leader_lease(&region);
+        // A lease ends the wait under the lock; a read made before it would answer false.
+        let confirmed = run_blocked_on_fence(
+            &region,
+            |r| r.is_confirmed_leader(),
+            |_| {
+                region
+                    .manifest_ctx
+                    .catchup_promoted_at
+                    .store(0, Ordering::Relaxed)
+            },
+        );
+        assert!(confirmed);
+    }
+
+    /// A catchup begins on no writable leader whose wait for a Leader lease ended, and promotes no
+    /// stopped region.
+    #[tokio::test]
+    async fn test_catchup_skips_confirmed_leader_and_promotes_no_stopped_region() {
+        let env = SchedulerEnv::new().await;
+        let region = build_test_region(&env).await;
+        await_leader_lease(&region);
+        let promotion = region
+            .manifest_ctx
+            .promote_unless_downgrade_started_after(std::time::Instant::now(), region.region_id);
+        assert!(promotion.ended_wait.is_some());
+        assert!(!region.manifest_ctx.awaits_leader_lease());
+        assert_eq!(region.manifest_ctx.begin_catchup(region.region_id), None);
+        assert!(region.is_writable());
+        region.set_role(RegionRole::Follower);
+        region.stop().await;
+        assert!(region.manifest_ctx.is_stopped());
+        assert!(!region.manifest_ctx.promote_after_catchup(region.region_id));
+        assert!(region.is_follower());
+    }
+
+    #[tokio::test]
+    async fn test_awaiting_leader_lease_requires_verification() {
+        let env = SchedulerEnv::new().await;
+        let region = build_test_region(&env).await;
+        let manifest_ctx = &region.manifest_ctx;
+        manifest_ctx.node_lease.enable();
+        manifest_ctx
+            .leader_deadline
+            .extend(std::time::Instant::now() + std::time::Duration::from_secs(60));
+        assert!(!manifest_ctx.must_verify_commit());
+
+        region.set_role(RegionRole::Follower);
+        assert!(manifest_ctx.promote_after_catchup(region.region_id));
+        assert!(manifest_ctx.must_verify_commit());
+
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        manifest_ctx.record_leader_lease(std::time::Instant::now());
+        assert!(!manifest_ctx.must_verify_commit());
     }
 
     #[tokio::test]
@@ -3005,11 +3446,64 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(1));
         assert!(manifest_ctx.promote_after_catchup(region.region_id));
 
-        assert!(manifest_ctx.promote_unless_downgrade_started_after(sent_before, region.region_id));
+        assert!(
+            manifest_ctx
+                .promote_unless_downgrade_started_after(sent_before, region.region_id)
+                .promoted
+        );
         assert!(!manifest_ctx.leader_lease_received());
         let sent_after = std::time::Instant::now();
-        assert!(manifest_ctx.promote_unless_downgrade_started_after(sent_after, region.region_id));
+        assert!(
+            manifest_ctx
+                .promote_unless_downgrade_started_after(sent_after, region.region_id)
+                .promoted
+        );
         assert!(manifest_ctx.leader_lease_received());
+    }
+
+    /// A replay of pending tails that commits while the region awaits its Leader lease starts no
+    /// checkpoint without conditional publication too, where no verification of the commit
+    /// turns it off.
+    #[tokio::test]
+    async fn test_tail_commit_awaiting_leader_lease_starts_no_checkpoint_without_conditional_publication()
+     {
+        let env = SchedulerEnv::new().await;
+        let region = build_test_region_with_checkpoint_distance(&env, 1).await;
+        let manifest_ctx = &region.manifest_ctx;
+        manifest_ctx.start_leader_lease_wait_for_test(region.region_id);
+        let action_list =
+            RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit::default()));
+
+        let publication = manifest_ctx
+            .update_manifest_for_tails(&[], action_list, TailsEditor::Replay)
+            .await
+            .unwrap();
+
+        assert!(matches!(publication, TailPublication::Committed(_)));
+        let manager = manifest_ctx.manifest_manager.read().await;
+        assert_eq!(0, manager.checkpointer().last_checkpoint_version());
+        assert!(!manager.checkpointer().is_doing_checkpoint());
+    }
+
+    /// Of the leases that apply together, only the one that ends the wait reports it.
+    #[tokio::test]
+    async fn test_only_the_lease_that_ends_the_wait_reports_it() {
+        let env = SchedulerEnv::new().await;
+        let region = build_test_region(&env).await;
+        let manifest_ctx = &region.manifest_ctx;
+        manifest_ctx.start_leader_lease_wait_for_test(region.region_id);
+        // Two leases that read the same wait before either ends it.
+        let promoted_at = manifest_ctx.catchup_promoted_at.load(Ordering::Relaxed);
+
+        assert!(manifest_ctx.end_leader_lease_wait(promoted_at).is_some());
+        assert!(manifest_ctx.end_leader_lease_wait(promoted_at).is_none());
+        assert!(!manifest_ctx.awaits_leader_lease());
+        // A lease that reads the wait after it ended.
+        assert!(
+            manifest_ctx
+                .record_leader_lease(std::time::Instant::now())
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -3032,7 +3526,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
-            wal_recovery: Default::default(),
+            ..Default::default()
         }));
 
         region
@@ -3049,6 +3543,69 @@ mod tests {
                 .files
                 .contains_key(&file_id)
         );
+    }
+
+    #[rstest::rstest]
+    #[case::writable(false)]
+    #[case::downgrading(true)]
+    #[tokio::test]
+    async fn test_index_publication_refused_awaiting_leader_lease_unless_downgrading(
+        #[case] downgrading: bool,
+    ) {
+        let env = SchedulerEnv::new().await;
+        let region = build_test_region(&env).await;
+        let source = crate::sst::file::FileMeta {
+            region_id: region.region_id,
+            file_id: FileId::random(),
+            level: 1,
+            file_size: 1024,
+            ..Default::default()
+        };
+        region
+            .manifest_ctx
+            .update_manifest(
+                RegionLeaderState::Writable,
+                RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit {
+                    files_to_add: vec![source.clone()],
+                    ..empty_edit()
+                })),
+                false,
+            )
+            .await
+            .unwrap();
+        let manifest_ctx = &region.manifest_ctx;
+        manifest_ctx.start_leader_lease_wait_for_test(region.region_id);
+        let index_source =
+            IndexBuildSource::new(source.clone(), region.version().metadata.schema_version);
+        let mut updated = source.clone();
+        updated.index_version = 1;
+        updated.index_file_size = 128;
+        let publish = || manifest_ctx.update_manifest_for_index(&index_source, updated.clone());
+
+        if downgrading {
+            // A downgrade is asked only of the leader in the route.
+            manifest_ctx.begin_downgrade(region.region_id);
+        } else {
+            let err = publish().await.unwrap_err();
+            assert!(
+                matches!(err, Error::RegionLeaseNotReceived { .. }),
+                "{err:?}"
+            );
+            assert_eq!(
+                manifest_ctx
+                    .manifest()
+                    .await
+                    .files
+                    .get(&source.file_id)
+                    .map(AsRef::as_ref),
+                Some(&source)
+            );
+            manifest_ctx.record_leader_lease(std::time::Instant::now());
+        }
+        assert!(matches!(
+            publish().await.unwrap(),
+            IndexPublication::Committed { .. }
+        ));
     }
 
     #[tokio::test]

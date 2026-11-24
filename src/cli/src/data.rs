@@ -26,12 +26,14 @@ mod storage_export;
 use clap::Subcommand;
 use client::DEFAULT_CATALOG_NAME;
 use common_error::ext::BoxedError;
+use common_telemetry::error;
 
 use crate::Tool;
 use crate::data::export::ExportCommand;
 use crate::data::export_v2::ExportV2Command;
 use crate::data::import::ImportCommand;
 use crate::data::import_v2::ImportV2Command;
+use crate::error::Result;
 
 pub(crate) const COPY_PATH_PLACEHOLDER: &str = "<PATH/TO/FILES>";
 
@@ -62,4 +64,21 @@ impl DataCommand {
 
 pub(crate) fn default_database() -> String {
     format!("{DEFAULT_CATALOG_NAME}-*")
+}
+
+fn collect_schema_job_results(
+    catalog: &str,
+    schemas: &[String],
+    results: Vec<Result<()>>,
+    operation: &str,
+) -> Result<()> {
+    for (schema, result) in schemas.iter().zip(&results) {
+        if let Err(error) = result {
+            error!(error; "Failed to {operation} {catalog}.{schema}");
+        }
+    }
+    for result in results {
+        result?;
+    }
+    Ok(())
 }

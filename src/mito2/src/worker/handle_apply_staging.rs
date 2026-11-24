@@ -130,7 +130,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 flushed_entry_id: None,
                 flushed_sequence: None,
                 committed_sequence: None,
-                wal_recovery: Default::default(),
+                ..Default::default()
             };
 
             let (tx, rx) = oneshot::channel();

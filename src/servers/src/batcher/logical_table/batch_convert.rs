@@ -16,13 +16,15 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use arrow::array::UInt32Array;
 use arrow::compute::concat_batches;
-use arrow::datatypes::{DataType as ArrowDataType, Schema as ArrowSchema};
+use arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use common_query::prelude::{greptime_timestamp, greptime_value};
 use metric_engine::batch_modifier::{TagColumnInfo, modify_batch_sparse};
 use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt, ensure};
+use store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME;
 use table::metadata::TableId;
 
 use crate::error;
@@ -194,7 +196,9 @@ pub(in crate::batcher::logical_table) fn columns_taxonomy(
 /// Transforms logical table batches into physical format (sparse primary key encoding).
 ///
 /// It identifies tag columns and essential columns (timestamp, value) for each logical batch
-/// and applies sparse primary key modification.
+/// and applies sparse primary key modification. On success, each input batch has
+/// one corresponding output batch, preserving table/batch order and each batch's
+/// row count and row order.
 pub(in crate::batcher::logical_table) fn transform_logical_batches_to_physical(
     table_batches: &[TableBatch],
     name_to_ids: &HashMap<String, u32>,
@@ -221,10 +225,6 @@ pub(in crate::batcher::logical_table) fn transform_logical_batches_to_physical(
             )?;
 
             columns_taxonomy_elapsed += start.elapsed();
-            if tag_columns.is_empty() && essential_col_indices.is_empty() {
-                continue;
-            }
-
             let modified = {
                 let start = Instant::now();
                 // The schema of modified batch is: __primary_key, timestamp, value, other partition columns...
@@ -260,15 +260,43 @@ pub(in crate::batcher::logical_table) fn transform_logical_batches_to_physical(
 
 /// Concatenates all modified batches into a single large batch.
 ///
-/// All modified batches share the same physical schema.
+/// All modified batches share the same physical schema. They must correspond
+/// one-to-one to the batches in `table_batches`, in table/batch order, preserving
+/// each batch's row count and row order. A per-row table-id column lets the physical rule use
+/// [`FromPayload`](partition::partition::PartitionEvalContext::FromPayload) even
+/// when the batch contains several logical tables.
 pub(in crate::batcher::logical_table) fn concat_modified_batches(
     modified_batches: &[RecordBatch],
+    table_batches: &[TableBatch],
 ) -> Result<RecordBatch> {
     let combined_schema = modified_batches[0].schema();
     let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
         .with_label_values(&["flush_physical_concat_all"])
         .start_timer();
-    concat_batches(&combined_schema, modified_batches).context(error::ArrowSnafu)
+    let combined = concat_batches(&combined_schema, modified_batches).context(error::ArrowSnafu)?;
+    // Build one array after concatenation instead of allocating one per logical batch.
+    // Always retain it in the IPC payload: a retry can introduce table-id partitioning.
+    let mut table_ids = Vec::with_capacity(combined.num_rows());
+    for table in table_batches {
+        for batch in &table.batches {
+            table_ids.extend(std::iter::repeat_n(table.table_id, batch.batch.num_rows()));
+        }
+    }
+    ensure!(
+        table_ids.len() == combined.num_rows(),
+        error::InternalSnafu {
+            err_msg: "Logical table ids do not match combined rows",
+        }
+    );
+    let mut fields = combined.schema().fields().to_vec();
+    fields.push(Arc::new(Field::new(
+        DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+        ArrowDataType::UInt32,
+        false,
+    )));
+    let mut columns = combined.columns().to_vec();
+    columns.push(Arc::new(UInt32Array::from(table_ids)));
+    RecordBatch::try_new(Arc::new(ArrowSchema::new(fields)), columns).context(error::ArrowSnafu)
 }
 
 #[cfg(test)]
@@ -283,7 +311,8 @@ mod tests {
     use smallvec::SmallVec;
 
     use crate::batcher::logical_table::batch_convert::{
-        TableBatch, columns_taxonomy, transform_logical_batches_to_physical,
+        TableBatch, columns_taxonomy, concat_modified_batches,
+        transform_logical_batches_to_physical,
     };
     use crate::batcher::logical_table::test_util::mock_aligned_tag_batch;
     use crate::error::Error;
@@ -577,6 +606,13 @@ mod tests {
                 .unwrap();
 
         assert_eq!(2, modified.len());
+
+        let err = concat_modified_batches(&modified, &table_batches[..1]).unwrap_err();
+        assert!(
+            matches!(&err, Error::Internal { err_msg }
+                if err_msg == "Logical table ids do not match combined rows"),
+            "{err}"
+        );
     }
 
     #[test]

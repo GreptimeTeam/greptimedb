@@ -52,6 +52,7 @@ use store_api::storage::{FileId, RegionId, ScanRequest};
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::engine::basic_test::build_bulk_insert_request;
+use crate::engine::lease_test::promote_to_await_leader_lease;
 use crate::engine::listener::{
     CountingStallListener, EventListener, FlushListener, NotifyEnterStagingResultListener,
 };
@@ -78,7 +79,7 @@ fn range_expr(col_name: &str, start: i64, end: i64) -> PartitionExpr {
         .and(col(col_name).lt(Value::Int64(end)))
 }
 
-fn float_range_expr(col_name: &str, start: f64, end: f64) -> PartitionExpr {
+pub(crate) fn float_range_expr(col_name: &str, start: f64, end: f64) -> PartitionExpr {
     col(col_name)
         .gt_eq(Value::Float64(start.into()))
         .and(col(col_name).lt(Value::Float64(end.into())))
@@ -881,7 +882,7 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
                         flushed_entry_id: None,
                         flushed_sequence: None,
                         committed_sequence: None,
-                        wal_recovery: Default::default(),
+                        ..Default::default()
                     })]),
                     true,
                 )
@@ -1110,7 +1111,7 @@ async fn test_staging_exit_conflict_partition_expr_change_and_change_with_format
                     flushed_entry_id: None,
                     flushed_sequence: None,
                     committed_sequence: None,
-                    wal_recovery: Default::default(),
+                    ..Default::default()
                 }),
             ]),
             true,
@@ -1437,7 +1438,7 @@ async fn test_enter_staging_clean_staging_manifest_error_with_format(flat_format
     test_enter_staging_error(&mut env, flat_format).await;
 }
 
-async fn enter_staging(engine: &MitoEngine, region_id: RegionId) {
+pub(crate) async fn enter_staging(engine: &MitoEngine, region_id: RegionId) {
     engine
         .handle_request(
             region_id,
@@ -1534,7 +1535,7 @@ async fn put_range_skip_wal(
 }
 
 /// Returns one of the files in the region's manifest.
-async fn first_file(region: &MitoRegionRef) -> FileMeta {
+pub(crate) async fn first_file(region: &MitoRegionRef) -> FileMeta {
     let manifest = region.manifest_ctx.manifest().await;
     manifest.files.values().next().unwrap().as_ref().clone()
 }
@@ -1548,7 +1549,7 @@ fn edit_adding(file: FileMeta) -> RegionEdit {
         flushed_entry_id: None,
         flushed_sequence: None,
         committed_sequence: None,
-        wal_recovery: Default::default(),
+        ..Default::default()
     }
 }
 
@@ -1661,8 +1662,13 @@ async fn test_memory_pressure_keeps_staging_rows_after_rollback() {
     assert_eq!(5, count_rows(&engine, staging_region_id).await);
 }
 
+/// The periodic flush skips a staging region and, with `awaiting_leader_lease`, a region that
+/// awaits its Leader lease instead: either defers its flush.
+#[rstest::rstest]
+#[case::staging(false)]
+#[case::awaiting_leader_lease(true)]
 #[tokio::test]
-async fn test_periodic_flush_skips_staging_region() {
+async fn test_periodic_flush_skips_region_deferring_flush(#[case] awaiting_leader_lease: bool) {
     let listener = Arc::new(FlushListener::default());
     let now = current_time_millis();
     let time_provider = Arc::new(MockTimeProvider::new(now));
@@ -1679,11 +1685,30 @@ async fn test_periodic_flush_skips_staging_region() {
             time_provider.clone(),
         )
         .await;
-    let staging_region_id = RegionId::new(1024, 0);
+    let deferring_region_id = RegionId::new(1024, 0);
     let writable_region_id = RegionId::new(1024, 1);
-    let (schema, _) = create_staging_region(&engine, staging_region_id).await;
+    let schema = if awaiting_leader_lease {
+        create_writable_region(&engine, deferring_region_id).await;
+        engine.require_write_lease();
+        promote_to_await_leader_lease(&engine, deferring_region_id).await;
+        rows_schema(&CreateRequestBuilder::new().build())
+    } else {
+        create_staging_region(&engine, deferring_region_id).await.0
+    };
     create_writable_region(&engine, writable_region_id).await;
-    put_range(&engine, staging_region_id, &schema, (0, 3)).await;
+    if awaiting_leader_lease {
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        engine
+            .set_region_role_with_lease(
+                writable_region_id,
+                RegionRole::Leader,
+                std::time::Instant::now(),
+                deadline,
+                None,
+            )
+            .unwrap();
+    }
+    put_range(&engine, deferring_region_id, &schema, (0, 3)).await;
     put_range(&engine, writable_region_id, &schema, (0, 3)).await;
 
     time_provider.set_now(now + 600_000);
@@ -1693,7 +1718,7 @@ async fn test_periodic_flush_skips_staging_region() {
         .unwrap();
 
     assert_eq!((1, 0), scan_inputs(&engine, writable_region_id).await);
-    assert_unflushed(&engine, staging_region_id).await;
+    assert_unflushed(&engine, deferring_region_id).await;
 }
 
 #[tokio::test]
@@ -2234,7 +2259,7 @@ async fn test_stale_staging_edit_rejected_after_close_time_flush_fails() {
     );
 }
 
-async fn submit_staging_edit(
+pub(crate) async fn submit_staging_edit(
     engine: &MitoEngine,
     region_id: RegionId,
     file: FileMeta,

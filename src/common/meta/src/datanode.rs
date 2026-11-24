@@ -130,6 +130,10 @@ pub struct RegionStat {
     /// The latest timestamp of the region's current data, if it holds any.
     #[serde(default)]
     pub max_timestamp: Option<Timestamp>,
+    /// Whether the region still has WAL ranges to recover. Omitted from the serialized form
+    /// when false.
+    #[serde(default, skip_serializing_if = "store_api::is_false")]
+    pub has_pending_tails: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -347,6 +351,7 @@ impl From<&api::v1::meta::RegionStat> for RegionStat {
             metadata_topic_latest_entry_id: region_stat.metadata_topic_latest_entry_id,
             min_timestamp: region_stat.min_timestamp,
             max_timestamp: region_stat.max_timestamp,
+            has_pending_tails: region_stat.has_pending_tails,
         }
     }
 }
@@ -612,6 +617,7 @@ mod tests {
                 metadata_topic_latest_entry_id: 0,
                 min_timestamp: None,
                 max_timestamp: None,
+                has_pending_tails: false,
             }],
             ..Default::default()
         };
@@ -780,6 +786,51 @@ mod tests {
             RegionStat::from(&api::v1::meta::RegionStat::default()).ingested_parquet_bytes,
             0
         );
+    }
+
+    #[test]
+    fn test_has_pending_tails_wire() {
+        // Frozen encodings of a release without the field.
+        let legacy_statistic: &[u8] = include_bytes!(
+            "../../../../tests/compatibility/wire/region_statistic_pending_tails/legacy_region_statistic.json"
+        );
+        let legacy_stat: &[u8] = include_bytes!(
+            "../../../../tests/compatibility/wire/region_statistic_pending_tails/legacy_region_stat.json"
+        );
+        let statistic: RegionStatistic = serde_json::from_slice(legacy_statistic).unwrap();
+        assert!(!statistic.has_pending_tails);
+        // A false flag is not written, so the encoding stays as it was.
+        assert_eq!(serde_json::to_vec(&statistic).unwrap(), legacy_statistic);
+        let stat: RegionStat = serde_json::from_slice(legacy_stat).unwrap();
+        assert!(!stat.has_pending_tails);
+        assert_eq!(serde_json::to_vec(&stat).unwrap(), legacy_stat);
+
+        // A true flag is written under this key, which readers that support the flag decode;
+        // older readers ignore it.
+        let statistic = RegionStatistic {
+            has_pending_tails: true,
+            ..statistic
+        };
+        let encoded = serde_json::to_value(&statistic).unwrap();
+        assert_eq!(encoded["has_pending_tails"], serde_json::Value::Bool(true));
+        let encoded = serde_json::to_value(RegionStat {
+            has_pending_tails: true,
+            ..stat
+        })
+        .unwrap();
+        assert_eq!(encoded["has_pending_tails"], serde_json::Value::Bool(true));
+
+        // A true flag travels from the heartbeat extension to the stored statistic.
+        let mut region = api::v1::meta::RegionStat::default();
+        region.extensions.insert(
+            REGION_STATISTIC_KEY.to_string(),
+            serde_json::to_vec(&statistic).unwrap(),
+        );
+        let stat = RegionStat::from(&region);
+        assert!(stat.has_pending_tails);
+        let stored: RegionStat =
+            serde_json::from_slice(&serde_json::to_vec(&stat).unwrap()).unwrap();
+        assert_eq!(stored, stat);
     }
 
     #[test]

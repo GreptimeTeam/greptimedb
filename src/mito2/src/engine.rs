@@ -108,7 +108,7 @@ mod puffin_index;
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use api::region::RegionResponse;
 use async_trait::async_trait;
@@ -274,6 +274,7 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
             .build();
 
         let inner = EngineInner {
+            series_cache_namespace: store_api::storage::FileId::random(),
             workers,
             config,
             wal_raw_entry_reader: RwLock::new(Some(wal_raw_entry_reader)),
@@ -372,6 +373,15 @@ impl MitoEngine {
             .record(region_id, sent_at, candidate_lease_id, || {
                 self.inner.find_region(region_id).is_ok()
             });
+    }
+
+    /// Extends the Leader deadline of a region as a Leader or StagingLeader lease that the region
+    /// ignores does. Like [Self::record_granted_lease], it serves a region of a group that received
+    /// the lease as a whole. Does nothing if the region is not open.
+    pub fn extend_leader_deadline(&self, region_id: RegionId, deadline: Instant) {
+        if let Ok(region) = self.inner.find_region(region_id) {
+            region.manifest_ctx.leader_deadline.extend(deadline);
+        }
     }
 
     /// Freezes the clock of the lease checks at `at`.
@@ -530,7 +540,7 @@ impl MitoEngine {
     }
 
     /// Edit region's metadata by [RegionEdit] directly. Use with care.
-    /// Now we only allow adding files or removing files from region (the [RegionEdit] struct can only contain a non-empty "files_to_add" or "files_to_remove" field).
+    /// Allows adding or removing data files and series indexes from the region.
     /// Other region editing intention will result in an "invalid request" error.
     /// Also note that if a region is to be edited directly, we MUST not write data to it thereafter.
     pub async fn edit_region(&self, region_id: RegionId, edit: RegionEdit) -> Result<()> {
@@ -553,6 +563,25 @@ impl MitoEngine {
             .submit_to_worker(region_id, request)
             .await?;
         rx.await.context(RecvSnafu)?
+    }
+
+    /// Pauses compaction on a loaded region and waits for any active cycle to finish.
+    /// Writes and flushes continue while the caller holds the guard.
+    /// The scheduler discards automatic follow-ups skipped during the pause. After the
+    /// last guard is dropped, a fresh trigger can start another compaction cycle.
+    pub async fn pause_compaction(
+        &self,
+        region_id: RegionId,
+    ) -> Result<crate::compaction::CompactionGuard> {
+        let (sender, receiver) = oneshot::channel();
+        self.inner
+            .workers
+            .submit_to_worker(
+                region_id,
+                WorkerRequest::PauseCompaction { region_id, sender },
+            )
+            .await?;
+        receiver.await.context(RecvSnafu)??.wait().await
     }
 
     /// Handles copy region from request.
@@ -868,7 +897,10 @@ impl MitoEngine {
 ///
 /// Only adding or removing files to region is considered valid now.
 fn is_valid_region_edit(edit: &RegionEdit) -> bool {
-    (!edit.files_to_add.is_empty() || !edit.files_to_remove.is_empty())
+    (!edit.files_to_add.is_empty()
+        || !edit.files_to_remove.is_empty()
+        || !edit.series_indexes_to_add.is_empty()
+        || !edit.series_indexes_to_remove.is_empty())
         && matches!(
             edit,
             RegionEdit {
@@ -888,6 +920,9 @@ fn is_valid_region_edit(edit: &RegionEdit) -> bool {
 struct EngineInner {
     /// Region workers group.
     workers: WorkerGroup,
+    /// Identifies this engine's series store across region closes/reopens. A new
+    /// engine may use a different store even with the same region/generation IDs.
+    series_cache_namespace: store_api::storage::FileId,
     /// Config of the engine.
     config: Arc<MitoConfig>,
     /// The Wal raw entry reader. `None` once the engine is stopped, so that it no longer holds
@@ -1220,6 +1255,22 @@ impl EngineInner {
         // in the query's older SST snapshot.
         let series_index = region.series_index_store.as_ref().map(|store| {
             crate::series_index::SeriesIndexReadContext {
+                cache_namespace: self.series_cache_namespace,
+                format: if region
+                    .series_index_version_control
+                    .formats
+                    .read()
+                    .unwrap()
+                    .index
+                    .as_ref()
+                    .is_some_and(|format| {
+                        format.format()
+                            == crate::series_index::artifact::ArtifactFormat::ColumnarSeries
+                    }) {
+                    crate::config::SeriesIndexFormat::Columnar
+                } else {
+                    crate::config::SeriesIndexFormat::Legacy
+                },
                 store: store.clone(),
                 version: region.series_index_version(),
             }
@@ -1356,7 +1407,8 @@ impl EngineInner {
     }
 
     /// Converts the [`RegionRole`]. Unlike lease and catchup promotions, a conversion to Leader
-    /// does not check whether the region waits for a reload.
+    /// does not check whether the region waits for a reload, and unlike a lease it is not held
+    /// back while a catchup runs on the region.
     fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<()> {
         let region = self.find_region(region_id)?;
         let was_leader = region.region_role() == RegionRole::Leader;
@@ -1383,6 +1435,23 @@ impl EngineInner {
         if previous.is_some_and(RegionRoleState::can_replay_tails) {
             self.workers.notify_cannot_replay(region);
         }
+    }
+
+    /// Logs the end of the wait of `region` for its Leader lease, which lasted `waited`, and
+    /// tells its worker to start what the wait deferred. Does nothing if the lease ended no wait
+    /// or the region waits again, so a wait ends with one notification.
+    fn notify_if_leader_lease_wait_ended(&self, region: &MitoRegionRef, waited: Option<Duration>) {
+        let Some(waited) = waited else {
+            return;
+        };
+        if region.manifest_ctx.awaits_leader_lease() {
+            return;
+        }
+        info!(
+            "Region {} received its Leader lease {:?} after a catchup made it writable",
+            region.region_id, waited
+        );
+        self.workers.notify_leader_lease_wait_ended(region);
     }
 
     /// Asks the worker to replay the pending tails of `region` if a role change made it
@@ -1742,11 +1811,20 @@ impl RegionEngine for MitoEngine {
         }
         if role == RegionRole::Leader {
             let was_writable = region.is_writable();
-            let promoted = region
+            let promotion = region
                 .manifest_ctx
                 .promote_unless_downgrade_started_after(sent_at, region_id);
             self.inner.notify_if_became_writable(&region, was_writable);
-            return Ok(promoted);
+            self.inner
+                .notify_if_leader_lease_wait_ended(&region, promotion.ended_wait);
+            return Ok(promotion.promoted);
+        }
+        // The metasrv grants it to the leader of a region whose route is in staging, and unless a
+        // catchup runs on the region it ends the wait for a Leader lease too.
+        if role == RegionRole::StagingLeader && region.manifest_ctx.awaits_leader_lease() {
+            let ended_wait = region.manifest_ctx.record_staging_leader_lease(sent_at);
+            self.inner
+                .notify_if_leader_lease_wait_ended(&region, ended_wait);
         }
         let previous = region.set_role(role);
         self.inner.notify_if_can_no_longer_replay(&region, previous);
@@ -1800,6 +1878,11 @@ impl RegionEngine for MitoEngine {
 
     fn role(&self, region_id: RegionId) -> Option<RegionRole> {
         self.inner.role(region_id)
+    }
+
+    fn is_confirmed_leader(&self, region_id: RegionId) -> Option<bool> {
+        self.find_region(region_id)
+            .map(|region| region.is_confirmed_leader())
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -1892,6 +1975,7 @@ impl MitoEngine {
             .build();
         Ok(MitoEngine {
             inner: Arc::new(EngineInner {
+                series_cache_namespace: store_api::storage::FileId::random(),
                 workers: WorkerGroup::start_for_test(
                     data_home,
                     config.clone(),
@@ -1973,6 +2057,22 @@ mod tests {
 
     #[test]
     fn test_is_valid_region_edit() {
+        for edit in [
+            RegionEdit {
+                series_indexes_to_add: vec![FileMeta::default()],
+                ..Default::default()
+            },
+            RegionEdit {
+                series_indexes_to_remove: vec![FileMeta::default().file_id()],
+                ..Default::default()
+            },
+        ] {
+            assert!(is_valid_region_edit(&edit));
+            assert!(!is_valid_region_edit(&RegionEdit {
+                flushed_entry_id: Some(1),
+                ..edit
+            }));
+        }
         // Valid: has only "files_to_add"
         let edit = RegionEdit {
             files_to_add: vec![FileMeta::default()],
@@ -1982,7 +2082,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
-            wal_recovery: Default::default(),
+            ..Default::default()
         };
         assert!(is_valid_region_edit(&edit));
 
@@ -1995,7 +2095,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
-            wal_recovery: Default::default(),
+            ..Default::default()
         };
         assert!(!is_valid_region_edit(&edit));
 
@@ -2008,7 +2108,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
-            wal_recovery: Default::default(),
+            ..Default::default()
         };
         assert!(is_valid_region_edit(&edit));
 
@@ -2021,7 +2121,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
-            wal_recovery: Default::default(),
+            ..Default::default()
         };
         assert!(is_valid_region_edit(&edit));
 
@@ -2034,7 +2134,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: None,
             committed_sequence: None,
-            wal_recovery: Default::default(),
+            ..Default::default()
         };
         assert!(!is_valid_region_edit(&edit));
         let edit = RegionEdit {
@@ -2045,7 +2145,7 @@ mod tests {
             flushed_entry_id: Some(1),
             flushed_sequence: None,
             committed_sequence: None,
-            wal_recovery: Default::default(),
+            ..Default::default()
         };
         assert!(!is_valid_region_edit(&edit));
         let edit = RegionEdit {
@@ -2056,7 +2156,7 @@ mod tests {
             flushed_entry_id: None,
             flushed_sequence: Some(1),
             committed_sequence: None,
-            wal_recovery: Default::default(),
+            ..Default::default()
         };
         assert!(!is_valid_region_edit(&edit));
         let edit = RegionEdit {
@@ -2071,6 +2171,7 @@ mod tests {
                 pending_tails: Some(vec![]),
                 handoff_floor: None,
             },
+            ..Default::default()
         };
         assert!(!is_valid_region_edit(&edit));
     }

@@ -17,10 +17,10 @@ use serde::{Deserialize, Serialize};
 /// Object store wal options allocated to a region.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ObjectStoreWalOptions {
-    /// Path prefix of the WAL objects the region belongs to.
-    ///
-    /// Persisted so that reopening the region can detect a prefix that differs
-    /// from the process configuration.
+    /// Public WAL root in distributed mode, unchanged when the region moves.
+    /// The local log store resolves it to its own node directory and rejects
+    /// roots that differ from its configuration. Standalone metadata may hold
+    /// the concrete node prefix, which remains accepted by that same store.
     pub prefix: String,
 }
 

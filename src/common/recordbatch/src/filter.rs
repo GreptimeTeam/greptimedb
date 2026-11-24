@@ -37,7 +37,7 @@ use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
 use snafu::ResultExt;
 
-pub use self::predicate::{regexp_is_match_dictionary, regexp_is_match_scalar};
+pub use self::predicate::{CompiledRegex, regexp_is_match_dictionary, regexp_is_match_scalar};
 pub use self::timestamp::timestamp_scalar_value;
 use crate::error::{Result, ToArrowScalarSnafu};
 use crate::filter::predicate::SimplePredicate;
@@ -51,8 +51,8 @@ pub struct MetadataFilter {
 }
 
 impl MetadataFilter {
-    /// Compiles supported conjuncts once for reuse across scan stages. OR is
-    /// never split: an unknown alternative might match the candidate.
+    /// Builds supported conjuncts once for reuse across scan stages; regex patterns compile on
+    /// first evaluation. OR is never split: an unknown alternative might match the candidate.
     pub fn new(expressions: &[Expr]) -> Self {
         Self {
             filters: expressions
@@ -77,7 +77,7 @@ impl MetadataFilter {
     }
 }
 
-/// Evaluates supported single-column predicates with precompiled regular expressions.
+/// Evaluates supported single-column predicates with lazily compiled regular expressions.
 /// Compound predicates preserve SQL null semantics until conversion to a scan mask.
 /// Float comparisons treat `-0.0` and `+0.0` as equal, as DataFusion does.
 #[derive(Debug, Clone)]

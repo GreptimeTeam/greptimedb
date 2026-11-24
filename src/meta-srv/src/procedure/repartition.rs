@@ -58,7 +58,7 @@ use common_telemetry::{error, info, warn};
 use partition::expr::PartitionExpr;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
-use store_api::storage::TableId;
+use store_api::storage::{RegionNumber, TableId};
 use table::table_name::TableName;
 
 use crate::error::{self, Result};
@@ -325,6 +325,24 @@ impl Context {
             .context(error::TableRouteNotFoundSnafu { table_id })?;
 
         Ok(table_route_value)
+    }
+
+    async fn reserve_region_numbers(
+        &self,
+        current: &DeserializedValueWithBytes<TableRouteValue>,
+        count: usize,
+    ) -> Result<RegionNumber> {
+        let table_id = self.persistent_ctx.table_id;
+        self.table_metadata_manager
+            .table_route_manager()
+            .try_reserve_region_numbers(table_id, current, count)
+            .await
+            .context(error::TableMetadataManagerSnafu)?
+            .with_context(|| error::RetryLaterSnafu {
+                reason: format!(
+                    "Table route changed while reserving region numbers for table {table_id}"
+                ),
+            })
     }
 
     /// Retrieves the table info value for the given table id.
@@ -2093,6 +2111,150 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn test_repartition_after_partial_create_failure() {
+        check_partial_create_failure(false).await;
+    }
+
+    #[tokio::test]
+    async fn test_repartition_after_pre_upgrade_partial_create_failure() {
+        check_partial_create_failure(true).await;
+    }
+
+    async fn check_partial_create_failure(pre_upgrade: bool) {
+        use api::v1::region::region_request::Body;
+        use common_meta::key::MetadataKey;
+        use common_meta::key::table_route::TableRouteKey;
+        use common_meta::rpc::store::PutRequest;
+
+        let env = TestingEnv::new();
+        let table_id = 1024;
+        let source = range_expr("x", 0, 90);
+        let route = test_region_route(RegionId::new(table_id, 1), &source.as_json_str().unwrap());
+        env.create_physical_table_metadata_for_repartition(
+            table_id,
+            vec![route.clone()],
+            test_region_wal_options(&[1]),
+        )
+        .await;
+
+        let (tx, mut requests) = mpsc::channel(1);
+        let fail_once = AtomicBool::new(true);
+        let nodes = Arc::new(MockDatanodeManager::new(
+            DatanodeWatcher::new(tx).with_handler(move |_, request| {
+                if let Some(Body::Create(create)) = request.body
+                    && create.region_id == RegionId::new(table_id, 3).as_u64()
+                    && fail_once.swap(false, Ordering::SeqCst)
+                {
+                    return error::UnexpectedSnafu {
+                        err_msg: "injected create failure",
+                    }
+                    .fail();
+                }
+                Ok(api::region::RegionResponse::new(0))
+            }),
+        ));
+        let new_split = || {
+            RepartitionProcedure::new(
+                RepartitionFrom::Partitioned {
+                    exprs: vec![source.clone()],
+                    target_partition_columns: None,
+                },
+                vec![
+                    range_expr("x", 0, 30),
+                    range_expr("x", 30, 60),
+                    range_expr("x", 60, 90),
+                ],
+                new_parent_context(&env, nodes.clone(), table_id),
+            )
+        };
+
+        let ctx = TestingEnv::procedure_context();
+        let mut first = new_split();
+        first.execute(&ctx).await.unwrap();
+        let original = first.context.get_table_route_value().await.unwrap();
+        first.execute(&ctx).await.unwrap();
+        let reserved = first.context.get_table_route_value().await.unwrap();
+        if pre_upgrade {
+            // Old BuildPlan persisted the same Execute checkpoint without updating the route.
+            env.kv_backend
+                .put(
+                    PutRequest::new()
+                        .with_key(TableRouteKey::new(table_id).to_bytes())
+                        .with_value(original.get_raw_bytes()),
+                )
+                .await
+                .unwrap();
+            first =
+                RepartitionProcedure::from_json(&first.dump().unwrap(), |persistent_ctx| Context {
+                    persistent_ctx,
+                    ..new_parent_context(&env, nodes.clone(), table_id)
+                })
+                .unwrap();
+        }
+
+        let observe_create = async {
+            // The one-slot channel holds the second create until we observe the first.
+            let (_, request) = requests.recv().await.unwrap();
+            let Some(Body::Create(create)) = request.body else {
+                panic!("expected create")
+            };
+            let current = new_split().context.get_table_route_value().await.unwrap();
+            assert_eq!(current.max_region_number().unwrap(), 3);
+            assert_eq!(current.version().unwrap(), reserved.version().unwrap());
+            RegionId::from_u64(create.region_id).region_number()
+        };
+        let create_timeout = Duration::from_secs(5);
+        let (result, first_number) = tokio::time::timeout(create_timeout, async {
+            tokio::join!(first.execute(&ctx), observe_create)
+        })
+        .await
+        .expect("first split timed out waiting for a create request");
+        assert!(!result.unwrap_err().is_retry_later());
+        let (_, request) = requests.try_recv().unwrap();
+        let Some(Body::Create(create)) = request.body else {
+            panic!("expected create")
+        };
+        let mut creates = [
+            first_number,
+            RegionId::from_u64(create.region_id).region_number(),
+        ];
+        creates.sort_unstable();
+        assert_eq!(creates, [2, 3]);
+        first.rollback(&ctx).await.unwrap();
+        assert_eq!(
+            current_parent_region_routes(&first.context).await,
+            vec![route]
+        );
+        assert_eq!(
+            first
+                .context
+                .get_table_route_value()
+                .await
+                .unwrap()
+                .max_region_number()
+                .unwrap(),
+            3
+        );
+
+        let mut second = new_split();
+        second.execute(&ctx).await.unwrap();
+        second.execute(&ctx).await.unwrap();
+        let (result, _) = tokio::time::timeout(create_timeout, async {
+            tokio::join!(second.execute(&ctx), requests.recv())
+        })
+        .await
+        .expect("second split timed out waiting for a create request");
+        result.unwrap();
+        assert_parent_state::<Dispatch>(&second);
+        let numbers: Vec<_> = current_parent_region_routes(&second.context)
+            .await
+            .iter()
+            .map(|route| route.region.id.region_number())
+            .collect();
+        assert_eq!(numbers, [1, 4, 5]);
     }
 
     #[tokio::test]

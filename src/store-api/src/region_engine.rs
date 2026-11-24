@@ -17,6 +17,7 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::{Debug, Display};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -31,7 +32,12 @@ use datafusion_execution::memory_pool::{MemoryPool, UnboundedMemoryPool};
 use datafusion_physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion_physical_plan::{DisplayAs, DisplayFormatType, PhysicalExpr};
 use datatypes::schema::SchemaRef;
+use datatypes::series::SeriesOrdering;
+use datatypes::series::frame::LabelDecodeSpec;
+use datatypes::series::raw::RawSeriesChunk;
+use datatypes::series::samples::SeriesSchema;
 use futures::FutureExt;
+use futures::Stream;
 use futures::future::{BoxFuture, join_all};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
@@ -41,7 +47,7 @@ use crate::metadata::RegionMetadataRef;
 use crate::region_request::{
     BatchRegionDdlRequest, RegionCatchupRequest, RegionOpenRequest, RegionPutRequest, RegionRequest,
 };
-use crate::storage::{FileId, RegionId, ScanRequest, SequenceNumber};
+use crate::storage::{ColumnId, FileId, RegionId, ScanRequest, SequenceNumber};
 
 /// The settable region role state.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -499,6 +505,139 @@ impl Default for QueryScanContext {
     }
 }
 
+/// A tag bound to a physical column in the scan's metadata snapshot.
+#[derive(Clone, Debug)]
+pub struct BoundTag {
+    /// Physical region column identifier for this logical tag.
+    pub column_id: ColumnId,
+    /// Logical tag name visible to the query.
+    pub name: Arc<str>,
+}
+
+/// Bound source for materializing labels from raw series chunks.
+#[derive(Clone, Debug)]
+pub enum RawLabelSource {
+    /// Scan-bound metadata for labels. A producer may expose encoded keys or
+    /// complete explicit labels; its stream decode specification distinguishes them.
+    PrimaryKey {
+        /// Metric name associated with the bound logical source.
+        metric_name: Arc<str>,
+        /// Physical metadata snapshot used to decode primary-key values.
+        physical_metadata: RegionMetadataRef,
+        /// Logical tag names mapped to physical column identifiers.
+        logical_tags: Arc<[BoundTag]>,
+    },
+    /// The stream supplies a complete metric name and label set in each chunk, not a partial
+    /// label projection; `Some(metric)` is a complete name/label set (the name itself may be
+    /// absent), or, for a stream that has no identity at all, see
+    /// [`NO_BOUND_LABEL_SOURCE`].
+    Explicit,
+}
+
+/// The identity a stream reports when no scan-bound label source was established for it.
+///
+/// [`RawLabelSource`] has no "absent" variant, and [`RawLabelSource::Explicit`] is the only one that
+/// carries no physical region key layout, so it stands in for "no identity" here. It is not a claim
+/// that the chunks carry labels: [`RawSeriesStream::label_decode_spec`] answers that, and a stream
+/// reporting this value can still return `Some` description and leave `metric` as `None` in every
+/// chunk. Decoding therefore asks the description, and only an identity check asks this.
+pub const NO_BOUND_LABEL_SOURCE: RawLabelSource = RawLabelSource::Explicit;
+
+/// A stream of raw series chunks with stable schema, label binding, and ordering.
+///
+/// Every series has strictly increasing timestamps within and across chunks; timestamps are
+/// unique per series. `Interleaved` permits a series to resume after another series; `Contiguous`
+/// and `KeyThenTime` guarantee each series' chunks are contiguous. `KeyThenTime` uses the complete
+/// stream identity compatible with its label binding, not just a TSID or hash. These are
+/// per-stream guarantees, not query-global order, partition ownership, or finality. `is_last`
+/// marks the last chunk of that series in this stream only; merging requires recomputing
+/// per-input-series finalization across all related inputs, not aggregate-group finality.
+/// Label interpretation is carried by the stream: [`RawSeriesStream::label_source`] states the
+/// scan-bound identity a producer read under, and [`RawSeriesStream::label_decode_spec`] states the
+/// label layout the stream's own chunks declare. Stream finality applies to all related input
+/// series, not aggregate groups or vector-match state.
+pub trait RawSeriesStream: Stream<Item = Result<RawSeriesChunk, BoxedError>> + Send {
+    /// Returns the schema shared by all chunks; raw schemas have no evaluation grid.
+    fn schema(&self) -> &Arc<SeriesSchema>;
+    /// Returns scan-bound label metadata. The binding does not dictate representation:
+    /// chunks with a decode specification leave `metric` as `None`; otherwise they
+    /// supply the complete explicit label set. The metric name itself may be absent.
+    ///
+    /// A stream that was decoded from a raw frame has no scan-bound identity and reports
+    /// [`NO_BOUND_LABEL_SOURCE`], which reads as `Explicit` while its chunks may still carry no
+    /// labels at all. That value therefore answers "is this the region I read under", never "are
+    /// these labels complete": [`Self::label_decode_spec`] is the stream's statement about its
+    /// encoding, and every consumer that decides whether to decode reads that instead.
+    fn label_source(&self) -> &RawLabelSource;
+    /// Returns the label decode description this stream declares for key-encoded labels.
+    ///
+    /// Every stream whose chunks carry key-encoded labels declares the description here, whether
+    /// it is a storage producer or a stream reassembled from a raw frame. A consumer holding only
+    /// that description can therefore decode labels without a scan-bound [`RawLabelSource`]: the
+    /// description, not the binding, describes the encoding, and a receiver reporting
+    /// [`NO_BOUND_LABEL_SOURCE`] still states through this description that its chunks are
+    /// undecoded key chunks. A stream that carries complete labels instead answers `None`. This is
+    /// the description the stream declares, not an authenticated statement about where the values
+    /// came from.
+    fn label_decode_spec(&self) -> Option<&LabelDecodeSpec> {
+        None
+    }
+    /// Returns this stream's ordering guarantee.
+    fn ordering(&self) -> SeriesOrdering;
+}
+
+/// A pinned raw-series stream that can be sent between threads.
+pub type SendableRawSeriesStream = Pin<Box<dyn RawSeriesStream>>;
+
+/// Stable identity metadata for one ordinal in a prepared series source.
+#[derive(Clone, Debug)]
+pub struct SeriesInfo {
+    /// Complete source identity, not a TSID or hash alone. Explicit-label sources
+    /// may use an opaque domain-qualified identity instead of a label-bearing key.
+    pub primary_key: datatypes::arrow::buffer::Buffer,
+    /// Complete explicit metric name and labels, not a partial label projection; or `None` for
+    /// primary-key label binding (undecoded, not nameless). The metric name itself may be absent.
+    pub metric: Option<datatypes::series::SeriesLabels>,
+}
+
+/// An immutable, finite selected set of series prepared for independent range reads.
+///
+/// The count may include series with no samples after filtering. Ordinals are stable local
+/// indexes, not protocol identifiers; each has exactly one complete identity returned by
+/// [`PreparedSeriesSource::series_info`], and that identity matches chunks for that ordinal.
+/// Every reader exposes the same fixed schema, label binding, and ordering before polling,
+/// including for an empty range, and describes labels independently of this source's lifetime.
+/// Key-encoded output has `metric: None`; explicit-label output has a complete
+/// `Some(metric)` matching each chunk, independently of its scan binding.
+/// Ordering describes the stream, not ordinal enumeration.
+///
+/// Preparation, identity lookup, and reader creation do not load sample payloads or perform
+/// hidden blocking I/O. The selected set is bound to the scanner's immutable MVCC view,
+/// predicates, authorization, projection, labels, and existing scan resources. Readers own
+/// resources needed to continue after this source or scanner is dropped. Dropping one reader
+/// does not cancel sibling readers; normal ownership cleanup applies without detached work.
+///
+/// A range must satisfy `start <= end <= num_series()`. Invalid ranges and invalid ordinals
+/// return errors; an empty in-bounds range returns an ordinary empty stream. Repeated and
+/// overlapping reads are independent and do not consume shared iteration state.
+pub trait PreparedSeriesSource: Send + Sync {
+    /// Returns the exact, stable number of selected local series ordinals.
+    fn num_series(&self) -> usize;
+
+    /// Returns label binding shared by series metadata and every reader, without opening or
+    /// polling a reader; the binding is self-contained for remote consumers.
+    fn label_source(&self) -> &RawLabelSource;
+
+    /// Returns identity metadata for an ordinal without polling sample data.
+    fn series_info(&self, ordinal: usize) -> Result<SeriesInfo, BoxedError>;
+
+    /// Creates an independent reader for the half-open ordinal range.
+    fn read_series(
+        &self,
+        range: std::ops::Range<usize>,
+    ) -> Result<SendableRawSeriesStream, BoxedError>;
+}
+
 /// A scanner that provides a way to scan the region concurrently.
 ///
 /// The scanner splits the region into partitions so that each partition can be scanned concurrently.
@@ -530,6 +669,83 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
         metrics_set: &ExecutionPlanMetricsSet,
         partition: usize,
     ) -> Result<SendableRecordBatchStream, BoxedError>;
+
+    /// Checks whether this scanner can provide a raw-series scan for the given labels.
+    ///
+    /// This is a non-consuming preflight: it must not start a scan or otherwise consume
+    /// scanner state. It checks immutable label binding, schema, and typed residual-predicate
+    /// eligibility. Returning `Some` requires overriding `scan_series_partition` and
+    /// promises that it can execute with this label source. `None` means the raw path is
+    /// unsupported and an ordinary scan remains available. Execution must revalidate and
+    /// return errors rather than falling back if the binding or schema changed since preflight.
+    fn raw_series_schema(
+        &self,
+        _label_source: &RawLabelSource,
+    ) -> Result<Option<Arc<SeriesSchema>>, BoxedError> {
+        Ok(None)
+    }
+
+    /// Whether raw chunks carry complete explicit labels under this scan binding.
+    /// This non-consuming declaration must agree with the stream before its first poll.
+    /// Returning true does not replace the immutable source binding or authorization checks.
+    fn raw_series_has_explicit_labels(&self, _labels: &RawLabelSource) -> Result<bool, BoxedError> {
+        Ok(false)
+    }
+
+    /// Returns the guarantee for subsequent raw scans without consuming scanner state.
+    ///
+    /// Legacy raw sources have no ordering declaration, so `Contiguous` is the conservative
+    /// default; `Interleaved` is not representable on the raw frame wire.
+    fn raw_series_ordering(&self) -> Result<SeriesOrdering, BoxedError> {
+        Ok(SeriesOrdering::Contiguous)
+    }
+
+    /// Scans a partition as raw series when this source supports that path.
+    ///
+    /// `None` means raw capability is absent before execution and permits a legacy scan instead.
+    /// `Some` selects this entrypoint, including for an empty successful stream. Errors propagate;
+    /// callers must not replay a failed raw scan through the legacy path. Use only one entrypoint
+    /// for a given scanner partition per execution. The explicit label source is owned by the
+    /// returned stream and must be bound to this scanner's metadata snapshot.
+    ///
+    /// Output preserves the ordinary storage reader's pushdown and MVCC semantics. Inexact
+    /// pushed-down predicates can leave false-positive candidates, just as in `scan_partition`.
+    /// Implementations must preserve typed residual-predicate semantics before any lossy value
+    /// conversion, or return `None` before execution when they cannot. Callers must retain
+    /// residual predicate columns until those predicates are evaluated and apply the final
+    /// projection afterward; raw capability does not mean filtering is complete.
+    ///
+    /// # Panics
+    ///
+    /// The default implementation panics. Implementations must override this method to support
+    /// raw series scanning.
+    fn scan_series_partition(
+        &self,
+        _ctx: &QueryScanContext,
+        _metrics_set: &ExecutionPlanMetricsSet,
+        _partition: usize,
+        _label_source: &RawLabelSource,
+    ) -> Result<Option<SendableRawSeriesStream>, BoxedError> {
+        todo!()
+    }
+
+    /// Prepares scanner-wide candidates once for independent ordinal-range reads.
+    ///
+    /// Metadata I/O is asynchronous; sample payloads are loaded only by polling readers.
+    /// The owned future does not borrow the scanner. `None` means unsupported before
+    /// execution; errors must propagate without replay through a different scan path.
+    /// Implementations may share preparation with their raw partition adapter.
+    fn prepare_series(
+        &self,
+        _ctx: &QueryScanContext,
+        _metrics_set: &ExecutionPlanMetricsSet,
+        _label_source: &RawLabelSource,
+    ) -> futures::future::BoxFuture<
+        'static,
+        Result<Option<Arc<dyn PreparedSeriesSource>>, BoxedError>,
+    > {
+        Box::pin(async { Ok(None) })
+    }
 
     /// Check if there is any predicate exclude region partition exprs that may be executed in this scanner.
     fn has_predicate_without_region(&self) -> bool;
@@ -642,6 +858,10 @@ pub struct RegionStatistic {
     pub data_topic_latest_entry_id: u64,
     #[serde(default)]
     pub metadata_topic_latest_entry_id: u64,
+    /// Whether the region still has WAL ranges to recover. Omitted from the serialized form
+    /// when false.
+    #[serde(default, skip_serializing_if = "crate::is_false")]
+    pub has_pending_tails: bool,
 }
 
 /// The manifest info of a region.
@@ -789,10 +1009,104 @@ impl RegionStatistic {
 }
 
 #[cfg(test)]
+#[path = "region_engine/prepared_series_tests.rs"]
+mod prepared_series_tests;
+
+#[cfg(test)]
 mod tests {
+    use common_recordbatch::{RecordBatch, RecordBatches};
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
+    use datatypes::vectors::{Int32Vector, TimestampMillisecondVector, VectorRef};
+    use futures::TryStreamExt;
     use serde_json::json;
 
     use super::*;
+
+    #[tokio::test]
+    async fn single_partition_scanner_raw_scan_panics_and_preserves_legacy_read() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        use api::v1::SemanticType;
+        use datatypes::arrow::array::Int32Array;
+        use datatypes::schema::Schema as ArrowSchema;
+
+        use crate::metadata::{ColumnMetadata, RegionMetadataBuilder};
+
+        let schema = Arc::new(ArrowSchema::new(vec![
+            ColumnSchema::new("value", ConcreteDataType::int32_datatype(), false),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+        ]));
+        let columns: Vec<VectorRef> = vec![
+            Arc::new(Int32Vector::from_slice([42])),
+            Arc::new(TimestampMillisecondVector::from_slice([7])),
+        ];
+        let batch = RecordBatch::new(schema.clone(), columns).unwrap();
+        let batches = RecordBatches::try_new(schema, vec![batch]).unwrap();
+        let mut metadata_builder = RegionMetadataBuilder::new(RegionId::new(1234, 1));
+        metadata_builder.push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new("value", ConcreteDataType::int32_datatype(), false),
+            semantic_type: SemanticType::Field,
+            column_id: 1,
+        });
+        metadata_builder.push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Timestamp,
+            column_id: 2,
+        });
+        let metadata = Arc::new(metadata_builder.build().unwrap());
+        let scanner = SinglePartitionScanner::new(batches.as_stream(), false, metadata, None);
+        let ctx = QueryScanContext::default();
+        let metrics = ExecutionPlanMetricsSet::new();
+
+        // The default raw-scan preflight declines without consuming the legacy scan, and the
+        // prepared-series entrypoint reports unsupported before consumption as well.
+        assert!(
+            scanner
+                .raw_series_schema(&RawLabelSource::Explicit)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            scanner
+                .prepare_series(&ctx, &metrics, &RawLabelSource::Explicit)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            scanner.raw_series_ordering().unwrap(),
+            SeriesOrdering::Contiguous
+        );
+
+        // SinglePartitionScanner uses the default raw-scan implementation, which panics.
+        let raw_scan = catch_unwind(AssertUnwindSafe(|| {
+            scanner.scan_series_partition(&ctx, &metrics, 0, &RawLabelSource::Explicit)
+        }));
+        assert!(raw_scan.is_err());
+        let legacy = scanner.scan_partition(&ctx, &metrics, 0).unwrap();
+        let legacy_batches = legacy.try_collect::<Vec<_>>().await.unwrap();
+        assert_eq!(legacy_batches.len(), 1);
+        assert_eq!(legacy_batches[0].num_rows(), 1);
+        assert_eq!(
+            legacy_batches[0]
+                .column(0)
+                .as_ref()
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap()
+                .value(0),
+            42
+        );
+    }
 
     #[test]
     fn test_legacy_granted_region_wire() {
@@ -1215,7 +1529,8 @@ pub trait RegionEngine: Send + Sync {
 
     /// Sets [RegionRole] for a region from a lease the metasrv grants until `deadline`, in reply
     /// to a heartbeat sent at `sent_at`. Returns false if the engine ignores a Leader lease because
-    /// the region was downgraded or (re)opened after `sent_at`.
+    /// the region was downgraded or (re)opened after `sent_at`, a catchup runs on it, or it waits
+    /// for a reload.
     ///
     /// The region must not acknowledge a write whose WAL append completes at or after the
     /// deadline of its latest Leader or StagingLeader lease. Leases of other roles do not extend
@@ -1257,6 +1572,21 @@ pub trait RegionEngine: Send + Sync {
     ///
     /// Returns the `None` if the region is not found.
     fn role(&self, region_id: RegionId) -> Option<RegionRole>;
+
+    /// Returns whether the region is a leader that needs no catchup: `None` if the region is not
+    /// found, `Some(false)` if it is a follower or, on a node that requires leases to confirm its
+    /// leaders, a catchup made it a leader and no Leader or StagingLeader lease sent after that
+    /// catchup, nor a direct promotion to Leader, has applied since, and `Some(true)` otherwise.
+    /// The default answers from [`role`](Self::role) alone, which suits an engine that does not tie
+    /// its commits to leases.
+    ///
+    /// An upgrade reports a region that answers `Some(true)` ready without a catchup, sends one
+    /// that answers `Some(false)` a catchup with `set_writable`, and reports one that answers
+    /// `None` missing.
+    fn is_confirmed_leader(&self, region_id: RegionId) -> Option<bool> {
+        self.role(region_id)
+            .map(|role| role != RegionRole::Follower)
+    }
 
     fn as_any(&self) -> &dyn Any;
 }

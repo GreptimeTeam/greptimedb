@@ -302,6 +302,7 @@ fn file_meta_from_sst_info(
         level: 0,
         file_size: info.file_size,
         max_row_group_uncompressed_size: info.max_row_group_uncompressed_size,
+        max_row_group_decoded_size: info.max_row_group_decoded_size,
         available_indexes: Default::default(),
         indexes: Default::default(),
         index_file_size: 0,
@@ -314,6 +315,7 @@ fn file_meta_from_sst_info(
         primary_key_min: None,
         primary_key_max: None,
         preserve_row_sequence: false,
+        format: Default::default(),
     }
 }
 
@@ -513,6 +515,7 @@ pub(super) async fn run_direct_sst(args: DirectArgs) {
         sst_format: format,
         append_mode: table.append_mode,
         pending_tails: Default::default(),
+        series_indexes: Default::default(),
         handoff_floors: Default::default(),
     };
     let checkpoint = RegionCheckpoint {

@@ -76,7 +76,40 @@ pub enum QueryMemoryPoolPolicy {
     Fair,
 }
 
-/// Query engine config
+#[derive(Debug, Clone, Default)]
+pub struct FactorizedJoinAggOptions {
+    pub enabled: bool,
+}
+
+impl ConfigExtension for FactorizedJoinAggOptions {
+    const PREFIX: &'static str = "factorized_join_agg";
+}
+
+impl ExtensionOptions for FactorizedJoinAggOptions {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+    fn cloned(&self) -> Box<dyn ExtensionOptions> {
+        Box::new(self.clone())
+    }
+    fn set(&mut self, key: &str, value: &str) -> datafusion::error::Result<()> {
+        Err(datafusion::common::DataFusionError::NotImplemented(
+            format!("FactorizedJoinAggOptions does not support set key: {key} with value: {value}"),
+        ))
+    }
+    fn entries(&self) -> Vec<ConfigEntry> {
+        vec![ConfigEntry {
+            key: "enabled".to_string(),
+            value: Some(self.enabled.to_string()),
+            description: "Enable experimental factorized join aggregation",
+        }]
+    }
+}
+
+/// Query engine configuration options.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct QueryOptions {
@@ -84,6 +117,8 @@ pub struct QueryOptions {
     pub parallelism: usize,
     /// Whether to allow query fallback when push down fails.
     pub allow_query_fallback: bool,
+    /// Experimental: enable shape-based factorized AVG/SUM join aggregation. Default false.
+    pub experimental_enable_factorized_join_agg: bool,
     /// Memory pool size for query execution. Setting it to 0 disables the limit (unbounded).
     /// Supports absolute size (e.g., "2GB") or percentage (e.g., "50%").
     /// When this limit is reached, queries will fail with ResourceExhausted error.
@@ -110,6 +145,14 @@ pub struct QueryOptions {
     /// - `fair`: Fair divides memory available after unspillable reservations
     ///   evenly among spillable reservations and may trigger earlier spills.
     pub experimental_memory_pool_policy: QueryMemoryPoolPolicy,
+    /// Enables the experimental native PromQL execution path for compatible queries. This
+    /// path currently applies only to standalone queries using in-process region transport.
+    ///
+    /// This is the engine-wide default. A session `SET query.experimental_native_promql = true`
+    /// or a per-request `query.experimental_native_promql` option overrides it, in that order, so
+    /// a `true` default routes every query natively and a `false` one still lets one query or one
+    /// session ask for it. Default: `false`.
+    pub experimental_native_promql: bool,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -118,6 +161,7 @@ impl Default for QueryOptions {
         Self {
             parallelism: 0,
             allow_query_fallback: false,
+            experimental_enable_factorized_join_agg: false,
             memory_pool_size: MemoryLimit::default(),
             enable_per_region_metrics: false,
             experimental_spill_mode: QuerySpillMode::Default,
@@ -125,6 +169,7 @@ impl Default for QueryOptions {
             experimental_spill_max_temp_directory_size: ReadableSize::gb(1),
             experimental_spill_compression: QuerySpillCompression::Uncompressed,
             experimental_memory_pool_policy: QueryMemoryPoolPolicy::Greedy,
+            experimental_native_promql: false,
         }
     }
 }
@@ -444,6 +489,57 @@ impl ExtensionOptions for ScheduledTimeExtension {
 
     fn entries(&self) -> Vec<ConfigEntry> {
         vec![]
+    }
+}
+
+/// Carries the native PromQL route switch a query asked for through
+/// [`ConfigOptions::extensions`].
+///
+/// The value is resolved once per query, where the query options snapshot is applied to the
+/// planning state: the request extension
+/// [`NATIVE_PROMQL_EXTENSION_KEY`](crate::promql::planner::NATIVE_PROMQL_EXTENSION_KEY) over a
+/// session `SET` of the same option over the engine-wide
+/// [`QueryOptions::experimental_native_promql`] default. Planning and `SHOW` both read it back from
+/// there, so a query that states nothing routes as the engine default says.
+///
+/// What it records is the *request*, not the plan the query got: planning still applies the
+/// conditions that decide whether the route can be taken at all (a statement that allows query
+/// fallback or one planned inside a CTE keeps the existing plan whatever this says), so `SHOW
+/// query.experimental_native_promql` answers what the query asked for.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct NativePromqlExtension {
+    pub(crate) requested: bool,
+}
+
+impl ConfigExtension for NativePromqlExtension {
+    const PREFIX: &'static str = "native_promql";
+}
+
+impl ExtensionOptions for NativePromqlExtension {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn cloned(&self) -> Box<dyn ExtensionOptions> {
+        Box::new(*self)
+    }
+
+    fn set(&mut self, key: &str, value: &str) -> datafusion::error::Result<()> {
+        Err(datafusion_common::DataFusionError::NotImplemented(format!(
+            "NativePromqlExtension does not support set key: {key} with value: {value}"
+        )))
+    }
+
+    fn entries(&self) -> Vec<ConfigEntry> {
+        vec![ConfigEntry {
+            key: "requested".to_string(),
+            value: Some(self.requested.to_string()),
+            description: "Whether the query requests the native fused-series PromQL route",
+        }]
     }
 }
 
@@ -858,6 +954,19 @@ experimental_memory_pool_policy = "fair"
             opts.experimental_memory_pool_policy,
             QueryMemoryPoolPolicy::Fair
         );
+    }
+
+    /// The native PromQL route is opt-in: a query that states nothing keeps the plan the
+    /// existing planner builds.
+    ///
+    /// The per-request `query.experimental_native_promql` extension is read by
+    /// `query::promql::planner::native::native_promql_requested`; this default is the other
+    /// half of that gate today, and it becomes the only gate for a query that states nothing
+    /// once #10262 lands. Flipping it would expose the native route to every query that sets
+    /// the extension.
+    #[test]
+    fn test_native_promql_is_off_by_default() {
+        assert!(!QueryOptions::default().experimental_native_promql);
     }
 
     #[test]

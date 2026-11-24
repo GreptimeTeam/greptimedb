@@ -17,6 +17,7 @@
 mod cache;
 mod sync_cache;
 
+pub mod batch;
 pub mod metrics;
 pub mod page;
 pub mod paged;

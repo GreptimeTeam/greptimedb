@@ -611,6 +611,9 @@ Additional SQL optimizer cases:
 
 - `sql_topk_order_by`: single-table TopK / `ORDER BY` on a DOUBLE field with
   time and tag predicates.
+- `sql_topk_time_index_selective_filter`: `ORDER BY ts DESC LIMIT 100` with a
+  1-in-1000 filter over 64 time-split SSTs; the TopK dynamic filter should let
+  the scan skip older SSTs.
 - `sql_aggregate_order_by`: grouped aggregate ordered by aggregate value with a
   `LIMIT`.
 - `sql_join_filter_order`: two direct-SST tables joined on a shared tag with

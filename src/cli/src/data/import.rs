@@ -20,12 +20,12 @@ use async_trait::async_trait;
 use clap::{Parser, ValueEnum};
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_error::ext::BoxedError;
-use common_telemetry::{error, info, warn};
+use common_telemetry::{info, warn};
 use snafu::{OptionExt, ResultExt, ensure};
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
 
-use crate::data::{COPY_PATH_PLACEHOLDER, default_database};
+use crate::data::{COPY_PATH_PLACEHOLDER, collect_schema_job_results, default_database};
 use crate::database::{DatabaseClient, parse_proxy_opts};
 use crate::error::{Error, FileIoSnafu, InvalidArgumentsSnafu, Result, SchemaNotFoundSnafu};
 use crate::{Tool, database};
@@ -148,11 +148,11 @@ impl Import {
         let db_names = self.get_db_names().await?;
         let db_count = db_names.len();
         let mut tasks = Vec::with_capacity(db_count);
-        for schema in db_names {
+        for schema in &db_names {
             let semaphore_moved = semaphore.clone();
             tasks.push(async move {
                 let _permit = semaphore_moved.acquire().await.unwrap();
-                let database_input_dir = self.catalog_path().join(&schema);
+                let database_input_dir = self.catalog_path().join(schema);
                 let sql_file = database_input_dir.join(filename);
                 let mut sql = tokio::fs::read_to_string(sql_file)
                     .await
@@ -161,9 +161,9 @@ impl Import {
                     info!("Empty `{filename}` {database_input_dir:?}");
                 } else {
                     if filename == "copy_from.sql" {
-                        sql = self.rewrite_copy_database_sql(&schema, &sql)?;
+                        sql = self.rewrite_copy_database_sql(schema, &sql)?;
                     }
-                    let db = exec_db.unwrap_or(&schema);
+                    let db = exec_db.unwrap_or(schema);
                     self.database_client.sql(&sql, db).await?;
                     info!("Imported `{filename}` for database {schema}");
                 }
@@ -172,19 +172,15 @@ impl Import {
             })
         }
 
-        let success = futures::future::join_all(tasks)
-            .await
-            .into_iter()
-            .filter(|r| match r {
-                Ok(_) => true,
-                Err(e) => {
-                    error!(e; "import {filename} job failed");
-                    false
-                }
-            })
-            .count();
+        let results = futures::future::join_all(tasks).await;
+        collect_schema_job_results(
+            &self.catalog,
+            &db_names,
+            results,
+            &format!("import {filename} for database"),
+        )?;
         let elapsed = timer.elapsed();
-        info!("Success {success}/{db_count} `{filename}` jobs, cost: {elapsed:?}");
+        info!("Success {db_count} `{filename}` jobs, cost: {elapsed:?}");
 
         Ok(())
     }

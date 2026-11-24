@@ -200,6 +200,7 @@ impl State for RepartitionStart {
         if plans.is_empty() {
             return Ok((Box::new(RepartitionEnd), Status::done()));
         }
+        Self::ensure_no_pending_tails(ctx, &plans)?;
 
         if ctx.persistent_ctx.partition_metadata_update.is_some() {
             Ok((
@@ -220,6 +221,34 @@ impl State for RepartitionStart {
 }
 
 impl RepartitionStart {
+    /// Fails with a retryable error before any region is allocated or rerouted if a source
+    /// region of `plans` still had pending WAL tails when it last reported as leader, since
+    /// entering staging would then fail after the route change. Targets are the sources or new
+    /// regions, so only sources are checked. A source without a leader report to this metasrv
+    /// passes, and entering staging still refuses its pending tails. Registry entries are not
+    /// expired, so after a datanode restart the check uses the flag of the last report until
+    /// the reopened region reports as leader again.
+    fn ensure_no_pending_tails(ctx: &Context, plans: &[AllocationPlanEntry]) -> Result<()> {
+        let region_ids = plans
+            .iter()
+            .flat_map(|plan| plan.source_regions.iter().map(|source| source.region_id()));
+        let mut pending = ctx
+            .leader_region_registry
+            .batch_get(region_ids)
+            .into_iter()
+            .filter(|(_, leader)| leader.has_pending_tails)
+            .map(|(region_id, _)| region_id)
+            .collect::<Vec<_>>();
+        pending.sort_unstable();
+        ensure!(
+            pending.is_empty(),
+            error::RepartitionPendingTailsSnafu {
+                region_ids: pending
+            }
+        );
+        Ok(())
+    }
+
     async fn prepare_from<'a>(&'a self, ctx: &mut Context) -> Result<&'a [PartitionExpr]> {
         match &self.from {
             RepartitionFrom::Partitioned {
@@ -474,6 +503,8 @@ impl RepartitionStart {
 mod tests {
     use std::sync::Arc;
 
+    use common_error::ext::ErrorExt;
+    use common_error::status_code::StatusCode;
     use common_meta::ddl::test_util::datanode_handler::NaiveDatanodeHandler;
     use common_meta::key::table_route::PhysicalTableRouteValue;
     use common_meta::peer::Peer;
@@ -485,7 +516,8 @@ mod tests {
 
     use super::*;
     use crate::procedure::repartition::test_util::{
-        TestingEnv, new_parent_context, range_expr, test_region_route, test_region_wal_options,
+        TestingEnv, new_parent_context, range_expr, report_leader_regions, test_region_route,
+        test_region_wal_options,
     };
 
     fn physical_route(region_routes: Vec<RegionRoute>) -> PhysicalTableRouteValue {
@@ -877,5 +909,76 @@ mod tests {
                 .contains("Partition column missing_col not found")
         );
         assert!(ctx.persistent_ctx.partition_metadata_update.is_none());
+    }
+
+    /// Creates a table of regions 1 and 2 and a repartition that merges them.
+    async fn new_merge(env: &TestingEnv, table_id: u32) -> (Context, RepartitionStart) {
+        env.create_physical_table_metadata_for_repartition(
+            table_id,
+            vec![
+                test_region_route(
+                    RegionId::new(table_id, 1),
+                    &range_expr("x", 0, 50).as_json_str().unwrap(),
+                ),
+                test_region_route(
+                    RegionId::new(table_id, 2),
+                    &range_expr("x", 50, 100).as_json_str().unwrap(),
+                ),
+            ],
+            test_region_wal_options(&[1, 2]),
+        )
+        .await;
+        let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+        let ctx = new_parent_context(env, node_manager, table_id);
+        let state = RepartitionStart::new(
+            RepartitionFrom::Partitioned {
+                exprs: vec![range_expr("x", 0, 50), range_expr("x", 50, 100)],
+                target_partition_columns: None,
+            },
+            vec![range_expr("x", 0, 100)],
+        );
+        (ctx, state)
+    }
+
+    #[tokio::test]
+    async fn test_repartition_start_retries_source_with_pending_tails() {
+        let env = TestingEnv::new();
+        let table_id = 1024;
+        let (mut ctx, mut state) = new_merge(&env, table_id).await;
+        report_leader_regions(&ctx, &[RegionId::new(table_id, 1)], false);
+        report_leader_regions(&ctx, &[RegionId::new(table_id, 2)], true);
+
+        let err = state
+            .next(&mut ctx, &TestingEnv::procedure_context())
+            .await
+            .unwrap_err();
+
+        assert!(err.is_retryable());
+        assert_eq!(StatusCode::RegionNotReady, err.status_code());
+        assert!(matches!(
+            &err,
+            error::Error::RepartitionPendingTails { region_ids, .. }
+                if region_ids == &[RegionId::new(table_id, 2)]
+        ));
+        report_leader_regions(&ctx, &[RegionId::new(table_id, 2)], false);
+        let (next, _) = state
+            .next(&mut ctx, &TestingEnv::procedure_context())
+            .await
+            .unwrap();
+        assert!(next.as_any().is::<AllocateRegion>());
+    }
+
+    #[tokio::test]
+    async fn test_repartition_start_passes_unreported_source() {
+        let env = TestingEnv::new();
+        let table_id = 1024;
+        let (mut ctx, mut state) = new_merge(&env, table_id).await;
+        report_leader_regions(&ctx, &[RegionId::new(table_id, 1)], false);
+
+        let (next, _) = state
+            .next(&mut ctx, &TestingEnv::procedure_context())
+            .await
+            .unwrap();
+        assert!(next.as_any().is::<AllocateRegion>());
     }
 }

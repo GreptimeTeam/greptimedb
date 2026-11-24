@@ -109,6 +109,8 @@ type FormatBuilder = fn(options::CopyOptionSet) -> PgWireResult<CopyFormat>;
 const REGISTERED_FORMATS: &[(&str, FormatBuilder)] = &[
     ("csv", csv::build_csv_codec),
     ("jsonl", jsonl::build_jsonl_codec),
+    // Alias matching the file-based format's name; it still means
+    // newline-delimited objects, not a top-level JSON array.
     ("json", jsonl::build_jsonl_codec),
     ("arrow", arrow::build_arrow_codec),
     ("influxdb", influxdb::build_influxdb_codec),
@@ -451,7 +453,7 @@ impl CopyInState {
             },
             memory_guards: Vec::new(),
             granted_bytes: 0,
-            codec_name: "csv",
+            codec_name: codec.name(),
             codec_format_code: 0,
             rows_written: 0,
         })
@@ -477,12 +479,12 @@ impl CopyInState {
     /// State for the OTLP format: the whole binary payload is buffered
     /// and completed once at `CopyDone` through the matching OTLP
     /// pipeline. Binary: the advertised wire format code is 1.
-    fn new_otlp(options: &OtlpOptions, query_ctx: QueryContextRef) -> Self {
+    fn new_otlp(options: OtlpOptions, query_ctx: QueryContextRef) -> Self {
         Self {
             query_ctx,
             payload: Payload::Otlp {
                 data: Vec::new(),
-                options: options.clone(),
+                options,
             },
             memory_guards: Vec::new(),
             granted_bytes: 0,
@@ -785,8 +787,14 @@ impl PostgresServerHandlerInner {
         let state = match &stmt.format {
             // Row-based table-bound formats parse records against the
             // target columns and insert them in batches.
-            CopyFormat::Csv(codec) => self.table_bound_state(&stmt, codec).await?,
-            CopyFormat::Jsonl(codec) => self.table_bound_state(&stmt, codec).await?,
+            CopyFormat::Csv(codec) => {
+                self.table_bound_state(&stmt, codec, query_ctx.clone())
+                    .await?
+            }
+            CopyFormat::Jsonl(codec) => {
+                self.table_bound_state(&stmt, codec, query_ctx.clone())
+                    .await?
+            }
             CopyFormat::Arrow(options) => {
                 if stmt.table.is_empty() {
                     return Err(unsupported("format arrow requires a target table"));
@@ -848,20 +856,43 @@ impl PostgresServerHandlerInner {
                 }
                 CopyInState::new_influxdb(options, query_ctx)
             }
-            // OTLP forbids a target table too — the payload's resource
-            // metrics route to their own tables — and completes through
-            // the OTLP metrics pipeline; the server must be wired.
+            // OTLP metrics route to their own tables. Logs and traces
+            // accept a destination without requiring it to exist yet.
             CopyFormat::Otlp(options) => {
-                if !stmt.table.is_empty() {
-                    return Err(unsupported(format!(
-                        "format otlp routes each record to its own table; \"COPY {} FROM STDIN\" must not name one",
-                        stmt.table.join(".")
-                    )));
+                if !stmt.columns.is_empty() {
+                    return Err(unsupported("format otlp does not support a column list"));
                 }
                 if self.otlp_handler.is_none() {
                     return Err(unsupported("this server is not wired for the otlp format"));
                 }
-                CopyInState::new_otlp(options, query_ctx)
+                let (options, target_ctx) =
+                    resolve_otlp_target(options, &stmt.table, query_ctx.clone())?;
+                if target_ctx.current_catalog() != query_ctx.current_catalog()
+                    || target_ctx.current_schema() != query_ctx.current_schema()
+                {
+                    // The same cross-catalog restriction SQL INSERT and
+                    // the csv format enforce — must run against the
+                    // ORIGINAL session context, before the user-provider
+                    // scope check and before any data is transferred.
+                    self.copy_in_handler
+                        .copy_in_validate_scope(
+                            target_ctx.current_catalog(),
+                            &target_ctx.current_schema(),
+                            query_ctx.clone(),
+                        )
+                        .await
+                        .map_err(convert_err)?;
+                    if let Some(source) = &self.auth_source {
+                        source
+                            .authorize_database(
+                                target_ctx.current_catalog(),
+                                &target_ctx.current_schema(),
+                                &query_ctx.current_user(),
+                            )
+                            .await?;
+                    }
+                }
+                CopyInState::new_otlp(options, target_ctx)
             }
             // promwrite forbids a target table too — the body's series
             // carry their own metric names — and completes through the
@@ -901,13 +932,15 @@ impl PostgresServerHandlerInner {
     }
 
     /// Resolves the target table and builds the table-bound copy state
-    /// shared by csv and jsonl.
+    /// shared by csv and jsonl. `query_ctx` is the connection's context
+    /// `begin_copy_in` created, so every format arm works from the same
+    /// snapshot of the session.
     async fn table_bound_state(
         &self,
         stmt: &CopyFromStdin,
         codec: &dyn TableBoundCodec,
+        query_ctx: QueryContextRef,
     ) -> PgWireResult<CopyInState> {
-        let query_ctx = self.new_query_context();
         if stmt.table.is_empty() {
             return Err(unsupported(format!(
                 "format {} requires a table: COPY tbl [(cols)] FROM STDIN WITH (FORMAT {})",
@@ -1251,6 +1284,32 @@ fn all_rejected_error(kind: &str, rejected: i64, reason: Option<&str>) -> PgWire
     })
 }
 
+/// Resolves the SQL target's scope and supplies a fallback destination
+/// for logs/traces. The explicit WITH table_name option takes precedence
+/// over the SQL target's name, but does not override its catalog/schema.
+fn resolve_otlp_target(
+    options: &OtlpOptions,
+    parts: &[String],
+    query_ctx: QueryContextRef,
+) -> PgWireResult<(OtlpOptions, QueryContextRef)> {
+    let mut options = options.clone();
+    if parts.is_empty() {
+        return Ok((options, query_ctx));
+    }
+    let table_name = match &mut options.signal {
+        OtlpSignal::Metrics { .. } => {
+            return Err(unsupported(format!(
+                "format otlp routes each metric to its own table; \"COPY {} FROM STDIN\" must not name one",
+                parts.join(".")
+            )));
+        }
+        OtlpSignal::Traces { table_name, .. } | OtlpSignal::Logs { table_name, .. } => table_name,
+    };
+    let (catalog, schema, table) = resolve_table_name(&query_ctx, parts)?;
+    table_name.get_or_insert(table);
+    Ok((options, adjust_query_context(query_ctx, &catalog, &schema)))
+}
+
 fn adjust_query_context(
     query_ctx: QueryContextRef,
     catalog: &str,
@@ -1544,6 +1603,69 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_otlp_target() {
+        for signal in ["logs", "traces"] {
+            for (target, catalog, schema, expected_table) in [
+                ("", "greptime", "public", None),
+                ("my_table", "greptime", "public", Some("my_table")),
+                ("other.my_table", "greptime", "other", Some("my_table")),
+                ("cat.other.my_table", "cat", "other", Some("my_table")),
+                (
+                    "\"Other\".\"MyTable\"",
+                    "greptime",
+                    "Other",
+                    Some("MyTable"),
+                ),
+            ] {
+                for override_name in [None, Some("overridden")] {
+                    let override_option = override_name
+                        .map(|name| format!(", table_name '{name}'"))
+                        .unwrap_or_default();
+                    let stmt = copy_from_stdin_from_sql(&format!(
+                        "COPY {target} FROM STDIN WITH (FORMAT otlp, signal '{signal}'{override_option})"
+                    ))
+                    .unwrap()
+                    .unwrap();
+                    let CopyFormat::Otlp(options) = stmt.format else {
+                        panic!("expected OTLP");
+                    };
+                    let original_ctx = session::context::QueryContext::arc();
+                    let (resolved, ctx) =
+                        resolve_otlp_target(&options, &stmt.table, original_ctx.clone()).unwrap();
+                    let table_name = match resolved.signal {
+                        OtlpSignal::Logs { table_name, .. }
+                        | OtlpSignal::Traces { table_name, .. } => table_name,
+                        _ => panic!("expected logs or traces"),
+                    };
+                    assert_eq!(table_name.as_deref(), override_name.or(expected_table));
+                    assert_eq!(ctx.current_catalog(), catalog);
+                    assert_eq!(ctx.current_schema(), schema);
+                    // A qualified target must not change the session context.
+                    assert_eq!(original_ctx.current_catalog(), "greptime");
+                    assert_eq!(original_ctx.current_schema(), "public");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_resolve_otlp_metrics_target_rejected() {
+        for signal in ["", ", signal 'metrics'"] {
+            let stmt = copy_from_stdin_from_sql(&format!(
+                "COPY my_metrics FROM STDIN WITH (FORMAT otlp{signal})"
+            ))
+            .unwrap()
+            .unwrap();
+            let CopyFormat::Otlp(options) = stmt.format else {
+                panic!("expected OTLP");
+            };
+            let ctx = session::context::QueryContext::arc();
+            let err = resolve_otlp_target(&options, &stmt.table, ctx).unwrap_err();
+            assert!(err.to_string().contains("must not name one"), "{err}");
+        }
+    }
+
+    #[test]
     fn test_parse_copy_from_stdin_requires_format() {
         let err = copy_from_stdin_from_sql("COPY t FROM STDIN").unwrap_err();
         assert!(
@@ -1570,6 +1692,34 @@ mod tests {
         .unwrap();
         assert_eq!(copy.columns, vec!["a", "b"]);
         assert!(matches!(copy.format, CopyFormat::Csv(_)));
+    }
+
+    #[test]
+    fn test_parse_copy_from_stdin_jsonl_and_json_alias() {
+        for sql in [
+            "COPY t FROM STDIN WITH (FORMAT jsonl)",
+            "COPY t FROM STDIN WITH (FORMAT json)",
+        ] {
+            let copy = copy_from_stdin_from_sql(sql).unwrap().unwrap();
+            assert!(matches!(copy.format, CopyFormat::Jsonl(_)), "{sql}");
+            assert_eq!(copy.format.name(), "jsonl", "{sql}");
+        }
+    }
+
+    #[test]
+    fn test_table_bound_codec_names() {
+        // The codec names `CopyInState` logs come from the codecs
+        // themselves, not a literal per match arm.
+        let csv = match csv::build_csv_codec(options::CopyOptionSet::default()).unwrap() {
+            CopyFormat::Csv(codec) => codec,
+            other => panic!("expected csv, got {other:?}"),
+        };
+        let jsonl = match jsonl::build_jsonl_codec(options::CopyOptionSet::default()).unwrap() {
+            CopyFormat::Jsonl(codec) => codec,
+            other => panic!("expected jsonl, got {other:?}"),
+        };
+        assert_eq!(csv.name(), "csv");
+        assert_eq!(jsonl.name(), "jsonl");
     }
 
     #[test]

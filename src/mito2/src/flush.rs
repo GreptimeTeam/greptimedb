@@ -71,6 +71,7 @@ use crate::sst::file::{FileMeta, UncommittedSsts};
 use crate::sst::parquet::metadata::extract_primary_key_range;
 use crate::sst::parquet::{
     DEFAULT_READ_BATCH_SIZE, DEFAULT_ROW_GROUP_SIZE, SstInfo, WriteOptions, flat_format,
+    row_group_size_for,
 };
 use crate::sst::{FlatSchemaOptions, FormatType, to_flat_sst_arrow_schema};
 use crate::wal::DurabilityBarrier;
@@ -506,7 +507,7 @@ impl RegionFlushTask {
             flushed_entry_id: Some(version_data.last_entry_id),
             flushed_sequence: Some(version_data.committed_sequence),
             committed_sequence: None,
-            wal_recovery: Default::default(),
+            ..Default::default()
         };
         info!("Applying {edit:?} to region {}", self.region_id);
 
@@ -775,6 +776,12 @@ impl MemtableSstWriter {
                 mem_stats.num_rows() as u64,
                 mem_stats.bytes_allocated() as u64,
             )]);
+            let mut mem_write_opts = write_opts.clone();
+            mem_write_opts.row_group_size = row_group_size_for(
+                mem_stats.num_rows() as u64,
+                mem_stats.bytes_allocated() as u64,
+                write_opts.row_group_size,
+            );
             // Sets `for_flush` flag and propagates the reader batch size.
             let mem_ranges =
                 mem.ranges(None, RangesOptions::for_flush().with_batch_size(batch_size))?;
@@ -794,7 +801,7 @@ impl MemtableSstWriter {
                 num_sources,
                 results,
             } = self
-                .flush_flat_mem_ranges(version, &write_opts, mem_ranges, state, uncommitted)
+                .flush_flat_mem_ranges(version, &mem_write_opts, mem_ranges, state, uncommitted)
                 .await?;
             encoded_part_count += num_encoded;
             for (source_idx, result) in results.into_iter().enumerate() {
@@ -993,6 +1000,7 @@ impl MemtableSstWriter {
             level: 0,
             file_size: sst_info.file_size,
             max_row_group_uncompressed_size: sst_info.max_row_group_uncompressed_size,
+            max_row_group_decoded_size: sst_info.max_row_group_decoded_size,
             available_indexes: sst_info.index_metadata.build_available_indexes(),
             indexes: sst_info.index_metadata.build_indexes()?,
             index_file_size: sst_info.index_metadata.file_size,
@@ -1005,6 +1013,7 @@ impl MemtableSstWriter {
             primary_key_min,
             primary_key_max,
             preserve_row_sequence,
+            format: sst_info.format.clone(),
         })
     }
 
@@ -2100,7 +2109,7 @@ mod tests {
                     flushed_entry_id: None,
                     flushed_sequence: None,
                     committed_sequence: None,
-                    wal_recovery: Default::default(),
+                    ..Default::default()
                 },
                 memtables_to_remove: smallvec![],
             }),
@@ -2424,7 +2433,7 @@ mod tests {
                 flushed_entry_id: None,
                 flushed_sequence: None,
                 committed_sequence: None,
-                wal_recovery: Default::default(),
+                ..Default::default()
             }),
             &[0],
             builder.file_purger(),
@@ -2726,7 +2735,7 @@ mod tests {
                 flushed_entry_id: None,
                 flushed_sequence: None,
                 committed_sequence: None,
-                wal_recovery: Default::default(),
+                ..Default::default()
             }),
             &[0],
             builder.file_purger(),
@@ -2801,7 +2810,7 @@ mod tests {
                 flushed_entry_id: None,
                 flushed_sequence: None,
                 committed_sequence: None,
-                wal_recovery: Default::default(),
+                ..Default::default()
             }),
             &[0],
             builder.file_purger(),

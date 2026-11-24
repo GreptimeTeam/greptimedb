@@ -380,7 +380,7 @@ impl RegionOpener {
         // Safety: must be set before calling this method.
         let mut options = self.options.take().unwrap();
         let object_store = get_object_store(&options.storage, &self.object_store_manager)?;
-        let provider = self.provider::<S>(&options.wal_options)?;
+        let provider = self.provider(wal, &options.wal_options)?;
         let metadata = Arc::new(metadata);
         // Sets the sst_format based on options or flat_format flag
         let sst_format = if let Some(format) = options.sst_format {
@@ -481,7 +481,8 @@ impl RegionOpener {
             region_id,
             compaction_state: Default::default(),
             version_control,
-            series_index_version_control: Default::default(),
+            series_index_version_control: crate::series_index::SeriesIndexVersionControl::default()
+                .with_format(config.experimental_series_index_format),
             series_index_store: self.series_index_store.clone(),
             access_layer: access_layer.clone(),
             // Region is writable after it is created.
@@ -543,8 +544,9 @@ impl RegionOpener {
         Ok(region)
     }
 
-    fn provider<S: LogStore>(&self, wal_options: &WalOptions) -> Result<Provider> {
-        provider_from_wal_options::<S>(self.region_id, wal_options)
+    fn provider<S: LogStore>(&self, wal: &Wal<S>, wal_options: &WalOptions) -> Result<Provider> {
+        let provider = provider_from_wal_options::<S>(self.region_id, wal_options)?;
+        wal.resolve_provider(self.region_id, provider)
     }
 
     /// Tries to open the region and returns `None` if the region directory is empty.
@@ -598,7 +600,7 @@ impl RegionOpener {
         region_options.validate_column_compression(&metadata)?;
 
         let region_id = self.region_id;
-        let provider = self.provider::<S>(&region_options.wal_options)?;
+        let provider = self.provider(wal, &region_options.wal_options)?;
         let wal_entry_reader = self
             .wal_entry_reader
             .take()
@@ -744,7 +746,8 @@ impl RegionOpener {
             region_id: self.region_id,
             compaction_state: Default::default(),
             version_control: version_control.clone(),
-            series_index_version_control,
+            series_index_version_control: series_index_version_control
+                .with_format(config.experimental_series_index_format),
             series_index_store: self.series_index_store.clone(),
             access_layer: access_layer.clone(),
             // Region is always opened in read only mode.
@@ -848,6 +851,10 @@ pub(crate) fn version_builder_from_manifest(
     region_options: RegionOptions,
 ) -> VersionBuilder {
     VersionBuilder::new(metadata, mutable)
+        .add_series_indexes(
+            file_purger.clone(),
+            manifest.series_indexes.values().cloned(),
+        )
         .add_files(file_purger, manifest.files.values().cloned())
         .flushed_entry_id(manifest.flushed_entry_id)
         .flushed_sequence(manifest.flushed_sequence)
@@ -1601,6 +1608,7 @@ mod tests {
             sst_format,
             append_mode: None,
             pending_tails: Default::default(),
+            series_indexes: Default::default(),
             handoff_floors: Default::default(),
         }
     }

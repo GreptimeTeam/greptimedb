@@ -454,6 +454,15 @@ mod tests {
 
     #[async_trait]
     impl CopyInHandler for Handler {
+        async fn copy_in_validate_scope(
+            &self,
+            _: &str,
+            _: &str,
+            _: QueryContextRef,
+        ) -> crate::error::Result<()> {
+            Ok(())
+        }
+
         async fn copy_in_table(
             &self,
             _: &str,

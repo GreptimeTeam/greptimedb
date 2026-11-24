@@ -23,11 +23,11 @@ use serde::{Deserialize, Serialize};
 /// both the heartbeat node epoch and the store epoch carried in object headers.
 pub const FIXED_DIRECTORY_GENERATION: u64 = 0;
 
-/// Plugin marker allowing a metasrv-controlled datanode to use object-store WAL.
+/// Plugin marker allowing metasrv and its datanodes to use object-store WAL.
 ///
 /// OSS does not register this marker. Cluster integration registers it only after
-/// the distributed WAL prerequisites are available; it does not itself configure
-/// metasrv or enable region failover.
+/// the distributed WAL prerequisites, including handoff and takeover, are available.
+/// It does not itself configure storage or implement region failover.
 #[derive(Debug, Clone, Copy)]
 pub struct EnableObjectStoreWal;
 
@@ -65,6 +65,9 @@ pub struct ObjectStoreWalConfig {
     /// An empty name selects the default object store.
     pub storage_provider: String,
     /// Path prefix of the WAL objects inside the storage provider.
+    /// In distributed mode, metasrv and all datanodes must use the same public
+    /// root prefix and shared object storage. A mismatched prefix prevents regions
+    /// from opening.
     ///
     /// The store runs under a node prefix derived from it, see
     /// [`node_prefix`](Self::node_prefix).
@@ -112,12 +115,40 @@ impl Default for ObjectStoreWalConfig {
 }
 
 impl ObjectStoreWalConfig {
+    /// Validates the public root prefix without changing its stored identity.
+    /// Other WAL settings are irrelevant to metasrv and validated by the datanode.
+    pub fn validate_prefix(&self) -> Result<(), &'static str> {
+        let prefix = self.prefix.trim();
+        if prefix.is_empty() {
+            return Err("must not be empty");
+        }
+        if prefix.starts_with('/') {
+            return Err("must be a relative path");
+        }
+        if prefix
+            .split('/')
+            .any(|component| component.is_empty() || component == "..")
+        {
+            return Err("must not contain empty or `..` components");
+        }
+        // The node suffix preserves trailing whitespace in the root's last component.
+        if self
+            .prefix
+            .trim_start()
+            .split('/')
+            .any(|component| component == ".")
+        {
+            return Err("must not contain `.` components");
+        }
+        Ok(())
+    }
+
     /// Returns the prefix the store of `node_id` runs under in `generation`:
     /// `<prefix>/datanodes/<node_id>/epochs/<generation>`.
     ///
-    /// Every place that names the store's prefix, whether to open the store or
-    /// to allocate the WAL options of a region, must derive it here so the
-    /// prefix a region persists matches the one its store runs under.
+    /// Writers and remote readers derive concrete node directories here.
+    /// Distributed region metadata retains the public root instead; standalone
+    /// WAL options retain this concrete prefix for compatibility.
     pub fn node_prefix(&self, node_id: u64, generation: u64) -> String {
         format!("{}/datanodes/{node_id}/epochs/{generation}", self.prefix)
     }
@@ -126,6 +157,27 @@ impl ObjectStoreWalConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_validate_prefix() {
+        for prefix in [
+            "", "   ", "/wal", "wal/", "wal//a", "wal/../a", ".", "wal/./a",
+        ] {
+            let config = ObjectStoreWalConfig {
+                prefix: prefix.to_string(),
+                ..Default::default()
+            };
+            assert!(config.validate_prefix().is_err(), "{prefix:?}");
+        }
+        for prefix in ["wal", "tenant/wal", " wal ", "wal/. ", ". "] {
+            let config = ObjectStoreWalConfig {
+                prefix: prefix.to_string(),
+                ..Default::default()
+            };
+            assert_eq!(Ok(()), config.validate_prefix());
+            assert_eq!(prefix, config.prefix);
+        }
+    }
 
     #[test]
     fn test_node_prefix() {

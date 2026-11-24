@@ -7,6 +7,25 @@ CREATE TABLE phy (ts timestamp time index, val double) engine=metric with ("phys
 -- It will use the database TTL setting --
 CREATE TABLE test_ttl (ts timestamp time index, val double, host string primary key) engine = metric with ("on_physical_table" = "phy");
 
+-- Logical tables omit database TTL in SHOW CREATE TABLE
+SHOW CREATE TABLE test_ttl;
+
+-- Legacy logical DDL with retention TTL succeeds with the retention option stripped
+CREATE TABLE legacy_ttl (ts timestamp time index, val double) engine=metric with ("on_physical_table" = "phy", "ttl" = "7d");
+
+SELECT table_name, create_options FROM information_schema.tables WHERE table_schema = 'test_ttl_db' AND table_name = 'legacy_ttl';
+
+-- Instant TTL is preserved on logical tables
+CREATE TABLE instant_ttl (ts timestamp time index, val double) engine=metric with ("on_physical_table" = "phy", "ttl" = "instant");
+
+SHOW CREATE TABLE instant_ttl;
+
+SELECT table_name, create_options FROM information_schema.tables WHERE table_schema = 'test_ttl_db' AND table_name = 'instant_ttl';
+
+DROP TABLE legacy_ttl;
+
+DROP TABLE instant_ttl;
+
 
 INSERT INTO test_ttl(ts, val, host) VALUES
        (now(), 1, 'host1'),

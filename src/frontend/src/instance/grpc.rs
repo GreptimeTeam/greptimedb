@@ -95,10 +95,12 @@ impl GrpcQueryHandler for Instance {
                         ctx.current_catalog(),
                         &ctx.current_schema(),
                     );
-                    let targets = self.resolve_query_permission_targets(targets, &ctx)
-                        .await.map_err(BoxedError::new).context(ExternalSnafu)?;
-                    self.check_table_permission(&ctx, PermissionReq::GrpcRequest(&request), targets)
-                        .context(PermissionSnafu)?;
+                    self.check_resolved_table_permission(
+                        &ctx,
+                        PermissionReq::GrpcRequest(&request),
+                        targets,
+                    )
+                    .await?;
                 }
             }
 

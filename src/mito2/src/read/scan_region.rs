@@ -41,10 +41,11 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::types::json_type::JsonNativeType;
 use datatypes::value::timestamp_to_scalar_value;
 use futures::StreamExt;
+use mito_codec::row_converter::{SortField, build_primary_key_codec_with_fields};
 use partition::expr::PartitionExpr;
 use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt, ensure};
-use store_api::metadata::{RegionMetadata, RegionMetadataRef};
+use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{PartitionRange, RegionScannerRef};
 use store_api::storage::{
     ColumnId, RegionId, ScanRequest, SequenceNumber, SequenceRange, TimeSeriesDistribution,
@@ -303,7 +304,36 @@ impl ScanRegion {
         mut self,
         series_index: Option<SeriesIndexReadContext>,
     ) -> Self {
-        self.series_index = series_index;
+        self.series_index = series_index.map(|mut context| {
+            // A daily artifact cannot be partially selected by source SST identity. Pin only
+            // generations whose complete source set is still visible in this data snapshot.
+            let visible = self
+                .version
+                .ssts
+                .levels()
+                .iter()
+                .flat_map(|l| l.files())
+                .map(|f| f.file_id().file_id())
+                .collect();
+            let previous = &context.version;
+            context.version = Arc::new(crate::series_index::SeriesIndexVersion {
+                samples: previous
+                    .samples
+                    .iter()
+                    .filter(|(_, h)| {
+                        h.entry().sources_visible(&visible)
+                            && (h.entry().window.is_none()
+                                || (self.request.sst_min_sequence.is_none()
+                                    && !self.request.exact_sequence_range))
+                    })
+                    .map(|(id, h)| (*id, h.clone()))
+                    .collect(),
+                range_indexes: previous.range_indexes.clone(),
+                series_indexes: previous.series_indexes.clone(),
+                index_buckets: previous.index_buckets.clone(),
+            });
+            context
+        });
         self
     }
 
@@ -493,6 +523,24 @@ impl ScanRegion {
             mapper
         };
 
+        // Only time-pruned sources from this pinned version may accompany an assigned SST
+        // in a grouped sample artifact. Explicit selections and sequence pruning stay strict.
+        let time_pruned_files = if self.exact_selection.is_none()
+            && !self.request.skip_sst_files
+            && self.request.sst_min_sequence.is_none()
+            && !self.request.exact_sequence_range
+        {
+            self.version
+                .ssts
+                .levels()
+                .iter()
+                .flat_map(|level| level.files.values())
+                .filter(|file| !file_in_range(file, &time_range))
+                .map(|file| file.file_id().file_id())
+                .collect()
+        } else {
+            HashSet::new()
+        };
         let (files, sequence_range) =
             if let Some((files, sequence_range)) = self.exact_selection.take() {
                 (files, sequence_range)
@@ -576,6 +624,7 @@ impl ScanRegion {
             .with_predicate(predicate)
             .with_memtables(mem_range_builders)
             .with_files(files)
+            .with_time_pruned_files(time_pruned_files)
             .with_primary_key_mapper(self.version.ssts.primary_key_mapper())
             .with_cache(self.cache_strategy)
             .with_inverted_index_appliers(inverted_index_appliers)
@@ -935,6 +984,8 @@ pub struct ScanInput {
     pub(crate) memtables: Vec<MemRangeBuilder>,
     /// Handles to SST files to scan.
     pub(crate) files: Vec<FileHandle>,
+    /// Visible sources excluded solely by the query time range.
+    pub(crate) time_pruned_files: HashSet<store_api::storage::FileId>,
     /// Shares the pinned schema's encoded defaults across parallel range readers.
     primary_key_mapper: OnceLock<Arc<PrimaryKeyRangeMapper>>,
     /// Scan-wide hint for rows in an execution batch.
@@ -1023,6 +1074,7 @@ impl ScanInput {
                 region_partition_expr: None,
                 memtables: Vec::new(),
                 files: Vec::new(),
+                time_pruned_files: HashSet::new(),
                 primary_key_mapper: OnceLock::new(),
                 batch_size: crate::sst::parquet::DEFAULT_READ_BATCH_SIZE,
                 cache_strategy: CacheStrategy::Disabled,
@@ -1240,6 +1292,16 @@ impl ScanInputBuilder {
     #[must_use]
     pub(crate) fn with_memtables(mut self, memtables: Vec<MemRangeBuilder>) -> Self {
         self.input.memtables = memtables;
+        self
+    }
+
+    /// Sets visible sources excluded solely by time pruning.
+    #[must_use]
+    pub(crate) fn with_time_pruned_files(
+        mut self,
+        files: HashSet<store_api::storage::FileId>,
+    ) -> Self {
+        self.input.time_pruned_files = files;
         self
     }
 
@@ -1462,11 +1524,14 @@ impl ScanInput {
         }
     }
 
-    /// Tries to build file-level pruning statistics using only the [FileHandle]'s manifest-level
-    /// time range, without reading any parquet metadata.
+    /// Tries to build file-level pruning statistics from the [FileHandle]'s time range and
+    /// primary key range, without reading any parquet metadata.
     ///
     /// Returns `None` if timestamp unit conversion overflows (conservative: keep the file).
-    fn try_file_level_pruning_stats(&self, file: &FileHandle) -> Option<FileLevelPruningStats> {
+    fn try_file_level_pruning_stats<'a>(
+        &'a self,
+        file: &'a FileHandle,
+    ) -> Option<FileLevelPruningStats<'a>> {
         let (ts_min, ts_max) = file.time_range();
         let time_index = self.mapper.metadata().time_index_column();
         let time_index_unit = time_index.column_schema.data_type.as_timestamp()?.unit();
@@ -1480,11 +1545,56 @@ impl ScanInput {
             min_scalar: timestamp_to_scalar_value(time_index_unit, Some(min_ts.value())),
             max_scalar: timestamp_to_scalar_value(time_index_unit, Some(max_ts.value())),
             time_index_col_name: time_index.column_schema.name.clone(),
+            first_primary_key: self.first_primary_key_stats(file),
         })
     }
 
+    /// Returns the first primary key column of `file`. Its range is decoded only when pruning
+    /// asks for the column.
+    fn first_primary_key_stats<'a>(
+        &'a self,
+        file: &'a FileHandle,
+    ) -> Option<FirstPrimaryKeyStats<'a>> {
+        let metadata = self.mapper.metadata();
+        let column = metadata.column_by_id(*metadata.primary_key.first()?)?;
+        Some(FirstPrimaryKeyStats {
+            input: self,
+            file,
+            column,
+            range: OnceLock::new(),
+        })
+    }
+
+    /// Decodes the min and max of `column`, the first primary key column, from the primary key
+    /// range of `file`.
+    fn decode_first_primary_key_range(
+        &self,
+        file: &FileHandle,
+        column: &ColumnMetadata,
+    ) -> Option<(ArrayRef, ArrayRef)> {
+        use datatypes::data_type::DataType as _;
+
+        let metadata = self.mapper.metadata();
+        let (min, max) = file.primary_key_range(self.primary_key_mapper())?;
+        let codec = build_primary_key_codec_with_fields(
+            metadata.primary_key_encoding,
+            std::iter::once((
+                column.column_id,
+                SortField::new(column.column_schema.data_type.clone()),
+            )),
+        );
+        let to_array = |bytes: &[u8]| -> Option<ArrayRef> {
+            let value = codec.decode_leftmost(bytes).ok()??;
+            let mut builder = column.column_schema.data_type.create_mutable_vector(1);
+            builder.try_push_value_ref(&value.as_value_ref()).ok()?;
+            Some(builder.to_vector().to_arrow_array())
+        };
+        Some((to_array(&min)?, to_array(&max)?))
+    }
+
     /// Checks whether a file can be definitively pruned using only its manifest-level
-    /// time range and the current predicate, without reading any parquet metadata.
+    /// time and primary key ranges and the current predicate, without reading any parquet
+    /// metadata.
     ///
     /// Returns `true` if [PruningStatistics] proves the file cannot contain matching rows.
     #[inline]
@@ -1527,9 +1637,9 @@ impl ScanInput {
     ) -> Result<FileRangeBuilder> {
         let predicate = self.predicate_for_file(file);
 
-        // Early file-level pruning using manifest time range before any parquet metadata access.
+        // Early file-level pruning using manifest ranges before any parquet metadata access.
         if self.manifest_prunes_file(file, predicate.as_ref()) {
-            reader_metrics.filter_metrics.files_time_range_pruned += 1;
+            reader_metrics.filter_metrics.files_manifest_pruned += 1;
             return Ok(FileRangeBuilder::default());
         }
 
@@ -1809,24 +1919,50 @@ impl ScanInput {
     }
 }
 
-/// Lightweight [PruningStatistics] that only uses the file-level time range from manifest
-/// metadata, avoiding any parquet metadata reads. Used for early file-level pruning before
-/// accessing row-group-level statistics.
-pub(crate) struct FileLevelPruningStats {
+/// Lightweight [PruningStatistics] that only uses the time range and first primary key range
+/// known by the file handle, avoiding any parquet metadata reads. Used for early file-level
+/// pruning before accessing row-group-level statistics.
+pub(crate) struct FileLevelPruningStats<'a> {
     /// Scalar value for the file's minimum timestamp in the time index column's unit.
     pub(crate) min_scalar: ScalarValue,
     /// Scalar value for the file's maximum timestamp in the time index column's unit.
     pub(crate) max_scalar: ScalarValue,
     /// Name of the time index column.
     pub(crate) time_index_col_name: String,
+    /// First primary key column; `None` when the region has no primary key.
+    pub(crate) first_primary_key: Option<FirstPrimaryKeyStats<'a>>,
 }
 
-impl PruningStatistics for FileLevelPruningStats {
+/// Min and max of the first primary key column of a file, decoded from the file's primary key
+/// range on first use. Predicates that do not reference the column skip the decoding.
+pub(crate) struct FirstPrimaryKeyStats<'a> {
+    input: &'a ScanInput,
+    file: &'a FileHandle,
+    column: &'a ColumnMetadata,
+    range: OnceLock<Option<(ArrayRef, ArrayRef)>>,
+}
+
+impl FirstPrimaryKeyStats<'_> {
+    fn range_of(&self, column: &Column) -> Option<&(ArrayRef, ArrayRef)> {
+        if column.name != self.column.column_schema.name {
+            return None;
+        }
+        self.range
+            .get_or_init(|| {
+                self.input
+                    .decode_first_primary_key_range(self.file, self.column)
+            })
+            .as_ref()
+    }
+}
+
+impl PruningStatistics for FileLevelPruningStats<'_> {
     fn min_values(&self, column: &Column) -> Option<ArrayRef> {
         if column.name == self.time_index_col_name {
             ScalarValue::iter_to_array(std::iter::once(self.min_scalar.clone())).ok()
         } else {
-            None
+            let (min, _) = self.first_primary_key.as_ref()?.range_of(column)?;
+            Some(min.clone())
         }
     }
 
@@ -1834,7 +1970,8 @@ impl PruningStatistics for FileLevelPruningStats {
         if column.name == self.time_index_col_name {
             ScalarValue::iter_to_array(std::iter::once(self.max_scalar.clone())).ok()
         } else {
-            None
+            let (_, max) = self.first_primary_key.as_ref()?.range_of(column)?;
+            Some(max.clone())
         }
     }
 
@@ -3148,6 +3285,7 @@ mod tests {
             min_scalar: ScalarValue::TimestampMillisecond(Some(0), None),
             max_scalar: ScalarValue::TimestampMillisecond(Some(500), None),
             time_index_col_name: ts_col_name.to_string(),
+            first_primary_key: None,
         };
         assert_eq!(
             vec![false],
@@ -3159,6 +3297,7 @@ mod tests {
             min_scalar: ScalarValue::TimestampMillisecond(Some(0), None),
             max_scalar: ScalarValue::TimestampMillisecond(Some(2000), None),
             time_index_col_name: ts_col_name.to_string(),
+            first_primary_key: None,
         };
         assert_eq!(
             vec![true],
@@ -3175,6 +3314,7 @@ mod tests {
             min_scalar: ScalarValue::TimestampMillisecond(Some(0), None),
             max_scalar: ScalarValue::TimestampMillisecond(Some(500), None),
             time_index_col_name: "ts".to_string(),
+            first_primary_key: None,
         };
         let arrow_schema = Arc::new(ArrowSchema::new(Vec::<Field>::new()));
         assert_eq!(
@@ -3235,6 +3375,7 @@ mod tests {
             min_scalar: ScalarValue::TimestampMillisecond(Some(0), None),
             max_scalar: ScalarValue::TimestampMillisecond(Some(1000), None),
             time_index_col_name: ts_col_name.to_string(),
+            first_primary_key: None,
         };
 
         assert_eq!(
@@ -3266,10 +3407,227 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(1, reader_metrics.filter_metrics.files_time_range_pruned);
+        assert_eq!(1, reader_metrics.filter_metrics.files_manifest_pruned);
         let mut ranges = SmallVec::new();
         builder.build_ranges(-1, &mut ranges);
         assert!(ranges.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_manifest_pruning_uses_first_primary_key_range() {
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
+        let predicate_group = PredicateGroup::new(
+            metadata.as_ref(),
+            &[datafusion_expr::col("k0").eq(datafusion_expr::lit("b"))],
+        )
+        .unwrap();
+        let input = ScanInput::builder(SchedulerEnv::new().await.access_layer.clone(), mapper)
+            .with_predicate(predicate_group)
+            .build();
+        use mito_codec::row_converter::PrimaryKeyCodec as _;
+
+        let key = |k0: &str| {
+            let mut bytes = Vec::new();
+            mito_codec::row_converter::DensePrimaryKeyCodec::new(&metadata)
+                .encode_values(
+                    &[
+                        (0, datatypes::value::Value::from(k0)),
+                        (1, datatypes::value::Value::from(1u32)),
+                    ],
+                    &mut bytes,
+                )
+                .unwrap();
+            bytes::Bytes::from(bytes)
+        };
+        let file = |range: Option<(&str, &str)>| {
+            FileHandle::new(
+                FileMeta {
+                    region_id: metadata.region_id,
+                    time_range: (
+                        Timestamp::new_millisecond(0),
+                        Timestamp::new_millisecond(1000),
+                    ),
+                    primary_key_min: range.map(|(min, _)| key(min)),
+                    primary_key_max: range.map(|(_, max)| key(max)),
+                    ..Default::default()
+                },
+                Arc::new(crate::sst::file_purger::NoopFilePurger),
+            )
+        };
+
+        // Files whose first-tag range excludes `k0 = 'b'` are pruned before reading their footer.
+        assert!(input.can_manifest_prune_file(&file(Some(("a", "a")))));
+        assert!(input.can_manifest_prune_file(&file(Some(("c", "d")))));
+        assert!(!input.can_manifest_prune_file(&file(Some(("a", "c")))));
+        assert!(!input.can_manifest_prune_file(&file(Some(("b", "b")))));
+        // Files without a recorded range are kept.
+        assert!(!input.can_manifest_prune_file(&file(None)));
+        // A range hydrated from the footer when the region opens also prunes the file.
+        let hydrated = file(None);
+        hydrated.set_primary_key_range((key("c"), key("d")));
+        assert!(input.can_manifest_prune_file(&hydrated));
+    }
+
+    #[tokio::test]
+    async fn test_manifest_pruning_topk_disjoint_ssts() {
+        use api::v1::Rows;
+        use datafusion::datasource::memory::MemorySourceConfig;
+        use datafusion::execution::context::TaskContext;
+        use datafusion::physical_expr::PhysicalSortExpr;
+        use datafusion::physical_plan::sorts::sort::SortExec;
+        use datafusion::physical_plan::{ExecutionPlan, collect};
+        use datatypes::arrow::array::{Float64Array, StringArray, TimestampMillisecondArray};
+        use datatypes::arrow::compute::SortOptions;
+        use datatypes::arrow::record_batch::RecordBatch;
+        use store_api::region_engine::RegionEngine;
+        use store_api::region_request::RegionRequest;
+
+        use crate::config::MitoConfig;
+        use crate::test_util::{
+            CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows, rows_schema,
+        };
+
+        let mut env = TestEnv::new().await;
+        let engine = env
+            .create_engine(MitoConfig {
+                min_compaction_interval: std::time::Duration::from_secs(60 * 60),
+                schedule_compaction_after_edit: false,
+                ..Default::default()
+            })
+            .await;
+        let region_id = RegionId::new(123, 456);
+        let request = CreateRequestBuilder::new()
+            .insert_option("append_mode", "true")
+            .insert_option("compaction.type", "twcs")
+            .insert_option("compaction.twcs.trigger_file_num", "100")
+            .build();
+        let row_schema = rows_schema(&request);
+        engine
+            .handle_request(region_id, RegionRequest::Create(request))
+            .await
+            .unwrap();
+        for (start, end) in [(0, 2), (10, 11), (20, 22)] {
+            let mut rows = build_rows(start, end);
+            if start == 0 {
+                rows[0].values[1].value_data = None;
+            }
+            put_rows(
+                &engine,
+                region_id,
+                Rows {
+                    schema: row_schema.clone(),
+                    rows,
+                },
+            )
+            .await;
+            flush_region(&engine, region_id, None).await;
+        }
+        let region = engine.get_region(region_id).unwrap();
+        let version = region.version();
+        let mut files = version.ssts.levels()[0]
+            .files
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        files.sort_by_key(|file| file.meta_ref().time_range.0);
+        assert_eq!(files.len(), 3, "three disjoint flushed SSTs");
+        for (file, (min, max)) in files
+            .iter()
+            .zip([(0, 1_000), (10_000, 10_000), (20_000, 21_000)])
+        {
+            assert_eq!(
+                file.time_range(),
+                (
+                    Timestamp::new_millisecond(min),
+                    Timestamp::new_millisecond(max)
+                )
+            );
+        }
+        let access_layer = region.access_layer();
+        for file in &files {
+            let path = file.file_path(access_layer.table_dir(), access_layer.path_type());
+            assert!(access_layer.object_store().exists(&path).await.unwrap());
+        }
+        let metadata = version.metadata.clone();
+        let arrow_schema = metadata.schema.arrow_schema();
+        let ts_expr = physical_col("ts", arrow_schema.as_ref()).unwrap();
+        let value_expr = physical_col("field_0", arrow_schema.as_ref()).unwrap();
+        let sort_options = SortOptions {
+            descending: true,
+            nulls_first: false,
+        };
+        // Fill the real TopK heap with (10s, 100). The oldest SST contains a
+        // NULL field_0; the manifest has no statistics for that field.
+        let seed = RecordBatch::try_new(
+            arrow_schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec![Some("seed")])),
+                Arc::new(Float64Array::from(vec![Some(100.0)])),
+                Arc::new(TimestampMillisecondArray::from(vec![10_000])),
+            ],
+        )
+        .unwrap();
+        let source =
+            MemorySourceConfig::try_new_exec(&[vec![seed]], arrow_schema.clone(), None).unwrap();
+        let sort = SortExec::new(
+            [
+                PhysicalSortExpr {
+                    expr: ts_expr,
+                    options: sort_options,
+                },
+                PhysicalSortExpr {
+                    expr: value_expr,
+                    options: sort_options,
+                },
+            ]
+            .into(),
+            source,
+        )
+        .with_fetch(Some(1));
+        let expr = sort
+            .dynamic_expressions_produced()
+            .into_iter()
+            .next()
+            .unwrap();
+        let dynamic_filter = (expr as Arc<dyn std::any::Any + Send + Sync>)
+            .downcast::<DynamicFilterPhysicalExpr>()
+            .unwrap();
+        let predicate_group = PredicateGroup::new(metadata.as_ref(), &[]).unwrap();
+        predicate_group.add_dyn_filters(vec![dynamic_filter]);
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 1, 2]).unwrap();
+        let input = ScanInput::builder(region.access_layer(), mapper)
+            .with_predicate(predicate_group)
+            .with_files(files.clone())
+            .build();
+        assert!(
+            !input.can_manifest_prune_file(&files[0]),
+            "uninitialized TopK keeps every SST"
+        );
+        collect(Arc::new(sort), Arc::new(TaskContext::default()))
+            .await
+            .unwrap();
+        assert!(
+            input.can_manifest_prune_file(&files[0]),
+            "a disjoint SST must be pruned despite unknown nullable secondary statistics"
+        );
+        let mut metrics = ReaderMetrics::default();
+        let builder = input
+            .prune_file(&files[0], PreFilterMode::SkipFields, &mut metrics)
+            .await
+            .unwrap();
+        let mut ranges = SmallVec::new();
+        builder.build_ranges(-1, &mut ranges);
+        assert!(ranges.is_empty());
+        assert_eq!(metrics.filter_metrics.files_manifest_pruned, 1);
+        assert!(
+            !input.can_manifest_prune_file(&files[1]),
+            "same-prefix SST must be kept for better suffixes"
+        );
+        assert!(
+            !input.can_manifest_prune_file(&files[2]),
+            "better timestamp SST must be kept"
+        );
     }
 
     #[tokio::test]

@@ -44,7 +44,7 @@ use crate::procedure::repartition::plan::{SourceRegionDescriptor, TargetRegionDe
 use crate::procedure::repartition::{
     Context as ParentContext, PersistentContext as ParentPersistentContext, RepartitionProcedure,
 };
-use crate::procedure::test_util::MailboxContext;
+use crate::procedure::test_util::{MailboxContext, new_leader_region};
 
 /// `TestingEnv` provides components during the tests.
 pub struct TestingEnv {
@@ -230,6 +230,20 @@ pub fn new_parent_context(
         env.server_addr.clone(),
         persistent_ctx,
     )
+}
+
+/// Records `region_ids` as leader regions that reported to this metasrv, with
+/// `has_pending_tails`, as their heartbeats do.
+pub fn report_leader_regions(
+    ctx: &ParentContext,
+    region_ids: &[RegionId],
+    has_pending_tails: bool,
+) {
+    let leaders = region_ids
+        .iter()
+        .map(|region_id| (*region_id, new_leader_region(0, has_pending_tails)))
+        .collect();
+    ctx.leader_region_registry.batch_put(leaders);
 }
 
 pub fn assert_parent_state<T: 'static>(procedure: &RepartitionProcedure) {

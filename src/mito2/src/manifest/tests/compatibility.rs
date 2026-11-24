@@ -71,6 +71,27 @@ fn test_file_only_manifest_compatibility() {
     }
 }
 
+#[test]
+fn test_decoded_row_group_size_is_optional_in_manifests() {
+    let actions = RegionMetaActionList::decode(EDIT.as_bytes()).unwrap();
+    let RegionMetaAction::Edit(edit) = &actions.actions[0] else {
+        panic!("expected edit")
+    };
+    // Files written before the field read as unknown, and stay byte-identical when re-encoded.
+    let legacy = &edit.files_to_add[0];
+    assert_eq!(0, legacy.max_row_group_decoded_size);
+    let encoded = serde_json::to_value(legacy).unwrap();
+    assert!(encoded.get("max_row_group_decoded_size").is_none());
+
+    let file = FileMeta {
+        max_row_group_decoded_size: 128 << 20,
+        ..legacy.clone()
+    };
+    let encoded = serde_json::to_value(&file).unwrap();
+    assert_eq!(json!(128 << 20), encoded["max_row_group_decoded_size"]);
+    assert_eq!(file, serde_json::from_value::<FileMeta>(encoded).unwrap());
+}
+
 #[rstest::rstest]
 #[case("table_compaction")]
 #[case("extensions")]

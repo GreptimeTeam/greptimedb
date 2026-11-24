@@ -65,6 +65,16 @@ impl RemoteDynFilterRegistry {
             .map(|query_regs| query_regs.clone())
     }
 
+    fn is_current_query(
+        &self,
+        query_id: &QueryId,
+        expected: &Arc<Mutex<QueryRemoteDynFilterRegs>>,
+    ) -> bool {
+        self.queries
+            .get(query_id)
+            .is_some_and(|query_regs| Arc::ptr_eq(&query_regs, expected))
+    }
+
     fn remove_query_if_empty(
         &self,
         query_id: &QueryId,
@@ -262,6 +272,9 @@ impl RemoteDynFilterState {
     }
 }
 
+/// Counted in [`REMOTE_DYN_FILTER_REGISTRY_ENTRIES`] from construction to drop;
+/// build it only through `new` and do not derive `Clone`. `new` and `Drop` are
+/// the only places that move the gauge.
 #[derive(Debug)]
 pub(super) struct RegisteredDynFilter {
     pub(super) filter_id: RemoteDynFilterId,
@@ -280,6 +293,7 @@ impl RegisteredDynFilter {
     ) -> Self {
         let mut subscriber_regions = HashSet::new();
         subscriber_regions.insert(region_id);
+        REMOTE_DYN_FILTER_REGISTRY_ENTRIES.inc();
 
         Self {
             filter_id,
@@ -437,6 +451,7 @@ impl RegisteredDynFilter {
 impl Drop for RegisteredDynFilter {
     fn drop(&mut self) {
         self.deactivate();
+        REMOTE_DYN_FILTER_REGISTRY_ENTRIES.dec();
     }
 }
 
@@ -475,40 +490,49 @@ pub(super) fn register_initial_dyn_filter_regs(
         return Vec::new();
     }
 
-    let query_regs = regs_by_query.get_or_insert_query(*query_id);
-    let mut query_regs = query_regs.lock().unwrap();
-    let mut registered_filter_ids = Vec::with_capacity(regs.regs.len());
+    loop {
+        let query_regs = regs_by_query.get_or_insert_query(*query_id);
+        let mut locked = query_regs.lock().unwrap();
+        let mut registered_filter_ids = Vec::with_capacity(regs.regs.len());
 
-    for reg in &regs.regs {
-        let filter_id = RemoteDynFilterId::new(reg.filter_id.clone());
-        match query_regs.entry(filter_id.clone()) {
-            Entry::Occupied(mut entry) => {
-                let registered = entry.get_mut();
-                if registered.child_exprs_datafusion_proto != reg.child_exprs_datafusion_proto {
-                    warn!(
-                        "Remote dynamic filter registration reused filter_id with different children, query_id: {}, filter_id: {}, region_id: {}",
-                        query_id, filter_id, region_id
-                    );
+        for reg in &regs.regs {
+            let filter_id = RemoteDynFilterId::new(reg.filter_id.clone());
+            match locked.entry(filter_id.clone()) {
+                Entry::Occupied(mut entry) => {
+                    let registered = entry.get_mut();
+                    if registered.child_exprs_datafusion_proto != reg.child_exprs_datafusion_proto {
+                        warn!(
+                            "Remote dynamic filter registration reused filter_id with different children, query_id: {}, filter_id: {}, region_id: {}",
+                            query_id, filter_id, region_id
+                        );
+                    }
+                    if registered.register_subscriber(region_id) {
+                        registered_filter_ids.push(filter_id);
+                    }
+                    let _ = registered.apply_initial_snapshot(reg);
                 }
-                if registered.register_subscriber(region_id) {
+                Entry::Vacant(entry) => {
+                    entry.insert(RegisteredDynFilter::new(
+                        filter_id.clone(),
+                        reg.child_exprs_datafusion_proto.clone(),
+                        PendingDynFilterUpdate::from_initial_reg(reg),
+                        region_id,
+                    ));
                     registered_filter_ids.push(filter_id);
                 }
-                let _ = registered.apply_initial_snapshot(reg);
-            }
-            Entry::Vacant(entry) => {
-                entry.insert(RegisteredDynFilter::new(
-                    filter_id.clone(),
-                    reg.child_exprs_datafusion_proto.clone(),
-                    PendingDynFilterUpdate::from_initial_reg(reg),
-                    region_id,
-                ));
-                REMOTE_DYN_FILTER_REGISTRY_ENTRIES.inc();
-                registered_filter_ids.push(filter_id);
             }
         }
-    }
+        drop(locked);
 
-    registered_filter_ids
+        // An empty query state can be removed from the registry between the
+        // lookup above and the insert. A non-empty state is never removed, so
+        // the registration is visible if the registry still holds this state.
+        // Check after releasing the query lock: `remove_query_if_empty` takes
+        // that lock while holding the registry shard.
+        if regs_by_query.is_current_query(query_id, &query_regs) {
+            return registered_filter_ids;
+        }
+    }
 }
 
 pub(super) fn remote_dyn_filter_exprs_for_initial_regs(
@@ -609,7 +633,6 @@ pub(super) fn unregister_remote_dyn_filter(
             record_unregister_outcome(outcome);
             return outcome;
         };
-        REMOTE_DYN_FILTER_REGISTRY_ENTRIES.dec();
         let should_remove_query = locked.is_empty();
         (registered, should_remove_query)
     };
@@ -650,7 +673,6 @@ pub(super) fn remove_initial_dyn_filter_regs(
                 .unwrap_or(false);
 
             if should_remove_filter && let Some(registered) = locked.remove(filter_id) {
-                REMOTE_DYN_FILTER_REGISTRY_ENTRIES.dec();
                 removed_filters.push(registered);
             }
         }
@@ -750,5 +772,100 @@ mod tests {
         assert_eq!(registered.subscriber_regions.len(), 2);
         assert!(registered.subscriber_regions.contains(&first_region_id));
         assert!(registered.subscriber_regions.contains(&second_region_id));
+    }
+
+    #[test]
+    fn remote_dyn_filter_register_survives_concurrent_last_subscriber_removal() {
+        let regs_by_query = RemoteDynFilterRegistry::new();
+        let query_id = QueryId::new();
+        let filter_id = RemoteDynFilterId::new("filter-1");
+        let first_region_id = RegionId::new(1024, 7);
+        let second_region_id = RegionId::new(1024, 8);
+        let regs = InitialDynFilterRegs::new(vec![InitialDynFilterReg::new("filter-1", vec![])]);
+
+        register_initial_dyn_filter_regs(&regs_by_query, &query_id, first_region_id, &regs);
+        let query_regs = regs_by_query.get_query(&query_id).unwrap();
+
+        std::thread::scope(|scope| {
+            let mut locked = query_regs.lock().unwrap();
+            let registering = scope.spawn(|| {
+                register_initial_dyn_filter_regs(&regs_by_query, &query_id, second_region_id, &regs)
+            });
+            // The registry, this test and the registering thread each hold the
+            // query state once the registration has looked it up.
+            while Arc::strong_count(&query_regs) < 3 {
+                assert!(
+                    !registering.is_finished(),
+                    "registration returned without waiting for the query lock"
+                );
+                std::thread::yield_now();
+            }
+
+            // The first region leaves while the second registration waits for
+            // the query lock: its filter goes away and so does the now empty
+            // query state. Remove both directly: the real removal path takes
+            // the registry shard and then this query lock, which this thread
+            // holds, so calling it here would deadlock.
+            locked.remove(&filter_id);
+            assert!(regs_by_query.queries.remove(&query_id).is_some());
+            drop(locked);
+
+            assert_eq!(registering.join().unwrap(), vec![filter_id.clone()]);
+        });
+
+        let subscriber_regions = regs_by_query.inspect_query(&query_id, |query_regs| {
+            query_regs
+                .get(&filter_id)
+                .map(|registered| registered.subscriber_regions.clone())
+        });
+        assert_eq!(
+            subscriber_regions,
+            Some(Some(HashSet::from([second_region_id])))
+        );
+    }
+
+    #[test]
+    fn remote_dyn_filter_registered_region_sees_filter_until_removed() {
+        let regs_by_query = RemoteDynFilterRegistry::new();
+        let query_id = QueryId::new();
+        let schema = Schema::empty();
+
+        std::thread::scope(|scope| {
+            for region_number in 0..4 {
+                let (regs_by_query, schema) = (&regs_by_query, &schema);
+                scope.spawn(move || {
+                    let region_id = RegionId::new(1024, region_number);
+                    // Each region registers its own filter, so only its own
+                    // registration can satisfy the lookup below.
+                    let regs = InitialDynFilterRegs::new(vec![InitialDynFilterReg::new(
+                        format!("filter-{region_number}"),
+                        vec![],
+                    )]);
+                    for _ in 0..1_000 {
+                        let filter_ids = register_initial_dyn_filter_regs(
+                            regs_by_query,
+                            &query_id,
+                            region_id,
+                            &regs,
+                        );
+                        let exprs = remote_dyn_filter_exprs_for_initial_regs(
+                            regs_by_query,
+                            &query_id,
+                            &regs,
+                            schema,
+                        );
+                        assert_eq!(exprs.len(), 1);
+                        remove_initial_dyn_filter_regs(
+                            regs_by_query,
+                            &query_id,
+                            region_id,
+                            &filter_ids,
+                        );
+                    }
+                });
+            }
+        });
+
+        assert!(regs_by_query.get_query(&query_id).is_none());
     }
 }

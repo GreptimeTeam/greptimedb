@@ -244,6 +244,22 @@ impl AccessLayer {
         Ok(())
     }
 
+    /// Deletes objects belonging to a fenced artifact in its canonical directory.
+    pub(crate) async fn delete_narthex_artifact(
+        &self,
+        region_id: RegionId,
+        file_id: FileId,
+    ) -> Result<()> {
+        let region_dir = self.build_region_dir(region_id);
+        let dir = location::narthex_file_dir(&region_dir, file_id);
+        self.object_store
+            .delete_with(&dir)
+            .recursive(true)
+            .await
+            .context(OpenDalSnafu)?;
+        Ok(())
+    }
+
     pub(crate) async fn delete_ssts(
         &self,
         region_id: RegionId,

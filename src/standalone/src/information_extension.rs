@@ -143,6 +143,7 @@ impl InformationExtension for StandaloneInformationExtension {
                     query_scanned_bytes: region_stat.query_scanned_bytes,
                     min_timestamp: region_stat.min_timestamp,
                     max_timestamp: region_stat.max_timestamp,
+                    has_pending_tails: region_stat.has_pending_tails,
                 }
             })
             .collect::<Vec<_>>();

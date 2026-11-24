@@ -27,23 +27,9 @@ use crate::request::{
     BuildIndexRequest, CompactionFailed, CompactionFinished, CompactionUnitNotification, OnFailure,
     OptionOutputTx,
 };
-use crate::sst::file::FileMeta;
 use crate::sst::index::IndexBuildType;
-use crate::sst::index::kind::{ExtensionIndexKind, IndexKind};
 use crate::worker::RegionWorkerLoop;
-
-/// Completed extensions prove the writer built this output's indexes together.
-/// A background replacement would otherwise erase those extension blobs.
-fn needs_background_indexes(file: &FileMeta) -> bool {
-    !ExtensionIndexKind::ALL.iter().any(|kind| {
-        let index_type = IndexKind::Extension(*kind).index_type();
-        file.available_indexes.contains(&index_type)
-            || file
-                .indexes
-                .iter()
-                .any(|column| column.created_indexes.contains(&index_type))
-    })
-}
+use crate::worker::handle_rebuild_index::needs_background_indexes;
 
 fn made_progress(files_to_add: usize, files_to_remove: usize) -> bool {
     files_to_add > 0 || files_to_remove > files_to_add

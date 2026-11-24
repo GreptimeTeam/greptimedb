@@ -91,6 +91,23 @@ pub trait TableMutationHandler: Send + Sync {
         table_name: TableName,
         ctx: QueryContextRef,
     ) -> Result<AffectedRows>;
+
+    /// Discards the pending WAL tails that datanode `node_id` wrote from a table region.
+    async fn discard_pending_tails(
+        &self,
+        region_id: RegionId,
+        node_id: u64,
+        ctx: QueryContextRef,
+    ) -> Result<AffectedRows>;
+
+    /// Discards the pending WAL tails that datanode `node_id` wrote from all regions of a
+    /// table.
+    async fn discard_pending_tails_by_table(
+        &self,
+        table_name: TableName,
+        node_id: u64,
+        ctx: QueryContextRef,
+    ) -> Result<AffectedRows>;
 }
 
 /// A trait for handling procedure service requests in `QueryEngine`.

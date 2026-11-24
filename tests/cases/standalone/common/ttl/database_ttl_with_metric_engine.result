@@ -15,6 +15,78 @@ CREATE TABLE test_ttl (ts timestamp time index, val double, host string primary 
 
 Affected Rows: 0
 
+-- Logical tables omit database TTL in SHOW CREATE TABLE
+SHOW CREATE TABLE test_ttl;
+
++----------+-----------------------------------------+
+| Table    | Create Table                            |
++----------+-----------------------------------------+
+| test_ttl | CREATE TABLE IF NOT EXISTS "test_ttl" ( |
+|          |   "host" STRING NULL,                   |
+|          |   "ts" TIMESTAMP(3) NOT NULL,           |
+|          |   "val" DOUBLE NULL,                    |
+|          |   TIME INDEX ("ts"),                    |
+|          |   PRIMARY KEY ("host")                  |
+|          | )                                       |
+|          |                                         |
+|          | ENGINE=metric                           |
+|          | WITH(                                   |
+|          |   on_physical_table = 'phy'             |
+|          | )                                       |
++----------+-----------------------------------------+
+
+-- Legacy logical DDL with retention TTL succeeds with the retention option stripped
+CREATE TABLE legacy_ttl (ts timestamp time index, val double) engine=metric with ("on_physical_table" = "phy", "ttl" = "7d");
+
+Affected Rows: 0
+
+SELECT table_name, create_options FROM information_schema.tables WHERE table_schema = 'test_ttl_db' AND table_name = 'legacy_ttl';
+
++------------+-----------------------+
+| table_name | create_options        |
++------------+-----------------------+
+| legacy_ttl | on_physical_table=phy |
++------------+-----------------------+
+
+-- Instant TTL is preserved on logical tables
+CREATE TABLE instant_ttl (ts timestamp time index, val double) engine=metric with ("on_physical_table" = "phy", "ttl" = "instant");
+
+Affected Rows: 0
+
+SHOW CREATE TABLE instant_ttl;
+
++-------------+--------------------------------------------+
+| Table       | Create Table                               |
++-------------+--------------------------------------------+
+| instant_ttl | CREATE TABLE IF NOT EXISTS "instant_ttl" ( |
+|             |   "ts" TIMESTAMP(3) NOT NULL,              |
+|             |   "val" DOUBLE NULL,                       |
+|             |   TIME INDEX ("ts")                        |
+|             | )                                          |
+|             |                                            |
+|             | ENGINE=metric                              |
+|             | WITH(                                      |
+|             |   on_physical_table = 'phy',               |
+|             |   ttl = 'instant'                          |
+|             | )                                          |
++-------------+--------------------------------------------+
+
+SELECT table_name, create_options FROM information_schema.tables WHERE table_schema = 'test_ttl_db' AND table_name = 'instant_ttl';
+
++-------------+-----------------------------------+
+| table_name  | create_options                    |
++-------------+-----------------------------------+
+| instant_ttl | ttl=instant on_physical_table=phy |
++-------------+-----------------------------------+
+
+DROP TABLE legacy_ttl;
+
+Affected Rows: 0
+
+DROP TABLE instant_ttl;
+
+Affected Rows: 0
+
 INSERT INTO test_ttl(ts, val, host) VALUES
        (now(), 1, 'host1'),
        (now(), 2, 'host2'),

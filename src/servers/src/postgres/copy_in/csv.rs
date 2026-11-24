@@ -34,13 +34,14 @@ use api::helper::vectors_to_rows;
 use arrow::csv::ReaderBuilder;
 use arrow::csv::reader::Decoder as CsvDecoder;
 use arrow_schema::{ArrowError, DataType as ArrowDataType, Field, Schema as ArrowSchema};
-use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema as GreptimeSchema};
 use datatypes::vectors::{BooleanVector, Helper, StringVector, Vector};
 use pgwire::error::{PgWireError, PgWireResult};
 
-use crate::postgres::copy_in::codec::{CopyFormat, ParsedRow, RecordParser};
+use crate::postgres::copy_in::codec::{
+    CopyFormat, ParsedRow, RecordParser, TableBoundCodec, check_arrow_column_type,
+};
 use crate::postgres::copy_in::options::CopyOptionSet;
 use crate::postgres::copy_in::{COPY_IN_FLUSH_ROWS, bad_copy_data, invalid_text_repr, unsupported};
 
@@ -83,37 +84,16 @@ pub(super) fn build_csv_codec(mut options: CopyOptionSet) -> PgWireResult<CopyFo
     }))
 }
 
-impl CsvCodec {
-    /// The column types arrow-csv can decode against.
-    pub(super) fn check_column_type(&self, data_type: &ConcreteDataType) -> PgWireResult<()> {
-        let supported = matches!(
-            data_type,
-            ConcreteDataType::Boolean(_)
-                | ConcreteDataType::Int8(_)
-                | ConcreteDataType::Int16(_)
-                | ConcreteDataType::Int32(_)
-                | ConcreteDataType::Int64(_)
-                | ConcreteDataType::UInt8(_)
-                | ConcreteDataType::UInt16(_)
-                | ConcreteDataType::UInt32(_)
-                | ConcreteDataType::UInt64(_)
-                | ConcreteDataType::Float32(_)
-                | ConcreteDataType::Float64(_)
-                | ConcreteDataType::String(_)
-                | ConcreteDataType::Date(_)
-                | ConcreteDataType::Timestamp(_)
-                | ConcreteDataType::Decimal128(_)
-        );
-        if !supported {
-            return Err(unsupported(format!(
-                "column type \"{}\" is not supported by format csv",
-                data_type.name()
-            )));
-        }
-        Ok(())
+impl TableBoundCodec for CsvCodec {
+    fn name(&self) -> &'static str {
+        "csv"
     }
 
-    pub(super) fn create_parser(
+    fn check_column_type(&self, data_type: &ConcreteDataType) -> PgWireResult<()> {
+        check_arrow_column_type(data_type, "csv")
+    }
+
+    fn create_parser(
         &self,
         columns: &[ColumnSchema],
         timezone: &str,

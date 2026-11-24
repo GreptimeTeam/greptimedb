@@ -96,6 +96,7 @@ pub struct GreptimeDbStandaloneBuilder {
     table_batcher: BatcherOptions,
     max_in_flight_write_bytes: ReadableSize,
     mito_config: Option<mito2::config::MitoConfig>,
+    query_options: query::options::QueryOptions,
     pipeline_options: pipeline::PipelineOptions,
 }
 
@@ -120,8 +121,16 @@ impl GreptimeDbStandaloneBuilder {
             table_batcher: BatcherOptions::default(),
             max_in_flight_write_bytes: ReadableSize(0),
             mito_config: None,
+            query_options: query::options::QueryOptions::default(),
             pipeline_options: pipeline::PipelineOptions::default(),
         }
+    }
+
+    /// Overrides query options for this standalone test instance.
+    #[must_use]
+    pub fn with_query_options(mut self, options: query::options::QueryOptions) -> Self {
+        self.query_options = options;
+        self
     }
 
     /// Overrides the Mito configuration for this test instance.
@@ -432,6 +441,7 @@ impl GreptimeDbStandaloneBuilder {
             slow_query: self.slow_query_options.clone(),
             event_recorder: self.event_recorder_options.clone(),
             auto_create_table: self.auto_create_table,
+            query: self.query_options.clone(),
             auto_create_physical_table_timestamp_unit: self
                 .auto_create_physical_table_timestamp_unit
                 .unwrap_or(common_time::timestamp::TimeUnit::Millisecond),

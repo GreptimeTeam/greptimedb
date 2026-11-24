@@ -1031,3 +1031,190 @@ fn test_shared_physical_conflicts_and_independent_backings() {
         }
     }
 }
+
+#[test]
+fn test_cumulative_and_unspecified_histogram_validation() {
+    for temporality in [
+        AggregationTemporality::Cumulative,
+        AggregationTemporality::Unspecified,
+    ] {
+        let convert = |data_points| {
+            let metric = Metric {
+                name: "latency".to_string(),
+                data: Some(metric::Data::Histogram(Histogram {
+                    data_points,
+                    aggregation_temporality: temporality as i32,
+                })),
+                ..Default::default()
+            };
+            to_grpc_insert_requests(metrics_request(vec![metric]), &mut OtlpMetricCtx::default())
+                .unwrap()
+        };
+
+        // 1. Reported layout mismatch (missing +Inf bucket).
+        // 2. Extra buckets beyond explicit_bounds.len() + 1.
+        // 3. Isolated bucket count total mismatch with valid layout length.
+        for (point, expected_err) in [
+            (
+                HistogramDataPoint {
+                    explicit_bounds: vec![0.0, 1.0],
+                    bucket_counts: vec![1, 2],
+                    count: 8,
+                    sum: Some(10.0),
+                    ..Default::default()
+                },
+                "bucket_counts length",
+            ),
+            (
+                HistogramDataPoint {
+                    explicit_bounds: vec![0.0],
+                    bucket_counts: vec![1, 2, 3],
+                    count: 6,
+                    ..Default::default()
+                },
+                "bucket_counts length",
+            ),
+            (
+                HistogramDataPoint {
+                    explicit_bounds: vec![0.0, 1.0],
+                    bucket_counts: vec![1, 2, 4],
+                    count: 8,
+                    sum: Some(10.0),
+                    ..Default::default()
+                },
+                "buckets contain 7 observations, declared count is 8",
+            ),
+        ] {
+            let conversion = convert(vec![point]);
+            assert_eq!(
+                0, conversion.outcome.accepted_data_points,
+                "{temporality:?}"
+            );
+            assert_eq!(
+                1, conversion.outcome.rejected_data_points,
+                "{temporality:?}"
+            );
+            assert!(
+                conversion
+                    .outcome
+                    .error_message
+                    .as_deref()
+                    .unwrap()
+                    .contains(expected_err),
+                "{temporality:?}: {:?}",
+                conversion.outcome.error_message
+            );
+            assert!(conversion.requests.inserts.is_empty());
+        }
+
+        // 4. Bounds checks: non-finite or non-strictly-increasing explicit_bounds.
+        for bounds in [
+            vec![0.0, f64::INFINITY],
+            vec![f64::NEG_INFINITY, 1.0],
+            vec![f64::NAN],
+            vec![1.0, 1.0],
+            vec![2.0, 1.0],
+        ] {
+            let bucket_len = bounds.len() + 1;
+            let point = HistogramDataPoint {
+                explicit_bounds: bounds,
+                bucket_counts: vec![1; bucket_len],
+                count: bucket_len as u64,
+                ..Default::default()
+            };
+            let conversion = convert(vec![point]);
+            assert_eq!(
+                0, conversion.outcome.accepted_data_points,
+                "{temporality:?}"
+            );
+            assert_eq!(
+                1, conversion.outcome.rejected_data_points,
+                "{temporality:?}"
+            );
+            assert!(
+                conversion
+                    .outcome
+                    .error_message
+                    .as_deref()
+                    .unwrap()
+                    .contains("explicit_bounds must be finite and strictly increasing"),
+                "{temporality:?}: {:?}",
+                conversion.outcome.error_message
+            );
+        }
+
+        // 5. Zero-count sum check.
+        for bad_sum in [Some(1.0), Some(f64::NAN)] {
+            let conversion = convert(vec![HistogramDataPoint {
+                count: 0,
+                sum: bad_sum,
+                ..Default::default()
+            }]);
+            assert_eq!(
+                0, conversion.outcome.accepted_data_points,
+                "{temporality:?}"
+            );
+            assert_eq!(
+                1, conversion.outcome.rejected_data_points,
+                "{temporality:?}"
+            );
+            assert!(
+                conversion
+                    .outcome
+                    .error_message
+                    .as_deref()
+                    .unwrap()
+                    .contains("sum must be absent or zero when count is zero"),
+                "{temporality:?}: {:?}",
+                conversion.outcome.error_message
+            );
+        }
+        for ok_sum in [Some(0.0), None] {
+            let conversion = convert(vec![HistogramDataPoint {
+                count: 0,
+                sum: ok_sum,
+                ..Default::default()
+            }]);
+            assert_eq!(
+                1, conversion.outcome.accepted_data_points,
+                "{temporality:?}"
+            );
+            assert_eq!(
+                0, conversion.outcome.rejected_data_points,
+                "{temporality:?}"
+            );
+        }
+
+        // 6. Valid edge shapes preserved: count-only, single +Inf bucket, and NoRecordedValueMask tombstone.
+        let valid_edges = vec![
+            HistogramDataPoint {
+                count: 8,
+                sum: Some(4.0),
+                ..Default::default()
+            },
+            HistogramDataPoint {
+                count: 8,
+                sum: Some(4.0),
+                bucket_counts: vec![8],
+                ..Default::default()
+            },
+            HistogramDataPoint {
+                count: u64::MAX,
+                sum: Some(99.0),
+                bucket_counts: vec![u64::MAX, 1],
+                explicit_bounds: vec![3.0, 2.0],
+                flags: DataPointFlags::NoRecordedValueMask as u32,
+                ..Default::default()
+            },
+        ];
+        let conversion = convert(valid_edges);
+        assert_eq!(
+            3, conversion.outcome.accepted_data_points,
+            "{temporality:?}"
+        );
+        assert_eq!(
+            0, conversion.outcome.rejected_data_points,
+            "{temporality:?}"
+        );
+    }
+}
