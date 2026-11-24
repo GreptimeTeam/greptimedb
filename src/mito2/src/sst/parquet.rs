@@ -316,18 +316,17 @@ pub(crate) fn max_row_value_width(metadata: &ParquetMetaData) -> u64 {
     })
 }
 
-/// Returns the value of `key`, or `None` when the footer does not have it.
+/// Returns the value of `key`, or `None` when the footer has no parseable value for it.
 fn footer_u64(metadata: &ParquetMetaData, key: &str) -> Option<u64> {
-    let kv = metadata
+    metadata
         .file_metadata()
-        .key_value_metadata()
-        .and_then(|kvs| kvs.iter().find(|kv| kv.key == key))?;
-    Some(
-        kv.value
-            .as_deref()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(0),
-    )
+        .key_value_metadata()?
+        .iter()
+        .find(|kv| kv.key == key)?
+        .value
+        .as_deref()?
+        .parse()
+        .ok()
 }
 
 /// Returns `(num_rows, value_bytes)` of each row group, where `value_bytes` sums the
@@ -1835,17 +1834,25 @@ mod tests {
             file.key_value_metadata().unwrap().len(),
             key_value_metadata.len() + 2
         );
-        let legacy = ParquetMetaData::new(
-            FileMetaData::new(
-                file.version(),
-                file.num_rows(),
-                file.created_by().map(str::to_string),
-                Some(key_value_metadata),
-                file.schema_descr_ptr(),
-                file.column_orders().cloned(),
-            ),
-            footer.row_groups().to_vec(),
-        );
+        let with_key_value_metadata = |key_value_metadata| {
+            ParquetMetaData::new(
+                FileMetaData::new(
+                    file.version(),
+                    file.num_rows(),
+                    file.created_by().map(str::to_string),
+                    Some(key_value_metadata),
+                    file.schema_descr_ptr(),
+                    file.column_orders().cloned(),
+                ),
+                footer.row_groups().to_vec(),
+            )
+        };
+        let mut malformed_key_value_metadata = key_value_metadata.clone();
+        for key in [MAX_ROW_GROUP_VALUE_BYTES_KEY, MAX_ROW_VALUE_WIDTH_KEY] {
+            malformed_key_value_metadata.push(KeyValue::new(key.to_string(), String::new()));
+        }
+        let legacy = with_key_value_metadata(key_value_metadata);
+        let malformed = with_key_value_metadata(malformed_key_value_metadata);
 
         assert!(max_row_group_uncompressed_size(&legacy) < 1024 * 1024);
         assert_eq!(256 * 32 * 1024, max_row_group_decoded_size(&legacy));
@@ -1856,6 +1863,15 @@ mod tests {
         assert_eq!(
             2048,
             estimate_batch_size(widest_row_group_statistic(&legacy))
+        );
+        // Keys without a parseable value fall back like absent ones.
+        assert_eq!(
+            max_row_group_decoded_size(&legacy),
+            max_row_group_decoded_size(&malformed)
+        );
+        assert_eq!(
+            max_row_value_width(&legacy),
+            max_row_value_width(&malformed)
         );
     }
 
