@@ -22,7 +22,7 @@ use object_store::{Error as StorageError, ErrorKind};
 use tokio::time::advance;
 
 use super::*;
-use crate::election::object_store::tests::{Backend, Request, store};
+use crate::election::object_store::tests::{Backend, Call, store};
 
 const CAPACITY: usize = 2;
 
@@ -42,7 +42,7 @@ impl Fixture {
             store,
             wall_ns: Arc::new(AtomicI64::new(0)),
         };
-        fixture.clear_requests();
+        fixture.clear_calls();
         fixture
     }
 
@@ -57,8 +57,8 @@ impl Fixture {
         ))
     }
 
-    fn clear_requests(&self) {
-        self.backend.data.lock().unwrap().requests.clear();
+    fn clear_calls(&self) {
+        self.backend.data.lock().unwrap().calls.clear();
     }
 
     fn puts(&self) -> Vec<AuthorityHead> {
@@ -66,11 +66,11 @@ impl Fixture {
             .data
             .lock()
             .unwrap()
-            .requests
+            .calls
             .iter()
-            .filter_map(|request| match request {
-                Request::Get(_) => None,
-                Request::Put(head) => Some(head.clone()),
+            .filter_map(|call| match call {
+                Call::Get(_) => None,
+                Call::Put(head) => Some(head.clone()),
             })
             .collect()
     }
@@ -80,11 +80,11 @@ impl Fixture {
             .data
             .lock()
             .unwrap()
-            .requests
+            .calls
             .iter()
-            .map(|request| match request {
-                Request::Get(_) => "GET",
-                Request::Put(_) => "PUT",
+            .map(|call| match call {
+                Call::Get(_) => "GET",
+                Call::Put(_) => "PUT",
             })
             .collect()
     }
@@ -189,7 +189,7 @@ async fn fill_queue(
         assert!(matches!(futures::poll!(&mut request), Poll::Pending));
         pending.push(request);
     }
-    assert_eq!(node.queue.capacity(), 0);
+    assert_eq!(node.request_tx.capacity(), 0);
     pending
 }
 
@@ -201,7 +201,7 @@ async fn empty_head_can_be_acquired_and_resigned() {
     let token = acquire(&leader).await;
     assert_eq!(token.epoch(), 1);
     let head = leader.head().await.unwrap();
-    assert_eq!(head.head().owner.as_ref(), Some(&leader.shared.identity));
+    assert_eq!(head.head().owner.as_ref(), Some(&leader.inner.identity));
     assert!(head.metadata().etag().is_some());
     assert!(head.metadata().last_modified().is_some());
     leader.resign(&token).await.unwrap();
@@ -222,7 +222,7 @@ async fn takeover_requires_strictly_more_than_twelve_seconds() {
     let token = acquire(&original).await;
     original.shutdown().await;
     fixture.expire_stored_lease(0).await;
-    fixture.clear_requests();
+    fixture.clear_calls();
     assert_eq!(
         replacement.takeover().await.unwrap(),
         TakeoverOutcome::NotEligible
@@ -234,12 +234,9 @@ async fn takeover_requires_strictly_more_than_twelve_seconds() {
     assert_eq!(new_token.epoch(), token.epoch() + 1);
     let head = replacement.head().await.unwrap();
     let owner = head.head().owner.as_ref().unwrap();
-    assert_eq!(owner.addr, original.shared.identity.addr);
-    assert_ne!(
-        owner.incarnation_id,
-        original.shared.identity.incarnation_id
-    );
-    fixture.clear_requests();
+    assert_eq!(owner.addr, original.inner.identity.addr);
+    assert_ne!(owner.incarnation_id, original.inner.identity.incarnation_id);
+    fixture.clear_calls();
     assert_rejected(renew(&replacement, token, AuthorityPrecondition::Any).await);
     assert!(fixture.puts().is_empty());
     replacement.shutdown().await;
@@ -283,7 +280,7 @@ async fn temporary_conflict_returns_before_deadline_without_replaying_put() {
     let token = acquire(&node).await;
     let (_, deadline) = node.status().term().unwrap();
     let base = fixture.store.read_head().await.unwrap();
-    fixture.clear_requests();
+    fixture.clear_calls();
     fixture.backend.fail_next_write(
         StorageError::new(ErrorKind::Conflict, "injected conditional conflict").set_temporary(),
     );
@@ -321,7 +318,7 @@ async fn same_address_with_another_uuid_cannot_write_an_existing_term() {
             next
         })
         .await;
-    fixture.clear_requests();
+    fixture.clear_calls();
     assert_rejected(renew(&leader, token, AuthorityPrecondition::Any).await);
     assert_eq!(fixture.order(), ["GET"]);
     assert_eq!(leader.status(), AuthorityStatus::Follower);
@@ -340,7 +337,7 @@ async fn overflow_is_rejected_before_put() {
             })
             .await;
         let node = fixture.node("a");
-        fixture.clear_requests();
+        fixture.clear_calls();
         let error = node.takeover().await.unwrap_err();
         assert!(matches!(error, Error::AuthorityOverflow { counter, .. } if counter == field));
         assert_eq!(fixture.order(), ["GET"]);
@@ -354,7 +351,7 @@ async fn write_seq_mismatch_rejects_put_without_retiring_term() {
     let node = fixture.node("a");
     let token = acquire(&node).await;
     let active = node.status();
-    fixture.clear_requests();
+    fixture.clear_calls();
 
     assert_write_seq_mismatch(
         renew(&node, token, AuthorityPrecondition::WriteSeq(0)).await,
@@ -377,7 +374,7 @@ async fn due_renewal_overtakes_a_prepared_request_and_a_full_queue() {
     let fixture = Fixture::new().await;
     let node = fixture.node("a");
     let token = acquire(&node).await;
-    fixture.clear_requests();
+    fixture.clear_calls();
     advance(RENEW_INTERVAL - Duration::from_millis(200)).await;
     let read = fixture.backend.pause_next_read();
     let condition = AuthorityPrecondition::WriteSeq(1);
@@ -408,7 +405,7 @@ async fn a_preparation_timeout_crossing_renewal_retries_against_the_renewed_head
     let fixture = Fixture::new().await;
     let node = fixture.node("a");
     let token = acquire(&node).await;
-    fixture.clear_requests();
+    fixture.clear_calls();
     advance(RENEW_INTERVAL - Duration::from_millis(200)).await;
     let read = fixture.backend.pause_next_read();
     let mut scheduled = fixture.backend.defer_next_write();
@@ -431,7 +428,7 @@ async fn renewal_does_not_overlap_an_authorized_put() {
     let fixture = Fixture::new().await;
     let node = fixture.node("a");
     let token = acquire(&node).await;
-    fixture.clear_requests();
+    fixture.clear_calls();
     advance(Duration::from_secs(4)).await;
     let mut ordinary = fixture.backend.defer_next_write();
     let pending = renew_task(&node, token);
@@ -490,7 +487,7 @@ async fn shutdown_interrupts_the_first_takeover_get_without_put() {
     node.shutdown().await;
     assert_closed(attempt.await.unwrap());
     assert_eq!(fixture.order(), ["GET"]);
-    assert!(node.writer.lock().await.is_none());
+    assert!(node.writer_task.lock().await.is_none());
 }
 
 #[tokio::test(start_paused = true)]
@@ -518,8 +515,8 @@ async fn renewal_success_at_deadline_stays_applied_but_retires_once() {
     let fixture = Fixture::new().await;
     let node = fixture.node("a");
     let token = acquire(&node).await;
-    let mut status = node.shared.status.subscribe();
-    fixture.clear_requests();
+    let mut status = node.inner.status_tx.subscribe();
+    fixture.clear_calls();
     let mut put = fixture.backend.defer_next_write();
     let attempt = renew_task(&node, token);
     put.arrived.notified().await;
@@ -593,11 +590,11 @@ async fn unchanged_version_stays_unknown_through_readback_backoff() {
         .data
         .lock()
         .unwrap()
-        .requests
+        .calls
         .iter()
-        .filter_map(|request| match request {
-            Request::Get(at) => Some(*at),
-            Request::Put(_) => None,
+        .filter_map(|call| match call {
+            Call::Get(at) => Some(*at),
+            Call::Put(_) => None,
         })
         .collect();
     assert_eq!(&fixture.order()[..3], ["GET", "PUT", "GET"]);
@@ -726,8 +723,8 @@ async fn late_confirmation_of_unknown_renewal_does_not_restore_term() {
     let fixture = Fixture::new().await;
     let node = fixture.node("a");
     let token = acquire(&node).await;
-    let mut status = node.shared.status.subscribe();
-    fixture.clear_requests();
+    let mut status = node.inner.status_tx.subscribe();
+    fixture.clear_calls();
     let mut put = fixture.backend.defer_next_write();
     let attempt = renew_task(&node, token);
     put.arrived.notified().await;
@@ -754,7 +751,7 @@ async fn confirmed_write_invalidates_its_base_even_when_refresh_fails() {
     let fixture = Fixture::new().await;
     let node = fixture.node("a");
     let token = acquire(&node).await;
-    fixture.clear_requests();
+    fixture.clear_calls();
     let mut put = fixture.backend.defer_next_write();
     let first = renew_task(&node, token);
     put.arrived.notified().await;
@@ -791,7 +788,7 @@ async fn confirmed_write_rejects_a_rolled_back_snapshot() {
     renew(&node, token, AuthorityPrecondition::Any)
         .await
         .unwrap();
-    fixture.clear_requests();
+    fixture.clear_calls();
     fixture.backend.data.lock().unwrap().objects = stale;
 
     let error = renew(&node, token, AuthorityPrecondition::Any)
@@ -810,8 +807,8 @@ async fn failed_prepare_get_retires_both_renewal_paths_once() {
         let node = fixture.node("a");
         let token = acquire(&node).await;
         let (_, deadline) = node.status().term().unwrap();
-        let mut status = node.shared.status.subscribe();
-        fixture.clear_requests();
+        let mut status = node.inner.status_tx.subscribe();
+        fixture.clear_calls();
         fixture.backend.fail_next_read();
 
         if scheduled {
@@ -846,8 +843,8 @@ async fn renewal_retries_a_timed_out_prepare_get_with_the_original_deadline() {
         let token = acquire(&node).await;
         let active = node.status();
         let (epoch, original_deadline) = active.term().unwrap();
-        let mut status = node.shared.status.subscribe();
-        fixture.clear_requests();
+        let mut status = node.inner.status_tx.subscribe();
+        fixture.clear_calls();
         let read = fixture.backend.pause_next_read();
         let mut put = fixture.backend.defer_next_write();
         let attempt = if scheduled {
@@ -891,7 +888,7 @@ async fn renewal_retries_a_temporary_prepare_get_error() {
     let fixture = Fixture::new().await;
     let node = fixture.node("a");
     let token = acquire(&node).await;
-    fixture.clear_requests();
+    fixture.clear_calls();
     fixture.backend.fail_next_read_with(
         StorageError::new(ErrorKind::Unexpected, "injected temporary read error").set_temporary(),
     );
@@ -912,8 +909,8 @@ async fn renewal_prepare_timeouts_exhaust_the_budget_without_a_put() {
     let token = acquire(&node).await;
     let (_, deadline) = node.status().term().unwrap();
     let budget_end = deadline - Duration::from_secs(1);
-    let mut status = node.shared.status.subscribe();
-    fixture.clear_requests();
+    let mut status = node.inner.status_tx.subscribe();
+    fixture.clear_calls();
     let first = fixture.backend.pause_next_read();
     for _ in 0..10 {
         fixture.backend.pause_next_read();
@@ -934,9 +931,9 @@ async fn renewal_prepare_timeouts_exhaust_the_budget_without_a_put() {
             .data
             .lock()
             .unwrap()
-            .requests
+            .calls
             .iter()
-            .all(|request| matches!(request, Request::Get(started_at) if *started_at < budget_end))
+            .all(|call| matches!(call, Call::Get(started_at) if *started_at < budget_end))
     );
     node.shutdown().await;
 }
@@ -948,7 +945,7 @@ async fn conditional_resign_rejects_mismatched_sequence_without_retiring_term() 
     let token = acquire(&node).await;
     let active = node.status();
     let before = node.head().await.unwrap();
-    fixture.clear_requests();
+    fixture.clear_calls();
 
     for expected in [0, 2] {
         let result = node
@@ -985,7 +982,7 @@ async fn conditional_resign_stops_admission_at_put_authorization() {
     let token = acquire(&node).await;
     let active = node.status();
     let (epoch, deadline) = active.term().unwrap();
-    fixture.clear_requests();
+    fixture.clear_calls();
     let read = fixture.backend.pause_next_read();
     let mut put = fixture.backend.defer_next_write();
     let mut resign = Box::pin(node.mutate(
@@ -1024,7 +1021,7 @@ async fn conditional_resign_rechecks_sequence_after_a_due_renewal() {
     let fixture = Fixture::new().await;
     let node = fixture.node("a");
     let token = acquire(&node).await;
-    fixture.clear_requests();
+    fixture.clear_calls();
     advance(RENEW_INTERVAL - Duration::from_millis(200)).await;
     let read = fixture.backend.pause_next_read();
     let mut resign = Box::pin(node.mutate(
@@ -1051,7 +1048,7 @@ async fn resign_cancels_a_preparing_get_before_authorization() {
     let fixture = Fixture::new().await;
     let node = fixture.node("a");
     let token = acquire(&node).await;
-    fixture.clear_requests();
+    fixture.clear_calls();
     let read = fixture.backend.pause_next_read();
     let prepared = renew_task(&node, token);
     read.arrived.notified().await;
@@ -1069,7 +1066,7 @@ async fn resign_wins_before_a_full_queue_can_authorize_a_put() {
     let fixture = Fixture::new().await;
     let node = fixture.node("a");
     let token = acquire(&node).await;
-    fixture.clear_requests();
+    fixture.clear_calls();
     let waiting = fill_queue(&node, token, AuthorityPrecondition::Any).await;
     let mut resign = Box::pin(node.resign(&token));
     assert!(futures::poll!(&mut resign).is_pending());
@@ -1149,13 +1146,13 @@ async fn resignation_does_not_discard_a_takeover_queued_after_retirement() {
     assert!(futures::poll!(&mut resign).is_pending());
 
     advance(Duration::from_secs(2)).await;
-    node.shared
+    node.inner
         .wait_until(|status| status == AuthorityStatus::Follower)
         .await;
     fixture.expire_stored_lease(1).await;
     let mut takeover = Box::pin(node.takeover());
     assert!(futures::poll!(&mut takeover).is_pending());
-    assert_eq!(node.queue.capacity(), CAPACITY - 1);
+    assert_eq!(node.request_tx.capacity(), CAPACITY - 1);
 
     advance(Duration::from_secs(8)).await;
     assert_unknown(sent.await.unwrap());
@@ -1210,7 +1207,7 @@ async fn shutdown_closes_a_full_queue_and_preserves_unknown_in_flight_put() {
     let fixture = Fixture::new().await;
     let node = fixture.node("a");
     let token = acquire(&node).await;
-    fixture.clear_requests();
+    fixture.clear_calls();
     let mut put = fixture.backend.defer_next_write();
     let sent = renew_task(&node, token);
     put.arrived.notified().await;
@@ -1224,7 +1221,7 @@ async fn shutdown_closes_a_full_queue_and_preserves_unknown_in_flight_put() {
     for request in waiting {
         assert_closed(request.await);
     }
-    assert!(node.writer.lock().await.is_none());
+    assert!(node.writer_task.lock().await.is_none());
     assert_eq!(node.status(), AuthorityStatus::Closed);
     assert_eq!(fixture.order(), ["GET", "PUT"]);
     assert!(
@@ -1233,7 +1230,7 @@ async fn shutdown_closes_a_full_queue_and_preserves_unknown_in_flight_put() {
     );
     assert!(!put.respond());
     let head = fixture.store.read_head().await.unwrap();
-    assert_eq!(head.head().owner.as_ref(), Some(&node.shared.identity));
+    assert_eq!(head.head().owner.as_ref(), Some(&node.inner.identity));
     assert_eq!(head.head().write_seq(), 2);
 }
 
@@ -1250,7 +1247,7 @@ async fn shutdown_preserves_a_put_response_ready_at_cancellation() {
     node.shutdown().await;
     sent.await.unwrap().unwrap();
     assert_eq!(node.status(), AuthorityStatus::Closed);
-    assert!(node.writer.lock().await.is_none());
+    assert!(node.writer_task.lock().await.is_none());
     assert_eq!(fixture.puts().len(), 2);
 }
 
@@ -1259,7 +1256,7 @@ async fn shutdown_cancels_renewal_preparation() {
     let fixture = Fixture::new().await;
     let node = fixture.node("a");
     let token = acquire(&node).await;
-    fixture.clear_requests();
+    fixture.clear_calls();
     let read = fixture.backend.pause_next_read();
     let renewal = renew_task(&node, token);
     read.arrived.notified().await;
@@ -1279,8 +1276,8 @@ async fn shutdown_cancels_resign_preparation_and_keeps_the_stored_owner() {
     read.arrived.notified().await;
     node.shutdown().await;
     assert_closed(resign.await.unwrap());
-    assert!(node.writer.lock().await.is_none());
+    assert!(node.writer_task.lock().await.is_none());
     assert_eq!(fixture.puts().len(), 1);
     let head = fixture.store.read_head().await.unwrap();
-    assert_eq!(head.head().owner.as_ref(), Some(&node.shared.identity));
+    assert_eq!(head.head().owner.as_ref(), Some(&node.inner.identity));
 }

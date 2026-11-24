@@ -33,7 +33,7 @@ use super::*;
 // not a claim about memory-service or real-backend semantics.
 #[derive(Debug, Default)]
 pub(crate) struct Data {
-    pub(crate) requests: Vec<Request>,
+    pub(crate) calls: Vec<Call>,
     read_actions: VecDeque<ReadAction>,
     write_actions: VecDeque<WriteAction>,
     next_write_error: Option<Error>,
@@ -89,7 +89,7 @@ impl Default for Backend {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Request {
+pub(crate) enum Call {
     Get(Instant),
     Put(AuthorityHead),
 }
@@ -133,8 +133,8 @@ impl DeferredWrite {
     }
 
     pub(crate) fn respond(mut self) -> bool {
-        let (result, reply) = self.receipt.take().unwrap();
-        reply.send(result).is_ok()
+        let (result, response) = self.receipt.take().unwrap();
+        response.send(result).is_ok()
     }
 }
 
@@ -294,7 +294,7 @@ impl oio::Read for TestReader {
     async fn open(&self, _: BytesRange) -> Result<(RpRead, Box<dyn oio::ReadStreamDyn>)> {
         let action = {
             let mut data = self.data.lock().unwrap();
-            data.requests.push(Request::Get(Instant::now()));
+            data.calls.push(Call::Get(Instant::now()));
             data.read_actions.pop_front()
         };
         let pause_response = match action {
@@ -380,24 +380,24 @@ impl oio::Write for TestWriter {
                 data.writes_in_flight -= 1;
             }
             data.writes += 1;
-            data.requests
-                .push(Request::Put(AuthorityHead::decode(&self.body).unwrap()));
+            data.calls
+                .push(Call::Put(AuthorityHead::decode(&self.body).unwrap()));
             data.write_actions.pop_front()
         };
         if let Some(action) = action {
             let writer = self.clone();
-            let (response, client) = oneshot::channel();
+            let (response, result) = oneshot::channel();
             // The server owns the conditional update even after the client stops waiting.
             tokio::spawn(async move {
                 action.arrived.notify_one();
-                let result = match action.commit.await {
+                let outcome = match action.commit.await {
                     Ok(true) => writer.commit(),
                     Ok(false) => Err(denied()),
                     Err(_) => return,
                 };
-                let _ = action.committed.send((result, response));
+                let _ = action.committed.send((outcome, response));
             });
-            return client.await.unwrap_or_else(|_| {
+            return result.await.unwrap_or_else(|_| {
                 Err(Error::new(ErrorKind::Unexpected, "lost response").set_temporary())
             });
         }

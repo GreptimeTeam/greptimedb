@@ -122,9 +122,9 @@ pub enum AuthorityMutation {
 
 /// Node-local Authority. Share one instance and its writer across callers.
 pub struct Authority {
-    shared: Arc<Shared>,
-    queue: mpsc::Sender<Request>,
-    writer: tokio::sync::Mutex<Option<JoinHandle<()>>>,
+    inner: Arc<Inner>,
+    request_tx: mpsc::Sender<Request>,
+    writer_task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
 }
 
 impl Authority {
@@ -150,37 +150,37 @@ impl Authority {
         capacity: usize,
         spawn: impl FnOnce(Pin<Box<dyn Future<Output = ()> + Send>>) -> JoinHandle<()>,
     ) -> Self {
-        let (status, _) = watch::channel(AuthorityStatus::Follower);
-        let shared = Arc::new(Shared {
+        let (status_tx, _) = watch::channel(AuthorityStatus::Follower);
+        let inner = Arc::new(Inner {
             store,
             identity,
             wall_now_ns: Box::new(wall_now_ns),
             control: Mutex::default(),
-            status,
+            status_tx,
         });
-        let (queue, requests) = mpsc::channel(capacity);
-        let writer = spawn(Box::pin(Writer::new(shared.clone(), requests).run()));
+        let (request_tx, request_rx) = mpsc::channel(capacity);
+        let writer_task = spawn(Box::pin(Writer::new(inner.clone(), request_rx).run()));
         Self {
-            shared,
-            queue,
-            writer: tokio::sync::Mutex::new(Some(writer)),
+            inner,
+            request_tx,
+            writer_task: tokio::sync::Mutex::new(Some(writer_task)),
         }
     }
 
     /// Reads a coherent Head and its complete metadata in a single storage operation.
     pub async fn head(&self) -> Result<AuthorityState> {
-        self.shared.read(Access::Read, None).await
+        self.inner.read(Admission::Read, None).await
     }
 
     /// Returns the local state, accounting for any elapsed monotonic deadline.
     pub fn status(&self) -> AuthorityStatus {
-        self.shared.update(|control, _| control.status)
+        self.inner.update(|control, _| control.status)
     }
 
     /// Attempts a single conditional takeover.
     pub async fn takeover(&self) -> Result<TakeoverOutcome> {
-        let (reply, result) = oneshot::channel();
-        self.submit(Access::Takeover, Request::Takeover(reply))
+        let (response, result) = oneshot::channel();
+        self.submit(Admission::Takeover, Request::Takeover(response))
             .await?;
         result.await.unwrap_or_else(|_| Err(closed()))
     }
@@ -193,31 +193,31 @@ impl Authority {
         mutation: AuthorityMutation,
     ) -> Result<()> {
         let epoch = token.epoch;
-        let (reply, result) = oneshot::channel();
+        let (response, result) = oneshot::channel();
         match (mutation, precondition) {
             (AuthorityMutation::Resign, AuthorityPrecondition::Any) => {
-                self.shared.update(|control, _| {
-                    Access::Renew(epoch).check(control.status)?;
+                self.inner.update(|control, _| {
+                    Admission::Renew(epoch).check(control.status)?;
                     let AuthorityStatus::Leader { deadline, .. } = control.status else {
                         return Err(rejected("term is inactive"));
                     };
                     control.status = AuthorityStatus::Resigning { epoch, deadline };
-                    control.resignation = Some(Resignation { epoch, reply });
+                    control.resignation = Some(Resignation { epoch, response });
                     Ok(())
                 })?;
             }
             (mutation, precondition) => {
-                let access = match mutation {
-                    AuthorityMutation::Renew => Access::Renew(epoch),
-                    AuthorityMutation::Resign => Access::ConditionalResign(epoch),
+                let admission = match mutation {
+                    AuthorityMutation::Renew => Admission::Renew(epoch),
+                    AuthorityMutation::Resign => Admission::ConditionalResign(epoch),
                 };
                 self.submit(
-                    access,
+                    admission,
                     Request::Mutate {
                         epoch,
                         mutation,
                         precondition,
-                        reply,
+                        response,
                     },
                 )
                 .await?;
@@ -234,29 +234,29 @@ impl Authority {
 
     /// Stops the local term, cancels I/O waits and joins the writer.
     pub async fn shutdown(&self) {
-        self.shared.close();
-        let mut writer = self.writer.lock().await;
-        if let Some(task) = writer.as_mut()
+        self.inner.close();
+        let mut writer_task = self.writer_task.lock().await;
+        if let Some(task) = writer_task.as_mut()
             && let Err(error) = task.await
         {
             common_telemetry::warn!("Authority writer exited with error: {error}");
         }
-        writer.take();
+        writer_task.take();
     }
 
-    async fn submit(&self, access: Access, request: Request) -> Result<()> {
-        access.check(self.status())?;
+    async fn submit(&self, admission: Admission, request: Request) -> Result<()> {
+        admission.check(self.status())?;
         tokio::select! {
-            permit = self.queue.reserve() => {
+            permit = self.request_tx.reserve() => {
                 let permit = permit.map_err(|_| closed())?;
-                self.shared.update(|control, _| {
-                    access.check(control.status)?;
+                self.inner.update(|control, _| {
+                    admission.check(control.status)?;
                     permit.send(request);
                     Ok(())
                 })
             }
-            _ = self.shared.wait_until(|status| access.check(status).is_err()) => {
-                access.check(self.status()).and_then(|()| Err(rejected("admission changed")))
+            _ = self.inner.wait_until(|status| admission.check(status).is_err()) => {
+                admission.check(self.status()).and_then(|()| Err(rejected("admission changed")))
             }
         }
     }
@@ -264,12 +264,12 @@ impl Authority {
 
 impl Drop for Authority {
     fn drop(&mut self) {
-        self.shared.close();
+        self.inner.close();
     }
 }
 
 #[derive(Clone, Copy)]
-enum Access {
+enum Admission {
     Read,
     Takeover,
     Renew(u64),
@@ -277,7 +277,7 @@ enum Access {
     Resign(u64),
 }
 
-impl Access {
+impl Admission {
     fn check(self, status: AuthorityStatus) -> Result<()> {
         match (self, status) {
             (_, AuthorityStatus::Closed) => Err(closed()),
@@ -372,15 +372,15 @@ impl SnapshotFloor {
     }
 }
 
-struct Shared {
+struct Inner {
     store: Arc<HeadStore>,
     identity: NodeIdentity,
     wall_now_ns: Box<dyn Fn() -> i128 + Send + Sync>,
     control: Mutex<Control>,
-    status: watch::Sender<AuthorityStatus>,
+    status_tx: watch::Sender<AuthorityStatus>,
 }
 
-impl Shared {
+impl Inner {
     /// Runs the short state transitions and PUT authorization under the same lock.
     fn update<T>(&self, f: impl FnOnce(&mut Control, Instant) -> T) -> T {
         let mut control = self.control.lock().unwrap_or_else(PoisonError::into_inner);
@@ -389,13 +389,13 @@ impl Shared {
         control.expire(now);
         let result = f(&mut control, now);
         if control.status != before {
-            self.status.send_replace(control.status);
+            self.status_tx.send_replace(control.status);
         }
         result
     }
 
     async fn wait_until(&self, predicate: impl Fn(AuthorityStatus) -> bool) {
-        let mut status = self.status.subscribe();
+        let mut status = self.status_tx.subscribe();
         let _ = status.wait_for(|status| predicate(*status)).await;
     }
 
@@ -403,8 +403,12 @@ impl Shared {
         self.update(|control, _| control.status = AuthorityStatus::Closed);
     }
 
-    async fn read(&self, access: Access, deadline: Option<Instant>) -> Result<AuthorityState> {
-        self.update(|control, _| access.check(control.status))?;
+    async fn read(
+        &self,
+        admission: Admission,
+        deadline: Option<Instant>,
+    ) -> Result<AuthorityState> {
+        self.update(|control, _| admission.check(control.status))?;
         let now = Instant::now();
         let stop = deadline.map_or(now + GET_TIMEOUT, |end| end.min(now + GET_TIMEOUT));
         if now >= stop {
@@ -412,9 +416,9 @@ impl Shared {
         }
         let result = tokio::select! {
             biased;
-            _ = self.wait_until(|status| access.check(status).is_err()) => {
+            _ = self.wait_until(|status| admission.check(status).is_err()) => {
                 return self.update(|control, _| {
-                    access.check(control.status)?;
+                    admission.check(control.status)?;
                     Err(rejected("read admission changed"))
                 });
             }
@@ -432,18 +436,18 @@ impl Shared {
         if Instant::now() >= stop {
             return Err(timeout("read"));
         }
-        self.observe(access, &state)?;
+        self.observe(admission, &state)?;
         Ok(state)
     }
 
-    fn observe(&self, access: Access, state: &AuthorityState) -> Result<()> {
+    fn observe(&self, admission: Admission, state: &AuthorityState) -> Result<()> {
         self.update(|control, _| {
             let head = state.head();
             if let Some(floor) = &control.snapshot {
                 // A concurrent reader can observe a newer Head while this response
                 // is in flight. Historical evidence is usable for readback, but
                 // it cannot replace the floor or supply a new CAS condition.
-                if matches!(access, Access::Read)
+                if matches!(admission, Admission::Read)
                     && head.write_seq() < floor.head().write_seq()
                     && head.epoch() <= floor.head().epoch()
                 {

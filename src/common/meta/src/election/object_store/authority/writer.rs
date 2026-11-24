@@ -21,8 +21,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, sleep_until};
 
 use crate::election::object_store::authority::{
-    Access, AuthorityMutation, AuthorityPrecondition, AuthorityStatus, CLOCK_GUARD, FencingToken,
-    LEASE, RENEW_INTERVAL, Shared, SnapshotFloor, TakeoverOutcome, closed, rejected, timeout,
+    Admission, AuthorityMutation, AuthorityPrecondition, AuthorityStatus, CLOCK_GUARD,
+    FencingToken, Inner, LEASE, RENEW_INTERVAL, SnapshotFloor, TakeoverOutcome, closed, rejected,
+    timeout,
 };
 use crate::election::object_store::{AuthorityHead, AuthorityState};
 use crate::error::{self, Error, Result};
@@ -38,18 +39,18 @@ pub(crate) enum Request {
         epoch: u64,
         mutation: AuthorityMutation,
         precondition: AuthorityPrecondition,
-        reply: oneshot::Sender<Result<()>>,
+        response: oneshot::Sender<Result<()>>,
     },
 }
 
 impl Request {
     fn reject(self, error: Error) {
         match self {
-            Self::Takeover(reply) => {
-                let _ = reply.send(Err(error));
+            Self::Takeover(response) => {
+                let _ = response.send(Err(error));
             }
-            Self::Mutate { reply, .. } => {
-                let _ = reply.send(Err(error));
+            Self::Mutate { response, .. } => {
+                let _ = response.send(Err(error));
             }
         }
     }
@@ -57,40 +58,40 @@ impl Request {
 
 pub(crate) struct Resignation {
     pub(crate) epoch: u64,
-    pub(crate) reply: oneshot::Sender<Result<()>>,
+    pub(crate) response: oneshot::Sender<Result<()>>,
 }
 
 pub(crate) struct Writer {
-    shared: Arc<Shared>,
-    queue: mpsc::Receiver<Request>,
+    inner: Arc<Inner>,
+    request_rx: mpsc::Receiver<Request>,
     ambiguous_takeover: Option<AuthorityState>,
 }
 
 impl Writer {
-    pub(crate) fn new(shared: Arc<Shared>, queue: mpsc::Receiver<Request>) -> Self {
+    pub(crate) fn new(inner: Arc<Inner>, request_rx: mpsc::Receiver<Request>) -> Self {
         Self {
-            shared,
-            queue,
+            inner,
+            request_rx,
             ambiguous_takeover: None,
         }
     }
 
     pub(crate) async fn run(mut self) {
-        let mut changes = self.shared.status.subscribe();
+        let mut changes = self.inner.status_tx.subscribe();
         loop {
             let (status, resignation) = self
-                .shared
+                .inner
                 .update(|control, _| (control.status, control.resignation.take()));
             if status == AuthorityStatus::Closed {
                 if let Some(request) = resignation {
-                    let _ = request.reply.send(Err(closed()));
+                    let _ = request.response.send(Err(closed()));
                 }
                 break;
             }
             if let Some(request) = resignation {
                 self.drain_resigning(request.epoch);
                 let result = self.resign(request.epoch).await;
-                let _ = request.reply.send(result);
+                let _ = request.response.send(result);
                 continue;
             }
             let term = match status {
@@ -107,42 +108,42 @@ impl Writer {
                         self.renew(epoch).await;
                     }
                 }
-                request = self.queue.recv() => match request {
+                request = self.request_rx.recv() => match request {
                     Some(request) => self.process(request).await,
                     None => break,
                 }
             }
         }
-        self.queue.close();
+        self.request_rx.close();
         self.drain(closed);
     }
 
     fn drain_resigning(&mut self, epoch: u64) {
         // Once the term retires, the FIFO can also contain a new takeover.
-        while let Some(request) = self.shared.update(|control, _| {
-            Access::Resign(epoch).check(control.status).ok()?;
-            self.queue.try_recv().ok()
+        while let Some(request) = self.inner.update(|control, _| {
+            Admission::Resign(epoch).check(control.status).ok()?;
+            self.request_rx.try_recv().ok()
         }) {
             request.reject(rejected("resignation stopped admission before PUT"));
         }
     }
 
     fn drain(&mut self, error: impl Fn() -> Error) {
-        while let Ok(request) = self.queue.try_recv() {
+        while let Ok(request) = self.request_rx.try_recv() {
             request.reject(error());
         }
     }
 
     async fn process(&mut self, request: Request) {
         match request {
-            Request::Takeover(reply) => {
-                let _ = reply.send(self.takeover().await);
+            Request::Takeover(response) => {
+                let _ = response.send(self.takeover().await);
             }
             Request::Mutate {
                 epoch,
                 mutation,
                 precondition,
-                reply,
+                response,
             } => {
                 let result = loop {
                     let put = match mutation {
@@ -150,8 +151,12 @@ impl Writer {
                             self.prepare_renewal(epoch, precondition, false).await
                         }
                         AuthorityMutation::Resign => {
-                            self.prepare_term(Access::ConditionalResign(epoch), precondition, true)
-                                .await
+                            self.prepare_term(
+                                Admission::ConditionalResign(epoch),
+                                precondition,
+                                true,
+                            )
+                            .await
                         }
                     };
                     match put {
@@ -165,15 +170,15 @@ impl Writer {
                         Err(error) => break Err(error),
                     }
                 };
-                let _ = reply.send(result);
+                let _ = response.send(result);
             }
         }
     }
 
     async fn takeover(&mut self) -> Result<TakeoverOutcome> {
-        let base = self.shared.read(Access::Takeover, None).await?;
+        let base = self.inner.read(Admission::Takeover, None).await?;
         let ambiguous = if let Some(previous) = &self.ambiguous_takeover {
-            self.shared
+            self.inner
                 .store
                 .same_version(previous.metadata(), base.metadata())?
         } else {
@@ -192,7 +197,7 @@ impl Writer {
                 })?
                 .into_inner()
                 .as_nanosecond();
-            if (self.shared.wall_now_ns)() <= modified + (LEASE + CLOCK_GUARD).as_nanos() as i128 {
+            if (self.inner.wall_now_ns)() <= modified + (LEASE + CLOCK_GUARD).as_nanos() as i128 {
                 return Ok(TakeoverOutcome::NotEligible);
             }
         }
@@ -201,15 +206,15 @@ impl Writer {
             .clone()
             .with_next_epoch()?
             .with_next_write_seq()?;
-        next.owner = Some(self.shared.identity.clone());
-        next.lease_deadline_ms = self.shared.diagnostic_deadline();
-        let put = self.shared.update(|control, now| {
-            Access::Takeover.check(control.status)?;
+        next.owner = Some(self.inner.identity.clone());
+        next.lease_deadline_ms = self.inner.diagnostic_deadline();
+        let put = self.inner.update(|control, now| {
+            Admission::Takeover.check(control.status)?;
             if let Some(floor) = &control.snapshot {
-                floor.validate(&self.shared.store, &base)?;
+                floor.validate(&self.inner.store, &base)?;
             }
             Ok(Put {
-                access: Access::Takeover,
+                admission: Admission::Takeover,
                 base,
                 next,
                 sent_at: now,
@@ -225,7 +230,7 @@ impl Writer {
             Ok(false) => Ok(TakeoverOutcome::AppliedButInactive),
             Err(error) => {
                 if matches!(error, Error::AuthorityUnknown { .. }) {
-                    let base_unresolved = self.shared.update(|control, _| {
+                    let base_unresolved = self.inner.update(|control, _| {
                         control.snapshot.as_ref().is_none_or(|observed| {
                             observed.head().write_seq() <= put.base.head().write_seq()
                         })
@@ -253,14 +258,14 @@ impl Writer {
         precondition: AuthorityPrecondition,
         scheduled: bool,
     ) -> Result<Option<Put>> {
-        let access = Access::Renew(epoch);
-        let result = self.prepare_term(access, precondition, !scheduled).await;
+        let admission = Admission::Renew(epoch);
+        let result = self.prepare_term(admission, precondition, !scheduled).await;
         if let Err(error) = &result
             && !matches!(error, Error::AuthorityWriteSeqMismatch { .. })
         {
             // Resignation or shutdown can take over while the preparation GET is in flight.
-            let retired = self.shared.update(|control, _| {
-                if access.check(control.status).is_ok() {
+            let retired = self.inner.update(|control, _| {
+                if admission.check(control.status).is_ok() {
                     control.retire(epoch);
                     true
                 } else {
@@ -276,59 +281,62 @@ impl Writer {
 
     async fn resign(&self, epoch: u64) -> Result<()> {
         let result = match self
-            .prepare_term(Access::Resign(epoch), AuthorityPrecondition::Any, false)
+            .prepare_term(Admission::Resign(epoch), AuthorityPrecondition::Any, false)
             .await
         {
             Ok(Some(put)) => self.write(&put).await.map(|_| ()),
             Ok(None) => Err(rejected("resignation could not be authorized")),
             Err(error) => Err(error),
         };
-        self.shared.update(|control, _| control.retire(epoch));
+        self.inner.update(|control, _| control.retire(epoch));
         result
     }
 
     /// An empty result keeps the FIFO request in hand while we perform a due renewal.
     async fn prepare_term(
         &self,
-        access: Access,
+        admission: Admission,
         precondition: AuthorityPrecondition,
         defer_for_renewal: bool,
     ) -> Result<Option<Put>> {
-        let (epoch, deadline) = self.shared.update(|control, _| {
-            access.check(control.status)?;
+        let (epoch, deadline) = self.inner.update(|control, _| {
+            admission.check(control.status)?;
             control
                 .status
                 .term()
                 .ok_or_else(|| rejected("term is inactive"))
         })?;
-        let read = match access {
-            Access::Renew(_) => {
-                self.read_renewal_head(access, deadline, defer_for_renewal)
+        let read = match admission {
+            Admission::Renew(_) => {
+                self.read_renewal_head(admission, deadline, defer_for_renewal)
                     .await
             }
-            _ => self.shared.read(access, Some(deadline)).await,
+            _ => self.inner.read(admission, Some(deadline)).await,
         };
         let base = match read {
             Ok(base) => base,
             Err(error) => {
                 let renew_due = defer_for_renewal
-                    && self.shared.update(|control, now| {
-                        access.check(control.status).is_ok() && now >= renew_at(deadline)
+                    && self.inner.update(|control, now| {
+                        admission.check(control.status).is_ok() && now >= renew_at(deadline)
                     });
                 return if renew_due { Ok(None) } else { Err(error) };
             }
         };
         let next = base.head().clone().with_next_write_seq().map(|mut next| {
-            if matches!(access, Access::Resign(_) | Access::ConditionalResign(_)) {
+            if matches!(
+                admission,
+                Admission::Resign(_) | Admission::ConditionalResign(_)
+            ) {
                 next.owner = None;
                 next.lease_deadline_ms = 0;
             } else {
-                next.lease_deadline_ms = self.shared.diagnostic_deadline();
+                next.lease_deadline_ms = self.inner.diagnostic_deadline();
             }
             next
         });
-        self.shared.update(|control, now| {
-            access.check(control.status)?;
+        self.inner.update(|control, now| {
+            admission.check(control.status)?;
             if defer_for_renewal && now >= renew_at(deadline) {
                 return Ok(None);
             }
@@ -337,24 +345,24 @@ impl Writer {
                 return Err(timeout("write budget"));
             }
             if base.head().epoch() != epoch
-                || base.head().owner.as_ref() != Some(&self.shared.identity)
+                || base.head().owner.as_ref() != Some(&self.inner.identity)
             {
                 return Err(rejected("Head is not owned by this term"));
             }
             if let Some(floor) = &control.snapshot {
-                floor.validate(&self.shared.store, &base)?;
+                floor.validate(&self.inner.store, &base)?;
             }
             precondition.check(base.head())?;
             let next = next?;
-            let access = if matches!(access, Access::ConditionalResign(_)) {
+            let admission = if matches!(admission, Admission::ConditionalResign(_)) {
                 // Close admission and authorize the CAS against this read under one lock.
                 control.status = AuthorityStatus::Resigning { epoch, deadline };
-                Access::Resign(epoch)
+                Admission::Resign(epoch)
             } else {
-                access
+                admission
             };
             Ok(Some(Put {
-                access,
+                admission,
                 base,
                 next,
                 sent_at: now,
@@ -366,7 +374,7 @@ impl Writer {
 
     async fn read_renewal_head(
         &self,
-        access: Access,
+        admission: Admission,
         deadline: Instant,
         defer_for_renewal: bool,
     ) -> Result<AuthorityState> {
@@ -379,7 +387,7 @@ impl Writer {
         };
         let mut backoff = INITIAL_BACKOFF;
         loop {
-            let error = match self.shared.read(access, Some(prepare_deadline)).await {
+            let error = match self.inner.read(admission, Some(prepare_deadline)).await {
                 Ok(head) => return Ok(head),
                 Err(error) => error,
             };
@@ -402,11 +410,11 @@ impl Writer {
             }
             tokio::select! {
                 biased;
-                _ = self.shared.wait_until(|status| access.check(status).is_err()) => {}
+                _ = self.inner.wait_until(|status| admission.check(status).is_err()) => {}
                 _ = sleep_until((now + backoff).min(retry_until)) => {}
             }
-            self.shared
-                .update(|control, _| access.check(control.status))?;
+            self.inner
+                .update(|control, _| admission.check(control.status))?;
             if Instant::now() >= retry_until {
                 return Err(error);
             }
@@ -425,7 +433,7 @@ impl Writer {
             PutResponse::Conflict(error) => {
                 self.retire(put);
                 // Re-evaluate the observed version and term without replaying the CAS.
-                let _ = self.shared.read(Access::Read, Some(put.deadline)).await;
+                let _ = self.inner.read(Admission::Read, Some(put.deadline)).await;
                 Err(error)
             }
             PutResponse::Unknown(error) => {
@@ -442,14 +450,15 @@ impl Writer {
     async fn send(&self, put: &Put) -> PutResponse {
         let stop = (put.sent_at + PUT_TIMEOUT).min(put.deadline - READBACK_RESERVE);
         let request = async {
-            if let Err(error) = Access::Read.check(self.shared.update(|control, _| control.status))
+            if let Err(error) =
+                Admission::Read.check(self.inner.update(|control, _| control.status))
             {
                 return PutResponse::Unsent(error);
             }
             if Instant::now() >= stop {
                 return PutResponse::Unsent(timeout("write budget"));
             }
-            match self.shared.store.replace_head(&put.base, &put.next).await {
+            match self.inner.store.replace_head(&put.base, &put.next).await {
                 Ok(()) => PutResponse::Applied,
                 Err(error) => match error.authority_storage_error() {
                     Some(storage)
@@ -477,7 +486,7 @@ impl Writer {
         tokio::select! {
             biased;
             result = request => result,
-            _ = self.shared.wait_until(|status| status == AuthorityStatus::Closed) => PutResponse::Unknown(closed()),
+            _ = self.inner.wait_until(|status| status == AuthorityStatus::Closed) => PutResponse::Unknown(closed()),
             _ = sleep_until(stop) => PutResponse::Unknown(timeout("write")),
         }
     }
@@ -485,10 +494,10 @@ impl Writer {
     async fn resolve(&self, put: &Put) -> bool {
         let mut backoff = INITIAL_BACKOFF;
         while Instant::now() < put.deadline {
-            match self.shared.read(Access::Read, Some(put.deadline)).await {
+            match self.inner.read(Admission::Read, Some(put.deadline)).await {
                 Ok(state) => {
                     let advanced = self
-                        .shared
+                        .inner
                         .store
                         .same_version(put.base.metadata(), state.metadata());
                     if matches!(advanced, Ok(false))
@@ -508,7 +517,7 @@ impl Writer {
             }
             let retry_at = (Instant::now() + backoff).min(put.deadline);
             tokio::select! {
-                _ = self.shared.wait_until(|status| Access::Read.check(status).is_err()) => return false,
+                _ = self.inner.wait_until(|status| Admission::Read.check(status).is_err()) => return false,
                 _ = sleep_until(retry_at) => {}
             }
             backoff = (backoff * 2).min(MAX_BACKOFF);
@@ -517,7 +526,7 @@ impl Writer {
     }
 
     fn confirm(&self, put: &Put, direct: bool) -> bool {
-        self.shared.update(|control, now| {
+        self.inner.update(|control, now| {
             let current = control.snapshot.as_ref().map(SnapshotFloor::head);
             let still_current = current
                 .is_none_or(|head| head.write_seq() < put.next.write_seq() || head == &put.next);
@@ -528,21 +537,21 @@ impl Writer {
                 });
             }
             let epoch = put.next.epoch();
-            if matches!(put.access, Access::Resign(_)) {
+            if matches!(put.admission, Admission::Resign(_)) {
                 control.retire(epoch);
                 return false;
             }
             if still_current && now < put.deadline {
-                match put.access {
-                    Access::Takeover if control.status == AuthorityStatus::Follower => {
+                match put.admission {
+                    Admission::Takeover if control.status == AuthorityStatus::Follower => {
                         control.status = AuthorityStatus::Leader {
                             epoch,
                             deadline: put.deadline,
                         };
                         return true;
                     }
-                    Access::Renew(_)
-                        if direct && Access::Renew(epoch).check(control.status).is_ok() =>
+                    Admission::Renew(_)
+                        if direct && Admission::Renew(epoch).check(control.status).is_ok() =>
                     {
                         control.status = AuthorityStatus::Leader {
                             epoch,
@@ -557,8 +566,8 @@ impl Writer {
     }
 
     fn retire(&self, put: &Put) {
-        if let Access::Renew(epoch) | Access::Resign(epoch) = put.access {
-            self.shared.update(|control, _| control.retire(epoch));
+        if let Admission::Renew(epoch) | Admission::Resign(epoch) = put.admission {
+            self.inner.update(|control, _| control.retire(epoch));
         }
     }
 }
@@ -570,7 +579,7 @@ fn renew_at(deadline: Instant) -> Instant {
 /// The writer obtains this single-use authorization under the state lock and
 /// owns it until the PUT outcome is classified. No other code sends a Head PUT.
 struct Put {
-    access: Access,
+    admission: Admission,
     base: AuthorityState,
     next: AuthorityHead,
     sent_at: Instant,
