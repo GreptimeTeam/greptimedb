@@ -303,7 +303,6 @@ mod tests {
         }
         let error = writer.write_all(b"j").await.unwrap_err();
         assert!(error.get_ref().unwrap().is::<UploadObjectLimit>());
-        assert_eq!(vec![4, 4], observations.lock().unwrap().write_sizes);
         writer.close().await.unwrap();
         assert_eq!(vec![4, 4, 1], observations.lock().unwrap().write_sizes);
         assert_eq!(

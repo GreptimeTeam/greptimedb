@@ -1163,29 +1163,6 @@ mod tests {
     use crate::test_util::TestEnv;
     use crate::test_util::sst_util::{new_record_batch_by_range, sst_region_metadata};
 
-    #[cfg(feature = "enterprise")]
-    #[tokio::test]
-    async fn test_oversized_sst_upload_reports_resource_limit() {
-        let store = ObjectStore::new(Memory::default()).unwrap();
-        let mut factory = ObjectStoreWriterFactory {
-            object_store: store.clone(),
-            concurrency: 1,
-            upload_limits: Some(upload::UploadLimits {
-                chunk_bytes: 4,
-                max_object_bytes: 8,
-            }),
-        };
-        let mut writer = factory.create("sst.parquet", 4, None).await.unwrap();
-        writer.write(Bytes::from_static(b"abcdefgh")).await.unwrap();
-        let error = writer.write(Bytes::from_static(b"i")).await.unwrap_err();
-        assert!(matches!(
-            map_write_error(ParquetError::External(Box::new(error))),
-            Error::MultiRegionCompactionResource { .. }
-        ));
-        ObjectStoreWriterFactory::abort(writer).await.unwrap();
-        assert!(!store.exists("sst.parquet").await.unwrap());
-    }
-
     struct GatedObjectStoreWriter {
         inner: oio::Writer,
         started: Option<oneshot::Sender<()>>,

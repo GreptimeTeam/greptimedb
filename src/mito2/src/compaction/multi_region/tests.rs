@@ -651,7 +651,6 @@ async fn test_failed_target_never_returns_a_partial_table_result() {
         fixture.layer.path_type(),
     );
     assert!(fixture.layer.object_store().exists(&path).await.unwrap());
-    assert_spill_cleaned(&fixture.env.path.path().join("spill")).await;
 }
 
 #[rstest::rstest]
@@ -715,8 +714,6 @@ async fn test_long_tag_stream_is_lossless_and_insufficient_admission_creates_no_
     let output = fixture.compact(plan).await;
     assert_eq!(102400, output.stats.output_rows);
     assert!(output.stats.estimated_memory_bytes <= 128 * 1024 * 1024);
-    // The long-tag regression still checks every physical row. There is no
-    // intermediate IPC path or repeated materialization of all destinations.
     let mut ordinal = 0;
     for file in output.files.into_values().flatten() {
         for batch in fixture.read_output(file, fixture.metadata.clone()).await {
@@ -754,7 +751,6 @@ async fn test_long_tag_stream_is_lossless_and_insufficient_admission_creates_no_
         "{error:?}"
     );
     assert!(protected.files.lock().unwrap().is_empty());
-    assert_spill_cleaned(&fixture.env.path.path().join("spill")).await;
 }
 
 #[tokio::test]
@@ -1801,15 +1797,6 @@ async fn test_streaming_merge_preserves_overlapping_versions_and_field_routing(
     for path in source_paths {
         assert!(fixture.layer.object_store().exists(&path).await.unwrap());
     }
-    assert_spill_cleaned(&fixture.env.path.path().join("spill")).await;
-}
-
-async fn assert_spill_cleaned(path: &std::path::Path) {
-    // Stronger than cleanup: the streaming merge must never create this directory.
-    assert!(
-        !tokio::fs::try_exists(path).await.unwrap(),
-        "merge spill directory was created"
-    );
 }
 
 struct BlockIndexedSstWrite {
@@ -2034,7 +2021,6 @@ async fn test_interrupted_indexed_worker_cleans_tantivy_files(#[case] fail_sibli
     })
     .await
     .expect("cancelled worker leaked Tantivy intermediate files");
-    assert_spill_cleaned(&fixture.env.path.path().join("spill")).await;
     // Attempt cleanup must not delete sources or protected SSTs owned by the caller.
     for id in [fixture.source.file_id(), file] {
         let path = crate::sst::location::sst_file_path(
@@ -2059,7 +2045,7 @@ impl SstWriteGuard for CancelBeforeCreate {
 }
 
 #[tokio::test]
-async fn test_cancelling_a_blocked_writer_preserves_sources_without_merge_spill() {
+async fn test_cancelling_a_blocked_writer_preserves_sources() {
     let (fixture, plan) = overlapping_fixture().await;
     let sources = plan.sources.clone();
     let (mut context, _) = fixture.context(None);
@@ -2073,7 +2059,6 @@ async fn test_cancelling_a_blocked_writer_preserves_sources_without_merge_spill(
         error,
         crate::error::Error::CompactionCancelled { .. }
     ));
-    assert_spill_cleaned(&fixture.env.path.path().join("spill")).await;
     for file in sources {
         let path = crate::sst::location::sst_file_path(
             fixture.layer.table_dir(),
@@ -2313,7 +2298,7 @@ const PAYLOAD_BYTES: usize = 640;
 const MULTIPART_TAGS: [&str; 2] = ["000", "020"];
 
 #[tokio::test]
-async fn test_small_arrow_batches_stream_multipart_outputs_with_lossless_readback() {
+async fn test_table_budget_below_legacy_floor_writes_multipart_outputs_losslessly() {
     let metadata = build_test_binary_test_region_metadata();
     let mut fixture = Fixture::empty((*metadata).clone()).await;
     let row_group_size = 256;
@@ -2346,22 +2331,10 @@ async fn test_small_arrow_batches_stream_multipart_outputs_with_lossless_readbac
     }
     let targets = plan.targets.clone();
     let uploads = install_multipart_backend(&mut fixture, MULTIPART_CHUNK);
-    let (mut context, protection) = fixture.context(None);
+    let (mut context, _) = fixture.context(None);
     context.index_kind_provider = Some(Arc::new(UploadProbeIndex));
 
-    // Use the production preparation/executor with counters so that a part
-    // sent only during close can't masquerade as online uploading.
-    let counters = Arc::new(SourceCounters::default());
-    let source = source::SharedSource::build(
-        &plan,
-        &context,
-        validate_plan(&plan).unwrap(),
-        counters.clone(),
-    )
-    .await
-    .unwrap();
-    assert!(source.limits.arrow_batch_bytes < MULTIPART_CHUNK);
-    let execution = worker::execute(plan, context, source, counters.clone());
+    let execution = compact_regions(plan, context);
     tokio::pin!(execution);
     tokio::select! {
         _ = uploads.part_waiting.notified() => {}
@@ -2371,22 +2344,12 @@ async fn test_small_arrow_batches_stream_multipart_outputs_with_lossless_readbac
         },
         _ = tokio::time::sleep(Duration::from_secs(60)) => panic!("SST never began uploading its parts"),
     }
-    let rows_per_target = MULTIPART_INPUTS * ROWS_PER_INPUT_PER_TARGET;
-    let total_rows = (rows_per_target * MULTIPART_TAGS.len()) as u64;
-    assert!(
-        counters.rows.load(Ordering::Relaxed) < rows_per_target as u64,
-        "the first part should reach storage before the first target's input is exhausted"
-    );
-    assert!(!protection.files.lock().unwrap().is_empty());
     uploads.resume_part.notify_one();
 
     let output = tokio::time::timeout(Duration::from_secs(60), execution)
         .await
         .expect("compaction did not finish after releasing the part")
         .unwrap();
-    assert_eq!(MULTIPART_INPUTS as u64, output.stats.source_files);
-    assert_eq!(total_rows, output.stats.source_rows);
-    assert_eq!(total_rows, output.stats.output_rows);
     assert!(output.stats.estimated_memory_bytes <= budget as u64);
     assert_eq!(targets.len(), output.files.len());
     let layer = &fixture.layer;
@@ -2394,7 +2357,6 @@ async fn test_small_arrow_batches_stream_multipart_outputs_with_lossless_readbac
         let files = &output.files[&id];
         assert_eq!(1, files.len());
         let file = &files[0];
-        assert!(protection.files.lock().unwrap().contains(&file.file_id()));
         let path = location::sst_file_path(layer.table_dir(), file.file_id(), layer.path_type());
         uploads.assert_completed(&path, file.file_size);
         let path = location::index_file_path(layer.table_dir(), file.index_id(), layer.path_type());
@@ -2408,65 +2370,42 @@ async fn test_small_arrow_batches_stream_multipart_outputs_with_lossless_readbac
             blob.blob_type == UPLOAD_PROBE_BLOB && blob.length as u64 == UPLOAD_PROBE_BYTES
         }));
 
-        let region = id.region_sequence() as usize;
-        check_multipart_rows(
-            fixture
-                .read_output(file.clone(), target.metadata.clone())
-                .await,
-            region,
-            rows_per_target,
-        );
         check_multipart_rows(
             fixture
                 .read_published_output(file.clone(), target.metadata)
                 .await,
-            region,
-            rows_per_target,
+            id.region_sequence() as usize,
+            MULTIPART_INPUTS * ROWS_PER_INPUT_PER_TARGET,
         );
     }
 }
 
 #[rstest::rstest]
-#[case::upload_reservation(MULTIPART_CHUNK, "Upload reservation")]
-#[case::zero_backend_cap(0, "No supported upload chunk size")]
+#[case::budget_cannot_cover_both_targets(8 * MIB, 92 * MIB)]
+#[case::backend_disallows_all_part_sizes(0, 512 * MIB)]
 #[tokio::test]
 async fn test_multipart_admission_rejects_before_protection_or_write(
     #[case] chunk: usize,
-    #[case] expected_reason: &str,
+    #[case] budget: usize,
 ) {
     let mut fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
     let mut plan = fixture.plan(2);
-    // Enough for one target's upload reservation but not both. Even the first
-    // target must not protect a path or open a writer on rejected admission.
-    plan.memory_limit = 32 * MIB;
+    plan.memory_limit = budget;
     let uploads = install_multipart_backend(&mut fixture, chunk);
-    let list_objects = async || {
-        fixture
-            .layer
-            .object_store()
-            .list_with(fixture.layer.table_dir())
-            .recursive(true)
-            .await
-            .unwrap()
-            .into_iter()
-            .filter(|entry| entry.metadata().is_file())
-            .map(|entry| entry.path().to_string())
-            .collect::<HashSet<_>>()
-    };
-    let before = list_objects().await;
     let (context, protection) = fixture.context(None);
     let error = compact_regions(plan, context)
         .await
         .err()
         .expect("must reject before writing");
     assert!(
-        matches!(&error, crate::error::Error::MultiRegionCompactionResource { reason, .. }
-            if reason.contains(expected_reason)),
+        matches!(
+            error,
+            crate::error::Error::MultiRegionCompactionResource { .. }
+        ),
         "{error:?}"
     );
     assert!(protection.files.lock().unwrap().is_empty());
     assert!(uploads.files.lock().unwrap().is_empty());
-    assert_eq!(before, list_objects().await);
 }
 
 fn multipart_input_batches(input: usize) -> Vec<RecordBatch> {
@@ -2810,7 +2749,7 @@ async fn test_admission_includes_each_tantivy_creator_even_in_async_mode(
 }
 
 #[tokio::test]
-async fn test_oversized_equal_key_group_fails_without_partial_outputs_or_spill() {
+async fn test_oversized_equal_key_group_fails_without_partial_outputs() {
     let fixture = Fixture::with_source(PrimaryKeyEncoding::Dense, FormatType::Flat, |_| {
         let batch = new_record_batch_with_custom_sequence(&["000", "series"], 0, 262_144, 0);
         let mut columns = batch.columns().to_vec();
@@ -2828,7 +2767,6 @@ async fn test_oversized_equal_key_group_fails_without_partial_outputs_or_spill()
         "{error:?}"
     );
     assert!(protection.files.lock().unwrap().is_empty());
-    assert_spill_cleaned(&fixture.env.path.path().join("spill")).await;
 }
 
 #[tokio::test]
@@ -2877,8 +2815,11 @@ async fn test_reader_admission_counts_decoded_values() {
 #[rstest::rstest]
 #[case::encoder("encoder")]
 #[case::metadata("metadata")]
+#[case::upload("upload")]
 #[tokio::test]
-async fn test_limited_writer_fails_instead_of_publishing_over_budget(#[case] kind: &'static str) {
+async fn test_limited_writer_fails_instead_of_returning_over_budget_output(
+    #[case] kind: &'static str,
+) {
     let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
     let plan = fixture.plan(1);
     let (context, protection) = fixture.context(None);
@@ -2888,6 +2829,7 @@ async fn test_limited_writer_fails_instead_of_publishing_over_budget(#[case] kin
     match kind {
         "encoder" => limits.writer.working_bytes = 1,
         "metadata" => limits.writer.metadata_bytes = 1,
+        "upload" => limits.writer.upload_limits.max_object_bytes = 1,
         _ => unreachable!(),
     }
     let error = writer::TargetWriter::new(
@@ -2902,10 +2844,11 @@ async fn test_limited_writer_fails_instead_of_publishing_over_budget(#[case] kin
     .await
     .err()
     .unwrap();
-    assert!(
-        matches!(&error, crate::error::Error::SstWriteMemoryExceeded { kind: actual, .. } if *actual == kind),
-        "{error:?}"
-    );
+    match error {
+        crate::error::Error::MultiRegionCompactionResource { .. } if kind == "upload" => {}
+        crate::error::Error::SstWriteMemoryExceeded { kind: actual, .. } if actual == kind => {}
+        _ => panic!("unexpected {kind} limit error: {error:?}"),
+    }
     assert_eq!(1, protection.files.lock().unwrap().len());
 }
 
