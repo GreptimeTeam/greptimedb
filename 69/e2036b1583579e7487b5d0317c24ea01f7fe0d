@@ -1,0 +1,74 @@
+src/common/meta/src/kv_backend/rds/postgres.rs
+  s_a0c2d0c6dc573d::t_cd49786d5be61b 1531-1550
+  s_a0c2d0c6dc573d::t_8a3a7706c22ccb 1530
+src/common/meta/src/kv_backend/test.rs
+  s_a0c2d0c6dc573d::t_cd49786d5be61b 26-73
+src/meta-srv/src/service/store/cached_kv.rs
+  s_a0c2d0c6dc573d::t_0e6361892433fc 25-26,170-173
+  s_a0c2d0c6dc573d::t_e61fdd8513a75e 384-385,471-472
+src/common/meta/src/ddl/create_logical_tables/update_metadata.rs
+  s_a0c2d0c6dc573d::t_07a970971038f2 92
+src/common/meta/src/kv_backend/rds.rs
+  s_a0c2d0c6dc573d::t_07a970971038f2 29-31,511-516,608-611
+src/common/meta/src/key.rs
+  s_a0c2d0c6dc573d::t_07a970971038f2 910,913,1341-1344,1683-1688
+  s_a0c2d0c6dc573d::t_c420daaf0a756c 3425
+src/common/meta/src/kv_backend/read_only.rs
+  s_a0c2d0c6dc573d::t_07a970971038f2 279,284
+  s_a0c2d0c6dc573d::t_0e6361892433fc 280-283,296
+  s_a0c2d0c6dc573d::t_c51e1647000c48 19,72-73,178-179
+src/common/meta/src/kv_backend/etcd.rs
+  s_a0c2d0c6dc573d::t_07a970971038f2 289-291
+  s_a0c2d0c6dc573d::t_a6e0083b1c73a3 28,83,288
+src/common/meta/src/kv_backend/chroot.rs
+  s_a0c2d0c6dc573d::t_07a970971038f2 19-21
+  s_a0c2d0c6dc573d::t_833364d4c6bd9f 51-52,58-61
+src/catalog/src/kvbackend/client.rs
+  s_a0c2d0c6dc573d::t_0e6361892433fc 29-31,134-135,141-144
+  s_a0c2d0c6dc573d::t_3acd1e52da7ab9 676
+src/common/meta/src/kv_backend/memory.rs
+  s_a0c2d0c6dc573d::t_07a970971038f2 290-292
+  s_a0c2d0c6dc573d::t_6b309f2e147f82 24,289
+src/common/meta/src/kv_backend/test_util.rs
+  s_a0c2d0c6dc573d::t_0e6361892433fc 74-76,82-85,162-163,169-172
+  s_a0c2d0c6dc573d::t_07a970971038f2 25-26
+  s_a0c2d0c6dc573d::t_c4221cbdfa25cb 38-39,73
+src/common/meta/src/kv_backend/rds/mysql.rs
+  s_a0c2d0c6dc573d::t_cd49786d5be61b 1342,1356-1359
+  s_a0c2d0c6dc573d::t_8bd4145703a101 220-229,365-379,448-449,453,457-458,567-570,574-602,607,611-613,774,810,912
+  s_a0c2d0c6dc573d::t_091e4ab9ecbfe4 571-573,1318-1341,1343-1355
+src/common/meta/src/state_store.rs
+  s_a0c2d0c6dc573d::t_3acd1e52da7ab9 404-408,435-437
+  s_a0c2d0c6dc573d::t_07a970971038f2 139-157,159-161,395-403,409-434,438
+  s_a0c2d0c6dc573d::t_1ebf1dd2589255 37,133-138,439
+src/log-store/src/raft_engine/backend.rs
+  s_a0c2d0c6dc573d::t_07a970971038f2 212-214
+  s_a0c2d0c6dc573d::t_ea407f429d9eab 26,211
+src/common/meta/src/ddl/utils/table_info.rs
+  s_a0c2d0c6dc573d::t_07a970971038f2 80
+src/common/meta/src/key/tombstone.rs
+  s_a0c2d0c6dc573d::t_0e6361892433fc 664-667
+  s_a0c2d0c6dc573d::t_07a970971038f2 19,297,300,302-306,310,355,578,612-615
+src/meta-srv/src/region/flush_trigger.rs
+  s_a0c2d0c6dc573d::t_07a970971038f2 357-361
+src/common/meta/src/kv_backend.rs
+  s_a0c2d0c6dc573d::t_7ad1e55422bc40 20,66-72,78-81
+src/common/meta/src/kv_backend/txn.rs
+  s_a0c2d0c6dc573d::t_8e35f54aa844c5 23-29,38-40
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "69e2036b1583579e7487b5d0317c24ea01f7fe0d",
+  "prompts": {},
+  "sessions": {
+    "s_a0c2d0c6dc573d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a20b9d-b770-7281-8e87-0cf727e380a3",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
