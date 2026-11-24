@@ -2958,7 +2958,6 @@ dependencies = [
  "serde_json",
  "snafu 0.8.6",
  "tempfile",
- "tokio",
  "tracing",
  "tracing-appender",
  "tracing-log",
