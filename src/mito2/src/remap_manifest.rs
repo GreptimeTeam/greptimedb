@@ -270,28 +270,38 @@ impl RemapManifest {
         source_domain: Option<&PartitionExpr>,
         target_domain: Option<&PartitionExpr>,
     ) -> Option<PartitionExpr> {
+        fn push<'a>(operands: &mut Vec<&'a PartitionExpr>, candidate: Option<&'a PartitionExpr>) {
+            if let Some(candidate) = candidate
+                && !operands.contains(&candidate)
+            {
+                operands.push(candidate);
+            }
+        }
+
         let creator = file_meta.partition_expr.as_deref();
         let mut operands: Vec<&PartitionExpr> = Vec::with_capacity(3);
-        for operand in [
-            file_meta.owned_range.as_deref(),
-            source_domain,
-            target_domain,
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if Some(operand) == creator || operands.contains(&operand) {
-                continue;
-            }
-            operands.push(operand);
+
+        // An explicit range is enforced even when it equals the creator: the
+        // source may have been narrowed for reasons the creator expression does
+        // not capture.
+        push(&mut operands, file_meta.owned_range.as_deref());
+
+        // The source's *effective* filter is the region expression, except that
+        // the reader skips the region predicate when it equals the creator's
+        // expression. In that case the source saw every physical row, so the
+        // source term is TRUE and must not be added back as a restriction.
+        if source_domain != creator {
+            push(&mut operands, source_domain);
         }
+
+        // The target domain always applies: it is what routes a row to this
+        // target. Dropping it because it happens to equal the creator would let
+        // two targets both keep a row the creator expression does not match.
+        push(&mut operands, target_domain);
 
         operands.into_iter().cloned().reduce(PartitionExpr::and)
     }
 
-    /// Unions the row authorizations of two references to the same physical file that
-    /// both reach the same target. `None` authorizes every physical row, so it absorbs
-    /// the union; otherwise the authorized sets are joined with `Or`.
     fn union_owned_range(
         existing: Option<&PartitionExpr>,
         incoming: Option<&PartitionExpr>,
@@ -954,10 +964,15 @@ mod tests {
         set_manifest_domain(&mut owning, Some(file_domain.clone()));
         let file_id = *owning.files.keys().next().unwrap();
 
-        // The target domain equals the creator expression, which cannot remove a row,
-        // so the reference stays unrestricted instead of carrying a useless range.
+        // A target whose domain equals the creator still keeps that domain: write
+        // admission does not constrain a file's physical rows to the creator
+        // expression, so dropping it would let a sibling target keep a row this
+        // target must not see.
         let remapped = remap_into(source, owning.clone(), target, file_domain.clone());
-        assert!(remapped.files[&file_id].owned_range.is_none());
+        assert_eq!(
+            Some(&file_domain),
+            remapped.files[&file_id].owned_range.as_deref()
+        );
 
         // Narrowing by the target domain; the source domain is dropped because it is
         // the creator expression.
@@ -994,19 +1009,83 @@ mod tests {
             .expect("the union must authorize rows");
         // The two source regions are visited in hash order, so either operand order is
         // correct for the `Or` chain.
+        // Each contribution is restricted by the target domain as well, because a
+        // target domain always applies (`whole` here), so the union is over
+        // `left AND whole` and `right AND whole`.
+        let left_contribution = left.clone().and(file_domain.clone());
+        let right_contribution = right.clone().and(file_domain.clone());
         let forward = PartitionExpr::new(
-            Operand::Expr(left.clone()),
+            Operand::Expr(left_contribution.clone()),
             RestrictedOp::Or,
-            Operand::Expr(right.clone()),
+            Operand::Expr(right_contribution.clone()),
         );
         let backward = PartitionExpr::new(
-            Operand::Expr(right.clone()),
+            Operand::Expr(right_contribution),
             RestrictedOp::Or,
-            Operand::Expr(left.clone()),
+            Operand::Expr(left_contribution),
         );
         assert!(
             owned == &forward || owned == &backward,
             "unexpected union: {owned:?}"
+        );
+    }
+
+    #[test]
+    fn test_two_hop_split_keeps_the_target_domain_of_a_creator_matching_target() {
+        // Write admission does not evaluate the region's partition expression, so
+        // a file created under `C` can physically contain a row outside `C`.
+        // Readers skip the region predicate when the expressions match, which
+        // means that row is visible in `C`.
+        //
+        // Remapping `C` to the superset `S` must therefore keep the row; but
+        // splitting `S` back into `C` and `U` must not let *both* halves keep it.
+        // That only holds if the target domain is never dropped, even when the
+        // target's expression happens to equal the creator's.
+        let creator = range_expr("k", 0, 5); // C
+        let sup = range_expr("k", 0, 10); // S
+        let upper = range_expr("k", 5, 100); // U
+
+        let source = RegionId::new(1, 1);
+        let sup_region = RegionId::new(1, 2);
+        let c_target = RegionId::new(1, 3);
+        let u_target = RegionId::new(1, 4);
+
+        let mut source_manifest = create_manifest(source, 1, Some(creator.clone()), 1, 1);
+        set_manifest_domain(&mut source_manifest, Some(creator.clone()));
+        let file_id = *source_manifest.files.keys().next().unwrap();
+
+        // First hop: C -> S. The creator-equal *source* domain contributes
+        // nothing (the source saw every physical row), so the range is `S`.
+        let first = remap_into(source, source_manifest, sup_region, sup.clone());
+        assert_eq!(
+            Some(&sup),
+            first.files[&file_id].owned_range.as_deref(),
+            "remapping to a superset must keep rows the creator expression excludes"
+        );
+
+        // Second hop: S -> {C, U}. Both targets overlap S.
+        let mut second = create_manifest(sup_region, 0, Some(creator.clone()), 1, 1);
+        set_manifest_domain(&mut second, Some(sup.clone()));
+        second.files.insert(file_id, first.files[&file_id].clone());
+        let remapped = RemapManifest::new(
+            HashMap::from([(sup_region, second)]),
+            HashMap::from([(c_target, creator.clone()), (u_target, upper.clone())]),
+            HashMap::from([(sup_region, vec![c_target, u_target])]),
+        )
+        .remap_manifests()
+        .unwrap()
+        .new_manifests
+        .clone();
+
+        assert_eq!(
+            Some(&sup.clone().and(creator.clone())),
+            remapped[&c_target].files[&file_id].owned_range.as_deref(),
+            "a target whose domain equals the creator must still restrict to its own domain"
+        );
+        assert_eq!(
+            Some(&sup.clone().and(upper.clone())),
+            remapped[&u_target].files[&file_id].owned_range.as_deref(),
+            "the other target keeps its own domain too"
         );
     }
 }
