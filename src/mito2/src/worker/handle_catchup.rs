@@ -402,11 +402,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 region.state()
             );
         }
-        // A region in another state does the work when it becomes a writable leader.
+        // The sweep after the batch runs it, after what the batch dispatched, or once the region
+        // is a writable leader.
         let work = self.defer_lease_work(&region);
         work.missing_index_pass = true;
         work.backfill = true;
-        self.finish_deferred_lease_work(region_id).await;
         self.listener.on_leader_lease_wait_ended(region_id);
     }
 
