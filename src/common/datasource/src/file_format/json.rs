@@ -130,7 +130,7 @@ impl FileFormat for JsonFormat {
 ///
 /// Unlike the stream of a `JsonSource`, a string column also takes a number or a boolean, as
 /// the text it has in the file. So a column whose numbers must be parsed from every digit can
-/// be read as a string, see [`parse_decimal_columns`](super::decimal::parse_decimal_columns).
+/// be read as a string, see [`parse_number_columns`](super::decimal::parse_number_columns).
 pub async fn json_text_stream(
     store: &ObjectStore,
     path: &str,

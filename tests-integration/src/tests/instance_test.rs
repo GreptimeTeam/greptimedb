@@ -3641,6 +3641,91 @@ async fn test_execute_copy_from_decimal_notation(instance: Arc<dyn MockInstance>
     }
 }
 
+// A json number in scientific notation loads into a BIGINT UNSIGNED column with every digit,
+// also when a `Float64` can't hold it.
+#[apply(standalone_instance_case)]
+async fn test_execute_copy_from_json_uint64_notation(instance: Arc<dyn MockInstance>) {
+    common_telemetry::init_default_ut_logging();
+    let instance = instance.frontend();
+
+    assert!(matches!(
+        execute_sql(
+            &instance,
+            "create table uint64_notation(k string, n bigint unsigned, ts timestamp time index, primary key(k));",
+        )
+        .await
+        .data,
+        OutputData::AffectedRows(0)
+    ));
+
+    let filepath = find_testing_resource("/tests/data/json/uint64_notation.json");
+    let output = execute_sql(
+        &instance,
+        &format!("copy uint64_notation from '{filepath}' WITH(FORMAT='json');"),
+    )
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(6)));
+
+    let output = execute_sql(&instance, "select k, n from uint64_notation order by k;")
+        .await
+        .data;
+    let expected = r#"+---+----------------------+
+| k | n                    |
++---+----------------------+
+| a | 9007199254740993     |
+| b | 18446744073709551615 |
+| c | 18446744073709551615 |
+| d | 9007199254740993     |
+| e | 7                    |
+| f |                      |
++---+----------------------+"#;
+    check_output_stream(output, expected).await;
+}
+
+// An empty json string is not a number. It fails to load into a DECIMAL column, also when the
+// column was inferred as a number from the rows before it.
+#[apply(standalone_instance_case)]
+async fn test_execute_copy_from_json_decimal_empty_string(instance: Arc<dyn MockInstance>) {
+    common_telemetry::init_default_ut_logging();
+    let instance = instance.frontend();
+
+    assert!(matches!(
+        execute_sql(
+            &instance,
+            "create table decimal_empty_string(k string, price decimal(38, 2), ts timestamp time index, primary key(k));",
+        )
+        .await
+        .data,
+        OutputData::AffectedRows(0)
+    ));
+
+    let filepath = find_testing_resource("/tests/data/json/decimal_empty_string.json");
+    let error = try_execute_sql(
+        &instance,
+        &format!(
+            "copy decimal_empty_string from '{filepath}' WITH(FORMAT='json', schema_infer_max_record=1);"
+        ),
+    )
+    .await
+    .unwrap_err();
+    let error = format!("{error:?}");
+    assert!(
+        error.contains("can't parse the value  as DECIMAL(38, 2)"),
+        "{error}"
+    );
+
+    let output = execute_sql(&instance, "select count(*) from decimal_empty_string;")
+        .await
+        .data;
+    let expected = r#"+----------+
+| count(*) |
++----------+
+| 0        |
++----------+"#;
+    check_output_stream(output, expected).await;
+}
+
 #[apply(standalone_instance_case)]
 async fn test_execute_copy_from_orc(instance: Arc<dyn MockInstance>) {
     common_telemetry::init_default_ut_logging();

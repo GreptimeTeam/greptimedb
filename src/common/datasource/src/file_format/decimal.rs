@@ -12,15 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Reads decimal columns from the text of a csv or json file.
+//! Reads decimal and unsigned integer columns from the text of a csv or json file.
 //!
 //! A file reader that decodes a number into a `Float64` loses the digits a `Float64` can't
-//! hold, and Arrow's own decimal decoding is wrong for some numbers in scientific notation. So
-//! the readers hand over the text of such a column and [`parse_decimal_columns`] parses it.
+//! hold. Arrow's own decimal decoding is wrong for some numbers in scientific notation, and its
+//! json integer decoding goes through a `Float64` for them. So the readers hand over the text
+//! of such a column and [`parse_number_columns`] parses it.
 
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, AsArray, Decimal128Array};
+use arrow::array::{Array, ArrayRef, AsArray, Decimal128Array, UInt64Array};
 use arrow::error::ArrowError;
 use arrow::record_batch::RecordBatch;
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
@@ -29,15 +30,34 @@ use datafusion::physical_plan::SendableRecordBatchStream;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use futures::StreamExt;
 
-/// Parses the string columns of `stream` that have a precision and scale in `decimals` into
-/// `Decimal128` columns. `decimals` has one entry for each column of the stream.
+/// The type to parse the text of a column into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextNumber {
+    Decimal128 { precision: u8, scale: i8 },
+    UInt64,
+}
+
+impl TextNumber {
+    fn data_type(&self) -> DataType {
+        match self {
+            TextNumber::Decimal128 { precision, scale } => DataType::Decimal128(*precision, *scale),
+            TextNumber::UInt64 => DataType::UInt64,
+        }
+    }
+}
+
+/// Parses the string columns of `stream` that have a type in `numbers` into columns of that
+/// type. `numbers` has one entry for each column of the stream.
 ///
-/// An empty string is read as NULL, which is what an empty csv field is for a number.
-pub fn parse_decimal_columns(
+/// With `empty_as_null` an empty string is read as NULL, which is what an empty csv field is
+/// for a number. Without it an empty string is an error, like any other text that is not a
+/// number.
+pub fn parse_number_columns(
     stream: SendableRecordBatchStream,
-    decimals: Vec<Option<(u8, i8)>>,
+    numbers: Vec<Option<TextNumber>>,
+    empty_as_null: bool,
 ) -> SendableRecordBatchStream {
-    if decimals.iter().all(Option::is_none) {
+    if numbers.iter().all(Option::is_none) {
         return stream;
     }
 
@@ -45,11 +65,9 @@ pub fn parse_decimal_columns(
     let fields = input_schema
         .fields()
         .iter()
-        .zip(&decimals)
-        .map(|(field, decimal)| match decimal {
-            Some((precision, scale)) => Arc::new(
-                Field::clone(field).with_data_type(DataType::Decimal128(*precision, *scale)),
-            ),
+        .zip(&numbers)
+        .map(|(field, number)| match number {
+            Some(number) => Arc::new(Field::clone(field).with_data_type(number.data_type())),
             None => field.clone(),
         })
         .collect::<Vec<_>>();
@@ -60,23 +78,25 @@ pub fn parse_decimal_columns(
 
     let output_schema = schema.clone();
     let stream = stream.map(move |batch| {
-        parse_decimal_batch(&batch?, &output_schema, &decimals).map_err(DataFusionError::from)
+        parse_number_batch(&batch?, &output_schema, &numbers, empty_as_null)
+            .map_err(DataFusionError::from)
     });
 
     Box::pin(RecordBatchStreamAdapter::new(schema, stream))
 }
 
-fn parse_decimal_batch(
+fn parse_number_batch(
     batch: &RecordBatch,
     schema: &SchemaRef,
-    decimals: &[Option<(u8, i8)>],
+    numbers: &[Option<TextNumber>],
+    empty_as_null: bool,
 ) -> Result<RecordBatch, ArrowError> {
     let columns = batch
         .columns()
         .iter()
-        .zip(decimals)
-        .map(|(column, decimal)| match decimal {
-            Some((precision, scale)) => parse_decimal_array(column, *precision, *scale),
+        .zip(numbers)
+        .map(|(column, number)| match number {
+            Some(number) => parse_number_array(column, *number, empty_as_null),
             None => Ok(column.clone()),
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -84,24 +104,38 @@ fn parse_decimal_batch(
     RecordBatch::try_new(schema.clone(), columns)
 }
 
-fn parse_decimal_array(array: &ArrayRef, precision: u8, scale: i8) -> Result<ArrayRef, ArrowError> {
+fn parse_number_array(
+    array: &ArrayRef,
+    number: TextNumber,
+    empty_as_null: bool,
+) -> Result<ArrayRef, ArrowError> {
     let strings = array.as_string_opt::<i32>().ok_or_else(|| {
         ArrowError::CastError(format!(
-            "expected a string column to parse DECIMAL({precision}, {scale}) from, got {}",
+            "expected a string column to parse {} from, got {}",
+            number.data_type(),
             array.data_type()
         ))
     })?;
-
-    let values = strings
+    let texts = strings
         .iter()
-        .map(|text| match text {
-            Some(text) if !text.is_empty() => parse_decimal128(text, precision, scale).map(Some),
-            _ => Ok(None),
-        })
-        .collect::<Result<Decimal128Array, _>>()?
-        .with_precision_and_scale(precision, scale)?;
+        .map(|text| text.filter(|text| !(empty_as_null && text.is_empty())));
 
-    Ok(Arc::new(values))
+    Ok(match number {
+        TextNumber::Decimal128 { precision, scale } => Arc::new(
+            texts
+                .map(|text| {
+                    text.map(|text| parse_decimal128(text, precision, scale))
+                        .transpose()
+                })
+                .collect::<Result<Decimal128Array, _>>()?
+                .with_precision_and_scale(precision, scale)?,
+        ),
+        TextNumber::UInt64 => Arc::new(
+            texts
+                .map(|text| text.map(parse_uint64).transpose())
+                .collect::<Result<UInt64Array, _>>()?,
+        ),
+    })
 }
 
 /// Parses a decimal number written in plain or scientific notation and returns its value
@@ -109,17 +143,55 @@ fn parse_decimal_array(array: &ArrayRef, precision: u8, scale: i8) -> Result<Arr
 ///
 /// Every digit of the text is used, so the result is exact apart from that rounding.
 pub fn parse_decimal128(text: &str, precision: u8, scale: i8) -> Result<i128, ArrowError> {
-    let invalid = || {
-        ArrowError::ParseError(format!(
-            "can't parse the value {text} as DECIMAL({precision}, {scale})"
-        ))
-    };
-    let overflow = || {
-        ArrowError::ParseError(format!(
-            "the value {text} is out of range for DECIMAL({precision}, {scale})"
-        ))
+    let error = |kind| {
+        ArrowError::ParseError(match kind {
+            ErrorKind::Invalid => {
+                format!("can't parse the value {text} as DECIMAL({precision}, {scale})")
+            }
+            ErrorKind::Overflow => {
+                format!("the value {text} is out of range for DECIMAL({precision}, {scale})")
+            }
+        })
     };
 
+    let (negative, value) = parse_digits(text, precision, scale, true).map_err(error)?;
+    Ok(if negative { -value } else { value })
+}
+
+/// Parses an unsigned integer written in plain or scientific notation.
+///
+/// Every digit of the text is used. Fractional digits are dropped, which is what Arrow's json
+/// reader does with them.
+pub fn parse_uint64(text: &str) -> Result<u64, ArrowError> {
+    let error = |kind| {
+        ArrowError::ParseError(match kind {
+            ErrorKind::Invalid => format!("can't parse the value {text} as UInt64"),
+            ErrorKind::Overflow => format!("the value {text} is out of range for UInt64"),
+        })
+    };
+
+    // A `u64` has at most 20 digits.
+    let (negative, value) = parse_digits(text, 20, 0, false).map_err(error)?;
+    if negative && value != 0 {
+        return Err(error(ErrorKind::Overflow));
+    }
+    u64::try_from(value).map_err(|_| error(ErrorKind::Overflow))
+}
+
+enum ErrorKind {
+    Invalid,
+    Overflow,
+}
+
+/// Returns the sign of the number in `text` and the first `precision` digits at most of
+/// `|number| * 10^scale`. The digits after those are rounded half away from zero with `round`
+/// and dropped without it.
+fn parse_digits(
+    text: &str,
+    precision: u8,
+    scale: i8,
+    round: bool,
+) -> Result<(bool, i128), ErrorKind> {
     let (negative, number) = match text.as_bytes().first() {
         Some(b'-') => (true, &text[1..]),
         Some(b'+') => (false, &text[1..]),
@@ -130,9 +202,9 @@ pub fn parse_decimal128(text: &str, precision: u8, scale: i8) -> Result<i128, Ar
             let exponent = &number[idx + 1..];
             let exponent_digits = exponent.strip_prefix(['+', '-']).unwrap_or(exponent);
             if exponent_digits.is_empty() || !exponent_digits.bytes().all(|b| b.is_ascii_digit()) {
-                return Err(invalid());
+                return Err(ErrorKind::Invalid);
             }
-            // An exponent that doesn't fit is far outside the range of any decimal.
+            // An exponent that doesn't fit is far outside the range of any number here.
             let exponent = exponent
                 .parse::<i64>()
                 .unwrap_or(if exponent.starts_with('-') {
@@ -151,7 +223,7 @@ pub fn parse_decimal128(text: &str, precision: u8, scale: i8) -> Result<i128, Ar
             .chain(fraction.bytes())
             .all(|b| b.is_ascii_digit())
     {
-        return Err(invalid());
+        return Err(ErrorKind::Invalid);
     }
 
     // The value is `0.d1 d2 d3 ... * 10^point`, where the digits start at the first non-zero
@@ -175,25 +247,25 @@ pub fn parse_decimal128(text: &str, precision: u8, scale: i8) -> Result<i128, Ar
             None => 0,
         };
         if taken >= precision as i64 {
-            return Err(overflow());
+            return Err(ErrorKind::Overflow);
         }
         value = value * 10 + digit as i128;
         taken += 1;
     }
-    if taken == kept && digits.next().is_some_and(|digit| digit >= b'5') {
+    if round && taken == kept && digits.next().is_some_and(|digit| digit >= b'5') {
         value += 1;
         if value >= 10_i128.pow(precision as u32) {
-            return Err(overflow());
+            return Err(ErrorKind::Overflow);
         }
     }
 
-    Ok(if negative { -value } else { value })
+    Ok((negative, value))
 }
 
 #[cfg(test)]
 mod tests {
     use arrow::array::StringArray;
-    use arrow::datatypes::Decimal128Type;
+    use arrow::datatypes::{Decimal128Type, UInt64Type};
     use datafusion::physical_plan::common::collect;
     use futures::stream;
 
@@ -281,11 +353,57 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_parse_uint64() {
+        let cases: &[(&str, u64)] = &[
+            ("0", 0),
+            ("7", 7),
+            ("+7", 7),
+            ("18446744073709551615", u64::MAX),
+            // A `Float64` can't hold these.
+            ("9007199254740993e0", 9007199254740993),
+            ("9007199254740993.0", 9007199254740993),
+            ("1.8446744073709551615e19", u64::MAX),
+            ("184467440737095516150e-1", u64::MAX),
+            ("1e3", 1000),
+            ("0e0", 0),
+            // Fractional digits are dropped.
+            ("1.5", 1),
+            ("1.999", 1),
+            ("15e-1", 1),
+            ("0.9", 0),
+            ("-0", 0),
+            ("-0.9", 0),
+            ("1e-999999999999999999999", 0),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(parse_uint64(text).unwrap(), *expected, "{text}");
+        }
+
+        for text in [
+            "18446744073709551616",
+            "1.8446744073709551616e19",
+            "1e20",
+            "1e999999999999999999999",
+            "-1",
+            "-1.5",
+            "",
+            "-",
+            "1e",
+            "1,5",
+            " 1",
+            "NaN",
+        ] {
+            assert!(parse_uint64(text).is_err(), "{text}");
+        }
+    }
+
     #[tokio::test]
-    async fn test_parse_decimal_columns() {
+    async fn test_parse_number_columns() {
         let schema = Arc::new(Schema::new(vec![
             Field::new("k", DataType::Utf8, true),
             Field::new("price", DataType::Utf8, true),
+            Field::new("id", DataType::Utf8, true),
         ]));
         let batch = RecordBatch::try_new(
             schema.clone(),
@@ -297,6 +415,12 @@ mod tests {
                     None,
                     Some("-0.005"),
                 ])),
+                Arc::new(StringArray::from(vec![
+                    Some("9007199254740993e0"),
+                    Some(""),
+                    None,
+                    Some("18446744073709551615"),
+                ])),
             ],
         )
         .unwrap();
@@ -305,9 +429,15 @@ mod tests {
             stream::iter(vec![Ok(batch.clone())]),
         ));
 
-        let stream = parse_decimal_columns(stream, vec![None, Some((38, 2))]);
+        let price = TextNumber::Decimal128 {
+            precision: 38,
+            scale: 2,
+        };
+        let numbers = vec![None, Some(price), Some(TextNumber::UInt64)];
+        let stream = parse_number_columns(stream, numbers.clone(), true);
+        let stream_schema = stream.schema();
         assert_eq!(
-            stream.schema().field(1),
+            stream_schema.field(1),
             &Field::new("price", DataType::Decimal128(38, 2), true)
         );
         let batches = collect(stream).await.unwrap();
@@ -318,12 +448,36 @@ mod tests {
             prices.iter().collect::<Vec<_>>(),
             vec![Some(125), None, None, Some(-1)]
         );
+        assert_eq!(
+            stream_schema.field(2),
+            &Field::new("id", DataType::UInt64, true)
+        );
+        let ids = batches[0].column(2).as_primitive::<UInt64Type>();
+        assert_eq!(
+            ids.iter().collect::<Vec<_>>(),
+            vec![Some(9007199254740993), None, None, Some(u64::MAX)]
+        );
+
+        // An empty string is only NULL when the caller asks for it.
+        let stream = Box::pin(RecordBatchStreamAdapter::new(
+            schema.clone(),
+            stream::iter(vec![Ok(batch.clone())]),
+        ));
+        let error = collect(parse_number_columns(stream, numbers, false))
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("can't parse the value  as DECIMAL(38, 2)"),
+            "{error}"
+        );
 
         let stream = Box::pin(RecordBatchStreamAdapter::new(
             schema,
             stream::iter(vec![Ok(batch)]),
         ));
-        let stream = parse_decimal_columns(stream, vec![Some((38, 2)), None]);
+        let stream = parse_number_columns(stream, vec![Some(price), None, None], true);
         let error = collect(stream).await.unwrap_err();
         assert!(
             error
