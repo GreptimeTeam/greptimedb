@@ -642,7 +642,6 @@ impl ScanRegion {
                 self.version.options.sst_format == Some(crate::sst::FormatType::Narthex),
             )
             .with_narthex_series_indexes(
-                self.version.truncated_entry_id,
                 self.version
                     .ssts
                     .series_indexes()
@@ -1010,7 +1009,6 @@ pub struct ScanInput {
     pub(crate) memtables: Vec<MemRangeBuilder>,
     /// Handles to SST files to scan.
     pub(crate) files: Vec<FileHandle>,
-    pub(crate) truncated_entry_id: Option<crate::wal::EntryId>,
     pub(crate) narthex_series_indexes: Vec<FileHandle>,
     /// Narthex regions require prepared reads, even before the first flush.
     pub(crate) narthex_format: bool,
@@ -1108,7 +1106,6 @@ impl ScanInput {
                 memtables: Vec::new(),
                 files: Vec::new(),
                 narthex_series_indexes: Vec::new(),
-                truncated_entry_id: None,
                 narthex_format: false,
                 time_pruned_files: HashSet::new(),
                 primary_key_mapper: OnceLock::new(),
@@ -1349,12 +1346,7 @@ impl ScanInputBuilder {
     }
 
     /// Sets the pinned authoritative series indexes.
-    fn with_narthex_series_indexes(
-        mut self,
-        truncated_entry_id: Option<crate::wal::EntryId>,
-        indexes: Vec<FileHandle>,
-    ) -> Self {
-        self.input.truncated_entry_id = truncated_entry_id;
+    fn with_narthex_series_indexes(mut self, indexes: Vec<FileHandle>) -> Self {
         self.input.narthex_series_indexes = indexes;
         self
     }

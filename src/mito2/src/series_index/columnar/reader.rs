@@ -51,6 +51,17 @@ pub(crate) struct ColumnarReader {
     handle: SeriesIndexFileHandle,
 }
 impl ColumnarReader {
+    /// Opening validates the manifest, but parts are normally read lazily.
+    pub(crate) async fn parts_exist(&self) -> Result<bool> {
+        for part in &self.manifest.files {
+            let path = self.manifest.part_path(part.part_id);
+            if !self.store.exists(&path).await.context(OpenDalSnafu)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     pub(crate) async fn open_cached(
         store: ObjectStore,
         handle: SeriesIndexFileHandle,

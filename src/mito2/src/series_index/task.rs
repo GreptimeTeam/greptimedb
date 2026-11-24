@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use common_telemetry::{info, warn};
 use object_store::ObjectStore;
-use snafu::{ResultExt, ensure};
+use snafu::ensure;
 use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedReceiver};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -33,6 +33,8 @@ use crate::metrics::{
 };
 use crate::read::series_candidate::is_sparse_metric_metadata;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionMapRef, RegionRoleState};
+use crate::series_index::SeriesIndexFileHandle;
+use crate::series_index::columnar::reader::ColumnarReader;
 use crate::series_index::maintenance::{ReconcileStats, reconcile_series_indexes_with_mode};
 use crate::series_index::purger::{IndexFilePurger, PurgeRequest, run_index_purge_task};
 use crate::time_provider::TimeProviderRef;
@@ -237,31 +239,27 @@ impl SeriesIndexTask {
     async fn reconcile_manual(&mut self, region: MitoRegionRef) -> Result<ReconcileStats> {
         self.validate_manual_region(&region)?;
         self.refresh_usage();
-        let mut missing = HashSet::new();
+        let mut unusable = HashSet::new();
         let native = region.version().options.sst_format == Some(crate::sst::FormatType::Narthex);
         if native {
             for index in region.version().ssts.series_indexes().values() {
                 let dir = region.access_layer.build_region_dir(index.region_id());
-                if let Some(objects) = index.meta_ref().narthex_objects(&dir) {
-                    for object in objects {
-                        if !region
-                            .access_layer
-                            .object_store()
-                            .exists(&object.path)
-                            .await
-                            .context(crate::error::OpenDalSnafu)?
-                        {
-                            missing.insert(index.file_id());
-                            break;
-                        }
-                    }
+                let handle = SeriesIndexFileHandle::from_narthex(index.clone(), &dir)?;
+                let store = region.access_layer.object_store().clone();
+                let readable = match ColumnarReader::open(store, handle).await {
+                    Ok(reader) => reader.parts_exist().await?,
+                    Err(error) if error.is_unusable_series_index() => false,
+                    Err(error) => return Err(error),
+                };
+                if !readable {
+                    unusable.insert(index.file_id());
                 }
             }
         }
         let mut total = ReconcileStats::default();
         loop {
             let result = self
-                .reconcile_region_with_mode(region.clone(), true, &missing)
+                .reconcile_region_with_mode(region.clone(), true, &unusable)
                 .await;
             self.refresh_usage();
             let next = result?;
@@ -287,20 +285,18 @@ impl SeriesIndexTask {
         &self,
         region: MitoRegionRef,
         manual: bool,
-        missing: &HashSet<crate::sst::file::RegionFileId>,
+        unusable: &HashSet<crate::sst::file::RegionFileId>,
     ) -> Result<ReconcileStats> {
+        if region.version().options.sst_format == Some(crate::sst::FormatType::Narthex) {
+            if region.state() != RegionRoleState::Leader(RegionLeaderState::Writable) {
+                return Ok(ReconcileStats::default());
+            }
+            return self.reconcile_native(region, manual, unusable).await;
+        }
         // Full capacity defers builds, but cleanup must still reclaim published usage.
         let allow_builds = self.disk_usage.load(Ordering::Relaxed) < self.max_size;
         if !allow_builds {
             SERIES_INDEX_CAPACITY_DEFERRED.inc();
-        }
-        if region.version().options.sst_format == Some(crate::sst::FormatType::Narthex) {
-            if !allow_builds
-                || region.state() != RegionRoleState::Leader(RegionLeaderState::Writable)
-            {
-                return Ok(ReconcileStats::default());
-            }
-            return self.reconcile_native(region, manual, missing).await;
         }
         let result = reconcile_series_indexes_with_mode(
             self.worker_id,
@@ -326,7 +322,7 @@ impl SeriesIndexTask {
         &self,
         region: MitoRegionRef,
         manual: bool,
-        missing: &HashSet<crate::sst::file::RegionFileId>,
+        unusable: &HashSet<crate::sst::file::RegionFileId>,
     ) -> Result<ReconcileStats> {
         use crate::request::{
             RegionEditKind, RegionEditRequest, WorkerRequest, WorkerRequestWithTime,
@@ -388,7 +384,6 @@ impl SeriesIndexTask {
                     };
                     let proof = index.coverage.as_ref()?;
                     (proof.region_id == region.region_id
-                        && proof.truncated_entry_id == version.truncated_entry_id
                         && proof
                             .windows
                             .iter()
@@ -398,7 +393,7 @@ impl SeriesIndexTask {
                 .collect();
             if bucket.files.iter().filter(|f| eligible(f)).all(|f| {
                 existing.iter().any(|(index, p)| {
-                    !missing.contains(&index.file_id())
+                    !unusable.contains(&index.file_id())
                         && p.schema_version == version.metadata.schema_version
                         && p.covers(f.meta_ref())
                 })
@@ -409,7 +404,6 @@ impl SeriesIndexTask {
             let coverage = NarthexCoverage {
                 region_id: region.region_id,
                 schema_version: version.metadata.schema_version,
-                truncated_entry_id: version.truncated_entry_id,
                 windows: vec![CertifiedWindow {
                     start: bucket.start,
                     end: bucket.end,
@@ -473,16 +467,7 @@ impl SeriesIndexTask {
             .regions
             .list_regions()
             .iter()
-            .map(|region| {
-                region.series_index_version().disk_usage()
-                    + region
-                        .version()
-                        .ssts
-                        .series_indexes()
-                        .values()
-                        .map(|file| file.meta_ref().file_size)
-                        .sum::<u64>()
-            })
+            .map(|region| region.series_index_version().disk_usage())
             .sum();
         self.report_usage(usage);
     }

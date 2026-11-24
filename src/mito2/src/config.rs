@@ -116,8 +116,8 @@ pub struct MitoConfig {
     pub experimental_enable_series_index: bool,
     /// Paired artifact format (default legacy).
     pub experimental_series_index_format: SeriesIndexFormat,
-    /// Approximate series and range index size limit in open regions (default: 5 GiB).
-    /// Workers share a periodically refreshed estimate and skip maintenance when full.
+    /// Approximate size limit for local series and range index sidecars in open regions (default: 5 GiB).
+    /// Workers share a periodically refreshed estimate and defer sidecar builds when full.
     /// In-flight reconciliation can exceed the limit; closed-region files are not counted.
     pub experimental_series_index_max_size: ReadableSize,
     /// Whether to build and query range indexes when series indexes are enabled (default false).

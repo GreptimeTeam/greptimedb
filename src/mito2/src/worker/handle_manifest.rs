@@ -438,6 +438,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             if !Arc::ptr_eq(origin, &region)
                 || region.is_staging()
                 || current.metadata.schema_version != snapshot.metadata.schema_version
+                // Full truncate clears published indexes. Fence in-flight builds here
+                // because the index set can be empty on both sides of the truncate.
                 || current.truncated_entry_id != snapshot.truncated_entry_id
                 || !current.pending_tails.is_empty()
                 || current

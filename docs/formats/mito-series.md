@@ -9,26 +9,20 @@ The format has two artifact roles: `NarthexSamples` owns sample data, and
 Region manifests serialize these roles as `narthex_samples` and
 `narthex_series_index`.
 
-## Authoritative storage and derived sidecars
+## Region manifest
 
 With `sst_format = 'narthex'`, samples are authoritative SSTs. Each artifact owns
 `<region_dir>/<file_id>/manifest.json` and its `part-<n>.samples` or
-`part-<n>.series` objects. The region manifest records the manifest size and a `parts` array in part-ID order.
-Each part record contains its encoded `file_size` in bytes. Both artifact types
-use ordinary SST lifetimes and reclamation.
+`part-<n>.series` objects. The region manifest records the manifest size and a
+`parts` array in part-ID order.
+Each part record contains its encoded `file_size` in bytes.
 
-A full native series build writes a `coverage` record into the region manifest.
-It identifies the logical region, schema version and truncate entry, and records
-a half-open time window with an inclusive sequence frontier. A scan can reuse
-the index after sample compaction if the replacement file fits inside that
-window and its sequence bound is known and at or below the frontier. Newer
-files and files with unknown bounds still require sample-key discovery. Older
-indexes record their exact source file IDs in `sources`.
-
-The same codecs also support rebuildable sidecars over Parquet SSTs. The catalog
-paths, source-SST coverage, daily consolidation, and local-cache rollout described
-below apply to that sidecar mode. They do not make authoritative Narthex samples
-rebuildable or subject them to local-cache eviction.
+In the region manifest, a native series index may carry a `coverage` object
+with `region_id`, `schema_version`, and an ordered array of `windows`. Each
+window describes a half-open timestamp interval `[start, end)` and an inclusive
+sequence upper bound `frontier`. Gaps between windows are permitted. Indexes
+without `coverage` identify their sample files by region-qualified IDs in
+`sources`.
 
 ## Wire specification
 
@@ -439,10 +433,3 @@ stored. A block contains at most 8,388,608 series. The manifest is at most 64 Mi
 Offsets, lengths, and counts must fit their enclosing areas without arithmetic
 overflow. Counts must not imply allocations larger than the enclosing decoded
 payload permits.
-
-## Local cache compatibility
-
-The local series-index cache has a root `version` marker independent of this
-format version. Before workers start, a missing or incompatible marker causes
-the entire derived cache (including samples, ranges, and catalogs) to be reset.
-Matching-version restarts preserve the cache.

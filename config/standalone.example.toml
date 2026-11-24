@@ -796,8 +796,8 @@ compress_manifest = false
 ## Under development. Select legacy Parquet indexes or paired columnar series and samples.
 #+ experimental_series_index_format = "legacy"
 
-## Approximate series and range index size limit in open regions, shared across workers.
-## Workers periodically refresh usage and skip maintenance when full. In-flight reconciliation
+## Approximate size limit for local series and range index sidecars in open regions, shared across workers.
+## Workers periodically refresh usage and defer sidecar builds when full. In-flight reconciliation
 ## can exceed the limit. Closed-region files, temporary output, catalogs, and old snapshots
 ## retained by readers are not counted.
 ## Minimum: 1KiB. Takes effect on restart.

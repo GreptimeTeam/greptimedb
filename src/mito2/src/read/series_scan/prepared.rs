@@ -489,16 +489,7 @@ impl ColumnarPreparedSource {
         match attempt(has_indexes).await {
             // Parts are opened lazily. Discard every candidate from the failed
             // attempt before discovering keys from the same pinned sample snapshot.
-            Err(error)
-                if has_indexes
-                    && (error.is_object_not_found()
-                        || matches!(
-                            error,
-                            Error::InvalidMeta { .. } | Error::UnsupportedOperation { .. }
-                        )) =>
-            {
-                attempt(false).await
-            }
+            Err(error) if has_indexes && error.is_unusable_series_index() => attempt(false).await,
             result => result,
         }
     }

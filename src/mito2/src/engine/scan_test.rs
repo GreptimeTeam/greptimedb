@@ -84,20 +84,7 @@ async fn test_narthex_sparse_upsert_after_adding_nullable_tag() -> WhateverResul
     check_sparse_upsert_after_adding_nullable_tag("narthex").await
 }
 
-async fn check_sparse_upsert_after_adding_nullable_tag(format: &str) -> WhateverResult<()> {
-    use datatypes::schema::ColumnSchema;
-    use store_api::metadata::ColumnMetadata;
-    use store_api::region_request::AddColumn;
-
-    let mut env = TestEnv::new().await;
-    let engine = env
-        .create_engine(MitoConfig {
-            experimental_enable_series_index: format == "narthex",
-            schedule_compaction_after_edit: false,
-            ..Default::default()
-        })
-        .await;
-    let region_id = RegionId::new(1024, 0);
+fn sparse_metric_create_request(format: &str) -> store_api::region_request::RegionCreateRequest {
     let mut request = CreateRequestBuilder::new()
         .tag_num(1)
         .field_num(1)
@@ -121,6 +108,125 @@ async fn check_sparse_upsert_after_adding_nullable_tag(format: &str) -> Whatever
     request
         .primary_key
         .splice(0..0, reserved.primary_key.into_iter().take(2));
+    request
+}
+
+fn build_series_index_request() -> RegionRequest {
+    RegionRequest::BuildIndex(store_api::region_request::RegionBuildIndexRequest {
+        options: Some(api::v1::region::build_index_request::Options::SeriesIndex(
+            Default::default(),
+        )),
+    })
+}
+
+#[tokio::test]
+async fn test_narthex_manual_repair_with_full_sidecar_budget() -> WhateverResult<()> {
+    let mut env = TestEnv::new().await;
+    let budget = ReadableSize(1024);
+    let engine = env
+        .create_engine(MitoConfig {
+            experimental_enable_series_index: true,
+            experimental_series_index_max_size: budget,
+            ..Default::default()
+        })
+        .await;
+    let native = RegionId::new(1024, 0);
+    let local = RegionId::new(1025, 0);
+    for (id, format) in [(native, "narthex"), (local, "flat")] {
+        engine
+            .handle_request(
+                id,
+                RegionRequest::Create(sparse_metric_create_request(format)),
+            )
+            .await?;
+        let region = engine.find_region(id).unwrap();
+        let key = new_sparse_primary_key(&["api"], &region.metadata(), 42, 7);
+        engine
+            .handle_request(id, test_util::sparse_metric_put(key, 1000, Some(1.0)))
+            .await?;
+        test_util::flush_region(&engine, id, None).await;
+        engine
+            .handle_request(id, build_series_index_request())
+            .await?;
+        if id == native {
+            let version = region.version();
+            let index = version.ssts.series_indexes().values().next().unwrap();
+            assert!(index.meta_ref().file_size >= budget.as_bytes());
+        } else {
+            assert!(region.series_index_version().disk_usage() >= budget.as_bytes());
+        }
+    }
+    let region = engine.find_region(native).unwrap();
+    let snapshot = region.version();
+    let index = snapshot.ssts.series_indexes().values().next().unwrap();
+    let handle = crate::series_index::SeriesIndexFileHandle::from_narthex(
+        index.clone(),
+        &region.access_layer.build_region_dir(native),
+    )?;
+    let store = region.access_layer.object_store();
+    let path = handle.manifest_path();
+    let bytes = store.read(&path).await.unwrap().to_bytes();
+    let mut manifest: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(manifest["version"], 1);
+    manifest["version"] = json!(2);
+    let incompatible = serde_json::to_vec(&manifest).unwrap();
+    assert_eq!(incompatible.len(), bytes.len());
+    store.write(&path, incompatible).await.unwrap();
+    assert!(matches!(
+        crate::series_index::columnar::reader::ColumnarReader::open(store.clone(), handle).await,
+        Err(Error::UnsupportedOperation { .. })
+    ));
+    engine
+        .handle_request(native, build_series_index_request())
+        .await?;
+    assert!(
+        !region
+            .version()
+            .ssts
+            .series_indexes()
+            .contains_key(&index.meta_ref().file_id)
+    );
+    let repaired = region.version();
+    let index = repaired.ssts.series_indexes().values().next().unwrap();
+    let handle = crate::series_index::SeriesIndexFileHandle::from_narthex(
+        index.clone(),
+        &region.access_layer.build_region_dir(native),
+    )?;
+    crate::series_index::columnar::reader::ColumnarReader::open(store.clone(), handle).await?;
+    engine.stop().await?;
+    Ok(())
+}
+
+async fn check_sparse_upsert_after_adding_nullable_tag(format: &str) -> WhateverResult<()> {
+    use datatypes::schema::ColumnSchema;
+    use store_api::metadata::ColumnMetadata;
+    use store_api::region_request::AddColumn;
+
+    let series_reads = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut env = TestEnv::new().await;
+    if format == "narthex" {
+        let reads = series_reads.clone();
+        let layer = object_store::layers::mock::MockLayerBuilder::default()
+            .reader_factory(Arc::new(move |path, _, inner| {
+                if path.ends_with(".series") {
+                    reads.lock().unwrap().push(path.to_owned());
+                }
+                inner
+            }))
+            .build()
+            .unwrap();
+        env = env.with_mock_layer(layer);
+    }
+    let engine = env
+        .create_engine(MitoConfig {
+            experimental_enable_series_index: format == "narthex",
+            sst_meta_cache_size: ReadableSize(0),
+            schedule_compaction_after_edit: false,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1024, 0);
+    let request = sparse_metric_create_request(format);
     let table_dir = request.table_dir.clone();
     engine
         .handle_request(region_id, RegionRequest::Create(request))
@@ -230,14 +336,7 @@ async fn check_sparse_upsert_after_adding_nullable_tag(format: &str) -> Whatever
                 ))
         );
         engine
-            .handle_request(
-                region_id,
-                RegionRequest::BuildIndex(store_api::region_request::RegionBuildIndexRequest {
-                    options: Some(api::v1::region::build_index_request::Options::SeriesIndex(
-                        Default::default(),
-                    )),
-                }),
-            )
+            .handle_request(region_id, build_series_index_request())
             .await?;
         let snapshot = region.version();
         let index = snapshot.ssts.series_indexes().values().next().unwrap();
@@ -351,21 +450,32 @@ async fn check_sparse_upsert_after_adding_nullable_tag(format: &str) -> Whatever
             crate::sst::file::FileFormat::NarthexSamples(_)
         )));
         reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
-        let stream = engine
-            .scan_to_stream(region_id, ScanRequest::default())
-            .await?;
-        let batches = RecordBatches::try_collect(stream).await?;
-        assert_eq!(batches.pretty_print()?, unindexed);
+        let region = engine.find_region(region_id).unwrap();
         let objects = index
             .meta_ref()
             .narthex_objects(&region.access_layer.build_region_dir(region_id))
             .unwrap();
-        region
-            .access_layer
-            .object_store()
-            .delete(&objects[0].path)
-            .await
-            .unwrap();
+        let part = &objects
+            .iter()
+            .find(|object| object.path.ends_with(".series"))
+            .unwrap()
+            .path;
+        series_reads.lock().unwrap().clear();
+        let scan = async || -> WhateverResult<String> {
+            let stream = engine
+                .scan_to_stream(region_id, ScanRequest::default())
+                .await?;
+            Ok(RecordBatches::try_collect(stream).await?.pretty_print()?)
+        };
+        assert_eq!(scan().await?, unindexed);
+        assert!(
+            series_reads
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|path| path.trim_start_matches('/') == part.trim_start_matches('/')),
+            "scan preparation must read the original index for compacted samples"
+        );
         let late = new_sparse_primary_key(&["late"], &region.metadata(), 42, 7);
         engine
             .handle_request(
@@ -374,14 +484,15 @@ async fn check_sparse_upsert_after_adding_nullable_tag(format: &str) -> Whatever
             )
             .await?;
         test_util::flush_region(&engine, region_id, None).await;
-        let rows = RecordBatches::try_collect(
-            engine
-                .scan_to_stream(region_id, ScanRequest::default())
-                .await?,
-        )
-        .await?
-        .pretty_print()?;
+        let rows = scan().await?;
         assert!(rows.contains("late") && rows.contains("api"), "{rows}");
+        region
+            .access_layer
+            .object_store()
+            .delete(part)
+            .await
+            .unwrap();
+        assert_eq!(scan().await?, rows);
     }
     engine.stop().await?;
     Ok(())
