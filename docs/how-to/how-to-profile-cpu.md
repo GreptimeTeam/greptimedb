@@ -1,6 +1,8 @@
 # Profiling CPU
 
 ## HTTP API
+When the server is started with a user provider, add `-u <username>:<password>` to the `curl` commands below.
+
 Sample at 99 Hertz, for 5 seconds, output report in [protobuf format](https://github.com/google/pprof/blob/master/proto/profile.proto).
 ```bash
 curl -X POST -s '0:4000/debug/prof/cpu' > /tmp/pprof.out

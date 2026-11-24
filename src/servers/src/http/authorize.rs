@@ -39,7 +39,7 @@ use crate::error::{
 use crate::http::header::{GREPTIME_TIMEZONE_HEADER_NAME, GreptimeDbName};
 use crate::http::result::error_result::ErrorResponse;
 use crate::http::splunk::is_splunk_request;
-use crate::http::{AUTHORIZATION_HEADER, HTTP_API_PREFIX, PUBLIC_API_PREFIX};
+use crate::http::{AUTHORIZATION_HEADER, HTTP_API_PREFIX, PUBLIC_API_PREFIX, is_namespace};
 use crate::influxdb::{is_influxdb_request, is_influxdb_v2_request};
 
 /// AuthState is a holder state for [`UserProviderRef`]
@@ -424,7 +424,7 @@ fn need_auth<B>(req: &Request<B>) -> bool {
         }
     }
 
-    path.starts_with(HTTP_API_PREFIX)
+    path.starts_with(HTTP_API_PREFIX) || is_namespace(path, "/debug")
 }
 
 fn extract_param_from_query<'a>(query: &'a str, param: &'a str) -> Option<&'a str> {
