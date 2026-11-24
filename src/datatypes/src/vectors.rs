@@ -260,8 +260,7 @@ macro_rules! impl_validity_for_vector {
 macro_rules! impl_get_for_vector {
     ($array: expr, $index: ident) => {
         if $array.is_valid($index) {
-            // Safety: The index have been checked by `is_valid()`.
-            unsafe { $array.value_unchecked($index).into() }
+            $array.value($index).into()
         } else {
             Value::Null
         }
@@ -271,8 +270,7 @@ macro_rules! impl_get_for_vector {
 macro_rules! impl_get_ref_for_vector {
     ($array: expr, $index: ident) => {
         if $array.is_valid($index) {
-            // Safety: The index have been checked by `is_valid()`.
-            unsafe { $array.value_unchecked($index).into() }
+            $array.value($index).into()
         } else {
             ValueRef::Null
         }
