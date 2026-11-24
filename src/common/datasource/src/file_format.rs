@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod csv;
+pub mod decimal;
 pub mod json;
 pub mod orc;
 pub mod parquet;
