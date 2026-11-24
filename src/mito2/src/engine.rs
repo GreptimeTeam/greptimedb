@@ -1410,12 +1410,14 @@ impl EngineInner {
         let region = self.find_region(region_id)?;
         let was_leader = region.region_role() == RegionRole::Leader;
         let previous = region.set_role(role);
+        let mut ended_wait = None;
         if role == RegionRole::Leader && !was_leader {
             // No lease comes for a direct promotion, so it counts as one. A leader is not promoted.
-            region.manifest_ctx.record_leader_lease(Instant::now());
+            ended_wait = region.manifest_ctx.record_leader_lease(Instant::now());
         }
         self.notify_if_can_no_longer_replay(&region, previous);
         self.notify_if_became_writable(&region, previous);
+        self.notify_if_leader_lease_wait_ended(&region, ended_wait);
         Ok(())
     }
 

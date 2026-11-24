@@ -1302,6 +1302,27 @@ async fn test_lease_outside_writable_leader_defers_work(#[case] again: LeaderAga
     assert_eq!(wait_persisted_partition_expr(&engine).await, expr_json);
 }
 
+/// A direct promotion of a region that awaits its Leader lease counts as that lease, so it ends
+/// the wait and runs the work the wait held back.
+#[tokio::test]
+async fn test_direct_promotion_ends_wait_and_runs_deferred_work() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("direct-promotion-ends-wait").await;
+    let listener = Arc::new(LeaseWaitEndedListener::default());
+    let (engine, expr_json) = catchup_region_with_backfill(&mut env, Some(listener.clone())).await;
+    let region = engine.get_region(REGION_ID).unwrap();
+    grant_at(&engine, RegionRole::DowngradingLeader, Instant::now(), None);
+    assert!(region.manifest_ctx.awaits_leader_lease());
+
+    engine
+        .set_region_role(REGION_ID, RegionRole::Leader)
+        .unwrap();
+    assert!(!region.manifest_ctx.awaits_leader_lease());
+    listener.wait_for_end().await;
+    listener.wait_for_backfill_persists(1).await;
+    assert_eq!(wait_persisted_partition_expr(&engine).await, expr_json);
+}
+
 /// Only a change that makes the region a writable leader tells the worker, not the Leader lease
 /// that every heartbeat grants a writable leader.
 #[tokio::test]

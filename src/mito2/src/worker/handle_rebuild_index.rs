@@ -222,7 +222,8 @@ impl<S> RegionWorkerLoop<S> {
         });
     }
 
-    /// Handles an index build request as [Self::handle_rebuild_index_inner] does.
+    /// Handles an index build request that is not a retry. Returns true if the state of the
+    /// registered region stopped it before it scheduled every build.
     pub(crate) async fn handle_rebuild_index(
         &mut self,
         request: BuildIndexRequest,
