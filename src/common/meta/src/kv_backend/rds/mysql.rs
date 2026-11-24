@@ -42,9 +42,6 @@ use crate::rpc::store::{
 
 const MYSQL_STORE_NAME: &str = "mysql_store";
 
-/// Local batching budget when the server does not expose its packet limit.
-const FALLBACK_MAX_ALLOWED_PACKET: usize = 4 * 1024 * 1024;
-
 // MySQL prepared statements accept at most 65,535 parameters.
 const MAX_BATCH_KEYS: usize = u16::MAX as usize;
 const MAX_BATCH_PUT_KVS: usize = MAX_BATCH_KEYS / 2;
@@ -365,19 +362,19 @@ impl Transaction<'_> for MySqlTxnClient {
 
 pub struct MySqlExecutorFactory {
     pool: Arc<Pool<MySql>>,
-    max_allowed_packet: usize,
+    max_allowed_packet: Option<usize>,
 }
 
 impl MySqlExecutorFactory {
     async fn new(pool: MySqlPool) -> Self {
         const SQL: &str = "SELECT CAST(@@SESSION.max_allowed_packet AS UNSIGNED)";
         let max_allowed_packet = match sqlx::query_scalar::<_, u64>(SQL).fetch_one(&pool).await {
-            Ok(bytes) => bytes as usize,
+            Ok(bytes) => Some(bytes as usize),
             Err(err) => {
                 warn!(
-                    "Failed to read MySQL max_allowed_packet, using {FALLBACK_MAX_ALLOWED_PACKET} bytes: {err}"
+                    "Failed to read MySQL max_allowed_packet, writing one key/value pair per statement: {err}"
                 );
-                FALLBACK_MAX_ALLOWED_PACKET
+                None
             }
         };
         Self {
@@ -575,7 +572,9 @@ impl MySqlStore {
     /// Plans both PREPARE and EXECUTE packets before any write. A byte split
     /// requires the same transaction as a split at the bind-parameter limit.
     fn put_chunk_ranges(&self, kvs: &[KeyValue]) -> Result<Vec<std::ops::Range<usize>>> {
-        let limit = self.executor_factory.max_allowed_packet;
+        let Some(limit) = self.executor_factory.max_allowed_packet else {
+            return Ok((0..kvs.len()).map(|idx| idx..idx + 1).collect());
+        };
         // Reserve 128 bytes for the fixed INSERT text and PREPARE command,
         // plus the table name and eight bytes per "(?, ?), " placeholder.
         let prepare_base = 128 + self.sql_template_set.table_name.len();
@@ -807,12 +806,12 @@ mod tests {
     use crate::test_util::test_certs_dir;
 
     #[tokio::test]
-    async fn test_packet_limit_query_failure_uses_fallback() {
+    async fn test_packet_limit_query_failure_leaves_limit_unknown() {
         let pool =
             sqlx::mysql::MySqlPoolOptions::new().connect_lazy_with(MySqlConnectOptions::new());
         pool.close().await;
         let factory = MySqlExecutorFactory::new(pool).await;
-        assert_eq!(factory.max_allowed_packet, 4 * 1024 * 1024);
+        assert_eq!(factory.max_allowed_packet, None);
     }
 
     #[tokio::test]
@@ -824,7 +823,7 @@ mod tests {
             txn_retry_count: RDS_STORE_TXN_RETRY_COUNT,
             executor_factory: MySqlExecutorFactory {
                 pool: Arc::new(pool.clone()),
-                max_allowed_packet: usize::MAX,
+                max_allowed_packet: None,
             },
             sql_template_set: MySqlTemplateFactory::new("close_test").build(),
             _phantom: PhantomData,
@@ -1336,7 +1335,7 @@ mod tests {
         // The trigger rejects the last chunk after the first one succeeds.
         let mut store = store;
         let packet_limit = store.executor_factory.max_allowed_packet;
-        store.executor_factory.max_allowed_packet = 1024;
+        store.executor_factory.max_allowed_packet = Some(1024);
         let make_kv = |key: u8, value| KeyValue {
             key: vec![key],
             value,
@@ -1369,6 +1368,32 @@ mod tests {
             .put_chunk_ranges(&[make_kv(1, vec![0; 1024])])
             .unwrap_err();
         assert!(err.to_string().contains("max_allowed_packet"));
+        store.executor_factory.max_allowed_packet = None;
+        let large = make_kv(4, vec![4; 5 * 1024 * 1024]);
+        let kvs = vec![large.clone(), make_kv(5, b"fail".to_vec())];
+        assert_eq!(store.put_chunk_ranges(&kvs).unwrap(), [0..1, 1..2]);
+        // When the server accepts this value, losing the limit probe must not reject it.
+        if packet_limit.is_some_and(|limit| limit > large.value.len() + 1024) {
+            store
+                .batch_put(BatchPutRequest {
+                    kvs: vec![large.clone()],
+                    prev_kv: false,
+                })
+                .await
+                .unwrap();
+            assert_eq!(reader.get(&large.key).await.unwrap().unwrap(), large);
+        }
+        let kvs = vec![make_kv(6, b"ok".to_vec()), make_kv(7, b"fail".to_vec())];
+        assert!(
+            store
+                .batch_put(BatchPutRequest {
+                    kvs,
+                    prev_kv: false
+                })
+                .await
+                .is_err()
+        );
+        assert!(reader.get(&[6]).await.unwrap().is_none());
         store.executor_factory.max_allowed_packet = packet_limit;
         let pool = store.executor_factory.pool.clone();
         crate::kv_backend::test::check_segmented_checkpoint(Arc::new(store), Arc::new(reader))
