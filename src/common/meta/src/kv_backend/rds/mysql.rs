@@ -41,6 +41,8 @@ use crate::rpc::store::{
 };
 
 const MYSQL_STORE_NAME: &str = "mysql_store";
+/// Local batching budget when the server does not expose its packet limit.
+const FALLBACK_MAX_ALLOWED_PACKET: usize = 16 * 1024 * 1024;
 
 // MySQL prepared statements accept at most 65,535 parameters.
 const MAX_BATCH_KEYS: usize = u16::MAX as usize;
@@ -366,16 +368,21 @@ pub struct MySqlExecutorFactory {
 }
 
 impl MySqlExecutorFactory {
-    async fn new(pool: MySqlPool) -> Result<Self> {
+    async fn new(pool: MySqlPool) -> Self {
         const SQL: &str = "SELECT CAST(@@SESSION.max_allowed_packet AS UNSIGNED)";
-        let max_allowed_packet: u64 = sqlx::query_scalar(SQL)
-            .fetch_one(&pool)
-            .await
-            .context(MySqlExecutionSnafu { sql: SQL })?;
-        Ok(Self {
+        let max_allowed_packet = match sqlx::query_scalar::<_, u64>(SQL).fetch_one(&pool).await {
+            Ok(bytes) => bytes as usize,
+            Err(err) => {
+                warn!(
+                    "Failed to read MySQL max_allowed_packet, using {FALLBACK_MAX_ALLOWED_PACKET} bytes: {err}"
+                );
+                FALLBACK_MAX_ALLOWED_PACKET
+            }
+        };
+        Self {
             pool: Arc::new(pool),
-            max_allowed_packet: max_allowed_packet as usize,
-        })
+            max_allowed_packet,
+        }
     }
 }
 
@@ -771,7 +778,7 @@ impl MySqlStore {
             max_txn_ops,
             sql_template_set,
             txn_retry_count: RDS_STORE_TXN_RETRY_COUNT,
-            executor_factory: MySqlExecutorFactory::new(pool).await?,
+            executor_factory: MySqlExecutorFactory::new(pool).await,
             _phantom: PhantomData,
         }))
     }
@@ -797,6 +804,15 @@ mod tests {
     use crate::maybe_skip_mysql_integration_test;
     use crate::rpc::store::{PutRequest, RangeRequest};
     use crate::test_util::test_certs_dir;
+
+    #[tokio::test]
+    async fn test_packet_limit_query_failure_uses_fallback() {
+        let pool =
+            sqlx::mysql::MySqlPoolOptions::new().connect_lazy_with(MySqlConnectOptions::new());
+        pool.close().await;
+        let factory = MySqlExecutorFactory::new(pool).await;
+        assert_eq!(factory.max_allowed_packet, FALLBACK_MAX_ALLOWED_PACKET);
+    }
 
     #[tokio::test]
     async fn test_close_backend() {
@@ -909,7 +925,7 @@ mod tests {
             max_txn_ops: 128,
             sql_template_set: sql_templates,
             txn_retry_count: RDS_STORE_TXN_RETRY_COUNT,
-            executor_factory: MySqlExecutorFactory::new(pool).await.unwrap(),
+            executor_factory: MySqlExecutorFactory::new(pool).await,
             _phantom: PhantomData,
         })
     }
