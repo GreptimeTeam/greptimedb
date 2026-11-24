@@ -76,7 +76,7 @@ pub(crate) struct SeriesCandidateScanner {
 }
 
 impl SeriesCandidateScanner {
-    /// Creates a candidate-series scanner for native memtable and SST ranges.
+    /// Creates a candidate-series scanner for narthex memtable and SST ranges.
     ///
     /// Callers must fall back to the legacy series-scan path when the scan contains
     /// extension ranges. Candidate-series discovery does not support other range types.

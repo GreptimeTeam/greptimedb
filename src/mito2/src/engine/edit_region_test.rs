@@ -1834,7 +1834,7 @@ async fn test_deferred_flush_queue_is_bounded_and_drains_after_role_change() {
 }
 
 #[tokio::test]
-async fn test_edit_narthex_artifacts() {
+async fn test_reject_narthex_artifacts_in_parquet_region() {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
@@ -1864,39 +1864,48 @@ async fn test_edit_narthex_artifacts() {
     {
         file.region_id = region_id;
     }
-    let mut samples = edit.files_to_add;
-    samples.push(FileMeta {
-        region_id,
-        file_id: FileId::random(),
-        ..Default::default()
-    });
-    let indexes = edit.series_indexes_to_add;
-    // Index-only edits are admitted independently of sample files.
-    engine
-        .edit_region(
+    // Even a valid Parquet entry before the Narthex samples must not be admitted.
+    edit.files_to_add.insert(
+        0,
+        FileMeta {
             region_id,
-            RegionEdit {
-                series_indexes_to_add: indexes.clone(),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    engine
-        .edit_region(
-            region_id,
-            RegionEdit {
-                files_to_add: samples.clone(),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
+            file_id: FileId::random(),
+            ..Default::default()
+        },
+    );
     let region = engine.get_region(region_id).unwrap();
-    let manifest = region.manifest_ctx.manifest().await;
-    assert_eq!(samples.len(), manifest.files.len());
-    assert_eq!(indexes.len(), manifest.series_indexes.len());
-    assert_eq!(indexes.len(), region.version().ssts.series_indexes().len());
+    let before = region.manifest_ctx.manifest().await;
+    let sequence = region.version_control.current().last_sequence;
+    let error = engine
+        .edit_region(region_id, edit.clone())
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .output_msg()
+            .contains("does not match the region storage format")
+    );
+    // Index-only edits must obey the same region storage contract.
+    let error = engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                series_indexes_to_add: edit.series_indexes_to_add,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .output_msg()
+            .contains("Series indexes require Narthex")
+    );
+    let after = region.manifest_ctx.manifest().await;
+    assert_eq!(before.manifest_version, after.manifest_version);
+    assert!(after.files.is_empty());
+    assert!(after.series_indexes.is_empty());
+    assert_eq!(sequence, region.version_control.current().last_sequence);
     crate::test_util::reopen_region(
         &engine,
         region_id,
@@ -1906,35 +1915,8 @@ async fn test_edit_narthex_artifacts() {
     )
     .await;
     let region = engine.get_region(region_id).unwrap();
-    assert_eq!(indexes.len(), region.version().ssts.series_indexes().len());
-    assert_eq!(
-        samples.len(),
-        region.manifest_ctx.manifest().await.files.len()
-    );
-    engine
-        .edit_region(
-            region_id,
-            RegionEdit {
-                series_indexes_to_remove: indexes.iter().map(|file| file.file_id()).collect(),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
     assert!(region.version().ssts.series_indexes().is_empty());
-    engine
-        .edit_region(
-            region_id,
-            RegionEdit {
-                files_to_remove: samples,
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    let manifest = region.manifest_ctx.manifest().await;
-    assert!(manifest.files.is_empty());
-    assert!(manifest.series_indexes.is_empty());
+    assert!(region.manifest_ctx.manifest().await.files.is_empty());
 }
 
 #[tokio::test]

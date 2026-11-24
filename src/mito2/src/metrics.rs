@@ -388,11 +388,6 @@ lazy_static! {
         &[TYPE_LABEL]
     )
     .unwrap();
-    // TODO(narthex-merge): overlaps main's cache_loading_metrics(); pick one once the loader accounting is unified
-    /// Counts cache loaders that actually ran.
-    pub static ref CACHE_LOAD: IntCounterVec = register_int_counter_vec!(
-        "greptime_mito_cache_load", "Cache loaders that actually ran", &["type"]
-    ).unwrap();
     /// Cache miss counter.
     pub static ref CACHE_MISS: IntCounterVec = register_int_counter_vec!(
         "greptime_mito_cache_miss",

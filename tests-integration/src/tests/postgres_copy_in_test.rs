@@ -2435,6 +2435,7 @@ async fn quota_test_server(
 /// are rejected over COPY too, not silently ingested without the
 /// pipeline.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "Exemplar writes require pre-encoded keys: https://github.com/GreptimeTeam/greptimedb/issues/10598"]
 async fn test_postgres_copy_in_prom_write_v2_pipeline_exemplar_rejection() {
     use api::greptime_proto::io::prometheus::write::v2::{Exemplar, Request, Sample, TimeSeries};
     use prost::Message;

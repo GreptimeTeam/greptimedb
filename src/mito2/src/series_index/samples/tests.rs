@@ -54,6 +54,50 @@ fn metadata() -> RegionMetadataRef {
         .data_type = ConcreteDataType::float64_datatype();
     Arc::new(m)
 }
+
+#[test]
+fn test_narthex_requires_one_value_field() {
+    use crate::region::options::RegionOptions;
+    use crate::sst::FormatType;
+
+    for field_count in [0, 1, 2] {
+        let mut metadata = metadata().as_ref().clone();
+        let field = metadata.field_columns().next().unwrap().clone();
+        metadata
+            .column_metadatas
+            .retain(|column| column.semantic_type != api::v1::SemanticType::Field);
+        for i in 0..field_count {
+            let mut column = field.clone();
+            column.column_id = 100 + i;
+            column.column_schema.name = format!("value_{i}");
+            metadata.column_metadatas.push(column);
+        }
+        let metadata = store_api::metadata::RegionMetadataBuilder::from_existing(metadata)
+            .build()
+            .unwrap();
+        let options = RegionOptions {
+            sst_format: Some(FormatType::Narthex),
+            ..Default::default()
+        };
+        let result = options.validate_schema(&metadata);
+        if field_count == 1 {
+            result.unwrap();
+        } else {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("exactly one value field")
+            );
+        }
+        let parquet_options = RegionOptions {
+            sst_format: Some(FormatType::Flat),
+            ..Default::default()
+        };
+        parquet_options.validate_schema(&metadata).unwrap();
+    }
+}
+
 fn store() -> ObjectStore {
     ObjectStore::new(object_store::services::Memory::default()).unwrap()
 }
@@ -2115,162 +2159,6 @@ async fn series_read_windows_are_bounded_and_gap_rows_are_not_returned() {
     }
 }
 
-#[ignore = "TODO(narthex-merge): native payload byte cache is disabled after the merge; re-enable with a dedicated page-cache budget"]
-#[tokio::test]
-async fn aligned_payload_cache_reuses_gap_bytes_across_readers() {
-    use crate::cache::{CacheManager, CacheStrategy};
-    use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
-
-    let store = store();
-    let m = metadata();
-    let input = (1..=2)
-        .flat_map(|id| (0..3).map(move |t| (1, id, t, 1, 1, Some(t as u64))))
-        .collect::<Vec<_>>();
-    let handle = build(
-        &ColumnarSamplesFormat::default(),
-        &store,
-        m.clone(),
-        &[batch(&m, &input, false)],
-    )
-    .await;
-    // The part's key area, so the loop below can tell a key read from a payload read.
-    let (_, framing, _, _) = root_page(&store, &handle).await;
-    let key_area = framing.keys();
-    let reads = Arc::new(Mutex::new(Vec::new()));
-    let observed = reads.clone();
-    let store = store.layer(
-        MockLayerBuilder::default()
-            .reader_factory(Arc::new(move |path, _, inner| {
-                Box::new(RecordingRead {
-                    inner,
-                    path: path.into(),
-                    reads: observed.clone(),
-                })
-            }))
-            .build()
-            .unwrap(),
-    );
-    let strategy = CacheStrategy::EnableAll(Arc::new(
-        CacheManager::builder()
-            .page_cache_size(1024 * 1024)
-            .sst_meta_cache_size(1024 * 1024)
-            .build(),
-    ));
-    let namespace = FileId::random();
-    for id in [1, 2, 1] {
-        reads.lock().unwrap().clear();
-        let reader = reader::SamplesReader::open_cached(
-            store.clone(),
-            handle.clone(),
-            strategy.columnar_metadata(namespace),
-        )
-        .await
-        .unwrap()
-        .with_payload_cache(strategy.columnar_payload(namespace));
-        let mut request = full_request();
-        request.keys = Some([exact(&m, &["a", "b"], 1, id)].into());
-        request.start = Some(1);
-        request.end = Some(3);
-        let rows = reader
-            .read(request)
-            .unwrap()
-            .try_collect::<Vec<_>>()
-            .await
-            .unwrap();
-        assert_eq!(
-            input
-                .iter()
-                .copied()
-                .filter(|r| r.1 == id && r.2 >= 1)
-                .collect::<Vec<_>>(),
-            collect_rows(&rows)
-        );
-        if id == 2 {
-            // A different series reuses the aligned over-read for its payload, including boundary
-            // values. Its exact key is new, and the key area is part of the same part file, so
-            // the only read left is the aligned block that covers it.
-            let reads = reads.lock().unwrap();
-            assert!(
-                reads.len() <= 1
-                    && reads.iter().all(|(_, range)| {
-                        range.offset() >= key_area.start
-                            && range.offset() + range.size().unwrap() <= key_area.end
-                    }),
-                "a different series must reuse the aligned over-read, including boundary values"
-            );
-        }
-    }
-    let reader =
-        reader::SamplesReader::open_cached(store, handle, strategy.columnar_metadata(namespace))
-            .await
-            .unwrap()
-            .with_payload_cache(strategy.columnar_payload(namespace));
-    let pool = Arc::new(GreedyMemoryPool::new(1024 * 1024));
-    let mut request = full_request();
-    request.memory_pool = Some(pool.clone());
-    let mut stream = reader.read(request).unwrap();
-    assert!(stream.try_next().await.unwrap().is_some());
-    assert!(pool.reserved() > 0);
-    drop(stream);
-    assert_eq!(0, pool.reserved());
-    let pool = Arc::new(GreedyMemoryPool::new(1));
-    let mut request = full_request();
-    request.memory_pool = Some(pool.clone());
-    assert!(reader.read(request).unwrap().try_next().await.is_err());
-    assert_eq!(0, pool.reserved());
-}
-
-#[tokio::test]
-async fn aligned_payload_cache_assembles_columns_across_blocks() {
-    use crate::cache::{CacheManager, CacheStrategy};
-    let store = store();
-    let m = metadata();
-    // Non-repeating payload bits force a value column across cache boundaries.
-    let input = (0..8192)
-        .map(|t| {
-            (
-                1,
-                1,
-                t,
-                1,
-                1,
-                Some((t as u64).wrapping_mul(0x9e3779b97f4a7c15)),
-            )
-        })
-        .collect::<Vec<_>>();
-    let handle = build(
-        &ColumnarSamplesFormat::default(),
-        &store,
-        m.clone(),
-        &[batch(&m, &input, false)],
-    )
-    .await;
-    let strategy = CacheStrategy::EnableAll(Arc::new(
-        CacheManager::builder().page_cache_size(1024 * 1024).build(),
-    ));
-    let reader = reader::SamplesReader::open(store, handle)
-        .await
-        .unwrap()
-        .with_payload_cache(strategy.columnar_payload(FileId::random()));
-    let (a, b) = tokio::join!(
-        reader.read(full_request()).unwrap().try_collect::<Vec<_>>(),
-        reader.read(full_request()).unwrap().try_collect::<Vec<_>>()
-    );
-    assert_eq!(input, collect_rows(&a.unwrap()));
-    assert_eq!(input, collect_rows(&b.unwrap()));
-    assert_eq!(
-        input,
-        collect_rows(
-            &reader
-                .read(full_request())
-                .unwrap()
-                .try_collect::<Vec<_>>()
-                .await
-                .unwrap()
-        )
-    );
-}
-
 /// Keys live in the part's key area, not in the metadata pages: a page keeps a fixed-size
 /// reference whatever the key length is, and the area holds one copy per covered series.
 #[tokio::test]
@@ -2515,7 +2403,6 @@ async fn exact_key_output_reservation_covers_the_retained_array() {
 #[case(64 * 1024)]
 #[tokio::test]
 async fn sparse_cached_reads_fit_the_scan_pool(#[case] capacity: usize) {
-    use crate::cache::{CacheManager, CacheStrategy};
     use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
     let store = store();
     let m = metadata();
@@ -2541,55 +2428,226 @@ async fn sparse_cached_reads_fit_the_scan_pool(#[case] capacity: usize) {
         &[batch(&m, &input, false)],
     )
     .await;
-    let strategy = CacheStrategy::EnableAll(Arc::new(
-        CacheManager::builder()
-            .page_cache_size(16 * 1024 * 1024)
-            .build(),
-    ));
-    for cached in [false, true] {
-        let mut reader = reader::SamplesReader::open(store.clone(), handle.clone())
-            .await
-            .unwrap();
-        if cached {
-            reader = reader.with_payload_cache(strategy.columnar_payload(FileId::random()));
-        }
-        let pool = Arc::new(GreedyMemoryPool::new(capacity));
-        let mut request = full_request();
-        request.memory_pool = Some(pool.clone());
-        request.keys = Some(
-            (0..256)
-                .step_by(2)
-                .map(|tsid| exact(&m, &["a", "b"], 1, tsid))
-                .collect(),
-        );
-        for warm in [false, true] {
-            if warm && cached {
-                let mut prime = request.clone();
-                prime.memory_pool = None;
-                reader
-                    .read(prime)
-                    .unwrap()
-                    .try_collect::<Vec<_>>()
-                    .await
-                    .unwrap();
-            }
-            let rows = reader
-                .read(request.clone())
-                .unwrap()
-                .try_collect::<Vec<_>>()
-                .await
-                .unwrap();
-            assert_eq!(
-                collect_rows(&rows),
-                input
-                    .iter()
-                    .copied()
-                    .filter(|r| r.1 % 2 == 0)
-                    .collect::<Vec<_>>()
-            );
-            assert_eq!(pool.reserved(), 0);
-        }
-    }
+    let reader = reader::SamplesReader::open(store, handle).await.unwrap();
+    let pool = Arc::new(GreedyMemoryPool::new(capacity));
+    let mut request = full_request();
+    request.memory_pool = Some(pool.clone());
+    request.keys = Some(
+        (0..256)
+            .step_by(2)
+            .map(|tsid| exact(&m, &["a", "b"], 1, tsid))
+            .collect(),
+    );
+    let rows = reader
+        .read(request.clone())
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(
+        collect_rows(&rows),
+        input
+            .iter()
+            .copied()
+            .filter(|r| r.1 % 2 == 0)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(pool.reserved(), 0);
 }
 
 mod keys;
+
+/// Narthex readers use the SST lifetime, not the local sidecar purger.
+#[tokio::test]
+async fn narthex_file_reader_pins_sst_lifetime() {
+    use crate::sst::file::{FileFormat, FileHandle, FileMeta, NarthexPartMeta, NarthexSamplesMeta};
+    use crate::sst::file_purger::FilePurger;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Debug)]
+    struct CountingPurger(Arc<AtomicUsize>);
+    impl FilePurger for CountingPurger {
+        fn purge_file(&self, _: FileMeta) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    let store = store();
+    let meta = metadata();
+    let id = FileId::random();
+    let prefix = format!("table/region/{id}/");
+    let rows = vec![
+        (1, 2, 100, 7, 0, Some(1.5f64.to_bits())),
+        (1, 2, 101, 8, 0, None),
+    ];
+    let mut writer = ColumnarSamplesFormat::default()
+        .writer(meta.clone(), store.clone(), &prefix, id, id)
+        .await
+        .unwrap();
+    writer.write(&batch(&meta, &rows, false)).await.unwrap();
+    let artifact = writer.finish().await.unwrap();
+    let (manifest, parts) = artifact.objects.split_first().unwrap();
+    let narthex = NarthexSamplesMeta {
+        manifest_size: manifest.file_size,
+        parts: parts
+            .iter()
+            .map(|part| NarthexPartMeta {
+                file_size: part.file_size,
+            })
+            .collect(),
+    };
+    let file_meta = FileMeta {
+        region_id: meta.region_id,
+        file_id: id,
+        file_size: artifact.file_size,
+        num_rows: rows.len() as u64,
+        format: FileFormat::NarthexSamples(Box::new(narthex)),
+        ..Default::default()
+    };
+    let restored: FileMeta =
+        serde_json::from_str(&serde_json::to_string(&file_meta).unwrap()).unwrap();
+    assert_eq!(file_meta, restored);
+    let purged = Arc::new(AtomicUsize::new(0));
+    let file = FileHandle::new(restored, Arc::new(CountingPurger(purged.clone())));
+    let handle = SamplesFileHandle::from_narthex(file.clone(), "table/region/").unwrap();
+    let reader = reader::SamplesReader::open(store, handle).await.unwrap();
+    file.mark_deleted();
+    drop(file);
+    assert_eq!(0, purged.load(Ordering::Relaxed));
+    let batches: Vec<_> = reader
+        .read(full_request())
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(rows, collect_rows(&batches));
+    drop(reader);
+    assert_eq!(1, purged.load(Ordering::Relaxed));
+}
+
+#[test]
+fn narthex_region_schema_rejected_before_writes() {
+    let options = crate::region::options::RegionOptions {
+        sst_format: Some(crate::sst::FormatType::Narthex),
+        ..Default::default()
+    };
+    options.validate_schema(&metadata()).unwrap();
+    let unsupported_field = sst_region_metadata_with_encoding(PrimaryKeyEncoding::Sparse);
+    assert!(options.validate_schema(&unsupported_field).is_err());
+    let dense = sst_region_metadata_with_encoding(PrimaryKeyEncoding::Dense);
+    assert!(options.validate_schema(&dense).is_err());
+}
+
+#[tokio::test]
+async fn narthex_write_error_cleans_completed_parts_before_returning() {
+    let store = store();
+    let metadata = metadata();
+    let format = ColumnarSamplesFormat {
+        block_rows: 1,
+        part_bytes: 1,
+        ..Default::default()
+    };
+    let mut writer = format
+        .writer(
+            metadata.clone(),
+            store.clone(),
+            "narthex-error/",
+            FileId::random(),
+            FileId::random(),
+        )
+        .await
+        .unwrap();
+    writer
+        .write(&batch(
+            &metadata,
+            &[
+                (1, 1, 1000, 1, 0, Some(1.0_f64.to_bits())),
+                (1, 2, 1000, 1, 0, Some(2.0_f64.to_bits())),
+                (1, 3, 1000, 1, 0, Some(3.0_f64.to_bits())),
+            ],
+            true,
+        ))
+        .await
+        .unwrap();
+    assert!(
+        !store
+            .list_with("narthex-error/")
+            .recursive(true)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let error = crate::series_index::columnar::invalid("injected source error");
+    let error = crate::sst::narthex::abort_narthex_write(writer, error).await;
+    assert!(error.to_string().contains("injected source error"));
+    assert!(
+        store
+            .list_with("narthex-error/")
+            .recursive(true)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn narthex_prepared_discovery_empty_projection_skips_payload() {
+    let store = store();
+    let metadata = metadata();
+    let rows = (1..=2)
+        .flat_map(|id| (0..10).map(move |time| (1, id, time, 1, 1, Some(1.0f64.to_bits()))))
+        .collect::<Vec<_>>();
+    let handle = build(
+        &ColumnarSamplesFormat::default(),
+        &store,
+        metadata.clone(),
+        &[batch(&metadata, &rows, false)],
+    )
+    .await;
+    let (_, framing, _, _) = root_page(&store, &handle).await;
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    let observed = reads.clone();
+    let store = store.layer(
+        MockLayerBuilder::default()
+            .reader_factory(Arc::new(move |path, _, inner| {
+                Box::new(RecordingRead {
+                    inner,
+                    path: path.into(),
+                    reads: observed.clone(),
+                })
+            }))
+            .build()
+            .unwrap(),
+    );
+    let reader = reader::SamplesReader::open(store, handle).await.unwrap();
+    let discovered = reader
+        .read(SamplesReadRequest::default())
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(
+        20,
+        discovered
+            .iter()
+            .map(|batch| batch.num_rows())
+            .sum::<usize>()
+    );
+    assert!(discovered.iter().all(|batch| batch.num_columns() == 0));
+    assert_eq!(
+        2,
+        discovered
+            .iter()
+            .map(|batch| &batch.key)
+            .collect::<BTreeSet<_>>()
+            .len()
+    );
+    let reads = reads.lock().unwrap();
+    assert!(reads.iter().any(|(path, _)| path.ends_with(".samples")));
+    for (path, range) in reads.iter().filter(|(path, _)| path.ends_with(".samples")) {
+        let end = range.offset() + range.size().unwrap();
+        assert!(
+            end <= HEADER_SIZE || range.offset() >= framing.payload_end,
+            "preparation read sample payload: {path} {range:?}"
+        );
+    }
+}

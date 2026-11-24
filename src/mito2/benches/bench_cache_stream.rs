@@ -30,7 +30,7 @@ use futures::TryStreamExt;
 use mito_codec::row_converter::DensePrimaryKeyCodec;
 use mito2::memtable::bulk::context::BulkIterContext;
 use mito2::memtable::bulk::part::{BulkPartConverter, BulkPartEncoder};
-use mito2::memtable::bulk::part_reader::EncodedBulkPartIter;
+use mito2::memtable::bulk::part_reader::ParquetBulkPartIter;
 use mito2::read::range_cache::bench_cache_flat_range_stream;
 use mito2::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
 use mito2::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
@@ -68,7 +68,10 @@ fn cache_flat_range_stream_bench(c: &mut Criterion) {
     let encoded_part = encoder.encode_part(&bulk_part).unwrap().unwrap();
 
     // Decode all record batches
-    let num_row_groups = encoded_part.metadata().parquet_metadata.num_row_groups();
+    let num_row_groups = encoded_part
+        .parquet_metadata()
+        .expect("benchmark uses Parquet")
+        .num_row_groups();
     let context = Arc::new(
         BulkIterContext::new(
             metadata.clone(),
@@ -89,8 +92,9 @@ fn cache_flat_range_stream_bench(c: &mut Criterion) {
     group.bench_function("baseline_iter_stream", |b| {
         b.iter(|| {
             rt.block_on(async {
-                let iter = EncodedBulkPartIter::try_new(
-                    &encoded_part,
+                let iter = ParquetBulkPartIter::try_new(
+                    encoded_part.parquet_part().unwrap(),
+                    encoded_part.metadata().num_series as usize,
                     context.clone(),
                     row_groups.clone(),
                     None,
@@ -108,8 +112,9 @@ fn cache_flat_range_stream_bench(c: &mut Criterion) {
     group.bench_function("cache_flat_range_stream", |b| {
         b.iter(|| {
             rt.block_on(async {
-                let iter = EncodedBulkPartIter::try_new(
-                    &encoded_part,
+                let iter = ParquetBulkPartIter::try_new(
+                    encoded_part.parquet_part().unwrap(),
+                    encoded_part.metadata().num_series as usize,
                     context.clone(),
                     row_groups.clone(),
                     None,
