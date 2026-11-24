@@ -2,6 +2,8 @@
 
 ## HTTP API
 
+When the server is started with a user provider, add `-u <username>:<password>` to the `curl` commands in this guide.
+
 example:
 ```bash
 curl --data "trace,flow=debug" 127.0.0.1:4000/debug/log_level

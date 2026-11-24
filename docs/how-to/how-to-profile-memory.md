@@ -58,6 +58,22 @@ enable_heap_profiling = true
 
 To disable memory profiling, set `enable_heap_profiling` to `false`.
 
+### Authentication
+
+When the server is started with a user provider, the `/debug` endpoints require HTTP Basic authentication. Add `-u <username>:<password>` to the `curl` commands in this guide.
+
+`dump.sh` reads credentials from the curl config file set in `GREPTIME_CURL_CONFIG`. Create the file with mode `600` and the following content:
+
+```
+user = "<username>:<password>"
+```
+
+Then run the script:
+
+```bash
+GREPTIME_CURL_CONFIG=/path/to/curl.conf ./dump.sh <pid>
+```
+
 ### Memory profiling control
 
 You can control heap profiling activation using the new HTTP APIs:
