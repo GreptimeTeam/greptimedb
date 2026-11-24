@@ -124,6 +124,7 @@ impl DistributedInformationExtension {
                         plan,
                         region_id: RegionId::default(),
                         header: None,
+                        prepared_plan: None,
                     })
                     .await
                     .context(crate::error::HandleQuerySnafu {

@@ -73,11 +73,14 @@ impl Datanode for RegionRequester {
     }
 
     async fn handle_query(&self, request: QueryRequest) -> MetaResult<SendableRecordBatchStream> {
-        let plan = DFLogicalSubstraitConvertor
-            .encode(&request.plan, DefaultSerializer)
-            .map_err(BoxedError::new)
-            .context(meta_error::ExternalSnafu)?
-            .to_vec();
+        let plan = match request.prepared_plan {
+            Some(bytes) => bytes.to_vec(),
+            None => DFLogicalSubstraitConvertor
+                .encode(&request.plan, DefaultSerializer)
+                .map_err(BoxedError::new)
+                .context(meta_error::ExternalSnafu)?
+                .to_vec(),
+        };
         let request = api::v1::region::QueryRequest {
             header: request.header,
             region_id: request.region_id.as_u64(),

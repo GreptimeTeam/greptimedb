@@ -331,6 +331,7 @@ impl RegionServer {
                     header: request.header,
                     region_id,
                     plan,
+                    prepared_plan: None,
                 },
                 query_ctx.clone(),
             )

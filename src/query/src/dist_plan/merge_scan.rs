@@ -827,6 +827,7 @@ impl MergeScanExec {
                     }),
                     region_id,
                     plan: plan.clone(),
+                    prepared_plan: None,
                 };
                 if explain_verbose {
                     common_telemetry::info!(
