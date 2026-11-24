@@ -16,11 +16,11 @@ use std::collections::HashMap;
 use std::fmt;
 
 use common_telemetry::{debug, error, info, warn};
-use futures::TryStreamExt;
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
-use crate::error::{Result, ToJsonSnafu};
+use crate::error::{Error, Result, ToJsonSnafu};
 pub(crate) use crate::store::state_store::StateStoreRef;
 use crate::{ProcedureContext, ProcedureId, SubprocedureRecovery};
 
@@ -72,6 +72,9 @@ pub struct ProcedureMessages {
     pub rollback_messages: HashMap<ProcedureId, ProcedureMessage>,
     /// A list of finished procedures' ids
     pub finished_ids: Vec<ProcedureId>,
+    /// Procedures with surviving keys but no usable checkpoint.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unreadable_ids: Vec<ProcedureId>,
 }
 
 /// Procedure storage layer.
@@ -203,17 +206,21 @@ impl ProcedureStore {
         // 8 should be enough for most procedures.
         let mut step_keys = Vec::with_capacity(8);
         let mut finish_keys = Vec::new();
-        while let Some((key_set, _)) = key_values.try_next().await? {
-            let key = key_set.key();
-            let Some(curr_key) = ParsedKey::parse_str(&self.proc_path, key) else {
+        while let Some(item) = key_values.next().await {
+            let (key, keys) = match item {
+                Ok((key_set, _)) => (key_set.key().to_owned(), key_set.keys()),
+                Err(Error::CorruptCheckpoint { key, keys, .. }) => (key, keys),
+                Err(error) => return Err(error),
+            };
+            let Some(curr_key) = ParsedKey::parse_str(&self.proc_path, &key) else {
                 warn!("Unknown key while deleting procedures, key: {}", key);
                 continue;
             };
             if curr_key.key_type == KeyType::Step {
-                step_keys.extend(key_set.keys());
+                step_keys.extend(keys);
             } else {
                 // .commit or .rollback
-                finish_keys.extend(key_set.keys());
+                finish_keys.extend(keys);
             }
         }
 
@@ -235,79 +242,96 @@ impl ProcedureStore {
 
     /// Load procedures from the storage.
     pub(crate) async fn load_messages(&self) -> Result<ProcedureMessages> {
-        // Track the key-value pair by procedure id.
-        let mut procedure_key_values: HashMap<_, (ParsedKey, Vec<u8>)> = HashMap::new();
-
-        // Scan all procedures.
-        let mut key_values = self.store.walk_top_down(&self.proc_path).await?;
-        while let Some((key_set, value)) = key_values.try_next().await? {
-            let key = key_set.key();
-            let Some(curr_key) = ParsedKey::parse_str(&self.proc_path, key) else {
+        // Keep one usable checkpoint per procedure even if keys arrive out of order.
+        let mut latest = HashMap::new();
+        let mut damaged = HashMap::<ProcedureId, ParsedKey>::new();
+        let mut stream = self.store.walk_top_down(&self.proc_path).await?;
+        while let Some(item) = stream.next().await {
+            let (key, value) = match item {
+                Ok((key, value)) => (key.key().to_owned(), Ok(value)),
+                Err(Error::CorruptCheckpoint { key, reason, .. }) => (key, Err(reason)),
+                Err(error) => return Err(error),
+            };
+            let Some(parsed) = ParsedKey::parse_str(&self.proc_path, &key) else {
                 warn!("Unknown key while loading procedures, key: {}", key);
                 continue;
             };
-
-            if let Some(entry) = procedure_key_values.get_mut(&curr_key.procedure_id) {
-                if entry.0.step < curr_key.step {
-                    entry.0 = curr_key;
-                    entry.1 = value;
+            let id = parsed.procedure_id;
+            let message = value.and_then(|value| match parsed.key_type {
+                KeyType::Commit => Ok(None),
+                _ => serde_json::from_slice::<ProcedureMessage>(&value)
+                    .map(Some)
+                    .map_err(|e| e.to_string()),
+            });
+            match message {
+                Ok(message) => {
+                    let rank = (parsed.step, parsed.key_type);
+                    if latest.get(&id).is_none_or(|(old, _)| *old < rank) {
+                        latest.insert(id, (rank, message));
+                    }
                 }
-            } else {
-                let _ = procedure_key_values.insert(curr_key.procedure_id, (curr_key, value));
+                Err(reason) => {
+                    error!(
+                        "Unreadable procedure checkpoint, procedure_id: {id}, key: {key}, reason: {reason}"
+                    );
+                    if damaged
+                        .get(&id)
+                        .is_none_or(|old| (old.step, old.key_type) < (parsed.step, parsed.key_type))
+                    {
+                        damaged.insert(id, parsed);
+                    }
+                }
             }
         }
 
-        let mut messages = HashMap::with_capacity(procedure_key_values.len());
+        let mut messages = HashMap::new();
         let mut rollback_messages = HashMap::new();
         let mut finished_ids = Vec::new();
-        for (procedure_id, (parsed_key, value)) in procedure_key_values {
-            match parsed_key.key_type {
+        for (id, ((step, kind), message)) in latest {
+            let bad = damaged.remove(&id);
+            let Some(mut message) = message else {
+                finished_ids.push(id);
+                continue;
+            };
+            if let Some(bad) = bad.filter(|bad| (bad.step, bad.key_type) > (step, kind)) {
+                let Some(next) = bad.step.checked_add(1) else {
+                    error!("Cannot allocate a checkpoint after {bad}, skipping procedure {id}");
+                    damaged.insert(id, bad);
+                    continue;
+                };
+                warn!(
+                    "Recovering procedure {id} from {step}.{kind:?} after unreadable checkpoint {bad}; next checkpoint: {next}"
+                );
+                // The payload is from the good checkpoint. The runner's write cursor
+                // must advance past every damaged checkpoint.
+                message.step = next;
+            }
+            match kind {
                 KeyType::Step => {
-                    let Some(message) = self.load_one_message(&parsed_key, &value) else {
-                        // We don't abort the loading process and just ignore errors to ensure all remaining
-                        // procedures are loaded.
-                        continue;
-                    };
-                    let _ = messages.insert(procedure_id, message);
-                }
-                KeyType::Commit => {
-                    finished_ids.push(procedure_id);
+                    messages.insert(id, message);
                 }
                 KeyType::Rollback => {
-                    let Some(message) = self.load_one_message(&parsed_key, &value) else {
-                        // We don't abort the loading process and just ignore errors to ensure all remaining
-                        // procedures are loaded.
-                        continue;
-                    };
-                    let _ = rollback_messages.insert(procedure_id, message);
+                    rollback_messages.insert(id, message);
                 }
+                KeyType::Commit => unreachable!(),
             }
         }
-
+        let unreadable_ids = damaged.into_keys().collect();
         Ok(ProcedureMessages {
             messages,
             rollback_messages,
             finished_ids,
+            unreadable_ids,
         })
-    }
-
-    fn load_one_message(&self, key: &ParsedKey, value: &[u8]) -> Option<ProcedureMessage> {
-        serde_json::from_slice(value)
-            .map_err(|e| {
-                // `e` doesn't impl ErrorExt so we print it as normal error.
-                error!("Failed to parse value, key: {:?}, source: {:?}", key, e);
-                e
-            })
-            .ok()
     }
 }
 
 /// Suffix type of the key.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum KeyType {
     Step,
-    Commit,
     Rollback,
+    Commit,
 }
 
 impl KeyType {
@@ -609,6 +633,7 @@ mod tests {
             messages,
             rollback_messages,
             finished_ids,
+            ..
         } = store.load_messages().await.unwrap();
         assert_eq!(1, messages.len());
         assert!(rollback_messages.is_empty());
@@ -645,6 +670,7 @@ mod tests {
             messages,
             rollback_messages,
             finished_ids,
+            ..
         } = store.load_messages().await.unwrap();
         assert!(messages.is_empty());
         assert!(rollback_messages.is_empty());
@@ -682,6 +708,7 @@ mod tests {
             messages,
             rollback_messages,
             finished_ids,
+            ..
         } = store.load_messages().await.unwrap();
         assert!(messages.is_empty());
         assert_eq!(1, rollback_messages.len());
@@ -715,6 +742,7 @@ mod tests {
             messages,
             rollback_messages,
             finished_ids,
+            ..
         } = store.load_messages().await.unwrap();
         assert!(messages.is_empty());
         assert!(rollback_messages.is_empty());
@@ -750,10 +778,64 @@ mod tests {
             messages,
             rollback_messages,
             finished_ids,
+            ..
         } = store.load_messages().await.unwrap();
         assert!(messages.is_empty());
         assert!(rollback_messages.is_empty());
         assert!(finished_ids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_recover_last_complete_checkpoint() {
+        let dir = create_temp_dir("recover_checkpoint");
+        let store = procedure_store_for_test(&dir);
+        for kind in [KeyType::Step, KeyType::Rollback] {
+            let id = ProcedureId::random();
+            let message = ProcedureMessage {
+                type_name: "mock".into(),
+                data: "step seven".into(),
+                parent_id: None,
+                subprocedure_recovery: SubprocedureRecovery::Discard,
+                step: 7,
+                error: None,
+                context: Default::default(),
+            };
+            if kind == KeyType::Rollback {
+                store.rollback_procedure(id, message.clone()).await.unwrap();
+            } else {
+                store.store_procedure_message(id, &message).await.unwrap();
+            }
+            for key in ["0000000008.step", "0000000009.rollback"] {
+                store
+                    .store
+                    .put(&proc_path!(store, "{id}/{key}"), vec![b'{'])
+                    .await
+                    .unwrap();
+            }
+            let loaded = store.load_messages().await.unwrap();
+            let recovered = if kind == KeyType::Rollback {
+                &loaded.rollback_messages[&id]
+            } else {
+                &loaded.messages[&id]
+            };
+            assert_eq!(
+                recovered,
+                &ProcedureMessage {
+                    step: 10,
+                    ..message
+                }
+            );
+            store.commit_procedure(id, recovered.step).await.unwrap();
+            assert!(
+                store
+                    .load_messages()
+                    .await
+                    .unwrap()
+                    .finished_ids
+                    .contains(&id)
+            );
+            store.delete_procedure(id).await.unwrap();
+        }
     }
 
     #[tokio::test]
@@ -817,6 +899,7 @@ mod tests {
             messages,
             rollback_messages,
             finished_ids,
+            ..
         } = store.load_messages().await.unwrap();
         assert_eq!(2, messages.len());
         assert!(rollback_messages.is_empty());

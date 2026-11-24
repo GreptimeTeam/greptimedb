@@ -821,6 +821,7 @@ impl LocalManager {
             messages,
             rollback_messages,
             finished_ids,
+            ..
         } = self.procedure_store.load_messages().await?;
         let rollback_messages = rollback_messages
             .into_iter()
@@ -971,11 +972,20 @@ impl ProcedureManager for LocalManager {
 
     async fn has_unfinished_procedure(&self, type_names: &[&str]) -> Result<bool> {
         let messages = self.procedure_store.load_messages().await?;
-        Ok(messages
+        if messages
             .messages
             .values()
             .chain(messages.rollback_messages.values())
-            .any(|message| type_names.contains(&message.type_name.as_str())))
+            .any(|message| type_names.contains(&message.type_name.as_str()))
+        {
+            return Ok(true);
+        }
+        if !messages.unreadable_ids.is_empty() {
+            return Err(crate::Error::UnknownProcedureTypes {
+                ids: messages.unreadable_ids,
+            });
+        }
+        Ok(false)
     }
 }
 

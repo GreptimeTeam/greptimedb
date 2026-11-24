@@ -211,6 +211,17 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Corrupt checkpoint {key}: {reason}"))]
+    CorruptCheckpoint {
+        key: String,
+        /// Actual stored keys, including surviving segments when the base key is missing.
+        keys: Vec<String>,
+        reason: String,
+    },
+
+    #[snafu(display("Unknown procedure type for unreadable checkpoints: {ids:?}"))]
+    UnknownProcedureTypes { ids: Vec<ProcedureId> },
+
     #[snafu(display("Failed to parse segment key: {key}"))]
     ParseSegmentKey {
         #[snafu(implicit)]
@@ -281,6 +292,8 @@ impl ErrorExt for Error {
                 StatusCode::InvalidArguments
             }
             Error::ProcedurePanic { .. }
+            | Error::CorruptCheckpoint { .. }
+            | Error::UnknownProcedureTypes { .. }
             | Error::ParseSegmentKey { .. }
             | Error::Unexpected { .. }
             | &Error::ProcedureNotFound { .. }

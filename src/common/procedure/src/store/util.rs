@@ -14,89 +14,69 @@
 
 use std::pin::Pin;
 
-use async_stream::try_stream;
-use futures::{Stream, TryStreamExt};
-use snafu::{ResultExt, ensure};
+use async_stream::stream;
+use futures::{Stream, StreamExt};
 
 use crate::error;
 use crate::error::Result;
 use crate::store::state_store::KeySet;
 
 struct CollectingState {
+    key: String,
     pairs: Vec<(String, Vec<u8>)>,
 }
 
-fn parse_segments(segments: Vec<(String, Vec<u8>)>, prefix: &str) -> Result<Vec<(usize, Vec<u8>)>> {
-    segments
-        .into_iter()
-        .map(|(key, value)| {
-            let suffix = key.trim_start_matches(prefix);
-            let index = suffix
-                .parse::<usize>()
-                .context(error::ParseSegmentKeySnafu { key })?;
-
-            Ok((index, value))
-        })
-        .collect::<Result<Vec<_>>>()
-}
-
-/// Merges multiple values into a single key-value pair.
-/// Returns an error if:
-/// - Part values are lost.
-/// - Failed to parse the key of segment.
-fn merge_multiple_values(
-    CollectingState { mut pairs }: CollectingState,
-) -> Result<(KeySet, Vec<u8>)> {
-    if pairs.len() == 1 {
-        // Safety: must exist.
-        let (key, value) = pairs.into_iter().next().unwrap();
-        Ok((KeySet::new(key, 0), value))
-    } else {
-        let segments = pairs.split_off(1);
-        // Safety: must exist.
-        let (key, value) = pairs.into_iter().next().unwrap();
-        let prefix = KeySet::with_prefix(&key);
-        let mut parsed_segments = parse_segments(segments, &prefix)?;
-        parsed_segments.sort_unstable_by_key(|a| a.0);
-
-        // Safety: `parsed_segments` must larger than 0.
-        let segment_num = parsed_segments.last().unwrap().0;
-        ensure!(
-            // The segment index start from 1.
-            parsed_segments.len() == segment_num,
-            error::UnexpectedSnafu {
-                err_msg: format!(
-                    "Corrupted segment keys, parsed segment indexes: {:?}",
-                    parsed_segments
-                        .into_iter()
-                        .map(|(key, _)| key)
-                        .collect::<Vec<_>>()
-                )
-            }
-        );
-
-        let segment_values = parsed_segments.into_iter().map(|(_, value)| value);
-        let mut values = Vec::with_capacity(segment_values.len() + 1);
-        values.push(value);
-        values.extend(segment_values);
-
-        Ok((KeySet::new(key, segment_num), values.concat()))
-    }
-}
-
 impl CollectingState {
-    fn new(key: String, value: Vec<u8>) -> CollectingState {
+    fn new(key: String, value: Vec<u8>) -> Self {
+        // A surviving suffix may be the first key in a damaged checkpoint.
+        let base = key
+            .rsplit_once('/')
+            .map(|(parent, _)| parent)
+            .filter(|parent| super::ParsedKey::parse_str("", parent).is_some())
+            .unwrap_or(&key)
+            .to_owned();
         Self {
+            key: base,
             pairs: vec![(key, value)],
         }
     }
 
-    fn push(&mut self, key: String, value: Vec<u8>) {
-        self.pairs.push((key, value));
-    }
-
-    fn key(&self) -> &str {
-        self.pairs[0].0.as_str()
+    fn finish(mut self) -> Result<(KeySet, Vec<u8>)> {
+        let corrupt = |reason| error::Error::CorruptCheckpoint {
+            key: self.key.clone(),
+            keys: self.pairs.iter().map(|(key, _)| key.clone()).collect(),
+            reason,
+        };
+        if self.pairs[0].0 != self.key {
+            return Err(corrupt("missing base segment".to_string()));
+        }
+        if self.pairs.len() == 1 {
+            let (key, value) = self.pairs.pop().unwrap();
+            return Ok((KeySet::new(key, 0), value));
+        }
+        let prefix = KeySet::with_prefix(&self.key);
+        let mut indexed = Vec::with_capacity(self.pairs.len());
+        indexed.push((0, 0));
+        for (position, (key, _)) in self.pairs.iter().enumerate().skip(1) {
+            let idx = key
+                .strip_prefix(&prefix)
+                .and_then(|suffix| suffix.parse::<usize>().ok())
+                .ok_or_else(|| corrupt(format!("invalid segment key {key}")))?;
+            indexed.push((idx, position));
+        }
+        indexed.sort_unstable();
+        for (expected, (actual, _)) in indexed.iter().enumerate() {
+            if expected != *actual {
+                return Err(corrupt(format!(
+                    "expected segment {expected}, found {actual}"
+                )));
+            }
+        }
+        let mut value = Vec::with_capacity(self.pairs.iter().map(|(_, part)| part.len()).sum());
+        for (_, position) in indexed {
+            value.extend_from_slice(&self.pairs[position].1);
+        }
+        Ok((KeySet::new(self.key, self.pairs.len() - 1), value))
     }
 }
 
@@ -107,26 +87,28 @@ type Upstream = dyn Stream<Item = Result<(String, Vec<u8>)>> + Send;
 pub fn multiple_value_stream(
     mut upstream: Pin<Box<Upstream>>,
 ) -> impl Stream<Item = Result<(KeySet, Vec<u8>)>> {
-    try_stream! {
+    stream! {
         let mut collecting: Option<CollectingState> = None;
-        while let Some((key, value)) = upstream.try_next().await? {
-            match collecting.take() {
-                Some(mut current) => {
-                    if key.starts_with(current.key()) {
-                        // Pushes the key value pair into `collecting`.
-                        current.push(key, value);
-                        collecting = Some(current);
-                    } else {
-                        // Starts to collect next key value pair.
-                        collecting = Some(CollectingState::new(key, value));
-                        yield merge_multiple_values(current)?;
-                    }
+        while let Some(item) = upstream.next().await {
+            let (key, value) = match item {
+                Ok(pair) => pair,
+                Err(error) => {
+                    yield Err(error);
+                    return;
                 }
-                None => collecting = Some(CollectingState::new(key, value)),
+            };
+            if let Some(current) = &mut collecting
+                && key.strip_prefix(&current.key).is_some_and(|suffix| suffix.starts_with('/'))
+            {
+                current.pairs.push((key, value));
+                continue;
+            }
+            if let Some(previous) = collecting.replace(CollectingState::new(key, value)) {
+                yield previous.finish();
             }
         }
-        if let Some(current) = collecting.take() {
-            yield merge_multiple_values(current)?
+        if let Some(last) = collecting {
+            yield last.finish();
         }
     }
 }
@@ -182,6 +164,30 @@ mod tests {
         assert!(stream.try_next().await.unwrap().is_none());
         // Call again
         assert!(stream.try_next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_missing_segments_leave_next_checkpoint_readable() {
+        let id = crate::ProcedureId::random();
+        let base = format!("procedure/{id}/0000000007.rollback");
+        let suffix = KeySet::with_segment_suffix(&base, 2);
+        let next = format!("procedure/{id}/0000000008.step");
+        for keys in [vec![suffix.clone()], vec![base.clone(), suffix.clone()]] {
+            let upstream = stream::iter(
+                keys.clone()
+                    .into_iter()
+                    .chain([next.clone()])
+                    .map(|key| Ok((key, vec![1]))),
+            );
+            let mut merged = Box::pin(multiple_value_stream(Box::pin(upstream)));
+            assert_matches!(merged.try_next().await, Err(error::Error::CorruptCheckpoint {
+                key, keys: observed, ..
+            }) if key == base && observed == keys);
+            let (key, value) = merged.try_next().await.unwrap().unwrap();
+            assert_eq!(key.key(), next);
+            assert_eq!(value, vec![1]);
+            assert!(merged.try_next().await.unwrap().is_none());
+        }
     }
 
     #[tokio::test]

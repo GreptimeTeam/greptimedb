@@ -80,13 +80,25 @@ impl RepartitionGcRequirementManager {
         let has_cross_region_references = table_reparts
             .iter()
             .any(|(_, value)| !value.src_to_dst.is_empty());
-        let has_unfinished_repartition = procedure_manager
+        let unfinished = procedure_manager
             .has_unfinished_procedure(&[
                 RepartitionProcedure::TYPE_NAME,
                 RepartitionGroupProcedure::TYPE_NAME,
             ])
-            .await
-            .context(error::InspectRepartitionProceduresSnafu)?;
+            .await;
+        let has_unfinished_repartition = match unfinished {
+            Err(common_procedure::Error::UnknownProcedureTypes { ids }) => {
+                common_telemetry::warn!(
+                    "Cannot determine if unreadable procedures {ids:?} require repartition GC"
+                );
+                if !has_cross_region_references {
+                    // Require GC for this startup without recording an unconfirmed durable requirement.
+                    return Ok(true);
+                }
+                false
+            }
+            result => result.context(error::InspectRepartitionProceduresSnafu)?,
+        };
 
         if has_cross_region_references || has_unfinished_repartition {
             self.require_gc().await?;
@@ -178,6 +190,26 @@ mod tests {
         fn lock_key(&self) -> LockKey {
             LockKey::default()
         }
+    }
+
+    #[tokio::test]
+    async fn test_unreadable_procedure_requires_gc_without_persisting_marker() {
+        use common_procedure::store::state_store::StateStore;
+
+        let kv_backend: KvBackendRef = Arc::new(MemoryKvBackend::new());
+        let id = ProcedureId::random();
+        KvStateStore::new(kv_backend.clone())
+            .put(&format!("procedure/{id}/0000000001.rollback"), vec![b'{'])
+            .await
+            .unwrap();
+        let manager = procedure_manager(kv_backend.clone());
+        let requirement = RepartitionGcRequirementManager::new(kv_backend);
+        assert!(matches!(
+            requirement.ensure_gc_enabled(false, &manager).await,
+            Err(error::Error::RepartitionGcRequired { .. })
+        ));
+        requirement.ensure_gc_enabled(true, &manager).await.unwrap();
+        assert!(!requirement.is_gc_required().await.unwrap());
     }
 
     #[tokio::test]
