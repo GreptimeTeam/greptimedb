@@ -1038,10 +1038,10 @@ impl NativeHistogramAggregateAccumulator {
             return Ok(());
         }
         let combined_count = self.combined_count(count)?;
-        // A histogram this crate cannot read - its spans or buckets disagree about the layout - is
-        // dropped along with the position, which is what the accumulator this replaced did with
-        // `legacy_bridge::add`'s `None`. The query answers as it did before: a group holding one is
-        // removed with the warning below, and the samples around it still count.
+        // A layout this crate cannot read -- its spans and its buckets disagree about how many
+        // buckets there are -- drops the position instead of failing the query. The position is
+        // dropped as a whole, with the warning below: none of its samples count toward the answer,
+        // not even the ones that are readable.
         let sample = match float_histogram(&histogram) {
             Ok(sample) => sample,
             Err(_) => {
@@ -2576,9 +2576,8 @@ impl DfAccumulator for NativeHistogramAggregateAccumulator {
             }
             let combined_count = self.combined_count(count)?;
             // The same disagreement `push_histogram` drops a position for, met through a state
-            // frame: the legacy path reached `legacy_bridge::add`, whose `None` it recorded as
-            // incompatible. A partition whose state cannot be read is dropped rather than failing
-            // the statement.
+            // frame: a layout this crate cannot read drops the partition's state instead of failing
+            // the statement, and with it the position the state was headed into.
             let sample = match float_histogram(&histogram) {
                 Ok(sample) => sample,
                 Err(_) => {
@@ -3720,9 +3719,8 @@ mod tests {
     #[test]
     fn an_illegally_shaped_histogram_drops_its_position_rather_than_failing_the_query() {
         // The spans claim two buckets and the row carries one, which is a layout this crate cannot
-        // read: the accumulator this replaced met the same disagreement through
-        // `legacy_bridge::add`'s `None` and dropped the position with the warning below. A query
-        // over a table holding one answers what it answered before, with the group removed.
+        // read: it drops the position instead of failing the query. A single sample is enough to
+        // drop it, because the position goes as a whole, with the warning below.
         let collector = PromqlAnnotationCollector::default();
         for kind in [
             NativeHistogramAggregateKind::Sum,
@@ -3824,6 +3822,109 @@ mod tests {
         let values = extract_array(&result).unwrap();
         let values = values.as_any().downcast_ref::<BooleanArray>().unwrap();
         assert!(!values.value(0));
+    }
+
+    /// The one sample the two tests below fold: one bucket holding observations and one explicit
+    /// empty bucket beside it.
+    ///
+    /// The answer keeps the bucket with observations and drops the empty one, which is a difference
+    /// [`NativeHistogramEq`] can tell apart from the input.
+    fn one_explicit_zero_bucket() -> NativeHistogram {
+        sample_histogram(1.0, 1.0, vec![1.0, 0.0])
+    }
+
+    /// A `sum` or `avg` over one sample answers `[1]` where the sample carried `[1, 0]`.
+    ///
+    /// The comparison change is intended. The answer is the fold's, not the sample's:
+    /// [`finished_histogram`] compacts the empty bucket away, and the native `Aggregate` node reads
+    /// its answers through that same function, so both paths answer `[1]` -- a one-sample group
+    /// included. `promql_eq` tells an explicit zero bucket from an absent one (see
+    /// [`comparison_observes_explicit_sparse_zero_buckets`]), so `sum(h)` is no longer equal to the
+    /// single sample `h` it folded.
+    #[test]
+    fn sum_and_avg_compact_a_single_samples_explicit_zero_bucket() {
+        for kind in [
+            NativeHistogramAggregateKind::Sum,
+            NativeHistogramAggregateKind::Avg,
+        ] {
+            let mut aggregate = NativeHistogramAggregateAccumulator::new(kind, None);
+            aggregate
+                .push_histogram(one_explicit_zero_bucket(), 1)
+                .unwrap();
+
+            // The answer the state hands over is where the bucket list is decided.
+            let answered = aggregate
+                .state_histogram()
+                .unwrap()
+                .expect("a single sample answers");
+            assert_eq!(
+                answered.positive_buckets,
+                vec![1.0],
+                "{}: the empty bucket is compacted away",
+                kind.name()
+            );
+            assert_eq!(answered.count, 1.0, "{}: the count", kind.name());
+            assert_eq!(answered.sum, 1.0, "{}: the sum", kind.name());
+
+            let evaluated = evaluated_histogram(&mut aggregate);
+            assert_eq!(
+                evaluated.positive_buckets,
+                vec![1.0],
+                "{}: reading the answer back keeps the empty bucket out",
+                kind.name()
+            );
+        }
+    }
+
+    /// A partial state round trip answers what the direct evaluation answers: `[1]`.
+    ///
+    /// The exported state carries the fold's answer, which has already lost the explicit zero
+    /// bucket, so merging it into an empty accumulator cannot put the bucket back: a state boundary
+    /// does not restore what the fold compacted away. The comparison change is the direct
+    /// evaluation's -- `promql_eq` tells `[1]` from the input's `[1, 0]` -- and it survives the
+    /// state the same way.
+    #[test]
+    fn a_partial_state_round_trip_answers_the_compacted_explicit_zero_bucket() {
+        for kind in [
+            NativeHistogramAggregateKind::Sum,
+            NativeHistogramAggregateKind::Avg,
+        ] {
+            let mut direct = NativeHistogramAggregateAccumulator::new(kind, None);
+            direct
+                .push_histogram(one_explicit_zero_bucket(), 1)
+                .unwrap();
+            let evaluated = evaluated_histogram(&mut direct);
+
+            let state = state_arrays(&mut direct);
+            let mut merged = NativeHistogramAggregateAccumulator::new(kind, None);
+            merged.merge_batch(&state).unwrap();
+            let round_tripped = evaluated_histogram(&mut merged);
+
+            assert_eq!(
+                round_tripped.positive_buckets,
+                vec![1.0],
+                "{}: the round trip keeps the empty bucket out",
+                kind.name()
+            );
+            assert_eq!(
+                round_tripped.positive_buckets,
+                evaluated.positive_buckets,
+                "{}: the round trip answers the direct buckets",
+                kind.name()
+            );
+            assert_eq!(
+                round_tripped.count,
+                evaluated.count,
+                "{}: the round trip answers the direct count",
+                kind.name()
+            );
+            assert_eq!(
+                round_tripped.sum,
+                evaluated.sum,
+                "{}: the round trip answers the direct sum",
+                kind.name()
+            );
+        }
     }
 
     #[test]
