@@ -1,16 +1,13 @@
-// Copyright 2023 Greptime Team
+// Copyright 2023-2026 GrepTime Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This file is part of the GreptimeDB Enterprise Edition and is licensed under
+// the GreptimeDB Enterprise License. You may not use this file except in
+// compliance with that license. A copy of the license is available at the root
+// of this repository in the file LICENSE-ENTERPRISE.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing, this software is
+// distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+// either express or implied.
 
 //! `ADMIN flow_backfill(...)` and `ADMIN flow_backfill_status(...)`.
 //!
@@ -284,9 +281,14 @@ mod tests {
     #[test]
     fn test_flow_backfill_registration() {
         for name in ["flow_backfill", "flow_backfill_status"] {
-            let factory = crate::function_registry::FUNCTION_REGISTRY
-                .get_function(name)
-                .unwrap_or_else(|| panic!("{name} is not registered as an admin function"));
+            let factory = crate::function_registry::get_admin_function(name)
+                .unwrap_or_else(|| panic!("{name} is not registered as an ADMIN function"));
+            assert!(
+                crate::function_registry::FUNCTION_REGISTRY
+                    .get_function(name)
+                    .is_none(),
+                "{name} must not resolve through the ordinary scalar registry"
+            );
             let function = factory.provide(FunctionContext::mock());
             assert_eq!(name, function.name());
             assert_eq!(ArrowDataType::Utf8, function.return_type(&[]).unwrap());

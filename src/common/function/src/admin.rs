@@ -62,11 +62,6 @@ impl AdminFunction {
         registry.register(BuildIndexFunction::factory());
         registry.register(BuildSeriesIndexFunction::factory());
         registry.register(FlushFlowFunction::factory());
-        #[cfg(feature = "enterprise")]
-        {
-            registry.register(FlowBackfillFunction::factory());
-            registry.register(FlowBackfillStatusFunction::factory());
-        }
         registry.register(ReconcileCatalogFunction::factory());
         registry.register(ReconcileDatabaseFunction::factory());
         registry.register(ReconcileTableFunction::factory());
@@ -77,6 +72,10 @@ impl AdminFunction {
         registry.register(DiscardUnflushedDataFunction::factory());
         registry.register(DiscardPendingTailsFunction::factory());
         #[cfg(feature = "enterprise")]
-        registry.register(PurgeTableFunction::factory());
+        {
+            registry.register(PurgeTableFunction::factory());
+            registry.register(FlowBackfillFunction::factory());
+            registry.register(FlowBackfillStatusFunction::factory());
+        }
     }
 }

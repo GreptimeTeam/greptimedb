@@ -14,7 +14,8 @@
 
 use api::v1::flow::FlowRequestHeader;
 use async_trait::async_trait;
-use common_error::ext::BoxedError;
+use common_error::ext::{BoxedError, PlainError};
+use common_error::status_code::StatusCode;
 use common_function::handlers::FlowServiceHandler;
 use common_meta::key::flow::FlowMetadataManagerRef;
 use common_meta::node_manager::{FlownodeRef, NodeManagerRef};
@@ -80,7 +81,7 @@ impl FlowServiceHandler for FlowServiceOperator {
             }),
         });
 
-        self.handle_routed(id, ctx, body).await
+        self.handle_single_owner(id, ctx, body).await
     }
 
     async fn backfill_status(
@@ -97,7 +98,7 @@ impl FlowServiceHandler for FlowServiceOperator {
             flow: flow.to_string(),
         });
 
-        self.handle_routed(id, ctx, body).await
+        self.handle_single_owner(id, ctx, body).await
     }
 }
 
@@ -139,13 +140,13 @@ impl FlowServiceOperator {
         .await)
     }
 
-    /// Sends `body` to every flownode that owns the flow `id` and merges their
-    /// responses, keeping the extensions they answered with.
+    /// Sends `body` to the one flownode that owns the flow `id`.
     ///
-    /// These are process-local answers (an attempt lives only in the process
-    /// that owns the flow), so the extensions of the answering node(s) are what
-    /// the caller reads back; they are never dropped here.
-    async fn handle_routed(
+    /// A backfill attempt and its status are process-local to the execution that
+    /// owns the flow. Broadcasting would create or read different attempts on
+    /// different nodes and then merge them under the same extension keys, so a
+    /// multi-owner flow is refused before any RPC is sent.
+    async fn handle_single_owner(
         &self,
         id: u32,
         ctx: QueryContextRef,
@@ -153,31 +154,32 @@ impl FlowServiceOperator {
     ) -> Result<api::v1::flow::FlowResponse> {
         use api::v1::flow::FlowRequest;
 
-        let all_flow_nodes = self.owning_flownodes(id).await?;
-
-        let mut final_result: Option<api::v1::flow::FlowResponse> = None;
-        for node in all_flow_nodes {
-            let req = FlowRequest {
-                header: Some(FlowRequestHeader {
-                    tracing_context: TracingContext::from_current_span().to_w3c(),
-                    query_context: Some(to_meta_query_context(ctx.clone()).into()),
-                }),
-                body: Some(body.clone()),
-            };
-            let res = node
-                .handle(req)
-                .await
-                .map_err(BoxedError::new)
-                .context(common_query::error::ExecuteSnafu)?;
-
-            if let Some(prev) = &mut final_result {
-                prev.extensions.extend(res.extensions);
-            } else {
-                final_result = Some(res);
-            }
+        let nodes = self.owning_flownodes(id).await?;
+        if nodes.len() != 1 {
+            return Err(BoxedError::new(PlainError::new(
+                format!(
+                    "flow {id} is owned by {} flownodes; backfill requires exactly one",
+                    nodes.len()
+                ),
+                StatusCode::InvalidArguments,
+            )))
+            .context(common_query::error::ExecuteSnafu);
         }
-
-        final_result.context(common_query::error::FlownodeNotFoundSnafu)
+        let node = nodes
+            .into_iter()
+            .next()
+            .context(common_query::error::FlownodeNotFoundSnafu)?;
+        let req = FlowRequest {
+            header: Some(FlowRequestHeader {
+                tracing_context: TracingContext::from_current_span().to_w3c(),
+                query_context: Some(to_meta_query_context(ctx).into()),
+            }),
+            body: Some(body),
+        };
+        node.handle(req)
+            .await
+            .map_err(BoxedError::new)
+            .context(common_query::error::ExecuteSnafu)
     }
 
     /// Flush the flownodes according to the flow id.
@@ -279,10 +281,14 @@ mod tests {
         }
     }
 
-    /// Builds an operator over the flow `greptime.demo` (id 42) routed to flownode 1.
-    async fn new_operator(handler: RecordingFlownode) -> FlowServiceOperator {
+    /// Builds an operator over the flow `greptime.demo` (id 42) with `routes`.
+    async fn new_operator_with_routes(
+        handler: RecordingFlownode,
+        routes: Vec<(u32, Peer)>,
+    ) -> FlowServiceOperator {
         let kv_backend = Arc::new(MemoryKvBackend::new());
         let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend));
+        let flownode_ids = routes.iter().map(|(id, _)| (*id, 1u64)).collect();
         flow_metadata_manager
             .create_flow_metadata(
                 FLOW_ID,
@@ -291,7 +297,7 @@ mod tests {
                     all_source_table_names: vec![],
                     unresolved_source_table_names: vec![],
                     sink_table_name: TableName::new("greptime", "public", "demo_sink"),
-                    flownode_ids: [(1, 1u64)].into(),
+                    flownode_ids,
                     catalog_name: "greptime".to_string(),
                     query_context: None,
                     flow_name: "demo".to_string(),
@@ -305,7 +311,10 @@ mod tests {
                     updated_time: Default::default(),
                     eval_schedule: None,
                 },
-                vec![(1, FlowRouteValue::from(Peer::empty(1)))],
+                routes
+                    .into_iter()
+                    .map(|(id, peer)| (id, FlowRouteValue::from(peer)))
+                    .collect(),
             )
             .await
             .unwrap();
@@ -314,6 +323,11 @@ mod tests {
             flow_metadata_manager,
             Arc::new(MockFlownodeManager::new(handler)),
         )
+    }
+
+    /// Builds an operator over the flow `greptime.demo` routed to flownode 1.
+    async fn new_operator(handler: RecordingFlownode) -> FlowServiceOperator {
+        new_operator_with_routes(handler, vec![(1, Peer::empty(1))]).await
     }
 
     #[tokio::test]
@@ -356,6 +370,29 @@ mod tests {
             }
             other => panic!("unexpected request body: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_backfill_refuses_a_multi_owner_flow_before_sending() {
+        let handler = RecordingFlownode::default();
+        let operator = new_operator_with_routes(
+            handler.clone(),
+            vec![(1, Peer::empty(1)), (2, Peer::empty(2))],
+        )
+        .await;
+
+        let err = operator
+            .backfill("greptime", "demo", 0, 1000, QueryContext::arc())
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("requires exactly one"),
+            "multi-owner backfill must be refused: {err}"
+        );
+        assert!(
+            handler.take_requests().is_empty(),
+            "the refusal must happen before any flownode RPC"
+        );
     }
 
     #[tokio::test]
