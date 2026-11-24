@@ -379,7 +379,7 @@ impl BulkParts {
                     }
                 }
             };
-            let charge = Arc::new(alloc_tracker.charge(part.estimated_size()));
+            let charge = Arc::new(alloc_tracker.charge(part.held_bytes()));
             self.parts.push(BulkPartWrapper {
                 part,
                 merging: false,
@@ -1206,6 +1206,17 @@ impl PartToMerge {
             PartToMerge::Bulk { part, .. } => part.estimated_size(),
             PartToMerge::Multi { part, .. } => part.estimated_size(),
             PartToMerge::Encoded { part, .. } => part.size_bytes(),
+        }
+    }
+
+    /// Returns the bytes this part holds in memory, charged to the write buffer. An encoded part
+    /// also keeps its parsed parquet metadata, which grows with the schema and row groups.
+    fn held_bytes(&self) -> usize {
+        match self {
+            PartToMerge::Encoded { part, .. } => part
+                .size_bytes()
+                .saturating_add(part.metadata().parquet_metadata.memory_size()),
+            _ => self.estimated_size(),
         }
     }
 
@@ -2391,9 +2402,10 @@ mod tests {
             .unwrap()
             .parts
             .iter()
-            .map(|wrapper| wrapper.part.estimated_size())
+            .map(|wrapper| expected_held_bytes(&wrapper.part))
             .sum();
-        // Encoded parts hold far fewer bytes than the batches written into them.
+        // Encoded parts hold far fewer bytes than the batches written into them, including their
+        // parsed metadata.
         assert!(held * 4 < written, "held {held}, written {written}");
         assert_eq!(held, memtable.stats().estimated_bytes);
     }
@@ -2414,7 +2426,7 @@ mod tests {
                 + parts
                     .parts
                     .iter()
-                    .map(|wrapper| wrapper.part.estimated_size())
+                    .map(|wrapper| expected_held_bytes(&wrapper.part))
                     .sum::<usize>()
         };
         // Fragments below the unordered threshold are buffered and sealed into sorted parts.
@@ -3010,6 +3022,16 @@ mod tests {
             },
             merging: false,
             charge: untracked_charge(),
+        }
+    }
+
+    /// Bytes a part keeps in memory: an encoded part holds its data and parsed metadata.
+    fn expected_held_bytes(part: &PartToMerge) -> usize {
+        match part {
+            PartToMerge::Encoded { part, .. } => {
+                part.data().len() + part.metadata().parquet_metadata.memory_size()
+            }
+            part => part.estimated_size(),
         }
     }
 
