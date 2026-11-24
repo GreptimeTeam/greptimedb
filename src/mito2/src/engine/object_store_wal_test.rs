@@ -773,6 +773,20 @@ async fn test_node_lease_fences_wal_and_renews_without_region_grants() {
     engine.stop().await.unwrap();
 }
 
+/// A region without a WAL provider hands nothing over: the object store WAL, which has no region
+/// for it, is not called, and the given entry id is the bound.
+#[tokio::test]
+async fn test_handoff_of_a_region_without_a_wal_provider_does_nothing() {
+    let log_store = new_log_store().await;
+    let wal = crate::wal::Wal::new(log_store.clone());
+    let bound = wal
+        .handoff(RegionId::new(1, 1), &Provider::Noop, 42)
+        .await
+        .unwrap();
+    assert_eq!(42, bound);
+    log_store.stop().await.unwrap();
+}
+
 async fn new_log_store() -> Arc<ObjectStoreLogStore> {
     ObjectStoreLogStore::try_new(
         ObjectStore::new(Memory::default()).unwrap(),
