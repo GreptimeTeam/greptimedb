@@ -75,9 +75,8 @@
 //! comparison that treats an empty label value as no label - so no drop above it can fold two of its
 //! series by dropping an empty one. The metadata labels a drop removes are another matter: a merge
 //! keeps two series that differ in `__name__`, `__type__` or `__unit__`, so the labels half of the
-//! proof is still asked above it. With that, `abs(abs(rate(x[5m])))` over a table whose key columns
-//! can spell the `NULL`/`''` pair pays for the one merge at the bottom of the chain rather than one
-//! per drop.
+//! proof is still asked above it. With that, a chain of drops - `abs(abs(rate(x[5m])))` - pays for
+//! the one merge at the bottom of the chain rather than one per drop.
 //!
 //! Canonicalizing a map's input is what makes the histogram case work: in
 //! `histogram_count(label_replace(x, "host", "same", "host", ".*"))` two scan partitions each
