@@ -527,6 +527,9 @@ impl MemtableBuilderProvider {
                     .with_config(config.clone())
                     .with_row_group_size(options.row_group_size())
                     .with_float_field_encoding(options.float_field_encoding)
+                    .with_narthex_format(
+                        options.sst_format == Some(crate::sst::FormatType::Narthex),
+                    )
                     .with_compact_dispatcher(self.compact_dispatcher.clone()),
             ),
             Some(MemtableOptions::TimeSeries) => Arc::new(TimeSeriesMemtableBuilder::new(
@@ -552,6 +555,7 @@ impl MemtableBuilderProvider {
         .with_config(self.default_bulk_memtable_config.clone())
         .with_row_group_size(options.row_group_size())
         .with_float_field_encoding(options.float_field_encoding)
+        .with_narthex_format(options.sst_format == Some(crate::sst::FormatType::Narthex))
         .with_compact_dispatcher(self.compact_dispatcher.clone());
 
         if let Some(MemtableOptions::Bulk(config)) = &options.memtable {
@@ -620,11 +624,20 @@ pub struct EncodedRange {
     pub sst_info: SstInfo,
 }
 
+/// Conservative exact-key discovery without decoding sample columns.
+pub type BoxedPrimaryKeyIterator = Box<dyn Iterator<Item = Bytes> + Send>;
+
 /// Builder to build an iterator to read the range.
 /// The builder should know the projection and the predicate to build the iterator.
 pub trait IterBuilder: Send + Sync {
     /// Returns the iterator to read the range.
     fn build(&self, metrics: Option<MemScanMetrics>) -> Result<BoxedBatchIterator>;
+
+    /// Returns exact keys directly when the range has a separate key representation.
+    /// Keys may repeat and may include rows excluded by query visibility.
+    fn primary_keys(&self) -> Option<BoxedPrimaryKeyIterator> {
+        None
+    }
 
     /// Returns whether the iterator is a record batch iterator.
     fn is_record_batch(&self) -> bool {
@@ -787,6 +800,10 @@ impl MemtableRange {
             time_range,
             time_filters,
         )))
+    }
+
+    pub(crate) fn primary_keys(&self) -> Option<BoxedPrimaryKeyIterator> {
+        self.context.builder.primary_keys()
     }
 
     /// Builds an iterator to read all rows in range.

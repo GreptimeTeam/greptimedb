@@ -217,6 +217,16 @@ pub struct MySqlTemplateSet {
     delete_template: RangeTemplate,
 }
 
+fn encoded_blob_len(len: usize) -> usize {
+    let prefix = match len {
+        0..=250 => 1,
+        251..=65_535 => 3,
+        65_536..=16_777_215 => 4,
+        _ => 9,
+    };
+    len + prefix
+}
+
 impl MySqlTemplateSet {
     /// Generates the sql for batch get.
     fn generate_batch_get_query(&self, key_len: usize) -> String {
@@ -352,6 +362,26 @@ impl Transaction<'_> for MySqlTxnClient {
 
 pub struct MySqlExecutorFactory {
     pool: Arc<Pool<MySql>>,
+    max_allowed_packet: Option<usize>,
+}
+
+impl MySqlExecutorFactory {
+    async fn new(pool: MySqlPool) -> Self {
+        const SQL: &str = "SELECT CAST(@@SESSION.max_allowed_packet AS UNSIGNED)";
+        let max_allowed_packet = match sqlx::query_scalar::<_, u64>(SQL).fetch_one(&pool).await {
+            Ok(bytes) => Some(bytes as usize),
+            Err(err) => {
+                warn!(
+                    "Failed to read MySQL max_allowed_packet, writing one key/value pair per statement: {err}"
+                );
+                None
+            }
+        };
+        Self {
+            pool: Arc::new(pool),
+            max_allowed_packet,
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -420,15 +450,17 @@ impl KvQueryExecutor<MySqlClient> for MySqlStore {
         if kvs.is_empty() {
             return Ok(BatchPutResponse::default());
         }
-        if (req.prev_kv || kvs.len() > (*RDS_BATCH_SIZE).min(MAX_BATCH_PUT_KVS))
+        let chunks = self.put_chunk_ranges(kvs)?;
+        if (req.prev_kv || chunks.len() > 1)
             && let ExecutorImpl::Default(executor) = query_executor
         {
             let mut txn = ExecutorImpl::Txn(executor.txn_executor().await?);
-            let response = self.put_chunks(&mut txn, kvs, req.prev_kv).await?;
+            let response = self.put_chunks(&mut txn, kvs, chunks, req.prev_kv).await?;
             txn.commit().await?;
             return Ok(response);
         }
-        self.put_chunks(query_executor, kvs, req.prev_kv).await
+        self.put_chunks(query_executor, kvs, chunks, req.prev_kv)
+            .await
     }
 
     async fn batch_get_with_query_executor(
@@ -537,16 +569,55 @@ impl MySqlStore {
         Ok(BatchGetResponse { kvs })
     }
 
+    /// Plans both PREPARE and EXECUTE packets before any write. A byte split
+    /// requires the same transaction as a split at the bind-parameter limit.
+    fn put_chunk_ranges(&self, kvs: &[KeyValue]) -> Result<Vec<std::ops::Range<usize>>> {
+        let Some(limit) = self.executor_factory.max_allowed_packet else {
+            return Ok((0..kvs.len()).map(|idx| idx..idx + 1).collect());
+        };
+        // Reserve 128 bytes for the fixed INSERT text and PREPARE command,
+        // plus the table name and eight bytes per "(?, ?), " placeholder.
+        let prepare_base = 128 + self.sql_template_set.table_name.len();
+        let row_limit = (*RDS_BATCH_SIZE)
+            .min(MAX_BATCH_PUT_KVS)
+            .min(limit.saturating_sub(prepare_base) / 8);
+        let mut chunks = Vec::new();
+        let mut start = 0;
+        let mut param_bytes = 0;
+        for (idx, kv) in kvs.iter().enumerate() {
+            // Two type descriptors and two length-encoded byte strings.
+            let row_bytes = 4 + encoded_blob_len(kv.key.len()) + encoded_blob_len(kv.value.len());
+            let rows = idx - start + 1;
+            // Command/statement/flags/iteration count, new-params flag, NULL bitmap.
+            let execute_bytes = 11 + (2 * rows).div_ceil(8) + param_bytes + row_bytes;
+            if row_limit == 0 || 12 + row_bytes >= limit {
+                return UnexpectedSnafu { err_msg: format!(
+                    "MySQL batch_put key/value pair cannot fit max_allowed_packet of {limit} bytes (key {}, value {})",
+                    kv.key.len(), kv.value.len()
+                ) }.fail();
+            }
+            if rows > row_limit || execute_bytes >= limit {
+                chunks.push(start..idx);
+                start = idx;
+                param_bytes = 0;
+            }
+            param_bytes += row_bytes;
+        }
+        chunks.push(start..kvs.len());
+        Ok(chunks)
+    }
+
     async fn put_chunks(
         &self,
         executor: &mut ExecutorImpl<'_, MySqlClient>,
         kvs: &[KeyValue],
+        chunks: Vec<std::ops::Range<usize>>,
         prev_kv: bool,
     ) -> Result<BatchPutResponse> {
         let mut prev_kvs = Vec::new();
-        let chunk_size = (*RDS_BATCH_SIZE).min(MAX_BATCH_PUT_KVS);
-        let mut params = Vec::with_capacity(kvs.len().min(chunk_size) * 2);
-        for chunk in kvs.chunks(chunk_size) {
+        let mut params = Vec::new();
+        for range in chunks {
+            let chunk = &kvs[range];
             let (select, update) = self
                 .sql_template_set
                 .generate_batch_upsert_query(chunk.len());
@@ -707,9 +778,7 @@ impl MySqlStore {
             max_txn_ops,
             sql_template_set,
             txn_retry_count: RDS_STORE_TXN_RETRY_COUNT,
-            executor_factory: MySqlExecutorFactory {
-                pool: Arc::new(pool),
-            },
+            executor_factory: MySqlExecutorFactory::new(pool).await,
             _phantom: PhantomData,
         }))
     }
@@ -737,6 +806,15 @@ mod tests {
     use crate::test_util::test_certs_dir;
 
     #[tokio::test]
+    async fn test_packet_limit_query_failure_leaves_limit_unknown() {
+        let pool =
+            sqlx::mysql::MySqlPoolOptions::new().connect_lazy_with(MySqlConnectOptions::new());
+        pool.close().await;
+        let factory = MySqlExecutorFactory::new(pool).await;
+        assert_eq!(factory.max_allowed_packet, None);
+    }
+
+    #[tokio::test]
     async fn test_close_backend() {
         let pool =
             sqlx::mysql::MySqlPoolOptions::new().connect_lazy_with(MySqlConnectOptions::new());
@@ -745,6 +823,7 @@ mod tests {
             txn_retry_count: RDS_STORE_TXN_RETRY_COUNT,
             executor_factory: MySqlExecutorFactory {
                 pool: Arc::new(pool.clone()),
+                max_allowed_packet: None,
             },
             sql_template_set: MySqlTemplateFactory::new("close_test").build(),
             _phantom: PhantomData,
@@ -846,9 +925,7 @@ mod tests {
             max_txn_ops: 128,
             sql_template_set: sql_templates,
             txn_retry_count: RDS_STORE_TXN_RETRY_COUNT,
-            executor_factory: MySqlExecutorFactory {
-                pool: Arc::new(pool),
-            },
+            executor_factory: MySqlExecutorFactory::new(pool).await,
             _phantom: PhantomData,
         })
     }
@@ -1254,7 +1331,74 @@ mod tests {
                 "successful earlier chunks must roll back"
             );
         }
-        drop_table(&store.executor_factory.pool, &table).await;
+        // Two 700-byte values fit the bind limit but exceed this packet budget.
+        // The trigger rejects the last chunk after the first one succeeds.
+        let mut store = store;
+        let packet_limit = store.executor_factory.max_allowed_packet;
+        store.executor_factory.max_allowed_packet = Some(1024);
+        let make_kv = |key: u8, value| KeyValue {
+            key: vec![key],
+            value,
+        };
+        let kvs = vec![
+            make_kv(1, vec![1; 700]),
+            make_kv(2, vec![2; 700]),
+            make_kv(3, b"fail".to_vec()),
+        ];
+        assert!(store.put_chunk_ranges(&kvs).unwrap().len() >= 2);
+        assert!(
+            store
+                .batch_put(BatchPutRequest {
+                    kvs,
+                    prev_kv: false
+                })
+                .await
+                .is_err()
+        );
+        let reader = build_mysql_kv_backend(&table).await.unwrap();
+        assert!(
+            reader
+                .range(RangeRequest::new().with_range(vec![0], vec![0]))
+                .await
+                .unwrap()
+                .kvs
+                .is_empty()
+        );
+        let err = store
+            .put_chunk_ranges(&[make_kv(1, vec![0; 1024])])
+            .unwrap_err();
+        assert!(err.to_string().contains("max_allowed_packet"));
+        store.executor_factory.max_allowed_packet = None;
+        let large = make_kv(4, vec![4; 5 * 1024 * 1024]);
+        let kvs = vec![large.clone(), make_kv(5, b"fail".to_vec())];
+        assert_eq!(store.put_chunk_ranges(&kvs).unwrap(), [0..1, 1..2]);
+        // When the server accepts this value, losing the limit probe must not reject it.
+        if packet_limit.is_some_and(|limit| limit > large.value.len() + 1024) {
+            store
+                .batch_put(BatchPutRequest {
+                    kvs: vec![large.clone()],
+                    prev_kv: false,
+                })
+                .await
+                .unwrap();
+            assert_eq!(reader.get(&large.key).await.unwrap().unwrap(), large);
+        }
+        let kvs = vec![make_kv(6, b"ok".to_vec()), make_kv(7, b"fail".to_vec())];
+        assert!(
+            store
+                .batch_put(BatchPutRequest {
+                    kvs,
+                    prev_kv: false
+                })
+                .await
+                .is_err()
+        );
+        assert!(reader.get(&[6]).await.unwrap().is_none());
+        store.executor_factory.max_allowed_packet = packet_limit;
+        let pool = store.executor_factory.pool.clone();
+        crate::kv_backend::test::check_segmented_checkpoint(Arc::new(store), Arc::new(reader))
+            .await;
+        drop_table(&pool, &table).await;
     }
 
     #[tokio::test]

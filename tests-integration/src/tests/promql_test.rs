@@ -6635,10 +6635,11 @@ async fn promql_output(
 /// `absent_over_time` answers with the labels its selector's matchers fix at every point no series
 /// of the selector has a sample at, and with nothing at the points one does. Three metric tables
 /// make the shapes reachable: `absent_probe` carries `probe_label`, which no row's value matches, so
-/// a nameless selector narrows to it; `absent_a` and `absent_b` carry the same ordinary labels, so a
-/// nameless selector over them is one discovery expands into several metrics; and no table carries
-/// `no_such_label`, which is the reported query - the one whose selector matches no metric table and
-/// whose labels therefore have to come from the matchers alone.
+/// a nameless selector narrows to it; `absent_a` and `absent_b` carry the same ordinary labels, so
+/// a nameless selector covers both and is one discovery expanding into several metrics, each
+/// answering through its own raw source; and no table carries `no_such_label`, which is the reported
+/// query - the one whose selector matches no metric table and whose labels therefore have to come
+/// from the matchers alone.
 ///
 /// The existing plan answers the call per series with a UDF, which needs a metric name to read a
 /// table from: such a selector writes none, and the labels still have to reach the answer at every
@@ -6748,33 +6749,131 @@ async fn native_promql_absent_over_time_answers_like_prometheus() {
         );
     }
 
-    // A nameless selector that discovery expands into more than one metric declines. The presence
-    // read keeps the metric name, and no single name is bound for the segment that hands it over; a
-    // fold that dropped the name would plan, and would read two metrics sharing their ordinary
-    // labels as one series. Neither tree is planned, so the query keeps the existing plan's answer
-    // for a selector that names no metric - an error - rather than answering wrongly.
+    // A nameless selector that discovery expands into more than one metric answers. `absent_a`,
+    // `absent_b` and `absent_probe` all carry `job`, and the first two carry the same ordinary
+    // labels, so `{job="api"}` is one discovery expanding into several metrics whose series would
+    // collapse into one if the presence read dropped the metric name. It does not, so the node
+    // reads a frame per metric - its child is the union of their raw sources - rather than one scan
+    // bound to one name.
+    //
+    // Both metrics holding samples in the window answer nothing: neither may be read as the other.
     observer.clear();
-    let declined = servers::prometheus_handler::PrometheusHandler::do_query(
-        instance.as_ref(),
-        &PromQuery {
-            query: r#"absent_over_time({job="api"}[5m])"#.to_string(),
-            start: "120".to_string(),
-            end: "120".to_string(),
-            step: "1s".to_string(),
-            ..PromQuery::default()
-        },
-        native_query_context(true, 4),
+    let (columns, rows) = native_labelled_rows(
+        promql_output(
+            &instance,
+            r#"absent_over_time({job="api"}[5m])"#,
+            "120",
+            "120",
+            "1s",
+        )
+        .await,
     )
     .await;
     assert!(
-        declined.is_err(),
-        "a nameless selector over several metrics must not be answered natively yet"
-    );
-    assert!(
-        !observed_physical_nodes(&observer)
+        observed_physical_nodes(&observer)
             .iter()
             .any(|node| node.name() == "FusedSeriesExec"),
-        "the declining shape must not run a fused node"
+        "a nameless selector over several metrics must run a fused node: {columns:?}"
+    );
+    assert!(
+        rows.is_empty(),
+        "two metrics with equal labels holding samples in the window: {columns:?} {rows:?}"
+    );
+
+    // The same selector where the window holds no sample of any of them answers once, with the
+    // selector's equality labels alone: the name the presence read kept is not a label of the
+    // answer, and neither is `probe_label`, which no matcher fixes.
+    let (columns, rows) = native_labelled_rows(
+        promql_output(
+            &instance,
+            r#"absent_over_time({job="api"}[5m])"#,
+            "400",
+            "400",
+            "1s",
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        vec![(400000, labels(&[("job", "api")]), 1.0)],
+        rows,
+        "{columns:?}"
+    );
+
+    // A range answers every step whose window holds nothing.
+    let (columns, rows) = native_labelled_rows(
+        promql_output(
+            &instance,
+            r#"absent_over_time({job="api"}[5m])"#,
+            "400",
+            "470",
+            "70s",
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        vec![
+            (400000, labels(&[("job", "api")]), 1.0),
+            (470000, labels(&[("job", "api")]), 1.0),
+        ],
+        rows,
+        "{columns:?}"
+    );
+
+    // A statement that compares a discovery over several metrics with one over a single metric cuts
+    // both occurrences into one segment. `{job="api"}` is a union of one raw source per discovered
+    // metric and `{probe_label="y"}` is a single raw source, and each is already the frame producer
+    // it reads through, so the segment hands them on rather than binding them again: a second
+    // binding nests a source in a source, and the physical planner refuses that, because a source's
+    // child has to be the region scan it binds.
+    //
+    // Both metrics hold a sample in the window at 120s, so the absent side reports nothing, and the
+    // addition answers alone. One-to-one matching under `on(job)` narrows the result to the labels
+    // the two operands are matched by, as Prometheus does: the probe's `probe_label` is not one of
+    // them, so it leaves the result. The value is the sum of the matched samples, 5 + 2.
+    observer.clear();
+    let (columns, rows) = native_labelled_rows(
+        promql_output(
+            &instance,
+            r#"absent_over_time({job="api"}[5m]) or ({probe_label="y"} + on(job) absent_a)"#,
+            "120",
+            "120",
+            "1s",
+        )
+        .await,
+    )
+    .await;
+    assert!(
+        observed_physical_nodes(&observer)
+            .iter()
+            .any(|node| node.name() == "FusedSeriesExec"),
+        "the mixed discovery statement must run a fused node: {columns:?}"
+    );
+    assert_eq!(
+        vec![(120000, labels(&[("job", "api")]), 7.0)],
+        rows,
+        "{columns:?}"
+    );
+
+    // At 400s the window holds no sample of either metric and both right-hand operands are older
+    // than the lookback, so the absent side answers alone: one series, labelled by the matcher it
+    // fixes, and nothing here supplies `probe_label`.
+    let (columns, rows) = native_labelled_rows(
+        promql_output(
+            &instance,
+            r#"absent_over_time({job="api"}[5m]) or ({probe_label="y"} + on(job) absent_a)"#,
+            "400",
+            "400",
+            "1s",
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        vec![(400000, labels(&[("job", "api")]), 1.0)],
+        rows,
+        "{columns:?}"
     );
 }
 
@@ -14783,6 +14882,197 @@ async fn native_promql_dynamic_histogram_quantile() {
     wrapped_actual.sort_by_key(|row| row.0);
     wrapped_expected.sort_by_key(|row| row.0);
     assert_eq!(wrapped_actual, wrapped_expected, "{wrapped_sql}");
+}
+
+/// A `quantile` whose parameter is evaluated reads it at every step and answers there what
+/// `quantile(<that step's φ>, m)` answers on its own.
+///
+/// The vector holds two series, one at 1 and one at 10 at every step, so the `φ`-quantile of a step
+/// is `1 + φ * 9` -- the linear interpolation Prometheus computes -- and a step whose `φ` the
+/// statement has no sample for is a NaN `φ`, which Prometheus' `quantile` answers with NaN rather
+/// than by dropping the point. The parameter is read from a second table, so the statement runs as
+/// one native execution over two inputs.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_dynamic_quantile() {
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_dynamic_quantile").with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE native_dyn_quantile (ts TIMESTAMP TIME INDEX, idc STRING, val DOUBLE, PRIMARY KEY(idc));
+         INSERT INTO native_dyn_quantile (ts, idc, val) VALUES
+         (-600000, 'a', 1), (0, 'a', 1), (600000, 'a', 1), (1200000, 'a', 1),
+         (-600000, 'b', 10), (0, 'b', 10), (600000, 'b', 10), (1200000, 'b', 10);
+         CREATE TABLE native_dyn_phi (ts TIMESTAMP TIME INDEX, val DOUBLE);
+         INSERT INTO native_dyn_phi (ts, val) VALUES (0, 0.25), (600000, 0.75)",
+        QueryContext::arc(),
+    )
+    .await;
+
+    // `scalar(native_dyn_phi)` is 0.25 at 0s, 0.75 at 600s, and NaN at 1200s: the 5m lookback of an
+    // instant selection reaches no sample there, and `scalar()` answers NaN for a point that does
+    // not hold exactly one.
+    let phi = "scalar(native_dyn_phi)";
+    let dynamic = format!("TQL EVAL (0, 1200, '600s') quantile({phi}, native_dyn_quantile)");
+    observer.clear();
+    let native = native_labelled_rows(native_tql_output(&instance, &dynamic, true).await).await;
+    assert!(
+        observer.fused().is_some(),
+        "the per-point quantile did not run natively: {dynamic}"
+    );
+    let values: Vec<(i64, f64)> = native
+        .1
+        .iter()
+        .map(|(ts, _, value)| (*ts, *value))
+        .collect();
+    assert_eq!(values.len(), 3, "{dynamic}: {values:?}");
+    // `quantile(0.25, {1, 10})` and `quantile(0.75, {1, 10})`, and then the NaN step: a NaN `φ`
+    // answers a NaN sample, which is a point of the result rather than a missing one.
+    assert_eq!((values[0].0, values[0].1), (0, 3.25), "{dynamic}");
+    assert_eq!((values[1].0, values[1].1), (600_000, 7.75), "{dynamic}");
+    assert_eq!(values[2].0, 1_200_000, "{dynamic}");
+    assert!(values[2].1.is_nan(), "{dynamic}: {:?}", values[2]);
+    assert!(
+        native.1.iter().all(|(_, labels, _)| labels.is_empty()),
+        "the ungrouped fold reported labels: {:?}",
+        native.1
+    );
+
+    // The same statement with each step's `φ` written as a number: the per-point answer is the
+    // constant one at every step that has one.
+    for (step, quantile, expected) in [(0, 0.25, 3.25), (600, 0.75, 7.75)] {
+        let literal =
+            format!("TQL EVAL ({step}, {step}, '600s') quantile({quantile}, native_dyn_quantile)");
+        let (_, rows) =
+            native_labelled_rows(native_tql_output(&instance, &literal, false).await).await;
+        assert_eq!(
+            rows.iter()
+                .map(|(ts, _, value)| (*ts, *value))
+                .collect::<Vec<_>>(),
+            vec![(step * 1_000, expected)],
+            "{literal}"
+        );
+    }
+
+    // A parameter that varies at every point, read from the evaluation time: `0`, `0.25`, `0.5`.
+    let time_sql = "TQL EVAL (0, 1200, '600s') quantile(time() / 2400, native_dyn_quantile)";
+    observer.clear();
+    let by_time = native_labelled_rows(native_tql_output(&instance, time_sql, true).await).await;
+    assert!(
+        observer.fused().is_some(),
+        "a `time()` parameter did not run natively: {time_sql}"
+    );
+    assert_eq!(
+        by_time
+            .1
+            .iter()
+            .map(|(ts, _, value)| (*ts, *value))
+            .collect::<Vec<_>>(),
+        vec![(0, 1.0), (600_000, 3.25), (1_200_000, 5.5)],
+        "{time_sql}"
+    );
+
+    // The grouping is untouched: each group is one member, so it answers that member's value at
+    // every step with a `φ`, and NaN at the step without one.
+    let grouped =
+        format!("TQL EVAL (0, 1200, '600s') quantile({phi}, native_dyn_quantile) by (idc)");
+    observer.clear();
+    let by_idc = native_labelled_rows(native_tql_output(&instance, &grouped, true).await).await;
+    assert!(
+        observer.fused().is_some(),
+        "a grouped per-point quantile did not run natively: {grouped}"
+    );
+    let mut grouped_values: Vec<(i64, String, f64)> = by_idc
+        .1
+        .iter()
+        .map(|(ts, labels, value)| (*ts, labels["idc"].clone(), *value))
+        .collect();
+    grouped_values.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+    let mut expected_grouped = [
+        (0, "a".to_string(), 1.0),
+        (600_000, "a".to_string(), 1.0),
+        (0, "b".to_string(), 10.0),
+        (600_000, "b".to_string(), 10.0),
+    ];
+    expected_grouped.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+    // Two groups at each of the three steps: the two steps with a `φ`, and the NaN step both
+    // groups answer too. The row count is asserted before the rows are read, so a group that
+    // answered nothing at the NaN step is a failure rather than a shorter list that happens to
+    // hold no wrong row.
+    assert_eq!(
+        6,
+        grouped_values.len(),
+        "the grouped fold did not answer every group at every step: {grouped_values:?}"
+    );
+    assert_eq!(grouped_values[..4], expected_grouped[..], "{grouped}");
+    assert_eq!(
+        vec![(1_200_000, "a"), (1_200_000, "b")],
+        grouped_values[4..]
+            .iter()
+            .map(|(ts, group, _)| (*ts, group.as_str()))
+            .collect::<Vec<_>>(),
+        "the grouped NaN step answered something else: {grouped_values:?}"
+    );
+    assert!(
+        grouped_values[4..]
+            .iter()
+            .all(|(_, _, value)| value.is_nan()),
+        "the grouped NaN step answered a value rather than NaN: {grouped_values:?}"
+    );
+
+    // A vector argument is not a scalar, which Prometheus refuses at type check: the native route
+    // keeps declining it, so the statement is answered by the existing plan and fails there.
+    let vector_parameter =
+        "TQL EVAL (0, 1200, '600s') quantile(native_dyn_quantile, native_dyn_quantile)";
+    observer.clear();
+    let error = instance
+        .do_query(vector_parameter, native_query_context(true, 4))
+        .await
+        .remove(0)
+        .unwrap_err();
+    assert!(
+        observer.fused().is_none(),
+        "a vector parameter was admitted: {vector_parameter}"
+    );
+    assert!(
+        format!("{error:?}").contains("quantile"),
+        "unexpected vector-parameter error: {error:?}"
+    );
+
+    // A constant written as an expression stays the number it folds to, and answers it natively.
+    let folded = "TQL EVAL (0, 1200, '600s') quantile(0.25 + 0.1 + 0.15, native_dyn_quantile)";
+    let literal = "TQL EVAL (0, 1200, '600s') quantile(0.5, native_dyn_quantile)";
+    observer.clear();
+    let folded_native =
+        native_labelled_rows(native_tql_output(&instance, folded, true).await).await;
+    assert!(
+        observer.fused().is_some(),
+        "the folded constant did not run natively: {folded}"
+    );
+    observer.clear();
+    let literal_native =
+        native_labelled_rows(native_tql_output(&instance, literal, true).await).await;
+    assert!(
+        observer.fused().is_some(),
+        "the literal did not run natively: {literal}"
+    );
+    assert_eq!(folded_native.1, literal_native.1, "{folded} != {literal}");
+    assert_eq!(
+        folded_native
+            .1
+            .iter()
+            .map(|(ts, _, value)| (*ts, *value))
+            .collect::<Vec<_>>(),
+        vec![(0, 5.5), (600_000, 5.5), (1_200_000, 5.5)],
+        "{folded}"
+    );
 }
 
 /// A dynamic `topk` parameter is evaluated at each TQL evaluation timestamp. `time() / 60 + 1`

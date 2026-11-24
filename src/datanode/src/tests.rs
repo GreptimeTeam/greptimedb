@@ -135,6 +135,7 @@ pub struct MockRegionEngine {
     pub(crate) handle_sync_region_mock_fn: Option<MockSyncRegionHandler>,
     pub(crate) handle_stop_mock_fn: Option<MockStopHandler>,
     pub(crate) mock_role: Option<Option<RegionRole>>,
+    pub(crate) mock_confirmed_leader: Option<bool>,
     /// The candidate lease ids of the leases the engine received.
     pub(crate) candidate_lease_ids: Mutex<Vec<Option<u64>>>,
     engine: String,
@@ -154,6 +155,7 @@ impl MockRegionEngine {
                 handle_sync_region_mock_fn: None,
                 handle_stop_mock_fn: None,
                 mock_role: None,
+                mock_confirmed_leader: None,
                 candidate_lease_ids: Mutex::default(),
                 engine: engine.to_string(),
             }),
@@ -177,6 +179,7 @@ impl MockRegionEngine {
                 handle_sync_region_mock_fn: None,
                 handle_stop_mock_fn: None,
                 mock_role: None,
+                mock_confirmed_leader: None,
                 candidate_lease_ids: Mutex::default(),
                 engine: engine.to_string(),
             }),
@@ -200,6 +203,7 @@ impl MockRegionEngine {
                 handle_sync_region_mock_fn: None,
                 handle_stop_mock_fn: None,
                 mock_role: None,
+                mock_confirmed_leader: None,
                 candidate_lease_ids: Mutex::default(),
                 engine: engine.to_string(),
             }),
@@ -224,6 +228,7 @@ impl MockRegionEngine {
             handle_sync_region_mock_fn: None,
             handle_stop_mock_fn: None,
             mock_role: None,
+            mock_confirmed_leader: None,
             candidate_lease_ids: Mutex::default(),
             engine: engine.to_string(),
         };
@@ -328,6 +333,13 @@ impl RegionEngine for MockRegionEngine {
             return role;
         }
         Some(RegionRole::Leader)
+    }
+
+    fn is_confirmed_leader(&self, region_id: RegionId) -> Option<bool> {
+        self.role(region_id).map(|role| {
+            self.mock_confirmed_leader
+                .unwrap_or(role != RegionRole::Follower)
+        })
     }
 
     async fn sync_region(

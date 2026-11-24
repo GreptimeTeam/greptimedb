@@ -17,9 +17,9 @@ use std::time::Instant;
 
 use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, error, info};
-use futures::future::try_join_all;
+use futures::future::join_all;
 use object_store::manager::ObjectStoreManagerRef;
-use snafu::{ResultExt, ensure};
+use snafu::{IntoError, ensure};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::PathType;
 use store_api::storage::{FileId, IndexVersion, RegionId};
@@ -104,7 +104,7 @@ pub struct RegionFileCopier {
 }
 
 /// A descriptor for a file.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum FileDescriptor {
     /// An index file.
     Index {
@@ -114,6 +114,13 @@ pub enum FileDescriptor {
     },
     /// A data file.
     Data { file_id: FileId, size: u64 },
+    /// One narthex object; manifests carry rewritten owner metadata.
+    NarthexObject {
+        source: String,
+        target: String,
+        size: u64,
+        manifest: Option<bytes::Bytes>,
+    },
 }
 
 impl FileDescriptor {
@@ -121,11 +128,13 @@ impl FileDescriptor {
         match self {
             FileDescriptor::Index { size, .. } => *size,
             FileDescriptor::Data { size, .. } => *size,
+            FileDescriptor::NarthexObject { size, .. } => *size,
         }
     }
 
     fn file_path(&self, region_id: RegionId, table_dir: &str, path_type: PathType) -> String {
         match *self {
+            FileDescriptor::NarthexObject { ref target, .. } => target.clone(),
             FileDescriptor::Index {
                 file_id, version, ..
             } => location::index_file_path(
@@ -158,6 +167,9 @@ fn build_copy_file_paths(
     table_dir: &str,
     path_type: PathType,
 ) -> (String, String) {
+    if let FileDescriptor::NarthexObject { source, target, .. } = file_descriptor {
+        return (source, target);
+    }
     (
         file_descriptor.file_path(source_region_id, table_dir, path_type),
         file_descriptor.file_path(target_region_id, table_dir, path_type),
@@ -215,25 +227,49 @@ impl RegionFileCopier {
         );
         let mut tasks = Vec::with_capacity(parallelism);
         for skip in 0..parallelism {
-            let target_file_ids = file_ids.iter().skip(skip).step_by(parallelism).copied();
+            let target_file_ids = file_ids.iter().skip(skip).step_by(parallelism).cloned();
             let object_store = object_store.clone();
             tasks.push(async move {
                 for file_desc in target_file_ids {
                     let (source_path, target_path) = build_copy_file_paths(
                         source_region_id,
                         target_region_id,
-                        file_desc,
+                        file_desc.clone(),
                         table_dir,
                         path_type,
                     );
                     let now = Instant::now();
-                    object_store
-                        .copy(&source_path, &target_path)
-                        .await
+                    let result = if let FileDescriptor::NarthexObject {
+                        manifest: Some(bytes),
+                        ..
+                    } = &file_desc
+                    {
+                        object_store
+                            .write(&target_path, bytes.clone())
+                            .await
+                            .map(|_| ())
+                    } else {
+                        object_store
+                            .copy(&source_path, &target_path)
+                            .await
+                            .map(|_| ())
+                    };
+                    result
                         .inspect_err(
                             |e| error!(e; "Failed to copy file {} to {}", source_path, target_path),
                         )
-                        .context(error::OpenDalSnafu)?;
+                        .map_err(|err| {
+                            if path_type == PathType::Metadata
+                                && err.kind() == object_store::ErrorKind::NotFound
+                            {
+                                error::MetadataCopyFileNotFoundSnafu {
+                                    path: source_path.clone(),
+                                }
+                                .into_error(err)
+                            } else {
+                                error::OpenDalSnafu.into_error(err)
+                            }
+                        })?;
                     let file_size = ReadableSize(file_desc.size());
                     info!(
                         "Copied file {} to {}, file size: {}, elapsed: {:?}",
@@ -248,7 +284,8 @@ impl RegionFileCopier {
             });
         }
 
-        if let Err(err) = try_join_all(tasks).await {
+        // Finish sibling copies before deleting partially written target objects.
+        if let Some(err) = join_all(tasks).await.into_iter().find_map(Result::err) {
             error!(err; "Failed to copy files from region {} to region {}", source_region_id, target_region_id);
             self.clean_target_region(target_region_id, file_ids).await;
             return Err(err);
@@ -262,6 +299,16 @@ impl RegionFileCopier {
         let table_dir = self.access_layer.table_dir();
         let path_type = self.access_layer.path_type();
         let object_store = self.access_layer.object_store();
+        let narthex_dirs: std::collections::BTreeSet<_> = file_ids
+            .iter()
+            .filter_map(|file| {
+                if let FileDescriptor::NarthexObject { target, .. } = file {
+                    location::parent_dir(target).map(str::to_string)
+                } else {
+                    None
+                }
+            })
+            .collect();
         let delete_file_path = file_ids
             .into_iter()
             .map(|file_descriptor| {
@@ -274,6 +321,12 @@ impl RegionFileCopier {
         );
         if let Err(err) = object_store.delete_iter(delete_file_path).await {
             error!(err; "Failed to delete files from region {}", target_region_id);
+            return;
+        }
+        for dir in narthex_dirs {
+            if let Err(err) = object_store.delete(&dir).await {
+                error!(err; "Failed to remove copied artifact directory {dir}");
+            }
         }
     }
 }
@@ -294,6 +347,40 @@ mod tests {
     use crate::sst::index::intermediate::IntermediateManager;
     #[cfg(feature = "hdfs-object-store")]
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
+
+    #[rstest::rstest]
+    #[case(PathType::Metadata, common_error::ext::RetryHint::Retryable)]
+    #[case(PathType::Bare, common_error::ext::RetryHint::NonRetryable)]
+    #[tokio::test]
+    async fn test_missing_copy_file_retry_hint(
+        #[case] path_type: PathType,
+        #[case] expected: common_error::ext::RetryHint,
+    ) {
+        use crate::test_util::{CreateRequestBuilder, TestEnv};
+        use common_error::ext::ErrorExt;
+        use store_api::region_engine::RegionEngine;
+        use store_api::region_request::RegionRequest;
+
+        let mut env = TestEnv::new().await;
+        let engine = env.create_engine(Default::default()).await;
+        let target = RegionId::new(1, 2);
+        let mut create = CreateRequestBuilder::new().build();
+        create.path_type = path_type;
+        engine
+            .handle_request(target, RegionRequest::Create(create))
+            .await
+            .unwrap();
+        let copier = RegionFileCopier::new(engine.get_region(target).unwrap().access_layer());
+        let missing = FileDescriptor::Data {
+            file_id: FileId::random(),
+            size: 1,
+        };
+        let err = copier
+            .copy_files(RegionId::new(1, 1), target, vec![missing], 1)
+            .await
+            .unwrap_err();
+        assert_eq!(err.retry_hint(), expected);
+    }
 
     #[test]
     fn test_build_copy_file_paths() {
@@ -401,7 +488,7 @@ mod tests {
         let (source_path, target_path) = build_copy_file_paths(
             source_region_id,
             target_region_id,
-            descriptor,
+            descriptor.clone(),
             "table_dir",
             PathType::Bare,
         );

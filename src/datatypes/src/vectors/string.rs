@@ -524,6 +524,13 @@ mod tests {
     use super::*;
 
     #[test]
+    #[should_panic(expected = "Trying to access an element at index")]
+    fn test_get_ref_out_of_bounds_without_nulls_panics() {
+        let vector = StringVector::from(vec!["a"]);
+        vector.get_ref(1);
+    }
+
+    #[test]
     fn test_string_vector_build_get() {
         let mut builder = StringVectorBuilder::with_capacity(4);
         builder.push(Some("hello"));

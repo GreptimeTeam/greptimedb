@@ -152,7 +152,9 @@ pub struct RegionMetadata {
     /// Columns in the region. Has the same order as columns
     /// in [schema](RegionMetadata::schema).
     pub column_metadatas: Vec<ColumnMetadata>,
-    /// Maintains an ordered list of primary keys
+    /// Primary key column IDs in declared order. Dense keys follow this order.
+    /// Metric-engine sparse keys start with table ID and TSID, followed by
+    /// non-null labels in label-name order, which can differ from this list.
     pub primary_key: Vec<ColumnId>,
 
     /// Immutable and unique id of a region.

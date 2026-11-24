@@ -57,6 +57,8 @@ pub type WalEntryStream<'a> = BoxStream<'a, Result<(EntryId, WalEntry)>>;
 /// a log store that acknowledges an append before its entries are durable
 /// hands out entry ids that a crash can lose, and a manifest watermark that
 /// names such an id would skip the entries assigned again after a restart.
+/// A catchup from a remote WAL calls it before it replays, so the entries the
+/// region acknowledged on this node are durable before the replay reads the WAL.
 #[derive(Clone)]
 pub(crate) struct DurabilityBarrier(
     Arc<dyn Fn(EntryId) -> BoxFuture<'static, Result<()>> + Send + Sync>,

@@ -318,6 +318,8 @@ impl CompactionRegionOpener {
         };
 
         let manifest = manifest_manager.manifest();
+        let mut region_options = req.region_options.clone();
+        crate::region::opener::sanitize_region_options(&manifest, &mut region_options);
         let region_metadata = manifest.metadata.clone();
         let hook: Option<RegionHookRef> = req.plugins.get();
         let manifest_ctx = Arc::new(ManifestContext::new(
@@ -341,7 +343,7 @@ impl CompactionRegionOpener {
             ssts.add_files(file_purger.clone(), manifest.files.values().cloned());
             CompactionVersion {
                 metadata: region_metadata.clone(),
-                options: req.region_options.clone(),
+                options: region_options.clone(),
                 ssts: Arc::new(ssts),
                 // Remote execution uses an already picked output. A manifest-only
                 // opener cannot prove that a new LastNonNull pick is memtable-safe.
@@ -355,26 +357,23 @@ impl CompactionRegionOpener {
             Either::Left(ttl) => ttl,
             // Get the ttl from the schema metadata manager.
             Either::Right(schema_metadata_manager) => {
-                let (_, ttl) = find_dynamic_options(
-                    req.region_id,
-                    &req.region_options,
-                    &schema_metadata_manager,
-                )
-                .await
-                .unwrap_or_else(|e| {
-                    warn!(e; "Failed to get ttl for region: {}", region_metadata.region_id);
-                    (
-                        crate::region::options::CompactionOptions::default(),
-                        TimeToLive::default(),
-                    )
-                });
+                let (_, ttl) =
+                    find_dynamic_options(req.region_id, &region_options, &schema_metadata_manager)
+                        .await
+                        .unwrap_or_else(|e| {
+                            warn!(e; "Failed to get ttl for region: {}", region_metadata.region_id);
+                            (
+                                crate::region::options::CompactionOptions::default(),
+                                TimeToLive::default(),
+                            )
+                        });
                 ttl
             }
         };
 
         Ok(CompactionRegion {
             region_id: req.region_id,
-            region_options: req.region_options.clone(),
+            region_options: region_options.clone(),
             engine_config: self.mito_config.clone(),
             region_metadata: region_metadata.clone(),
             // Lets the scan reuse the input footers read while planning the merge.
@@ -564,9 +563,10 @@ impl CompactionContext {
 /// Remote compaction runs off-process and ships `MergeOutput` over the wire;
 /// [`MergeOutput::sst_infos`] is `#[serde(skip)]` because the parquet footer
 /// (`ParquetMetaData`) is not serde-serializable. To avoid feeding the hook
-/// default (zero) values for real SSTs, this rebuilds the seven fields `FileMeta`
+/// default (zero) values for real SSTs, this rebuilds the eight fields `FileMeta`
 /// and `SstInfo` share: `file_id`, `time_range`, `file_size`,
-/// `max_row_group_uncompressed_size`, `num_rows`, `num_row_groups`, `num_series`.
+/// `max_row_group_uncompressed_size`, `max_row_group_decoded_size`, `num_rows`,
+/// `num_row_groups`, `num_series`.
 ///
 /// Two fields stay default and **cannot be recovered on the datanode**:
 /// - `file_metadata` — the parquet footer, whose column min/max/null-count
@@ -586,6 +586,7 @@ fn sst_info_from_file_meta(meta: &FileMeta) -> SstInfo {
         time_range: meta.time_range,
         file_size: meta.file_size,
         max_row_group_uncompressed_size: meta.max_row_group_uncompressed_size,
+        max_row_group_decoded_size: meta.max_row_group_decoded_size,
         num_rows: meta.num_rows as usize,
         num_row_groups: meta.num_row_groups,
         num_series: meta.num_series,
@@ -790,6 +791,7 @@ impl DefaultSstMerger {
             .join(",");
         let sequence_metadata = output_sequence_metadata(&context, &output.inputs);
         let builder = CompactionSstReaderBuilder {
+            narthex_format: context.region_options.sst_format == Some(FormatType::Narthex),
             metadata: context.region_metadata.clone(),
             sst_layer: context.access_layer.clone(),
             cache: context.cache_manager.clone(),
@@ -836,10 +838,14 @@ impl DefaultSstMerger {
                 .with_puffin_metadata_cache(context.cache_manager.puffin_metadata_cache().cloned()),
             can_merge_inputs,
         });
-        let source = tokio::select! {
+        let (source, row_group_size) = tokio::select! {
             biased;
             _ = cancellation.cancelled() => return error::CompactionCancelledSnafu.fail(),
-            source = builder.build_flat_sst_reader() => source?,
+            source = builder.build_flat_sst_reader_and_row_group_size(write_opts.row_group_size) => source?,
+        };
+        let write_opts = WriteOptions {
+            row_group_size,
+            ..write_opts
         };
         let source = spawn_merge(source);
 
@@ -858,7 +864,11 @@ impl DefaultSstMerger {
                     // their effective sequences here could promote old rows above
                     // versions in SSTs that were not part of this merge.
                     max_sequence: None,
-                    sst_write_format: if flat_format {
+                    sst_write_format: if context.region_options.sst_format
+                        == Some(FormatType::Narthex)
+                    {
+                        FormatType::Narthex
+                    } else if flat_format {
                         FormatType::Flat
                     } else {
                         FormatType::PrimaryKey
@@ -898,6 +908,7 @@ impl DefaultSstMerger {
                     level: output.output_level,
                     file_size: sst_info.file_size,
                     max_row_group_uncompressed_size: sst_info.max_row_group_uncompressed_size,
+                    max_row_group_decoded_size: sst_info.max_row_group_decoded_size,
                     available_indexes: sst_info.index_metadata.build_available_indexes(),
                     indexes: sst_info.index_metadata.build_indexes()?,
                     index_file_size: sst_info.index_metadata.file_size,
@@ -1009,6 +1020,7 @@ impl<M: SstMerger> DefaultCompactor<M> {
                     WriteOptions {
                         write_buffer_size: context.engine_config.sst_write_buffer_size,
                         max_file_size: unit.max_file_size,
+                        // Narrowed by the decoded sizes of the inputs once their footers are read.
                         row_group_size: context.region_options.row_group_size(),
                         float_field_encoding: context.region_options.float_field_encoding,
                         encode_parallelism: context
@@ -1089,6 +1101,7 @@ where
             let write_opts = WriteOptions {
                 write_buffer_size: compaction_region.engine_config.sst_write_buffer_size,
                 max_file_size: picker_output.max_file_size,
+                // Narrowed by the decoded sizes of the inputs once their footers are read.
                 row_group_size: compaction_region.region_options.row_group_size(),
                 float_field_encoding: compaction_region.region_options.float_field_encoding,
                 encode_parallelism: compaction_region
@@ -1903,6 +1916,7 @@ mod tests {
                 deletes.clone()
             });
             let mut reader = CompactionSstReaderBuilder {
+                narthex_format: false,
                 metadata: compaction_region.region_metadata.clone(),
                 sst_layer: region.access_layer.clone(),
                 cache: engine.cache_manager(),
@@ -2024,6 +2038,7 @@ mod tests {
         assert_eq!(1, files.len());
         let outputs: Vec<_> = files.into_iter().map(new_file_handle).collect();
         let mut reader = CompactionSstReaderBuilder {
+            narthex_format: false,
             metadata: version.metadata.clone(),
             sst_layer: region.access_layer.clone(),
             cache: Arc::new(CacheManager::default()),

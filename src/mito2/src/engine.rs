@@ -375,6 +375,15 @@ impl MitoEngine {
             });
     }
 
+    /// Extends the Leader deadline of a region as a Leader or StagingLeader lease that the region
+    /// ignores does. Like [Self::record_granted_lease], it serves a region of a group that received
+    /// the lease as a whole. Does nothing if the region is not open.
+    pub fn extend_leader_deadline(&self, region_id: RegionId, deadline: Instant) {
+        if let Ok(region) = self.inner.find_region(region_id) {
+            region.manifest_ctx.leader_deadline.extend(deadline);
+        }
+    }
+
     /// Freezes the clock of the lease checks at `at`.
     #[cfg(any(test, feature = "test"))]
     pub fn freeze_lease_clock(&self, at: Instant) {
@@ -554,6 +563,25 @@ impl MitoEngine {
             .submit_to_worker(region_id, request)
             .await?;
         rx.await.context(RecvSnafu)?
+    }
+
+    /// Pauses compaction on a loaded region and waits for any active cycle to finish.
+    /// Writes and flushes continue while the caller holds the guard.
+    /// The scheduler discards automatic follow-ups skipped during the pause. After the
+    /// last guard is dropped, a fresh trigger can start another compaction cycle.
+    pub async fn pause_compaction(
+        &self,
+        region_id: RegionId,
+    ) -> Result<crate::compaction::CompactionGuard> {
+        let (sender, receiver) = oneshot::channel();
+        self.inner
+            .workers
+            .submit_to_worker(
+                region_id,
+                WorkerRequest::PauseCompaction { region_id, sender },
+            )
+            .await?;
+        receiver.await.context(RecvSnafu)??.wait().await
     }
 
     /// Handles copy region from request.
@@ -869,10 +897,7 @@ impl MitoEngine {
 ///
 /// Only adding or removing files to region is considered valid now.
 fn is_valid_region_edit(edit: &RegionEdit) -> bool {
-    (!edit.files_to_add.is_empty()
-        || !edit.files_to_remove.is_empty()
-        || !edit.series_indexes_to_add.is_empty()
-        || !edit.series_indexes_to_remove.is_empty())
+    edit.has_file_changes()
         && matches!(
             edit,
             RegionEdit {
@@ -1379,7 +1404,8 @@ impl EngineInner {
     }
 
     /// Converts the [`RegionRole`]. Unlike lease and catchup promotions, a conversion to Leader
-    /// does not check whether the region waits for a reload.
+    /// does not check whether the region waits for a reload, and unlike a lease it is not held
+    /// back while a catchup runs on the region.
     fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<()> {
         let region = self.find_region(region_id)?;
         let was_leader = region.region_role() == RegionRole::Leader;
@@ -1790,14 +1816,22 @@ impl RegionEngine for MitoEngine {
                 .notify_if_leader_lease_wait_ended(&region, promotion.ended_wait);
             return Ok(promotion.promoted);
         }
-        // The metasrv grants it to the leader of a region whose route is in staging, and it ends
-        // the wait for a Leader lease too.
+        // The metasrv grants it to the leader of a region whose route is in staging, and unless a
+        // catchup runs on the region it ends the wait for a Leader lease too.
         if role == RegionRole::StagingLeader && region.manifest_ctx.awaits_leader_lease() {
-            let ended_wait = region.manifest_ctx.record_leader_lease(sent_at);
+            let ended_wait = region.manifest_ctx.record_staging_leader_lease(sent_at);
             self.inner
                 .notify_if_leader_lease_wait_ended(&region, ended_wait);
         }
-        let previous = region.set_role(role);
+        // A Follower lease carrying a candidate lease id goes to a migration's target. It leaves
+        // the state of a region that awaits its Leader lease unchanged instead of demoting it, and
+        // still counts as applied. Keep this out of `MitoRegion::set_role`, whose other callers
+        // must demote such a region.
+        let previous = if role == RegionRole::Follower && candidate_lease_id.is_some() {
+            region.manifest_ctx.demote_candidate(region_id)
+        } else {
+            region.set_role(role)
+        };
         self.inner.notify_if_can_no_longer_replay(&region, previous);
         Ok(true)
     }
@@ -1849,6 +1883,11 @@ impl RegionEngine for MitoEngine {
 
     fn role(&self, region_id: RegionId) -> Option<RegionRole> {
         self.inner.role(region_id)
+    }
+
+    fn is_confirmed_leader(&self, region_id: RegionId) -> Option<bool> {
+        self.find_region(region_id)
+            .map(|region| region.is_confirmed_leader())
     }
 
     fn as_any(&self) -> &dyn Any {

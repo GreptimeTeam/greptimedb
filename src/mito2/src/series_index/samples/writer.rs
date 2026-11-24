@@ -41,7 +41,6 @@ use crate::series_index::samples::{
     ColumnarSamplesFormat, MANIFEST_LIMIT, Manifest, MetricSeriesId, Part, TimestampColumn,
     TimestampUnit, VERSION, ValueColumn, invalid, require, valid_rows,
 };
-use crate::series_index::writer::validate_metadata;
 
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
 
@@ -190,7 +189,7 @@ impl SamplesWriter {
         source_file_id: FileId,
         generation: FileId,
     ) -> Result<Self> {
-        validate_metadata(&metadata)?;
+        super::validate_narthex_metadata(&metadata)?;
         require(
             (1..=super::MAX_ROWS).contains(&options.block_rows)
                 && (1..=metadata::ROOT_CAPACITY).contains(&options.root_capacity)
@@ -220,6 +219,7 @@ impl SamplesWriter {
             })
             .collect::<Result<Vec<_>>>()?;
         let manifest = Manifest {
+            prefix: Some(prefix.to_string()),
             format: ArtifactFormat::ColumnarSamples,
             version: VERSION,
             identity_encoding: IdentityEncoding::CURRENT_SAMPLES,
@@ -236,8 +236,8 @@ impl SamplesWriter {
         };
         manifest.validate_schema()?;
         require(
-            prefix == manifest.prefix(),
-            "samples output prefix mismatch",
+            prefix.ends_with('/') && !prefix.split('/').any(|part| part == ".."),
+            "invalid samples output prefix",
         )?;
         let manifest_bytes = serde_json::to_vec(&manifest).context(SerdeJsonSnafu)?.len();
         require(

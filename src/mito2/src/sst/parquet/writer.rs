@@ -63,8 +63,10 @@ use crate::sst::parquet::flat_format::{
 use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyWriteFormat};
 use crate::sst::parquet::parallel_writer::ParallelArrowWriter;
 use crate::sst::parquet::{
-    COLUMN_INDEX_TRUNCATE_LENGTH, PARQUET_METADATA_KEY, SstInfo, WriteOptions,
+    COLUMN_INDEX_TRUNCATE_LENGTH, PARQUET_METADATA_KEY, RowGroupValueBytes, SstInfo, WriteOptions,
     apply_column_compression, apply_float_field_encoding, apply_internal_column_encoding,
+    large_value_fields, max_row_group_decoded_size, max_row_group_uncompressed_size,
+    skip_statistics,
 };
 use crate::sst::upload::{self, UploadError};
 use crate::sst::{
@@ -181,6 +183,13 @@ impl<W: AsyncFileWriter> SstArrowWriter<W> {
         }
     }
 
+    fn append_key_value_metadata(&mut self, kv: KeyValue) {
+        match self {
+            SstArrowWriter::Serial(writer) => writer.append_key_value_metadata(kv),
+            SstArrowWriter::Parallel(writer) => writer.append_key_value_metadata(kv),
+        }
+    }
+
     async fn finish(&mut self) -> parquet::errors::Result<ParquetMetaData> {
         match self {
             SstArrowWriter::Serial(writer) => writer.finish().await,
@@ -253,12 +262,21 @@ pub struct ParquetWriter<'a, F: WriterFactory, I: IndexerBuilder, P: FilePathPro
     write_guard: Option<Arc<dyn SstWriteGuard>>,
     cancellation: Option<CancellationToken>,
     memory: WriteMemory,
+    /// Field columns of the current file that skip min/max statistics, picked from its first batch.
+    large_value_columns: Vec<String>,
+    /// Decoded value bytes per row group of the current file.
+    row_group_value_bytes: Option<RowGroupValueBytes>,
 }
 
 /// Registers output ownership before either an SST or its index is created in storage.
 #[async_trait::async_trait]
 pub trait SstWriteGuard: Send + Sync {
     async fn before_create(&self, file_id: RegionFileId) -> Result<()>;
+
+    /// Registers a multi-object output before its first object is created.
+    async fn before_create_narthex(&self, file_id: RegionFileId) -> Result<()> {
+        self.before_create(file_id).await
+    }
 }
 
 /// Optional ownership, cancellation, and resource limits for an SST write.
@@ -451,6 +469,8 @@ where
             metrics,
             write_guard: None,
             cancellation: None,
+            large_value_columns: Vec::new(),
+            row_group_value_bytes: None,
         }
     }
 
@@ -544,15 +564,18 @@ where
             self.check_cancelled()?;
             // Keep the upload owned until finalization succeeds, so an error
             // still reaches the common abort path.
-            let parquet_metadata = self
-                .writer
-                .as_mut()
-                .context(UnexpectedSnafu {
-                    reason: "Missing SST writer during finalization",
-                })?
-                .finish()
-                .await
-                .map_err(map_write_error)?;
+            let writer = self.writer.as_mut().context(UnexpectedSnafu {
+                reason: "Missing SST writer during finalization",
+            })?;
+            for kv in self
+                .row_group_value_bytes
+                .take()
+                .map(RowGroupValueBytes::into_key_values)
+                .unwrap_or_default()
+            {
+                writer.append_key_value_metadata(kv);
+            }
+            let parquet_metadata = writer.finish().await.map_err(map_write_error)?;
             self.writer.take();
             let file_size = self.bytes_written.load(Ordering::Relaxed) as u64;
             if self.memory.limits.is_some() {
@@ -568,23 +591,16 @@ where
             // Safety: num rows > 0 so we must have min/max.
             let time_range = stats.time_range.unwrap();
 
-            let max_row_group_uncompressed_size: u64 = parquet_metadata
-                .row_groups()
-                .iter()
-                .map(|rg| {
-                    rg.columns()
-                        .iter()
-                        .map(|c| c.uncompressed_size() as u64)
-                        .sum::<u64>()
-                })
-                .max()
-                .unwrap_or(0);
+            let max_row_group_uncompressed_size =
+                max_row_group_uncompressed_size(&parquet_metadata);
+            let max_row_group_decoded_size = max_row_group_decoded_size(&parquet_metadata);
             let num_series = stats.series_estimator.finish();
             ssts.push(SstInfo {
                 file_id: self.current_file,
                 time_range,
                 file_size,
                 max_row_group_uncompressed_size,
+                max_row_group_decoded_size,
                 num_rows: stats.num_rows,
                 num_row_groups: parquet_metadata.num_row_groups() as u64,
                 file_metadata: Some(Arc::new(parquet_metadata)),
@@ -754,11 +770,21 @@ where
             let arrow_batch = converter.convert_batch(batch)?;
             self.check_cancelled()?;
             let start = Instant::now();
+            if self.writer.is_none() {
+                // The first non-empty batch of a file decides which columns skip statistics.
+                if arrow_batch.num_rows() == 0 {
+                    return Ok(());
+                }
+                self.large_value_columns = large_value_fields(&self.metadata, &arrow_batch);
+            }
             self.maybe_init_writer(arrow_batch.schema_ref(), opts)
                 .await?
                 .write(&arrow_batch)
                 .await
                 .map_err(map_write_error)?;
+            if let Some(value_bytes) = &mut self.row_group_value_bytes {
+                value_bytes.update(&arrow_batch);
+            }
             self.metrics.write_batch += start.elapsed();
 
             self.check_cancelled()?;
@@ -831,6 +857,9 @@ where
                 .set_column_index_truncate_length(COLUMN_INDEX_TRUNCATE_LENGTH)
                 .set_statistics_truncate_length(None);
             let props_builder = apply_internal_column_encoding(props_builder, &self.metadata);
+            let props_builder =
+                skip_statistics(props_builder, &mem::take(&mut self.large_value_columns));
+            self.row_group_value_bytes = Some(RowGroupValueBytes::new(opts.row_group_size));
             let props_builder = apply_float_field_encoding(
                 props_builder,
                 &self.metadata,
@@ -1319,6 +1348,7 @@ mod tests {
         .await;
         let batch = new_record_batch_by_range(&["a", "b"], 0, 4);
         let converter = match format {
+            FormatType::Narthex => unreachable!("Parquet writer test"),
             FormatType::Flat => FlatBatchConverter::Flat(FlatWriteFormat::new(
                 metadata.clone(),
                 &FlatSchemaOptions::default(),
@@ -1354,6 +1384,7 @@ mod tests {
         let source =
             FlatSource::new_stream(batch.schema(), Box::pin(futures::stream::iter([Ok(batch)])));
         let error = match format {
+            FormatType::Narthex => unreachable!("Parquet writer test"),
             FormatType::Flat => writer.write_all_flat(source, None, &opts).await,
             FormatType::PrimaryKey => {
                 writer
@@ -1413,6 +1444,7 @@ mod tests {
         };
         let mut write = Box::pin(async {
             match format {
+                FormatType::Narthex => unreachable!("Parquet writer test"),
                 FormatType::Flat => writer.write_all_flat(source, None, &opts).await,
                 FormatType::PrimaryKey => {
                     writer
@@ -1474,6 +1506,7 @@ mod tests {
                 ..Default::default()
             };
             let result = match format {
+                FormatType::Narthex => unreachable!("Parquet writer test"),
                 FormatType::Flat => writer.write_all_flat(source, None, &opts).await,
                 FormatType::PrimaryKey => {
                     writer
@@ -1529,6 +1562,7 @@ mod tests {
         let batch = new_record_batch_by_range(&["a", "b"], 0, 4);
         let retained_field = Arc::downgrade(batch.column(2));
         let converter = match format {
+            FormatType::Narthex => unreachable!("Parquet writer test"),
             FormatType::Flat => FlatBatchConverter::Flat(FlatWriteFormat::new(
                 metadata.clone(),
                 &FlatSchemaOptions::default(),
@@ -1594,6 +1628,7 @@ mod tests {
         let mut write = Box::pin(async {
             let _budget = budget;
             match format {
+                FormatType::Narthex => unreachable!("Parquet writer test"),
                 FormatType::Flat => writer.write_all_flat(source, None, &opts).await,
                 FormatType::PrimaryKey => {
                     writer

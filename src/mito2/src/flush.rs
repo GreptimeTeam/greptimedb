@@ -71,6 +71,7 @@ use crate::sst::file::{FileMeta, UncommittedSsts};
 use crate::sst::parquet::metadata::extract_primary_key_range;
 use crate::sst::parquet::{
     DEFAULT_READ_BATCH_SIZE, DEFAULT_ROW_GROUP_SIZE, SstInfo, WriteOptions, flat_format,
+    row_group_size_for,
 };
 use crate::sst::{FlatSchemaOptions, FormatType, to_flat_sst_arrow_schema};
 use crate::wal::DurabilityBarrier;
@@ -775,6 +776,12 @@ impl MemtableSstWriter {
                 mem_stats.num_rows() as u64,
                 mem_stats.bytes_allocated() as u64,
             )]);
+            let mut mem_write_opts = write_opts.clone();
+            mem_write_opts.row_group_size = row_group_size_for(
+                mem_stats.num_rows() as u64,
+                mem_stats.bytes_allocated() as u64,
+                write_opts.row_group_size,
+            );
             // Sets `for_flush` flag and propagates the reader batch size.
             let mem_ranges =
                 mem.ranges(None, RangesOptions::for_flush().with_batch_size(batch_size))?;
@@ -794,7 +801,7 @@ impl MemtableSstWriter {
                 num_sources,
                 results,
             } = self
-                .flush_flat_mem_ranges(version, &write_opts, mem_ranges, state, uncommitted)
+                .flush_flat_mem_ranges(version, &mem_write_opts, mem_ranges, state, uncommitted)
                 .await?;
             encoded_part_count += num_encoded;
             for (source_idx, result) in results.into_iter().enumerate() {
@@ -827,7 +834,8 @@ impl MemtableSstWriter {
                         sst_info,
                         partition_expr.clone(),
                         pk_range,
-                        version.options.preserve_row_sequence,
+                        version.options.preserve_row_sequence
+                            || version.options.sst_format == Some(FormatType::Narthex),
                     )?);
                 }
                 if self.hook.is_some() {
@@ -993,6 +1001,7 @@ impl MemtableSstWriter {
             level: 0,
             file_size: sst_info.file_size,
             max_row_group_uncompressed_size: sst_info.max_row_group_uncompressed_size,
+            max_row_group_decoded_size: sst_info.max_row_group_decoded_size,
             available_indexes: sst_info.index_metadata.build_available_indexes(),
             indexes: sst_info.index_metadata.build_indexes()?,
             index_file_size: sst_info.index_metadata.file_size,
@@ -1030,7 +1039,9 @@ impl MemtableSstWriter {
             // contain Puts and retained delete barriers for the same row.
             max_sequence: (version.options.merge_mode() != MergeMode::LastNonNull)
                 .then_some(max_sequence),
-            sst_write_format: if flat_format {
+            sst_write_format: if version.options.sst_format == Some(FormatType::Narthex) {
+                FormatType::Narthex
+            } else if flat_format {
                 FormatType::Flat
             } else {
                 FormatType::PrimaryKey
@@ -1112,7 +1123,11 @@ fn memtable_flat_sources(
     };
     let mut rows_remaining = components
         .iter()
-        .filter(|component| component.len() != 1 || component[0].encoded().is_none())
+        .filter(|component| {
+            options.sst_format == Some(FormatType::Narthex)
+                || component.len() != 1
+                || component[0].encoded().is_none()
+        })
         .flatten()
         .map(MemtableRange::num_rows)
         .sum::<usize>();
@@ -1121,7 +1136,8 @@ fn memtable_flat_sources(
     for component in components {
         // A standalone encoded component is an ordering barrier. Do not merge
         // raw ranges on either side while uploading the intervening rows as-is.
-        if component.len() == 1
+        if options.sst_format != Some(FormatType::Narthex)
+            && component.len() == 1
             && let Some(encoded) = component[0].encoded()
         {
             if !pending.is_empty() {

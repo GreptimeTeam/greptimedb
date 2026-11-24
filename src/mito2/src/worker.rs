@@ -847,6 +847,7 @@ impl<S: LogStore> WorkerStarter<S> {
             id: self.id,
             config: self.config.clone(),
             regions: regions.clone(),
+            copy_region_locks: handle_copy_region::CopyRegionLocks::default(),
             catchup_regions: catchup_regions.clone(),
             dropping_regions: Arc::new(RegionMap::default()),
             opening_regions: opening_regions.clone(),
@@ -1289,6 +1290,9 @@ struct RegionWorkerLoop<S> {
     config: Arc<MitoConfig>,
     /// Regions bound to the worker.
     regions: RegionMapRef,
+    /// Serializes COPY through publication and installation, including across region reopen.
+    /// Task guards remove entries when the last active or queued COPY finishes.
+    copy_region_locks: handle_copy_region::CopyRegionLocks,
     /// Regions that are not yet fully dropped.
     dropping_regions: RegionMapRef,
     /// Regions that are opening.
@@ -1633,6 +1637,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 WorkerRequest::EditRegion(request) => {
                     self.handle_incoming_region_edit(request);
                 }
+                WorkerRequest::PauseCompaction { region_id, sender } => {
+                    self.compaction_scheduler
+                        .pause_compaction(region_id, sender);
+                }
                 WorkerRequest::CancelCompaction {
                     region_id,
                     task_id,
@@ -1870,6 +1878,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             BackgroundNotify::RegionFenced => {}
             BackgroundNotify::RegionReloaded { old, result } => {
                 self.handle_region_reloaded(region_id, old, result).await
+            }
+            BackgroundNotify::CaughtUpAgain(caught_up) => {
+                self.handle_caught_up_again(region_id, caught_up).await
             }
             BackgroundNotify::RegionBecameWritable => self.maybe_replay_tails(region_id),
             BackgroundNotify::LeaderLeaseWaitEnded => {

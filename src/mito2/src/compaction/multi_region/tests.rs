@@ -60,7 +60,8 @@ use crate::sst::parquet::flat_format::{
 use crate::sst::{FlatSchemaOptions, FormatType, to_flat_sst_arrow_schema};
 use crate::test_util::scheduler_util::SchedulerEnv;
 use crate::test_util::sst_util::{
-    new_flat_source_from_record_batches, new_record_batch_with_custom_sequence,
+    build_test_binary_test_region_metadata, new_flat_source_from_record_batches,
+    new_record_batch_with_binary_values, new_record_batch_with_custom_sequence,
     new_sparse_primary_key, sst_region_metadata_with_encoding,
 };
 
@@ -539,6 +540,11 @@ async fn test_single_scan_routes_all_versions_without_folding(
                 assert_eq!(file.file_id, footer.file_id);
                 assert_eq!(file.file_size, footer.file_size);
                 assert_eq!(file.num_rows, footer.num_rows as u64);
+                assert!(file.max_row_group_decoded_size > 0);
+                assert_eq!(
+                    file.max_row_group_decoded_size,
+                    footer.max_row_group_decoded_size
+                );
             }
             let target = &targets[&id];
             let mut actual_rows = Vec::new();
@@ -2311,6 +2317,48 @@ async fn test_oversized_equal_key_group_fails_without_partial_outputs_or_spill()
     assert_spill_cleaned(&fixture.env.path.path().join("spill")).await;
 }
 
+#[tokio::test]
+async fn test_target_writer_sizes_row_groups_from_source_size() {
+    let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
+    let plan = fixture.plan(1);
+    let (context, _protection) = fixture.context(None);
+    let source = new_flat_source_from_record_batches(vec![source_batch(&fixture.metadata, 0, 100)]);
+    let limits = memory::MemoryLimits::new(&plan, source.schema()).unwrap();
+    // 64 decoded rows of 4 MiB: 32 rows fill the 128 MiB target. The target's `FileMeta` inputs
+    // describe the narrow fixture rows, which would allow the full cap.
+    let writer = writer::TargetWriter::new(
+        &plan.targets[&RegionId::new(1, 0)],
+        &context,
+        &limits,
+        plan.max_output_file_size,
+        (64, 256 << 20),
+        Arc::default(),
+    );
+    assert_eq!(32, writer.options().row_group_size);
+}
+
+#[tokio::test]
+async fn test_reader_admission_counts_decoded_values() {
+    let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
+    // 2048 copies of one 64 KiB value: tiny once dictionary-encoded, 128 MiB decoded.
+    let batch = new_record_batch_with_binary_values("a", &vec![vec![7u8; 64 * 1024]; 2048]);
+    let info = fixture
+        .write_source(
+            build_test_binary_test_region_metadata(),
+            vec![batch],
+            FormatType::Flat,
+        )
+        .await;
+    let footer = info.file_metadata.unwrap();
+    assert!(
+        footer
+            .row_groups()
+            .iter()
+            .all(|group| group.total_byte_size() < 1 << 20)
+    );
+    assert!(memory::reader_bytes(&footer) >= 128 << 20);
+}
+
 #[rstest::rstest]
 #[case::encoder("encoder")]
 #[case::metadata("metadata")]
@@ -2331,6 +2379,7 @@ async fn test_limited_writer_fails_instead_of_publishing_over_budget(#[case] kin
         &context,
         &limits,
         plan.max_output_file_size,
+        (0, 0),
         Arc::default(),
     )
     .write(source)
@@ -2621,5 +2670,113 @@ async fn test_missing_index_handler_does_not_block_routed_compaction() {
                     )))
             );
         }
+    }
+}
+
+#[rstest::rstest]
+#[case::borrowed(PrimaryKeyEncoding::Dense)]
+#[case::materialized(PrimaryKeyEncoding::Sparse)]
+#[tokio::test]
+async fn test_routing_at_source_batch_budget(#[case] encoding: PrimaryKeyEncoding) {
+    let fixture = Fixture::new(encoding, FormatType::Flat, 7).await;
+    let plan = fixture.plan(2);
+    let (context, _) = fixture.context(None);
+    let mut source = source::SharedSource::build(
+        &plan,
+        &context,
+        validate_plan(&plan).unwrap(),
+        Arc::new(SourceCounters::default()),
+    )
+    .await
+    .unwrap();
+    let source = Arc::get_mut(&mut source).unwrap();
+    let batch = source_batch(&fixture.metadata, 0, 7);
+    source.limits.batch = batch.get_array_memory_size();
+    let owners = source.row_owners(&batch);
+    if encoding == PrimaryKeyEncoding::Dense {
+        assert_eq!(
+            owners.unwrap(),
+            vec![fixture.metadata.region_id; batch.num_rows()]
+        );
+    } else {
+        assert!(matches!(
+            owners,
+            Err(crate::error::Error::MultiRegionCompactionResource { .. })
+        ));
+    }
+}
+
+// Exercise persisted sparse inputs, schema alignment, routing and output readback
+// together: unrelated nullable tags must never become merge columns.
+#[rstest::rstest]
+#[case(2)]
+#[case(40)]
+#[case(3600)]
+#[tokio::test]
+async fn test_sparse_routing_with_wide_target_schema(#[case] target_tag_count: u32) {
+    let fixture = Fixture::new(PrimaryKeyEncoding::Sparse, FormatType::Flat, 7).await;
+    let mut plan = fixture.plan(8);
+    for target in plan.targets.values_mut() {
+        let mut keys = target.metadata.primary_key.clone();
+        let mut builder = RegionMetadataBuilder::from_existing((*target.metadata).clone());
+        // Sparse keys also contain the internal table ID and TSID.
+        let existing_tags = keys.len() as u32 - 2;
+        for offset in 0..target_tag_count - existing_tags {
+            let id = 4 + offset;
+            builder.push_column_metadata(ColumnMetadata {
+                column_schema: datatypes::schema::ColumnSchema::new(
+                    format!("tag_{id}"),
+                    datatypes::data_type::ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                semantic_type: api::v1::SemanticType::Tag,
+                column_id: id,
+            });
+            keys.push(id);
+        }
+        assert_eq!(keys.len(), target_tag_count as usize + 2);
+        builder.primary_key(keys);
+        target.metadata = Arc::new(builder.build().unwrap());
+    }
+    let targets = plan.targets.clone();
+    let (context, _) = fixture.context(None);
+    let metadata = targets.values().next().unwrap().metadata.clone();
+    let source = super::source::SharedSource::build(
+        &plan,
+        &context,
+        metadata,
+        Arc::new(super::SourceCounters::default()),
+    )
+    .await
+    .unwrap();
+    assert!(
+        source
+            .schema()
+            .fields()
+            .iter()
+            .all(|field| !field.name().starts_with("tag_"))
+    );
+    drop(source);
+    let output = compact_regions(plan, context).await.unwrap();
+    assert_eq!(124, output.stats.source_rows);
+    assert_eq!(124, output.stats.output_rows);
+    for (id, files) in output.files {
+        let mut rows = Vec::new();
+        for file in files {
+            rows.extend(
+                fixture
+                    .read_output_rows(file, targets[&id].metadata.clone())
+                    .await,
+            );
+        }
+        let sequence = if id == fixture.metadata.region_id {
+            7
+        } else {
+            100 + id.region_sequence() as u64
+        };
+        let mut expected = expected_source_rows(8, id, sequence);
+        rows.sort();
+        expected.sort();
+        assert_eq!(expected, rows);
     }
 }

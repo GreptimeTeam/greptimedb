@@ -354,7 +354,12 @@ impl RegionFlushTrigger {
             return Ok(Vec::new());
         }
 
-        let max_txn_ops = self.table_metadata_manager.kv_backend().max_txn_ops();
+        // A transaction limit bounds the batch size when available. Otherwise write one region per request.
+        let max_txn_ops = self
+            .table_metadata_manager
+            .kv_backend()
+            .txn_capability()
+            .map_or(1, |txn| txn.max_ops.max(1));
         let batch_size = max_txn_ops.min(regions.len());
         debug!(
             "persisting {} region checkpoints for topic '{}', regions: {:?}",
