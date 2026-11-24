@@ -39,10 +39,18 @@ pub(crate) struct UploadLimits {
 /// Owns at most one part while assembling bytes from encoder blocks or index blobs.
 /// Sending whole owned parts avoids retaining a large producer allocation or a
 /// queue of small fragments in OpenDAL. Only the final part may be short.
+/// Both write paths check the remaining object allowance before buffering bytes.
 pub(crate) struct UploadBuffer {
     limits: UploadLimits,
     pending: BytesMut,
     object_bytes: u64,
+}
+
+/// A bounded write stopped at the object limit or failed in the store writer.
+#[derive(Debug)]
+pub(crate) enum BufferedWriteError {
+    ObjectLimit(UploadObjectLimit),
+    Upload(UploadError),
 }
 
 impl UploadBuffer {
@@ -54,7 +62,7 @@ impl UploadBuffer {
         }
     }
 
-    pub(crate) fn check_size(&self, bytes: usize) -> Result<(), UploadObjectLimit> {
+    fn check_size(&self, bytes: usize) -> Result<(), UploadObjectLimit> {
         if bytes as u64 > self.limits.max_object_bytes - self.object_bytes {
             return Err(UploadObjectLimit {
                 limit: self.limits.max_object_bytes,
@@ -90,14 +98,18 @@ impl UploadBuffer {
         writer: &mut Writer,
         mut bytes: Bytes,
         cancellation: Option<&CancellationToken>,
-    ) -> Result<u64, UploadError> {
+    ) -> Result<u64, BufferedWriteError> {
+        self.check_size(bytes.len())
+            .map_err(BufferedWriteError::ObjectLimit)?;
         let len = bytes.len() as u64;
         let parts = std::iter::from_fn(|| {
             let appended = self.append(&bytes);
             bytes.advance(appended);
             self.is_full().then(|| self.take_part())
         });
-        upload::write_chunks(writer, parts, cancellation).await?;
+        upload::write_chunks(writer, parts, cancellation)
+            .await
+            .map_err(BufferedWriteError::Upload)?;
         Ok(len)
     }
 
@@ -175,6 +187,7 @@ impl<S: Sink<Buffer, Error = io::Error> + Unpin> AsyncWrite for BufferedUploadWr
 mod tests {
     use std::sync::{Arc, Mutex};
 
+    use bytes::Bytes;
     use futures::io::AsyncWriteExt;
     use object_store::ObjectStore;
     use object_store::layers::mock::{MockLayerBuilder, ObservedWriter, WriterObservations};
@@ -212,6 +225,35 @@ mod tests {
         assert_eq!(
             b"abcdefghi",
             store.read("index").await.unwrap().to_bytes().as_ref()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_upload_buffer_accepts_the_object_limit_and_rejects_more() {
+        let store = ObjectStore::new(Memory::default()).unwrap();
+        let mut buffer = UploadBuffer::new(UploadLimits {
+            chunk_bytes: 4,
+            max_object_bytes: 5,
+        });
+        let mut writer = store.writer("sst").await.unwrap();
+        buffer
+            .write(&mut writer, Bytes::from_static(b"abcd"), None)
+            .await
+            .unwrap();
+        buffer
+            .write(&mut writer, Bytes::from_static(b"e"), None)
+            .await
+            .unwrap();
+        let error = buffer
+            .write(&mut writer, Bytes::from_static(b"f"), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, BufferedWriteError::ObjectLimit(_)));
+        buffer.write_tail(&mut writer).await.unwrap();
+        writer.close().await.unwrap();
+        assert_eq!(
+            b"abcde",
+            store.read("sst").await.unwrap().to_bytes().as_ref()
         );
     }
 }

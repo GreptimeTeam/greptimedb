@@ -342,13 +342,10 @@ impl ObjectStoreWriter {
     async fn write_bytes(&mut self, bytes: Bytes) -> parquet::errors::Result<u64> {
         #[cfg(feature = "enterprise")]
         if let Some(buffer) = &mut self.buffered_upload {
-            buffer
-                .check_size(bytes.len())
-                .map_err(|error| ParquetError::External(Box::new(error)))?;
             return buffer
                 .write(&mut self.inner, bytes, self.cancellation.as_ref())
                 .await
-                .map_err(map_upload_error);
+                .map_err(map_buffered_upload_error);
         }
         upload::write(
             &mut self.inner,
@@ -394,6 +391,16 @@ fn map_upload_error(error: UploadError) -> ParquetError {
         UploadError::Read { source } | UploadError::Write { source } => {
             ParquetError::External(Box::new(source))
         }
+    }
+}
+
+#[cfg(feature = "enterprise")]
+fn map_buffered_upload_error(error: upload::buffered::BufferedWriteError) -> ParquetError {
+    match error {
+        upload::buffered::BufferedWriteError::ObjectLimit(error) => {
+            ParquetError::External(Box::new(error))
+        }
+        upload::buffered::BufferedWriteError::Upload(error) => map_upload_error(error),
     }
 }
 
