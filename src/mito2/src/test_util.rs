@@ -253,6 +253,37 @@ impl object_store::layers::mock::Write for BlockingManifestWriter {
     }
 }
 
+/// Parks the first task that passes it once armed, until released.
+#[derive(Default)]
+pub(crate) struct Gate {
+    armed: AtomicBool,
+    entered: Notify,
+    release: Notify,
+}
+
+impl Gate {
+    pub(crate) fn arm(&self) {
+        self.armed.store(true, Ordering::Relaxed);
+    }
+
+    pub(crate) async fn pass(&self) {
+        if self.armed.swap(false, Ordering::Relaxed) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+    }
+
+    pub(crate) async fn wait_entered(&self) {
+        tokio::time::timeout(std::time::Duration::from_secs(10), self.entered.notified())
+            .await
+            .unwrap();
+    }
+
+    pub(crate) fn release(&self) {
+        self.release.notify_one();
+    }
+}
+
 /// Injects faults into the next manifest delta write of a mock object store.
 #[derive(Clone, Default)]
 pub struct DeltaFaults {

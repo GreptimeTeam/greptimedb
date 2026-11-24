@@ -1478,6 +1478,8 @@ pub(crate) struct LeaderLeasePromotion {
     /// How long the region awaited its Leader lease, if this lease ended the wait, as
     /// [ManifestContext::record_leader_lease] returns it.
     pub(crate) ended_wait: Option<Duration>,
+    /// The state the promotion replaced, None if it left the state unchanged.
+    pub(crate) replaced: Option<RegionRoleState>,
 }
 
 /// Context to update the region manifest.
@@ -2261,6 +2263,7 @@ impl ManifestContext {
             return LeaderLeasePromotion {
                 promoted: true,
                 ended_wait: None,
+                replaced: None,
             };
         }
         let fence = self.promotion_fence.lock().unwrap();
@@ -2268,12 +2271,15 @@ impl ManifestContext {
             return LeaderLeasePromotion {
                 promoted: false,
                 ended_wait: None,
+                replaced: None,
             };
         }
         let ended_wait = self.record_leader_lease(issued_at);
+        let promotion = self.promote_unless_reload_pending(&fence, region_id, false);
         LeaderLeasePromotion {
-            promoted: self.promote_unless_reload_pending(&fence, region_id, false),
+            promoted: promotion.is_some(),
             ended_wait,
+            replaced: promotion.flatten(),
         }
     }
 
@@ -2283,6 +2289,7 @@ impl ManifestContext {
         let mut fence = self.promotion_fence.lock().unwrap();
         fence.catching_up = false;
         self.promote_unless_reload_pending(&fence, region_id, true)
+            .is_some()
     }
 
     /// Returns whether the region was stopped, so no catchup promotes it.
@@ -2358,23 +2365,23 @@ impl ManifestContext {
     }
 
     /// Promotes the region unless it waits for a reload or was stopped. The caller holds the fence
-    /// lock.
+    /// lock. Returns None if it does not promote the region, otherwise the state the role change
+    /// replaced, as [Self::set_role] returns it.
     fn promote_unless_reload_pending(
         &self,
         fence: &PromotionFence,
         region_id: RegionId,
         by_catchup: bool,
-    ) -> bool {
+    ) -> Option<Option<RegionRoleState>> {
         if fence.reload_pending || fence.stopped {
-            return false;
+            return None;
         }
         if by_catchup {
             // Before the role, so a lease that finds the region writable compares with it.
             self.catchup_promoted_at
                 .store(lease_nanos(Instant::now()).max(1), Ordering::Relaxed);
         }
-        self.set_role(RegionRole::Leader, region_id);
-        true
+        Some(self.set_role(RegionRole::Leader, region_id))
     }
 
     /// Counts an applied Leader lease (or StagingLeader lease, on a node whose writes need a lease)

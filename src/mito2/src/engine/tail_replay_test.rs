@@ -76,7 +76,7 @@ use crate::request::{BackgroundNotify, WorkerRequest};
 use crate::sst::file::RegionFileId;
 use crate::sst::location::region_dir_from_table_dir;
 use crate::test_util::{
-    CreateRequestBuilder, DeltaFaults, TestEnv, build_rows, build_rows_for_key, flush_region,
+    CreateRequestBuilder, DeltaFaults, Gate, TestEnv, build_rows, build_rows_for_key, flush_region,
     nop_action, put_rows, reopen_region, rows_schema,
 };
 use crate::time_provider::StdTimeProvider;
@@ -108,37 +108,6 @@ struct TailReplayListener {
     became_writable: AtomicUsize,
     park_deferred_work: Gate,
     park_backfill: Gate,
-}
-
-/// Parks the first task that passes it once armed, until released.
-#[derive(Default)]
-struct Gate {
-    armed: AtomicBool,
-    entered: tokio::sync::Notify,
-    release: tokio::sync::Notify,
-}
-
-impl Gate {
-    fn arm(&self) {
-        self.armed.store(true, Ordering::Relaxed);
-    }
-
-    async fn pass(&self) {
-        if self.armed.swap(false, Ordering::Relaxed) {
-            self.entered.notify_one();
-            self.release.notified().await;
-        }
-    }
-
-    async fn wait_entered(&self) {
-        tokio::time::timeout(Duration::from_secs(10), self.entered.notified())
-            .await
-            .unwrap();
-    }
-
-    fn release(&self) {
-        self.release.notify_one();
-    }
 }
 
 #[async_trait]
@@ -1768,7 +1737,7 @@ async fn test_promotion_replays_tails_of_region_busy_meanwhile(#[case] busy: Reg
     region
         .engine
         .inner
-        .notify_if_became_writable(&mito_region, RegionRoleState::Follower);
+        .notify_if_became_writable(&mito_region, Some(RegionRoleState::Follower));
 
     wait_until(|| region.listener.commits() > 0).await;
     mito_region.switch_state_to_writable(busy);

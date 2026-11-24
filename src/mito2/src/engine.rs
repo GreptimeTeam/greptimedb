@@ -1409,14 +1409,13 @@ impl EngineInner {
     fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<()> {
         let region = self.find_region(region_id)?;
         let was_leader = region.region_role() == RegionRole::Leader;
-        let before = region.state();
         let previous = region.set_role(role);
         if role == RegionRole::Leader && !was_leader {
             // No lease comes for a direct promotion, so it counts as one. A leader is not promoted.
             region.manifest_ctx.record_leader_lease(Instant::now());
         }
         self.notify_if_can_no_longer_replay(&region, previous);
-        self.notify_if_became_writable(&region, before);
+        self.notify_if_became_writable(&region, previous);
         Ok(())
     }
 
@@ -1452,13 +1451,13 @@ impl EngineInner {
     }
 
     /// Tells the worker that a role change outside it made `region` a writable leader from the
-    /// state `before`, so it replays the pending tails and runs the work the region's wait for
+    /// state `replaced`, so it replays the pending tails and runs the work the region's wait for
     /// its Leader lease held back. The worker may already have started an ALTER or an edit of
-    /// the region. Only a change from a state that cannot replay tails (a staging, downgrading
-    /// or follower region) sends it, so the Leader lease a writable leader receives with every
-    /// heartbeat sends none.
-    fn notify_if_became_writable(&self, region: &MitoRegionRef, before: RegionRoleState) {
-        if !before.can_replay_tails() && region.can_replay_tails() {
+    /// the region. Only a change that replaced a state that cannot replay tails (a staging,
+    /// downgrading or follower region) sends it, so the Leader lease a writable leader receives
+    /// with every heartbeat, which changes no state, sends none.
+    fn notify_if_became_writable(&self, region: &MitoRegionRef, replaced: Option<RegionRoleState>) {
+        if replaced.is_some_and(|state| !state.can_replay_tails()) && region.can_replay_tails() {
             self.workers.notify_writable(region);
         }
     }
@@ -1811,11 +1810,11 @@ impl RegionEngine for MitoEngine {
             region.manifest_ctx.leader_deadline.extend(deadline);
         }
         if role == RegionRole::Leader {
-            let before = region.state();
             let promotion = region
                 .manifest_ctx
                 .promote_unless_downgrade_started_after(sent_at, region_id);
-            self.inner.notify_if_became_writable(&region, before);
+            self.inner
+                .notify_if_became_writable(&region, promotion.replaced);
             self.inner
                 .notify_if_leader_lease_wait_ended(&region, promotion.ended_wait);
             return Ok(promotion.promoted);

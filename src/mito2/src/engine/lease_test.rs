@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use api::region::RegionResponse;
@@ -40,7 +40,6 @@ use store_api::region_request::{
     RegionPutRequest, RegionRequest, RegionTruncateRequest, StagingPartitionDirective,
 };
 use store_api::storage::{FileId, RegionId, ScanRequest};
-use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 use crate::config::MitoConfig;
@@ -67,8 +66,8 @@ use crate::request::{BackgroundNotify, BuildIndexRequest, WorkerRequest};
 use crate::sst::file::{FileMeta, IndexType};
 use crate::sst::index::IndexBuildType;
 use crate::test_util::{
-    CreateRequestBuilder, DeltaFaults, LogStoreFactory, TestEnv, build_rows, fail_next_write_to,
-    flush_region, kafka_log_store_factory, multiple_log_store_factories,
+    CreateRequestBuilder, DeltaFaults, Gate, LogStoreFactory, TestEnv, build_rows,
+    fail_next_write_to, flush_region, kafka_log_store_factory, multiple_log_store_factories,
     prepare_test_for_kafka_log_store, put_rows, raft_engine_log_store_factory, reopen_region,
     rows_schema,
 };
@@ -1075,37 +1074,6 @@ impl LeaseWaitEndedListener {
 impl LeaseWaitEndedListener {
     async fn wait_for_backfill_deferrals(&self, deferrals: usize) {
         wait_until(|| self.backfill_deferrals.load(Ordering::Acquire) >= deferrals).await;
-    }
-}
-
-/// Parks the first task that passes it once armed, until released.
-#[derive(Default)]
-struct Gate {
-    armed: AtomicBool,
-    entered: Notify,
-    release: Notify,
-}
-
-impl Gate {
-    fn arm(&self) {
-        self.armed.store(true, Ordering::Relaxed);
-    }
-
-    async fn pass(&self) {
-        if self.armed.swap(false, Ordering::Relaxed) {
-            self.entered.notify_one();
-            self.release.notified().await;
-        }
-    }
-
-    async fn wait_entered(&self) {
-        tokio::time::timeout(Duration::from_secs(10), self.entered.notified())
-            .await
-            .unwrap();
-    }
-
-    fn release(&self) {
-        self.release.notify_one();
     }
 }
 
