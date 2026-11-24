@@ -1,0 +1,49 @@
+src/mito2/src/engine.rs
+  s_17057bba187655::t_ea4c3d99d55eee 568,582-588,596
+src/mito2/src/engine/table_compaction.rs
+  s_17057bba187655::t_e83a52c6d5dc10 246
+  s_17057bba187655::t_ea4c3d99d55eee 35,103-126
+  s_17057bba187655::t_98d388362dd9d7 31,210-233
+  s_17057bba187655::t_6124342fe40792 209
+src/mito2/src/region.rs
+  s_17057bba187655::t_98d388362dd9d7 1099,1104-1105
+src/mito2/src/worker/handle_manifest.rs
+  s_17057bba187655::t_ea4c3d99d55eee 143,1268-1294
+  s_17057bba187655::t_0a1ccf0e190981 1295-1297
+src/mito2/src/worker/handle_table_compaction.rs
+  s_17057bba187655::t_98d388362dd9d7 12,100
+  s_17057bba187655::t_e83a52c6d5dc10 92-98
+  s_17057bba187655::t_44434dee80edfb 99
+src/cmd/src/bin/query_perf_fixture/direct_sst.rs
+  s_17057bba187655::t_45c77fe7cbcc37 519
+src/mito2/src/engine/table_compaction/tests.rs
+  s_17057bba187655::t_5e709f3afeda44 750-757,761-766,773-792
+src/mito2/src/manifest/action.rs
+  s_17057bba187655::t_3aee1bbcc9b39b 17-18,29,105-107,112-150,322-324,372,402,463,503-505,649,1253,1440,1459,1994-2013
+src/mito2/src/manifest/tests/checkpoint.rs
+  s_17057bba187655::t_f10f0c947ecac6 240-294
+src/mito2/src/region/opener.rs
+  s_17057bba187655::t_7c3e90f09ac9b1 1613
+src/mito2/src/remap_manifest.rs
+  s_17057bba187655::t_5c49a946246c55 122,477
+tests/compatibility/manifest/table_compaction/README.md
+  s_17057bba187655::t_c40684873bd266 7-13
+tests/compatibility/manifest/table_compaction/publication-edit.json
+  s_17057bba187655::t_bf942b16ce80c6 1-33
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "963a46877e060b33b3f770e73d4b8a7b132b1ba9",
+  "prompts": {},
+  "sessions": {
+    "s_17057bba187655": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c56d-fbcd-75c2-86d2-c4b3f17c03dc",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
