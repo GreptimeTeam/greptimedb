@@ -80,6 +80,11 @@ impl ScanHintRule {
             return Ok(Transformed::no(LogicalPlan::TableScan(table_scan)));
         };
 
+        // File scans follow file order and leave time-series row selection to the query.
+        if original.is_file_engine() {
+            return Ok(Transformed::no(LogicalPlan::TableScan(table_scan)));
+        }
+
         // Attached scan filters are checked below; residual Filter nodes are
         // rejected by the single-evaluation path allowlist.
         let filters_preserve_last_row = if rewriter.inside_single_evaluation {
