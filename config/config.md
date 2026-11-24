@@ -99,7 +99,7 @@
 | `prom_store` | -- | -- | Prometheus remote storage options |
 | `prom_store.enable` | Bool | `true` | Whether to enable Prometheus remote write and read in HTTP API. |
 | `prom_store.with_metric_engine` | Bool | `true` | Whether to store the data from Prometheus remote write in metric engine. |
-| `prom_store.prom_validation_mode` | String | `strict` | Whether to enable validation for Prometheus remote write requests.<br/>Available options:<br/>- strict: deny invalid UTF-8 strings (default).<br/>- lossy: allow invalid UTF-8 strings, replace invalid characters with REPLACEMENT_CHARACTER(U+FFFD).<br/>- unchecked: do not valid strings. |
+| `prom_store.prom_validation_mode` | String | `strict` | Whether to enable validation for Prometheus remote write requests.<br/>Available options:<br/>- strict: deny invalid UTF-8 strings (default).<br/>- lossy: allow invalid UTF-8 strings, replace invalid characters with REPLACEMENT_CHARACTER(U+FFFD).<br/>- unchecked: same as `lossy`. Kept for compatibility. |
 | `wal` | -- | -- | The WAL options. |
 | `wal.provider` | String | `raft_engine` | The provider of the WAL.<br/>- `raft_engine`: the wal is stored in the local file system by raft-engine.<br/>- `kafka`: it's remote wal that data is stored in Kafka.<br/>- `experimental_object_store`: the wal is stored as objects in an object store.<br/>**Notes: experimental and not supported yet.** |
 | `wal.dir` | String | Unset | The directory to store the WAL files.<br/>**It's only used when the provider is `raft_engine`**. |
@@ -374,7 +374,7 @@
 | `prom_store` | -- | -- | Prometheus remote storage options |
 | `prom_store.enable` | Bool | `true` | Whether to enable Prometheus remote write and read in HTTP API. |
 | `prom_store.with_metric_engine` | Bool | `true` | Whether to store the data from Prometheus remote write in metric engine. |
-| `prom_store.prom_validation_mode` | String | `strict` | Whether to enable validation for Prometheus remote write requests.<br/>Available options:<br/>- strict: deny invalid UTF-8 strings (default).<br/>- lossy: allow invalid UTF-8 strings, replace invalid characters with REPLACEMENT_CHARACTER(U+FFFD).<br/>- unchecked: do not valid strings. |
+| `prom_store.prom_validation_mode` | String | `strict` | Whether to enable validation for Prometheus remote write requests.<br/>Available options:<br/>- strict: deny invalid UTF-8 strings (default).<br/>- lossy: allow invalid UTF-8 strings, replace invalid characters with REPLACEMENT_CHARACTER(U+FFFD).<br/>- unchecked: same as `lossy`. Kept for compatibility. |
 | `meta_client` | -- | -- | The metasrv client options. |
 | `meta_client.metasrv_addrs` | Array | -- | The addresses of the metasrv. |
 | `meta_client.timeout` | String | `3s` | Operation timeout. |
