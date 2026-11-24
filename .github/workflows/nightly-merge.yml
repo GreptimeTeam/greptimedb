@@ -3,7 +3,8 @@ name: Nightly Merge
 
 on:
   pull_request_target:
-    types: [opened, edited, reopened]
+    branches: [main]
+    types: [opened, edited, reopened, unlabeled]
   schedule:
     # Hourly from 02:10 through 08:10 Asia/Shanghai (UTC+8), inclusive.
     # GitHub may delay scheduled runs.
@@ -19,7 +20,9 @@ permissions: {}
 
 jobs:
   sync-label:
-    if: github.repository == 'GreptimeTeam/greptimedb' && github.event_name == 'pull_request_target'
+    if: >-
+      github.repository == 'GreptimeTeam/greptimedb' && github.event_name == 'pull_request_target' &&
+      (github.event.action != 'unlabeled' || github.event.label.name == 'skip nightly merge')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -44,7 +47,7 @@ jobs:
             const { owner, repo } = context.repo;
             const issue_number = context.payload.pull_request.number;
             const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: issue_number });
-            if (pr.state !== 'open') return;
+            if (pr.state !== 'open' || pr.base.ref !== 'main') return;
             const selected = skipChecked(pr.body);
             const labeled = pr.labels.some(item => item.name === skipLabel);
             if (selected === labeled) return;

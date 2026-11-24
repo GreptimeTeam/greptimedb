@@ -14,7 +14,7 @@
 
 const { execFileSync } = require('node:child_process');
 const { readFileSync, writeFileSync } = require('node:fs');
-const { checklistItems, skipChecked, skipLabel } = require('./nightly-merge.cjs');
+const { checklistItems, skipCheckboxState, skipLabel } = require('./nightly-merge.cjs');
 
 const repository = 'GreptimeTeam/greptimedb';
 const oldNightly = 'merge nightly';
@@ -34,7 +34,7 @@ function migrateBody(body, hold) {
     if (old) {
       const following = updated.slice(item.end).replace(/^(?:[ \t]*\r?\n)+ {0,3}<!--[\s\S]*?-->/, comment =>
         comment.replace(/^Uncheck to opt out and remove the `merge nightly` label; this does not enable immediate merging\.$/m,
-          'Check to opt out. Maintainers can also apply the `skip nightly merge` label directly.'));
+          'Check to opt out. To resume, uncheck the box and remove any manually applied `skip nightly merge` label.'));
       updated = updated.slice(0, item.index) + (hold ? '[x]' : '[ ]') + item.space +
         'Skip nightly merge' + item.text.slice(old[0].length) + following;
     }
@@ -44,17 +44,21 @@ function migrateBody(body, hold) {
 
 function changesFor(entry, pr) {
   const labels = new Set(pr.labels.map(label => label.name));
-  const hold = !entry.optedIn;
-  const body = migrateBody(pr.body, hold);
-  const checked = skipChecked(body);
+  const targetsMain = pr.base.ref === 'main';
+  const migrateNightly = targetsMain && entry.base === 'main';
+  const hold = migrateNightly && !entry.optedIn;
+  const body = migrateNightly ? migrateBody(pr.body, hold) : pr.body;
+  const checkbox = targetsMain ? skipCheckboxState(body) : null;
   const labeled = labels.has(skipLabel);
+  const obsolete = migrateNightly ? [oldNightly, oldDocs] : [oldDocs];
   return {
     body,
     // A converted checked box gets a bot-owned label from its edit event.
-    addHold: hold && !checked && !labeled,
-    remove: [oldNightly, oldDocs].filter(label => labels.has(label)),
-    waitingForSync: checked && !labeled,
-    extraHold: entry.optedIn && (checked || labeled),
+    addHold: hold && !checkbox && !labeled,
+    remove: obsolete.filter(label => labels.has(label)),
+    waitingForSync: checkbox === true && !labeled,
+    extraHold: migrateNightly && entry.optedIn && (checkbox === true || labeled),
+    needsChoice: targetsMain && !migrateNightly && checkbox === null && !labeled,
   };
 }
 
@@ -86,7 +90,7 @@ function main([mode, file, rolloutPR]) {
     const captured = new Set(snapshot.prs.map(entry => entry.number));
     for (const pr of openBefore(snapshot.mergedAt)) {
       if (!captured.has(pr.number)) {
-        console.error(`#${pr.number}: open before rollout but missing from the snapshot; review its nightly preference`);
+        console.error(`#${pr.number}: open before rollout but missing from the snapshot`);
         process.exitCode = 1;
       }
     }
@@ -96,7 +100,7 @@ function main([mode, file, rolloutPR]) {
     const pr = JSON.parse(api(`pulls/${number}`));
     if (pr.state !== 'open') continue;
     open++;
-    const { body, addHold, remove, waitingForSync, extraHold } = changesFor(entry, pr);
+    const { body, addHold, remove, waitingForSync, extraHold, needsChoice } = changesFor(entry, pr);
     if (mode === 'apply') {
       if (body !== pr.body) api(`pulls/${number}`, ['--method', 'PATCH', '--silent'], { body });
       if (addHold) api(`issues/${number}/labels`, ['--method', 'POST', '--silent'], { labels: [skipLabel] });
@@ -108,6 +112,7 @@ function main([mode, file, rolloutPR]) {
       if (body !== pr.body) pending.push('convert legacy checkbox');
       if (addHold || waitingForSync) pending.push(`missing ${skipLabel}`);
       if (extraHold) pending.push('review opt-out added since snapshot');
+      if (needsChoice) pending.push(`record a nightly preference after retargeting from ${entry.base} to main`);
       if (pending.length) {
         console.error(`#${number}: ${pending.join(', ')}`);
         process.exitCode = 1;

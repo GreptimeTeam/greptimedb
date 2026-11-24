@@ -3,9 +3,10 @@
 Open PRs targeting `main` participate by default, including automated PRs
 without a checklist. Check **Skip nightly merge** to opt out. The scheduler
 honors the checkbox immediately, and label sync adds `skip nightly merge`.
-Unchecking releases a hold placed by the bot. Maintainers can also apply the
-label directly and remove it when they are ready. Editing the title or
-description preserves a manually applied hold.
+Uncheck the box to release the bot's hold. Maintainers can also apply the label
+directly and remove it when ready. If someone removes the label while the box
+is checked, label sync restores it. A manually applied label survives title
+and description edits.
 
 Every day at 02:10, 03:10, 04:10, 05:10, 06:10, 07:10, and 08:10
 Asia/Shanghai (UTC+8), the workflow enqueues up to five eligible PRs targeting
@@ -59,13 +60,13 @@ this change. PR body edits made by this account trigger checkbox label sync.
    node .github/scripts/migrate-pr-labels.cjs snapshot /tmp/pr-labels.json ROLLOUT_PR_NUMBER
    ```
 
-3. Apply the saved snapshot. The old `merge nightly` label
-   records each PR's previous preference. A PR that had it stays in the nightly
-   pool. A PR that lacked it receives a hold. The migration converts legacy
-   checklist lines, removes `merge nightly` and `docs-not-required`, and
-   preserves `docs-required` and other labels. It reads each open PR's latest
-   description before editing. Coordinate description edits during this step
-   because GitHub accepts the complete PR body on update.
+3. Apply the saved snapshot. The migration removes `docs-not-required` from
+   captured open PRs on every base branch. For PRs targeting `main` both in
+   the snapshot and at apply time, it also converts legacy checkboxes and
+   removes `merge nightly`. PRs that had `merge nightly` in the snapshot stay
+   in the pool. Those that lacked it receive a hold. Coordinate retargeting
+   and description edits during apply because GitHub accepts the complete PR
+   body on update.
 
    ```sh
    node .github/scripts/migrate-pr-labels.cjs apply /tmp/pr-labels.json
@@ -75,8 +76,11 @@ this change. PR body edits made by this account trigger checkbox label sync.
    lists outstanding changes and exits unsuccessfully for any mismatch. If a
    checked box still needs a label, rerun its failed label job or edit its
    description to trigger sync. Confirm any new manual opt-out with the
-   maintainer and record it as an intentional difference. An interrupted apply
-   can be rerun with the original snapshot.
+   maintainer and record it as an intentional difference. For a PR retargeted
+   into `main`, record its current choice with a **Skip nightly merge** checkbox
+   (checked to hold, unchecked to participate) or a manual `skip nightly merge`
+   label. Verification flags a retargeted PR until it has a current choice.
+   An interrupted apply can be rerun with the original snapshot.
 
    ```sh
    node .github/scripts/migrate-pr-labels.cjs verify /tmp/pr-labels.json

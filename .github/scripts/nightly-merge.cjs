@@ -56,11 +56,19 @@ function* checklistItems(body) {
   }
 }
 
-function skipChecked(body) {
+// Rollout verification distinguishes a missing checkbox from an unchecked one.
+function skipCheckboxState(body) {
+  let state = null;
   for (const item of checklistItems(body)) {
-    if (item.checked && /^Skip nightly merge\b/i.test(item.text)) return true;
+    if (!/^Skip nightly merge\b/i.test(item.text)) continue;
+    if (item.checked) return true;
+    state = false;
   }
-  return false;
+  return state;
+}
+
+function skipChecked(body) {
+  return skipCheckboxState(body) === true;
 }
 
 function eligibleForNightly(pr) {
@@ -68,4 +76,4 @@ function eligibleForNightly(pr) {
     !pr.labels.some(label => label.name === skipLabel) && !skipChecked(pr.body);
 }
 
-module.exports = { checklistItems, skipLabel, skipChecked, eligibleForNightly };
+module.exports = { checklistItems, skipLabel, skipCheckboxState, skipChecked, eligibleForNightly };

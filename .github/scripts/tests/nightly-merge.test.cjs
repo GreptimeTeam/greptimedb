@@ -29,6 +29,10 @@ const checked = '- [x] Skip nightly merge';
 const unchecked = '- [ ] Skip nightly merge';
 const legacy = '- [x] Merge during the nightly window <!-- nightly-merge -->';
 
+function migrateMainPr(optedIn, pr) {
+  return changesFor({ base: 'main', optedIn }, { ...pr, base: { ref: 'main' } });
+}
+
 async function run({ sync = false, body = unchecked, labels = [], events = [], payload = {},
   detail = {}, listed = {}, current = {}, threads = [[true]], count = 1, dryRun = false,
   failFirst = false, enqueueError = Error('head changed') } = {}) {
@@ -89,6 +93,24 @@ test('label sync reads the helper from the trusted workflow commit', () => {
   assert.match(syncJob, /ref: \$\{\{ github\.sha \}\}/);
   assert.match(syncJob, /persist-credentials: false/);
   assert.doesNotMatch(syncJob, /pull_request\.head/);
+});
+
+test('removing the skip label reconciles the current checkbox on main', async () => {
+  const trigger = workflow.split('  pull_request_target:\n')[1].split('  schedule:\n')[0];
+  assert.match(trigger, /branches: \[main\]/);
+  assert.match(trigger, /types: \[[^\]\n]*\bunlabeled\b/);
+  const guard = workflow.split('  sync-label:\n')[1].match(/    if: >-\n((?:      .*\n)+)/)[1];
+  const enabled = new Function('github', `return (${guard});`);
+  const payload = { action: 'unlabeled', label: { name: label } };
+  const admits = event => enabled({ repository: 'GreptimeTeam/greptimedb', event_name: 'pull_request_target', event });
+  assert.equal(admits(payload), true);
+  assert.equal(admits({ ...payload, label: { name: 'docs-required' } }), false);
+  assert.equal(admits({ action: 'edited' }), true);
+
+  const opts = { sync: true, payload };
+  assert.deepEqual(await run({ ...opts, body: checked }), [['add', [label]]]);
+  for (const body of [unchecked, null]) assert.deepEqual(await run({ ...opts, body }), []);
+  assert.deepEqual(await run({ ...opts, body: checked, current: { base: { ref: 'release/v1.3' } } }), []);
 });
 
 test('enqueueing requires rollout activation and dry runs work while paused', () => {
@@ -189,7 +211,7 @@ test('list fences hide example checkboxes and leave the following merge checklis
       assert.deepEqual(await run({ sync: true, body }), box === checked ? [['add', [label]]] : [], body);
       assert.equal((await run({ body })).some(call => call[0] === 'enqueue'), box === unchecked, body);
     }
-    assert.equal(changesFor({ optedIn: false }, { body: description(legacy, legacy), labels: [] }).body,
+    assert.equal(migrateMainPr(false, { body: description(legacy, legacy), labels: [] }).body,
       description(legacy, checked));
   }
 });
@@ -200,23 +222,47 @@ test('migration follows the snapshotted label, edits only visible legacy items a
     const before = ['Author notes', `> ${old}`, '```md', old, '```', '<!--', old, '-->', ''];
     const pr = { body: [...before, old + ' — note', legacy + ' (later)'].join('\r\n'),
       labels: ['docs-required', 'bug', 'docs-not-required', ...(optedIn ? ['merge nightly'] : [])].map(name => ({ name })) };
-    const entry = { optedIn };
-    const result = changesFor(entry, pr);
+    const result = migrateMainPr(optedIn, pr);
     const replacement = optedIn ? unchecked : checked;
     assert.equal(result.body, [...before, replacement + ' — note', replacement + ' (later)'].join('\r\n'));
     assert.deepEqual(result.remove, optedIn ? ['merge nightly', 'docs-not-required'] : ['docs-not-required']);
     assert.equal(result.addHold, false);
     assert.equal(result.waitingForSync, !optedIn);
     const migrated = { body: result.body, labels: optedIn ? [] : [{ name: label }] };
-    assert.deepEqual(changesFor(entry, migrated), { body: migrated.body, addHold: false, remove: [],
-      waitingForSync: false, extraHold: false });
+    assert.deepEqual(migrateMainPr(optedIn, migrated), { body: migrated.body, addHold: false, remove: [],
+      waitingForSync: false, extraHold: false, needsChoice: false });
+  }
+});
+
+test('migration only cleans the old docs label on release PRs, including PRs retargeted from main', () => {
+  const release = 'release/v1.3';
+  for (const [base, optedIn] of [[release, true], ['main', false]]) {
+    const names = ['docs-required', 'docs-not-required', ...(optedIn ? ['merge nightly'] : [])];
+    for (const body of [legacy, null, checked]) {
+      const pr = { base: { ref: release }, body, labels: names.map(name => ({ name })) };
+      assert.deepEqual(changesFor({ base, optedIn }, pr), { body, addHold: false, remove: ['docs-not-required'],
+        waitingForSync: false, extraHold: false, needsChoice: false });
+    }
+  }
+});
+
+test('a PR retargeted into main needs a current checkbox or manual hold', () => {
+  const entry = { base: 'release/v1.3', optedIn: true };
+  for (const [body, names, needsChoice, waitingForSync] of [
+    [legacy, ['merge nightly'], true, false], [null, [], true, false],
+    ['> ' + unchecked, [], true, false], [unchecked, [], false, false],
+    [checked, [], false, true], [null, [label], false, false]
+  ]) {
+    const pr = { base: { ref: 'main' }, body, labels: names.map(name => ({ name })) };
+    assert.deepEqual(changesFor(entry, pr), { body, addHold: false, remove: [],
+      waitingForSync, extraHold: false, needsChoice });
   }
 });
 
 test('migration updates the stock help only in the comment following a converted checkbox', () => {
   const oldHelp = 'Uncheck to opt out and remove the `merge nightly` label; this does not enable immediate merging.';
-  const newHelp = 'Check to opt out. Maintainers can also apply the `skip nightly merge` label directly.';
-  const migrate = (body, optedIn) => changesFor({ optedIn }, { body, labels: [] }).body;
+  const newHelp = 'Check to opt out. To resume, uncheck the box and remove any manually applied `skip nightly merge` label.';
+  const migrate = (body, optedIn) => migrateMainPr(optedIn, { body, labels: [] }).body;
   assert.ok(template.includes(newHelp));
   assert.equal(migrate(template.replace(unchecked, legacy).replace(newHelp, oldHelp), true), template);
 
@@ -233,12 +279,12 @@ test('migration updates the stock help only in the comment following a converted
 
 test('migration holds checkbox-free PRs across retries and flags a later manual opt-out for review', () => {
   const pr = { body: null, labels: [] };
-  assert.equal(changesFor({ optedIn: false }, pr).addHold, true);
-  assert.equal(changesFor({ optedIn: true }, pr).addHold, false);
+  assert.equal(migrateMainPr(false, pr).addHold, true);
+  assert.equal(migrateMainPr(true, pr).addHold, false);
   pr.labels.push({ name: label });
-  assert.equal(changesFor({ optedIn: false }, pr).addHold, false);
-  assert.equal(changesFor({ optedIn: true }, pr).extraHold, true);
-  assert.equal(changesFor({ optedIn: false }, pr).body, null);
+  assert.equal(migrateMainPr(false, pr).addHold, false);
+  assert.equal(migrateMainPr(true, pr).extraHold, true);
+  assert.equal(migrateMainPr(false, pr).body, null);
 });
 
 const stackMessage = 'This pull request is part of a stack and must be enqueued using the asynchronous merge REST API. For more information, see https://docs.github.com/rest/pulls/pulls#merge-a-pull-request-asynchronously';
