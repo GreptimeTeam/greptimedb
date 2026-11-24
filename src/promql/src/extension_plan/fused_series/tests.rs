@@ -554,6 +554,9 @@ fn declaring_orderings(tree: &NativeTree, orderings: &[SeriesOrdering]) -> Nativ
             }
             NativeExpr::ParameterizedTopK {
                 input, parameter, ..
+            }
+            | NativeExpr::ParameterizedAggregate {
+                input, parameter, ..
             } => {
                 **input = rewrite(input, orderings, seen);
                 **parameter = rewrite(parameter, orderings, seen);
@@ -8942,6 +8945,146 @@ fn histogram_split_carries_a_per_point_parameter() {
             .unwrap()
             .is_none(),
         "`histogram_quantile(scalar(sum(rate(x[5m]))), sum by (le) (rate(x[5m])))` must decline: {reading}"
+    );
+}
+
+/// A `quantile` exports no state, with a per-point `φ` or without: the split declines both.
+///
+/// Its answer is the quantile of a group's whole sample set, and the quantile of two partitions'
+/// quantiles is not the quantile of their union. Reading the `φ` per point changes where the number
+/// comes from and nothing about that, so the fold that binds a number and the one that reads the
+/// statement's are declined by the same rule.
+#[test]
+fn a_per_point_quantile_is_not_split() {
+    let window = rate_tree().root().clone();
+    let grid = window
+        .output
+        .samples()
+        .expect("a window produces samples")
+        .eval_grid
+        .clone()
+        .expect("a window's output is evaluated on a grid");
+    let output = NativeType::Samples(Arc::new(SeriesSchema {
+        fields: raw_schema().fields.clone(),
+        eval_grid: Some(grid.clone()),
+    }));
+    let quantile = |parameter: NativeNode| NativeNode {
+        expr: NativeExpr::ParameterizedAggregate {
+            input: Box::new(window.clone()),
+            // Unused: the `φ` this fold reads is its parameter's.
+            op: BoundAggregate {
+                kind: AggregateKind::Quantile { quantile: 0.0 },
+                group: Grouping::By(Arc::from([Arc::from(JOB)])),
+                stage: AggregateStage::Complete,
+                field_kind: FieldKind::Float,
+            },
+            parameter: Box::new(parameter),
+        },
+        output: output.clone(),
+    };
+    // `time()`, and a scalar the statement reads from the series the split would read.
+    let eval_time = NativeNode {
+        expr: NativeExpr::EvalTime { date: None },
+        output: NativeType::Scalar(Arc::clone(&grid)),
+    };
+    let scalar_of_window = NativeNode {
+        expr: NativeExpr::ScalarOf {
+            input: Box::new(window.clone()),
+        },
+        output: NativeType::Scalar(Arc::clone(&grid)),
+    };
+    for parameter in [eval_time, scalar_of_window] {
+        let tree = NativeTree::try_new(quantile(parameter)).expect("the bound tree is legal");
+        assert!(
+            FusedSeries::split_aggregate(&tree, TIME).unwrap().is_none(),
+            "a per-point quantile must keep the plan it had: {tree}"
+        );
+    }
+}
+
+/// A fold above a state input reads every owner of the `Final` it folds.
+///
+/// The rows of a grouped `Final` state are split by their group's labels, which is how a split
+/// aggregate folds in parallel: each owner folds its own groups. A fold above that `Final` reads
+/// whole vectors, though, so the same split answers something else there: an ungrouped `quantile`
+/// is the quantile of every group's samples at once, and one fold per owner is a set of per-group
+/// quantiles instead. The state is therefore gathered when the fold above it reads across groups,
+/// wherever that fold sits: `quantile(time(), v)` reads the state as its input, and
+/// `quantile(scalar(v), v)` reads it through the parameter, where the routing walk finds it too.
+#[test]
+fn a_fold_across_groups_gathers_the_state_it_reads() {
+    let out = grid();
+    let samples = NativeType::Samples(Arc::new(SeriesSchema {
+        fields: raw_schema().fields.clone(),
+        eval_grid: Some(Arc::clone(&out)),
+    }));
+    let state = Arc::new(AggregateStateSchema {
+        group: Grouping::By(Arc::new([Arc::from(JOB)])),
+        kind: AggregateStateKind::Sum,
+        components: Arc::from([StateComponent::Value, StateComponent::Compensation]),
+        accumulators: raw_schema().fields.clone(),
+        grid: Arc::clone(&out),
+    });
+    let bound_input = |output: NativeType| NativeNode {
+        expr: NativeExpr::Input(BoundInput {
+            output: output.clone(),
+            source_index: 0,
+            ordering: SeriesOrdering::Contiguous,
+        }),
+        output,
+    };
+    // `sum by (job) (…)` at the end of its fold: one row per group and point.
+    let final_over_state = NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(bound_input(NativeType::AggregateState(Arc::clone(&state)))),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group: Grouping::By(Arc::new([Arc::from(JOB)])),
+                stage: AggregateStage::Final,
+                field_kind: FieldKind::Float,
+            },
+        },
+        output: samples.clone(),
+    };
+    let eval_time = NativeNode {
+        expr: NativeExpr::EvalTime { date: None },
+        output: NativeType::Scalar(Arc::clone(&out)),
+    };
+    let quantile = |input: NativeNode, parameter: NativeNode| NativeNode {
+        expr: NativeExpr::ParameterizedAggregate {
+            input: Box::new(input),
+            op: BoundAggregate {
+                kind: AggregateKind::Quantile { quantile: 0.5 },
+                group: Grouping::By(Arc::from([])),
+                stage: AggregateStage::Complete,
+                field_kind: FieldKind::Float,
+            },
+            parameter: Box::new(parameter),
+        },
+        output: samples.clone(),
+    };
+    // `quantile(time(), sum by (job) (…))`: ungrouped, so the fold folds every group together.
+    let across = quantile(final_over_state.clone(), eval_time);
+    assert_eq!(
+        Some((super::StateGroup::Single, SeriesRouting::CanonicalLabels)),
+        super::state_routing(&across),
+        "a fold across the Final's groups must read them on one owner"
+    );
+    // `quantile(scalar(sum by (job) (…)), v)`: the state is read by the parameter, which is one
+    // value of the whole vector, so it is as much a fold across groups as the one above.
+    let through_parameter = quantile(
+        bound_input(samples.clone()),
+        NativeNode {
+            expr: NativeExpr::ScalarOf {
+                input: Box::new(final_over_state),
+            },
+            output: NativeType::Scalar(Arc::clone(&out)),
+        },
+    );
+    assert_eq!(
+        Some((super::StateGroup::Single, SeriesRouting::CanonicalLabels)),
+        super::state_routing(&through_parameter),
+        "the Final under the fold's parameter is the state this tree reads"
     );
 }
 

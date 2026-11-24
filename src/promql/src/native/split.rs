@@ -229,6 +229,10 @@ pub(crate) fn split(
             op: BoundVectorOp::TopK { .. },
             ..
         } => Err(declined("a whole-vector operation above a split aggregate")),
+        // A per-point `φ` does not make the fold splittable: `check_cut` declines every `quantile`,
+        // whose state is its group's samples however its argument is read. A `ParameterizedAggregate`
+        // is only ever that fold, so there is nothing here to admit.
+        NativeExpr::ParameterizedAggregate { .. } => Err(declined("a `quantile` aggregate")),
         NativeExpr::Merge { .. } => Err(declined("an aggregate split across a canonical merge")),
         // A window whose input is already evaluated - a subquery - applies to the merged values the
         // suffix reads, provided it evaluates on a grid. The declared grid and the input's grid are
