@@ -63,10 +63,12 @@ this change. PR body edits made by this account trigger checkbox label sync.
 3. Apply the saved snapshot. The migration removes `docs-not-required` from
    captured open PRs on every base branch. For PRs targeting `main` both in
    the snapshot and at apply time, it also converts legacy checkboxes and
-   removes `merge nightly`. PRs that had `merge nightly` in the snapshot stay
-   in the pool. Those that lacked it receive a hold. Coordinate retargeting
-   and description edits during apply because GitHub accepts the complete PR
-   body on update.
+   removes `merge nightly`. A converted checkbox is unchecked if the PR had
+   `merge nightly` in the snapshot and checked otherwise. For PRs that lacked
+   the old label, `apply` adds a manual hold only when the checkbox is missing.
+   If an author unchecks **Skip nightly merge**, retrying `apply` honors that
+   choice. Coordinate retargeting and description edits during apply because
+   GitHub accepts the complete PR body on update.
 
    ```sh
    node .github/scripts/migrate-pr-labels.cjs apply /tmp/pr-labels.json

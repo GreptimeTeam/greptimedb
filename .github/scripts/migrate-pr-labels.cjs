@@ -54,7 +54,7 @@ function changesFor(entry, pr) {
   return {
     body,
     // A converted checked box gets a bot-owned label from its edit event.
-    addHold: hold && !checkbox && !labeled,
+    addHold: hold && checkbox === null && !labeled,
     remove: obsolete.filter(label => labels.has(label)),
     waitingForSync: checkbox === true && !labeled,
     extraHold: migrateNightly && entry.optedIn && (checkbox === true || labeled),

@@ -234,6 +234,12 @@ test('migration follows the snapshotted label, edits only visible legacy items a
   }
 });
 
+test('retrying migration honors a cleared nightly opt-out checkbox', () => {
+  const retry = migrateMainPr(false, { body: unchecked, labels: [] });
+  assert.deepEqual(retry, { body: unchecked, addHold: false, remove: [],
+    waitingForSync: false, extraHold: false, needsChoice: false });
+});
+
 test('migration only cleans the old docs label on release PRs, including PRs retargeted from main', () => {
   const release = 'release/v1.3';
   for (const [base, optedIn] of [[release, true], ['main', false]]) {
