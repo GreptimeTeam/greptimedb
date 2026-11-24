@@ -422,7 +422,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         };
         self.listener.on_deferred_lease_work_begin(region_id).await;
-        self.build_missing_indexes(&region).await;
+        if self.build_missing_indexes(&region).await {
+            // A role change outside the worker stopped the pass, so the region does the work
+            // once it is a writable leader again.
+            self.defer_lease_work(&region).extend(retries);
+            return;
+        }
         // A retry the region cannot run after a role change outside the worker stays due, and so
         // does the rest once the save below finds that change.
         for request in retries {
@@ -449,10 +454,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     }
 
     /// Builds the indexes of the region's files that lack them, which a region that waits does
-    /// not build.
-    async fn build_missing_indexes(&mut self, region: &MitoRegionRef) {
+    /// not build. Returns true if the state of the region stopped it.
+    async fn build_missing_indexes(&mut self, region: &MitoRegionRef) -> bool {
         if self.config.index.build_mode != IndexBuildMode::Async {
-            return;
+            return false;
         }
         let request = BuildIndexRequest {
             region_id: region.region_id,
@@ -461,7 +466,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             result_senders: Vec::new(),
         };
         self.handle_rebuild_index(request, OptionOutputTx::new(None))
-            .await;
+            .await
     }
 }
 

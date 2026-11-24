@@ -58,6 +58,10 @@ pub trait EventListener: Send + Sync {
     /// lease held back.
     async fn on_deferred_lease_work_begin(&self, _region_id: RegionId) {}
 
+    /// Notifies the listener when an index build request passed the worker's checks of the
+    /// region's state, before it reads the manifest.
+    async fn on_rebuild_index_admitted(&self, _region_id: RegionId) {}
+
     /// Notifies the listener when the worker receives a notification that a save of the region's
     /// backfilled metadata was deferred.
     fn on_backfill_deferred(&self, _region_id: RegionId) {}

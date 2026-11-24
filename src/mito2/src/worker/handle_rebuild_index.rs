@@ -222,21 +222,24 @@ impl<S> RegionWorkerLoop<S> {
         });
     }
 
+    /// Handles an index build request as [Self::handle_rebuild_index_inner] does.
     pub(crate) async fn handle_rebuild_index(
         &mut self,
         request: BuildIndexRequest,
         sender: OptionOutputTx,
-    ) {
+    ) -> bool {
         self.handle_rebuild_index_inner(request, sender, false)
-            .await;
+            .await
     }
 
+    /// Handles an index build request, a retry if `is_retry`. Returns true if the state of the
+    /// registered region stopped it before it scheduled every build.
     pub(crate) async fn handle_rebuild_index_inner(
         &mut self,
         request: BuildIndexRequest,
         mut sender: OptionOutputTx,
         is_retry: bool,
-    ) {
+    ) -> bool {
         let region_id = request.region_id;
         // A retry has no caller to try again, so the region keeps it until it is a writable
         // leader with its Leader lease, such as after its wait for that lease or a role change
@@ -250,10 +253,10 @@ impl<S> RegionWorkerLoop<S> {
                 region.state()
             );
             self.defer_lease_work(&region).push(request);
-            return;
+            return true;
         }
         let Some(region) = self.regions.writable_region_or(region_id, &mut sender) else {
-            return;
+            return self.regions.get_region(region_id).is_some();
         };
         // Staging regions are writable but must not publish indexes.
         if region.should_abort_index() {
@@ -265,7 +268,7 @@ impl<S> RegionWorkerLoop<S> {
                 }
                 .fail(),
             );
-            return;
+            return true;
         }
         // A region that awaits its Leader lease could not publish the index. In async build
         // mode the end of the wait builds the missing indexes if the region is then a writable
@@ -276,7 +279,7 @@ impl<S> RegionWorkerLoop<S> {
         {
             info!("Region {region_id} awaits its Leader lease, building no index");
             sender.send(Err(e));
-            return;
+            return true;
         }
 
         // Only keep the parts of the version that index builds need, so the
@@ -304,6 +307,7 @@ impl<S> RegionWorkerLoop<S> {
         // A committed index publication may not have reached version control
         // yet. Use the manifest's FileMeta as the conditional publication
         // source while keeping the builder's schema generation from the version.
+        self.listener.on_rebuild_index_admitted(region_id).await;
         let manifest = region.manifest_ctx.manifest().await;
         let current_file_meta = |file_id| {
             let file_meta = manifest.files.get(&file_id);
@@ -353,7 +357,7 @@ impl<S> RegionWorkerLoop<S> {
                         .await;
                 }
                 sender.send(Err(BuildIndexAsyncSnafu { region_id }.into_error(err)));
-                return;
+                return false;
             }
         };
         let build_tasks = if request.file_metas.is_empty() {
@@ -368,7 +372,7 @@ impl<S> RegionWorkerLoop<S> {
                 region_id, request
             );
             sender.send(Ok(0));
-            return;
+            return false;
         }
 
         let file_ids = build_tasks
@@ -378,6 +382,7 @@ impl<S> RegionWorkerLoop<S> {
         let build_type = request.build_type.clone();
         // Each task holds a sender and reports at most once, so sends never block.
         let (tx, mut rx) = mpsc::channel::<Result<IndexBuildOutcome>>(build_tasks.len());
+        let mut stopped = false;
         for (file_handle, file_meta) in build_tasks {
             debug!(
                 "Scheduling index build for region {}, file_id {}",
@@ -393,6 +398,12 @@ impl<S> RegionWorkerLoop<S> {
                     region.state(),
                     file_handle.meta_ref().file_id
                 );
+                // A role change outside the worker during the awaits above stops a retry,
+                // which the region keeps until it is a writable leader again.
+                if is_retry {
+                    self.defer_lease_work(&region).push(request);
+                }
+                stopped = true;
                 break;
             }
 
@@ -477,6 +488,7 @@ impl<S> RegionWorkerLoop<S> {
             };
             sender.send(result);
         });
+        stopped
     }
 
     pub(crate) async fn handle_index_build_finished(

@@ -105,6 +105,40 @@ struct TailReplayListener {
     index_builds_stopped: AtomicUsize,
     compactions_scheduled: AtomicUsize,
     leader_lease_wait_ends: AtomicUsize,
+    became_writable: AtomicUsize,
+    park_deferred_work: Gate,
+    park_backfill: Gate,
+}
+
+/// Parks the first task that passes it once armed, until released.
+#[derive(Default)]
+struct Gate {
+    armed: AtomicBool,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl Gate {
+    fn arm(&self) {
+        self.armed.store(true, Ordering::Relaxed);
+    }
+
+    async fn pass(&self) {
+        if self.armed.swap(false, Ordering::Relaxed) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+    }
+
+    async fn wait_entered(&self) {
+        tokio::time::timeout(Duration::from_secs(10), self.entered.notified())
+            .await
+            .unwrap();
+    }
+
+    fn release(&self) {
+        self.release.notify_one();
+    }
 }
 
 #[async_trait]
@@ -134,6 +168,18 @@ impl EventListener for TailReplayListener {
     fn on_leader_lease_wait_ended(&self, _region_id: RegionId) {
         // Releases the index build counts recorded before it.
         self.leader_lease_wait_ends.fetch_add(1, Ordering::Release);
+    }
+
+    fn on_region_became_writable(&self, _region_id: RegionId) {
+        self.became_writable.fetch_add(1, Ordering::Release);
+    }
+
+    async fn on_deferred_lease_work_begin(&self, _region_id: RegionId) {
+        self.park_deferred_work.pass().await;
+    }
+
+    async fn on_persist_backfilled_metadata_lock_begin(&self, _region_id: RegionId) {
+        self.park_backfill.pass().await;
     }
 
     fn on_tail_fence_begin(&self, _region_id: RegionId) {
@@ -1961,6 +2007,86 @@ async fn test_replayed_ssts_build_index_as_flushed(
     let files = &version.ssts.levels()[0].files;
     let has_index = files.values().any(|file| file.meta_ref().exists_index());
     assert_eq!(create_on_flush, has_index);
+}
+
+/// A role change outside the worker that stops the pass building the index the replay could not
+/// publish, and is undone before the save the work ends with, leaves the pass due.
+#[tokio::test]
+async fn test_missing_index_pass_stopped_by_role_change_stays_due() {
+    let region = TestRegion::build(
+        "tail-replay-index-role-change",
+        true,
+        None,
+        None,
+        async_build_mode_config(true),
+    )
+    .await;
+    region
+        .engine
+        .renew_node_lease(Instant::now() + Duration::from_secs(10));
+    let region_id = RegionId::new(1, 2);
+    let request = CreateRequestBuilder::new()
+        .insert_option(WAL_OPTIONS_KEY, &wal_options()[WAL_OPTIONS_KEY])
+        .build_with_index();
+    let table_dir = request.table_dir.clone();
+    region
+        .engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let last = region.write_remote_rows(region_id, 0, 3).await;
+    let tails = vec![remote_tail(0, last, UptoKind::Reported)];
+    commit_edit(&region.engine, region_id, pending_tails_edit(tails)).await;
+    reopen_region(&region.engine, region_id, table_dir, false, wal_options()).await;
+    let catchup = RegionRequest::Catchup(RegionCatchupRequest {
+        set_writable: true,
+        ..Default::default()
+    });
+    region
+        .engine
+        .handle_request(region_id, catchup)
+        .await
+        .unwrap();
+    let replayed = region.engine.get_region(region_id).unwrap();
+    wait_until(|| !replayed.version().has_pending_tails()).await;
+    assert!(replayed.manifest_ctx.awaits_leader_lease());
+    let listener = &region.listener;
+
+    // The lease starts the work, and a demotion lands before the pass.
+    listener.park_deferred_work.arm();
+    listener.park_backfill.arm();
+    let now = Instant::now();
+    region
+        .engine
+        .set_region_role_with_lease(
+            region_id,
+            RegionRole::Leader,
+            now,
+            now + Duration::from_secs(10),
+            None,
+        )
+        .unwrap();
+    listener.park_deferred_work.wait_entered().await;
+    region
+        .engine
+        .set_region_role(region_id, RegionRole::Follower)
+        .unwrap();
+    listener.park_deferred_work.release();
+    // The worker reports the end of the wait once it ran what it could.
+    wait_until(|| listener.leader_lease_wait_ends.load(Ordering::Acquire) == 1).await;
+    // A promotion before any save checks the region.
+    let notified = listener.became_writable.load(Ordering::Acquire);
+    region
+        .engine
+        .set_region_role(region_id, RegionRole::Leader)
+        .unwrap();
+    wait_until(|| listener.became_writable.load(Ordering::Acquire) > notified).await;
+    listener.park_backfill.release();
+
+    wait_until(|| listener.index_builds_stopped() == 1).await;
+    let version = replayed.version();
+    let files = &version.ssts.levels()[0].files;
+    assert!(files.values().any(|file| file.meta_ref().exists_index()));
 }
 
 #[tokio::test]

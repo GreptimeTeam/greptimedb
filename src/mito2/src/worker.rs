@@ -1855,7 +1855,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
             BackgroundNotify::IndexBuildRetry(req) => {
                 self.handle_rebuild_index_inner(req, OptionOutputTx::new(None), true)
-                    .await
+                    .await;
             }
             BackgroundNotify::CompactionFinished(req) => {
                 self.handle_compaction_finished(region_id, req).await
@@ -2131,6 +2131,14 @@ impl WorkerListener {
         #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {
             listener.on_deferred_lease_work_begin(_region_id).await;
+        }
+    }
+
+    /// An index build request passed the worker's checks of the region's state.
+    pub(crate) async fn on_rebuild_index_admitted(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_rebuild_index_admitted(_region_id).await;
         }
     }
 

@@ -1014,6 +1014,7 @@ struct LeaseWaitEndedListener {
     park_backfill: Gate,
     park_enter_staging_result: Gate,
     park_deferred_work: Gate,
+    park_rebuild_admitted: Gate,
 }
 
 #[async_trait::async_trait]
@@ -1041,6 +1042,10 @@ impl EventListener for LeaseWaitEndedListener {
 
     async fn on_deferred_lease_work_begin(&self, _region_id: RegionId) {
         self.park_deferred_work.pass().await;
+    }
+
+    async fn on_rebuild_index_admitted(&self, _region_id: RegionId) {
+        self.park_rebuild_admitted.pass().await;
     }
 
     fn on_backfill_deferred(&self, _region_id: RegionId) {
@@ -1573,8 +1578,82 @@ async fn test_deferred_work_kept_across_role_change_while_it_runs() {
         .unwrap();
     listener.park_deferred_work.release();
     wait_until(|| listener.became_writable.load(Ordering::Acquire) > notified).await;
-    // The save finds the demotion too.
-    listener.wait_for_backfill_deferrals(1).await;
+    assert_eq!(listener.backfill_persists(), 0);
+    assert!(!has_inverted_index());
+
+    engine
+        .set_region_role(REGION_ID, RegionRole::Leader)
+        .unwrap();
+    wait_until(has_inverted_index).await;
+}
+
+/// A role change outside the worker after it admitted an index build retry, while the retry
+/// reads the manifest, stops the retry, which the region keeps until it is a writable leader
+/// again.
+#[tokio::test]
+async fn test_retry_stopped_by_role_change_after_admission_is_kept() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("retry-stopped-after-admission").await;
+    let listener = Arc::new(LeaseWaitEndedListener::default());
+    let engine = env
+        .create_engine_with(
+            async_build_mode_config(false),
+            None,
+            Some(listener.clone()),
+            None,
+        )
+        .await;
+    engine.require_write_lease();
+    engine.freeze_lease_clock(Instant::now());
+    let request = CreateRequestBuilder::new().build_with_index();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(REGION_ID, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    grant(&engine, RegionRole::Leader, Instant::now() + LEASE);
+    let rows = Rows {
+        schema,
+        rows: build_rows(0, 3),
+    };
+    put_rows(&engine, REGION_ID, rows).await;
+    flush_region(&engine, REGION_ID, None).await;
+    let files = engine
+        .get_region(REGION_ID)
+        .unwrap()
+        .all_manifest_files()
+        .await
+        .0;
+    let has_inverted_index = || {
+        let version = engine.get_region(REGION_ID).unwrap().version();
+        version.ssts.levels()[0].files.values().all(|file| {
+            file.meta_ref()
+                .available_indexes
+                .contains(&IndexType::InvertedIndex)
+        })
+    };
+
+    listener.park_rebuild_admitted.arm();
+    let notify = BackgroundNotify::IndexBuildRetry(BuildIndexRequest {
+        region_id: REGION_ID,
+        build_type: IndexBuildType::Manual,
+        file_metas: files,
+        result_senders: Vec::new(),
+    });
+    let request = WorkerRequest::Background {
+        region_id: REGION_ID,
+        notify,
+    };
+    let workers = &engine.inner.workers;
+    workers.submit_to_worker(REGION_ID, request).await.unwrap();
+    listener.park_rebuild_admitted.wait_entered().await;
+    engine
+        .set_region_role(REGION_ID, RegionRole::Follower)
+        .unwrap();
+    listener.park_rebuild_admitted.release();
+    // A request the worker handles after the retry, which a follower refuses.
+    let build = RegionRequest::BuildIndex(RegionBuildIndexRequest::default());
+    engine.handle_request(REGION_ID, build).await.unwrap_err();
     assert!(!has_inverted_index());
 
     engine
