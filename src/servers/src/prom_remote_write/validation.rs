@@ -90,8 +90,10 @@ impl PromValidationMode {
                     return Err(DecodeError::new("invalid utf-8"));
                 }
             },
-            PromValidationMode::Lossy => String::from_utf8_lossy(bytes).to_string(),
-            PromValidationMode::Unchecked => unsafe { String::from_utf8_unchecked(bytes.to_vec()) },
+            // `Unchecked` is accepted for config compatibility and decodes like `Lossy`.
+            PromValidationMode::Lossy | PromValidationMode::Unchecked => {
+                String::from_utf8_lossy(bytes).into_owned()
+            }
         };
         Ok(result)
     }

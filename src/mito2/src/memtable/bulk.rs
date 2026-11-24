@@ -740,13 +740,16 @@ impl BulkMemtable {
             max_sequence: AtomicU64::new(0),
             min_sequence: AtomicU64::new(u64::MAX),
             num_rows: AtomicUsize::new(0),
-            compactor: Arc::new(Mutex::new(MemtableCompactor::new(
-                metadata.region_id,
-                id,
-                self.config.clone(),
-                self.row_group_size,
-                self.float_field_encoding,
-            ))),
+            compactor: Arc::new(Mutex::new(
+                MemtableCompactor::new(
+                    metadata.region_id,
+                    id,
+                    self.config.clone(),
+                    self.row_group_size,
+                    self.float_field_encoding,
+                )
+                .with_narthex_format(self.compactor.lock().unwrap().narthex_format),
+            )),
             compact_dispatcher: self.compact_dispatcher.clone(),
             compacting: Arc::new(AtomicBool::new(false)),
             append_mode: self.append_mode,
@@ -946,6 +949,10 @@ struct MultiBulkRangeIterBuilder {
 }
 
 impl IterBuilder for BulkRangeIterBuilder {
+    fn primary_keys(&self) -> Option<crate::memtable::BoxedPrimaryKeyIterator> {
+        part::bulk_primary_keys(&self.part.batch)
+    }
+
     fn build(&self, _metrics: Option<MemScanMetrics>) -> Result<BoxedBatchIterator> {
         UnsupportedOperationSnafu {
             err_msg: "BatchIterator is not supported for bulk memtable",
@@ -989,6 +996,10 @@ impl IterBuilder for BulkRangeIterBuilder {
 }
 
 impl IterBuilder for MultiBulkRangeIterBuilder {
+    fn primary_keys(&self) -> Option<crate::memtable::BoxedPrimaryKeyIterator> {
+        self.part.primary_keys()
+    }
+
     fn build(&self, _metrics: Option<MemScanMetrics>) -> Result<BoxedBatchIterator> {
         UnsupportedOperationSnafu {
             err_msg: "BatchIterator is not supported for multi bulk memtable",
@@ -1035,6 +1046,10 @@ struct EncodedBulkRangeIterBuilder {
 }
 
 impl IterBuilder for EncodedBulkRangeIterBuilder {
+    fn primary_keys(&self) -> Option<crate::memtable::BoxedPrimaryKeyIterator> {
+        self.part.primary_keys()
+    }
+
     fn build(&self, _metrics: Option<MemScanMetrics>) -> Result<BoxedBatchIterator> {
         UnsupportedOperationSnafu {
             err_msg: "BatchIterator is not supported for encoded bulk memtable",
@@ -1068,8 +1083,8 @@ impl IterBuilder for EncodedBulkRangeIterBuilder {
 
     fn encoded_range(&self) -> Option<EncodedRange> {
         Some(EncodedRange {
-            data: self.part.data().clone(),
-            sst_info: self.part.to_sst_info(self.file_id),
+            data: self.part.data()?.clone(),
+            sst_info: self.part.to_sst_info(self.file_id)?,
             _charges: self.charges.clone(),
         })
     }
@@ -1210,13 +1225,14 @@ impl PartToMerge {
         }
     }
 
-    /// Returns the bytes this part holds in memory, charged to the write buffer. An encoded part
-    /// also keeps its parsed parquet metadata, which grows with the schema and row groups.
+    /// Returns the bytes this part holds in memory, charged to the write buffer. An encoded
+    /// Parquet part also keeps its parsed metadata, which grows with the schema and row groups.
     fn held_bytes(&self) -> usize {
         match self {
-            PartToMerge::Encoded { part, .. } => part
-                .size_bytes()
-                .saturating_add(part.metadata().parquet_metadata.memory_size()),
+            PartToMerge::Encoded { part, .. } => part.size_bytes().saturating_add(
+                part.parquet_metadata()
+                    .map_or(0, |metadata| metadata.memory_size()),
+            ),
             _ => self.estimated_size(),
         }
     }
@@ -1228,13 +1244,16 @@ impl PartToMerge {
             PartToMerge::Multi { part, .. } => part.estimated_size() as u64,
             PartToMerge::Encoded { part, .. } => {
                 let metadata = part.metadata();
-                let encoded: u64 = metadata
-                    .parquet_metadata
-                    .row_groups()
-                    .iter()
-                    .flat_map(|row_group| row_group.columns())
-                    .map(|column| column.uncompressed_size() as u64)
-                    .sum();
+                let encoded: u64 =
+                    part.parquet_metadata()
+                        .map_or(part.size_bytes() as u64, |metadata| {
+                            metadata
+                                .row_groups()
+                                .iter()
+                                .flat_map(|row_group| row_group.columns())
+                                .map(|column| column.uncompressed_size() as u64)
+                                .sum()
+                        });
                 encoded.max(metadata.var_len_bytes)
             }
         }
@@ -1249,9 +1268,9 @@ impl PartToMerge {
             PartToMerge::Multi { part, .. } => {
                 Some((part.num_rows() as u64, part.estimated_size() as u64))
             }
-            PartToMerge::Encoded { part, .. } => {
-                widest_row_group_statistic(&part.metadata().parquet_metadata)
-            }
+            PartToMerge::Encoded { part, .. } => part
+                .parquet_metadata()
+                .and_then(|metadata| widest_row_group_statistic(metadata)),
         }
     }
 
@@ -1318,9 +1337,15 @@ struct MemtableCompactor {
     /// Max number of rows in a parquet row group for encoded parts.
     row_group_size: usize,
     float_field_encoding: FloatFieldEncoding,
+    narthex_format: bool,
 }
 
 impl MemtableCompactor {
+    fn with_narthex_format(mut self, narthex_format: bool) -> Self {
+        self.narthex_format = narthex_format;
+        self
+    }
+
     /// Creates a new MemtableCompactor.
     fn new(
         region_id: RegionId,
@@ -1335,6 +1360,7 @@ impl MemtableCompactor {
             config,
             row_group_size,
             float_field_encoding,
+            narthex_format: false,
         }
     }
 
@@ -1393,6 +1419,7 @@ impl MemtableCompactor {
                     encode_bytes_threshold,
                     row_group_size,
                     float_field_encoding,
+                    self.narthex_format,
                 )
             })
             .collect::<Result<Vec<Option<MergedPart>>>>()?;
@@ -1433,6 +1460,7 @@ impl MemtableCompactor {
         encode_bytes_threshold: usize,
         row_group_size: usize,
         float_field_encoding: FloatFieldEncoding,
+        narthex_format: bool,
     ) -> Result<Option<MergedPart>> {
         if parts_to_merge.is_empty() {
             return Ok(None);
@@ -1551,7 +1579,8 @@ impl MemtableCompactor {
                     row_group_size,
                 ),
                 float_field_encoding,
-            )?;
+            )?
+            .with_narthex_format(narthex_format);
             let mut metrics = BulkPartEncodeMetrics::default();
             let encoded_part = encoder.encode_record_batch_iter(
                 boxed_iter,
@@ -1695,6 +1724,7 @@ pub struct BulkMemtableBuilder {
     /// Max number of rows in a parquet row group for encoded parts.
     row_group_size: usize,
     float_field_encoding: FloatFieldEncoding,
+    narthex_format: bool,
 }
 
 impl Default for BulkMemtableBuilder {
@@ -1707,11 +1737,17 @@ impl Default for BulkMemtableBuilder {
             merge_mode: MergeMode::default(),
             row_group_size: DEFAULT_ROW_GROUP_SIZE,
             float_field_encoding: FloatFieldEncoding::default(),
+            narthex_format: false,
         }
     }
 }
 
 impl BulkMemtableBuilder {
+    pub(crate) fn with_narthex_format(mut self, narthex_format: bool) -> Self {
+        self.narthex_format = narthex_format;
+        self
+    }
+
     /// Creates a new builder with specific `write_buffer_manager`.
     pub fn new(
         write_buffer_manager: Option<WriteBufferManagerRef>,
@@ -1757,7 +1793,7 @@ impl BulkMemtableBuilder {
 
 impl MemtableBuilder for BulkMemtableBuilder {
     fn build(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef {
-        Arc::new(BulkMemtable::new_with_row_group_size_and_encoding(
+        let memtable = BulkMemtable::new_with_row_group_size_and_encoding(
             id,
             self.config.clone(),
             metadata.clone(),
@@ -1767,7 +1803,9 @@ impl MemtableBuilder for BulkMemtableBuilder {
             self.merge_mode,
             self.row_group_size,
             self.float_field_encoding,
-        ))
+        );
+        memtable.compactor.lock().unwrap().narthex_format = self.narthex_format;
+        Arc::new(memtable)
     }
 
     fn use_bulk_insert(&self, _metadata: &RegionMetadataRef) -> bool {
@@ -2095,6 +2133,7 @@ mod tests {
             usize::MAX,
             DEFAULT_ROW_GROUP_SIZE,
             FloatFieldEncoding::default(),
+            false,
         )?
         .unwrap();
         let MergedPart::Multi(part) = merged else {
@@ -2163,6 +2202,7 @@ mod tests {
             1,
             DEFAULT_ROW_GROUP_SIZE,
             FloatFieldEncoding::default(),
+            false,
         )
         .unwrap()
         .unwrap();
@@ -2170,8 +2210,8 @@ mod tests {
             unreachable!()
         };
         let row_counts: Vec<_> = part
-            .metadata()
-            .parquet_metadata
+            .parquet_metadata()
+            .unwrap()
             .row_groups()
             .iter()
             .map(|rg| rg.num_rows())
@@ -2179,15 +2219,15 @@ mod tests {
         assert!(row_counts.len() > 1, "{row_counts:?}");
         assert!(row_counts.iter().all(|rows| *rows <= 32), "{row_counts:?}");
         let field_index = part
-            .metadata()
-            .parquet_metadata
+            .parquet_metadata()
+            .unwrap()
             .file_metadata()
             .schema_descr()
             .columns()
             .iter()
             .position(|column| column.name() == "field_0")
             .unwrap();
-        for row_group in part.metadata().parquet_metadata.row_groups() {
+        for row_group in part.parquet_metadata().unwrap().row_groups() {
             assert!(row_group.column(field_index).statistics().is_none());
         }
     }
@@ -2227,6 +2267,7 @@ mod tests {
             1,
             DEFAULT_ROW_GROUP_SIZE,
             FloatFieldEncoding::default(),
+            false,
         )
         .unwrap()
         .unwrap();
@@ -2234,8 +2275,8 @@ mod tests {
             unreachable!()
         };
         let row_counts: Vec<_> = part
-            .metadata()
-            .parquet_metadata
+            .parquet_metadata()
+            .unwrap()
             .row_groups()
             .iter()
             .map(|rg| rg.num_rows())
@@ -2246,7 +2287,7 @@ mod tests {
             "{row_counts:?}"
         );
         // The part flushes as an SST that records the decoded size for compaction admission.
-        let info = part.to_sst_info(FileId::random());
+        let info = part.to_sst_info(FileId::random()).unwrap();
         assert!(info.max_row_group_uncompressed_size < 1 << 20, "{info:?}");
         assert!(
             info.max_row_group_decoded_size >= 1024 * 64 * 1024,
@@ -3200,11 +3241,11 @@ mod tests {
         }
     }
 
-    /// Bytes a part keeps in memory: an encoded part holds its data and parsed metadata.
+    /// Bytes a part keeps in memory: an encoded Parquet part holds its data and parsed metadata.
     fn expected_held_bytes(part: &PartToMerge) -> usize {
         match part {
             PartToMerge::Encoded { part, .. } => {
-                part.data().len() + part.metadata().parquet_metadata.memory_size()
+                part.data().unwrap().len() + part.parquet_metadata().unwrap().memory_size()
             }
             part => part.estimated_size(),
         }
@@ -3452,8 +3493,8 @@ mod tests {
         )?;
         let encoded_part = encoder.encode_part(&bulk_part)?.unwrap();
         let field_column = encoded_part
-            .metadata()
-            .parquet_metadata
+            .parquet_metadata()
+            .unwrap()
             .row_groups()
             .iter()
             .flat_map(|row_group| row_group.columns())
@@ -3484,8 +3525,8 @@ mod tests {
         let encoder = BulkPartEncoder::new(metadata, DEFAULT_ROW_GROUP_SIZE)?;
         let encoded_part = encoder.encode_part(&bulk_part)?.unwrap();
         let columns = encoded_part
-            .metadata()
-            .parquet_metadata
+            .parquet_metadata()
+            .unwrap()
             .row_group(0)
             .columns();
 
@@ -3525,8 +3566,8 @@ mod tests {
         let encoder = BulkPartEncoder::new(metadata, ROW_GROUP_SIZE).unwrap();
         let encoded_part = encoder.encode_part(&bulk_part).unwrap().unwrap();
         let expected = encoded_part
-            .metadata()
-            .parquet_metadata
+            .parquet_metadata()
+            .unwrap()
             .row_groups()
             .iter()
             .map(|row_group| {

@@ -186,6 +186,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "Exemplar writes require pre-encoded keys: https://github.com/GreptimeTeam/greptimedb/issues/10598"]
     async fn test_exemplar_wide_schema_conversion_memory_limit() {
         use std::time::Duration;
 

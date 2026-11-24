@@ -31,7 +31,7 @@ use object_store::ObjectStore;
 use parquet::file::metadata::KeyValue;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
-use store_api::metadata::RegionMetadataRef;
+use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
 use store_api::storage::consts::ReservedColumnId;
 
@@ -474,7 +474,7 @@ fn time_index_unit(metadata: &RegionMetadataRef) -> Result<TimeUnit> {
         .unit())
 }
 
-pub(crate) fn validate_metadata(metadata: &RegionMetadataRef) -> Result<()> {
+pub(crate) fn validate_metadata(metadata: &RegionMetadata) -> Result<()> {
     for column in &metadata.column_metadatas {
         ensure!(
             !matches!(

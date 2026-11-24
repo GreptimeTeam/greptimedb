@@ -850,7 +850,8 @@ impl MemtableSstWriter {
                         sst_info,
                         partition_expr.clone(),
                         pk_range,
-                        version.options.preserve_row_sequence,
+                        version.options.preserve_row_sequence
+                            || version.options.sst_format == Some(FormatType::Narthex),
                     )?);
                 }
                 if self.hook.is_some() {
@@ -1054,7 +1055,9 @@ impl MemtableSstWriter {
             // contain Puts and retained delete barriers for the same row.
             max_sequence: (version.options.merge_mode() != MergeMode::LastNonNull)
                 .then_some(max_sequence),
-            sst_write_format: if flat_format {
+            sst_write_format: if version.options.sst_format == Some(FormatType::Narthex) {
+                FormatType::Narthex
+            } else if flat_format {
                 FormatType::Flat
             } else {
                 FormatType::PrimaryKey
@@ -1136,7 +1139,11 @@ fn memtable_flat_sources(
     };
     let mut rows_remaining = components
         .iter()
-        .filter(|component| component.len() != 1 || component[0].encoded().is_none())
+        .filter(|component| {
+            options.sst_format == Some(FormatType::Narthex)
+                || component.len() != 1
+                || component[0].encoded().is_none()
+        })
         .flatten()
         .map(MemtableRange::num_rows)
         .sum::<usize>();
@@ -1145,7 +1152,8 @@ fn memtable_flat_sources(
     for component in components {
         // A standalone encoded component is an ordering barrier. Do not merge
         // raw ranges on either side while uploading the intervening rows as-is.
-        if component.len() == 1
+        if options.sst_format != Some(FormatType::Narthex)
+            && component.len() == 1
             && let Some(encoded) = component[0].encoded()
         {
             if !pending.is_empty() {
