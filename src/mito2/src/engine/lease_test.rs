@@ -894,6 +894,51 @@ async fn test_catchup_again_drops_unflushed_rows_under_local_wal() {
     assert_eq!(count_rows(&engine).await, 0);
 }
 
+/// A candidate lease leaves a region that awaits its Leader lease writable, also the replacement a
+/// catchup again swapped in; other Follower leases, and candidate leases after the Leader lease,
+/// demote it.
+#[rstest]
+#[case::awaiting_leader_lease(false, false)]
+#[case::caught_up_again(false, true)]
+#[case::leader_lease_received(true, false)]
+#[tokio::test]
+async fn test_candidate_lease_after_catchup(
+    #[case] leader_lease_received: bool,
+    #[case] catch_up_again: bool,
+) {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("candidate-lease-after-catchup").await;
+    let (_listener, engine, _schema) = create_region(&mut env, None).await;
+    promote_to_await_leader_lease(&engine, REGION_ID).await;
+    if catch_up_again {
+        let region = engine.get_region(REGION_ID).unwrap();
+        catchup(&engine).await.unwrap();
+        assert!(!Arc::ptr_eq(
+            &region,
+            &engine.get_region(REGION_ID).unwrap()
+        ));
+    }
+    if leader_lease_received {
+        grant_at(&engine, RegionRole::Leader, Instant::now(), None);
+    }
+    let region = engine.get_region(REGION_ID).unwrap();
+
+    assert!(grant_at(
+        &engine,
+        RegionRole::Follower,
+        Instant::now(),
+        Some(7)
+    ));
+    assert_eq!(region.is_writable(), !leader_lease_received);
+    assert_eq!(
+        region.manifest_ctx.awaits_leader_lease(),
+        !leader_lease_received
+    );
+
+    grant_at(&engine, RegionRole::Follower, Instant::now(), None);
+    assert!(region.is_follower());
+}
+
 /// Opens a region whose opener filled in the partition expression its manifest lacks and makes
 /// it writable by a catchup, after which it awaits its Leader lease. Returns the engine and the
 /// expression.

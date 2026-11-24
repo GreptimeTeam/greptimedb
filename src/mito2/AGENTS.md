@@ -241,7 +241,8 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   its memtable for the next Leader lease (`catch_up_again`, `handle_caught_up_again`); the datanode
   upgrade handler sends that catchup unless `RegionEngine::is_confirmed_leader` is true, so an
   engine wrapping mito must implement that method from mito's answers (the metric engine requires
-  both regions of the pair).
+  both regions of the pair). A Follower lease that carries a `candidate_lease_id` leaves a waiting
+  region alone (`ManifestContext::demote_candidate`); other Follower leases demote it.
 - The latest lease each region received (`GrantedLeases` in `lease.rs`) lives outside the
   region instance, so a reopen during catchup keeps it. Every path that removes a region from
   a worker's region map must also remove its record and its kept index build retries:

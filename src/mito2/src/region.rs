@@ -2299,6 +2299,21 @@ impl ManifestContext {
         self.record_leader_lease(issued_at)
     }
 
+    /// Demotes the region to a follower for a lease the metasrv granted to it as the candidate of
+    /// a migration, unless the region [awaits its Leader lease](Self::awaits_leader_lease) (a
+    /// catchup of the migration promoted it, and the route switch that follows grants that lease).
+    /// Returns the state this call replaced, None if it left the state unchanged.
+    ///
+    /// It holds the lock of [Self::promote_after_catchup], so a promotion is either seen or
+    /// happens after the demotion.
+    pub(crate) fn demote_candidate(&self, region_id: RegionId) -> Option<RegionRoleState> {
+        let _fence = self.promotion_fence.lock().unwrap();
+        if self.awaits_leader_lease() {
+            return None;
+        }
+        self.set_role(RegionRole::Follower, region_id)
+    }
+
     /// Ends a catchup that does not promote the region, so the next Leader lease promotes it.
     pub(crate) fn end_catchup(&self) {
         self.promotion_fence.lock().unwrap().catching_up = false;
@@ -3427,6 +3442,36 @@ mod tests {
         assert!(!promotion.promoted);
         assert!(promotion.ended_wait.is_none());
         assert!(region.manifest_ctx.awaits_leader_lease());
+    }
+
+    /// A candidate lease reads the wait for a Leader lease under the fence lock, so it does not
+    /// demote a region that a catchup promotes meanwhile.
+    #[tokio::test]
+    async fn test_candidate_demotion_sees_catchup_promotion_under_fence() {
+        let env = SchedulerEnv::new().await;
+        let region = Arc::new(build_test_region(&env).await);
+        region.manifest_ctx.node_lease.enable();
+        // A writable leader, so a demotion that misses the fence returns Some and fails below.
+        assert!(region.is_writable());
+        assert!(!region.manifest_ctx.awaits_leader_lease());
+        let demoted = run_blocked_on_fence(
+            &region,
+            |r| r.manifest_ctx.demote_candidate(r.region_id),
+            // What a catchup's promotion does under the lock.
+            |fence| {
+                assert!(region.manifest_ctx.promote_unless_reload_pending(
+                    fence,
+                    region.region_id,
+                    true
+                ))
+            },
+        );
+        assert_eq!(demoted, None);
+        assert!(region.manifest_ctx.awaits_leader_lease());
+        assert_eq!(
+            region.state(),
+            RegionRoleState::Leader(RegionLeaderState::Writable)
+        );
     }
 
     /// The readiness of an upgrade reads the role and the wait for a Leader lease under the fence
