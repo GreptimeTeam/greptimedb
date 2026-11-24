@@ -276,6 +276,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 /// Tells the worker that a region became writable, so it replays the pending tails and runs the
 /// work the region's wait for its Leader lease held back, without waiting.
 pub(crate) fn notify_writable(sender: &Sender<WorkerRequestWithTime>, region: &MitoRegionRef) {
+    #[cfg(test)]
+    region
+        .manifest_ctx
+        .writable_notifications
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let sender = sender.clone();
     let region_id = region.region_id;
     common_runtime::spawn_global(async move {

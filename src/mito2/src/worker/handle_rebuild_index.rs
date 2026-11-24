@@ -238,6 +238,20 @@ impl<S> RegionWorkerLoop<S> {
         is_retry: bool,
     ) {
         let region_id = request.region_id;
+        // A retry has no caller to try again, so the region keeps it until it is a writable
+        // leader with its Leader lease, such as after its wait for that lease or a role change
+        // while the worker runs the work the wait deferred.
+        if is_retry
+            && let Some(region) = self.regions.get_region(region_id)
+            && !region.may_finish_deferred_lease_work()
+        {
+            info!(
+                "Region {region_id} is {:?} or awaits its Leader lease, keeping an index build retry",
+                region.state()
+            );
+            self.defer_lease_work(&region).push(request);
+            return;
+        }
         let Some(region) = self.regions.writable_region_or(region_id, &mut sender) else {
             return;
         };
@@ -260,12 +274,6 @@ impl<S> RegionWorkerLoop<S> {
             .manifest_ctx
             .ensure_leader_lease_or_downgrading(region_id)
         {
-            // A retry has no caller to try again, so the end of the wait re-issues it.
-            if is_retry {
-                info!("Region {region_id} awaits its Leader lease, keeping an index build retry");
-                self.defer_lease_work(&region).push(request);
-                return;
-            }
             info!("Region {region_id} awaits its Leader lease, building no index");
             sender.send(Err(e));
             return;

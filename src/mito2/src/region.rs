@@ -809,7 +809,8 @@ impl MitoRegion {
         if !self.may_finish_deferred_lease_work() {
             return false;
         }
-        let pending = self.persist_backfilled_metadata_locked(&mut manager).await;
+        // Checked once: a change the worker starts now cannot commit before the lock is dropped.
+        let pending = self.commit_backfilled_metadata_locked(&mut manager).await;
         // The hook may read the manifest.
         drop(manager);
         if let Some(pending) = pending {
@@ -831,11 +832,18 @@ impl MitoRegion {
         &self,
         manager: &mut RwLockWriteGuard<'_, RegionManifestManager>,
     ) -> Option<PendingManifestHook> {
-        if self.state() != RegionRoleState::Leader(RegionLeaderState::Writable)
-            || self.manifest_ctx.awaits_leader_lease()
-        {
+        if !self.may_finish_deferred_lease_work() {
             return None;
         }
+        self.commit_backfilled_metadata_locked(manager).await
+    }
+
+    /// Commits the backfilled metadata if the manifest lacks it, under the caller's manifest lock,
+    /// without checking the state. Returns the hook to fire after the lock is dropped.
+    async fn commit_backfilled_metadata_locked(
+        &self,
+        manager: &mut RwLockWriteGuard<'_, RegionManifestManager>,
+    ) -> Option<PendingManifestHook> {
         // Persist backfilled metadata if manifest is missing fields (e.g., partition_expr).
         // Only the metadata and the format are kept, so the memtables of the version are not
         // pinned across the write below.
@@ -1511,6 +1519,9 @@ pub(crate) struct ManifestContext {
     staging_partition_info: Mutex<Option<StagingPartitionInfo>>,
     /// Optional region hook for observing manifest mutations.
     hook: Option<RegionHookRef>,
+    /// Notifications that the region became writable sent to its worker.
+    #[cfg(test)]
+    pub(crate) writable_notifications: std::sync::atomic::AtomicUsize,
 }
 
 impl ManifestContext {
@@ -1535,6 +1546,8 @@ impl ManifestContext {
             node_lease,
             staging_partition_info: Mutex::new(None),
             hook,
+            #[cfg(test)]
+            writable_notifications: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 

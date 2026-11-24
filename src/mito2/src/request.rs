@@ -1224,7 +1224,10 @@ pub(crate) enum BackgroundNotify {
     LeaderLeaseWaitEnded,
     /// A save of the region's backfilled metadata found it not a writable leader with its
     /// Leader lease, so it saved nothing.
-    BackfillDeferred,
+    BackfillDeferred {
+        /// The instance the save ran on.
+        region: MitoRegionRef,
+    },
     /// A role change left the region unable to replay its tails (see
     /// [MitoRegion::can_replay_tails](crate::region::MitoRegion::can_replay_tails)); a running
     /// replay is cancelled.
@@ -1292,7 +1295,7 @@ impl BackgroundNotify {
             | Self::CaughtUpAgain(_)
             | Self::RegionBecameWritable
             | Self::LeaderLeaseWaitEnded
-            | Self::BackfillDeferred
+            | Self::BackfillDeferred { .. }
             | Self::RegionCannotReplay { .. }
             | Self::TailReplayCommitted { .. }
             | Self::TailReplayEnded

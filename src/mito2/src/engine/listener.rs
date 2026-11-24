@@ -54,6 +54,14 @@ pub trait EventListener: Send + Sync {
     /// writable.
     fn on_region_became_writable(&self, _region_id: RegionId) {}
 
+    /// Notifies the listener when the worker starts the work the region's wait for its Leader
+    /// lease held back.
+    async fn on_deferred_lease_work_begin(&self, _region_id: RegionId) {}
+
+    /// Notifies the listener when the worker receives a notification that a save of the region's
+    /// backfilled metadata was deferred.
+    fn on_backfill_deferred(&self, _region_id: RegionId) {}
+
     /// Notifies the listener before a tail replay commits its result.
     async fn on_tail_commit_begin(&self, _region_id: RegionId) {}
 

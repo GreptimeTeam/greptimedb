@@ -1894,7 +1894,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             BackgroundNotify::LeaderLeaseWaitEnded => {
                 self.handle_leader_lease_wait_ended(region_id).await
             }
-            BackgroundNotify::BackfillDeferred => self.handle_backfill_deferred(region_id).await,
+            BackgroundNotify::BackfillDeferred { region } => {
+                self.handle_backfill_deferred(region).await
+            }
             BackgroundNotify::RegionCannotReplay { region } => {
                 self.handle_region_cannot_replay(region_id, region)
             }
@@ -2121,6 +2123,23 @@ impl WorkerListener {
             listener
                 .on_persist_backfilled_metadata_lock_begin(_region_id)
                 .await;
+        }
+    }
+
+    /// The worker starts the work the region's wait for its Leader lease held back.
+    pub(crate) async fn on_deferred_lease_work_begin(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_deferred_lease_work_begin(_region_id).await;
+        }
+    }
+
+    /// The worker received a notification that a save of the region's backfilled metadata was
+    /// deferred.
+    pub(crate) fn on_backfill_deferred(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_backfill_deferred(_region_id);
         }
     }
 

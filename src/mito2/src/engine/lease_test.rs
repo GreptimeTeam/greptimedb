@@ -1010,8 +1010,10 @@ struct LeaseWaitEndedListener {
     wait_ends: AtomicUsize,
     backfill_persists: AtomicUsize,
     became_writable: AtomicUsize,
+    backfill_deferrals: AtomicUsize,
     park_backfill: Gate,
     park_enter_staging_result: Gate,
+    park_deferred_work: Gate,
 }
 
 #[async_trait::async_trait]
@@ -1036,6 +1038,14 @@ impl EventListener for LeaseWaitEndedListener {
     async fn on_enter_staging_result_begin(&self, _region_id: RegionId) {
         self.park_enter_staging_result.pass().await;
     }
+
+    async fn on_deferred_lease_work_begin(&self, _region_id: RegionId) {
+        self.park_deferred_work.pass().await;
+    }
+
+    fn on_backfill_deferred(&self, _region_id: RegionId) {
+        self.backfill_deferrals.fetch_add(1, Ordering::Release);
+    }
 }
 
 impl LeaseWaitEndedListener {
@@ -1054,6 +1064,12 @@ impl LeaseWaitEndedListener {
     async fn wait_for_backfill_persists(&self, persists: usize) {
         wait_until(|| self.backfill_persists() >= persists).await;
         assert_eq!(self.backfill_persists(), persists);
+    }
+}
+
+impl LeaseWaitEndedListener {
+    async fn wait_for_backfill_deferrals(&self, deferrals: usize) {
+        wait_until(|| self.backfill_deferrals.load(Ordering::Acquire) >= deferrals).await;
     }
 }
 
@@ -1322,16 +1338,22 @@ async fn test_leader_leases_of_writable_leader_notify_no_worker() {
     let listener = Arc::new(LeaseWaitEndedListener::default());
     let (engine, _schema) =
         create_region_with_config(&mut env, None, MitoConfig::default(), listener.clone()).await;
+    let region = engine.get_region(REGION_ID).unwrap();
+    let notifications = || {
+        region
+            .manifest_ctx
+            .writable_notifications
+            .load(Ordering::Relaxed)
+    };
     for _ in 0..20 {
         grant_at(&engine, RegionRole::Leader, Instant::now(), None);
     }
+    assert_eq!(notifications(), 0);
 
     grant_at(&engine, RegionRole::Follower, Instant::now(), None);
     grant_at(&engine, RegionRole::Leader, Instant::now(), None);
-    wait_until(|| listener.became_writable.load(Ordering::Acquire) != 0).await;
-    // Notifications of the earlier leases would have been sent before.
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(listener.became_writable.load(Ordering::Acquire), 1);
+    assert_eq!(notifications(), 1);
+    wait_until(|| listener.became_writable.load(Ordering::Acquire) == 1).await;
 }
 
 /// A save of the backfilled metadata the end of the wait spawned may find the region in a change
@@ -1360,8 +1382,8 @@ async fn test_backfill_save_finding_change_runs_at_its_end() {
     };
     listener.park_enter_staging_result.wait_entered().await;
     listener.park_backfill.release();
-    // Gives the save time to find the region entering staging.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // The worker learns that the save found the region entering staging.
+    listener.wait_for_backfill_deferrals(1).await;
     assert_eq!(persisted_partition_expr(&engine).await, None);
 
     listener.park_enter_staging_result.release();
@@ -1393,7 +1415,9 @@ async fn test_duplicate_backfill_deferrals_run_work_once() {
     for _ in 0..2 {
         let request = WorkerRequest::Background {
             region_id: REGION_ID,
-            notify: BackgroundNotify::BackfillDeferred,
+            notify: BackgroundNotify::BackfillDeferred {
+                region: region.clone(),
+            },
         };
         engine
             .inner
@@ -1414,7 +1438,7 @@ async fn test_duplicate_backfill_deferrals_run_work_once() {
     // A notification that arrives after the change ended runs the save at once.
     let request = WorkerRequest::Background {
         region_id: REGION_ID,
-        notify: BackgroundNotify::BackfillDeferred,
+        notify: BackgroundNotify::BackfillDeferred { region },
     };
     let workers = &engine.inner.workers;
     workers.submit_to_worker(REGION_ID, request).await.unwrap();
@@ -1468,6 +1492,158 @@ async fn test_deferred_work_removed_with_region(#[case] close: bool) {
         flush(&engine).await.unwrap();
     }
     assert_eq!(listener.backfill_persists(), 0);
+}
+
+/// A role change outside the worker while it runs the deferred work keeps what is left due, here
+/// the retry of a file that the missing-index pass leaves since its writer built an extension
+/// index.
+#[tokio::test]
+async fn test_deferred_work_kept_across_role_change_while_it_runs() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("deferred-work-role-change").await;
+    let listener = Arc::new(LeaseWaitEndedListener::default());
+    let engine = env
+        .create_engine_with(
+            async_build_mode_config(false),
+            None,
+            Some(listener.clone()),
+            None,
+        )
+        .await;
+    engine.require_write_lease();
+    engine.freeze_lease_clock(Instant::now());
+    let request = CreateRequestBuilder::new().build_with_index();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(REGION_ID, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    grant(&engine, RegionRole::Leader, Instant::now() + LEASE);
+    let rows = Rows {
+        schema,
+        rows: build_rows(0, 3),
+    };
+    put_rows(&engine, REGION_ID, rows).await;
+    flush_region(&engine, REGION_ID, None).await;
+    let region = engine.get_region(REGION_ID).unwrap();
+    let mut files = region.all_manifest_files().await.0;
+    files[0].available_indexes.push(IndexType::HllIndex);
+    let edit = RegionEdit {
+        files_to_add: files.clone(),
+        ..Default::default()
+    };
+    engine.edit_region(REGION_ID, edit).await.unwrap();
+    promote_to_await_leader_lease(&engine, REGION_ID).await;
+    let notify = BackgroundNotify::IndexBuildRetry(BuildIndexRequest {
+        region_id: REGION_ID,
+        build_type: IndexBuildType::Manual,
+        file_metas: files,
+        result_senders: Vec::new(),
+    });
+    let request = WorkerRequest::Background {
+        region_id: REGION_ID,
+        notify,
+    };
+    let workers = &engine.inner.workers;
+    workers.submit_to_worker(REGION_ID, request).await.unwrap();
+    let request = RegionRequest::EnterStaging(EnterStagingRequest {
+        partition_directive: StagingPartitionDirective::RejectAllWrites,
+    });
+    engine.handle_request(REGION_ID, request).await.unwrap();
+    grant_at(&engine, RegionRole::StagingLeader, Instant::now(), None);
+    listener.wait_for_end().await;
+    let has_inverted_index = || {
+        let version = engine.get_region(REGION_ID).unwrap().version();
+        version.ssts.levels()[0].files.values().all(|file| {
+            file.meta_ref()
+                .available_indexes
+                .contains(&IndexType::InvertedIndex)
+        })
+    };
+
+    // Leaving staging starts the work, and a demotion lands before it builds.
+    listener.park_deferred_work.arm();
+    let notified = listener.became_writable.load(Ordering::Acquire);
+    engine
+        .set_region_role(REGION_ID, RegionRole::Leader)
+        .unwrap();
+    listener.park_deferred_work.wait_entered().await;
+    engine
+        .set_region_role(REGION_ID, RegionRole::Follower)
+        .unwrap();
+    listener.park_deferred_work.release();
+    wait_until(|| listener.became_writable.load(Ordering::Acquire) > notified).await;
+    // The save finds the demotion too.
+    listener.wait_for_backfill_deferrals(1).await;
+    assert!(!has_inverted_index());
+
+    engine
+        .set_region_role(REGION_ID, RegionRole::Leader)
+        .unwrap();
+    wait_until(has_inverted_index).await;
+}
+
+/// A save that a closed instance spawned reports its deferral late, which does not give the
+/// region opened after the close the work the close removed.
+#[tokio::test]
+async fn test_late_backfill_deferral_of_closed_region_adds_no_work() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("late-backfill-deferral").await;
+    let listener = Arc::new(LeaseWaitEndedListener::default());
+    let (engine, _) = catchup_region_with_backfill(&mut env, Some(listener.clone())).await;
+    listener.park_backfill.arm();
+    grant_at(&engine, RegionRole::Leader, Instant::now(), None);
+    listener.park_backfill.wait_entered().await;
+    assert_eq!(listener.backfill_persists(), 1);
+
+    engine
+        .set_region_role(REGION_ID, RegionRole::Follower)
+        .unwrap();
+    let request = RegionRequest::Close(RegionCloseRequest::default());
+    engine.handle_request(REGION_ID, request).await.unwrap();
+    let table_dir = CreateRequestBuilder::new().table_dir("t").build().table_dir;
+    reopen_region(&engine, REGION_ID, table_dir, false, HashMap::new()).await;
+    listener.park_backfill.release();
+    listener.wait_for_backfill_deferrals(1).await;
+
+    let notified = listener.became_writable.load(Ordering::Acquire);
+    engine
+        .set_region_role(REGION_ID, RegionRole::Leader)
+        .unwrap();
+    wait_until(|| listener.became_writable.load(Ordering::Acquire) > notified).await;
+    assert_eq!(listener.backfill_persists(), 1);
+}
+
+/// A close leaves staging before its flush, and a failed flush leaves the region a writable
+/// leader that runs the work its wait deferred.
+#[tokio::test]
+async fn test_failed_close_flush_runs_deferred_work() {
+    common_telemetry::init_default_ut_logging();
+    let (fail_parquet, layer) = fail_next_write_to(".parquet");
+    let mut env = TestEnv::with_prefix("failed-close-flush")
+        .await
+        .with_mock_layer(layer);
+    let listener = Arc::new(LeaseWaitEndedListener::default());
+    let (engine, expr_json) = catchup_region_with_backfill(&mut env, Some(listener.clone())).await;
+    enter_staging(&engine, REGION_ID).await;
+    grant_at(&engine, RegionRole::StagingLeader, Instant::now(), None);
+    listener.wait_for_end().await;
+    let schema = rows_schema(&CreateRequestBuilder::new().build());
+    put(&engine, REGION_ID, &schema, 0).await.unwrap().unwrap();
+    assert_eq!(listener.backfill_persists(), 0);
+
+    fail_parquet.store(true, Ordering::Relaxed);
+    let close = RegionRequest::Close(RegionCloseRequest {
+        flush_on_close: true,
+    });
+    engine.handle_request(REGION_ID, close).await.unwrap_err();
+    let region = engine.get_region(REGION_ID).unwrap();
+    assert_eq!(
+        region.state(),
+        RegionRoleState::Leader(RegionLeaderState::Writable)
+    );
+    listener.wait_for_backfill_persists(1).await;
+    assert_eq!(wait_persisted_partition_expr(&engine).await, expr_json);
 }
 
 /// Work deferred past the end of one wait stays due across a catchup that reopens the region and

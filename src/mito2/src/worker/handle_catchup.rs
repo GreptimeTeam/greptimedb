@@ -421,7 +421,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let Some(retries) = self.deferred_lease_work.remove(&region_id) else {
             return;
         };
+        self.listener.on_deferred_lease_work_begin(region_id).await;
         self.build_missing_indexes(&region).await;
+        // A retry the region cannot run after a role change outside the worker stays due, and so
+        // does the rest once the save below finds that change.
         for request in retries {
             self.handle_rebuild_index_inner(request, OptionOutputTx::new(None), true)
                 .await;
@@ -429,9 +432,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         spawn_persist_backfilled_metadata(&self.listener, &self.sender, region);
     }
 
-    /// Defers the save of the backfilled metadata that found the region not a writable leader
-    /// with its Leader lease. The region may be one again by now.
-    pub(crate) async fn handle_backfill_deferred(&mut self, region_id: RegionId) {
+    /// Defers the save of the backfilled metadata that found `source` not a writable leader with
+    /// its Leader lease. The region may be one again by now. A close or a drop stopped a source
+    /// whose work it removed, so a later instance does not take it over.
+    pub(crate) async fn handle_backfill_deferred(&mut self, source: MitoRegionRef) {
+        let region_id = source.region_id;
+        self.listener.on_backfill_deferred(region_id);
+        if source.manifest_ctx.is_stopped() {
+            return;
+        }
         let Some(region) = self.regions.get_region(region_id) else {
             return;
         };
@@ -558,7 +567,10 @@ pub(crate) async fn persist_backfilled_metadata_and_notify_if_fenced(
     region: &MitoRegionRef,
 ) {
     if !region.persist_backfilled_metadata().await {
-        notify_worker(sender, region.region_id, BackgroundNotify::BackfillDeferred).await;
+        let notify = BackgroundNotify::BackfillDeferred {
+            region: region.clone(),
+        };
+        notify_worker(sender, region.region_id, notify).await;
     }
     handle_reload::notify_if_fenced(sender, region).await;
 }
