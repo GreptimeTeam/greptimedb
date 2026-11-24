@@ -1176,7 +1176,7 @@ mod tests {
                 .next()
                 .unwrap()
                 .entry()
-                .source_file_ids
+                .source_file_ids()
                 .len()
         );
         assert_eq!(rebuilt.disk_usage(), usage.load(Ordering::Relaxed));

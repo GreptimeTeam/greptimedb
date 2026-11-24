@@ -73,8 +73,9 @@ pub(crate) struct SeriesIndexEntry {
     pub(crate) bucket_end: Timestamp,
     /// Source SST IDs retained for diagnostics and exact coverage of unknown-sequence files. Compaction can replace these
     /// files without changing indexed data, so known-sequence reuse does not depend on IDs.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) source_file_ids: Vec<FileId>,
+    /// Native indexes omit this field and use region-manifest coverage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) source_file_ids: Option<Vec<FileId>>,
     pub(crate) min_file_sequence: u64,
     pub(crate) max_file_sequence: u64,
     /// Width used to align the half-open compaction windows, in seconds.
@@ -88,6 +89,10 @@ pub(crate) struct SeriesIndexEntry {
 }
 
 impl SeriesIndexEntry {
+    pub(crate) fn source_file_ids(&self) -> &[FileId] {
+        self.source_file_ids.as_deref().unwrap_or_default()
+    }
+
     /// Entries written before pluggable formats describe the original Parquet layout.
     pub(crate) fn format(&self) -> crate::series_index::artifact::ArtifactFormat {
         self.artifact.as_ref().map_or(
@@ -113,7 +118,9 @@ impl SeriesIndexEntry {
                 }
                 // Manual builds can cover immutable files without sequence metadata.
                 // This is exact membership, never a claim about replacement SSTs.
-                None => self.min_file_sequence == 0 && self.source_file_ids.contains(&file.file_id),
+                None => {
+                    self.min_file_sequence == 0 && self.source_file_ids().contains(&file.file_id)
+                }
             }
     }
 }
@@ -341,7 +348,7 @@ mod tests {
             index_uuid: FileId::random(),
             bucket_start: Timestamp::new_second(1),
             bucket_end: Timestamp::new_second(2),
-            source_file_ids: Vec::new(),
+            source_file_ids: Some(Vec::new()),
             min_file_sequence: 2,
             max_file_sequence: 4,
             compaction_window_secs: 1,
@@ -439,7 +446,7 @@ mod tests {
             index_uuid: FileId::random(),
             bucket_start: Timestamp::new_second(0),
             bucket_end: Timestamp::new_second(100),
-            source_file_ids: vec![FileId::random()],
+            source_file_ids: Some(vec![FileId::random()]),
             min_file_sequence: 1,
             max_file_sequence: 2,
             compaction_window_secs: 10,

@@ -147,7 +147,7 @@ impl Manifest {
         std::mem::size_of::<Self>() + self.prefix.as_ref().map_or(0, String::capacity) + self.files.capacity() * std::mem::size_of::<Part>()
             + self.tags.capacity() * std::mem::size_of::<Tag>()
             + self.tags.iter().map(|tag| tag.name.capacity()).sum::<usize>()
-            + self.coverage.source_file_ids.capacity() * std::mem::size_of::<FileId>()
+            + self.coverage.source_file_ids.as_ref().map_or(0, Vec::capacity) * std::mem::size_of::<FileId>()
             // BTree nodes include allocation and partially occupied key/value slots.
             + 512
             + self.coverage.window_sequences.len() * 128

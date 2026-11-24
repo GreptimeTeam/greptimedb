@@ -52,7 +52,7 @@ pub(crate) fn narthex_series_entry(
         index_uuid: file.file_id,
         bucket_start: file.time_range.0,
         bucket_end: file.time_range.1,
-        source_file_ids: Vec::new(),
+        source_file_ids: None,
         min_file_sequence: 0,
         max_file_sequence: 0,
         compaction_window_secs: 0,

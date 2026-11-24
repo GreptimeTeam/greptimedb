@@ -2388,7 +2388,7 @@ async fn check_two_phase_series_scan(
             index_uuid: FileId::random(),
             bucket_start: Timestamp::new_millisecond(0),
             bucket_end: Timestamp::new_millisecond(2001),
-            source_file_ids: Vec::new(),
+            source_file_ids: Some(Vec::new()),
             min_file_sequence: sequence,
             max_file_sequence: sequence,
             compaction_window_secs: 1,

@@ -512,7 +512,7 @@ async fn test_reconcile_replaces_whole_bucket_after_failure(#[case] failure: &st
         4,
         previous.series_indexes[&old_id]
             .entry()
-            .source_file_ids
+            .source_file_ids()
             .len()
     );
     region.version_control.apply_edit(
@@ -552,8 +552,8 @@ async fn test_reconcile_replaces_whole_bucket_after_failure(#[case] failure: &st
     assert_eq!(1, replacement.series_indexes.len());
     assert!(!replacement.series_indexes.contains_key(&old_id));
     let entry = replacement.series_indexes.values().next().unwrap().entry();
-    assert_eq!(5, entry.source_file_ids.len());
-    assert!(entry.source_file_ids.contains(&newest.file_id));
+    assert_eq!(5, entry.source_file_ids().len());
+    assert!(entry.source_file_ids().contains(&newest.file_id));
     let restored = load_version_control(&test.store, region.region_id, &test.purger).await;
     assert_eq!(replacement.index_buckets, restored.current().index_buckets);
     assert_eq!(1, restored.current().series_indexes.len());
@@ -947,7 +947,7 @@ async fn test_drop_catalogs_and_retained_snapshot_after_task_stop() {
         index_uuid: FileId::random(),
         bucket_start: Timestamp::new_second(0),
         bucket_end: Timestamp::new_second(100),
-        source_file_ids: vec![FileId::random()],
+        source_file_ids: Some(vec![FileId::random()]),
         min_file_sequence: 1,
         max_file_sequence: 2,
         compaction_window_secs: 10,
