@@ -126,6 +126,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 series_indexes_to_add: staging_manifest
                     .series_indexes
                     .values()
+                    .filter(|file| !matches!(&file.format, crate::sst::file::FileFormat::NarthexSeriesIndex(meta) if meta.coverage.is_some()))
                     .map(|index| index.as_ref().clone())
                     .collect(),
                 files_to_add,

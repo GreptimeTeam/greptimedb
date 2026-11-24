@@ -208,9 +208,13 @@ impl RemapManifest {
             }
         }
 
-        // Remap creates references, not physical copies: retain index owner,
-        // inventory and exact source identities together with the samples.
+        // A source certificate describes its original sequence domain. The
+        // destination builds its own certificate after admission.
         for (id, index) in &source_manifest.series_indexes {
+            if matches!(&index.format, FileFormat::NarthexSeriesIndex(meta) if meta.coverage.is_some())
+            {
+                continue;
+            }
             if let Some(existing) = target_manifest.series_indexes.get(id) {
                 ensure!(
                     existing == index,

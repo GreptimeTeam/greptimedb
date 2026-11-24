@@ -28,7 +28,7 @@ use crate::series_index::purger::{IndexFilePurger, PurgeRequest};
 use crate::sst::file::RegionFileId;
 
 /// Legacy codec coverage descriptor derived from immutable narthex metadata.
-/// Narthex admission and scan selection use the region-qualified `sources` instead.
+/// The region manifest carries logical coverage separately from this descriptor.
 pub(crate) fn narthex_series_entry(
     file: &crate::sst::file::FileMeta,
     region_dir: &str,

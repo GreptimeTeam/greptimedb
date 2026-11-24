@@ -1696,6 +1696,36 @@ mod tests {
         assert_eq!(replaced.files.len(), 1);
         assert_eq!(replaced.series_indexes[&index.file_id].as_ref(), &index);
         assert_eq!(checkpoint.series_indexes.len(), 1);
+        // Upgrade a checkpoint containing the source-list format, then replay an
+        // independent series replacement. The replacement spans unequal frontiers.
+        let file::FileFormat::NarthexSeriesIndex(old) = &index.format else {
+            unreachable!()
+        };
+        assert!(old.coverage.is_none());
+        let bytes = include_bytes!(
+            "../../../../tests/compatibility/manifest/narthex/certified-replacement.json"
+        );
+        let (_, _, replacement) = RegionMetaActionList::decode(bytes)
+            .unwrap()
+            .split_region_change_and_edit();
+        let mut builder =
+            RegionManifestBuilder::with_checkpoint(Some(checkpoint), Default::default());
+        builder.apply_edit(2, replacement);
+        let upgraded = builder.try_build().unwrap();
+        let restored = RegionManifest::decode(&serde_json::to_vec(&upgraded).unwrap()).unwrap();
+        assert_eq!(upgraded, restored);
+        assert_eq!(restored.series_indexes.len(), 1);
+        let native = restored.series_indexes.values().next().unwrap();
+        let file::FileFormat::NarthexSeriesIndex(meta) = &native.format else {
+            unreachable!()
+        };
+        assert!(meta.sources.is_empty());
+        let proof = meta.coverage.as_ref().unwrap();
+        let mut spanning = restored.files.values().next().unwrap().as_ref().clone();
+        spanning.sequence = std::num::NonZeroU64::new(80);
+        assert!(proof.covers(&spanning));
+        spanning.sequence = std::num::NonZeroU64::new(81);
+        assert!(!proof.covers(&spanning));
         let legacy = include_bytes!(
             "../../../../tests/compatibility/manifest/table_compaction/legacy-edit.json"
         );

@@ -322,10 +322,7 @@ pub struct NarthexSeriesIndexMeta {
     pub manifest_size: u64,
     /// Parts in part-ID order, starting at zero.
     pub parts: SmallVec<[NarthexPartMeta; 1]>,
-    /// Sample files recorded by the experimental builder. The manifest neither
-    /// validates coverage nor retires indexes when samples are replaced. Both
-    /// policies depend on how production series files will be organized and
-    /// maintained across compaction.
+    /// Exact source membership for legacy indexes. Certified builds leave this empty.
     pub sources: Vec<RegionFileId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coverage: Option<NarthexCoverage>,

@@ -1003,6 +1003,17 @@ fn prepare_region_edit(region: &MitoRegionRef, edit: &mut RegionEdit) -> Result<
         &edit.files_to_add,
         &edit.series_indexes_to_add,
     )?;
+    snafu::ensure!(
+        !edit
+            .series_indexes_to_add
+            .iter()
+            .any(|file| matches!(&file.format,
+            file::FileFormat::NarthexSeriesIndex(meta) if meta.coverage.is_some())),
+        crate::error::InvalidRequestSnafu {
+            region_id,
+            reason: "only a pinned native maintenance build can publish sequence coverage",
+        }
+    );
     edit.validate_shared_reclassification(region_id)?;
     let current = region.version_control.current();
     let shared = &current.version.ssts.levels()[file::SHARED_LEVEL_SLOT].files;

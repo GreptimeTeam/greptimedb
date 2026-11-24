@@ -473,6 +473,45 @@ impl ColumnarPreparedSource {
         metrics: PartitionMetrics,
         scan_pool: Arc<dyn MemoryPool>,
     ) -> Result<Self> {
+        let has_indexes = context.input.requires_narthex_preparation()
+            && !context.input.narthex_series_indexes.is_empty();
+        let attempt = |use_indexes| {
+            Self::prepare_from_snapshot(
+                context.clone(),
+                ranges.clone(),
+                labels.clone(),
+                raw.clone(),
+                metrics.clone(),
+                scan_pool.clone(),
+                use_indexes,
+            )
+        };
+        match attempt(has_indexes).await {
+            // Parts are opened lazily. Discard every candidate from the failed
+            // attempt before discovering keys from the same pinned sample snapshot.
+            Err(error)
+                if has_indexes
+                    && (error.is_object_not_found()
+                        || matches!(
+                            error,
+                            Error::InvalidMeta { .. } | Error::UnsupportedOperation { .. }
+                        )) =>
+            {
+                attempt(false).await
+            }
+            result => result,
+        }
+    }
+
+    async fn prepare_from_snapshot(
+        context: Arc<StreamContext>,
+        ranges: Vec<PartitionRange>,
+        labels: RawLabelSource,
+        raw: RawScanPreparation,
+        metrics: PartitionMetrics,
+        scan_pool: Arc<dyn MemoryPool>,
+        use_indexes: bool,
+    ) -> Result<Self> {
         let _prepare_timer = crate::metrics::READ_STAGE_ELAPSED
             .with_label_values(&["columnar_prepare_wall"])
             .start_timer();
@@ -482,7 +521,7 @@ impl ColumnarPreparedSource {
         let input = &context.input;
         let metadata = input.region_metadata();
         let (samples, series) = if context.input.requires_narthex_preparation() {
-            narthex::open_sources(&context, &ranges, &scan_pool).await?
+            narthex::open_sources(&context, &ranges, &scan_pool, use_indexes).await?
         } else {
             open_sidecar_sources(&context, &ranges).await?
         };

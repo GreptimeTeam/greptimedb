@@ -5,7 +5,7 @@ for Prometheus-style metric data. It separates series identities and string tags
 from timestamped numeric samples.
 
 The format has two artifact roles: `NarthexSamples` owns sample data, and
-`NarthexSeriesIndex` indexes series and references the samples it covers.
+`NarthexSeriesIndex` indexes exact series identities for sample discovery.
 Region manifests serialize these roles as `narthex_samples` and
 `narthex_series_index`.
 
@@ -14,8 +14,16 @@ Region manifests serialize these roles as `narthex_samples` and
 With `sst_format = 'narthex'`, samples are authoritative SSTs. Each artifact owns
 `<region_dir>/<file_id>/manifest.json` and its `part-<n>.samples` or
 `part-<n>.series` objects. The region manifest records the manifest size and a `parts` array in part-ID order.
-Each part record contains its encoded `file_size` in bytes. Series indexes reference region-qualified sample file IDs without owning those
-samples. Both artifact types use ordinary SST lifetimes and reclamation.
+Each part record contains its encoded `file_size` in bytes. Both artifact types
+use ordinary SST lifetimes and reclamation.
+
+A full native series build writes a `coverage` record into the region manifest.
+It identifies the logical region, schema version and truncate entry, and records
+a half-open time window with an inclusive sequence frontier. A scan can reuse
+the index after sample compaction if the replacement file fits inside that
+window and its sequence bound is known and at or below the frontier. Newer
+files and files with unknown bounds still require sample-key discovery. Older
+indexes record their exact source file IDs in `sources`.
 
 The same codecs also support rebuildable sidecars over Parquet SSTs. The catalog
 paths, source-SST coverage, daily consolidation, and local-cache rollout described

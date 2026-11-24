@@ -82,6 +82,7 @@ pub(crate) async fn open_sources(
     context: &StreamContext,
     ranges: &[PartitionRange],
     pool: &Arc<dyn datafusion::execution::memory_pool::MemoryPool>,
+    use_indexes: bool,
 ) -> Result<(
     Vec<Arc<dyn SamplesFormatReader>>,
     Vec<Box<dyn FormatReader>>,
@@ -90,7 +91,12 @@ pub(crate) async fn open_sources(
     let mut series = Vec::<Box<dyn FormatReader>>::new();
     let indices = file_indices(context, ranges)?;
     let mut covered = std::collections::HashSet::new();
-    for file in &context.input.narthex_series_indexes {
+    let indexes = if use_indexes {
+        context.input.narthex_series_indexes.as_slice()
+    } else {
+        &[]
+    };
+    for file in indexes {
         let FileFormat::NarthexSeriesIndex(index) = &file.meta_ref().format else {
             continue;
         };
