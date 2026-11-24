@@ -1293,6 +1293,7 @@ mod tests {
             metadata_topic_latest_entry_id: 0,
             min_timestamp: None,
             max_timestamp: None,
+            has_pending_tails: false,
         }
     }
 

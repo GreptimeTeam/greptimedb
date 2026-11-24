@@ -1,8 +1,8 @@
--- The distributed nested broadcast join rewrite of the query engine.
+-- The distributed materialized broadcast join of the query engine.
 --
--- `SET experimental_dist_join = true` opts the session into the rewrite: it nests the build
--- side's MergeScan inside the probe side's MergeScan, so that the join runs on the datanodes
--- that own the probe regions. The rewrite is additionally gated by the region statistics that
+-- `SET experimental_dist_join = true` opts the session into the rewrite: the frontend reads
+-- the small build side once, ships the materialized rows to the datanodes that own the probe
+-- regions, and the join runs there. The rewrite is additionally gated by the region statistics that
 -- the datanodes report in their heartbeats: every region of both candidate tables has to have
 -- a non-zero reported size, and broadcasting the build table to the probe regions has to be
 -- cheaper than reading the probe table itself.
@@ -97,7 +97,7 @@ ON p.p_key = b.b_key AND p.p_val + b.b_val > 105
 WHERE p.p_id < 200
 ORDER BY p.p_val, p.p_id, b.b_val, b.b_id;
 
--- With the opt-in the build side is nested into the probe side's MergeScan.
+-- With the opt-in the build side is materialized and broadcast to the probe regions.
 -- SQLNESS PROTOCOL MYSQL
 SET experimental_dist_join = true;
 

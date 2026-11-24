@@ -26,12 +26,17 @@ pub struct MaterializedBroadcastNode {
     schema: DFSchemaRef,
     batches: Vec<RecordBatch>,
     row_count: usize,
+    /// A schema-only node inserted while analyzing a plan that is not executed
+    /// yet (plain `EXPLAIN`). It keeps the materialization visible in the plan
+    /// without evaluating the small side, and is never executed as is.
+    placeholder: bool,
 }
 
 impl PartialEq for MaterializedBroadcastNode {
     fn eq(&self, other: &Self) -> bool {
         self.schema == other.schema
             && self.row_count == other.row_count
+            && self.placeholder == other.placeholder
             && self.batches == other.batches
     }
 }
@@ -40,6 +45,7 @@ impl Hash for MaterializedBroadcastNode {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.schema.hash(state);
         self.row_count.hash(state);
+        self.placeholder.hash(state);
         for batch in &self.batches {
             batch.num_rows().hash(state);
             for array in batch.columns() {
@@ -53,7 +59,8 @@ impl PartialOrd for MaterializedBroadcastNode {
         Some(
             self.row_count
                 .cmp(&other.row_count)
-                .then_with(|| self.batches.len().cmp(&other.batches.len())),
+                .then_with(|| self.batches.len().cmp(&other.batches.len()))
+                .then_with(|| self.placeholder.cmp(&other.placeholder)),
         )
     }
 }
@@ -74,7 +81,23 @@ impl MaterializedBroadcastNode {
             schema,
             batches,
             row_count,
+            placeholder: false,
         }
+    }
+
+    /// A schema-only stand-in used when planning must stay side-effect free,
+    /// e.g. for plain `EXPLAIN`.
+    pub fn new_placeholder(schema: DFSchemaRef) -> Self {
+        Self {
+            schema,
+            batches: Vec::new(),
+            row_count: 0,
+            placeholder: true,
+        }
+    }
+
+    pub fn is_placeholder(&self) -> bool {
+        self.placeholder
     }
 
     pub fn batches(&self) -> &[RecordBatch] {
@@ -137,7 +160,11 @@ impl UserDefinedLogicalNodeCore for MaterializedBroadcastNode {
         vec![]
     }
     fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "MaterializedBroadcast rows={}", self.row_count)
+        if self.placeholder {
+            write!(f, "MaterializedBroadcast (planned)")
+        } else {
+            write!(f, "MaterializedBroadcast rows={}", self.row_count)
+        }
     }
     fn with_exprs_and_inputs(
         &self,

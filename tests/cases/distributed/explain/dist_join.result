@@ -1,8 +1,8 @@
--- The distributed nested broadcast join rewrite of the query engine.
+-- The distributed materialized broadcast join of the query engine.
 --
--- `SET experimental_dist_join = true` opts the session into the rewrite: it nests the build
--- side's MergeScan inside the probe side's MergeScan, so that the join runs on the datanodes
--- that own the probe regions. The rewrite is additionally gated by the region statistics that
+-- `SET experimental_dist_join = true` opts the session into the rewrite: the frontend reads
+-- the small build side once, ships the materialized rows to the datanodes that own the probe
+-- regions, and the join runs there. The rewrite is additionally gated by the region statistics that
 -- the datanodes report in their heartbeats: every region of both candidate tables has to have
 -- a non-zero reported size, and broadcasting the build table to the probe regions has to be
 -- cheaper than reading the probe table itself.
@@ -139,7 +139,7 @@ ORDER BY p.p_val, p.p_id, b.b_val, b.b_id;
 |_|_|
 +-+-+
 
--- With the opt-in the build side is nested into the probe side's MergeScan.
+-- With the opt-in the build side is materialized and broadcast to the probe regions.
 -- SQLNESS PROTOCOL MYSQL
 SET experimental_dist_join = true;
 
@@ -161,26 +161,18 @@ ORDER BY p.p_val, p.p_id, b.b_val, b.b_id;
 | plan_type_| plan_|
 +-+-+
 | logical_plan_| Sort: p.p_val ASC NULLS LAST, p.p_id ASC NULLS LAST, b.b_val ASC NULLS LAST, b.b_id ASC NULLS LAST_|
-|_|_Inner Join: p.p_key = b.b_key Filter: p.p_val + b.b_val > Int32(105)_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| Projection: p.p_id, p.p_key, p.p_val_|
+|_| Projection: p.p_id, p.p_key, p.p_val, b.b_id, b.b_key, b.b_val_|
+|_|_Projection: p.p_id, p.p_key, p.p_val, p.p_pad, p.ts, b.b_id, b.b_key, b.b_val, b.ts_|
+|_|_Inner Join: b.b_key = p.p_key Filter: p.p_val + b.b_val > Int32(105)_|
+|_|_MaterializedBroadcast (planned)_|
+|_|_Projection: p.p_id, p.p_key, p.p_val, p.p_pad, p.ts_|
 |_|_SubqueryAlias: p_|
 |_|_Filter: dist_join_probe.p_key IS NOT NULL AND dist_join_probe.p_id < Int32(200)_|
 |_|_TableScan: dist_join_probe, partial_filters=[dist_join_probe.p_key IS NOT NULL, dist_join_probe.p_id < Int32(200)]_|
 |_| ]]_|
-|_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| Projection: b.b_id, b.b_key, b.b_val_|
-|_|_SubqueryAlias: b_|
-|_|_Filter: dist_join_build.b_key IS NOT NULL_|
-|_|_TableScan: dist_join_build, partial_filters=[dist_join_build.b_key IS NOT NULL]_|
-|_| ]]_|
 | physical_plan | SortPreservingMergeExec: [p_val@2 ASC NULLS LAST, p_id@0 ASC NULLS LAST, b_val@5 ASC NULLS LAST, b_id@3 ASC NULLS LAST]_|
-|_|_ProjectionExec: expr=[p_id@3 as p_id, p_key@4 as p_key, p_val@5 as p_val, b_id@0 as b_id, b_key@1 as b_key, b_val@2 as b_val]_|
-|_|_SortExec: expr=[p_val@5 ASC NULLS LAST, p_id@3 ASC NULLS LAST, b_val@2 ASC NULLS LAST, b_id@0 ASC NULLS LAST], preserve_partitioning=[true] |
-|_|_REDACTED
-|_|_CoalescePartitionsExec_|
-|_|_MergeScanExec: REDACTED
-|_|_RepartitionExec: partitioning=REDACTED
+|_|_SortExec: expr=[p_val@2 ASC NULLS LAST, p_id@0 ASC NULLS LAST, b_val@5 ASC NULLS LAST, b_id@3 ASC NULLS LAST], preserve_partitioning=[true] |
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+

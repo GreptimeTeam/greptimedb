@@ -195,6 +195,7 @@ impl DatafusionQueryEngine {
         &self,
         analyzed_plan: &LogicalPlan,
         ctx: &QueryEngineContext,
+        placeholder_only: bool,
     ) -> Result<LogicalPlan> {
         use crate::dist_plan::{
             DistJoinStats, MaterializedBroadcastNode, MergeScanLogicalPlan, restore_join_schema,
@@ -332,61 +333,73 @@ impl DatafusionQueryEngine {
         } else {
             (large_plan, large, small_plan, small_scan)
         };
-        let small_output = self
-            .execute(small_plan.clone(), ctx.query_ctx().clone())
-            .await?;
-        let batches = match small_output.data {
-            common_query::OutputData::RecordBatches(batches) => {
-                let mut rows = 0usize;
-                let mut bytes = 0usize;
-                let mut collected = Vec::new();
-                for batch in batches.iter() {
-                    let batch = batch.df_record_batch().clone();
-                    rows += batch.num_rows();
-                    bytes += batch.get_array_memory_size();
-                    if rows > MaterializedBroadcastNode::MAX_ROWS
-                        || bytes > MaterializedBroadcastNode::MAX_BYTES
-                    {
-                        return Ok(analyzed_plan.clone());
+        let batches = if placeholder_only {
+            // Plain `EXPLAIN` must not evaluate the small side: insert a schema-only
+            // stand-in so the plan shows the materialization path without running it.
+            Vec::new()
+        } else {
+            let small_output = self
+                .execute(small_plan.clone(), ctx.query_ctx().clone())
+                .await?;
+            match small_output.data {
+                common_query::OutputData::RecordBatches(batches) => {
+                    let mut rows = 0usize;
+                    let mut bytes = 0usize;
+                    let mut collected = Vec::new();
+                    for batch in batches.iter() {
+                        let batch = batch.df_record_batch().clone();
+                        rows += batch.num_rows();
+                        bytes += batch.get_array_memory_size();
+                        if rows > MaterializedBroadcastNode::MAX_ROWS
+                            || bytes > MaterializedBroadcastNode::MAX_BYTES
+                        {
+                            return Ok(analyzed_plan.clone());
+                        }
+                        collected.push(batch);
                     }
-                    collected.push(batch);
+                    collected
                 }
-                collected
-            }
-            common_query::OutputData::Stream(mut stream) => {
-                // Enforce the row and memory budgets while consuming the stream: the
-                // small side can be large even when the disk-size heuristic favors it,
-                // and collecting it first would let one query exhaust frontend memory
-                // before the cap is checked.
-                let mut rows = 0usize;
-                let mut bytes = 0usize;
-                let mut collected = Vec::new();
-                while let Some(batch) = stream.next().await {
-                    let batch = batch
-                        .map_err(|e| datafusion_common::DataFusionError::External(Box::new(e)))?;
-                    let batch = batch.df_record_batch().clone();
-                    rows += batch.num_rows();
-                    bytes += batch.get_array_memory_size();
-                    if rows > MaterializedBroadcastNode::MAX_ROWS
-                        || bytes > MaterializedBroadcastNode::MAX_BYTES
-                    {
-                        return Ok(analyzed_plan.clone());
+                common_query::OutputData::Stream(mut stream) => {
+                    // Enforce the row and memory budgets while consuming the stream: the
+                    // small side can be large even when the disk-size heuristic favors it,
+                    // and collecting it first would let one query exhaust frontend memory
+                    // before the cap is checked.
+                    let mut rows = 0usize;
+                    let mut bytes = 0usize;
+                    let mut collected = Vec::new();
+                    while let Some(batch) = stream.next().await {
+                        let batch = batch.map_err(|e| {
+                            datafusion_common::DataFusionError::External(Box::new(e))
+                        })?;
+                        let batch = batch.df_record_batch().clone();
+                        rows += batch.num_rows();
+                        bytes += batch.get_array_memory_size();
+                        if rows > MaterializedBroadcastNode::MAX_ROWS
+                            || bytes > MaterializedBroadcastNode::MAX_BYTES
+                        {
+                            return Ok(analyzed_plan.clone());
+                        }
+                        collected.push(batch);
                     }
-                    collected.push(batch);
+                    collected
                 }
-                collected
-            }
-            common_query::OutputData::AffectedRows(_) => {
-                return Err(datafusion_common::DataFusionError::Internal(
-                    "small side materialization must produce record batches".to_string(),
-                )
-                .into());
+                common_query::OutputData::AffectedRows(_) => {
+                    return Err(datafusion_common::DataFusionError::Internal(
+                        "small side materialization must produce record batches".to_string(),
+                    )
+                    .into());
+                }
             }
         };
-        let node = MaterializedBroadcastNode::new(small_plan.schema().clone(), batches);
-        if !node.within_cap() {
-            return Ok(analyzed_plan.clone());
-        }
+        let node = if placeholder_only {
+            MaterializedBroadcastNode::new_placeholder(small_plan.schema().clone())
+        } else {
+            let node = MaterializedBroadcastNode::new(small_plan.schema().clone(), batches);
+            if !node.within_cap() {
+                return Ok(analyzed_plan.clone());
+            }
+            node
+        };
         // The materialized side becomes the join's left input so DataFusion hashes it as
         // the build side. When the materialized side is the original right input, the
         // join keys swap with it; when it is the original left input, they keep their
@@ -829,7 +842,34 @@ impl DatafusionQueryEngine {
         let state = ctx.state();
 
         // special handle EXPLAIN plan
-        if matches!(logical_plan, DfLogicalPlan::Explain(_)) {
+        if let DfLogicalPlan::Explain(explain) = logical_plan {
+            // `Explain` is always plain EXPLAIN; `EXPLAIN ANALYZE` is planned as an
+            // `Analyze` node and keeps the regular execution path.
+            if ctx
+                .query_ctx()
+                .configuration_parameter()
+                .experimental_dist_join()
+            {
+                // The inner plan of an `Explain` node is the initial logical plan; run
+                // the analyzer first so the join and its `MergeScan` boundaries exist
+                // before looking for a materialization candidate.
+                let analyzed = state.analyzer().execute_and_check(
+                    explain.plan.as_ref().clone(),
+                    state.config_options(),
+                    |_, _| {},
+                )?;
+                let inner = self
+                    .maybe_materialize_volatile_broadcast(&analyzed, ctx, true)
+                    .await?;
+                let explained = DfLogicalPlan::Explain(datafusion_expr::Explain {
+                    plan: Arc::new(inner),
+                    ..(*explain).clone()
+                });
+                return state
+                    .create_physical_plan(&explained)
+                    .await
+                    .map_err(Into::into);
+            }
             return state
                 .create_physical_plan(logical_plan)
                 .await
@@ -843,7 +883,7 @@ impl DatafusionQueryEngine {
             |_, _| {},
         )?;
         let analyzed_plan = self
-            .maybe_materialize_volatile_broadcast(&analyzed_plan, ctx)
+            .maybe_materialize_volatile_broadcast(&analyzed_plan, ctx, false)
             .await?;
 
         expr_depth::validate_plan(&analyzed_plan)?;
@@ -2342,6 +2382,7 @@ mod tests {
             metadata_topic_latest_entry_id: 0,
             min_timestamp: None,
             max_timestamp: None,
+            has_pending_tails: false,
         }
     }
 
@@ -2635,12 +2676,15 @@ mod tests {
             "the statistics of one query must come from one region stats call"
         );
 
-        // With the materialized broadcast, the analyzer leaves the plan unchanged and the
-        // EXPLAIN keeps the frontend join; the rewrite happens at physical planning.
+        // Plain EXPLAIN inserts a schema-only placeholder: it shows the materialized
+        // broadcast path without evaluating the small side.
         let explained = explain_logical_plan(query_engine, &mut ctx, &plan).await;
+        // With a materialized build side the probe `MergeScan` carries the frontend
+        // join, so the join text appears inside the probe boundary; the materialized
+        // node marks the path.
         assert!(
-            !nests_join_in_merge_scan(&explained),
-            "the EXPLAIN must keep the frontend join (no nested rewrite), got:\n{explained}"
+            explained.contains("MaterializedBroadcast"),
+            "plain EXPLAIN must show the materialized broadcast path, got:\n{explained}"
         );
         assert_eq!(2, calls.load(Ordering::SeqCst));
     }
@@ -2918,8 +2962,8 @@ mod tests {
 
         let explained = explain_logical_plan(query_engine, &mut ctx, &plan).await;
         assert!(
-            !nests_join_in_merge_scan(&explained),
-            "the EXPLAIN must keep the frontend join (no nested rewrite), got:\n{explained}"
+            explained.contains("MaterializedBroadcast"),
+            "aliased tables must stay materialization candidates, got:\n{explained}"
         );
         assert_eq!(2, calls.load(Ordering::SeqCst));
     }
