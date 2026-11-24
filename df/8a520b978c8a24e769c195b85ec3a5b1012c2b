@@ -1,0 +1,22 @@
+src/common/meta/src/kv_backend/rds/postgres.rs
+  s_a0c2d0c6dc573d::t_007e7596bb2210 87-88,730-731,735-737,741,921-940,972-973,976,992,1580-1615
+  s_a0c2d0c6dc573d::t_5543fca3290488 1555-1566
+src/common/meta/src/kv_backend/rds/mysql.rs
+  s_a0c2d0c6dc573d::t_007e7596bb2210 365,372,375,377,575-577,809,814,826,1338,1371-1396
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "df8a520b978c8a24e769c195b85ec3a5b1012c2b",
+  "prompts": {},
+  "sessions": {
+    "s_a0c2d0c6dc573d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a20b9d-b770-7281-8e87-0cf727e380a3",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
