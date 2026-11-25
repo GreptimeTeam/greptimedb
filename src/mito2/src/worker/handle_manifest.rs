@@ -479,10 +479,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 }
             },
             #[cfg(feature = "enterprise")]
-            RegionEditKind::Compaction(_) => edit
-                .files_to_add
-                .iter()
-                .fold(0u64, |bytes, file| bytes.saturating_add(file.file_size)),
+            RegionEditKind::Compaction(_) => table_compaction_ingested_bytes(&edit),
             RegionEditKind::Import => 0,
         };
 
@@ -1044,6 +1041,26 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     }
 }
 
+#[cfg(feature = "enterprise")]
+fn table_compaction_ingested_bytes(edit: &RegionEdit) -> u64 {
+    if edit.files_to_remove.is_empty()
+        || edit
+            .files_to_remove
+            .iter()
+            .any(|f| f.level != file::LEVEL_SHARED)
+    {
+        return 0;
+    }
+    let mut bytes = 0u64;
+    for output in &edit.files_to_add {
+        if output.level != 0 {
+            return 0;
+        }
+        bytes = bytes.saturating_add(output.file_size);
+    }
+    bytes
+}
+
 /// Visits only incoming files and uses existing per-level maps for duplicate checks.
 /// A shared file with unknown target coverage cannot be charged in full to every region.
 fn new_ingested_parquet_bytes(region: &MitoRegionRef, edit: &RegionEdit) -> Result<u64> {
@@ -1329,6 +1346,35 @@ mod tests {
     use super::*;
     use crate::sst::file::{FileMeta, LEVEL_SHARED};
     use crate::test_util::{CreateRequestBuilder, TestEnv};
+
+    #[cfg(feature = "enterprise")]
+    #[test]
+    fn test_table_compaction_ingested_bytes() {
+        let files = |levels: &[u8]| {
+            levels
+                .iter()
+                .map(|&level| FileMeta {
+                    level,
+                    file_size: 7,
+                    ..Default::default()
+                })
+                .collect()
+        };
+        for (removed, added, expected) in [
+            (&[LEVEL_SHARED, LEVEL_SHARED][..], &[0, 0][..], 14),
+            (&[LEVEL_SHARED, 0], &[0], 0),
+            (&[LEVEL_SHARED], &[0, 1], 0),
+            (&[], &[0], 0),
+            (&[LEVEL_SHARED], &[], 0),
+        ] {
+            let edit = RegionEdit {
+                files_to_remove: files(removed),
+                files_to_add: files(added),
+                ..Default::default()
+            };
+            assert_eq!(expected, table_compaction_ingested_bytes(&edit));
+        }
+    }
 
     #[test]
     fn test_edit_queue_preserves_ingestion_source() {
