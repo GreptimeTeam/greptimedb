@@ -106,3 +106,4 @@ common-test-util.workspace = true
 common-wal = { workspace = true, features = ["testing"] }
 datatypes.workspace = true
 object-store = { workspace = true, features = ["testing"] }
+tokio = { workspace = true, features = ["test-util"] }
