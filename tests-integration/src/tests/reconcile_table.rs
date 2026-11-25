@@ -541,6 +541,77 @@ async fn test_renamed_table() {
     check_output_stream(output.data, expected).await;
 }
 
+#[tokio::test]
+async fn test_reconcile_table_preserves_column_order_and_pk_order() {
+    let builder =
+        GreptimeDbClusterBuilder::new("test_reconcile_table_preserves_column_order_and_pk_order")
+            .await;
+    let test_context = TestContext::new(MockInstanceBuilder::Distributed(builder)).await;
+    let frontend = test_context.frontend();
+    let metasrv = test_context.metasrv();
+    let reconciliation_manager = metasrv.reconciliation_manager();
+
+    // 1. CREATE TABLE q8 with columns ts, a, b and non-column-ordered PRIMARY KEY (b, a)
+    let output = execute_sql(
+        &frontend,
+        "CREATE TABLE q8 (ts TIMESTAMP TIME INDEX, a STRING, b STRING, PRIMARY KEY(b, a));",
+    )
+    .await;
+    assert_affected_rows(output.data).await;
+
+    // 2. Positional INSERT before ALTER TABLE
+    let output = execute_sql(
+        &frontend,
+        "INSERT INTO q8 VALUES ('1970-01-01 00:00:01', 'a1', 'b1');",
+    )
+    .await;
+    assert_affected_rows(output.data).await;
+
+    // 3. ALTER TABLE q8 ADD COLUMN c INT introduces #10248 stale primary_key_indices order
+    let output = execute_sql(&frontend, "ALTER TABLE q8 ADD COLUMN c INT;").await;
+    assert_affected_rows(output.data).await;
+
+    // 4. Reconcile the table (repairs stale primary key order while preserving column order)
+    reconcile_table(metasrv.procedure_manager(), reconciliation_manager, "q8").await;
+
+    // 5. Positional INSERT after reconcile (must insert into ts, a, b, c)
+    let output = execute_sql(
+        &frontend,
+        "INSERT INTO q8 VALUES ('1970-01-01 00:00:02', 'a2', 'b2', 2);",
+    )
+    .await;
+    assert_affected_rows(output.data).await;
+
+    // 6. SELECT * asserts columns are ts, a, b, c and positional inserts landed correctly
+    let output = execute_sql(&frontend, "SELECT * FROM q8 ORDER BY ts").await;
+    let expected = r#"+---------------------+----+----+---+
+| ts                  | a  | b  | c |
++---------------------+----+----+---+
+| 1970-01-01T00:00:01 | a1 | b1 |   |
+| 1970-01-01T00:00:02 | a2 | b2 | 2 |
++---------------------+----+----+---+"#;
+    check_output_stream(output.data, expected).await;
+
+    // 7. SHOW CREATE TABLE q8 asserts columns ts, a, b, c and PRIMARY KEY (b, a).
+    let output = execute_sql(&frontend, "SHOW CREATE TABLE q8").await;
+    let expected = r#"+-------+-----------------------------------+
+| Table | Create Table                      |
++-------+-----------------------------------+
+| q8    | CREATE TABLE IF NOT EXISTS "q8" ( |
+|       |   "ts" TIMESTAMP(3) NOT NULL,     |
+|       |   "a" STRING NULL,                |
+|       |   "b" STRING NULL,                |
+|       |   "c" INT NULL,                   |
+|       |   TIME INDEX ("ts"),              |
+|       |   PRIMARY KEY ("b", "a")          |
+|       | )                                 |
+|       |                                   |
+|       | ENGINE=mito                       |
+|       |                                   |
++-------+-----------------------------------+"#;
+    check_output_stream(output.data, expected).await;
+}
+
 async fn unwrap_err(output: OutputData) -> String {
     let error = match output {
         OutputData::Stream(stream) => collect_batches(stream).await.unwrap_err(),
