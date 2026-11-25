@@ -214,21 +214,6 @@ fn cut_as_segment(node: &NativeNode, canonical_segmentation: bool) -> bool {
     !sources.is_empty()
 }
 
-/// Whether any canonical merge in `node` answers with histogram samples, given the kind its input
-/// carries.
-///
-/// A merge collects the pieces of one label set and hands on the samples it was given, so its answer
-/// kind is its child's. A histogram answer standing on a merge would travel through the canonical
-/// boundary carrying histogram frames, a pairing no execution exercises yet: the planner keeps such
-/// a statement on the existing plan until that pairing is covered, and it has to look at every
-/// merge, not only a root one.
-pub fn merge_answers_histogram(node: &NativeNode, input_kind: FieldKind) -> bool {
-    node.any(&|node| {
-        matches!(node.expr, NativeExpr::Merge { .. })
-            && node.output_field_kind(Some(input_kind)) == Some(FieldKind::Histogram)
-    })
-}
-
 /// Whether the merge producer's entire prefix can run on each scan partition independently.
 pub fn canonical_local_prefix(node: &NativeNode) -> bool {
     match &node.expr {
@@ -766,7 +751,12 @@ fn build_evaluated_segment(
             .output
             .samples()
             .is_some_and(|schema| schema.eval_grid.is_some())
-            || is_raw_series_source(&child)
+            // A selector that discovered one metric is prepared as that metric's source, and one that
+            // discovered several as the union of one source per metric; either way it already
+            // declares the frames this segment reads, since it names each metric's source. So there
+            // is nothing to bind it to and nothing to wrap it in, and binding a source in a source
+            // is what the physical planner refuses. See [`is_sourced_plan`].
+            || is_sourced_plan(&child)
             // The typed empty frame of a selector that matched no table is an input in its own
             // right: it reads no region and carries no metric, so there is nothing to wrap it in.
             // A segment over it is still an explicit-label frame with no series.

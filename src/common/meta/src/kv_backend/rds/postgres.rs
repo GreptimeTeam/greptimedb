@@ -84,6 +84,8 @@ impl Default for TlsOption {
     }
 }
 
+// Target Bind payload per upsert. A single larger KV still gets its own statement.
+const BATCH_PUT_TARGET_BYTES: usize = 4 * 1024 * 1024;
 const PG_STORE_NAME: &str = "pg_store";
 
 pub struct PgClient(deadpool::managed::Object<deadpool_postgres::Manager>);
@@ -725,15 +727,18 @@ impl KvQueryExecutor<PgClient> for PgStore {
         req: BatchPutRequest,
     ) -> Result<BatchPutResponse> {
         let chunk_size = (*RDS_BATCH_SIZE).min(u16::MAX as usize / 3);
-        if req.kvs.len() > chunk_size
+        let chunks = batch_put_chunks(&req.kvs, chunk_size);
+        if chunks.len() > 1
             && let ExecutorImpl::Default(client) = query_executor
         {
             let mut transaction = ExecutorImpl::Txn(client.txn_executor().await?);
-            let response = self.put_chunks(&mut transaction, &req, chunk_size).await?;
+            let response = self
+                .put_chunks(&mut transaction, chunks, req.prev_kv)
+                .await?;
             transaction.commit().await?;
             return Ok(response);
         }
-        self.put_chunks(query_executor, &req, chunk_size).await
+        self.put_chunks(query_executor, chunks, req.prev_kv).await
     }
 
     /// Batch get with certain client. It's needed for a client with transaction.
@@ -913,6 +918,26 @@ impl PgStore {
     }
 }
 
+fn batch_put_chunks(kvs: &[KeyValue], max_rows: usize) -> Vec<&[KeyValue]> {
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    let mut bytes = 0;
+    for (idx, kv) in kvs.iter().enumerate() {
+        // Bind sends the key twice and the value once, each with a four-byte length.
+        let row_bytes = kv.key.len() * 2 + kv.value.len() + 12;
+        if idx > start && (idx - start == max_rows || bytes + row_bytes > BATCH_PUT_TARGET_BYTES) {
+            chunks.push(&kvs[start..idx]);
+            start = idx;
+            bytes = 0;
+        }
+        bytes += row_bytes;
+    }
+    if start < kvs.len() {
+        chunks.push(&kvs[start..]);
+    }
+    chunks
+}
+
 impl PgStore {
     async fn get_chunks(
         &self,
@@ -944,11 +969,11 @@ impl PgStore {
     async fn put_chunks(
         &self,
         executor: &mut ExecutorImpl<'_, PgClient>,
-        req: &BatchPutRequest,
-        chunk_size: usize,
+        chunks: Vec<&[KeyValue]>,
+        prev_kv: bool,
     ) -> Result<BatchPutResponse> {
         let mut prev_kvs = Vec::new();
-        for chunk in req.kvs.chunks(chunk_size) {
+        for chunk in chunks {
             let mut params = Vec::with_capacity(chunk.len() * 3);
             params.extend(chunk.iter().map(|kv| &kv.key));
             for kv in chunk {
@@ -964,7 +989,7 @@ impl PgStore {
                 RDS_STORE_OP_BATCH_PUT,
                 ""
             )?;
-            if req.prev_kv {
+            if prev_kv {
                 prev_kvs.extend(kvs);
             }
         }
@@ -1525,6 +1550,75 @@ mod tests {
             );
         }
         unprepare_kv(&backend, prefix).await;
+    }
+
+    #[test]
+    fn test_batch_put_chunk_byte_budget() {
+        let kv = KeyValue {
+            key: vec![0; 2],
+            value: vec![1; BATCH_PUT_TARGET_BYTES / 2 - 16],
+        };
+        let mut kvs = vec![kv.clone(), kv];
+        assert_eq!(batch_put_chunks(&kvs, 128).len(), 1);
+        kvs[1].value.push(1);
+        assert_eq!(batch_put_chunks(&kvs, 128), [&kvs[..1], &kvs[1..]]);
+    }
+
+    #[tokio::test]
+    async fn test_pg_segmented_checkpoint() {
+        maybe_skip_postgres_integration_test!();
+        let table = format!("checkpoint_{}", uuid::Uuid::new_v4().simple());
+        let backend = build_pg_kv_backend(&table).await.unwrap();
+        let reader = build_pg_kv_backend(&table).await.unwrap();
+        let client = backend.executor_factory.pool.get().await.unwrap();
+        client
+            .batch_execute(&format!(
+                "ALTER TABLE {table} ADD CHECK (v <> convert_to('fail', 'UTF8'))"
+            ))
+            .await
+            .unwrap();
+        let large = KeyValue {
+            key: b"large-singleton".to_vec(),
+            value: vec![1; BATCH_PUT_TARGET_BYTES + 1],
+        };
+        let kvs = vec![
+            large.clone(),
+            KeyValue {
+                key: b"rejected".to_vec(),
+                value: b"fail".to_vec(),
+            },
+        ];
+        assert_eq!(
+            batch_put_chunks(&kvs, 128)
+                .iter()
+                .map(|chunk| chunk.len())
+                .collect::<Vec<_>>(),
+            [1, 1]
+        );
+        assert!(
+            backend
+                .batch_put(BatchPutRequest {
+                    kvs,
+                    prev_kv: false
+                })
+                .await
+                .is_err()
+        );
+        assert!(reader.get(&large.key).await.unwrap().is_none());
+        backend
+            .batch_put(BatchPutRequest {
+                kvs: vec![large.clone()],
+                prev_kv: false,
+            })
+            .await
+            .unwrap();
+        assert_eq!(reader.get(&large.key).await.unwrap().unwrap(), large);
+        crate::kv_backend::test::check_segmented_checkpoint(Arc::new(backend), Arc::new(reader))
+            .await;
+        client
+            .batch_execute(&format!("DROP TABLE {table}"))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

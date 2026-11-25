@@ -16,7 +16,7 @@ use std::any::Any;
 
 use crate::error::{ReadOnlyKvBackendSnafu, Result};
 use crate::kv_backend::txn::{Txn, TxnOp, TxnResponse};
-use crate::kv_backend::{KvBackend, KvBackendRef, TxnService};
+use crate::kv_backend::{KvBackend, KvBackendRef, TxnCapability, TxnService};
 use crate::rpc::KeyValue;
 use crate::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
@@ -69,8 +69,8 @@ impl TxnService for ReadOnlyKvBackend {
         self.inner.txn(txn).await
     }
 
-    fn max_txn_ops(&self) -> usize {
-        self.inner.max_txn_ops()
+    fn txn_capability(&self) -> Option<TxnCapability> {
+        self.inner.txn_capability()
     }
 }
 
@@ -175,8 +175,8 @@ mod tests {
             })
         }
 
-        fn max_txn_ops(&self) -> usize {
-            7
+        fn txn_capability(&self) -> Option<TxnCapability> {
+            Some(TxnCapability { max_ops: 7 })
         }
     }
 
@@ -276,7 +276,12 @@ mod tests {
     async fn test_read_only_backend_rejects_write_txn() {
         let backend = read_only_backend().await;
 
-        assert_eq!(backend.max_txn_ops(), usize::MAX);
+        assert_eq!(
+            backend.txn_capability(),
+            Some(TxnCapability {
+                max_ops: usize::MAX
+            })
+        );
         assert_read_only(
             backend
                 .txn(Txn::put_if_not_exists(b"k3".to_vec(), b"v3".to_vec()))
@@ -288,7 +293,7 @@ mod tests {
     async fn test_read_only_backend_delegates_read_txn() {
         let backend = ReadOnlyKvBackend::new(Arc::new(TxnOnlyBackend));
 
-        assert_eq!(backend.max_txn_ops(), 7);
+        assert_eq!(backend.txn_capability(), Some(TxnCapability { max_ops: 7 }));
         let resp = backend
             .txn(Txn::new().and_then(vec![TxnOp::Get(b"k1".to_vec())]))
             .await

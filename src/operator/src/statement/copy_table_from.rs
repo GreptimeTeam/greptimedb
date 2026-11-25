@@ -23,7 +23,8 @@ use common_base::readable_size::ReadableSize;
 use common_datasource::file_format::csv::{
     CsvFormat, is_skippable_arrow_error, tolerant_csv_stream,
 };
-use common_datasource::file_format::json::JsonFormat;
+use common_datasource::file_format::decimal::{TextNumber, parse_number_columns};
+use common_datasource::file_format::json::{JsonFormat, json_text_stream};
 use common_datasource::file_format::orc::{ReaderAdapter, infer_orc_schema, new_orc_stream_reader};
 use common_datasource::file_format::{FileFormat, Format, file_to_stream};
 use common_datasource::lister::{Lister, Source};
@@ -40,7 +41,7 @@ use datafusion_common::arrow::error::ArrowError;
 use datafusion_common::config::CsvOptions;
 use datafusion_expr::Expr;
 use datatypes::arrow::compute::can_cast_types;
-use datatypes::arrow::datatypes::{DataType as ArrowDataType, Schema, SchemaRef};
+use datatypes::arrow::datatypes::{DataType as ArrowDataType, FieldRef, Schema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::vectors::Helper;
 use futures_util::StreamExt;
@@ -241,7 +242,9 @@ impl StatementExecutor {
                 let options = CsvOptions::default()
                     .with_has_header(format.has_header)
                     .with_delimiter(format.delimiter);
-                let csv_source = CsvSource::new(schema.clone())
+                let reader_schema = exact_numeric_reader_schema(schema, &compat_schema, false);
+                let numbers = text_number_columns(schema, &compat_schema, &projection, false);
+                let csv_source = CsvSource::new(Arc::new(reader_schema))
                     .with_csv_options(options)
                     .with_batch_size(DEFAULT_BATCH_SIZE);
                 let stream = if format.skip_bad_records {
@@ -257,7 +260,7 @@ impl StatementExecutor {
                     .await
                     .context(error::BuildFileStreamSnafu)?
                 } else {
-                    file_to_stream(
+                    let stream = file_to_stream(
                         object_store,
                         path,
                         csv_source,
@@ -265,7 +268,9 @@ impl StatementExecutor {
                         format.compression_type,
                     )
                     .await
-                    .context(error::BuildFileStreamSnafu)?
+                    .context(error::BuildFileStreamSnafu)?;
+                    // An empty csv field is NULL.
+                    parse_number_columns(stream, numbers, true)
                 };
 
                 let stream = Box::pin(
@@ -292,17 +297,39 @@ impl StatementExecutor {
                         .context(error::ProjectSchemaSnafu)?,
                 );
 
-                let json_source =
-                    JsonSource::new(schema.clone()).with_batch_size(DEFAULT_BATCH_SIZE);
-                let stream = file_to_stream(
-                    object_store,
-                    path,
-                    json_source,
-                    Some(projection),
-                    format.compression_type,
-                )
-                .await
-                .context(error::BuildFileStreamSnafu)?;
+                let reader_schema = exact_numeric_reader_schema(schema, &compat_schema, true);
+                let numbers = text_number_columns(schema, &compat_schema, &projection, true);
+                let stream = if numbers.iter().any(Option::is_some) {
+                    // Only this stream reads a number as its text.
+                    let projected_schema = Arc::new(
+                        reader_schema
+                            .project(&projection)
+                            .context(error::ProjectSchemaSnafu)?,
+                    );
+                    json_text_stream(
+                        object_store,
+                        path,
+                        projected_schema,
+                        format,
+                        DEFAULT_BATCH_SIZE,
+                    )
+                    .await
+                    .context(error::BuildFileStreamSnafu)?
+                } else {
+                    let json_source = JsonSource::new(Arc::new(reader_schema))
+                        .with_batch_size(DEFAULT_BATCH_SIZE);
+                    file_to_stream(
+                        object_store,
+                        path,
+                        json_source,
+                        Some(projection),
+                        format.compression_type,
+                    )
+                    .await
+                    .context(error::BuildFileStreamSnafu)?
+                };
+                // An empty json string is not a number, so it is an error like other text.
+                let stream = parse_number_columns(stream, numbers, false);
 
                 Ok(Box::pin(
                     // The projection is already applied in the JSON reader when we created the stream,
@@ -720,6 +747,78 @@ fn can_cast_types_for_greptime(from: &ArrowDataType, to: &ArrowDataType) -> bool
 
     // For all other cases, use Arrow's built-in can_cast_types
     can_cast_types(from, to)
+}
+
+/// Returns the schema to read the file with.
+///
+/// Schema inference reads a number as `Int64` or `Float64`. Casting such a column to a wider
+/// table type afterwards rounds every value a `Float64` can't hold, and a value outside the
+/// `Int64` range fails to parse. So these columns are read as a string and parsed by
+/// [`parse_number_columns`], see [`text_number_columns`]:
+/// - A `Decimal128` column.
+/// - A `UInt64` column when `uint64_text` is set, which is for json. The CSV reader keeps the
+///   inferred type for it.
+fn exact_numeric_reader_schema(file: &SchemaRef, compat: &SchemaRef, uint64_text: bool) -> Schema {
+    let fields = file
+        .fields()
+        .iter()
+        .enumerate()
+        .map(|(idx, file_field)| {
+            match text_number(file_field, compat.fields().get(idx), uint64_text) {
+                Some(_) => Arc::new(
+                    file_field
+                        .as_ref()
+                        .clone()
+                        .with_data_type(ArrowDataType::Utf8),
+                ),
+                None => file_field.clone(),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    Schema::new_with_metadata(fields, file.metadata().clone())
+}
+
+/// Returns the type to parse each projected column into that
+/// [`exact_numeric_reader_schema`] reads as a string, and `None` for the other columns.
+fn text_number_columns(
+    file: &SchemaRef,
+    compat: &SchemaRef,
+    projection: &[usize],
+    uint64_text: bool,
+) -> Vec<Option<TextNumber>> {
+    projection
+        .iter()
+        .map(|idx| {
+            text_number(
+                file.fields().get(*idx)?,
+                compat.fields().get(*idx),
+                uint64_text,
+            )
+        })
+        .collect()
+}
+
+fn text_number(
+    file_field: &FieldRef,
+    compat_field: Option<&FieldRef>,
+    uint64_text: bool,
+) -> Option<TextNumber> {
+    if !is_inferred_number(file_field.data_type()) {
+        return None;
+    }
+    match compat_field?.data_type() {
+        ArrowDataType::Decimal128(precision, scale) => Some(TextNumber::Decimal128 {
+            precision: *precision,
+            scale: *scale,
+        }),
+        ArrowDataType::UInt64 if uint64_text => Some(TextNumber::UInt64),
+        _ => None,
+    }
+}
+
+fn is_inferred_number(data_type: &ArrowDataType) -> bool {
+    matches!(data_type, ArrowDataType::Int64 | ArrowDataType::Float64)
 }
 
 fn csv_reader_schema_for_skip_bad_records(file: &SchemaRef, compat: &SchemaRef) -> Schema {
@@ -1417,6 +1516,87 @@ mod tests {
         assert_eq!(
             reader_schema.field(2).data_type(),
             compat_schema.field(2).data_type()
+        );
+    }
+
+    #[test]
+    fn test_exact_numeric_reader_schema() {
+        let file_schema = make_test_schema(&[
+            Field::new("price", DataType::Float64, true),
+            Field::new("amount", DataType::Int64, true),
+            Field::new("count", DataType::Float64, true),
+            Field::new("id", DataType::Int64, true),
+            Field::new("cpu", DataType::Float64, true),
+            Field::new("quoted", DataType::Utf8, true),
+            Field::new("extra", DataType::Float64, true),
+        ]);
+        let compat_schema = make_test_schema(&[
+            Field::new("price", DataType::Decimal128(38, 10), false),
+            Field::new("amount", DataType::Decimal128(20, 2), true),
+            Field::new("count", DataType::UInt64, true),
+            Field::new("id", DataType::UInt64, true),
+            Field::new("cpu", DataType::Float64, true),
+            Field::new("quoted", DataType::Decimal128(38, 10), true),
+        ]);
+
+        // A decimal column is read as a string, to be parsed from every digit.
+        let csv_schema = exact_numeric_reader_schema(&file_schema, &compat_schema, false);
+        assert_eq!(
+            csv_schema.field(0),
+            &Field::new("price", DataType::Utf8, true)
+        );
+        assert_eq!(
+            csv_schema.field(1),
+            &Field::new("amount", DataType::Utf8, true)
+        );
+        for idx in 2..file_schema.fields().len() {
+            assert_eq!(csv_schema.field(idx), file_schema.field(idx));
+        }
+
+        let json_schema = exact_numeric_reader_schema(&file_schema, &compat_schema, true);
+        assert_eq!(
+            json_schema.field(0),
+            &Field::new("price", DataType::Utf8, true)
+        );
+        assert_eq!(
+            json_schema.field(1),
+            &Field::new("amount", DataType::Utf8, true)
+        );
+        assert_eq!(
+            json_schema.field(2),
+            &Field::new("count", DataType::Utf8, true)
+        );
+        assert_eq!(
+            json_schema.field(3),
+            &Field::new("id", DataType::Utf8, true)
+        );
+        for idx in 4..file_schema.fields().len() {
+            assert_eq!(json_schema.field(idx), file_schema.field(idx));
+        }
+
+        // The quoted column is not an inferred number, so it is not parsed here.
+        let amount = TextNumber::Decimal128 {
+            precision: 20,
+            scale: 2,
+        };
+        let price = TextNumber::Decimal128 {
+            precision: 38,
+            scale: 10,
+        };
+        assert_eq!(
+            text_number_columns(&file_schema, &compat_schema, &[5, 1, 4, 0, 6, 3], false),
+            vec![None, Some(amount), None, Some(price), None, None]
+        );
+        assert_eq!(
+            text_number_columns(&file_schema, &compat_schema, &[5, 1, 4, 0, 6, 3], true),
+            vec![
+                None,
+                Some(amount),
+                None,
+                Some(price),
+                None,
+                Some(TextNumber::UInt64)
+            ]
         );
     }
 

@@ -51,7 +51,7 @@ use store_api::mito_engine_options::SKIP_WAL_KEY;
 use store_api::region_engine::{RegionEngine, RegionManifestInfo, RegionRole};
 use store_api::region_request::{
     PathType, RegionCatchupRequest, RegionCloseRequest, RegionDropRequest, RegionFlushRequest,
-    RegionOpenRequest, RegionPutRequest, RegionRequest, RegionTruncateRequest,
+    RegionOpenRequest, RegionPutRequest, RegionRequest, RegionTruncateRequest, ReplayCheckpoint,
 };
 use store_api::storage::{RegionId, ScanRequest};
 
@@ -62,7 +62,9 @@ use crate::engine::object_store_wal_test::{
     encode_delta, is_replaced, next_manifest_version, publish_delta, wait_until,
 };
 use crate::engine::pending_tail_test::{set_pending_tails, tail};
-use crate::manifest::action::{PendingTail, UptoKind};
+use crate::manifest::action::{
+    PendingTail, RegionEdit, RegionMetaAction, RegionMetaActionList, UptoKind,
+};
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::request::WorkerRequest;
 use crate::sst::location::region_dir_from_table_dir;
@@ -994,6 +996,178 @@ async fn test_moving_the_wal_keeps_the_history_only_with_its_objects() {
     assert_eq!(10, engine.get_region_statistic(REGION_A).unwrap().num_rows);
 }
 
+/// A catchup whose source reported entries above the flushed entry id cannot replay them from this
+/// node's WAL, so it hands nothing over: it fails, and so do one without a reported entry id and
+/// one that does not make the region writable, also after a restart. A writable catchup of a
+/// region that skips the WAL hands nothing over either.
+#[tokio::test]
+async fn test_catchups_that_hand_nothing_over() {
+    let mut env = TestEnv::with_prefix("object-store-wal-no-handoff").await;
+    let config = ObjectStoreWalConfig {
+        flush_interval: Duration::from_millis(10),
+        ..store_config(AckMode::Durable)
+    };
+    let open_store = |object_store: ObjectStore| {
+        let config = config.clone();
+        async move {
+            ObjectStoreLogStore::try_new(object_store, &config, 0, FIXED_DIRECTORY_GENERATION)
+                .await
+                .unwrap()
+        }
+    };
+    let engine = new_engine(&mut env, open_store(memory_store()).await).await;
+    let (table_dir, schema) = create_region(&engine, REGION_A, &[]).await;
+    let (table_dir_b, _) = create_region(&engine, REGION_B, &[(SKIP_WAL_KEY, "true")]).await;
+    put_rows(&engine, REGION_A, rows(&schema, 0, 3)).await;
+    flush_region(&engine, REGION_A, None).await;
+    let flushed_entry_id = region(&engine, REGION_A).version().flushed_entry_id;
+    put_rows(&engine, REGION_A, rows(&schema, 3, 5)).await;
+    let reported_entry_id = region(&engine, REGION_A)
+        .version_control
+        .current()
+        .last_entry_id;
+    engine.stop().await.unwrap();
+    drop(engine);
+
+    let location = memory_store();
+    let catchup = |set_writable, entry_id| {
+        RegionRequest::Catchup(RegionCatchupRequest {
+            set_writable,
+            entry_id,
+            ..Default::default()
+        })
+    };
+    let skip_replay = || {
+        RegionRequest::Open(RegionOpenRequest {
+            skip_wal_replay: true,
+            ..open_request(&table_dir)
+        })
+    };
+    for (set_writable, entry_id) in [
+        (true, Some(reported_entry_id)),
+        (true, None),
+        (false, Some(flushed_entry_id)),
+    ] {
+        let store = open_store(location.clone()).await;
+        let engine = new_engine(&mut env, store.clone()).await;
+        engine
+            .handle_request(REGION_A, skip_replay())
+            .await
+            .unwrap();
+        let error = engine
+            .handle_request(REGION_A, catchup(set_writable, entry_id))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                error.as_any().downcast_ref::<crate::error::Error>(),
+                Some(crate::error::Error::CheckWalHistory { .. })
+            ),
+            "{set_writable} {entry_id:?}: {error:?}"
+        );
+        crash(engine, store).await;
+    }
+
+    let store = open_store(location.clone()).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    open_region(&engine, REGION_B, &table_dir_b, &[(SKIP_WAL_KEY, "true")])
+        .await
+        .unwrap();
+    engine
+        .set_region_role(REGION_B, RegionRole::Follower)
+        .unwrap();
+    let objects = wal_object_seqs(&location).await;
+    engine
+        .handle_request(REGION_B, catchup(true, Some(0)))
+        .await
+        .unwrap();
+    assert_eq!(objects, wal_object_seqs(&location).await);
+}
+
+/// A catchup that makes a region writable with the last entry id its source reported hands the
+/// region over to this node's WAL, whose location held no object when the store opened: the
+/// catchup passes the WAL history check, the region opens again after a crash right after it,
+/// its new entries take ids above the entry id its source reported, and after another crash the
+/// region opens with every row.
+#[tokio::test]
+async fn test_catchup_with_reported_entry_id_hands_the_region_over() {
+    let mut env = TestEnv::with_prefix("object-store-wal-handoff").await;
+    // Seals on its own, as a datanode's store does.
+    let config = ObjectStoreWalConfig {
+        flush_interval: Duration::from_millis(10),
+        ..store_config(AckMode::Durable)
+    };
+    let open_store = |object_store: ObjectStore| {
+        let config = config.clone();
+        async move {
+            ObjectStoreLogStore::try_new(object_store, &config, 0, FIXED_DIRECTORY_GENERATION)
+                .await
+                .unwrap()
+        }
+    };
+    let source = open_store(memory_store()).await;
+    let engine = new_engine(&mut env, source).await;
+    let (table_dir, schema) = create_region(&engine, REGION_A, &[]).await;
+    // One durable append per row puts the flushed entry id in a later object of the source than
+    // a fresh destination reaches with its first writes without the hand-off.
+    for row in 0..5 {
+        put_rows(&engine, REGION_A, rows(&schema, row, row + 1)).await;
+    }
+    flush_region(&engine, REGION_A, None).await;
+    let reported_entry_id = region(&engine, REGION_A).version().flushed_entry_id;
+    engine.stop().await.unwrap();
+    drop(engine);
+
+    let location = memory_store();
+    let store = open_store(location.clone()).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    engine
+        .handle_request(
+            REGION_A,
+            RegionRequest::Open(RegionOpenRequest {
+                skip_wal_replay: true,
+                ..open_request(&table_dir)
+            }),
+        )
+        .await
+        .unwrap();
+    engine
+        .handle_request(
+            REGION_A,
+            RegionRequest::Catchup(RegionCatchupRequest {
+                set_writable: true,
+                entry_id: Some(reported_entry_id),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(region(&engine, REGION_A).is_writable());
+    // The hand-off's object alone holds the region's history here after a crash.
+    crash(engine, store).await;
+    let store = open_store(location.clone()).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    open_region(&engine, REGION_A, &table_dir, &[])
+        .await
+        .unwrap();
+    put_rows(&engine, REGION_A, rows(&schema, 5, 8)).await;
+    let last_entry_id = region(&engine, REGION_A)
+        .version_control
+        .current()
+        .last_entry_id;
+    assert!(last_entry_id > reported_entry_id, "{last_entry_id}");
+    let rows_before = scan_rows(&engine, REGION_A).await;
+    crash(engine, store).await;
+
+    let store = open_store(location).await;
+    let engine = new_engine(&mut env, store).await;
+    open_region(&engine, REGION_A, &table_dir, &[])
+        .await
+        .unwrap();
+    assert_eq!(rows_before, scan_rows(&engine, REGION_A).await);
+    assert_eq!(8, engine.get_region_statistic(REGION_A).unwrap().num_rows);
+}
+
 #[tokio::test]
 async fn test_open_region_fails_when_its_watermark_is_above_the_wal_objects() {
     let mut env = TestEnv::with_prefix("object-store-wal-watermark-above").await;
@@ -1449,6 +1623,7 @@ async fn test_flush_waits_until_the_wal_is_durable() {
 /// created while creates are held.
 struct WaitingRegion {
     env: TestEnv,
+    location: ObjectStore,
     store: Arc<ObjectStoreLogStore>,
     engine: MitoEngine,
     schema: Vec<api::v1::ColumnSchema>,
@@ -1458,7 +1633,8 @@ struct WaitingRegion {
 
 async fn waiting_region(prefix: &str, ack_mode: AckMode) -> WaitingRegion {
     let mut env = TestEnv::with_prefix(prefix).await;
-    let store = open_store(&memory_store(), ack_mode).await;
+    let location = memory_store();
+    let store = open_store(&location, ack_mode).await;
     let engine = new_engine(&mut env, store.clone()).await;
     engine.require_write_lease();
     let (table_dir, schema) = create_region(&engine, REGION_A, &[]).await;
@@ -1474,6 +1650,7 @@ async fn waiting_region(prefix: &str, ack_mode: AckMode) -> WaitingRegion {
     let waiting = region(&engine, REGION_A);
     WaitingRegion {
         env,
+        location,
         store,
         engine,
         schema,
@@ -1672,6 +1849,103 @@ async fn test_catchup_again_replaces_region_behind_published_manifest() {
     assert!(caught_up.is_follower());
     assert!(grant_leader_lease(engine, Instant::now(), deadline));
     assert!(caught_up.is_writable());
+}
+
+/// A catchup again with `set_writable` and the entry id its source reported hands the region over
+/// and commits the next manifest version before it replaces the region: the replacement holds that
+/// version, the replaced instance does not, and the hand-off's record lies above the reported
+/// entry id.
+#[tokio::test]
+async fn test_catchup_again_hands_over_and_commits_before_the_swap() {
+    let w = waiting_region("object-store-wal-catchup-again-commit", AckMode::Durable).await;
+    let engine = &w.engine;
+    let version = next_manifest_version(&w.waiting).await;
+    // Above every entry of the region, so only the hand-off puts its new entries above it.
+    let reported_entry_id = entry_id(100, 1);
+    let request = RegionCatchupRequest {
+        set_writable: true,
+        entry_id: Some(reported_entry_id),
+        checkpoint: Some(ReplayCheckpoint {
+            entry_id: reported_entry_id,
+            metadata_entry_id: None,
+        }),
+        ..Default::default()
+    };
+    let catchup = {
+        let engine = engine.clone();
+        tokio::spawn(async move {
+            engine
+                .handle_request(REGION_A, RegionRequest::Catchup(request))
+                .await
+        })
+    };
+    // The store seals no batch on its own, and the hand-off answers once its record is durable.
+    tokio::time::timeout(WAIT, async {
+        while !catchup.is_finished() {
+            w.store.seal_open_batch().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    catchup_result(catchup).await.unwrap();
+
+    let caught_up = region(engine, REGION_A);
+    assert!(!Arc::ptr_eq(&w.waiting, &caught_up));
+    assert!(caught_up.is_writable());
+    assert_eq!(version, caught_up.manifest_ctx.manifest_version().await);
+    assert_eq!(version, next_manifest_version(&w.waiting).await);
+    // The hand-off's record went into an object above the reported entry id; the end of the
+    // replay raises the next object sequence too, but writes no object.
+    let seqs = wal_object_seqs(&w.location).await;
+    assert!(seqs.iter().any(|seq| *seq > 100), "{seqs:?}");
+}
+
+/// A catchup again whose commit conflicts with a version another writer published while it
+/// replayed keeps the region's instance with its rows and fails retryably; a retry opens the
+/// replacement from that version and replaces the region.
+#[tokio::test]
+async fn test_catchup_again_commit_conflict_keeps_the_region() {
+    let w = waiting_region("object-store-wal-catchup-again-conflict", AckMode::Enqueued).await;
+    let (engine, waiting) = (&w.engine, &w.waiting);
+    let version = next_manifest_version(waiting).await;
+    let (catchup, seal) = spawn_catchup_waiting_for_durability(&w, true).await;
+    // Other content than the catchup's empty edit.
+    let other = RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit {
+        timestamp_ms: Some(1),
+        ..Default::default()
+    }));
+    let region_dir = region_dir_from_table_dir(&w.table_dir, REGION_A, PathType::Bare);
+    publish_delta(
+        &w.env.get_object_store().unwrap(),
+        &region_dir,
+        version,
+        encode_delta(other).await,
+    )
+    .await;
+    release_held_batch(&w.store, seal).await;
+
+    let error = catchup_result(catchup).await.unwrap_err();
+    assert!(
+        matches!(
+            error.as_any().downcast_ref::<crate::error::Error>(),
+            Some(crate::error::Error::ManifestVersionConflict { .. })
+        ),
+        "{error:?}"
+    );
+    assert!(error.retry_hint().is_retryable(), "{error:?}");
+    assert!(!engine.is_region_catching_up(REGION_A));
+    assert!(Arc::ptr_eq(waiting, &region(engine, REGION_A)));
+    assert!(waiting.is_follower());
+    assert_eq!(3, memtable_rows(engine).await);
+
+    catchup_result(spawn_catchup(engine, true, None))
+        .await
+        .unwrap();
+    let caught_up = region(engine, REGION_A);
+    assert!(!Arc::ptr_eq(waiting, &caught_up));
+    assert!(caught_up.is_writable());
+    assert_eq!(version + 1, caught_up.manifest_ctx.manifest_version().await);
 }
 
 /// What happens to the waiting region while its catchup again waits for durability.

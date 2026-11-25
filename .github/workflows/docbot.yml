@@ -3,12 +3,17 @@ on:
   pull_request_target:
     types: [opened, edited, closed]
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.action }}-${{ github.head_ref || github.run_id }}
-  cancel-in-progress: true
-
 jobs:
   docbot:
+    # An unrelated edit must not displace a pending docs checkbox change.
+    if: >-
+      github.event.action != 'edited' ||
+      (github.event.changes.body &&
+       contains(github.event.changes.body.from, '[x] This PR requires documentation updates.') !=
+       contains(github.event.pull_request.body, '[x] This PR requires documentation updates.'))
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number }}-${{ github.event.action == 'closed' && 'close' || 'labels' }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write

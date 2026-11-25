@@ -209,6 +209,7 @@ macro_rules! http_tests {
                 test_remote_write_v2_histogram_flush_native_consistency,
                 test_remote_write_v2_histogram_native_partitions,
                 test_remote_write_v2_histogram_native_range_function,
+                test_remote_write_v2_histogram_native_nullable_tag_boundary,
                 test_prometheus_remote_write_batched,
                 test_prometheus_remote_write_batched_mixed_time_index_units,
                 test_prometheus_remote_write_batched_interceptor_time_index_units,
@@ -1702,10 +1703,13 @@ fn assert_native_plan(
 ) -> Value {
     let fused = {
         let mut nodes = plan_nodes_named(plan, "FusedSeriesExec");
-        assert_eq!(
-            nodes.len(),
-            1,
-            "{context}: expected one fused node: {nodes:?}"
+        // One node, or the pair a collected metadata drop is: the producer that runs the tree on
+        // each partition and the consumer that converts the assembled frames into rows. These
+        // fixture tables declare their tag column nullable, so the drop is collected and the pair is
+        // what a vector statement plans.
+        assert!(
+            (1..=2).contains(&nodes.len()),
+            "{context}: expected one fused node or the boundary's pair: {nodes:?}"
         );
         nodes.remove(0)
     };
@@ -2548,6 +2552,25 @@ pub async fn test_prometheus_native_promql_route(store_type: StorageType) {
     instance.guard.remove_all().await;
 }
 
+/// The fused node `node` is, as its own line renders it.
+fn describe_node(node: &Arc<dyn ExecutionPlan>) -> String {
+    datafusion::physical_plan::displayable(node.as_ref())
+        .one_line()
+        .to_string()
+}
+
+/// The fused nodes of one request, as their own node lines render them, for a failure message.
+fn describe_nodes(nodes: &[Arc<dyn ExecutionPlan>]) -> Vec<String> {
+    nodes
+        .iter()
+        .map(|node| {
+            datafusion::physical_plan::displayable(node.as_ref())
+                .one_line()
+                .to_string()
+        })
+        .collect()
+}
+
 /// Keeps the native fused node and the raw scan the request executed, for the figures only they
 /// record.
 ///
@@ -2574,9 +2597,39 @@ impl NativeFusedObserver {
         assert_eq!(
             captured.len(),
             1,
-            "`{context}`: the request executed {} fused nodes: {captured:?}",
-            captured.len()
+            "`{context}`: the request executed {} fused nodes: {:?}",
+            captured.len(),
+            describe_nodes(&captured)
         );
+        captured.remove(0)
+    }
+
+    /// The fused node that ran the statement's own tree.
+    ///
+    /// A statement whose metadata drop is collected runs a canonical boundary: the producer runs the
+    /// tree on each scan partition and the consumer above the router only converts the assembled
+    /// frames into the statement's rows. Every figure below is read off the producer, because it is
+    /// the node that binds the source, reads the scan and reports the partitions it ran on; a
+    /// statement with nothing collected runs that node alone.
+    fn take_statement(&self, context: &str) -> Arc<dyn ExecutionPlan> {
+        let mut captured = std::mem::take(&mut *self.0.lock().unwrap());
+        assert!(
+            !captured.is_empty(),
+            "`{context}`: the request executed no fused node, so it left the native route"
+        );
+        // At most the pair a boundary is: one producer and the consumer above it.
+        assert!(
+            captured.len() <= 2,
+            "`{context}`: the request executed {} fused nodes: {:?}",
+            captured.len(),
+            describe_nodes(&captured)
+        );
+        if let Some(index) = captured
+            .iter()
+            .position(|node| promql::extension_plan::is_canonical_producer_exec(node.as_ref()))
+        {
+            return captured.remove(index);
+        }
         captured.remove(0)
     }
 
@@ -2773,7 +2826,7 @@ pub async fn test_native_promql_route_plans_the_query(store_type: StorageType) {
         // The body is drained, so every partition has finished and the node this statement ran is
         // complete; its own registrations - not the flat set the JSON view reads - carry the
         // per-partition figures.
-        let exec = observer.take(query);
+        let exec = observer.take_statement(query);
         assert_native_plan(&plan, &exec, scan_partitions, query);
         assert_native_partition_output(&exec, scan_partitions, expected.len(), query);
 
@@ -2832,10 +2885,12 @@ pub async fn test_native_promql_route_plans_the_query(store_type: StorageType) {
         "`{query}` did not execute the fused route"
     );
     let fused_nodes = plan_nodes_named(&plan, "FusedSeriesExec");
-    assert_eq!(
-        fused_nodes.len(),
-        1,
-        "`{query}`: expected one fused node: {fused_nodes:?}"
+    // The drop `* 100` makes over these fixture tables' nullable tag column is collected, so the
+    // native plan is that boundary: the producer that runs the tree and the consumer above it. An
+    // empty match changes which series are read, not which stages the statement is lowered into.
+    assert!(
+        (1..=2).contains(&fused_nodes.len()),
+        "`{query}`: expected one fused node or the boundary's pair: {fused_nodes:?}"
     );
     let scans = plan_nodes_named(&plan, "SeriesScanExec");
     assert_eq!(
@@ -2846,7 +2901,7 @@ pub async fn test_native_promql_route_plans_the_query(store_type: StorageType) {
     // The body is drained, so the one fused node the request ran has finished. Its own child list is
     // what says how many plans it reads, and its own line is where the tree it ran is still one text:
     // the JSON view lists that tree's nodes as children of the operator, next to the plans it reads.
-    let exec = observer.take(query);
+    let exec = observer.take_statement(query);
     assert_eq!(
         exec.children().len(),
         1,
@@ -5782,11 +5837,16 @@ pub async fn test_remote_write_v2_histogram_native_range_function(store_type: St
         .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
         .build();
     let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+    // `__unit__` leaves with the metric name `sum_over_time` drops, and a scan that carries it can
+    // hold two series that agree on everything else: that is the collision the boundary below is
+    // carried by. A nullable key column is not one - see the note on
+    // `test_remote_write_v2_histogram_native_nullable_tag_boundary`.
     write_native_histogram(
         &client,
         &[
             (prom_store::METRIC_NAME_LABEL, "native_histogram_range"),
             ("job", "api"),
+            ("__unit__", "s"),
         ],
         1000,
         5,
@@ -5798,6 +5858,7 @@ pub async fn test_remote_write_v2_histogram_native_range_function(store_type: St
         &[
             (prom_store::METRIC_NAME_LABEL, "native_histogram_range"),
             ("job", "api"),
+            ("__unit__", "s"),
         ],
         3000,
         8,
@@ -5819,9 +5880,208 @@ pub async fn test_remote_write_v2_histogram_native_range_function(store_type: St
         body["data"]["result"][0]["histogram"][1]["sum"], "30",
         "`sum_over_time` adds the sums as {PROMETHEUS_REFERENCE} does"
     );
+    // `sum_over_time` over a native histogram drops the metadata labels, and this binding carries
+    // `__unit__`, so the canonical pass collects that drop: the answer stands on a canonical merge
+    // carrying histogram frames. Lowering such a boundary is two nodes, not one - a producer that
+    // runs the statement's own tree per partition and exports a frame, and the consumer above the
+    // router that converts the merged frames into the statement's rows. Both are the fused route;
+    // the answer asserted above is what proves the histograms survived the crossing.
+    let fused = observer.take_all("histogram sum_over_time");
     assert_eq!(
-        observer.take("histogram sum_over_time").name(),
-        "FusedSeriesExec"
+        2,
+        fused.len(),
+        "the canonical boundary is a producer and a consumer: {fused:?}"
+    );
+    assert!(
+        fused.iter().all(|node| node.name() == "FusedSeriesExec"),
+        "the boundary executed a node that is not the fused producer: {fused:?}"
+    );
+}
+
+/// A native histogram answer crosses a canonical merge on a real metric table.
+///
+/// A binding that carries `__unit__` holds two series that agree on everything else, and a kernel
+/// that drops the metadata labels removes `__unit__` with the name, so such a statement pays a
+/// canonical merge. A nullable key column is not what that collection is for: the labels are the
+/// whole of the drop's proof, and the `NULL`/`''` pair they cannot state is deliberately left
+/// outside it. For a histogram answer the merge carries histogram frames, which is the pairing this
+/// test pins end to end: the producer routes the pieces of one label set, the owner merges them with
+/// the same kernel
+/// it merges floats with, and the consumer answers what it collected.
+///
+/// The statement shapes here are the two sides of that crossing: `sum_over_time(h[1m])` answers the
+/// histograms the merge collected, and `histogram_count(sum_over_time(h[1m]))` reduces them to
+/// floats above it - so the boundary carries histograms while the statement answers a float.
+pub async fn test_remote_write_v2_histogram_native_nullable_tag_boundary(store_type: StorageType) {
+    let observer = Arc::new(NativeFusedObserver::default());
+    let plugins = Plugins::default();
+    let wrapper: PhysicalPlanWrapperRef = observer.clone();
+    plugins.insert(wrapper);
+    let instance = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(
+        "remote_write_v2_histogram_native_nullable_tag_boundary",
+    )
+    .with_default_store_type(store_type)
+    .with_query_options(QueryOptions {
+        experimental_native_promql: true,
+        ..Default::default()
+    })
+    .with_plugin(plugins)
+    .build()
+    .await;
+    let server = build_test_prom_server(instance.fe_instance().clone(), false, None)
+        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
+        .build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+    write_native_histogram(
+        &client,
+        &[
+            (prom_store::METRIC_NAME_LABEL, "native_histogram_nullable"),
+            ("job", "api"),
+            ("__unit__", "s"),
+        ],
+        1000,
+        5,
+        10.0,
+    )
+    .await;
+    write_native_histogram(
+        &client,
+        &[
+            (prom_store::METRIC_NAME_LABEL, "native_histogram_nullable"),
+            ("job", "api"),
+            ("__unit__", "s"),
+        ],
+        3000,
+        8,
+        20.0,
+    )
+    .await;
+    // The premise of this test, read off the table the writes created: `__unit__` is a tag of the
+    // table, so a drop of the metadata labels removes a label two series could be told apart by and
+    // the labels cannot prove it.
+    validate_data(
+        "native histogram metadata tag",
+        &client,
+        "select column_name, is_nullable from information_schema.columns \
+         where table_schema = 'public' and table_name = 'native_histogram_nullable' \
+         and column_name = '__unit__'",
+        "[[\"__unit__\",\"YES\"]]",
+    )
+    .await;
+
+    // A histogram answer standing on the collected merge: `sum_over_time` over a native histogram
+    // drops the metadata labels, so the two writes' histograms travel through the boundary and the
+    // answer is the one histogram the merge collected.
+    observer.clear();
+    let response = client
+        .get("/v1/prometheus/api/v1/query?query=sum_over_time(native_histogram_nullable%5B1m%5D)&time=3")
+        .header("x-greptime-hints", "query.experimental_native_promql=true")
+        .send()
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await;
+    assert_eq!(body["data"]["resultType"], "vector", "{body}");
+    assert_eq!(body["data"]["result"][0]["histogram"][0], 3.0, "{body}");
+    assert_eq!(
+        body["data"]["result"][0]["histogram"][1]["count"], "13",
+        "`sum_over_time` adds the counts of the merged histograms: {body}"
+    );
+    assert_eq!(
+        body["data"]["result"][0]["histogram"][1]["sum"], "30",
+        "`sum_over_time` adds the sums of the merged histograms: {body}"
+    );
+    let fused = observer.take_all("histogram answer over a nullable tag");
+    assert_eq!(
+        2,
+        fused.len(),
+        "the collected drop is a producer and a consumer: {fused:?}"
+    );
+    assert!(
+        fused.iter().all(|node| node.name() == "FusedSeriesExec"),
+        "the histogram boundary left the native route: {fused:?}"
+    );
+
+    // The same boundary with a float answer above it: `histogram_count` maps the histograms the
+    // merge collected to floats, so the frames crossing the boundary are still histograms while the
+    // statement publishes a float column. This is the shape the removed fallback used to refuse for
+    // the histogram case and the only one that ever worked here, and both now take one route.
+    observer.clear();
+    let response = client
+        .get("/v1/prometheus/api/v1/query?query=histogram_count(sum_over_time(native_histogram_nullable%5B1m%5D))&time=3")
+        .header("x-greptime-hints", "query.experimental_native_promql=true")
+        .send()
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await;
+    assert_eq!(body["data"]["resultType"], "vector", "{body}");
+    assert_eq!(
+        body["data"]["result"][0]["value"][1].as_str(),
+        Some("13.0"),
+        "`histogram_count` counts the merged histograms' samples: {body}"
+    );
+    let fused = observer.take_all("float answer over a histogram boundary");
+    assert_eq!(
+        2,
+        fused.len(),
+        "the collected drop is a producer and a consumer: {fused:?}"
+    );
+    assert!(
+        fused.iter().all(|node| node.name() == "FusedSeriesExec"),
+        "the float answer left the native route: {fused:?}"
+    );
+
+    // `rate` is the same crossing over a window: a histogram answer whose count and sum the merge
+    // carries, compared against the existing plan's answer so the crossing is judged by the number
+    // rather than by the shape alone.
+    let url = "/v1/prometheus/api/v1/query?query=rate(native_histogram_nullable%5B5m%5D)&time=4";
+    observer.clear();
+    let native = client
+        .get(url)
+        .header("x-greptime-hints", "query.experimental_native_promql=true")
+        .send()
+        .await;
+    assert_eq!(native.status(), StatusCode::OK);
+    let native: Value = native.json().await;
+    let legacy = client.get(url).send().await;
+    assert_eq!(legacy.status(), StatusCode::OK);
+    let legacy: Value = legacy.json().await;
+    assert_eq!(
+        native["data"]["result"], legacy["data"]["result"],
+        "`rate(h[5m])`: the native answer differs from the existing plan's"
+    );
+    // The two writes 2s apart are `count` 5 and `8` with `sum` 10 and 20, and the 5m window at the
+    // instant `4` extrapolates that over the range: (8 - 5) / 300s and (20 - 10) / 300s, in seconds.
+    assert_eq!(
+        (
+            native["data"]["result"][0]["histogram"][1]["count"].as_str(),
+            native["data"]["result"][0]["histogram"][1]["sum"].as_str(),
+        ),
+        (Some("0.02"), Some("0.06666666666666667")),
+        "`rate(h[5m])` answered {native}"
+    );
+    let fused = observer.take_all("histogram rate over a nullable tag");
+    let descriptions = fused
+        .iter()
+        .map(|node| {
+            datafusion::physical_plan::displayable(node.as_ref())
+                .one_line()
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        descriptions
+            .iter()
+            .all(|description| description.starts_with("FusedSeriesExec")),
+        "`rate(h[5m])` left the native route: {descriptions:?}"
+    );
+    // How many fused nodes a raw window's boundary executes is a property of where its regions run
+    // it, so this asks what the executed plan carries instead: a canonical merge standing on the
+    // histogram window, which is the pairing the answer above is computed through.
+    assert!(
+        descriptions.iter().any(|description| description
+            .contains("Merge: canonical label-set merge")
+            && description.contains("Window: rate ")),
+        "`rate(h[5m])` executed no canonical merge over its histogram window: {descriptions:?}"
     );
 }
 
@@ -5899,10 +6159,21 @@ pub async fn test_remote_write_v2_histogram_native_arithmetic(store_type: Storag
             (expected_count.to_string(), expected_sum.to_string()),
             "{query}: {body}"
         );
-        assert_eq!(
-            observer.take("histogram arithmetic").name(),
-            "FusedSeriesExec",
-            "{query} left the native route"
+        // Scalar arithmetic over a histogram drops the metadata labels, and the labels prove that
+        // drop here: the table binds one metric and carries no metadata label among its tags, so
+        // nothing is collected and the statement runs as one fused node. A shape whose drop is not
+        // proved - a rewrite that folds label sets, or a tag such as `__unit__` - keeps the pair a
+        // canonical merge lowers to, a producer that scales each partition's histograms and the
+        // consumer above the router. Either way every node is the fused route, and the scaled counts
+        // and sums asserted above are what proves the payload survived.
+        let fused = observer.take_all(query);
+        assert!(
+            (1..=2).contains(&fused.len()),
+            "{query}: the statement is one node, or the producer and consumer of a boundary: {fused:?}"
+        );
+        assert!(
+            fused.iter().all(|node| node.name() == "FusedSeriesExec"),
+            "{query} left the native route: {fused:?}"
         );
     }
 
@@ -5921,12 +6192,19 @@ pub async fn test_remote_write_v2_histogram_native_arithmetic(store_type: Storag
         Some(0),
         "`2 / h` should drop the histogram position: {body}"
     );
-    assert_eq!(
-        observer
-            .take("histogram arithmetic: scalar over histogram")
-            .name(),
-        "FusedSeriesExec",
-        "`2 / h` left the native route"
+    // `2 / h` drops the histogram position and answers nothing, but it is still the same statement
+    // kind on the same drop: the labels prove that drop here, so nothing is collected and the
+    // statement runs as one fused node that scales each partition's histograms, drops them and
+    // answers the empty result. A shape whose drop is not proved keeps the producer/consumer pair a
+    // canonical merge lowers to, which is why either count is the route's own.
+    let fused = observer.take_all("histogram arithmetic: scalar over histogram");
+    assert!(
+        (1..=2).contains(&fused.len()),
+        "`2 / h`: the statement is one node, or the producer and consumer of a boundary: {fused:?}"
+    );
+    assert!(
+        fused.iter().all(|node| node.name() == "FusedSeriesExec"),
+        "`2 / h` left the native route: {fused:?}"
     );
 }
 
@@ -7285,16 +7563,25 @@ pub async fn test_remote_write_v2_histogram_sum_and_avg_native_route(store_type:
             &format!("{query}: the existing path answered something else: {legacy}"),
         );
 
-        // Both halves of the split executed: the partial producer folded each partition and the
-        // final consumer merged that state into the answer above.
+        // Both halves of the split executed: a partial producer that folds its own input and a final
+        // consumer that merges the partials above the state router. The capture holds them once per
+        // stage that ran the split, so the count is not pinned; what is asserted is that every node
+        // is a fused stage of that split and that both halves are there - one alone would mean the
+        // other stage fell back to the existing plan.
         let fused = observer.take_all(query);
-        assert_eq!(
-            fused.len(),
-            2,
-            "{query}: expected the split's two nodes: {fused:?}"
+        let described = describe_nodes(&fused);
+        assert!(
+            described
+                .iter()
+                .all(|node| node.contains(" partial") || node.contains(" final")),
+            "{query}: a node of the capture is not one half of the split: {described:?}"
         );
-        let consumer = answer_consumer(&fused);
-        assert_eq!(consumer.name(), "FusedSeriesExec");
+        for half in [" partial", " final"] {
+            assert!(
+                described.iter().any(|node| node.contains(half)),
+                "{query}: the split ran without its{half} half: {described:?}"
+            );
+        }
     }
 }
 
@@ -7375,28 +7662,26 @@ pub async fn test_remote_write_v2_histogram_avg_native_partitions(store_type: St
         "the partitioned average is wrong: {partitioned}"
     );
     let fused = observer.take_all("avg over partitions");
-    let consumer = answer_consumer(&fused);
-    assert_eq!(consumer.name(), "FusedSeriesExec");
-    assert_eq!(
-        fused.len(),
-        2,
-        "the split's partial and final nodes both execute: {fused:?}"
-    );
     // The producer runs once per partition that read rows, which is what makes this a merge and not
-    // a single fold.
+    // a single fold, so the figures this test reads are the partial stage's: it is the node whose
+    // tree carries the fold before the state router, and it is the only node that reports them.
     let producer = fused
         .iter()
-        .find(|node| !Arc::ptr_eq(node, consumer))
-        .expect("the partial producer");
+        .find(|node| describe_node(node).contains(" partial"))
+        .expect("the split's partial producer");
+    // The per-partition figures are the ones the node registered per partition, which is the view
+    // `node_metric_set` reports; the node's own aggregated set sums them into one entry.
     let metrics = node_metric_set(producer);
     let mut partitions: BTreeMap<usize, usize> = BTreeMap::new();
     for metric in metrics.iter() {
-        if metric.value().name() == "native.root.output_values"
-            && let MetricValue::Count { count, .. } = metric.value()
-        {
-            *partitions
-                .entry(metric.partition().expect("partition label"))
-                .or_insert(0usize) += count.value();
+        let Some(partition) = metric.partition() else {
+            continue;
+        };
+        let MetricValue::Count { count, .. } = metric.value() else {
+            continue;
+        };
+        if metric.value().name() == "native.root.output_values" {
+            *partitions.entry(partition).or_insert(0usize) += count.value();
         }
     }
     assert_eq!(

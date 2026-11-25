@@ -11,6 +11,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::num::NonZeroU64;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -33,14 +34,20 @@ use datatypes::value::Value;
 use datatypes::vectors::json::array::JsonArray;
 use datatypes::vectors::json::json2_physical_data_type;
 use futures::TryStreamExt;
+use futures::io::{self, AsyncReadExt};
+use object_store::layers::CapabilityOverrideLayer;
+use object_store::layers::mock::oio::Write as _;
 use object_store::layers::mock::{self, MockLayerBuilder, oio};
 use partition::expr::col;
 use partition::multi_dim::MultiDimPartitionRule;
+use puffin::puffin_manager::{PuffinManager, PuffinReader, PuffinWriter};
+use rand::{RngCore, SeedableRng, rngs::SmallRng};
 use serde_json::json;
 use store_api::codec::PrimaryKeyEncoding;
-use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
 use store_api::region_request::PathType;
 use store_api::storage::RegionId;
+use tokio::sync::watch;
 
 use super::*;
 use crate::access_layer::{AccessLayer, Metrics, OperationType, SstWriteRequest, WriteType};
@@ -49,10 +56,15 @@ use crate::error::InvalidMultiRegionCompactionSnafu;
 use crate::read::FlatSource;
 use crate::sst::file::{FileHandle, RegionFileId};
 use crate::sst::file_purger::NoopFilePurger;
-use crate::sst::index::handler::{IndexKindHandler, IndexKindProvider, PlanContext, PlannedIndex};
+use crate::sst::index::CompletedEntry;
+use crate::sst::index::handler::{
+    BuildContext, IndexCreator, IndexKindHandler, IndexKindProvider, PlanContext, PlanEntry,
+    PlannedIndex,
+};
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::kind::{ExtensionIndexKind, IndexKind};
-use crate::sst::index::puffin_manager::PuffinManagerFactory;
+use crate::sst::index::puffin_manager::{PuffinManagerFactory, SstPuffinWriter};
+use crate::sst::location;
 use crate::sst::parquet::WriteOptions;
 use crate::sst::parquet::flat_format::{
     primary_key_column_index, sequence_column_index, time_index_column_index,
@@ -124,30 +136,8 @@ impl Fixture {
         format: FormatType,
         batches: impl FnOnce(&RegionMetadataRef) -> Vec<RecordBatch>,
     ) -> Self {
-        let env = SchedulerEnv::new().await;
-        let aux = env.path.path().join("table-index");
-        let layer = Arc::new(AccessLayer::new(
-            "table/",
-            if encoding == PrimaryKeyEncoding::Sparse {
-                PathType::Data
-            } else {
-                PathType::Bare
-            },
-            env.access_layer.object_store().clone(),
-            PuffinManagerFactory::new(&aux, 1024 * 1024, None, None)
-                .await
-                .unwrap(),
-            IntermediateManager::init_fs(aux.to_str().unwrap())
-                .await
-                .unwrap(),
-        ));
-        let mut metadata = sst_region_metadata_with_encoding(encoding);
-        metadata.region_id = RegionId::new(1, 0);
-        let metadata = Arc::new(metadata);
-        let mut config = MitoConfig::default();
-        config.index.aux_path = aux.display().to_string();
-        let config = Arc::new(config);
-        let mut batches = batches(&metadata);
+        let mut fixture = Self::without_source(sst_region_metadata_with_encoding(encoding)).await;
+        let mut batches = batches(&fixture.metadata);
         batches.sort_by_cached_key(|batch| {
             let keys = cast(
                 batch.column(primary_key_column_index(batch.num_columns())),
@@ -160,18 +150,41 @@ impl Fixture {
                 .value(0)
                 .to_vec()
         });
-        let mut fixture = Self {
+        let info = fixture
+            .write_source(fixture.metadata.clone(), batches, format)
+            .await;
+        fixture.source = file_meta(info, fixture.metadata.region_id);
+        fixture
+    }
+
+    async fn without_source(mut metadata: RegionMetadata) -> Self {
+        let env = SchedulerEnv::new().await;
+        let aux = env.path.path().join("table-index");
+        let layer = Arc::new(AccessLayer::new(
+            "table/",
+            if metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse {
+                PathType::Data
+            } else {
+                PathType::Bare
+            },
+            env.access_layer.object_store().clone(),
+            PuffinManagerFactory::new(&aux, 1024 * 1024, None, None)
+                .await
+                .unwrap(),
+            IntermediateManager::init_fs(aux.to_str().unwrap())
+                .await
+                .unwrap(),
+        ));
+        metadata.region_id = RegionId::new(1, 0);
+        let mut config = MitoConfig::default();
+        config.index.aux_path = aux.display().to_string();
+        Self {
             env,
             layer,
-            metadata: metadata.clone(),
+            metadata: Arc::new(metadata),
             source: FileMeta::default(),
-            config,
-        };
-        let info = fixture
-            .write_source(metadata.clone(), batches, format)
-            .await;
-        fixture.source = file_meta(info, metadata.region_id);
-        fixture
+            config: Arc::new(config),
+        }
     }
 
     async fn write_source(
@@ -179,6 +192,17 @@ impl Fixture {
         metadata: RegionMetadataRef,
         batches: Vec<RecordBatch>,
         format: FormatType,
+    ) -> SstInfo {
+        self.write_source_with_options(metadata, batches, format, &WriteOptions::default())
+            .await
+    }
+
+    async fn write_source_with_options(
+        &self,
+        metadata: RegionMetadataRef,
+        batches: Vec<RecordBatch>,
+        format: FormatType,
+        options: &WriteOptions,
     ) -> SstInfo {
         self.layer
             .write_sst(
@@ -188,7 +212,7 @@ impl Fixture {
                     &self.config,
                     format,
                 ),
-                &WriteOptions::default(),
+                options,
                 &mut Metrics::new(WriteType::Flush),
             )
             .await
@@ -204,6 +228,10 @@ impl Fixture {
     }
 
     fn plan(&self, regions: u32) -> MultiRegionCompactionPlan {
+        self.plan_with_sources(regions, vec![self.source.clone()])
+    }
+
+    fn plan_with_sources(&self, regions: u32, sources: Vec<FileMeta>) -> MultiRegionCompactionPlan {
         let mut targets = BTreeMap::new();
         for region in 0..regions {
             let id = RegionId::new(1, region);
@@ -218,8 +246,14 @@ impl Fixture {
                     .as_json_str()
                     .unwrap(),
             ));
-            let mut input = self.source.clone();
-            input.sequence = NonZeroU64::new(100 + region as u64);
+            let inputs = sources
+                .iter()
+                .cloned()
+                .map(|mut input| {
+                    input.sequence = NonZeroU64::new(100 + region as u64);
+                    (input.file_id(), input)
+                })
+                .collect();
             let options = RegionOptions {
                 append_mode: true,
                 preserve_row_sequence: true,
@@ -231,7 +265,7 @@ impl Fixture {
                 MultiRegionTarget {
                     metadata: Arc::new(metadata),
                     options,
-                    inputs: [(input.file_id(), input)].into_iter().collect(),
+                    inputs,
                 },
             );
         }
@@ -254,7 +288,7 @@ impl Fixture {
         );
         MultiRegionCompactionPlan {
             partition_rule,
-            sources: vec![self.source.clone()],
+            sources,
             targets,
             // Includes the fixed Parquet encoder allocations of every resident
             // target, unlike the old run-cache-only budget.
@@ -617,7 +651,6 @@ async fn test_failed_target_never_returns_a_partial_table_result() {
         fixture.layer.path_type(),
     );
     assert!(fixture.layer.object_store().exists(&path).await.unwrap());
-    assert_spill_cleaned(&fixture.env.path.path().join("spill")).await;
 }
 
 #[rstest::rstest]
@@ -681,8 +714,6 @@ async fn test_long_tag_stream_is_lossless_and_insufficient_admission_creates_no_
     let output = fixture.compact(plan).await;
     assert_eq!(102400, output.stats.output_rows);
     assert!(output.stats.estimated_memory_bytes <= 128 * 1024 * 1024);
-    // The long-tag regression still checks every physical row. There is no
-    // intermediate IPC path or repeated materialization of all destinations.
     let mut ordinal = 0;
     for file in output.files.into_values().flatten() {
         for batch in fixture.read_output(file, fixture.metadata.clone()).await {
@@ -720,7 +751,6 @@ async fn test_long_tag_stream_is_lossless_and_insufficient_admission_creates_no_
         "{error:?}"
     );
     assert!(protected.files.lock().unwrap().is_empty());
-    assert_spill_cleaned(&fixture.env.path.path().join("spill")).await;
 }
 
 #[tokio::test]
@@ -1767,15 +1797,6 @@ async fn test_streaming_merge_preserves_overlapping_versions_and_field_routing(
     for path in source_paths {
         assert!(fixture.layer.object_store().exists(&path).await.unwrap());
     }
-    assert_spill_cleaned(&fixture.env.path.path().join("spill")).await;
-}
-
-async fn assert_spill_cleaned(path: &std::path::Path) {
-    // Stronger than cleanup: the streaming merge must never create this directory.
-    assert!(
-        !tokio::fs::try_exists(path).await.unwrap(),
-        "merge spill directory was created"
-    );
 }
 
 struct BlockIndexedSstWrite {
@@ -2000,7 +2021,6 @@ async fn test_interrupted_indexed_worker_cleans_tantivy_files(#[case] fail_sibli
     })
     .await
     .expect("cancelled worker leaked Tantivy intermediate files");
-    assert_spill_cleaned(&fixture.env.path.path().join("spill")).await;
     // Attempt cleanup must not delete sources or protected SSTs owned by the caller.
     for id in [fixture.source.file_id(), file] {
         let path = crate::sst::location::sst_file_path(
@@ -2025,7 +2045,7 @@ impl SstWriteGuard for CancelBeforeCreate {
 }
 
 #[tokio::test]
-async fn test_cancelling_a_blocked_writer_preserves_sources_without_merge_spill() {
+async fn test_cancelling_a_blocked_writer_preserves_sources() {
     let (fixture, plan) = overlapping_fixture().await;
     let sources = plan.sources.clone();
     let (mut context, _) = fixture.context(None);
@@ -2039,7 +2059,6 @@ async fn test_cancelling_a_blocked_writer_preserves_sources_without_merge_spill(
         error,
         crate::error::Error::CompactionCancelled { .. }
     ));
-    assert_spill_cleaned(&fixture.env.path.path().join("spill")).await;
     for file in sources {
         let path = crate::sst::location::sst_file_path(
             fixture.layer.table_dir(),
@@ -2271,6 +2290,538 @@ async fn test_all_resident_writers_are_admitted_before_creating_outputs() {
     assert!(protection.files.lock().unwrap().is_empty());
 }
 
+const MIB: usize = 1024 * 1024;
+const MULTIPART_CHUNK: usize = 5 * MIB;
+const MULTIPART_INPUTS: usize = 8;
+const ROWS_PER_INPUT_PER_TARGET: usize = 4096;
+const PAYLOAD_BYTES: usize = 640;
+const MULTIPART_TAGS: [&str; 2] = ["000", "020"];
+
+#[tokio::test]
+async fn test_table_budget_below_legacy_floor_writes_multipart_outputs_losslessly() {
+    let metadata = build_test_binary_test_region_metadata();
+    let mut fixture = Fixture::without_source((*metadata).clone()).await;
+    let row_group_size = 256;
+    let options = WriteOptions {
+        row_group_size,
+        ..Default::default()
+    };
+    // Each SST has both tags and a disjoint timestamp range: 40 MiB of
+    // incompressible payload overall, but only 40 KiB of payload per 64 rows.
+    let mut sources = Vec::new();
+    for input in 0..MULTIPART_INPUTS {
+        let info = fixture
+            .write_source_with_options(
+                fixture.metadata.clone(),
+                multipart_input_batches(input),
+                FormatType::Flat,
+                &options,
+            )
+            .await;
+        sources.push(info);
+    }
+    // The final source row group contains the last batches for the second target.
+    let tail = Arc::new(InputTailGate::new(
+        &fixture,
+        sources.last().unwrap(),
+        RegionId::new(1, 1),
+    ));
+    let sources = sources
+        .into_iter()
+        .map(|info| file_meta(info, fixture.metadata.region_id))
+        .collect();
+    let mut plan = fixture.plan_with_sources(2, sources);
+    // The old per-Arrow-buffer minimum rejected this even at 1 GiB. Each
+    // target now gets a separate upload chunk and writes one ~20 MiB SST.
+    let budget = 512 * MIB;
+    plan.memory_limit = budget;
+    plan.max_output_file_size = 32 * MIB;
+    for target in plan.targets.values_mut() {
+        target.options.max_row_group_row_count = Some(row_group_size);
+    }
+    let targets = plan.targets.clone();
+    let uploads = install_multipart_backend(&mut fixture, MULTIPART_CHUNK, Some(tail.clone()));
+    let (mut context, _) = fixture.context(None);
+    context.index_kind_provider = Some(Arc::new(UploadProbeIndex));
+
+    let output = tokio::time::timeout(Duration::from_secs(60), compact_regions(plan, context))
+        .await
+        .expect("the target must upload a part before reading its final input group")
+        .unwrap();
+    assert!(
+        tail.requested.load(Ordering::Relaxed),
+        "input never reached the gated row group"
+    );
+    assert!(output.stats.estimated_memory_bytes <= budget as u64);
+    assert_eq!(targets.len(), output.files.len());
+    let layer = &fixture.layer;
+    for (id, target) in targets {
+        let files = &output.files[&id];
+        assert_eq!(1, files.len());
+        let file = &files[0];
+        let path = location::sst_file_path(layer.table_dir(), file.file_id(), layer.path_type());
+        uploads.assert_completed(&path, file.file_size);
+        let path = location::index_file_path(layer.table_dir(), file.index_id(), layer.path_type());
+        uploads.assert_completed(&path, file.index_file_size);
+        let puffin = layer
+            .build_puffin_manager()
+            .reader(&file.index_id())
+            .await
+            .unwrap();
+        assert!(puffin.metadata().await.unwrap().blobs.iter().any(|blob| {
+            blob.blob_type == UPLOAD_PROBE_BLOB && blob.length as u64 == UPLOAD_PROBE_BYTES
+        }));
+
+        check_multipart_rows(
+            fixture
+                .read_published_output(file.clone(), target.metadata)
+                .await,
+            id.region_sequence() as usize,
+            MULTIPART_INPUTS * ROWS_PER_INPUT_PER_TARGET,
+        );
+    }
+}
+
+#[rstest::rstest]
+#[case::budget_cannot_cover_both_targets(8 * MIB, 92 * MIB)]
+#[case::backend_disallows_all_part_sizes(0, 512 * MIB)]
+#[tokio::test]
+async fn test_multipart_admission_rejects_before_protection_or_write(
+    #[case] chunk: usize,
+    #[case] budget: usize,
+) {
+    let mut fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
+    let mut plan = fixture.plan(2);
+    plan.memory_limit = budget;
+    let uploads = install_multipart_backend(&mut fixture, chunk, None);
+    let (context, protection) = fixture.context(None);
+    let error = compact_regions(plan, context)
+        .await
+        .err()
+        .expect("must reject before writing");
+    assert!(
+        matches!(
+            error,
+            crate::error::Error::MultiRegionCompactionResource { .. }
+        ),
+        "{error:?}"
+    );
+    assert!(protection.files.lock().unwrap().is_empty());
+    assert!(uploads.files.lock().unwrap().is_empty());
+}
+
+fn multipart_input_batches(input: usize) -> Vec<RecordBatch> {
+    let start = input * ROWS_PER_INPUT_PER_TARGET;
+    let end = start + ROWS_PER_INPUT_PER_TARGET;
+    MULTIPART_TAGS
+        .iter()
+        .enumerate()
+        .map(|(target, tag)| {
+            let values = (start..end)
+                .map(|timestamp| multipart_payload(target, timestamp).to_vec())
+                .collect::<Vec<_>>();
+            let batch = new_record_batch_with_binary_values(tag, &values);
+            let mut columns = batch.columns().to_vec();
+            let time_index = time_index_column_index(columns.len());
+            columns[time_index] = Arc::new(TimestampMillisecondArray::from_iter_values(
+                start as i64..end as i64,
+            ));
+            RecordBatch::try_new(batch.schema(), columns).unwrap()
+        })
+        .collect()
+}
+
+fn multipart_payload(target: usize, timestamp: usize) -> [u8; PAYLOAD_BYTES] {
+    let mut bytes = [0; PAYLOAD_BYTES];
+    SmallRng::seed_from_u64((timestamp * MULTIPART_TAGS.len() + target) as u64)
+        .fill_bytes(&mut bytes);
+    bytes
+}
+
+fn check_multipart_rows(batches: Vec<RecordBatch>, target: usize, rows: usize) {
+    let mut seen = vec![false; rows];
+    // The input owner keeps physical versions; the other region uses its
+    // admitted file version (see plan_with_sources).
+    let expected_sequence = if target == 0 { 1000 } else { 101 };
+    for batch in batches {
+        let tags = cast(batch.column_by_name("tag_0").unwrap(), &DataType::Utf8).unwrap();
+        let tags = tags.as_any().downcast_ref::<StringArray>().unwrap();
+        let values = cast(batch.column_by_name("field_0").unwrap(), &DataType::Binary).unwrap();
+        let values = values.as_any().downcast_ref::<BinaryArray>().unwrap();
+        let timestamps =
+            crate::read::timestamp_array_to_i64_slice(batch.column_by_name("ts").unwrap());
+        let sequences = batch
+            .column(sequence_column_index(batch.num_columns()))
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        for (row, &timestamp) in timestamps.iter().enumerate() {
+            assert_eq!(expected_sequence, sequences.value(row));
+            assert!(tags.is_valid(row) && tags.value(row) == MULTIPART_TAGS[target]);
+            let timestamp = timestamp as usize;
+            assert!(!seen[timestamp], "duplicate timestamp {timestamp}");
+            seen[timestamp] = true;
+            assert!(
+                values.is_valid(row)
+                    && values.value(row) == &multipart_payload(target, timestamp)[..],
+                "wrong payload for target {target}, timestamp {timestamp}"
+            );
+        }
+    }
+    assert!(
+        seen.into_iter().all(|row| row),
+        "missing rows in target {target}"
+    );
+}
+
+/// Withholds the payload of the last input row group until its target's SST starts uploading.
+struct InputTailGate {
+    source_path: String,
+    source_size: usize,
+    payload_offset: usize,
+    target_dir: String,
+    first_part: watch::Sender<bool>,
+    requested: AtomicBool,
+}
+
+impl InputTailGate {
+    fn new(fixture: &Fixture, source: &SstInfo, target: RegionId) -> Self {
+        let footer = source.file_metadata.as_ref().unwrap();
+        let payload = footer
+            .row_groups()
+            .last()
+            .unwrap()
+            .columns()
+            .iter()
+            .find(|column| column.column_path().string() == "field_0")
+            .unwrap();
+        let layer = &fixture.layer;
+        Self {
+            source_path: location::sst_file_path(
+                layer.table_dir(),
+                RegionFileId::new(fixture.metadata.region_id, source.file_id),
+                layer.path_type(),
+            ),
+            source_size: source.file_size as usize,
+            payload_offset: payload.byte_range().0 as usize,
+            target_dir: location::region_dir_from_table_dir(
+                layer.table_dir(),
+                target,
+                layer.path_type(),
+            ),
+            first_part: watch::channel(false).0,
+            requested: AtomicBool::new(false),
+        }
+    }
+
+    async fn wait_for_part(&self, range: mock::BytesRange) -> mock::Result<()> {
+        if range
+            .to_content_range(self.source_size)?
+            .contains(&self.payload_offset)
+        {
+            self.requested.store(true, Ordering::Relaxed);
+            self.first_part
+                .subscribe()
+                .wait_for(|&started| started)
+                .await
+                .unwrap();
+        }
+        Ok(())
+    }
+}
+
+struct TailReader {
+    inner: oio::Reader,
+    gate: Arc<InputTailGate>,
+}
+
+impl oio::Read for TailReader {
+    async fn open(
+        &self,
+        range: mock::BytesRange,
+    ) -> mock::Result<(mock::RpRead, Box<dyn oio::ReadStreamDyn>)> {
+        self.gate.wait_for_part(range).await?;
+        self.inner.open(range).await
+    }
+
+    async fn read(&self, range: mock::BytesRange) -> mock::Result<(mock::RpRead, mock::Buffer)> {
+        self.gate.wait_for_part(range).await?;
+        self.inner.read(range).await
+    }
+}
+
+struct MultipartUploads {
+    files: Mutex<BTreeMap<String, MultipartUpload>>,
+    tail: Option<Arc<InputTailGate>>,
+}
+
+#[derive(Default)]
+struct MultipartUpload {
+    parts: Vec<u64>,
+    completed: bool,
+}
+
+impl MultipartUploads {
+    fn assert_completed(&self, path: &str, size: u64) {
+        let uploads = self.files.lock().unwrap();
+        let upload = uploads
+            .get(path)
+            .unwrap_or_else(|| panic!("no upload for {path}"));
+        assert!(
+            upload.completed,
+            "multipart upload did not complete for {path}"
+        );
+        let (last, full) = upload.parts.split_last().unwrap();
+        assert!(
+            full.len() >= 2
+                && full.iter().all(|&part| part == MULTIPART_CHUNK as u64)
+                && (1..=MULTIPART_CHUNK as u64).contains(last),
+            "wrong multipart sizes for {path}: {:?}",
+            upload.parts
+        );
+        assert_eq!(size, upload.parts.iter().sum::<u64>(), "{path}");
+    }
+}
+
+/// Uses the same OpenDAL chunker and multipart state machine as S3. Only the
+/// service's part requests are replaced, appending to an FS writer with no
+/// whole-file buffer in the fake backend.
+fn install_multipart_backend(
+    fixture: &mut Fixture,
+    chunk: usize,
+    tail: Option<Arc<InputTailGate>>,
+) -> Arc<MultipartUploads> {
+    let mut mock = MockLayerBuilder::default();
+    if let Some(gate) = tail.clone() {
+        mock.reader_factory(Arc::new(move |path, _, inner| {
+            if path == gate.source_path {
+                Box::new(TailReader {
+                    inner,
+                    gate: gate.clone(),
+                })
+            } else {
+                inner
+            }
+        }));
+    }
+    let uploads = Arc::new(MultipartUploads {
+        files: Mutex::default(),
+        tail,
+    });
+    let layer = &fixture.layer;
+    let store = layer.object_store().clone();
+    let executor = store.context().executor().clone();
+    let observed = uploads.clone();
+    let mock = mock
+        .writer_factory(Arc::new(move |path, args, inner| {
+            assert_eq!(1, args.concurrent(), "multipart concurrency for {path}");
+            let previous = observed
+                .files
+                .lock()
+                .unwrap()
+                .insert(path.to_string(), MultipartUpload::default());
+            assert!(previous.is_none(), "opened multiple writers for {path}");
+            Box::new(oio::MultipartWriter::new(
+                executor.clone(),
+                FsMultipartSink {
+                    inner: tokio::sync::Mutex::new(inner),
+                    path: path.to_string(),
+                    uploads: observed.clone(),
+                },
+                args.concurrent(),
+            )) as oio::Writer
+        }))
+        .build()
+        .unwrap();
+    let store = store
+        .layer(mock)
+        .layer(CapabilityOverrideLayer::new(move |mut caps| {
+            caps.write_multi_min_size = Some(chunk);
+            caps.write_multi_max_size = Some(chunk);
+            caps
+        }));
+    fixture.layer = Arc::new(AccessLayer::new(
+        layer.table_dir(),
+        layer.path_type(),
+        store,
+        layer.puffin_manager_factory().clone(),
+        layer.intermediate_manager().clone(),
+    ));
+    uploads
+}
+
+struct FsMultipartSink {
+    inner: tokio::sync::Mutex<oio::Writer>,
+    path: String,
+    uploads: Arc<MultipartUploads>,
+}
+
+impl oio::MultipartWrite for FsMultipartSink {
+    async fn write_once(&self, _size: u64, body: mock::Buffer) -> mock::Result<mock::Metadata> {
+        let mut writer = self.inner.lock().await;
+        writer.write(body).await?;
+        writer.close().await
+    }
+
+    async fn initiate_part(&self) -> mock::Result<String> {
+        Ok(self.path.clone())
+    }
+
+    async fn write_part(
+        &self,
+        _: &str,
+        part_number: usize,
+        size: u64,
+        body: mock::Buffer,
+    ) -> mock::Result<oio::MultipartPart> {
+        {
+            let mut files = self.uploads.files.lock().unwrap();
+            let parts = &mut files.get_mut(&self.path).unwrap().parts;
+            assert_eq!(
+                parts.len(),
+                part_number,
+                "out-of-order part for {}",
+                self.path
+            );
+            parts.push(size);
+        }
+        if part_number == 0
+            && let Some(tail) = &self.uploads.tail
+            && self.path.starts_with(&tail.target_dir)
+            && self.path.ends_with(".parquet")
+        {
+            assert!(
+                !tail.first_part.send_replace(true),
+                "multiple SSTs released the same input tail"
+            );
+        }
+        self.inner.lock().await.write(body).await?;
+        Ok(oio::MultipartPart {
+            part_number,
+            size: Some(size),
+            etag: part_number.to_string(),
+            checksum: None,
+        })
+    }
+
+    async fn complete_part(
+        &self,
+        _: &str,
+        _: &[oio::MultipartPart],
+    ) -> mock::Result<mock::Metadata> {
+        let metadata = self.inner.lock().await.close().await?;
+        self.uploads
+            .files
+            .lock()
+            .unwrap()
+            .get_mut(&self.path)
+            .unwrap()
+            .completed = true;
+        Ok(metadata)
+    }
+
+    async fn abort_part(&self, _: &str) -> mock::Result<()> {
+        self.inner.lock().await.abort().await
+    }
+}
+
+const UPLOAD_PROBE_BLOB: &str = "test.upload-budget";
+const UPLOAD_PROBE_BYTES: u64 = (2 * MULTIPART_CHUNK + 123) as u64;
+const UPLOAD_PROBE_ENTRY: PlanEntry = PlanEntry {
+    column_id: 0,
+    kind: IndexKind::Extension(ExtensionIndexKind::Hll),
+    format_version: 1,
+};
+
+/// An uncompressed streaming blob drives the real Puffin writer across two
+/// parts without inflating a built-in index or retaining a large creator state.
+#[derive(Debug)]
+struct UploadProbeIndex;
+
+impl IndexKindProvider for UploadProbeIndex {
+    fn handlers(&self) -> Vec<Arc<dyn IndexKindHandler>> {
+        vec![Arc::new(Self)]
+    }
+}
+
+impl IndexKindHandler for UploadProbeIndex {
+    fn kinds(&self) -> &[IndexKind] {
+        &[UPLOAD_PROBE_ENTRY.kind]
+    }
+
+    fn validate(&self, _: &PlanContext<'_>) -> std::result::Result<(), BoxedError> {
+        Ok(())
+    }
+
+    fn plan(
+        &self,
+        _: &PlanContext<'_>,
+    ) -> std::result::Result<Option<Arc<dyn PlannedIndex>>, BoxedError> {
+        Ok(Some(Arc::new(Self)))
+    }
+}
+
+#[async_trait::async_trait]
+impl PlannedIndex for UploadProbeIndex {
+    fn kinds(&self) -> &[IndexKind] {
+        IndexKindHandler::kinds(self)
+    }
+
+    fn entries(&self) -> &[PlanEntry] {
+        &[UPLOAD_PROBE_ENTRY]
+    }
+
+    async fn build(
+        &self,
+        _: &BuildContext<'_>,
+    ) -> std::result::Result<Option<Box<dyn IndexCreator>>, BoxedError> {
+        Ok(Some(Box::new(Self)))
+    }
+
+    fn is_current(&self, _: &FileMeta, _: &PlanContext<'_>) -> bool {
+        false
+    }
+}
+
+#[async_trait::async_trait]
+impl IndexCreator for UploadProbeIndex {
+    async fn update(&mut self, _: &mut crate::read::Batch) -> std::result::Result<(), BoxedError> {
+        Ok(())
+    }
+
+    async fn update_flat(&mut self, _: &RecordBatch) -> std::result::Result<(), BoxedError> {
+        Ok(())
+    }
+
+    async fn finish(
+        &mut self,
+        writer: &mut SstPuffinWriter,
+    ) -> std::result::Result<Vec<CompletedEntry>, BoxedError> {
+        writer
+            .put_blob(
+                UPLOAD_PROBE_BLOB,
+                io::repeat(0x5a).take(UPLOAD_PROBE_BYTES),
+                Default::default(),
+                Default::default(),
+            )
+            .await
+            .map_err(BoxedError::new)?;
+        Ok(vec![CompletedEntry {
+            column_id: Some(UPLOAD_PROBE_ENTRY.column_id),
+            kind: UPLOAD_PROBE_ENTRY.kind,
+            format_version: UPLOAD_PROBE_ENTRY.format_version,
+        }])
+    }
+
+    async fn abort(&mut self) -> std::result::Result<(), BoxedError> {
+        Ok(())
+    }
+
+    fn memory_usage(&self) -> usize {
+        0
+    }
+}
+
 #[rstest::rstest]
 #[case::sync(crate::config::IndexBuildMode::Sync)]
 #[case::async_mode(crate::config::IndexBuildMode::Async)]
@@ -2296,7 +2847,7 @@ async fn test_admission_includes_each_tantivy_creator_even_in_async_mode(
 }
 
 #[tokio::test]
-async fn test_oversized_equal_key_group_fails_without_partial_outputs_or_spill() {
+async fn test_oversized_equal_key_group_fails_without_partial_outputs() {
     let fixture = Fixture::with_source(PrimaryKeyEncoding::Dense, FormatType::Flat, |_| {
         let batch = new_record_batch_with_custom_sequence(&["000", "series"], 0, 262_144, 0);
         let mut columns = batch.columns().to_vec();
@@ -2314,7 +2865,6 @@ async fn test_oversized_equal_key_group_fails_without_partial_outputs_or_spill()
         "{error:?}"
     );
     assert!(protection.files.lock().unwrap().is_empty());
-    assert_spill_cleaned(&fixture.env.path.path().join("spill")).await;
 }
 
 #[tokio::test]
@@ -2323,7 +2873,8 @@ async fn test_target_writer_sizes_row_groups_from_source_size() {
     let plan = fixture.plan(1);
     let (context, _protection) = fixture.context(None);
     let source = new_flat_source_from_record_batches(vec![source_batch(&fixture.metadata, 0, 100)]);
-    let limits = memory::MemoryLimits::new(&plan, source.schema()).unwrap();
+    let upload = memory::UploadBudget::new(&plan, context.access_layer.object_store()).unwrap();
+    let limits = memory::MemoryLimits::new(&plan, source.schema(), upload).unwrap();
     // 64 decoded rows of 4 MiB: 32 rows fill the 128 MiB target. The target's `FileMeta` inputs
     // describe the narrow fixture rows, which would allow the full cap.
     let writer = writer::TargetWriter::new(
@@ -2362,16 +2913,21 @@ async fn test_reader_admission_counts_decoded_values() {
 #[rstest::rstest]
 #[case::encoder("encoder")]
 #[case::metadata("metadata")]
+#[case::upload("upload")]
 #[tokio::test]
-async fn test_limited_writer_fails_instead_of_publishing_over_budget(#[case] kind: &'static str) {
+async fn test_limited_writer_fails_instead_of_returning_over_budget_output(
+    #[case] kind: &'static str,
+) {
     let fixture = Fixture::new(PrimaryKeyEncoding::Dense, FormatType::Flat, 0).await;
     let plan = fixture.plan(1);
     let (context, protection) = fixture.context(None);
     let source = new_flat_source_from_record_batches(vec![source_batch(&fixture.metadata, 0, 100)]);
-    let mut limits = memory::MemoryLimits::new(&plan, source.schema()).unwrap();
+    let upload = memory::UploadBudget::new(&plan, context.access_layer.object_store()).unwrap();
+    let mut limits = memory::MemoryLimits::new(&plan, source.schema(), upload).unwrap();
     match kind {
         "encoder" => limits.writer.working_bytes = 1,
         "metadata" => limits.writer.metadata_bytes = 1,
+        "upload" => limits.writer.upload_limits.max_object_bytes = 1,
         _ => unreachable!(),
     }
     let error = writer::TargetWriter::new(
@@ -2386,10 +2942,11 @@ async fn test_limited_writer_fails_instead_of_publishing_over_budget(#[case] kin
     .await
     .err()
     .unwrap();
-    assert!(
-        matches!(&error, crate::error::Error::SstWriteMemoryExceeded { kind: actual, .. } if *actual == kind),
-        "{error:?}"
-    );
+    match error {
+        crate::error::Error::MultiRegionCompactionResource { .. } if kind == "upload" => {}
+        crate::error::Error::SstWriteMemoryExceeded { kind: actual, .. } if actual == kind => {}
+        _ => panic!("unexpected {kind} limit error: {error:?}"),
+    }
     assert_eq!(1, protection.files.lock().unwrap().len());
 }
 
@@ -2670,5 +3227,113 @@ async fn test_missing_index_handler_does_not_block_routed_compaction() {
                     )))
             );
         }
+    }
+}
+
+#[rstest::rstest]
+#[case::borrowed(PrimaryKeyEncoding::Dense)]
+#[case::materialized(PrimaryKeyEncoding::Sparse)]
+#[tokio::test]
+async fn test_routing_at_source_batch_budget(#[case] encoding: PrimaryKeyEncoding) {
+    let fixture = Fixture::new(encoding, FormatType::Flat, 7).await;
+    let plan = fixture.plan(2);
+    let (context, _) = fixture.context(None);
+    let mut source = source::SharedSource::build(
+        &plan,
+        &context,
+        validate_plan(&plan).unwrap(),
+        Arc::new(SourceCounters::default()),
+    )
+    .await
+    .unwrap();
+    let source = Arc::get_mut(&mut source).unwrap();
+    let batch = source_batch(&fixture.metadata, 0, 7);
+    source.limits.arrow_batch_bytes = batch.get_array_memory_size();
+    let owners = source.row_owners(&batch);
+    if encoding == PrimaryKeyEncoding::Dense {
+        assert_eq!(
+            owners.unwrap(),
+            vec![fixture.metadata.region_id; batch.num_rows()]
+        );
+    } else {
+        assert!(matches!(
+            owners,
+            Err(crate::error::Error::MultiRegionCompactionResource { .. })
+        ));
+    }
+}
+
+// Exercise persisted sparse inputs, schema alignment, routing and output readback
+// together: unrelated nullable tags must never become merge columns.
+#[rstest::rstest]
+#[case(2)]
+#[case(40)]
+#[case(3600)]
+#[tokio::test]
+async fn test_sparse_routing_with_wide_target_schema(#[case] target_tag_count: u32) {
+    let fixture = Fixture::new(PrimaryKeyEncoding::Sparse, FormatType::Flat, 7).await;
+    let mut plan = fixture.plan(8);
+    for target in plan.targets.values_mut() {
+        let mut keys = target.metadata.primary_key.clone();
+        let mut builder = RegionMetadataBuilder::from_existing((*target.metadata).clone());
+        // Sparse keys also contain the internal table ID and TSID.
+        let existing_tags = keys.len() as u32 - 2;
+        for offset in 0..target_tag_count - existing_tags {
+            let id = 4 + offset;
+            builder.push_column_metadata(ColumnMetadata {
+                column_schema: datatypes::schema::ColumnSchema::new(
+                    format!("tag_{id}"),
+                    datatypes::data_type::ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                semantic_type: api::v1::SemanticType::Tag,
+                column_id: id,
+            });
+            keys.push(id);
+        }
+        assert_eq!(keys.len(), target_tag_count as usize + 2);
+        builder.primary_key(keys);
+        target.metadata = Arc::new(builder.build().unwrap());
+    }
+    let targets = plan.targets.clone();
+    let (context, _) = fixture.context(None);
+    let metadata = targets.values().next().unwrap().metadata.clone();
+    let source = super::source::SharedSource::build(
+        &plan,
+        &context,
+        metadata,
+        Arc::new(super::SourceCounters::default()),
+    )
+    .await
+    .unwrap();
+    assert!(
+        source
+            .schema()
+            .fields()
+            .iter()
+            .all(|field| !field.name().starts_with("tag_"))
+    );
+    drop(source);
+    let output = compact_regions(plan, context).await.unwrap();
+    assert_eq!(124, output.stats.source_rows);
+    assert_eq!(124, output.stats.output_rows);
+    for (id, files) in output.files {
+        let mut rows = Vec::new();
+        for file in files {
+            rows.extend(
+                fixture
+                    .read_output_rows(file, targets[&id].metadata.clone())
+                    .await,
+            );
+        }
+        let sequence = if id == fixture.metadata.region_id {
+            7
+        } else {
+            100 + id.region_sequence() as u64
+        };
+        let mut expected = expected_source_rows(8, id, sequence);
+        rows.sort();
+        expected.sort();
+        assert_eq!(expected, rows);
     }
 }

@@ -1141,6 +1141,51 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Authority is closed"))]
+    AuthorityClosed {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Authority Head requires operator recovery"))]
+    AuthorityRecoveryRequired {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Authority operation was not executed: {}", reason))]
+    AuthorityRejected {
+        reason: &'static str,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Authority Head write sequence mismatch: expected {}, actual {}",
+        expected,
+        actual
+    ))]
+    AuthorityWriteSeqMismatch {
+        expected: u64,
+        actual: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Authority {} timed out", operation))]
+    AuthorityTimeout {
+        operation: &'static str,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Authority PUT outcome is unknown"))]
+    AuthorityUnknown {
+        source: Box<Error>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to open Authority storage"))]
     AuthorityOpen {
         #[snafu(source)]
@@ -1334,7 +1379,13 @@ impl ErrorExt for Error {
             AuthorityMissing { .. }
             | AuthorityMetadata { .. }
             | AuthorityStorage { .. }
-            | AuthorityOpen { .. } => StatusCode::StorageUnavailable,
+            | AuthorityOpen { .. }
+            | AuthorityClosed { .. }
+            | AuthorityRecoveryRequired { .. }
+            | AuthorityTimeout { .. }
+            | AuthorityUnknown { .. } => StatusCode::StorageUnavailable,
+            AuthorityRejected { .. } => StatusCode::IllegalState,
+            AuthorityWriteSeqMismatch { .. } => StatusCode::RequestOutdated,
             NoLeader { .. } => StatusCode::TableUnavailable,
             ValueNotExist { .. }
             | ProcedurePoisonConflict { .. }
@@ -1557,6 +1608,7 @@ impl Error {
             Self::AuthorityStorage { error, .. } | Self::AuthorityMissing { error, .. } => {
                 Some(error)
             }
+            Self::AuthorityUnknown { source, .. } => source.authority_storage_error(),
             _ => None,
         }
     }

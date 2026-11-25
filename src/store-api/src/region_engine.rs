@@ -185,9 +185,12 @@ impl SetRegionRoleStateResponse {
 pub struct GrantedRegion {
     pub region_id: RegionId,
     pub region_role: RegionRole,
-    /// An opaque non-zero id the metadata plane attaches to some leases, `None` for a lease
-    /// without one. It reaches the engine through [`RegionEngine::set_region_role_with_lease`];
-    /// engines may keep it with the lease and must not interpret it.
+    /// A non-zero id the metadata plane attaches to the Follower leases of a region migration's
+    /// target before the route names that target, `None` for a lease without one. It reaches the
+    /// engine through [`RegionEngine::set_region_role_with_lease`]. An engine may keep it with the
+    /// lease, and may use its presence to keep such a lease from demoting a region that the
+    /// migration's catchup made writable and that still awaits a Leader or StagingLeader lease.
+    /// Engines must not interpret its value.
     pub candidate_lease_id: Option<u64>,
     pub extensions: HashMap<String, Vec<u8>>,
 }
@@ -1536,7 +1539,9 @@ pub trait RegionEngine: Send + Sync {
     /// deadline of its latest Leader or StagingLeader lease. Leases of other roles do not extend
     /// that deadline.
     ///
-    /// `candidate_lease_id` is the lease's [GrantedRegion::candidate_lease_id].
+    /// `candidate_lease_id` is the lease's [GrantedRegion::candidate_lease_id]. A Follower lease
+    /// that carries one may leave a region that a catchup made writable alone until its Leader or
+    /// StagingLeader lease, see [`is_confirmed_leader`](Self::is_confirmed_leader).
     fn set_region_role_with_lease(
         &self,
         region_id: RegionId,

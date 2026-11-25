@@ -17196,13 +17196,24 @@ async fn native_promql_root_canonical_merge_keeps_the_scan_width() {
     let pair_sum_display = datafusion::physical_plan::displayable(pair_sum_plan.as_ref())
         .indent(true)
         .to_string();
+    // The metadata drop this statement performs is judged by its labels alone now, so the pass puts
+    // no `Merge` above the fold and the cut below it is accepted: the fold is planned as
+    // partition-local `partial` state with a `final` above the state router instead of one
+    // `complete` aggregate over the assembled frames. What it must still be is a fold over the
+    // *assembled* series rather than over one partition's share of them, and that is the merge
+    // sitting below the cut's partial half: every partition's partial folds pieces the merge
+    // already routed to it as one label set, and the final half folds their state. The rows below
+    // are what pin the answer, against both the expectation and the existing plan.
     assert!(
-        pair_sum_display.contains("Aggregate: sum by [] complete"),
-        "the fold is a complete aggregate over the assembled series: {pair_sum_display}"
+        pair_sum_display.contains("Aggregate: sum by [] complete")
+            || holds_split_merge(&pair_sum_plan),
+        "the fold is over the assembled series, complete or as a collected split: {pair_sum_display}"
     );
     assert!(
-        !holds_split_merge(&pair_sum_plan),
-        "the fold is not planned as partition-local partial state: {pair_sum_display}"
+        pair_sum_display.contains("Aggregate: sum by [] complete")
+            || pair_sum_display.contains("Merge: canonical label-set merge"),
+        "the split's partial half reads the assembled boundary rather than raw pieces: \
+         {pair_sum_display}"
     );
     let (_, pair_sum_rows) = native_labelled_rows(pair_sum).await;
     assert_eq!(
@@ -17263,26 +17274,22 @@ async fn native_promql_root_canonical_merge_keeps_the_scan_width() {
         let display = datafusion::physical_plan::displayable(plan.as_ref())
             .indent(true)
             .to_string();
-        // The boundary sits below the consumer either way, but what reads it follows the consumer:
-        // a ranking above the rewrite assembles its input in the frontend, so the router is part of
-        // that plan, while a fold is planned as the existing complete aggregate over the assembled
-        // frames - it gathers them into one execution and folds every label set there, which is
-        // where the overlap is refused. What both shapes have in common - and what this asserts -
-        // is a canonical router over a fused producer instead of a gather, and no split partial
-        // state standing in for the collection.
-        if shape == "a fold" {
-            assert!(
-                display.contains("Aggregate: sum by [] complete"),
-                "{shape}: the fold is a complete aggregate over the assembled frames: {display}"
-            );
-            assert!(
-                !holds_split_merge(&plan),
-                "{shape}: the aggregate runs over the boundary itself, not as partial state: {display}"
-            );
-        }
+        // The boundary sits below the consumer either way, and the merge that collects the rewritten
+        // series is what refuses the overlap. What reads it follows the consumer: a ranking above
+        // the rewrite assembles its input in the frontend, so the merge is a canonical producer
+        // under its own router; a fold drops the metadata labels, and since that drop is judged by
+        // its labels alone no merge is put above it - the cut is accepted and the merge sits below
+        // the split's partial half, where every partition's partial still folds one label set.
+        // What both shapes have in common, and what this asserts, is that merge, and a router over
+        // its producer rather than a gather of the series.
         assert!(
-            canonical_router(&observer).is_some(),
-            "{shape}: the boundary is still the canonical router, not a gather: {} regions {:?}",
+            display.contains("Merge: canonical label-set merge"),
+            "{shape}: the merge that collects the rewritten series is gone, so nothing can refuse \
+             the overlap: {display}"
+        );
+        assert!(
+            canonical_router(&observer).is_some() || holds_split_merge(&plan),
+            "{shape}: the boundary is a router over its producer, not a gather: {} regions {:?}",
             display_plan_tree(&plan),
             observer
                 .region_plans()
@@ -17344,9 +17351,11 @@ async fn native_promql_root_canonical_merge_keeps_the_scan_width() {
     );
 
     // An aggregate after a colliding rewrite cannot hide the same-point conflict: the merge must
-    // validate its canonical input before the aggregate consumes it. The fold is the existing
-    // complete aggregate, placed above the boundary because it reads every assembled label set;
-    // there is no partition-local partial state to fall back to.
+    // validate its canonical input before the aggregate consumes it. The fold drops the metadata
+    // labels and that drop is judged by its labels alone now, so no merge is put above the fold and
+    // the cut below it is accepted: the fold is partition-local `partial` state with a `final`
+    // above the state router, and the merge that validates the overlap sits below the partial half.
+    // The error asserted here is what says it validated before anything folded.
     let rewritten_sum = r#"sum(label_replace(root_fold, "host", "same", "host", ".*"))"#;
     observer.clear();
     let sum_output = instance
@@ -17367,16 +17376,18 @@ async fn native_promql_root_canonical_merge_keeps_the_scan_width() {
         .indent(true)
         .to_string();
     assert!(
-        sum_display.contains("Aggregate: sum by [] complete"),
-        "the fold runs natively as a complete aggregate over the boundary: {sum_display}"
+        sum_display.contains("Aggregate: sum by [] complete") || holds_split_merge(&sum_plan),
+        "the fold runs natively over the boundary, complete or as a collected split: {sum_display}"
     );
     assert!(
-        !holds_split_merge(&sum_plan),
-        "the fold's state is not the substitute for the canonical merge: {sum_display}"
+        sum_display.contains("Aggregate: sum by [] complete")
+            || sum_display.contains("Merge: canonical label-set merge"),
+        "the split's partial half still reads the canonical merge, so the overlap is validated \
+         before anything folds it: {sum_display}"
     );
     assert!(
-        canonical_router(&observer).is_some(),
-        "the fold's prefix keeps the canonical router: {sum_display}"
+        canonical_router(&observer).is_some() || holds_split_merge(&sum_plan),
+        "the fold's prefix keeps its router over the producer: {sum_display}"
     );
 
     // A rewrite above the aggregate is pointwise on its single globally computed output, and must
@@ -17467,6 +17478,204 @@ async fn native_promql_root_canonical_merge_keeps_the_scan_width() {
             "the existing plan reports the overlap too: {consumer}: {legacy_error}"
         );
     }
+}
+
+/// A fold over a label rewrite reports the collision the rewrite created, across scan partitions.
+///
+/// The rewrite gives two series one label set, and a fold cannot answer two values at one grid point:
+/// the pieces of the set have to meet before anything folds them. They meet at the canonical
+/// boundary - each partition's producer collects what its own scan holds, the canonical router routes
+/// every piece of one label set to one owner, and the fold above it reads whole series - so two
+/// colliding series that were scanned in *different* partitions are reported as `vector cannot
+/// contain metrics with the same labelset` instead of being folded into the sum of two partial
+/// states, which is a number no label set ever stood for.
+///
+/// Which partition scans a series follows its stored identity, not its row order, so the pair is
+/// found rather than assumed: sixteen series are written, each is probed alone with a rewrite to a
+/// fresh destination - which cannot make two series equal, so it always answers - and the partition
+/// that reported it is what that series is scanned in. Two series found in different partitions then
+/// get the collapsing rewrite.
+///
+/// Three claims are made below: that cross-partition pair, the same statement at one partition (which
+/// must report the same error rather than a value), and a rewrite of the same pair that does not
+/// collapse it, which still answers the sum of both values. The last one is what says the error above
+/// is the collision's and not the fold's.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_fold_over_cross_partition_collision_reports_the_collision() {
+    common_telemetry::init_default_ut_logging();
+    let mito_config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_fold_collision")
+            .with_mito_config(mito_config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    // Sixteen series over one timestamp, one value each: the scan hands them out over the session's
+    // four partitions, so a pair of them can be found in two different partitions.
+    let hosts = [
+        "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p",
+    ];
+    execute_all(
+        &instance,
+        &format!(
+            "CREATE TABLE fold_collision_phy (ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE=metric WITH ('physical_metric_table'='true'); \
+             CREATE TABLE fold_collision (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)) ENGINE=metric WITH ('on_physical_table'='fold_collision_phy'); \
+             INSERT INTO fold_collision (host,ts,val) VALUES {}",
+            hosts
+                .iter()
+                .enumerate()
+                .map(|(index, host)| format!("('{host}',0,{})", index + 1))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        QueryContext::arc(),
+    )
+    .await;
+    let value_of = |host: &str| f64::from(host.as_bytes()[0] - b'a' + 1);
+
+    let mut probed: Vec<(&str, usize)> = Vec::new();
+    for host in hosts {
+        observer.clear();
+        let single = instance
+            .do_query(
+                &format!(
+                    "TQL EVAL (0, 0, '1s') \
+                     label_replace(fold_collision{{host=\"{host}\"}}, \"dst\", \"$1\", \"host\", \"(.*)\")"
+                ),
+                native_query_context(true, 4),
+            )
+            .await
+            .remove(0)
+            .unwrap();
+        let rows = native_result_rows(single).await;
+        assert_eq!(1, rows.len(), "`{host}` answers its own one series");
+        let producer =
+            frontend_producer(&observer).unwrap_or_else(|| panic!("`{host}` runs natively"));
+        // `input_samples` is what the producer read: a merge below it refuses a shared position
+        // before any value is published, so only the input counts describe the collision case too.
+        let occupied = nonempty_partitions(&producer, "native.root.input_samples");
+        assert_eq!(
+            1,
+            occupied.len(),
+            "one series is scanned in exactly one partition: {host}={occupied:?}"
+        );
+        probed.push((host, occupied[0]));
+    }
+    let (left_host, left_partition) = probed[0];
+    let (right_host, _) = probed
+        .iter()
+        .copied()
+        .find(|(_, partition)| *partition != left_partition)
+        .unwrap_or_else(|| {
+            panic!("sixteen series spread over the scan's four partitions: {probed:?}")
+        });
+
+    // The collision, with the two series scanned in two different partitions. Every output of the
+    // boundary holds whole label sets, so the two rewritten series meet there and the second value at
+    // that one position is the error Prometheus reports. Reading the answer is also what runs the
+    // region half, because a region plan is planned when the statement's stream asks for batches.
+    let collapsing = format!(
+        "TQL EVAL (0, 0, '1s') \
+         sum(label_replace(fold_collision{{host=~\"{left_host}|{right_host}\"}}, \"host\", \"same\", \"host\", \".*\"))"
+    );
+    observer.clear();
+    let cross_partition = instance
+        .do_query(&collapsing, native_query_context(true, 4))
+        .await
+        .remove(0)
+        .unwrap();
+    let cross_partition_error = collect_error(cross_partition).await;
+    assert!(
+        cross_partition_error.contains("vector cannot contain metrics with the same labelset"),
+        "the fold must report the overlap its rewrite created rather than add two partial states: \
+         {cross_partition_error}"
+    );
+    // The error is the boundary's, so the statement was not replanned as legacy: the canonical
+    // router runs over a producer whose own tree is the merge, and the pieces the producer read came
+    // from the two partitions the pair was scanned in.
+    let plan = observer.root_plan();
+    let router = canonical_router(&observer).unwrap_or_else(|| {
+        panic!(
+            "the fold reads a canonical boundary rather than one partition's pieces: {} \
+             regions {:?}",
+            display_plan_tree(&plan),
+            observer
+                .region_plans()
+                .iter()
+                .map(display_plan_tree)
+                .collect::<Vec<_>>()
+        )
+    });
+    let producer = router.children()[0].clone();
+    assert_eq!(
+        producer.name(),
+        "FusedSeriesExec",
+        "the router reads the producer: {}",
+        display_plan_tree(&plan)
+    );
+    let producer_display = datafusion::physical_plan::displayable(producer.as_ref())
+        .one_line()
+        .to_string();
+    let producer_tree = producer_display
+        .split_once('\n')
+        .map(|(_, tree)| tree)
+        .unwrap_or_else(|| panic!("the producer renders its tree: {producer_display}"));
+    assert!(
+        producer_tree.contains("Merge: canonical label-set merge"),
+        "the producer's tree is the canonical merge itself: {producer_tree}"
+    );
+    let read = nonempty_partitions(&producer, "native.root.input_samples");
+    assert!(
+        read.len() > 1,
+        "the two colliding series are read in different execution partitions: {read:?}"
+    );
+
+    // The same statement at one partition. Both series are scanned by the one execution there, so the
+    // collision is that execution's to report - the same error, not a value - which is what makes the
+    // cross-partition case above a question of where the pieces are and not of what they mean.
+    observer.clear();
+    let single_partition = instance
+        .do_query(&collapsing, native_query_context(true, 1))
+        .await
+        .remove(0)
+        .unwrap();
+    let single_partition_error = collect_error(single_partition).await;
+    assert!(
+        single_partition_error.contains("vector cannot contain metrics with the same labelset"),
+        "one partition reports the same overlap: {single_partition_error}"
+    );
+
+    // The control: the same pair of series, rewritten onto a label of their own. Two series with
+    // different values at one point are two series, so the fold answers their sum - the answer the
+    // collision above must not silently become.
+    let control = format!(
+        "TQL EVAL (0, 0, '1s') \
+         sum(label_replace(fold_collision{{host=~\"{left_host}|{right_host}\"}}, \"dst\", \"$1\", \"host\", \"(.*)\"))"
+    );
+    observer.clear();
+    let control_output = instance
+        .do_query(&control, native_query_context(true, 4))
+        .await
+        .remove(0)
+        .unwrap();
+    let (_, control_rows) = native_labelled_rows(control_output).await;
+    assert_eq!(
+        1,
+        control_rows.len(),
+        "a fold with no grouping answers one row: {control_rows:?}"
+    );
+    assert_eq!(
+        control_rows[0].2,
+        value_of(left_host) + value_of(right_host),
+        "the fold answers the sum of the two values it collected: {control_rows:?}"
+    );
+    assert!(
+        control_rows[0].1.is_empty(),
+        "`sum` keeps no label of its own: {control_rows:?}"
+    );
 }
 
 /// A subquery evaluates its inner expression on its own grid, on the native route.

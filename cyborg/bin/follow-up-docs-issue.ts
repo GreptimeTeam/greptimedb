@@ -26,8 +26,7 @@ import {
 // @ts-expect-error moduleResolution:nodenext issue 54523
 import {RequestError} from "@octokit/request-error";
 
-const needFollowUpDocs = "[x] This PR requires documentation updates."
-const labelDocsNotRequired = "docs-not-required"
+const needFollowUpDocs = /\[x\] This PR requires documentation updates\./i
 const labelDocsRequired = "docs-required"
 
 async function main() {
@@ -44,19 +43,9 @@ async function main() {
     }
 
     switch (payload.action) {
-        case "opened": {
-            const client = obtainClient("GITHUB_TOKEN")
-            await updateDocsLabels(client, owner, repo, number, checkPullRequestOpenedEvent(payload as PullRequestOpenedEvent))
-            break
-        }
+        case "opened":
         case "edited": {
-            const followUpDocs = checkPullRequestEditedEvent(payload as PullRequestEditedEvent)
-            if (followUpDocs === undefined) {
-                core.info("Docs checkbox state unchanged; leaving labels as-is.")
-                return
-            }
-            const client = obtainClient("GITHUB_TOKEN")
-            await updateDocsLabels(client, owner, repo, number, followUpDocs)
+            await syncDocsLabel(obtainClient("GITHUB_TOKEN"), owner, repo, payload)
             break
         }
         case "closed": {
@@ -87,17 +76,17 @@ async function main() {
     }
 }
 
-async function updateDocsLabels(client: ReturnType<typeof obtainClient>, owner: string, repo: string, number: number, followUpDocs: boolean) {
-    if (followUpDocs) {
+export async function syncDocsLabel(client: ReturnType<typeof obtainClient>, owner: string, repo: string, event: PullRequestOpenedEvent | PullRequestEditedEvent) {
+    const { number, body } = event.pull_request
+    const previous = event.action === "opened" ? null : event.changes.body?.from ?? body
+    if (needFollowUpDocs.test(previous ?? "") === needFollowUpDocs.test(body ?? "")) return
+
+    // A newer checkbox edit can arrive while this run is waiting.
+    const { data: pr } = await client.rest.pulls.get({ owner, repo, pull_number: number })
+    const required = needFollowUpDocs.test(pr.body ?? "")
+    if (pr.labels.some(label => label.name === labelDocsRequired) === required) return
+    if (required) {
         core.info("Follow up docs.")
-        await client.rest.issues.removeLabel({
-            owner, repo, issue_number: number, name: labelDocsNotRequired,
-        }).catch((e: RequestError) => {
-            if (e.status != 404) {
-                throw e;
-            }
-            core.debug(`Label ${labelDocsNotRequired} not exist.`)
-        })
         await client.rest.issues.addLabels({
             owner, repo, issue_number: number, labels: [labelDocsRequired],
         })
@@ -110,9 +99,6 @@ async function updateDocsLabels(client: ReturnType<typeof obtainClient>, owner: 
                 throw e;
             }
             core.debug(`Label ${labelDocsRequired} not exist.`)
-        })
-        await client.rest.issues.addLabels({
-            owner, repo, issue_number: number, labels: [labelDocsNotRequired],
         })
     }
 }
@@ -165,24 +151,4 @@ async function waitForPendingLabelUpdates(client: ReturnType<typeof obtainClient
     core.warning("Timed out waiting for pending docbot runs; proceeding with the current label state.")
 }
 
-function checkPullRequestOpenedEvent(event: PullRequestOpenedEvent): boolean {
-    // @ts-ignore
-    return event.pull_request.body?.includes(needFollowUpDocs)
-}
-
-// Returns undefined when the checkbox state did not change in this edit, so the
-// caller leaves the labels untouched (preserving manual label overrides).
-function checkPullRequestEditedEvent(event: PullRequestEditedEvent): boolean | undefined {
-    if (!event.changes.body) {
-        // The body was not part of this edit (e.g. title-only edit).
-        return undefined
-    }
-    const previous = event.changes.body.from.includes(needFollowUpDocs)
-    const current = event.pull_request.body?.includes(needFollowUpDocs) ?? false
-    if (previous === current) {
-        return undefined
-    }
-    return current
-}
-
-main().catch(handleError)
+if (require.main === module) main().catch(handleError)

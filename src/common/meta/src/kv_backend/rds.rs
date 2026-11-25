@@ -26,7 +26,9 @@ use crate::error::{Error, RdsTransactionRetryFailedSnafu, Result, UnexpectedSnaf
 use crate::kv_backend::txn::{
     Compare, Txn as KvTxn, TxnOp, TxnOpResponse, TxnResponse as KvTxnResponse,
 };
-use crate::kv_backend::{ClosableKvBackend, KvBackend, TxnService};
+use crate::kv_backend::{
+    ClosableKvBackend, KvBackend, KvBackendCapabilities, TxnCapability, TxnService,
+};
 use crate::metrics::METRIC_META_TXN_REQUEST;
 use crate::rpc::KeyValue;
 use crate::rpc::store::{
@@ -221,6 +223,8 @@ pub trait KvQueryExecutor<T: Executor> {
         Ok(PutResponse::default())
     }
 
+    /// Applies all writes atomically. Implementations that split a request across
+    /// statements must run them in one transaction, reusing the caller's transaction if present.
     async fn batch_put_with_query_executor(
         &self,
         query_executor: &mut ExecutorImpl<'_, T>,
@@ -506,6 +510,12 @@ where
     T: Executor + 'static,
     S: ExecutorFactory<T> + 'static,
 {
+    fn capabilities(&self) -> KvBackendCapabilities {
+        KvBackendCapabilities {
+            atomic_batch_put: true,
+        }
+    }
+
     fn name(&self) -> &str {
         T::name()
     }
@@ -597,8 +607,10 @@ where
         RdsTransactionRetryFailedSnafu {}.fail()
     }
 
-    fn max_txn_ops(&self) -> usize {
-        self.max_txn_ops
+    fn txn_capability(&self) -> Option<TxnCapability> {
+        Some(TxnCapability {
+            max_ops: self.max_txn_ops,
+        })
     }
 }
 

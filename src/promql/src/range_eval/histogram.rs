@@ -159,7 +159,8 @@ pub(super) fn evaluate(
                 HistogramAggregate::Avg
             };
             // The hints are read from the window's own histograms, so nothing is cloned for the
-            // check; the fold below clones one sample at a time as it consumes them.
+            // check; the fold below copies each histogram in turn and folds it into the
+            // accumulator it keeps.
             if has_contradictory_reset_hints(histograms.iter().map(|(_, h)| h)) {
                 record_warning(
                     collector,

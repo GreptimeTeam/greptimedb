@@ -14,7 +14,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use arrow_schema::extension::EXTENSION_TYPE_METADATA_KEY;
 use common_base::readable_size::ReadableSize;
 use common_time::Timestamp;
 use datatypes::arrow::array::{
@@ -32,10 +31,9 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
 use tokio_util::sync::CancellationToken;
 
-use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheStrategy;
 use crate::compaction::json2::collect_json2_rewrite_plans_from_parquet;
-use crate::compaction::multi_region::memory::{BATCH_SIZE, MemoryLimits};
+use crate::compaction::multi_region::memory::{BATCH_SIZE, MemoryLimits, UploadBudget};
 use crate::compaction::multi_region::{
     MultiRegionCompactionContext, MultiRegionCompactionPlan, MultiRegionTarget, SourceCounters,
 };
@@ -44,22 +42,24 @@ use crate::error::{
     ComputeArrowSnafu, ExternalSnafu, InvalidMultiRegionCompactionSnafu,
     MultiRegionCompactionResourceSnafu, NewRecordBatchSnafu, Result,
 };
-use crate::read::compat::FlatCompatBatch;
 use crate::read::flat_merge::FlatMergeReader;
 use crate::read::flat_projection::FlatProjectionMapper;
 use crate::read::read_columns::ReadColumns;
+use crate::read::scan_region::ScanInput;
 use crate::read::{BoxedRecordBatchStream, timestamp_array_to_i64_slice};
 use crate::sst::file::{FileHandle, FileMeta};
 use crate::sst::file_purger::NoopFilePurger;
 use crate::sst::index::IndexBuildType;
 use crate::sst::index::handler::PlanContext;
 use crate::sst::index::registry::{IndexBuildPlan, IndexRegistry};
+use crate::sst::parquet::decoded_input_size;
+use crate::sst::parquet::file_range::PreFilterMode;
 use crate::sst::parquet::flat_format::{
     primary_key_column_index, sequence_column_index, time_index_column_index,
 };
 use crate::sst::parquet::format::{PrimaryKeyArray, need_override_sequence};
-use crate::sst::parquet::reader::{MetadataCacheMetrics, ParquetReader, ReaderMetrics};
-use crate::sst::parquet::{Json2RewriteTargets, Json2TargetLayout, decoded_input_size};
+use crate::sst::parquet::reader::{MetadataCacheMetrics, ReaderMetrics};
+use crate::sst::parquet::row_group::ParquetFetchMetrics;
 
 pub(crate) struct SourceEvent {
     pub(crate) region_id: RegionId,
@@ -88,7 +88,7 @@ impl RoutedBatch {
         let batch = take_record_batch(&self.batch, &indices).context(ComputeArrowSnafu)?;
         let batch = compact_dictionaries(batch)?;
         ensure!(
-            batch.get_array_memory_size() <= source.limits.batch,
+            batch.get_array_memory_size() <= source.limits.arrow_batch_bytes,
             MultiRegionCompactionResourceSnafu {
                 reason: "Routed batch exceeds the task buffer budget"
             }
@@ -99,15 +99,13 @@ impl RoutedBatch {
 }
 
 pub(crate) struct SharedSource {
-    layer: AccessLayerRef,
-    cache: CacheStrategy,
     sources: Vec<FileMeta>,
     legacy_overrides: Vec<bool>,
     expected_rows: Vec<i64>,
     targets: BTreeMap<RegionId, MultiRegionTarget>,
     metadata: RegionMetadataRef,
-    mapper: FlatProjectionMapper,
-    json2_targets: Json2RewriteTargets,
+    scan_input: ScanInput,
+    routing_codec: Arc<dyn mito_codec::row_converter::PrimaryKeyCodec>,
     schema: SchemaRef,
     merge_schema: SchemaRef,
     partition_rule: PartitionRuleRef,
@@ -129,6 +127,7 @@ impl SharedSource {
         metadata: RegionMetadataRef,
         counters: Arc<SourceCounters>,
     ) -> Result<Arc<Self>> {
+        let upload = UploadBudget::new(plan, context.access_layer.object_store())?;
         let mut common = (*metadata).clone();
         common.set_partition_expr(None);
         let metadata = Arc::new(common);
@@ -159,9 +158,12 @@ impl SharedSource {
             let footer = sst.parquet_metadata();
             footer_bytes = footer_bytes.saturating_add(footer.memory_size());
             ensure!(
-                footer_bytes <= plan.memory_limit / 8,
+                footer_bytes <= upload.compute_bytes / 8,
                 MultiRegionCompactionResourceSnafu {
-                    reason: "Source footer metadata exceeds the task budget",
+                    reason: format!(
+                        "Source footer metadata needs {footer_bytes} bytes, budget after reserving uploads is {}",
+                        upload.compute_bytes / 8,
+                    ),
                 }
             );
             footers.push(footer);
@@ -176,31 +178,7 @@ impl SharedSource {
             .collect();
         let input_size = decoded_input_size(footers.iter().map(Arc::as_ref));
         let layouts = collect_json2_rewrite_plans_from_parquet(&metadata, &footers)?;
-        let mut json2 = BTreeMap::new();
-        for (name, layout) in layouts {
-            let column =
-                metadata
-                    .column_by_name(&name)
-                    .context(InvalidMultiRegionCompactionSnafu {
-                        reason: "JSON2 layout names an unknown column",
-                    })?;
-            let extension_metadata = column
-                .column_schema
-                .metadata()
-                .get(EXTENSION_TYPE_METADATA_KEY)
-                .cloned()
-                .context(InvalidMultiRegionCompactionSnafu {
-                    reason: "JSON2 extension metadata missing",
-                })?;
-            json2.insert(
-                column.column_id,
-                Json2TargetLayout {
-                    extension_metadata,
-                    target_layout: layout.target_layout,
-                },
-            );
-        }
-        let json2_targets = Arc::new(json2);
+        let json2_targets = crate::compaction::reader::json2_rewrite_targets(&metadata, &layouts)?;
         let mapper = FlatProjectionMapper::new_with_json2_rewrite_targets(
             &metadata,
             (0..metadata.column_metadatas.len()).collect(),
@@ -212,8 +190,15 @@ impl SharedSource {
             ),
             &json2_targets,
         )?;
-        let schema = mapper.input_arrow_schema(false);
-        let mut limits = MemoryLimits::new(plan, &schema)?;
+        let schema = mapper.input_arrow_schema(true);
+        let scan_input = ScanInput::builder(context.access_layer.clone(), mapper)
+            .with_compaction(true)
+            .with_page_index_policy(PageIndexPolicy::Skip)
+            .with_batch_size(BATCH_SIZE)
+            .with_cache(cache.clone())
+            .with_json2_rewrite_targets(json2_targets.clone())
+            .build();
+        let mut limits = MemoryLimits::new(plan, &schema, upload)?;
         let mut inverted = context.config.inverted_index.clone();
         inverted.mem_threshold_on_create =
             admitted_index_threshold(inverted.mem_threshold_on_create(), limits.index);
@@ -243,7 +228,7 @@ impl SharedSource {
             .collect::<BTreeMap<_, _>>();
         limits.admit(
             plan,
-            context,
+            &context.config,
             &footers,
             index_plans
                 .values()
@@ -265,15 +250,13 @@ impl SharedSource {
             .collect::<Vec<_>>();
         let merge_schema = Arc::new(Schema::new(fields));
         Ok(Arc::new(Self {
-            layer: context.access_layer.clone(),
-            cache,
             sources: plan.sources.clone(),
             legacy_overrides,
             expected_rows,
             targets: plan.targets.clone(),
+            routing_codec: mito_codec::row_converter::build_primary_key_codec(&metadata),
             metadata,
-            mapper,
-            json2_targets,
+            scan_input,
             schema,
             merge_schema,
             partition_rule: plan.partition_rule.clone(),
@@ -361,43 +344,35 @@ impl SharedSource {
             let mut raw_meta = file.clone();
             raw_meta.sequence = None;
             raw_meta.preserve_row_sequence = true;
-            let builder = self
-                .layer
-                .read_sst(FileHandle::new(raw_meta, Arc::new(NoopFilePurger)))
-                .cache(self.cache.clone())
-                .batch_size(BATCH_SIZE)
-                .expected_metadata(Some(self.metadata.clone()))
-                .json2_rewrite_targets(self.json2_targets.clone())
-                .compaction(false)
-                .page_index_policy(PageIndexPolicy::Skip);
+            let handle = FileHandle::new(raw_meta, Arc::new(NoopFilePurger));
+            let input = self.scan_input.prune_file(
+                &handle, PreFilterMode::All, &mut ReaderMetrics::default(),
+            ).await?;
+            let mut ranges = smallvec::SmallVec::new();
+            input.build_ranges(-1, &mut ranges);
+            let fetch_metrics = ParquetFetchMetrics::default();
             let mut rows = 0u64;
-            let input = builder
-                .build_reader_input(&mut ReaderMetrics::default())
-                .await?;
-            if let Some((input, selection)) = input {
-                let compat = FlatCompatBatch::try_new(&self.mapper, input.read_format(), false)?
-                    .map(Arc::new);
-                let mut reader = ParquetReader::new(Arc::new(input), selection).await?;
-                let mut last_key = None;
-                while let Some(batch) = reader.next_record_batch().await? {
+            let mut last_key = None;
+            for range in ranges {
+                let Some(mut reader) = range.flat_reader(None, Some(&fetch_metrics)).await? else {
+                    continue;
+                };
+                while let Some(batch) = crate::read::scan_util::next_aligned_file_batch(
+                    &range, &mut reader, None, false,
+                ).await? {
                     self.check_cancelled()?;
                     let preparing = self.clone();
-                    let compat = compat.clone();
                     let (batch, previous) = common_runtime::spawn_blocking_compact(move || {
                         preparing.check_cancelled()?;
-                        let batch = match compat {
-                            Some(compat) => compat.compat(batch)?,
-                            None => batch,
-                        };
                         let batch = compact_dictionaries(batch)?;
                         let batch_bytes = batch.get_array_memory_size();
                         ensure!(
-                            batch_bytes <= preparing.limits.batch,
+                            batch_bytes <= preparing.limits.arrow_batch_bytes,
                             MultiRegionCompactionResourceSnafu {
                                 reason: format!(
                                     "Decoded source batch uses {} bytes, budget is {}",
                                     batch_bytes,
-                                    preparing.limits.batch,
+                                    preparing.limits.arrow_batch_bytes,
                                 ),
                             }
                         );
@@ -410,10 +385,13 @@ impl SharedSource {
                     self.counters.rows.fetch_add(batch.num_rows() as u64, Ordering::Relaxed);
                     yield batch;
                 }
-                self.counters
-                    .store_page_bytes
-                    .fetch_add(reader.fetched_store_page_bytes()?, Ordering::Relaxed);
             }
+            let store_bytes = fetch_metrics.data.lock()
+                .map(|metrics| metrics.page_size_to_fetch_store)
+                .map_err(|_| crate::error::UnexpectedSnafu {
+                    reason: "Source fetch metrics lock poisoned",
+                }.build())?;
+            self.counters.store_page_bytes.fetch_add(store_bytes, Ordering::Relaxed);
             let expected = self.expected_rows[index];
             if expected < 0 || rows != expected as u64 {
                 Err(InvalidMultiRegionCompactionSnafu {
@@ -560,7 +538,61 @@ impl SharedSource {
         })
     }
 
-    fn row_owners(&self, batch: &RecordBatch) -> Result<Vec<RegionId>> {
+    /// Materialize only routing dependencies; merge and output retain encoded keys.
+    fn routing_batch(&self, batch: &RecordBatch) -> Result<(RecordBatch, usize)> {
+        let mut materialized_bytes = 0usize;
+        let mut decoded = None;
+        let mut fields = Vec::new();
+        let mut arrays = Vec::new();
+        for name in self.partition_rule.partition_columns() {
+            let column =
+                self.metadata
+                    .column_by_name(name)
+                    .context(InvalidMultiRegionCompactionSnafu {
+                        reason: "Unknown partition column",
+                    })?;
+            let array = if let Some(array) = batch.column_by_name(name) {
+                array.clone()
+            } else {
+                if decoded.is_none() {
+                    decoded = Some(crate::sst::parquet::flat_format::decode_primary_keys(
+                        self.routing_codec.as_ref(),
+                        batch,
+                    )?);
+                }
+                let array = decoded
+                    .as_mut()
+                    .context(InvalidMultiRegionCompactionSnafu {
+                        reason: "Missing decoded routing key",
+                    })?
+                    .get_tag_column(column.column_id, None, &column.column_schema.data_type)?;
+                materialized_bytes =
+                    materialized_bytes.saturating_add(array.get_array_memory_size());
+                array
+            };
+            fields.push(Field::new(name, array.data_type().clone(), true));
+            arrays.push(array);
+        }
+        let options = datatypes::arrow::record_batch::RecordBatchOptions::new()
+            .with_row_count(Some(batch.num_rows()));
+        let routing =
+            RecordBatch::try_new_with_options(Arc::new(Schema::new(fields)), arrays, &options)
+                .context(NewRecordBatchSnafu)?;
+        Ok((routing, materialized_bytes))
+    }
+
+    pub(super) fn row_owners(&self, batch: &RecordBatch) -> Result<Vec<RegionId>> {
+        let (routing, materialized_bytes) = self.routing_batch(batch)?;
+        ensure!(
+            batch
+                .get_array_memory_size()
+                .saturating_add(materialized_bytes)
+                <= self.limits.arrow_batch_bytes,
+            MultiRegionCompactionResourceSnafu {
+                reason: "Routing projection exceeds the task buffer budget"
+            }
+        );
+        let batch = &routing;
         let rows = batch.num_rows();
         let masks = self
             .partition_rule

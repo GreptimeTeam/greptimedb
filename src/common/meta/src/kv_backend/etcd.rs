@@ -25,7 +25,7 @@ use snafu::{ResultExt, ensure};
 
 use crate::error::{self, Error, LoadTlsCertificateSnafu, Result};
 use crate::kv_backend::txn::{Txn as KvTxn, TxnResponse as KvTxnResponse};
-use crate::kv_backend::{KvBackend, KvBackendRef, TxnService};
+use crate::kv_backend::{KvBackend, KvBackendRef, TxnCapability, TxnService};
 use crate::metrics::METRIC_META_TXN_REQUEST;
 use crate::rpc::KeyValue;
 use crate::rpc::store::{
@@ -80,7 +80,7 @@ impl EtcdStore {
     }
 
     async fn do_multi_txn(&self, txn_ops: Vec<TxnOp>) -> Result<Vec<TxnResponse>> {
-        let max_txn_ops = self.max_txn_ops();
+        let max_txn_ops = self.max_txn_ops;
         if txn_ops.len() < max_txn_ops {
             // fast path
             let _timer = METRIC_META_TXN_REQUEST
@@ -285,8 +285,10 @@ impl TxnService for EtcdStore {
         txn_res.try_into()
     }
 
-    fn max_txn_ops(&self) -> usize {
-        self.max_txn_ops
+    fn txn_capability(&self) -> Option<TxnCapability> {
+        Some(TxnCapability {
+            max_ops: self.max_txn_ops,
+        })
     }
 }
 

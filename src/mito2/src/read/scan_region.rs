@@ -1058,6 +1058,8 @@ pub struct ScanInput {
     pub(crate) compaction_read_parallelism: usize,
     /// Compaction-only JSON2 physical rewrite targets.
     json2_rewrite_targets: Json2RewriteTargets,
+    /// Override for footer page-index loading. `None` uses the reader default.
+    page_index_policy: Option<parquet::file::metadata::PageIndexPolicy>,
     /// Counters that should receive query-load metrics.
     pub(crate) query_stat_counters: Option<RegionQueryStatCounters>,
     #[cfg(feature = "enterprise")]
@@ -1092,6 +1094,7 @@ impl ScanInput {
         ScanInputBuilder {
             input: ScanInput {
                 series_index: None,
+                page_index_policy: None,
                 ignore_range_index: false,
                 access_layer,
                 read_cols: mapper.read_columns().clone(),
@@ -1350,6 +1353,16 @@ impl ScanInputBuilder {
 
     pub(crate) fn with_files(mut self, files: Vec<FileHandle>) -> Self {
         self.input.files = files;
+        self
+    }
+
+    /// Selects footer page-index loading for maintenance readers.
+    #[cfg(feature = "enterprise")]
+    pub(crate) fn with_page_index_policy(
+        mut self,
+        policy: parquet::file::metadata::PageIndexPolicy,
+    ) -> Self {
+        self.input.page_index_policy = Some(policy);
         self
     }
 
@@ -1732,6 +1745,10 @@ impl ScanInput {
             .bloom_filter_index_appliers(self.bloom_filter_index_appliers.clone())
             .fulltext_index_appliers(self.fulltext_index_appliers.clone());
         let reader = reader.batch_size(self.batch_size);
+        let reader = match self.page_index_policy {
+            Some(policy) => reader.page_index_policy(policy),
+            None => reader,
+        };
         let reader = if !self.compaction && may_build_selective_row_selection {
             reader.deferred_optional_page_index()
         } else {
