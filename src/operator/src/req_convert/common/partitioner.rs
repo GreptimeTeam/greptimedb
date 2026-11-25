@@ -20,6 +20,7 @@ use api::v1::region::{
     bulk_insert_request, region_request::Body,
 };
 use api::v1::{ArrowIpc, PartitionExprVersion, Rows};
+use common_catalog::consts::{MITO_ENGINE, MITO2_ENGINE};
 use common_error::ext::BoxedError;
 use common_grpc::flight::{self, FlightDecoder};
 use datatypes::arrow::array::{Array, BinaryArray, StringBuilder, UInt32Builder, UInt64Builder};
@@ -48,13 +49,20 @@ pub struct Partitioner<'a> {
 }
 
 /// Returns whether `table_info` specifies case-insensitive `'primary_key_encoding'='sparse'`.
-pub(crate) fn is_sparse_primary_key_table(table_info: &TableInfo) -> bool {
+fn has_sparse_primary_key_option(table_info: &TableInfo) -> bool {
     table_info
         .meta
         .options
         .extra_options
         .get(metric_engine_consts::PRIMARY_KEY_ENCODING)
         .is_some_and(|v| v.eq_ignore_ascii_case("sparse"))
+}
+
+/// Only Mito accepts pre-encoded keys from ordinary inserts. The metric engine
+/// applies its physical-table write guard to row requests.
+pub(crate) fn is_sparse_mito_table(table_info: &TableInfo) -> bool {
+    matches!(table_info.meta.engine.as_str(), MITO_ENGINE | MITO2_ENGINE)
+        && has_sparse_primary_key_option(table_info)
 }
 
 #[derive(Clone, Debug)]
@@ -628,7 +636,7 @@ fn resolve_sparse_partition_columns(
     table_info: &TableInfo,
 ) -> Vec<SparsePartitionColumn> {
     let meta = &table_info.meta;
-    if (!table_info.is_physical_table() && !is_sparse_primary_key_table(table_info))
+    if (!table_info.is_physical_table() && !has_sparse_primary_key_option(table_info))
         || meta.column_ids.len() != meta.schema.num_columns()
     {
         return Vec::new();
@@ -916,6 +924,31 @@ mod tests {
             ],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn test_direct_sparse_encoding_requires_mito() {
+        let mut table_info = build_sparse_table_info();
+        table_info.meta.options.extra_options.insert(
+            metric_engine_consts::PRIMARY_KEY_ENCODING.to_string(),
+            "SPARSE".to_string(),
+        );
+        table_info.meta.engine = metric_engine_consts::METRIC_ENGINE_NAME.to_string();
+        assert!(!is_sparse_mito_table(&table_info));
+        // Internal metric-engine bulk writes still need their partition tags decoded.
+        assert_eq!(
+            resolve_sparse_partition_columns(&["zone".into()], &table_info).len(),
+            1
+        );
+
+        for (engine, expected) in [
+            (MITO_ENGINE, true),
+            (MITO2_ENGINE, true),
+            (common_catalog::consts::FILE_ENGINE, false),
+        ] {
+            table_info.meta.engine = engine.to_string();
+            assert_eq!(is_sparse_mito_table(&table_info), expected, "{engine}");
+        }
     }
 
     #[test]

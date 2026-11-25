@@ -112,7 +112,7 @@ use crate::req_convert::insert::{
     exemplars_to_sparse_record_batch, fill_reqs_with_impure_default, rows_to_record_batch,
     sparse_rows_to_record_batch,
 };
-use crate::req_convert::{TablePartitioner, is_sparse_primary_key_table};
+use crate::req_convert::{TablePartitioner, is_sparse_mito_table};
 use crate::statement::StatementExecutor;
 use crate::statement::ddl::is_retention_ttl;
 use crate::write_dispatcher::{WriteDispatcher, WriteDispatcherRef};
@@ -791,8 +791,15 @@ impl Inserter {
             )
             .await?;
 
-        self.dispatch_sparse_bulk_batch(&destination, batch, &ctx, write_cost as _, permit)
-            .await
+        self.dispatch_sparse_bulk_batch(
+            &destination,
+            batch,
+            &ctx,
+            ctx.skip_wal(),
+            write_cost as _,
+            permit,
+        )
+        .await
     }
 
     /// Handles row inserts request and creates a log table on demand.
@@ -906,14 +913,11 @@ impl Inserter {
             && !self.any_table_has_flow(table_infos.keys().copied()).await
         {
             return self
-                .submit_pending_rows(requests, table_infos, ctx, batcher)
+                .submit_pending_rows(requests, table_infos, skip_wal, ctx, batcher)
                 .await;
         }
 
-        if table_infos
-            .values()
-            .any(|info| is_sparse_primary_key_table(info))
-        {
+        if table_infos.values().any(|info| is_sparse_mito_table(info)) {
             return self
                 .dispatch_direct_sparse_row_inserts(
                     requests,
@@ -944,6 +948,7 @@ impl Inserter {
         &self,
         mut requests: RowInsertRequests,
         table_infos: HashMap<TableId, Arc<TableInfo>>,
+        skip_wal: bool,
         ctx: QueryContextRef,
         batcher: &Arc<dyn PendingRowsBatcher>,
     ) -> Result<Output> {
@@ -972,7 +977,7 @@ impl Inserter {
             };
             ImpureDefaultFiller::new((*table_info).clone())?.fill_rows(rows);
             if batcher.memory_limit_bytes() != 0 {
-                let item_bytes = if is_sparse_primary_key_table(table_info) {
+                let item_bytes = if is_sparse_mito_table(table_info) {
                     estimated_sparse_record_batch_bytes(rows, table_info)
                 } else {
                     crate::req_convert::insert::estimated_record_batch_bytes(rows, table_info)
@@ -998,7 +1003,7 @@ impl Inserter {
         for request in &requests.inserts {
             let table_info = by_name[request.table_name.as_str()];
             if let Some(rows) = &request.rows {
-                let batch = if is_sparse_primary_key_table(table_info) {
+                let batch = if is_sparse_mito_table(table_info) {
                     sparse_rows_to_record_batch(rows, table_info)?
                 } else {
                     rows_to_record_batch(rows, table_info)?
@@ -1042,6 +1047,7 @@ impl Inserter {
                 let mut target_ctx = ctx.fork();
                 target_ctx.set_current_catalog(&info.catalog_name);
                 target_ctx.set_current_schema(&info.schema_name);
+                target_ctx.set_skip_wal(skip_wal);
                 batcher.submit(info, batch, Arc::new(target_ctx), permit.clone())
             });
             // Observe every table completion even when another table fails.
@@ -1166,6 +1172,7 @@ impl Inserter {
         &self,
         rows: Rows,
         table_info: TableInfoRef,
+        skip_wal: bool,
         ctx: QueryContextRef,
         batcher: &Arc<dyn PendingRowsBatcher>,
     ) -> Result<Output> {
@@ -1176,7 +1183,7 @@ impl Inserter {
             }],
         };
         let table_infos = HashMap::from_iter([(table_info.table_id(), table_info)]);
-        self.submit_pending_rows(requests, table_infos, ctx, batcher)
+        self.submit_pending_rows(requests, table_infos, skip_wal, ctx, batcher)
             .await
     }
 
@@ -1306,7 +1313,7 @@ impl Inserter {
                 for request in &requests.inserts {
                     let info = by_name.get(&request.table_name)?;
                     if !is_instant_table(info)
-                        && is_sparse_primary_key_table(info)
+                        && is_sparse_mito_table(info)
                         && let Some(rows) = &request.rows
                     {
                         total =
@@ -1319,7 +1326,7 @@ impl Inserter {
         )?;
 
         let mut sparse_batches = Vec::new();
-        let mut non_sparse_inserts = Vec::new();
+        let mut sparse_envelopes = Vec::new();
         let mut metered = InstantAndNormalInsertRequests::default();
         for request in requests.inserts {
             let info = &by_name[&request.table_name];
@@ -1327,7 +1334,7 @@ impl Inserter {
                 continue;
             };
             let is_instant = is_instant_table(info);
-            if is_sparse_primary_key_table(info) {
+            if is_sparse_mito_table(info) {
                 if !is_instant {
                     let batch = sparse_rows_to_record_batch(&rows, info)?;
                     sparse_batches.push((info.clone(), batch));
@@ -1340,7 +1347,7 @@ impl Inserter {
                 if is_instant {
                     metered.instant_requests.requests.push(region_req);
                 } else {
-                    metered.normal_requests.requests.push(region_req);
+                    sparse_envelopes.push(region_req);
                 }
             } else {
                 let partitioned = crate::req_convert::common::partitioner::Partitioner::new(
@@ -1351,12 +1358,14 @@ impl Inserter {
                 if is_instant {
                     metered.instant_requests.requests.extend(partitioned);
                 } else {
-                    metered.normal_requests.requests.extend(partitioned.clone());
-                    non_sparse_inserts.extend(partitioned);
+                    metered.normal_requests.requests.extend(partitioned);
                 }
             }
         }
 
+        // The suffix is needed for metering and Flow only. Its rows go to storage as Arrow batches.
+        let dense_request_count = metered.normal_requests.requests.len();
+        metered.normal_requests.requests.extend(sparse_envelopes);
         let write_cost = write_meter!(
             catalog,
             schema.clone(),
@@ -1387,7 +1396,9 @@ impl Inserter {
             self.mirror_pending_rows.clone(),
             has_instant_rows,
         )?;
-        drop(metered);
+        drop(metered.instant_requests);
+        let mut dense_inserts = metered.normal_requests;
+        dense_inserts.requests.truncate(dense_request_count);
 
         let mut results = Vec::new();
         for (info, batch) in sparse_batches {
@@ -1395,20 +1406,14 @@ impl Inserter {
                 continue;
             }
             results.push(
-                self.dispatch_sparse_bulk_batch(&info, batch, ctx, 0, permit.clone())
+                self.dispatch_sparse_bulk_batch(&info, batch, ctx, skip_wal, 0, permit.clone())
                     .await,
             );
         }
-        if !non_sparse_inserts.is_empty() {
+        if !dense_inserts.requests.is_empty() {
             results.push(
-                self.dispatch_normal_region_requests(
-                    RegionInsertRequests {
-                        requests: non_sparse_inserts,
-                    },
-                    0,
-                    ctx,
-                )
-                .await,
+                self.dispatch_normal_region_requests(dense_inserts, 0, ctx)
+                    .await,
             );
         }
         collect_batcher_outputs(results, write_cost as usize, ctx).await
@@ -1419,6 +1424,7 @@ impl Inserter {
         table_info: &TableInfoRef,
         batch: RecordBatch,
         ctx: &QueryContextRef,
+        skip_wal: bool,
         write_cost: usize,
         permit: Option<PendingRowsPermit>,
     ) -> Result<Output> {
@@ -1437,7 +1443,7 @@ impl Inserter {
             let partitioned = partitioner.partition_tracked_bulk_insert_requests(
                 batch,
                 vec![0; num_rows],
-                ctx.skip_wal(),
+                skip_wal,
             )?;
             let writes = partitioned
                 .into_iter()
@@ -1485,8 +1491,7 @@ impl Inserter {
             return Ok(Output::new(OutputData::AffectedRows(rows), meta));
         }
 
-        let partitioned =
-            partitioner.partition_bulk_insert_requests(batch, None, ctx.skip_wal())?;
+        let partitioned = partitioner.partition_bulk_insert_requests(batch, None, skip_wal)?;
         let requests = partitioned
             .into_iter()
             .map(|request| RegionRequest {
@@ -1535,9 +1540,11 @@ impl Inserter {
         let skip_wal = request.skip_wal;
         let rows = converter.prepare(request)?;
         if let Some(batcher) = self.eligible_table_batcher(&table_info, &ctx).await {
-            return self.submit_table_rows(rows, table_info, ctx, batcher).await;
+            return self
+                .submit_table_rows(rows, table_info, skip_wal, ctx, batcher)
+                .await;
         }
-        if is_sparse_primary_key_table(&table_info) {
+        if is_sparse_mito_table(&table_info) {
             return self
                 .dispatch_single_sparse_table_rows(rows, table_info, skip_wal, &ctx)
                 .await;
@@ -1559,10 +1566,10 @@ impl Inserter {
         let (rows, table_info) = converter.prepare(insert, ctx).await?;
         if let Some(batcher) = self.eligible_table_batcher(&table_info, ctx).await {
             return self
-                .submit_table_rows(rows, table_info, ctx.clone(), batcher)
+                .submit_table_rows(rows, table_info, ctx.skip_wal(), ctx.clone(), batcher)
                 .await;
         }
-        if is_sparse_primary_key_table(&table_info) {
+        if is_sparse_mito_table(&table_info) {
             return self
                 .dispatch_single_sparse_table_rows(rows, table_info, ctx.skip_wal(), ctx)
                 .await;
@@ -4422,7 +4429,13 @@ mod tests {
                 }],
             };
             let error = inserter
-                .submit_table_rows(rows, table_info.clone(), ctx.clone(), &batcher)
+                .submit_table_rows(
+                    rows,
+                    table_info.clone(),
+                    ctx.skip_wal(),
+                    ctx.clone(),
+                    &batcher,
+                )
                 .await
                 .unwrap_err();
             assert_eq!(error.status_code(), StatusCode::RateLimited);
@@ -4614,6 +4627,7 @@ mod tests {
             let mut sparse_info = new_test_table_info(10, "table_10", [1].into_iter());
             sparse_info.catalog_name = CATALOG.to_string();
             sparse_info.schema_name = "target_db".to_string();
+            sparse_info.meta.engine = default_engine().to_string();
             sparse_info.meta.schema = Arc::new(Schema::new(vec![
                 ColumnSchema::new(
                     DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
@@ -4683,18 +4697,87 @@ mod tests {
                 "target_db",
                 Channel::Postgres,
             ));
-            let out = inserter
-                .dispatch_single_sparse_table_rows(
-                    sparse_rows.clone(),
-                    sparse_info.clone(),
-                    false,
-                    &sparse_ctx,
-                )
-                .await
-                .unwrap();
-            assert_eq!(out.meta.cost, if enabled { 17 } else { 0 });
-            assert!(matches!(out.data, OutputData::AffectedRows(2)));
-            dispatched.try_recv().unwrap();
+            let mixed = RowInsertRequests {
+                inserts: vec![
+                    RowInsertRequest {
+                        table_name: sparse_info.name.clone(),
+                        rows: Some(sparse_rows.clone()),
+                    },
+                    RowInsertRequest {
+                        table_name: table_info.name.clone(),
+                        rows: Some(Rows {
+                            schema: vec![api::v1::helper::tag_column_schema(
+                                "a",
+                                ColumnDataType::Int32,
+                            )],
+                            rows: [1, 11, 101]
+                                .into_iter()
+                                .map(|a| Row {
+                                    values: vec![ValueData::I32Value(a).into()],
+                                })
+                                .collect(),
+                        }),
+                    },
+                ],
+            };
+            let infos = HashMap::from_iter([
+                (sparse_info.table_id(), sparse_info.clone()),
+                (table_info.table_id(), table_info.clone()),
+            ]);
+            for confirmed in [false, true] {
+                for skip_wal in [false, true] {
+                    let ctx = Arc::new(if confirmed {
+                        sparse_ctx.with_confirmed_writes()
+                    } else {
+                        sparse_ctx.fork()
+                    });
+                    ctx.set_skip_wal(!skip_wal);
+                    let out = inserter
+                        .dispatch_direct_sparse_row_inserts(
+                            mixed.clone(),
+                            infos.clone(),
+                            HashSet::new(),
+                            skip_wal,
+                            &ctx,
+                        )
+                        .await
+                        .unwrap();
+                    assert!(matches!(out.data, OutputData::AffectedRows(5)));
+                    assert_eq!(out.meta.cost, if enabled { 17 } else { 0 });
+                    let records = std::mem::take(&mut *meter.attempts.lock().unwrap());
+                    assert_eq!(records.len(), usize::from(enabled));
+                    if enabled {
+                        assert_eq!((records[0].rows, records[0].value), (5, 17));
+                    }
+
+                    let mut bulk_requests = 0;
+                    let mut dense_rows = 0;
+                    while let Ok((_, request)) = dispatched.try_recv() {
+                        match request.body.unwrap() {
+                            Body::BulkInsert(bulk) => {
+                                assert_eq!(
+                                    RegionId::from_u64(bulk.region_id).table_id(),
+                                    sparse_info.table_id()
+                                );
+                                assert_eq!(bulk.skip_wal, skip_wal);
+                                bulk_requests += 1;
+                            }
+                            Body::Inserts(inserts) => {
+                                for insert in inserts.requests {
+                                    assert_eq!(
+                                        RegionId::from_u64(insert.region_id).table_id(),
+                                        table_info.table_id()
+                                    );
+                                    assert_eq!(insert.skip_wal, skip_wal);
+                                    dense_rows += insert.rows.unwrap().rows.len();
+                                }
+                            }
+                            body => panic!("unexpected request: {body:?}"),
+                        }
+                    }
+                    assert_eq!((bulk_requests, dense_rows), (1, 3));
+                }
+            }
 
             meter.reject.store(true, Ordering::Relaxed);
             let err_or_ok = inserter
@@ -5361,6 +5444,7 @@ mod tests {
                     rows: vec![],
                 },
                 table.clone(),
+                ctx.skip_wal(),
                 ctx.clone(),
                 &batcher,
             )
@@ -5376,6 +5460,7 @@ mod tests {
                     }],
                 },
                 HashMap::from_iter([(table.table_id(), table)]),
+                ctx.skip_wal(),
                 ctx,
                 &batcher,
             )

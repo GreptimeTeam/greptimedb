@@ -16,4 +16,4 @@ pub(crate) mod common;
 pub mod delete;
 pub mod insert;
 
-pub(crate) use common::partitioner::{TablePartitioner, is_sparse_primary_key_table};
+pub(crate) use common::partitioner::{TablePartitioner, is_sparse_mito_table};

@@ -82,6 +82,33 @@ async fn test_sparse_primary_key_schema_validation(instance: Arc<dyn MockInstanc
 }
 
 #[apply(both_instances_cases)]
+async fn test_sparse_physical_metric_table_rejects_ordinary_insert(
+    instance: Arc<dyn MockInstance>,
+) {
+    let instance = instance.frontend();
+    execute_sql(
+        &instance,
+        "CREATE TABLE sparse_physical (ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING PRIMARY KEY) \
+         ENGINE = metric WITH ('physical_metric_table' = '', 'primary_key_encoding' = 'sparse')",
+    )
+    .await;
+
+    let error = try_execute_sql(
+        &instance,
+        "INSERT INTO sparse_physical (ts, val, host) VALUES (1000, 1.0, 'a')",
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status_code(), StatusCode::Unsupported);
+    assert!(
+        error
+            .output_msg()
+            .contains("Write request to physical region is forbidden"),
+        "{error:?}"
+    );
+}
+
+#[apply(both_instances_cases)]
 async fn test_sparse_reserved_key_round_trip(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
     execute_sql(

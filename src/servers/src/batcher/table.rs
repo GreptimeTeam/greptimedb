@@ -613,10 +613,10 @@ mod tests {
         let ingest_count =
             DIST_INGEST_ROW_COUNT.with_label_values(&[influx_ctx.get_db_string().as_str()]);
         assert_eq!(0, ingest_count.get());
-        influx_ctx.set_skip_wal(skip_wal);
-        opentsdb_ctx.set_skip_wal(skip_wal);
         let (first_result, second_result) = timeout(Duration::from_secs(5), async {
             if shared_request {
+                influx_ctx.set_skip_wal(skip_wal);
+                opentsdb_ctx.set_skip_wal(skip_wal);
                 let permit = batcher.acquire(0, 0).await.unwrap();
                 let (first, second) = tokio::join!(
                     batcher.submit(table.clone(), first, influx_ctx, permit.clone()),
@@ -627,6 +627,9 @@ mod tests {
                     second.map(|output| output.extract_rows_and_cost().0),
                 )
             } else {
+                // TableInsertRequest owns the WAL policy even when its context disagrees.
+                influx_ctx.set_skip_wal(!skip_wal);
+                opentsdb_ctx.set_skip_wal(!skip_wal);
                 let inserter = Inserter::new(
                     MemoryCatalogManager::new_with_table(DistTable::table(table.clone())),
                     partitions,

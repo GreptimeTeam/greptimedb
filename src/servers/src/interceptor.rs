@@ -443,13 +443,13 @@ pub trait PromStoreProtocolInterceptor {
         Ok(())
     }
 
+    /// Checks exemplar batches and may redirect their destination through `ctx`.
+    /// Implement the exemplar policy here because these batches bypass [`Self::pre_write`].
     fn pre_write_exemplars(
         &self,
-        _exemplars: &operator::insert::ExemplarBatch,
-        _ctx: QueryContextRef,
-    ) -> Result<(), Self::Error> {
-        Ok(())
-    }
+        exemplars: &operator::insert::ExemplarBatch,
+        ctx: QueryContextRef,
+    ) -> Result<(), Self::Error>;
 
     fn pre_read(&self, _read_req: &ReadRequest, _ctx: QueryContextRef) -> Result<(), Self::Error> {
         Ok(())
