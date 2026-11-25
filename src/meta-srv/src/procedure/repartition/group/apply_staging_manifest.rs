@@ -402,3 +402,195 @@ impl ApplyStagingManifest {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use common_meta::instruction::ApplyStagingManifest as ApplyStagingManifestInstruction;
+    use common_meta::peer::Peer;
+    use common_meta::rpc::router::{Region, RegionRoute};
+    use common_procedure::Procedure;
+    use store_api::storage::RegionId;
+
+    use crate::procedure::repartition::group::apply_staging_manifest::ApplyStagingManifest;
+    use crate::procedure::repartition::group::{
+        GroupPrepareResult, PersistentContext, RepartitionGroupProcedure,
+    };
+    use crate::procedure::repartition::plan::{SourceRegionDescriptor, TargetRegionDescriptor};
+    use crate::procedure::repartition::test_util::{
+        TestingEnv, new_persistent_context, range_expr,
+    };
+
+    /// Pins the remap -> apply handoff across a persisted boundary: a remap has
+    /// finished and recorded `staging_manifest_paths` in the group's
+    /// `PersistentContext`, and a (new) metasrv resumes the group at
+    /// [`ApplyStagingManifest`]. The state is dumped and restored exactly as a
+    /// restarted leader restores it, and the resumed step must address every target
+    /// with the path the remap recorded rather than computing its own.
+    ///
+    /// Version skew: an old (pre-`owned_range`) node that finishes a remap records
+    /// `staging_manifest_paths` whose entries name manifest files without an
+    /// `owned_range`. Such output must not be applied by a node that requires the
+    /// field, and `mito2` refuses it at install time
+    /// (`test_remap_install_without_an_owned_range_is_refused` in
+    /// `src/mito2/src/worker/handle_apply_staging.rs`; not duplicated here). The
+    /// recorded paths outlive the remapping node, so a repartition resumed after a
+    /// partial upgrade reaches exactly that refusal - which is why every node must be
+    /// upgraded before a repartition is resumed.
+    #[test]
+    fn test_resumed_apply_staging_manifest_uses_the_persisted_paths() {
+        let table_id = 1024;
+        let central_region = RegionId::new(table_id, 1);
+        let targets = vec![
+            TargetRegionDescriptor {
+                region_id: central_region,
+                partition_expr: range_expr("x", 0, 10),
+            },
+            TargetRegionDescriptor {
+                region_id: RegionId::new(table_id, 2),
+                partition_expr: range_expr("x", 10, 20),
+            },
+            TargetRegionDescriptor {
+                region_id: RegionId::new(table_id, 3),
+                partition_expr: range_expr("x", 20, 30),
+            },
+        ];
+        // The central region stays on peer 1, the two new regions land on peers 2
+        // and 3.
+        let target_routes = targets
+            .iter()
+            .enumerate()
+            .map(|(idx, target)| RegionRoute {
+                region: Region {
+                    id: target.region_id,
+                    partition_expr: target.partition_expr.as_json_str().unwrap(),
+                    ..Default::default()
+                },
+                leader_peer: Some(Peer::empty(idx as u64 + 1)),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        let source_routes = vec![RegionRoute {
+            region: Region {
+                id: central_region,
+                partition_expr: range_expr("x", 0, 30).as_json_str().unwrap(),
+                ..Default::default()
+            },
+            leader_peer: Some(Peer::empty(1)),
+            ..Default::default()
+        }];
+
+        // The boundary an old node leaves behind once its remap finished: the paths
+        // exist only in the persisted group context.
+        let staging_manifest_paths = HashMap::from([
+            (central_region, "manifests/region-1.manifest".to_string()),
+            (
+                RegionId::new(table_id, 2),
+                "manifests/region-2.manifest".to_string(),
+            ),
+            (
+                RegionId::new(table_id, 3),
+                "manifests/region-3.manifest".to_string(),
+            ),
+        ]);
+        let mut persistent_ctx = new_persistent_context(
+            table_id,
+            vec![SourceRegionDescriptor::partitioned(
+                central_region,
+                range_expr("x", 0, 30),
+            )],
+            targets.clone(),
+        );
+        persistent_ctx.group_prepare_result = Some(GroupPrepareResult {
+            source_routes,
+            target_routes: target_routes.clone(),
+            central_region,
+            central_region_datanode: Peer::empty(1),
+        });
+        persistent_ctx.staging_manifest_paths = staging_manifest_paths.clone();
+
+        // The context decodes back to the same paths, so what the apply step reads is
+        // what the remap wrote.
+        let encoded = serde_json::to_string(&persistent_ctx).unwrap();
+        let decoded: PersistentContext = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, persistent_ctx);
+        assert_eq!(decoded.staging_manifest_paths, staging_manifest_paths);
+
+        // A restarted metasrv loads the persisted group and resumes at this state.
+        let env = TestingEnv::new();
+        let procedure = RepartitionGroupProcedure {
+            state: Box::new(ApplyStagingManifest),
+            context: env.create_context(persistent_ctx),
+        };
+        let resumed =
+            RepartitionGroupProcedure::from_json(&procedure.dump().unwrap(), |persistent_ctx| {
+                env.create_context(persistent_ctx)
+            })
+            .unwrap();
+        assert!(resumed.state.as_any().is::<ApplyStagingManifest>());
+        assert_eq!(
+            resumed.context.persistent_ctx.staging_manifest_paths,
+            staging_manifest_paths
+        );
+
+        let resumed_ctx = &resumed.context.persistent_ctx;
+        // Safety: set by the `RepartitionStart` state, restored above.
+        let prepare_result = resumed_ctx.group_prepare_result.as_ref().unwrap();
+        let built = ApplyStagingManifest::build_apply_staging_manifest_instructions(
+            &resumed_ctx.staging_manifest_paths,
+            &prepare_result.target_routes,
+            &resumed_ctx.targets,
+            prepare_result.central_region,
+        )
+        .unwrap();
+
+        // The central region is addressed on its own, every other target through the
+        // per-peer list.
+        let mut by_region: HashMap<RegionId, (Peer, ApplyStagingManifestInstruction)> =
+            HashMap::with_capacity(resumed_ctx.targets.len());
+        for (peer, instructions) in &built.instructions {
+            assert!(!instructions.is_empty());
+            for instruction in instructions {
+                assert_ne!(instruction.region_id, central_region);
+                assert!(
+                    by_region
+                        .insert(instruction.region_id, (peer.clone(), instruction.clone()))
+                        .is_none(),
+                    "region {} received more than one apply instruction",
+                    instruction.region_id
+                );
+            }
+        }
+        let (central_peer, central_instruction) = built
+            .central_region_instruction
+            .expect("the central region is a target, so it is addressed separately");
+        assert_eq!(central_instruction.region_id, central_region);
+        assert!(
+            by_region
+                .insert(central_region, (central_peer, central_instruction))
+                .is_none()
+        );
+
+        // One instruction per target, each carrying the path the remap recorded, each
+        // sent to the peer that leads the region.
+        assert_eq!(by_region.len(), resumed_ctx.targets.len());
+        for target in &resumed_ctx.targets {
+            let (peer, instruction) = &by_region[&target.region_id];
+            assert_eq!(
+                instruction.manifest_path,
+                staging_manifest_paths[&target.region_id]
+            );
+            assert_eq!(
+                instruction.partition_expr,
+                target.partition_expr.as_json_str().unwrap()
+            );
+            assert_eq!(instruction.central_region_id, central_region);
+            let route = target_routes
+                .iter()
+                .find(|route| route.region.id == target.region_id)
+                .unwrap();
+            assert_eq!(Some(peer), route.leader_peer.as_ref());
+        }
+    }
+}

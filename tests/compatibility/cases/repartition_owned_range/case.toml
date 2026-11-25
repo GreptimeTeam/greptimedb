@@ -1,0 +1,11 @@
+name = "repartition_owned_range"
+reason = "Preserve the persisted owned_range field on shared SST references written by ALTER TABLE REPARTITION, so an upgraded datanode reads only the rows each reference owns."
+introduced_by = "owned_range row authorization for repartitioned SST references"
+topologies = ["distributed"]
+# The runner compares core versions only, so this also admits 1.4.0 prereleases.
+from_range = [">=v1.4.0"]
+to_range = [">=v1.4.0"]
+features = ["repartition", "partition", "metadata", "owned_range"]
+owner = "storage"
+# ALTER TABLE REPARTITION needs metasrv GC, which compat profiles disable by default.
+enable_gc = true

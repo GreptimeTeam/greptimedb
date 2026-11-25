@@ -46,6 +46,14 @@ pub struct CaseMetadata {
     /// Optional old-stage server configuration sidecars.
     #[serde(default)]
     pub old_config: Option<OldConfigMetadata>,
+    /// Opt in to metasrv GC for this case's profile.
+    ///
+    /// Compatibility profiles render metasrv with GC disabled, and
+    /// `ALTER TABLE ... REPARTITION` refuses to run without it. Only a case
+    /// that sets this flag joins a GC-enabled profile, so every other case
+    /// keeps the GC-disabled baseline.
+    #[serde(default)]
+    pub enable_gc: bool,
 }
 
 /// Optional configuration sidecars for the old compatibility stage.
@@ -569,6 +577,7 @@ mod tests {
                 owner: "team".to_string(),
                 namespace: None,
                 old_config: None,
+                enable_gc: false,
             },
             dir: PathBuf::from("case"),
             namespace: "case".to_string(),
@@ -591,6 +600,7 @@ mod tests {
                 owner: "test".to_string(),
                 namespace: None,
                 old_config: None,
+                enable_gc: false,
             },
             dir: PathBuf::from("bad_constraint"),
             namespace: "bad_constraint".to_string(),
@@ -613,6 +623,7 @@ mod tests {
                 owner: "test".to_string(),
                 namespace: None,
                 old_config: None,
+                enable_gc: false,
             },
             dir: PathBuf::from("case_a"),
             namespace: "shared_name".to_string(),
@@ -629,6 +640,7 @@ mod tests {
                 owner: "test".to_string(),
                 namespace: None,
                 old_config: None,
+                enable_gc: false,
             },
             dir: PathBuf::from("case_b"),
             namespace: "shared_name".to_string(),
@@ -654,6 +666,7 @@ mod tests {
                 owner: "test".to_string(),
                 namespace: Some("shared_name".to_string()),
                 old_config: None,
+                enable_gc: false,
             },
             dir: PathBuf::from("case_a"),
             namespace: "shared_name".to_string(),
@@ -670,6 +683,7 @@ mod tests {
                 owner: "test".to_string(),
                 namespace: Some("shared_name".to_string()),
                 old_config: None,
+                enable_gc: false,
             },
             dir: PathBuf::from("case_b"),
             namespace: "shared_name".to_string(),
@@ -692,6 +706,7 @@ mod tests {
                 owner: "team".to_string(),
                 namespace: None,
                 old_config: None,
+                enable_gc: false,
             },
             dir: PathBuf::from("case"),
             namespace: "case".to_string(),

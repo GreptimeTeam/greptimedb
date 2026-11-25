@@ -396,6 +396,7 @@ impl CompatCommand {
             for profile in profiles.iter() {
                 println!("  profile:      {}", profile.profile_id());
                 println!("    cases:       {}", profile.case_names().join(", "));
+                println!("    enable_gc:   {}", profile.enable_gc());
                 for source in profile.sources() {
                     println!("    sidecar:     {}", source.display());
                 }
@@ -457,29 +458,44 @@ impl CompatCommand {
 }
 
 /// Cases sharing one old-stage datanode configuration lifecycle.
+///
+/// `enable_gc` is part of the profile identity: cases only share a cluster when
+/// they agree on it, so an opt-in GC case never changes the profile of a case
+/// that relies on the GC-disabled baseline.
 #[derive(Debug)]
 enum CompatProfile {
     Baseline {
         cases: Vec<CompatCase>,
+        enable_gc: bool,
     },
     Overlay {
         overlay: Arc<PreparedDatanodeOverlay>,
         cases: Vec<CompatCase>,
         sources: Vec<PathBuf>,
+        enable_gc: bool,
     },
 }
 
 impl CompatProfile {
-    fn profile_id(&self) -> &str {
+    fn profile_id(&self) -> String {
         match self {
-            Self::Baseline { .. } => "baseline",
-            Self::Overlay { overlay, .. } => overlay.profile_id(),
+            Self::Baseline { enable_gc, .. } => gc_profile_id("baseline", *enable_gc),
+            Self::Overlay {
+                overlay, enable_gc, ..
+            } => gc_profile_id(overlay.profile_id(), *enable_gc),
+        }
+    }
+
+    /// Whether metasrv GC is rendered for this profile's cluster.
+    fn enable_gc(&self) -> bool {
+        match self {
+            Self::Baseline { enable_gc, .. } | Self::Overlay { enable_gc, .. } => *enable_gc,
         }
     }
 
     fn cases(&self) -> &[CompatCase] {
         match self {
-            Self::Baseline { cases } | Self::Overlay { cases, .. } => cases,
+            Self::Baseline { cases, .. } | Self::Overlay { cases, .. } => cases,
         }
     }
 
@@ -512,6 +528,15 @@ impl CompatProfile {
     }
 }
 
+/// Profile id, suffixed when the profile opts in to metasrv GC.
+fn gc_profile_id(base: &str, enable_gc: bool) -> String {
+    if enable_gc {
+        format!("{base}-gc")
+    } else {
+        base.to_string()
+    }
+}
+
 /// Deterministically ordered compatibility profiles.
 #[derive(Debug)]
 struct CompatProfiles(Vec<CompatProfile>);
@@ -533,6 +558,7 @@ impl CompatProfiles {
 #[derive(Debug)]
 struct OverlayProfileGroup {
     overlay: Arc<PreparedDatanodeOverlay>,
+    enable_gc: bool,
     cases: Vec<CompatCase>,
     sources: Vec<PathBuf>,
 }
@@ -542,12 +568,15 @@ fn prepare_compat_profiles(
     wal_config: &WalConfig,
 ) -> Result<CompatProfiles, String> {
     let protection = DatanodeProtectionPolicy::for_wal(wal_config);
-    let mut baseline_cases = Vec::new();
-    let mut overlays: BTreeMap<[u8; 32], OverlayProfileGroup> = BTreeMap::new();
+    // Cases share a profile only when they agree on both the old datanode
+    // configuration and the GC opt-in, so a GC case never flips GC for others.
+    let mut baseline_cases: BTreeMap<bool, Vec<CompatCase>> = BTreeMap::new();
+    let mut overlays: BTreeMap<([u8; 32], bool), OverlayProfileGroup> = BTreeMap::new();
 
     for case in cases {
+        let enable_gc = case.metadata.enable_gc;
         let Some(reference) = case.metadata.old_datanode_overlay() else {
-            baseline_cases.push(case);
+            baseline_cases.entry(enable_gc).or_default().push(case);
             continue;
         };
         let overlay = DatanodeOverlay::load(&case.dir, reference).map_err(|error| {
@@ -562,10 +591,11 @@ fn prepare_compat_profiles(
                 case.metadata.name
             )
         })?);
-        let key = *prepared.profile_key();
+        let key = (*prepared.profile_key(), enable_gc);
         let source = prepared.source().to_path_buf();
         let entry = overlays.entry(key).or_insert_with(|| OverlayProfileGroup {
             overlay: Arc::clone(&prepared),
+            enable_gc,
             cases: Vec::new(),
             sources: Vec::new(),
         });
@@ -573,17 +603,16 @@ fn prepare_compat_profiles(
         entry.sources.push(source);
     }
 
-    baseline_cases.sort_by(|left, right| left.metadata.name.cmp(&right.metadata.name));
     let mut profiles = Vec::new();
-    if !baseline_cases.is_empty() {
-        profiles.push(CompatProfile::Baseline {
-            cases: baseline_cases,
-        });
+    for (enable_gc, mut cases) in baseline_cases {
+        cases.sort_by(|left, right| left.metadata.name.cmp(&right.metadata.name));
+        profiles.push(CompatProfile::Baseline { cases, enable_gc });
     }
     for (
         _,
         OverlayProfileGroup {
             overlay,
+            enable_gc,
             mut cases,
             mut sources,
         },
@@ -596,6 +625,7 @@ fn prepare_compat_profiles(
             overlay,
             cases,
             sources,
+            enable_gc,
         });
     }
 
@@ -614,7 +644,7 @@ fn emit_protected_path_warnings(profiles: &CompatProfiles) {
         }
         println!(
             "{}",
-            format_protected_path_warning(profile.profile_id(), profile.case_names(), paths)
+            format_protected_path_warning(&profile.profile_id(), profile.case_names(), paths)
         );
     }
 }
@@ -719,7 +749,7 @@ async fn run_profile(profile: &CompatProfile, config: &ProfileRunConfig<'_>) -> 
         setup_pg: None,
         setup_mysql: None,
         enable_flat_format: false,
-        enable_gc: false,
+        enable_gc: profile.enable_gc(),
     };
     let env = Env::new(
         sqlness_home.clone(),
@@ -1354,6 +1384,7 @@ mod tests {
                 old_config: overlay.map(|_| OldConfigMetadata {
                     datanode: PathBuf::from("overlay.toml"),
                 }),
+                enable_gc: false,
             },
             dir: case_dir,
             namespace: name.to_string(),
@@ -1395,6 +1426,27 @@ mod tests {
             })
             .collect();
         assert!(overlay_keys.windows(2).all(|keys| keys[0] < keys[1]));
+    }
+
+    #[test]
+    fn gc_opt_in_cases_get_their_own_profile() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut gc_case = test_case(temp_dir.path(), "gc_case", None);
+        gc_case.metadata.enable_gc = true;
+        let profiles = prepare_compat_profiles(
+            vec![test_case(temp_dir.path(), "baseline", None), gc_case],
+            &WalConfig::RaftEngine,
+        )
+        .unwrap();
+        let profiles: Vec<_> = profiles.iter().collect();
+
+        assert_eq!(profiles.len(), 2);
+        assert_eq!(profiles[0].case_names(), ["baseline"]);
+        assert!(!profiles[0].enable_gc());
+        assert_eq!(profiles[0].profile_id(), "baseline");
+        assert_eq!(profiles[1].case_names(), ["gc_case"]);
+        assert!(profiles[1].enable_gc());
+        assert_eq!(profiles[1].profile_id(), "baseline-gc");
     }
 
     #[test]
