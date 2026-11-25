@@ -226,6 +226,7 @@ macro_rules! http_tests {
                 test_loki_json_logs,
                 test_loki_json_logs_with_pipeline,
                 test_elasticsearch_logs,
+                test_elasticsearch_logs_reports_failed_insert,
                 test_elasticsearch_logs_with_index,
                 test_elasticsearch_pipeline_version,
                 test_splunk_logs,
@@ -12135,6 +12136,74 @@ pub async fn test_elasticsearch_logs(store_type: StorageType) {
         &client,
         "select foo, bar from test;",
         expected,
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
+/// A write that fails after the documents were parsed must not be acknowledged as
+/// accepted: Elasticsearch clients read `errors` and `items[].create.status`, and would
+/// treat the dropped document as written. See #10471.
+pub async fn test_elasticsearch_logs_reports_failed_insert(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) = setup_test_http_app_with_frontend(
+        store_type,
+        "test_elasticsearch_logs_reports_failed_insert",
+    )
+    .await;
+
+    let client = TestClient::new(app).await;
+
+    // The first request creates `test` with an Int64 `age` column.
+    let body = r#"
+        {"create":{"_index":"test","_id":"1"}}
+        {"age":30}
+    "#;
+
+    let res = send_req(
+        &client,
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/json"),
+        )],
+        "/v1/elasticsearch/_bulk",
+        body.as_bytes().to_vec(),
+        false,
+    )
+    .await;
+
+    assert_eq!(StatusCode::OK, res.status());
+
+    // A string cannot be written to the Int64 column, so the insert fails.
+    let body = r#"
+        {"create":{"_index":"test","_id":"2"}}
+        {"age":"abc"}
+    "#;
+
+    let res = send_req(
+        &client,
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/json"),
+        )],
+        "/v1/elasticsearch/_bulk",
+        body.as_bytes().to_vec(),
+        false,
+    )
+    .await;
+
+    assert_eq!(StatusCode::BAD_REQUEST, res.status());
+    let content: Value = serde_json::from_str(&res.text().await).unwrap();
+    assert_eq!(content["errors"], json!(true));
+    assert_eq!(content["items"][0]["create"]["status"], json!(400));
+
+    // Only the accepted document is stored.
+    validate_data(
+        "test_elasticsearch_logs_reports_failed_insert",
+        &client,
+        "select age from test;",
+        "[[30]]",
     )
     .await;
 

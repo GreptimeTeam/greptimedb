@@ -41,7 +41,6 @@ use crate::error::{
     InvalidElasticsearchInputSnafu, ParseJsonSnafu, Result as ServersResult,
     status_code_to_http_status,
 };
-use crate::http::HttpResponse;
 use crate::http::event::{
     LogIngesterQueryParams, LogState, PipelineIngestRequest,
     extract_pipeline_params_map_from_headers, ingest_logs_inner,
@@ -236,13 +235,18 @@ async fn do_handle_bulk_api(
     )
     .await;
     let failure = match ingest_result {
-        Ok(response) => ingest_failure(&response),
+        Ok(response) => response.error_details(),
         Err(e) => {
             error!(e; "Failed to ingest logs");
             Some((status_code_to_http_status(&e.status_code()), e.to_string()))
         }
     };
     if let Some((http_status, reason)) = failure {
+        // The failed write keeps the status of the error, so a 5xx makes Elasticsearch
+        // clients retry the whole batch. The batches that did commit before the failure
+        // are not rolled back, so such a retry can duplicate those rows. Returning `200`
+        // with one item per action would avoid the retry; that is the document-level
+        // work tracked in #10471.
         return (
             http_status,
             elasticsearch_headers(),
@@ -270,22 +274,6 @@ async fn do_handle_bulk_api(
             "",
         )),
     )
-}
-
-/// Returns the HTTP status and reason if the ingestion response reports a failure.
-///
-/// `ingest_logs_inner` returns `Ok` even when inserting the transformed rows fails,
-/// carrying the insert error in an [`HttpResponse::Error`]. Without this check those
-/// documents would be acknowledged with `201` although nothing was written.
-fn ingest_failure(response: &HttpResponse) -> Option<(StatusCode, String)> {
-    match response {
-        HttpResponse::Error(err) => {
-            let status = common_error::status_code::StatusCode::from_u32(err.code())
-                .unwrap_or(common_error::status_code::StatusCode::Unknown);
-            Some((status_code_to_http_status(&status), err.error().to_string()))
-        }
-        _ => None,
-    }
 }
 
 // It will generate the following response when write _bulk request to GreptimeDB successfully:
@@ -481,6 +469,7 @@ mod tests {
 
     use super::*;
     use crate::error::Error as ServersError;
+    use crate::http::HttpResponse;
     use crate::http::result::error_result::ErrorResponse;
     use crate::http::result::greptime_result_v1::GreptimedbV1Response;
     use crate::query_handler::{PipelineHandler, PipelineHandlerRef};
@@ -665,7 +654,7 @@ mod tests {
             common_error::status_code::StatusCode::InvalidArguments,
             "column age expect type Int64, given: STRING".to_string(),
         ));
-        let (status, reason) = ingest_failure(&response).unwrap();
+        let (status, reason) = response.error_details().unwrap();
         assert_eq!(StatusCode::BAD_REQUEST, status);
         assert_eq!("column age expect type Int64, given: STRING", reason);
 
@@ -673,7 +662,7 @@ mod tests {
             common_error::status_code::StatusCode::Internal,
             "region unavailable".to_string(),
         ));
-        let (status, _) = ingest_failure(&response).unwrap();
+        let (status, _) = response.error_details().unwrap();
         assert_eq!(StatusCode::INTERNAL_SERVER_ERROR, status);
 
         let response = HttpResponse::GreptimedbV1(GreptimedbV1Response {
@@ -681,7 +670,7 @@ mod tests {
             execution_time_ms: 0,
             resp_metrics: Default::default(),
         });
-        assert!(ingest_failure(&response).is_none());
+        assert!(response.error_details().is_none());
     }
 
     #[test]
