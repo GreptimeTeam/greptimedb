@@ -1828,6 +1828,12 @@ impl Instance {
         let Some(cache) = self.rollup_cache.as_ref() else {
             return Ok(None);
         };
+        if query_ctx
+            .extension(session::hints::ROLLUP_CACHE_NOCACHE)
+            .is_some()
+        {
+            return Ok(None);
+        }
         // An instant query is one point, and the cache keys whole chunks of a grid.
         if eval_stmt.start == eval_stmt.end {
             return Ok(None);
