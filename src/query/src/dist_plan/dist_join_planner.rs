@@ -18,7 +18,8 @@
 //! [`DatafusionQueryEngine::create_physical_plan`](crate::datafusion::DatafusionQueryEngine)
 //! then fetches the approximate disk sizes of the candidate tables into [`DistJoinStats`], a
 //! query-local config extension, and the heuristic rewrites the join only when those statistics
-//! favor the right build side. Runs after `DistPlannerAnalyzer`, which wraps the remote scans in
+//! favor the right build side and the build table's bytes stay under
+//! `MAX_BROADCAST_BUILD_BYTES`. Runs after `DistPlannerAnalyzer`, which wraps the remote scans in
 //! `MergeScan` and assigns the remote dynamic filter producer ids preserved here.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -88,6 +89,15 @@ impl ExtensionOptions for DistJoinStats {
         vec![]
     }
 }
+
+/// Upper bound on the disk bytes of a broadcast build table, checked while the rewrite is
+/// planned.
+///
+/// The build side is materialized in the frontend's memory, so the rewrite is only planned when
+/// the statistics of the build table stay at or below this bound; a larger build table keeps the
+/// frontend join. The bound is a planning decision from statistics: the materialization itself has
+/// no run-time limit and never fails a running query.
+pub(crate) const MAX_BROADCAST_BUILD_BYTES: u64 = 64 * 1024 * 1024;
 
 impl DistJoinStats {
     /// Whether `build` should be the nested build side of a join whose probe side is `probe`.

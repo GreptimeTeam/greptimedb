@@ -36,8 +36,8 @@ pub(crate) use commutativity::{Categorizer, Commutativity};
 #[cfg(test)]
 pub(crate) use dist_join_planner::DistJoinTableStats;
 pub(crate) use dist_join_planner::{
-    DistJoinStats, aggregate_region_stats, candidate_joins, expected_region_ids,
-    restore_join_schema, side_base_table_id,
+    DistJoinStats, MAX_BROADCAST_BUILD_BYTES, aggregate_region_stats, candidate_joins,
+    expected_region_ids, restore_join_schema, side_base_table_id,
 };
 pub use filter_id::{FilterFingerprint, FilterId, ParseFilterIdError, RemoteDynFilterProducerId};
 pub(crate) use materialize::MaterializeLogicalPlan;

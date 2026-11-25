@@ -1945,22 +1945,19 @@ mod tests {
         );
     }
 
-    /// Waiting for the build side happens before a region read is issued: an oversized build
-    /// side fails the query without any probe request.
+    /// The build side has no run-time size limit: a build side far above the former row budget is
+    /// materialized and shipped to the probe regions instead of failing the query.
     #[tokio::test]
-    async fn merge_scan_broadcast_rejects_an_oversized_build_side_without_a_probe() {
+    async fn merge_scan_broadcast_ships_a_build_side_beyond_any_row_budget() {
         let slot_schema = int64_schema(&["a"]);
         let slot = MaterializedInput::new(
             Arc::new(DFSchema::try_from(slot_schema.arrow_schema().as_ref().clone()).unwrap()),
             Vec::new(),
         );
+        let rows = 10_001usize;
         let oversized = record_batch(
             slot_schema.clone(),
-            vec![Arc::new(Int64Vector::from_vec(vec![
-                1i64;
-                crate::dist_plan::materialize_exec::MAX_ROWS
-                    + 1
-            ])) as _],
+            vec![Arc::new(Int64Vector::from_vec(vec![1i64; rows])) as _],
         );
         let build = TestMemoryExec::try_new(
             &[vec![oversized.into_df_record_batch()]],
@@ -1992,19 +1989,28 @@ mod tests {
             Arc::new(build),
         ))));
 
-        let error = exec
+        let batches: Vec<_> = exec
             .execute(0, Arc::new(TaskContext::default()))
             .unwrap()
-            .try_collect::<Vec<_>>()
+            .try_collect()
             .await
-            .unwrap_err();
+            .unwrap();
+        assert_eq!(1, batches.len(), "the probe region answers the join");
+
+        let requests = handler.requests.lock().unwrap();
+        assert_eq!(1, requests.len());
         assert!(
-            error.to_string().contains("exceeds the broadcast budget"),
-            "{error}"
+            requests[0]
+                .plan
+                .display_indent()
+                .to_string()
+                .contains(&format!("rows={rows}")),
+            "the whole build side is shipped, got: {}",
+            requests[0].plan.display_indent()
         );
         assert!(
-            handler.requests.lock().unwrap().is_empty(),
-            "a rejected build side must not send a probe request"
+            requests[0].prepared_plan.is_some(),
+            "the shipped stage carries the encoded join"
         );
     }
 

@@ -196,8 +196,9 @@ impl DatafusionQueryEngine {
         ctx: &QueryEngineContext,
     ) -> Result<LogicalPlan> {
         use crate::dist_plan::{
-            DistJoinStats, MaterializeBroadcastJoin, MaterializeLogicalPlan, MaterializedInput,
-            MergeScanLogicalPlan, restore_join_schema, side_base_table_id,
+            DistJoinStats, MAX_BROADCAST_BUILD_BYTES, MaterializeBroadcastJoin,
+            MaterializeLogicalPlan, MaterializedInput, MergeScanLogicalPlan, restore_join_schema,
+            side_base_table_id,
         };
         use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
         use datafusion_expr::{Join, LogicalPlan as DfLogicalPlan};
@@ -322,6 +323,23 @@ impl DatafusionQueryEngine {
         if materialize_right == materialize_left {
             // Neither orientation favors a broadcast, or both do (degenerate equal stats):
             // keep the plan unchanged.
+            return Ok(analyzed_plan.clone());
+        }
+        // The build side is materialized in the frontend's memory, so a build table above the
+        // planning bound keeps the frontend join. This is the only size decision of the
+        // rewrite: the materialization has no run-time limit, i.e. the amount of data the build
+        // side turns out to hold never fails the query.
+        let build_table = if materialize_right {
+            right_table
+        } else {
+            left_table
+        };
+        let Some(build_stats) = stats.tables.get(&build_table) else {
+            // The heuristic above already requires the build table, but without its statistics
+            // there is nothing to bound the broadcast with: keep the plan unchanged.
+            return Ok(analyzed_plan.clone());
+        };
+        if build_stats.total_bytes > MAX_BROADCAST_BUILD_BYTES {
             return Ok(analyzed_plan.clone());
         }
         // From here on `large`/`small` mean the probe/build sides of the broadcast:
@@ -2711,6 +2729,75 @@ mod tests {
             "an incomplete description must keep the existing plan, got:\n{explained}"
         );
         assert_eq!(2, calls.load(Ordering::SeqCst));
+    }
+
+    /// The broadcast build side is bounded while the plan is built: a build table at the bound is
+    /// still broadcast, a build table above it keeps the frontend join even though the cost
+    /// heuristic favors the broadcast. The build side is never measured at run time.
+    #[tokio::test]
+    async fn test_dist_join_stats_build_side_bounded_by_broadcast_limit() {
+        use crate::dist_plan::MAX_BROADCAST_BUILD_BYTES;
+
+        common_telemetry::init_default_ut_logging();
+
+        // Two probe regions of 70 MiB each favor the build side as the broadcast build in both
+        // cases: `2 * build_bytes < 140 MiB` holds at the bound and one byte above it.
+        let probe_bytes = 70 * 1024 * 1024;
+        let reports_of = |build_bytes: u64| {
+            vec![
+                region_stat(
+                    RegionId::new(PROBE_TABLE_ID, 1),
+                    probe_bytes,
+                    RegionRole::Leader,
+                ),
+                region_stat(
+                    RegionId::new(PROBE_TABLE_ID, 2),
+                    probe_bytes,
+                    RegionRole::Leader,
+                ),
+                region_stat(
+                    RegionId::new(BUILD_TABLE_ID, 1),
+                    build_bytes,
+                    RegionRole::Leader,
+                ),
+            ]
+        };
+
+        for (build_bytes, broadcast) in [
+            (MAX_BROADCAST_BUILD_BYTES, true),
+            (MAX_BROADCAST_BUILD_BYTES + 1, false),
+        ] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let engine = dist_join_engine(reports_of(build_bytes), calls, true).await;
+            let query_engine = engine
+                .as_any()
+                .downcast_ref::<DatafusionQueryEngine>()
+                .unwrap();
+            let mut ctx = query_engine
+                .engine_context(dist_join_query_ctx(true))
+                .unwrap();
+            let plan = dist_join_test_plan();
+
+            let stats = query_engine.dist_join_stats(&ctx, &plan).await.unwrap();
+            assert!(
+                stats.favors_right_build(PROBE_TABLE_ID, BUILD_TABLE_ID),
+                "{build_bytes} build bytes must favor the broadcast build"
+            );
+
+            let materialized = materialized_logical_plan(query_engine, &mut ctx, &plan).await;
+            assert_eq!(
+                broadcast,
+                materialized.contains("MaterializeBroadcastJoin"),
+                "{build_bytes} build bytes must {} the broadcast rewrite, got:\n{materialized}",
+                if broadcast { "keep" } else { "drop" }
+            );
+            if !broadcast {
+                assert!(
+                    !nests_join_in_merge_scan(&materialized),
+                    "an oversized build side must keep the frontend join, got:\n{materialized}"
+                );
+            }
+        }
     }
 
     /// A candidate table that resolves to another physical table id is not priced under the id the

@@ -24,9 +24,12 @@
 //! * dropping the pollers pauses the read instead of leaving it running in the
 //!   background.
 //!
-//! The budget check ([`MAX_ROWS`], [`MAX_BYTES`]) runs while the build side is read, so an
-//! oversized build side is never published: the batches read so far are dropped together
-//! with the shared failure.
+//! The materialization collects every batch of the build side and has no run-time row or byte
+//! limit: an oversized build side never fails a running query. Whether a build side is small
+//! enough to broadcast is a planning decision, taken from the table statistics
+//! (`MAX_BROADCAST_BUILD_BYTES` of the nested broadcast join planner), so the memory a
+//! query-local broadcast needs is what DataFusion's memory pool and the operating system
+//! account for, like any other frontend-side allocation.
 
 use std::fmt::{self, Debug, Formatter};
 use std::future::Future;
@@ -49,11 +52,6 @@ use datafusion_common::{DataFusionError, Result};
 use datafusion_physical_expr::EquivalenceProperties;
 use futures::future::{BoxFuture, FutureExt, Shared};
 use futures_util::StreamExt;
-
-/// Row budget of one materialization.
-pub const MAX_ROWS: usize = 10_000;
-/// Byte budget of one materialization, measured with `RecordBatch::get_array_memory_size`.
-pub const MAX_BYTES: usize = 64 * 1024 * 1024;
 
 /// The shared failure type of [`OnceAsync`], so a failed evaluation is handed to every
 /// waiter without cloning the error.
@@ -175,7 +173,7 @@ impl MaterializeExec {
     /// Evaluates the build side once and returns the shared batches.
     ///
     /// Every caller - the first output partition and the merge stage - goes through this
-    /// method, so the build plan is read exactly once and a budget failure reaches all of
+    /// method, so the build plan is read exactly once and a failure reaches all of
     /// them.
     pub async fn materialize(&self, context: Arc<TaskContext>) -> Result<Vec<RecordBatch>> {
         let build = self.inner.build.clone();
@@ -197,7 +195,7 @@ impl MaterializeExec {
         }
     }
 
-    /// Fully consumes the build side within the broadcast budget.
+    /// Fully consumes the build side, whatever its size.
     async fn evaluate(
         build: Arc<dyn ExecutionPlan>,
         context: Arc<TaskContext>,
@@ -208,21 +206,8 @@ impl MaterializeExec {
         let mut stream = coalesced.execute(0, context)?;
 
         let mut batches = Vec::new();
-        let mut rows = 0usize;
-        let mut bytes = 0usize;
         while let Some(batch) = stream.next().await {
-            let batch = batch?;
-            rows = rows.saturating_add(batch.num_rows());
-            bytes = bytes.saturating_add(batch.get_array_memory_size());
-            if rows > MAX_ROWS || bytes > MAX_BYTES {
-                // Drop the partially read stream: nothing is published for an oversized
-                // build side and the merge stage never sends a probe request.
-                return Err(DataFusionError::ResourcesExhausted(format!(
-                    "the materialized build side exceeds the broadcast budget: \
-                     {rows} rows and {bytes} bytes read, limits are {MAX_ROWS} rows and {MAX_BYTES} bytes"
-                )));
-            }
-            batches.push(batch);
+            batches.push(batch?);
         }
         Ok(batches)
     }
@@ -338,16 +323,8 @@ mod tests {
         Arc::new(TaskContext::default())
     }
 
-    /// The shared cell hands every waiter the same error, wrapped as a shared error.
-    fn root_error(error: &DataFusionError) -> &DataFusionError {
-        match error {
-            DataFusionError::Shared(inner) => inner,
-            other => other,
-        }
-    }
-
     #[tokio::test]
-    async fn materializes_the_build_side_once_within_the_budget() {
+    async fn materializes_the_build_side_once() {
         let exec = materialize_exec(vec![batch(vec![1, 2]), batch(vec![3])]);
 
         let batches = exec.materialize(context()).await.unwrap();
@@ -379,28 +356,25 @@ mod tests {
         assert!(batches.is_empty());
     }
 
+    /// There is no run-time size limit on the build side: a build side far above the former row
+    /// budget is collected completely and shared, instead of failing the query.
     #[tokio::test]
-    async fn over_budget_build_side_fails_without_publishing_batches() {
-        let exec = materialize_exec(vec![batch(vec![1i64; MAX_ROWS + 1])]);
+    async fn materializes_a_build_side_beyond_any_row_budget() {
+        let build = vec![batch(vec![1i64; 10_001]), batch(vec![2i64; 10_001])];
+        let exec = materialize_exec(build.clone());
 
-        let error = exec.materialize(context()).await.unwrap_err();
-        assert!(
-            matches!(root_error(&error), DataFusionError::ResourcesExhausted(_)),
-            "{error}"
-        );
-
-        // The failure is shared, not retried, and no batch is published.
-        let error = exec.materialize(context()).await.unwrap_err();
-        assert!(
-            matches!(root_error(&error), DataFusionError::ResourcesExhausted(_)),
-            "{error}"
-        );
+        assert_eq!(build, exec.materialize(context()).await.unwrap());
         assert_eq!(1, exec.result().init_count());
 
         let stream = exec.execute(0, context()).unwrap();
         let batches: Vec<_> = stream.collect().await;
-        assert_eq!(1, batches.len());
-        assert!(batches[0].is_err(), "the stage must not publish a prefix");
+        assert_eq!(2, batches.len());
+        assert!(batches.iter().all(|batch| batch.is_ok()));
+        assert_eq!(
+            1,
+            exec.result().init_count(),
+            "the output stream must reuse the shared evaluation"
+        );
     }
 
     #[tokio::test]
