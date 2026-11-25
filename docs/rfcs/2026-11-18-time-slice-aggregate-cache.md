@@ -69,13 +69,13 @@ AggregateExec (Final)                     (unchanged)
 
 A physical optimizer rule looks for a `Partial` aggregation that reads a region scan through row-wise operators only (filter and projection), where the scan request bounds the time index on both ends. The rule splits the time range into slices aligned to a fixed width and places `SliceAggregateExec` above the partial aggregation.
 
-If the aggregation already groups by a time bucket that lies within one slice, such as `date_bin` with a bucket that divides the slice width, the slice of each group follows from its bucket and the aggregation stays as planned. Otherwise, the rule adds the slice of each row as an extra grouping key. An extra key costs time on every run, so the rule adds it only when the same plan runs a second time; a query that runs once does not pay for it.
+If the aggregation already groups by a time bucket that lies within one slice, the slice of each group follows from its bucket. Otherwise, the rule adds the slice of each row as an extra grouping key.
 
-When the query runs, `SliceAggregateExec` asks the scan for the fingerprint of each slice. Slices whose cached entry has the same fingerprint are emitted from the cache, and a dynamic filter lets the scan skip their rows. The remaining slices are computed by the original scan in one pass, and an extra grouping key is removed from their states before they are emitted. Once every partition of the scan has finished, a background task merges their states across partitions, splits them by slice, and caches them, so the query does not wait for it. A failure there only costs later hits. The final aggregation merges partial states regardless of how the input rows were split, so its output does not change.
+When the query runs, `SliceAggregateExec` asks the scan for the fingerprint of each slice. Slices whose cached entry has the same fingerprint are emitted from the cache, and a dynamic filter lets the scan skip their rows. The remaining slices are computed by the original scan in one pass, and an extra grouping key is removed from their states before they are emitted. Once every partition of the scan has finished, their states are merged across partitions and cached per slice, without delaying the query. The final aggregation merges partial states regardless of how the input rows were split, so its output does not change.
 
 The rule runs where the partial aggregation reads the region scan: in-process in standalone mode, and on the datanode in distributed mode. In distributed mode, the aggregation above `SliceAggregateExec` produces the states that the frontend merges. Aggregations that the distributed planner keeps above `MergeScan`, such as those that cannot be split into steps, are not affected. The frontend plan and the region request protocol do not change.
 
-Every slice, cached or computed, comes from the files of the version the scan was built on. A plain scan reads memtables without a sequence bound, so a row written while the query runs may or may not be seen, with or without the cache. The cache does not add another outcome: a cached slice does not see the row, which an uncached scan can also miss. A computed slice that sees the row is cached under a fingerprint that never matches again, because afterwards the row is either in a memtable that overlaps the slice or in a new file.
+A row written while a query runs may or may not be seen by a plain scan, with or without the cache. The cache keeps that visibility and does not add another outcome. A slice computed with such a row is cached under a fingerprint that does not match again, because the row stays in a memtable or moves to a new file.
 
 Results are not bit-identical to those of an uncached run: merging states in a different order can change the last digits of a floating-point `sum` or `avg`, as a different partition count already does.
 
@@ -106,8 +106,8 @@ SST files are immutable. Every operation that changes the persisted rows of a ra
 - Key: the region ID, the partial aggregation and the operators below it, the scan request, the session settings, and the slice bounds. The key is kept in full and compared on lookup, so two plans never share an entry by a hash collision. It leaves out only the time-index range predicates that the slice bounds provably imply, so two queries with different windows can share their interior slices. Any other predicate on the time index, such as `date_part('hour', ts) = 3`, stays in the key. Session settings are in the key because functions read some of them, such as the time zone, at execution time.
 - Exclusions: dynamic filters change while a query runs, so the rule skips scans that hold one, such as a filter pushed down by a TopK or a join, and runs after filter pushdown to see them. Plans with expressions that are not immutable are skipped too, because their values can change between queries.
 - Entry: the fingerprint under which the entry was computed, and the partial state batches.
-- Capacity: one cache per node, bounded in bytes and weighted by batch size. Entries not read for an idle timeout are dropped. The states a query collects for the cache are reserved in the query memory pool; if the pool refuses them, the query caches nothing and goes on. A query whose states exceed a per-query bound caches nothing, and the rule stops rewriting its plan for the idle timeout, which would otherwise pay for the extra grouping on every run.
-- Configuration: the cache is experimental and off by default. An option in `[query]` enables it for the node and sets its size, the per-query bound, and the idle timeout. A per-request query option overrides the switch for one query.
+- Capacity: one cache per node, bounded in bytes. The states a query collects count against the query memory limit, and a query whose states exceed a per-query bound caches nothing.
+- The cache is experimental and off by default, with a node-level switch that a single query can override.
 
 ## Worked example
 
@@ -150,7 +150,7 @@ Benefits:
 
 Drawbacks:
 
-- The first execution of a query does more work: the scan prunes nothing yet, and the states are collected for the cache. The prototype measured up to 12% more time on a first run. When the plan needs an extra grouping key, that key multiplies the groups by the number of slices and is paid from the plan's second run on, until the slices are cached.
+- The first execution of a query does more work. The prototype measured up to 12% more time on a first run. When the rule must add a grouping key, the key multiplies the groups by the number of slices.
 - Slices are not cached while a memtable overlaps them, and a memtable spans everything from its oldest row to its newest. A late write therefore disables the cache from its timestamp to the present until the next flush. A dashboard that only shows the last 15 or 30 minutes, the default window of several of the front ends above, gains little.
 - Aggregations whose states grow with their input, such as an exact `count(DISTINCT)`, exceed the per-query bound and are never cached; their first run pays for the extra grouping.
 - Only aggregations with a partial stage are rewritten. A query that groups by the whole primary key aggregates each series within one partition, and a `min` or `max` without grouping pushes its own dynamic filter into the scan; neither uses the cache.
@@ -159,9 +159,9 @@ Drawbacks:
 # Implementation Plan
 
 1. Add `RegionScanner::time_range_fingerprint`, implement it for mito, and test every change path listed in [Data fingerprint](#data-fingerprint).
-2. Add the optimizer rule and `SliceAggregateExec`, disabled by default behind an experimental `[query]` option that a per-request option overrides, with a node-level cache bounded by its own size option.
-3. Report slice hits and the reasons for misses in `EXPLAIN ANALYZE` and as a metric.
-4. Test writes that interleave with a query, and run the rule in distributed mode, where the partial aggregation runs on the datanode.
+2. Add the optimizer rule and `SliceAggregateExec`, experimental and disabled by default.
+3. Report slice hits and misses in `EXPLAIN ANALYZE` and as a metric.
+4. Test writes that interleave with a query, and verify distributed mode.
 
 # Alternatives
 
@@ -179,7 +179,7 @@ Drawbacks:
 1. **Slice width.** A fixed one-hour width is simple. Deriving the width from the region's compaction window or from the query's bucket width could raise the hit rate.
 2. **Plan identity.** The prototype identifies the plan by the debug form of its expressions plus the session settings. This relies on the debug form of every expression covering everything that affects its result. A stable serialization of physical expressions would remove that reliance.
 3. **Cost of a full hit.** A 30-day window with hourly slices still takes about 18 ms when every slice hits. Where that time goes has not been measured.
-4. **Sequence fence.** The cache keeps the visibility of an uncached plain scan, in which rows written during the query may or may not appear. Bounding the memtable reads of rewritten scans by the sequence at scan creation would make each query read exactly one version, at the cost of a behavior that differs from uncached scans.
+4. **Sequence fence.** Bounding the memtable reads of rewritten scans by a sequence would make each query read exactly one version, at the cost of behaving differently from uncached scans.
 5. **Distributed mode.** The prototype has been verified in standalone mode only.
 
 # Future Work
