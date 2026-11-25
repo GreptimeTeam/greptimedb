@@ -335,11 +335,27 @@ impl PromPlanner {
             return Ok(declined("selector_without_table_or_time_index"));
         };
         let tags = self.ctx.tag_columns.clone();
-        let fields = self.ctx.field_columns.clone();
-        // A `__field__` matcher narrows the field set in a projection the existing planner builds, and the
-        // raw series scan below this node has no equivalent: it reports every field the scan carries.
-        if self.ctx.field_column_matcher.is_some() || fields.is_empty() {
-            return Ok(declined("field_selector_without_raw_series_equivalent"));
+        // The fields this input reads. A `__field__` matcher selects among the table's field columns,
+        // and the selection is resolved exactly as the existing plan resolves it - `=` and `!=` name
+        // one column, `=~` and `!~` keep or drop the columns they match - so both routes read the
+        // same fields, in the same order. A matcher naming a column the table does not carry is an
+        // error there, so that selection is left to the existing plan rather than answered here.
+        let reads_a_field_selection = self.ctx.field_column_matcher.is_some();
+        let fields = match &self.ctx.field_column_matcher {
+            Some(field_matchers) => {
+                let Ok(fields) =
+                    Self::field_columns_selected_by(field_matchers, &self.ctx.field_columns)
+                else {
+                    return Ok(declined("field_selector_names_a_column_the_table_lacks"));
+                };
+                fields
+            }
+            None => self.ctx.field_columns.clone(),
+        };
+        // A selection no field is left of has no column to read a value from, so it keeps the
+        // existing plan.
+        if fields.is_empty() {
+            return Ok(declined("selector_reads_no_field"));
         }
         // Delta samples are increments: the existing planner sums them for `increase` and
         // divides by the range for `rate`, while the native tree assumes cumulative samples.
@@ -372,38 +388,45 @@ impl PromPlanner {
             Some((mut scan, predicate, _)) => {
                 // Preserve logical field order and the table restriction on the direct
                 // physical scan.
-                let source_schema = scan.source.schema();
-                let Some(mut ordered_projection) = fields
-                    .iter()
-                    .map(|field| source_schema.index_of(field).ok())
-                    .collect::<Option<Vec<_>>>()
+                let Some(projection) =
+                    field_first_projection(&scan, &fields, &self.ctx.field_columns)
                 else {
                     return Ok(declined("field_missing_from_source_schema"));
                 };
-                let original_projection = scan.projection.as_ref();
-                let selected_indices = original_projection
-                    .cloned()
-                    .unwrap_or_else(|| (0..source_schema.fields().len()).collect());
-                for index in selected_indices {
-                    let is_field = fields
-                        .iter()
-                        .any(|field| field == source_schema.field(index).name());
-                    if !is_field && !ordered_projection.contains(&index) {
-                        ordered_projection.push(index);
-                    }
-                }
                 scan.filters.push(predicate);
                 scan = TableScanBuilder::from(scan)
-                    .with_projection(Some(ordered_projection))
+                    .with_projection(Some(projection))
                     .build()
                     .context(DataFusionPlanningSnafu)?;
                 input = LogicalPlan::TableScan(scan.clone());
                 scan
             }
-            None => match &input {
-                LogicalPlan::TableScan(scan) => scan.clone(),
-                _ => return Ok(declined("selector_plan_is_not_a_table_scan")),
-            },
+            None => {
+                let LogicalPlan::TableScan(plain) = &input else {
+                    return Ok(declined("selector_plan_is_not_a_table_scan"));
+                };
+                let plain = plain.clone();
+                // A plain scan reads every column of its table, so a `__field__` selection is what
+                // narrows it: the raw series scan below this node reports the field columns of the
+                // schema it is handed, and the frame this input declares carries exactly the fields
+                // the selection names. A selection is the whole field set only when it names one, so
+                // a selector carrying no `__field__` matcher keeps the scan it was given.
+                if !reads_a_field_selection {
+                    plain
+                } else {
+                    let Some(projection) =
+                        field_first_projection(&plain, &fields, &self.ctx.field_columns)
+                    else {
+                        return Ok(declined("field_missing_from_source_schema"));
+                    };
+                    let scan = TableScanBuilder::from(plain)
+                        .with_projection(Some(projection))
+                        .build()
+                        .context(DataFusionPlanningSnafu)?;
+                    input = LogicalPlan::TableScan(scan.clone());
+                    scan
+                }
+            }
         };
         let table = self.table_from_source(&scan.source)?;
         let table_meta = &table.table_info().meta;
@@ -3119,6 +3142,43 @@ fn metric_scan_and_table_id(
         return None;
     };
     Some((scan.clone(), filter.predicate.clone(), *table_id))
+}
+
+/// The scan projection that reads `fields`, followed by every column of the scan that is not a
+/// field.
+///
+/// The raw series scan reports one field per field column of the schema it is handed, so the field
+/// columns a scan projects are the fields the native node below it reads, in that order. The columns
+/// beside the fields - the tags, the time index, the tsid - are what a frame is built from and what
+/// the scan's own filters read, so they are kept. `table_fields` is the table's own field columns,
+/// which is what tells a field column apart from a column of another kind: a field column `fields`
+/// does not name is dropped rather than read beside the selection, since the frame this input
+/// declares holds the selection and nothing else. A field that is not a column of the scan's source
+/// answers `None`: this route has nothing to bind it to.
+fn field_first_projection(
+    scan: &datafusion::logical_expr::TableScan,
+    fields: &[String],
+    table_fields: &[String],
+) -> Option<Vec<usize>> {
+    let source_schema = scan.source.schema();
+    // Preserve logical field order and the table restriction on the direct physical scan.
+    let mut projection = fields
+        .iter()
+        .map(|field| source_schema.index_of(field).ok())
+        .collect::<Option<Vec<_>>>()?;
+    let read_indices = scan
+        .projection
+        .clone()
+        .unwrap_or_else(|| (0..source_schema.fields().len()).collect());
+    for index in read_indices {
+        let is_field = table_fields
+            .iter()
+            .any(|field| field == source_schema.field(index).name());
+        if !is_field && !projection.contains(&index) {
+            projection.push(index);
+        }
+    }
+    Some(projection)
 }
 
 #[cfg(test)]
