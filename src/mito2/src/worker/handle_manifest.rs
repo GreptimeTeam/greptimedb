@@ -468,8 +468,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return RegionEditDispatch::Rejected;
         }
 
-        let ingested_parquet_bytes = if matches!(kind, RegionEditKind::Ingest) {
-            match new_ingested_parquet_bytes(&region, &edit) {
+        let ingested_parquet_bytes = match &kind {
+            RegionEditKind::Ingest => match new_ingested_parquet_bytes(&region, &edit) {
                 Ok(bytes) => bytes,
                 Err(error) => {
                     let error = Arc::new(error);
@@ -477,9 +477,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         .reply_with(|| Err(error.clone()).context(EditRegionSnafu { region_id }));
                     return RegionEditDispatch::Rejected;
                 }
-            }
-        } else {
-            0
+            },
+            #[cfg(feature = "enterprise")]
+            RegionEditKind::Compaction(_) => edit
+                .files_to_add
+                .iter()
+                .fold(0u64, |bytes, file| bytes.saturating_add(file.file_size)),
+            RegionEditKind::Import => 0,
         };
 
         // Allow retrieving `is_staging` before spawn the edit region task.

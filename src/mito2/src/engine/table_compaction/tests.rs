@@ -332,6 +332,15 @@ async fn test_partial_success_can_retry_both_regions_without_duplicate_files() {
     let b = RegionId::new(1, 2);
     let (snapshot_a, output_a) = seed(&engine, a).await;
     let (snapshot_b, output_b) = seed(&engine, b).await;
+    let bytes = |id| {
+        engine
+            .get_region(id)
+            .unwrap()
+            .region_statistic()
+            .ingested_parquet_bytes
+    };
+    let before_a = bytes(a);
+    let before_b = bytes(b);
     let invalid = FileMeta {
         file_size: output_b.file_size + 1,
         ..output_b.clone()
@@ -342,6 +351,8 @@ async fn test_partial_success_can_retry_both_regions_without_duplicate_files() {
     );
     assert_eq!(PublicationOutcome::Applied, first_a.unwrap());
     assert!(first_b.is_err());
+    assert_eq!(bytes(a), before_a + output_a.file_size);
+    assert_eq!(bytes(b), before_b);
     assert_eq!(
         snapshot_b.inputs,
         engine.table_compaction_snapshot(b).unwrap().inputs
@@ -352,6 +363,8 @@ async fn test_partial_success_can_retry_both_regions_without_duplicate_files() {
     );
     assert_eq!(PublicationOutcome::Applied, retry_a.unwrap());
     assert_eq!(PublicationOutcome::Applied, retry_b.unwrap());
+    assert_eq!(bytes(a), before_a + output_a.file_size);
+    assert_eq!(bytes(b), before_b + output_b.file_size);
     for (id, output) in [(a, output_a), (b, output_b)] {
         let region = engine.get_region(id).unwrap();
         let manifest = region.manifest_ctx.manifest().await;
