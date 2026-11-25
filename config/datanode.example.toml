@@ -335,7 +335,7 @@ overwrite_entry_start_id = false
 
 ## The query engine options.
 [query]
-## Experimental opt-in for shape-based AVG/SUM join aggregation; default false.
+## Experimental opt-in for shape-based AVG/SUM/COUNT join aggregation; default false.
 experimental_enable_factorized_join_agg = false
 
 ## Parallelism of the query engine.

@@ -570,7 +570,7 @@ max_running_procedures = 128
 ## query.experimental_native_promql option overrides it, in that order.
 ## Default: false
 #+ experimental_native_promql = false
-## Experimental opt-in for shape-based AVG/SUM join aggregation; default false.
+## Experimental opt-in for shape-based AVG/SUM/COUNT join aggregation; default false.
 experimental_enable_factorized_join_agg = false
 
 ## Parallelism of the query engine.
