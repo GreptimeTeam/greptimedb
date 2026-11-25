@@ -23,8 +23,11 @@ window describes a half-open timestamp interval `[start, end)` and an inclusive
 sequence upper bound `frontier`. Optional `increments` use the same timestamp
 bounds and certify the sequence interval `(after, frontier]`. At each timestamp,
 a scan combines full windows and increments from readable indexes with matching
-region and schema. It skips sample-key discovery only when contiguous sequence
-coverage reaches the sample SST's bound across its entire inclusive time range.
+region and compatible tags. New proofs record user tags as ordered
+`[column_id, name]` pairs in `tags`. Field-only changes and additional nullable
+string tags without defaults preserve coverage. Older index rows supply null for
+these added labels. Proofs without a tag list require the original schema version.
+A scan skips sample-key discovery only when contiguous sequence coverage reaches the sample SST's bound across its entire inclusive time range.
 A gap or unknown sample sequence requires sample-key discovery. Maintenance
 expires an index using the maximum source timestamp recorded in its file metadata.
 

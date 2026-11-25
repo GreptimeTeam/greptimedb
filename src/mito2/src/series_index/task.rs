@@ -354,8 +354,7 @@ impl SeriesIndexTask {
                 continue;
             };
             let live = !expired(index)
-                && proof.region_id == region.region_id
-                && proof.schema_version == metadata.schema_version
+                && proof.matches_metadata(&metadata)
                 && files.iter().any(|f| {
                     !expired(f)
                         && proof
@@ -423,6 +422,7 @@ impl SeriesIndexTask {
                 continue;
             }
             let mut proof = NarthexCoverage {
+                tags: Some(super::writer::tag_columns(&metadata)),
                 region_id: region.region_id,
                 schema_version: metadata.schema_version,
                 windows: Vec::new(),

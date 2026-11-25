@@ -100,13 +100,10 @@ pub(crate) async fn open_sources(
         let FileFormat::NarthexSeriesIndex(index) = &file.meta_ref().format else {
             continue;
         };
-        let region = context.input.region_metadata().region_id;
         let Some(proof) = &index.coverage else {
             continue;
         };
-        if proof.schema_version != context.input.region_metadata().schema_version
-            || proof.region_id != region
-        {
+        if !proof.matches_metadata(context.input.region_metadata()) {
             continue;
         }
         if !indices.iter().any(|i| {
@@ -117,7 +114,7 @@ pub(crate) async fn open_sources(
         }) {
             continue;
         }
-        let reader = match crate::series_index::columnar::reader::ColumnarReader::open_cached(
+        let mut reader = match crate::series_index::columnar::reader::ColumnarReader::open_cached(
             context.input.access_layer.object_store().clone(),
             crate::series_index::SeriesIndexFileHandle::from_narthex(
                 file.clone(),
@@ -137,13 +134,9 @@ pub(crate) async fn open_sources(
             Err(error) if error.is_object_not_found() => continue,
             Err(error) => return Err(error),
         };
-        // Indexes built before a schema extension need sample-key discovery until
-        // they can supply the current tag schema, including newly nullable tags.
-        if crate::series_index::format::validate_series_schema(
-            &reader.schema(),
-            context.input.region_metadata(),
-        )
-        .is_err()
+        if reader
+            .adapt_tags(context.input.region_metadata(), proof)
+            .is_err()
         {
             continue;
         }

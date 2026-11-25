@@ -35,6 +35,7 @@
                 "coverage": {
                   "region_id": 98784247841,
                   "schema_version": 0,
+                  "tags": [[1, "host"]],
                   "increments": [
                     {
                       "start": {"value": 5, "unit": "Millisecond"},

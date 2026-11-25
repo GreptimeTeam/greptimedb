@@ -224,6 +224,36 @@ pub(crate) fn validate_sample_schema(schema: &SchemaRef, metadata: &RegionMetada
     Ok(())
 }
 
+impl crate::sst::file::NarthexCoverage {
+    pub(crate) fn matches_metadata(&self, metadata: &RegionMetadata) -> bool {
+        if self.region_id != metadata.region_id {
+            return false;
+        }
+        if self.schema_version == metadata.schema_version {
+            return true;
+        }
+        let Some(tags) = &self.tags else {
+            return false;
+        };
+        if super::writer::validate_metadata(metadata).is_err() {
+            return false;
+        }
+        tags.iter().all(|(id, name)| {
+            metadata.primary_key.contains(id)
+                && metadata
+                    .column_by_id(*id)
+                    .is_some_and(|c| c.column_schema.name == *name)
+        }) && metadata
+            .primary_key_columns()
+            .filter(|c| !ReservedColumnId::is_reserved(c.column_id))
+            .all(|c| {
+                tags.iter().any(|(id, _)| *id == c.column_id)
+                    || (c.column_schema.is_nullable()
+                        && c.column_schema.default_constraint().is_none())
+            })
+    }
+}
+
 /// Checks whether a series index contains exactly the current non-reserved tags.
 pub(crate) fn validate_series_schema(schema: &SchemaRef, metadata: &RegionMetadata) -> Result<()> {
     let mut ids = HashSet::new();

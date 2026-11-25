@@ -91,6 +91,121 @@ async fn test_narthex_sparse_upsert_after_adding_nullable_tag() -> WhateverResul
 }
 
 #[tokio::test]
+async fn test_narthex_series_index_survives_added_label() -> WhateverResult<()> {
+    let reads = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = reads.clone();
+    let layer = object_store::layers::mock::MockLayerBuilder::default()
+        .reader_factory(Arc::new(move |path, _, inner| {
+            if path.ends_with(".series") {
+                captured.lock().unwrap().push(path.to_owned());
+            }
+            inner
+        }))
+        .build()
+        .unwrap();
+    let mut env = TestEnv::new().await.with_mock_layer(layer);
+    let engine = env
+        .create_engine(MitoConfig {
+            experimental_enable_series_index: true,
+            schedule_compaction_after_edit: false,
+            sst_meta_cache_size: ReadableSize(0),
+            ..Default::default()
+        })
+        .await;
+    let id = RegionId::new(1024, 0);
+    engine
+        .handle_request(
+            id,
+            RegionRequest::Create(sparse_metric_create_request("narthex")),
+        )
+        .await?;
+    let region = engine.get_region(id).unwrap();
+    let old = new_sparse_primary_key(&["old"], &region.metadata(), 42, 7);
+    engine
+        .handle_request(id, test_util::sparse_metric_put(old, 1000, Some(1.0)))
+        .await?;
+    test_util::flush_region(&engine, id, None).await;
+    engine
+        .handle_request(id, build_series_index_request())
+        .await?;
+    let snapshot = region.version();
+    let index = snapshot.ssts.series_indexes().values().next().unwrap();
+    let part = index
+        .meta_ref()
+        .narthex_objects(&region.access_layer.build_region_dir(id))
+        .unwrap()
+        .into_iter()
+        .find(|o| o.path.ends_with(".series"))
+        .unwrap()
+        .path;
+    engine
+        .handle_request(
+            id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::AddColumns {
+                    columns: vec![AddColumn {
+                        column_metadata: ColumnMetadata {
+                            column_schema: ColumnSchema::new(
+                                "tag_1",
+                                ConcreteDataType::string_datatype(),
+                                true,
+                            ),
+                            semantic_type: SemanticType::Tag,
+                            column_id: 3,
+                        },
+                        location: None,
+                    }],
+                },
+            }),
+        )
+        .await?;
+    let new = new_sparse_primary_key(&["new", "west"], &region.metadata(), 42, 7);
+    engine
+        .handle_request(id, test_util::sparse_metric_put(new, 2000, Some(2.0)))
+        .await?;
+    test_util::flush_region(&engine, id, None).await;
+    engine
+        .handle_request(id, build_series_index_request())
+        .await?;
+    assert!(
+        region
+            .version()
+            .ssts
+            .series_indexes()
+            .contains_key(&index.meta_ref().file_id)
+    );
+    for (filter, label) in [
+        (col("tag_1").eq(lit("west")), "new"),
+        (col("tag_1").is_null().or(col("tag_1").eq(lit(""))), "old"),
+    ] {
+        reads.lock().unwrap().clear();
+        let batches = RecordBatches::try_collect(
+            engine
+                .scan_to_stream(
+                    id,
+                    ScanRequest {
+                        filters: vec![filter],
+                        ..Default::default()
+                    },
+                )
+                .await?,
+        )
+        .await?;
+        assert_eq!(1, batches.iter().map(|b| b.num_rows()).sum::<usize>());
+        assert!(batches.pretty_print()?.contains(label));
+        assert!(
+            reads
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p.trim_start_matches('/') == part.trim_start_matches('/'))
+        );
+    }
+    engine.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_narthex_manual_build_trusts_manifest_with_full_sidecar_budget() -> WhateverResult<()>
 {
     let mut env = TestEnv::new().await;

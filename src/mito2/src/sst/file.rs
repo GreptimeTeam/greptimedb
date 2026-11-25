@@ -286,6 +286,9 @@ pub struct CertifiedWindow {
 /// Logical coverage in the sequence domain of a pinned region version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NarthexCoverage {
+    /// User tags encoded by the index. Older proofs require an exact schema version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<(ColumnId, String)>>,
     pub schema_version: u64,
     pub region_id: RegionId,
     /// Windows in ascending start order. Gaps are allowed.
@@ -1557,6 +1560,7 @@ mod tests {
     fn incremental_coverage_requires_a_contiguous_chain_across_split_windows() {
         let ts = Timestamp::new_second;
         let proof = |start, end, frontier| NarthexCoverage {
+            tags: None,
             schema_version: 0,
             region_id: RegionId::new(1, 0),
             windows: vec![CertifiedWindow {
@@ -1591,6 +1595,7 @@ mod tests {
             frontier,
         };
         let mut coverage = NarthexCoverage {
+            tags: None,
             schema_version: 0,
             region_id: RegionId::new(1, 0),
             increments: Vec::new(),
