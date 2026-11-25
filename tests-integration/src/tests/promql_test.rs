@@ -2400,6 +2400,219 @@ async fn native_promql_clamp_aggregates_execute_on_native_segments() {
     }
 }
 
+/// The alternative (`or`) matchers of one table run natively, and a series several alternatives
+/// keep is reported once.
+///
+/// A group of matchers is a row filter and every group of one selector filters the same table, so the
+/// scan below the node states them as the disjunction of their conjunctions. The existing plan states
+/// none of them - `native_or_pair{host="a" or host="b"}` carries no `host` filter there, so it reads
+/// every series of the table - which is why these fixtures hold exactly the series the alternatives
+/// name: that is where the two routes answer the same rows, and `native_or_overlap` holds the one
+/// series both of its alternatives keep, which both routes report once.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_or_matchers_over_one_table_match_legacy() {
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_or_matchers").with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE native_or_phy (ts TIMESTAMP TIME INDEX, v DOUBLE) \
+             ENGINE=metric WITH (\"physical_metric_table\" = \"\"); \
+         CREATE TABLE native_or_pair (host STRING NULL, ts TIMESTAMP NOT NULL, v DOUBLE NULL, \
+             TIME INDEX (ts), PRIMARY KEY (host)) \
+             ENGINE=metric WITH (on_physical_table = 'native_or_phy'); \
+         CREATE TABLE native_or_overlap (host STRING NULL, ts TIMESTAMP NOT NULL, v DOUBLE NULL, \
+             TIME INDEX (ts), PRIMARY KEY (host)) \
+             ENGINE=metric WITH (on_physical_table = 'native_or_phy'); \
+         INSERT INTO native_or_pair (host, ts, v) VALUES ('a', 0, 2), ('b', 0, 4); \
+         INSERT INTO native_or_overlap (host, ts, v) VALUES ('a', 0, 6); \
+         CREATE TABLE native_or_two_fields (host STRING NULL, ts TIMESTAMP NOT NULL, \
+             f0 DOUBLE NULL, f1 DOUBLE NULL, TIME INDEX (ts), PRIMARY KEY (host)); \
+         INSERT INTO native_or_two_fields (host, ts, f0, f1) \
+             VALUES ('a', 0, 1, NULL), ('b', 0, NULL, 3)",
+        QueryContext::arc(),
+    )
+    .await;
+
+    // Two alternatives over one tag keep the rows either group keeps, and a repeated alternative is
+    // one filter rather than a second reading of the same rows.
+    for (query, expected) in [
+        (
+            r#"native_or_pair{host="a" or host="b"}"#,
+            vec![(0, "a".to_string(), 2.0), (0, "b".to_string(), 4.0)],
+        ),
+        (
+            r#"native_or_pair{host="a" or host="b" or host="a"}"#,
+            vec![(0, "a".to_string(), 2.0), (0, "b".to_string(), 4.0)],
+        ),
+    ] {
+        let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+        observer.clear();
+        let native = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
+        assert_native_rows_plan(&observer);
+        let legacy = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
+        assert_eq!(expected, native, "{query}");
+        assert_eq!(native, legacy, "{query}");
+    }
+
+    // Two alternatives that both keep one series: the series is read once, as the existing plan
+    // answers it, not once per alternative.
+    let query = r#"native_or_overlap{host=~"a" or host="a"}"#;
+    let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+    observer.clear();
+    let native = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
+    assert_native_rows_plan(&observer);
+    let legacy = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
+    assert_eq!(vec![(0, "a".to_string(), 6.0)], native, "{query}");
+    assert_eq!(legacy, native, "{query}");
+
+    // A `__field__` alternative names columns rather than rows, so the groups' selections are one
+    // selection: a selection both forms name reads the same fields.
+    let query = r#"native_or_pair{__field__="v" or __field__="v"}"#;
+    let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+    observer.clear();
+    let native = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
+    assert_native_rows_plan(&observer);
+    let legacy = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
+    assert_eq!(
+        vec![(0, "a".to_string(), 2.0), (0, "b".to_string(), 4.0)],
+        native,
+        "{query}"
+    );
+    assert_eq!(native, legacy, "{query}");
+
+    // A metric table carries one field column, so the form two different fields state is planned on a
+    // plain table: the fields either group names are the fields the scan reads, which is the
+    // selection stating both of them once. The value columns are named after the expression, so the
+    // two statements name them differently; the positions and the values are what a selection
+    // decides.
+    observer.clear();
+    let both = positional_rows(
+        native_tql_output(
+            &instance,
+            r#"TQL EVAL (0, 0, '1s') native_or_two_fields{__field__="f0" or __field__="f1"}"#,
+            true,
+        )
+        .await,
+    )
+    .await;
+    assert_native_rows_plan(&observer);
+    let stated = positional_rows(
+        native_tql_output(
+            &instance,
+            r#"TQL EVAL (0, 0, '1s') native_or_two_fields{__field__="f0", __field__="f1"}"#,
+            true,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        stated, both,
+        "the fields either alternative names are the fields the scan reads"
+    );
+    assert_eq!(2, both.len(), "both series answer one row each: {both:?}");
+
+    // A selector that names no metric reads the metric tables the discovery scope allows, and each
+    // of them is filtered by the alternatives.
+    let mut ctx = QueryContext::with_db_name(None);
+    ctx.set_extension(QUERY_PARALLELISM_HINT, "4".to_string());
+    ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, "true".to_string());
+    ctx.set_metric_discovery_scope(MetricDiscoveryScope::allowed([(
+        DEFAULT_CATALOG_NAME.to_string(),
+        DEFAULT_SCHEMA_NAME.to_string(),
+        "native_or_pair".to_string(),
+    )]));
+    observer.clear();
+    let output = instance
+        .do_query(
+            r#"TQL EVAL (0, 0, '1s') {host="a" or host="b"}"#,
+            Arc::new(ctx),
+        )
+        .await
+        .remove(0)
+        .unwrap();
+    let rows = native_rows(output, None).await;
+    assert_native_rows_plan(&observer);
+    // The name column's position among the labels is the rows layout's, not this test's; the label
+    // set each row reports is what the alternatives decide.
+    let labels = rows
+        .iter()
+        .map(|(time, labels, value)| {
+            let mut parts = labels.split(',').collect::<Vec<_>>();
+            parts.sort_unstable();
+            (*time, parts.join(","), *value)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        vec![
+            (0, "__name__=native_or_pair,host=a".to_string(), 2.0),
+            (0, "__name__=native_or_pair,host=b".to_string(), 4.0),
+        ],
+        labels,
+        "a nameless selector filters every table its alternatives keep"
+    );
+
+    // Alternatives that name different schemas name different tables, so the existing plan answers
+    // the same rows instead of this route planning them.
+    let query = r#"native_or_pair{__schema__="alpha" or __schema__="beta"}"#;
+    let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+    observer.clear();
+    let native = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
+    let display = datafusion::physical_plan::displayable(observer.root_plan().as_ref())
+        .indent(true)
+        .to_string();
+    assert!(
+        !display.contains("FusedSeriesExec"),
+        "{query} names a table per alternative: {display}"
+    );
+    let legacy = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
+    assert_eq!(legacy, native, "{query}");
+}
+
+/// Every row of a rows answer, rendered by column position.
+///
+/// Two statements that read the same series name their value columns after the expression they
+/// state, so comparing what they answer compares the values their rows carry rather than the names
+/// the columns were given.
+async fn positional_rows(output: Output) -> Vec<Vec<String>> {
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!("TQL EVAL returns record batches"),
+    };
+    let mut rows = batches
+        .iter()
+        .flat_map(|batch| {
+            (0..batch.num_rows())
+                .map(|row| {
+                    batch
+                        .columns()
+                        .iter()
+                        .map(|column| {
+                            let values = cast(column.as_ref(), &DataType::Utf8).unwrap();
+                            let values = values.as_any().downcast_ref::<StringArray>().unwrap();
+                            if values.is_null(row) {
+                                "NULL".to_string()
+                            } else {
+                                values.value(row).to_string()
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    rows.sort();
+    rows
+}
+
 /// A native rows result names each row after the metric it came from.
 ///
 /// The name is part of what the statement answers, not of how a result is displayed: `sum by

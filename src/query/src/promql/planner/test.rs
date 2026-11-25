@@ -5390,30 +5390,159 @@ async fn native_fused_float64_field_is_accepted() {
     );
 }
 
-/// Alternative (`or`) matchers keep the existing plan.
+/// Alternative (`or`) matchers over one table read through the one scan below the node.
 ///
-/// `a{x="1" or x="2"}` names alternative matchers, which the one scan below the node cannot
-/// represent. These queries are only asserted to fall back: what the existing plan answers for
-/// them is its own question, not one this route claims to have fixed.
+/// `a{x="1" or x="2"}` keeps the rows either group keeps, and both groups are row filters over the
+/// same table: the scan states them as the disjunction of their conjunctions. The groups are not
+/// scans of their own, so a series both groups keep is read once and the statement keeps the series
+/// order every other selector answers in.
 #[tokio::test]
-async fn native_fused_or_matchers_fall_back() {
-    for query in [
-        r#"some_metric{tag_0="a" or tag_0="b"}"#,
-        r#"rate(some_metric{tag_0="a" or tag_0="b"}[5m])"#,
+async fn native_fused_or_matchers_read_one_scan() {
+    let native = build_native_fused_plan(r#"some_metric{tag_0="a" or tag_0="b"}"#, true).await;
+    assert!(
+        find_fused_series(&native).is_some(),
+        "alternative matchers over one table keep the native route: {}",
+        native.display_indent()
+    );
+    let scan = find_metric_physical_scan(&native).expect("the fused route keeps the table scan");
+    let filters = scan
+        .filters
+        .iter()
+        .map(|filter| format!("{filter:?}"))
+        .collect::<Vec<_>>();
+    assert!(
+        filters.iter().any(|filter| {
+            filter.contains("Or") && filter.contains("\"a\"") && filter.contains("\"b\"")
+        }),
+        "the scan filters with the disjunction of the two alternatives: {filters:?}"
+    );
+
+    // A range function over the same selector folds it like a selector without alternatives.
+    let rate =
+        build_native_fused_plan(r#"rate(some_metric{tag_0="a" or tag_0="b"}[5m])"#, true).await;
+    assert!(
+        find_fused_series(&rate).is_some(),
+        "a rate over alternative matchers keeps the native route: {}",
+        rate.display_indent()
+    );
+
+    // Two groups that keep the same rows are one alternative: the plan is the one their rows state
+    // once, not two filters that would report every row twice.
+    let repeated = build_native_fused_plan(r#"some_metric{tag_0="a" or tag_0="a"}"#, true).await;
+    let once = build_native_fused_plan(r#"some_metric{tag_0="a"}"#, true).await;
+    assert_eq!(
+        repeated.display_indent().to_string(),
+        once.display_indent().to_string(),
+        "a repeated alternative is stated once"
+    );
+}
+
+/// A `__field__` alternative selects the columns it names, and the groups' selections are one
+/// selection: a scan reads one field set, so the fields of every group are the fields it reads.
+#[tokio::test]
+async fn native_field_selector_reads_the_fields_either_alternative_names() {
+    for (query, expected) in [
+        (
+            r#"some_metric{__field__="field_0" or __field__="field_1"}"#,
+            vec!["field_0", "field_1"],
+        ),
+        // A group with no row filter of its own keeps every row the shared matchers keep, and the
+        // other group's rows are part of that answer.
+        (
+            r#"some_metric{__field__="field_2", tag_0="a" or __field__="field_0"}"#,
+            vec!["field_0", "field_2"],
+        ),
     ] {
-        let native = build_native_fused_plan(query, true).await;
-        let without_flag = build_native_fused_plan(query, false).await;
+        let native = build_native_fused_plan_with_provider(
+            query,
+            true,
+            native_field_selector_provider().await,
+        )
+        .await;
+        let display = native.display_indent().to_string();
         assert!(
-            find_fused_series(&native).is_none(),
-            "`{query}` names alternative matchers: {}",
-            native.display_indent()
+            find_fused_series(&native).is_some(),
+            "`{query}` keeps the native route: {display}"
         );
+        let selection = scan_projected_field_names(&native);
         assert_eq!(
-            native.display_indent().to_string(),
-            without_flag.display_indent().to_string(),
-            "`{query}` must keep the existing plan"
+            Some(expected),
+            selection,
+            "`{query}` reads the fields its groups name: {display}"
         );
     }
+}
+
+/// Alternatives that name different tables keep the existing plan.
+///
+/// `__name__`, `__schema__` and `__database__` choose the table a selector reads rather than the
+/// rows it keeps, so a group that names another one than another reads a second table - which the
+/// one scan below the node cannot state.
+#[tokio::test]
+async fn native_fused_or_matchers_over_two_tables_fall_back() {
+    // A `__schema__` alternative names a table per group, and the existing plan states none of them:
+    // it plans the selector in the schema the statement runs in, so the two routes plan one query.
+    let query = r#"some_metric{__schema__="alpha" or __schema__="beta"}"#;
+    let native = build_native_fused_plan(query, true).await;
+    let without_flag = build_native_fused_plan(query, false).await;
+    assert!(
+        find_fused_series(&native).is_none(),
+        "`{query}` names a table per alternative: {}",
+        native.display_indent()
+    );
+    assert_eq!(
+        native.display_indent().to_string(),
+        without_flag.display_indent().to_string(),
+        "`{query}` must keep the existing plan"
+    );
+    assert_eq!(
+        Some("or_matchers_name_different_tables"),
+        take_reported_decline(),
+        "`{query}` reports the alternatives as the reason the existing plan answers"
+    );
+
+    // A `__name__` alternative is a table per group as well. The existing plan refuses more than one
+    // name matcher in a selector, so these assert this route's own refusal: what the existing plan
+    // answers for them stays its own question.
+    for query in [
+        r#"{__name__="alpha_total" or __name__="beta_total"}"#,
+        r#"{__name__="alpha_total", tag_0="a" or __name__="beta_total", tag_0="b"}"#,
+    ] {
+        assert_eq!(
+            Some("or_matchers_name_different_tables"),
+            reported_native_decline(query).await,
+            "`{query}` names a table per alternative"
+        );
+    }
+}
+
+/// The reason the native route reports for `query`, for a query whose existing plan is not built:
+/// the refusal is recorded before that plan is.
+async fn reported_native_decline(query: &str) -> Option<&'static str> {
+    let provider = build_test_table_provider_with_options(
+        &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+        1,
+        1,
+        vec![],
+        ConcreteDataType::timestamp_millisecond_datatype(),
+        false,
+        ConcreteDataType::float64_datatype(),
+        NATIVE_ENGINE,
+    )
+    .await;
+    // Nothing is reported until this query is planned, so a reason left by another test cannot be
+    // read as this one's.
+    let _ = take_reported_decline();
+    let eval_stmt = build_eval_stmt(query);
+    let _ = PromPlanner::stmt_to_plan_with_annotations(
+        provider,
+        &eval_stmt,
+        &build_query_engine_state(),
+        None,
+        true,
+    )
+    .await;
+    take_reported_decline()
 }
 
 /// A `rate`/`increase` over a delta-temporality table keeps the existing plan, which sums each

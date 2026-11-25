@@ -90,7 +90,8 @@ use crate::promql::native_compile::{
     info_input, statement_grid, subquery_child_grid,
 };
 use crate::promql::planner::{
-    DEFAULT_FIELD_COLUMN, DEFAULT_TIME_INDEX_COLUMN, GrownStack, PromPlanner,
+    DB_COLUMN_MATCHER, DEFAULT_FIELD_COLUMN, DEFAULT_TIME_INDEX_COLUMN, FIELD_COLUMN_MATCHER,
+    GrownStack, PromPlanner, SCHEMA_COLUMN_MATCHER,
 };
 use crate::query_engine::QueryEngineState;
 
@@ -320,6 +321,9 @@ impl PromPlanner {
     async fn prepare_one_scan(
         &mut self,
         matchers: Matchers,
+        // The rows the selector's alternatives keep, one conjunction per group; empty when the
+        // selector states none. See [`AlternativeFilters`].
+        alternative_groups: &[Matchers],
         under_rate_or_increase: bool,
         // The expression this statement asks for. Its shape, not the catalog type of a field, is what says
         // whether the existing plan reports a `Float64` for a numeric field the raw scan reads as one.
@@ -566,6 +570,7 @@ impl PromPlanner {
         // because only the compiler knows whether this occurrence reads a window or one
         // instant.
         let mut filters = Self::matchers_to_expr(matchers, input.schema())?;
+        filters.extend(alternative_conjuncts(alternative_groups, input.schema())?);
         if let LogicalPlan::TableScan(table_scan) = &mut input {
             table_scan.filters.append(&mut filters);
         } else {
@@ -1037,17 +1042,22 @@ impl PromPlanner {
             let mut statement_kind: Option<FieldKind> = None;
             for (selector, under_rate_or_increase) in &selectors {
                 self.ctx = original_context.clone();
-                // These matchers are alternatives the one scan below the node cannot represent, so the
-                // query keeps the plan the existing path builds for it.
-                if !selector.matchers.or_matchers.is_empty() {
-                    return Ok(declined("or_matchers_have_no_single_raw_scan"));
-                }
+                // A selector's matchers can be alternatives: `{a="1" or a="2"}` keeps the rows either
+                // group keeps. The groups are row filters over one table, so the one scan below the node
+                // states them as one predicate; see [`AlternativeFilters`]. A group that names another
+                // table than another has no such scan, and the query keeps the plan the existing path
+                // builds for it.
+                let Some(alternatives) = AlternativeFilters::of_selector(selector) else {
+                    return Ok(declined("or_matchers_name_different_tables"));
+                };
                 // A selector that names no metric is answered by enumerating the schema's logical metric
                 // tables: one input per metric, each reading its own region, so every series keeps the
                 // identity the expression itself cannot name.
                 if discovers_metric_name(selector) {
-                    let name_matchers = selector.matchers.find_matchers(METRIC_NAME);
-                    let mut ordinary_matchers = selector.matchers.clone();
+                    // The groups' own matchers narrow rows rather than names, so the tables a nameless
+                    // selector may read are the ones its shared matchers name.
+                    let name_matchers = alternatives.shared.find_matchers(METRIC_NAME);
+                    let mut ordinary_matchers = alternatives.shared.clone();
                     ordinary_matchers
                         .matchers
                         .retain(|matcher| matcher.name != METRIC_NAME);
@@ -1109,13 +1119,20 @@ impl PromPlanner {
                             .all(|matcher| matcher.is_match(&table.table_info().name))
                     });
                     // A label a table does not carry reads as the empty string on every one of its
-                    // rows, so a matcher that rejects the empty string cannot match anything there.
+                    // rows, so a matcher that rejects the empty string cannot match anything there. A
+                    // table is a candidate while the shared matchers keep it and one alternative still
+                    // keeps rows in it.
                     metrics.retain(|table| {
                         let schema = table.schema();
-                        matchers.matchers.iter().all(|matcher| {
-                            matcher.is_match("")
-                                || schema.column_schema_by_name(&matcher.name).is_some()
-                        })
+                        let keeps = |matchers: &Matchers| {
+                            matchers.matchers.iter().all(|matcher| {
+                                matcher.is_match("")
+                                    || schema.column_schema_by_name(&matcher.name).is_some()
+                            })
+                        };
+                        keeps(&matchers)
+                            && (alternatives.groups.is_empty()
+                                || alternatives.groups.iter().any(keeps))
                     });
                     metrics.sort_by_key(|table| table.table_info().name.clone());
                     if metrics.len() > MAX_DISCOVERED_METRICS {
@@ -1179,6 +1196,7 @@ impl PromPlanner {
                         )) = self
                             .prepare_one_scan(
                                 matchers.clone(),
+                                &alternatives.groups,
                                 *under_rate_or_increase,
                                 &stmt.expr,
                                 &mut logical_scan_id,
@@ -1280,7 +1298,7 @@ impl PromPlanner {
                     continue;
                 }
                 let matchers =
-                    match self.preprocess_label_matchers(&selector.matchers, &selector.name) {
+                    match self.preprocess_label_matchers(&alternatives.shared, &selector.name) {
                         Ok(m) => m,
                         Err(_) => return Ok(declined("selector_matchers_cannot_be_preprocessed")),
                     };
@@ -1309,6 +1327,7 @@ impl PromPlanner {
                 let Some(one) = self
                     .prepare_one_scan(
                         matchers,
+                        &alternatives.groups,
                         *under_rate_or_increase,
                         &stmt.expr,
                         &mut logical_scan_id,
@@ -2577,7 +2596,128 @@ pub(crate) fn same_table_scans<'a>(plans: impl IntoIterator<Item = &'a LogicalPl
 /// that reads the whole schema at once.
 const MAX_DISCOVERED_METRICS: usize = 1024;
 
+/// The rows a selector's `or` alternatives keep, over the matchers those alternatives share.
+///
+/// `{a="1" or a="2"}` keeps the rows either group keeps. Both are row filters over one table, and a
+/// scan filters with one conjunction, so the groups are composed into that scan's predicate rather
+/// than read as one scan each: [`alternative_conjuncts`] adds their disjunction below the shared
+/// matchers. Reading them as separate scans would report a series both groups keep twice and would
+/// hand the statement its rows in group order instead of the series order every other selector
+/// answers in; the existing plan reports such a series once.
+///
+/// The matchers that choose *what* is read rather than *which rows* match are the groups' to agree
+/// on. `__name__`, `__schema__` and `__database__` name the table, so a group that disagrees with
+/// another reads another table, which no one scan states - that selector answers `None` and keeps the
+/// plan the existing path builds. `__field__` names columns, and a selection is a set of them, so the
+/// groups' selections are unioned into the one selection every group's rows are read from.
+#[derive(Debug, Clone)]
+struct AlternativeFilters {
+    /// The matchers every group carries: the table the selector names and the columns it reads.
+    shared: Matchers,
+    /// One conjunction of row filters per group, in the order the selector states them. A selector
+    /// with no alternatives has none, and keeps filtering with [`Self::shared`] alone.
+    groups: Vec<Matchers>,
+}
+
+impl AlternativeFilters {
+    /// Splits `selector`'s matchers into the ones its groups share and the rows each group keeps.
+    ///
+    /// `None` when the groups name different tables or databases, which one scan cannot read.
+    fn of_selector(selector: &VectorSelector) -> Option<Self> {
+        if selector.matchers.or_matchers.is_empty() {
+            return Some(Self {
+                shared: selector.matchers.clone(),
+                groups: Vec::new(),
+            });
+        }
+        // The matchers before the first `or` hold for every group, so they are part of the selection
+        // rather than of any one group's rows.
+        let mut fields = Vec::new();
+        let mut selection = Vec::new();
+        let mut base_rows = Vec::new();
+        for matcher in &selector.matchers.matchers {
+            match matcher.name.as_str() {
+                FIELD_COLUMN_MATCHER => fields.push(matcher.clone()),
+                METRIC_NAME | SCHEMA_COLUMN_MATCHER | DB_COLUMN_MATCHER => {
+                    selection.push(matcher.clone())
+                }
+                _ => base_rows.push(matcher.clone()),
+            }
+        }
+        let base_selection = selection.clone();
+        let mut groups: Vec<Matchers> = Vec::with_capacity(selector.matchers.or_matchers.len());
+        for group in &selector.matchers.or_matchers {
+            let mut group_selection = Vec::new();
+            let mut rows = base_rows.clone();
+            for matcher in group {
+                match matcher.name.as_str() {
+                    FIELD_COLUMN_MATCHER => fields.push(matcher.clone()),
+                    METRIC_NAME | SCHEMA_COLUMN_MATCHER | DB_COLUMN_MATCHER => {
+                        group_selection.push(matcher.clone())
+                    }
+                    _ => rows.push(matcher.clone()),
+                }
+            }
+            // A group that names a table of its own reads a second table, which this scan cannot
+            // union. A group that repeats the shared name is the same table named twice.
+            if group_selection != base_selection {
+                return None;
+            }
+            // Two groups that keep the same rows are one alternative: stating both would keep every
+            // row of theirs twice.
+            let rows = Matchers::new(rows);
+            if !groups.contains(&rows) {
+                groups.push(rows);
+            }
+        }
+        selection.extend(fields);
+        Some(Self {
+            shared: Matchers::new(selection),
+            groups,
+        })
+    }
+}
+
+/// The conjuncts a selector's alternatives add to its scan: the disjunction of the groups' own
+/// conjunctions, or one group's conjuncts when the selector states one alternative.
+///
+/// A group with no row filter of its own keeps every row the shared matchers keep, so its disjunction
+/// with the other groups keeps everything and nothing narrows the scan.
+fn alternative_conjuncts(groups: &[Matchers], schema: &DFSchemaRef) -> Result<Vec<DfExpr>> {
+    let conjunctions = groups
+        .iter()
+        .map(|group| {
+            Ok(PromPlanner::matchers_to_expr(group.clone(), schema)?
+                .into_iter()
+                .reduce(|left, right| left.and(right)))
+        })
+        .collect::<Result<Vec<Option<DfExpr>>>>()?;
+    match conjunctions.len() {
+        // A selector with no alternatives filters with its shared matchers alone.
+        0 => Ok(Vec::new()),
+        // One alternative is the conjunction it states.
+        1 => Ok(conjunctions.into_iter().flatten().collect()),
+        _ => {
+            // An alternative that keeps every row the shared matchers keep is one without a
+            // condition, and its disjunction with the others keeps everything.
+            if conjunctions.iter().any(Option::is_none) {
+                return Ok(Vec::new());
+            }
+            Ok(conjunctions
+                .into_iter()
+                .flatten()
+                .reduce(|left, right| left.or(right))
+                .into_iter()
+                .collect())
+        }
+    }
+}
+
 /// Whether a selector names no single table and has to enumerate the schema's metric tables.
+///
+/// The matchers of a selector's `or` alternatives are row filters, so a group that names no table of
+/// its own still narrows by them: a nameless selector needs discovery whatever form its matchers
+/// take.
 ///
 /// Exported so the authorization layer can ask the same question before it authorizes what the
 /// planner will scan; the two answers have to agree.
@@ -2589,13 +2729,22 @@ pub fn discovers_metric_name(selector: &VectorSelector) -> bool {
     let has_exact_name_matcher = name_matchers.len() == 1 && !has_non_equal_name_matcher;
     selector.name.is_none()
         && !has_exact_name_matcher
-        && selector.matchers.or_matchers.is_empty()
         && (name_matchers.len() > 1
             || has_non_equal_name_matcher
-            || selector.matchers.matchers.iter().any(|matcher| {
-                !["__schema__", "__database__", "__field__", METRIC_NAME]
+            || selector
+                .matchers
+                .matchers
+                .iter()
+                .chain(selector.matchers.or_matchers.iter().flatten())
+                .any(|matcher| {
+                    ![
+                        SCHEMA_COLUMN_MATCHER,
+                        DB_COLUMN_MATCHER,
+                        FIELD_COLUMN_MATCHER,
+                        METRIC_NAME,
+                    ]
                     .contains(&matcher.name.as_str())
-            }))
+                }))
 }
 
 /// Whether `node` holds an operation whose answer depends on the order its input arrives in.
