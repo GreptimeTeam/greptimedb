@@ -21,7 +21,9 @@ mod planner;
 
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use async_trait::async_trait;
 use catalog::kvbackend::KvBackendCatalogManager;
@@ -32,9 +34,11 @@ use common_function::function::FunctionContext;
 use common_function::function_factory::ScalarFunctionFactory;
 use common_query::{Output, OutputData, OutputMeta};
 use common_recordbatch::adapter::{
-    RecordBatchStreamAdapter, RegionQueryStatCounters, SERIES_SCAN_EXEC_NAME,
+    RecordBatchMetrics, RecordBatchStreamAdapter, RegionQueryStatCounters, SERIES_SCAN_EXEC_NAME,
 };
-use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
+use common_recordbatch::{
+    EmptyRecordBatchStream, OrderOption, RecordBatchStream, SendableRecordBatchStream,
+};
 use common_telemetry::tracing;
 use datafusion::catalog::TableFunction;
 use datafusion::dataframe::DataFrame;
@@ -46,10 +50,12 @@ use datafusion_expr::{
     AggregateUDF, DmlStatement, LogicalPlan as DfLogicalPlan, LogicalPlan, WindowUDF, WriteOp,
 };
 use datatypes::prelude::VectorRef;
-use datatypes::schema::Schema;
+use datatypes::schema::{Schema, SchemaRef};
+use futures::future::BoxFuture;
+use futures::{FutureExt, Stream};
 use futures_util::StreamExt;
 use session::context::QueryContextRef;
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{IntoError, OptionExt, ResultExt, ensure};
 use sqlparser::ast::AnalyzeFormat;
 use table::TableRef;
 use table::requests::{DeleteRequest, InsertRequest};
@@ -59,8 +65,9 @@ use tracing::Span;
 use crate::analyze::DistAnalyzeExec;
 pub use crate::datafusion::planner::DfContextProviderAdapter;
 use crate::dist_plan::{
-    DistJoinStats, MergeScanLogicalPlan, RemoteDynFilterReceiverInjectorRef,
-    aggregate_region_stats, candidate_joins, expected_region_ids,
+    BroadcastMaterializeError, DistJoinStats, MaterializeExec, MergeScanLogicalPlan,
+    RemoteDynFilterReceiverInjectorRef, aggregate_region_stats, candidate_joins,
+    expected_region_ids,
 };
 use crate::error::{
     CatalogSnafu, CreateRecordBatchSnafu, MissingTableMutationHandlerSnafu,
@@ -155,6 +162,30 @@ fn query_stat_counters(plan: &Arc<dyn ExecutionPlan>) -> Option<RegionQueryStatC
     }
 
     counters
+}
+
+/// Whether the output stream of `physical_plan` falls back to the original plan when its broadcast
+/// materialization fails.
+///
+/// The broadcast join rewrite replaces a join of two distributed inputs with a merge stage whose
+/// local child reads the build side on the frontend, so only a plan with that stage can fail on the
+/// materialization. `allow_broadcast_fallback` is `false` for a statement that consumes the stream
+/// itself, as the retry replays the query from its start.
+fn needs_broadcast_fallback(
+    physical_plan: &Arc<dyn ExecutionPlan>,
+    allow_broadcast_fallback: bool,
+) -> bool {
+    allow_broadcast_fallback && contains_broadcast_materialization(physical_plan)
+}
+
+/// Whether `plan` evaluates the build side of a broadcast join on the frontend.
+fn contains_broadcast_materialization(plan: &Arc<dyn ExecutionPlan>) -> bool {
+    if plan.downcast_ref::<MaterializeExec>().is_some() {
+        return true;
+    }
+    plan.children()
+        .iter()
+        .any(|child| contains_broadcast_materialization(child))
 }
 
 pub struct DatafusionQueryEngine {
@@ -289,6 +320,11 @@ impl DatafusionQueryEngine {
             .configuration_parameter()
             .experimental_dist_join()
         {
+            return Ok(analyzed_plan.clone());
+        }
+        // The query level fallback of a failed broadcast materialization replans with the switch
+        // set, so its second plan is the frontend join instead of the same broadcast.
+        if ctx.query_ctx().disable_broadcast_materialize() {
             return Ok(analyzed_plan.clone());
         }
         if contains_zero_limit(analyzed_plan) {
@@ -511,27 +547,18 @@ impl DatafusionQueryEngine {
         (!stats.tables.is_empty()).then_some(stats)
     }
 
-    #[tracing::instrument(skip_all)]
-    async fn exec_query_plan(
+    /// Creates the physical plan of `plan` as this query executes it: the planning of the logical
+    /// plan, the physical optimization, the plugins and the query-wide bounds of the reads.
+    async fn plan_query(
         &self,
-        plan: LogicalPlan,
-        query_ctx: QueryContextRef,
-    ) -> Result<Output> {
-        let mut ctx = self.engine_context(query_ctx)?;
-        let query_ctx = ctx.query_ctx();
-        let plan = if let Some(receiver_injector) =
-            self.plugins.get::<RemoteDynFilterReceiverInjectorRef>()
-        {
-            receiver_injector.maybe_inject(plan, query_ctx.clone())
-        } else {
-            plan
-        };
-
+        ctx: &mut QueryEngineContext,
+        plan: &LogicalPlan,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
         // `create_physical_plan` will optimize logical plan internally
-        let physical_plan = self.create_physical_plan(&mut ctx, &plan).await?;
-        let physical_plan = self.optimize_physical_plan(&mut ctx, physical_plan)?;
+        let physical_plan = self.create_physical_plan(ctx, plan).await?;
+        let physical_plan = self.optimize_physical_plan(ctx, physical_plan)?;
         let physical_plan = if let Some(wrapper) = self.plugins.get::<PhysicalPlanWrapperRef>() {
-            wrapper.wrap(physical_plan, query_ctx)
+            wrapper.wrap(physical_plan, ctx.query_ctx())
         } else {
             physical_plan
         };
@@ -548,12 +575,63 @@ impl DatafusionQueryEngine {
                 .set_extension(Arc::new(RegionReadLimiter::new(target_partitions)));
         }
 
+        Ok(physical_plan)
+    }
+
+    /// Executes `plan` as a stream of record batches.
+    ///
+    /// `allow_broadcast_fallback` retries the query once with the original plan when the broadcast
+    /// materialization fails before it yields a batch: a client of a statement that way reads the
+    /// frontend join instead of a resource error. A statement that consumes the stream itself
+    /// (`INSERT`, `DELETE`: see [`Self::exec_dml_statement`]) must pass `false`, since nothing of it
+    /// can be replayed after it reported affected rows.
+    #[tracing::instrument(skip_all)]
+    async fn exec_query_plan(
+        &self,
+        plan: LogicalPlan,
+        query_ctx: QueryContextRef,
+        allow_broadcast_fallback: bool,
+    ) -> Result<Output> {
+        let mut ctx = self.engine_context(query_ctx)?;
+        let query_ctx = ctx.query_ctx();
+        let plan = if let Some(receiver_injector) =
+            self.plugins.get::<RemoteDynFilterReceiverInjectorRef>()
+        {
+            receiver_injector.maybe_inject(plan, query_ctx.clone())
+        } else {
+            plan
+        };
+
+        let physical_plan = self.plan_query(&mut ctx, &plan).await?;
         let stream = self.execute_stream(&ctx, &physical_plan)?;
+        let stream: SendableRecordBatchStream =
+            if needs_broadcast_fallback(&physical_plan, allow_broadcast_fallback) {
+                Box::pin(BroadcastFallbackStream::new(
+                    stream,
+                    self.broadcast_fallback(plan, query_ctx),
+                ))
+            } else {
+                stream
+            };
 
         Ok(Output::new(
             OutputData::Stream(stream),
             OutputMeta::new_with_plan(physical_plan),
         ))
+    }
+
+    /// The context with which [`Self::exec_query_plan`] replans a query whose broadcast
+    /// materialization failed.
+    fn broadcast_fallback(
+        &self,
+        plan: LogicalPlan,
+        query_ctx: QueryContextRef,
+    ) -> BroadcastFallback {
+        BroadcastFallback {
+            engine: DatafusionQueryEngine::new(self.state.clone(), self.plugins.clone()),
+            plan,
+            query_ctx,
+        }
     }
 
     #[tracing::instrument(skip_all)]
@@ -579,7 +657,9 @@ impl DatafusionQueryEngine {
         let table = self.find_table(&table_name, &query_ctx).await?;
 
         let Output { data, meta } = self
-            .exec_query_plan((*dml.input).clone(), query_ctx.clone())
+            // The statement consumes the stream itself and reports affected rows afterwards, so a
+            // failed broadcast materialization cannot be replayed here: no query level fallback.
+            .exec_query_plan((*dml.input).clone(), query_ctx.clone(), false)
             .await?;
         let mut stream = match data {
             OutputData::RecordBatches(batches) => batches.as_stream(),
@@ -893,6 +973,176 @@ impl DatafusionQueryEngine {
     }
 }
 
+/// The replanning of a query whose broadcast materialization failed, with the switch that turns
+/// the rewrite off: the second plan is the frontend join of the default planner, i.e. plan C of
+/// the distributed join rewrite is not taken again.
+struct BroadcastFallback {
+    engine: DatafusionQueryEngine,
+    plan: LogicalPlan,
+    query_ctx: QueryContextRef,
+}
+
+impl BroadcastFallback {
+    /// Plans and starts `plan` again without the broadcast materialization.
+    fn replan(&self) -> BoxFuture<'static, Result<SendableRecordBatchStream>> {
+        // The engine is cheap to clone: both of its fields are handles to the engine-wide state.
+        let engine =
+            DatafusionQueryEngine::new(self.engine.state.clone(), self.engine.plugins.clone());
+        let plan = self.plan.clone();
+        let mut query_ctx = (*self.query_ctx).clone();
+        query_ctx.set_disable_broadcast_materialize();
+        async move {
+            let mut ctx = engine.engine_context(Arc::new(query_ctx))?;
+            let physical_plan = engine.plan_query(&mut ctx, &plan).await?;
+            engine.execute_stream(&ctx, &physical_plan)
+        }
+        .boxed()
+    }
+}
+
+/// Whether the output stream of a query may be retried with the original plan.
+///
+/// A client of the statement sees the stream as it is produced, so a retry replays the query from
+/// its start: it is only possible while no batch has been yielded, and the original plan is tried
+/// at most once.
+#[derive(Debug, Default)]
+struct BroadcastFallbackPolicy {
+    /// Whether the original plan has already been run for this query.
+    retried: bool,
+    /// Batches of the current stream handed to the client.
+    yielded: usize,
+}
+
+impl BroadcastFallbackPolicy {
+    /// Whether the failure of the current stream falls back to the original plan.
+    ///
+    /// Only a broadcast materialization that fails before the stream produced anything is
+    /// retried: a later failure would make the client read a query twice, and any other failure
+    /// concerns the rest of the query, which the original plan would fail on as well.
+    fn allows_retry(&self, err: &common_recordbatch::error::Error) -> bool {
+        !self.retried && self.yielded == 0 && BroadcastMaterializeError::is_in_chain(err)
+    }
+}
+
+/// The stream of a query plan, replaced by the original plan when its broadcast materialization
+/// fails before the first batch.
+struct BroadcastFallbackStream {
+    fallback: BroadcastFallback,
+    policy: BroadcastFallbackPolicy,
+    current: FallbackStream,
+    /// The schema of the query, which both plans produce.
+    schema: SchemaRef,
+}
+
+/// The stream of the current plan, or the original plan being planned and started.
+enum FallbackStream {
+    Streaming(SendableRecordBatchStream),
+    Replanning(BoxFuture<'static, Result<SendableRecordBatchStream>>),
+    /// The original plan failed to start; the query has nothing left to yield.
+    Failed,
+}
+
+impl BroadcastFallbackStream {
+    fn new(stream: SendableRecordBatchStream, fallback: BroadcastFallback) -> Self {
+        let schema = stream.schema();
+        Self {
+            fallback,
+            policy: BroadcastFallbackPolicy::default(),
+            current: FallbackStream::Streaming(stream),
+            schema,
+        }
+    }
+}
+
+impl RecordBatchStream for BroadcastFallbackStream {
+    fn name(&self) -> &str {
+        match &self.current {
+            FallbackStream::Streaming(stream) => stream.name(),
+            _ => "BroadcastFallbackStream",
+        }
+    }
+
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+
+    fn output_ordering(&self) -> Option<&[OrderOption]> {
+        match &self.current {
+            FallbackStream::Streaming(stream) => stream.output_ordering(),
+            _ => None,
+        }
+    }
+
+    fn metrics(&self) -> Option<RecordBatchMetrics> {
+        match &self.current {
+            FallbackStream::Streaming(stream) => stream.metrics(),
+            _ => None,
+        }
+    }
+}
+
+impl Stream for BroadcastFallbackStream {
+    type Item = common_recordbatch::error::Result<common_recordbatch::RecordBatch>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        loop {
+            // The state is moved out so that a poll may replace it with the next one.
+            match std::mem::replace(&mut this.current, FallbackStream::Failed) {
+                FallbackStream::Streaming(mut stream) => {
+                    match Pin::new(&mut stream).poll_next(cx) {
+                        Poll::Pending => {
+                            this.current = FallbackStream::Streaming(stream);
+                            return Poll::Pending;
+                        }
+                        Poll::Ready(Some(Ok(batch))) => {
+                            this.policy.yielded += 1;
+                            this.current = FallbackStream::Streaming(stream);
+                            return Poll::Ready(Some(Ok(batch)));
+                        }
+                        Poll::Ready(Some(Err(err))) => {
+                            if !this.policy.allows_retry(&err) {
+                                this.current = FallbackStream::Streaming(stream);
+                                return Poll::Ready(Some(Err(err)));
+                            }
+                            this.policy.retried = true;
+                            common_telemetry::warn!(
+                                %err;
+                                "Broadcast materialization failed before the first batch, \
+                                 retrying the query with the original plan"
+                            );
+                            // The build side of the broadcast is evaluated before the query yields
+                            // anything, so the client has not seen the failed plan.
+                            this.current = FallbackStream::Replanning(this.fallback.replan());
+                        }
+                        Poll::Ready(None) => return Poll::Ready(None),
+                    }
+                }
+                FallbackStream::Replanning(mut replan) => match replan.as_mut().poll(cx) {
+                    Poll::Pending => {
+                        this.current = FallbackStream::Replanning(replan);
+                        return Poll::Pending;
+                    }
+                    Poll::Ready(Ok(stream)) => {
+                        this.schema = stream.schema();
+                        this.current = FallbackStream::Streaming(stream);
+                        // Poll the original plan in this poll, so the retry costs no wake-up.
+                    }
+                    Poll::Ready(Err(err)) => {
+                        common_telemetry::warn!(
+                            err;
+                            "Failed to execute the original plan of the broadcast fallback"
+                        );
+                        return Poll::Ready(Some(Err(common_recordbatch::error::ExternalSnafu
+                            .into_error(BoxedError::new(err)))));
+                    }
+                },
+                FallbackStream::Failed => return Poll::Ready(None),
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl QueryEngine for DatafusionQueryEngine {
     fn as_any(&self) -> &dyn Any {
@@ -918,7 +1168,7 @@ impl QueryEngine for DatafusionQueryEngine {
     async fn execute(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output> {
         match plan {
             LogicalPlan::Dml(dml) => self.exec_dml_statement(dml, query_ctx).await,
-            _ => self.exec_query_plan(plan, query_ctx).await,
+            _ => self.exec_query_plan(plan, query_ctx, true).await,
         }
     }
 
@@ -1152,9 +1402,10 @@ mod tests {
     use datafusion::physical_plan::expressions::PhysicalSortExpr;
     use datafusion::physical_plan::joins::{CrossJoinExec, HashJoinExec, JoinOn, PartitionMode};
     use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+    use datafusion::physical_plan::test::TestMemoryExec;
     use datafusion::physical_plan::{ExecutionPlan, PhysicalExpr};
     use datafusion::prelude::{col, lit};
-    use datafusion_common::{JoinType, NullEquality, ScalarValue};
+    use datafusion_common::{DataFusionError, JoinType, NullEquality, ScalarValue};
     use datafusion_expr::LogicalPlanBuilder;
     use datafusion_physical_expr::expressions::Column;
     use datatypes::prelude::ConcreteDataType;
@@ -3032,5 +3283,251 @@ mod tests {
             "the rejected self-join must not be priced"
         );
         assert_eq!(1, calls.load(Ordering::SeqCst));
+    }
+
+    /// A query engine over an empty catalog, enough to plan and execute a plan without tables.
+    fn broadcast_fallback_engine() -> DatafusionQueryEngine {
+        DatafusionQueryEngine::new(
+            Arc::new(QueryEngineState::new(
+                catalog::memory::new_memory_catalog_manager().unwrap(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+                Plugins::default(),
+                QueryOptions::default(),
+            )),
+            Plugins::default(),
+        )
+    }
+
+    /// `SELECT 1`, the plan the fallback of the tests runs.
+    fn one_row_plan() -> LogicalPlan {
+        LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("n")])
+            .unwrap()
+            .build()
+            .unwrap()
+    }
+
+    /// The error a broadcast materialization reports when the memory pool of the query refuses the
+    /// build side.
+    fn broadcast_materialize_error() -> DataFusionError {
+        let marker = BroadcastMaterializeError::ExceededMemoryPool { requested: 8 };
+        DataFusionError::Shared(Arc::new(DataFusionError::External(Box::new(marker))))
+    }
+
+    /// The output stream of a query whose first poll fails with `err`, as the record batch adapter
+    /// of the engine reports it.
+    fn failing_stream(err: DataFusionError) -> SendableRecordBatchStream {
+        let arrow_schema = Arc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+            "n",
+            arrow_schema::DataType::Int64,
+            false,
+        )]));
+        let df_stream = datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
+            arrow_schema,
+            futures::stream::iter(vec![Err::<
+                common_recordbatch::DfRecordBatch,
+                DataFusionError,
+            >(err)]),
+        );
+        let stream =
+            common_recordbatch::adapter::RecordBatchStreamAdapter::try_new(Box::pin(df_stream))
+                .unwrap();
+        Box::pin(stream)
+    }
+
+    /// The failure the stream reports on its first poll.
+    async fn first_error(stream: SendableRecordBatchStream) -> common_recordbatch::error::Error {
+        let mut stream = stream;
+        match stream.next().await {
+            Some(Err(err)) => err,
+            other => panic!("the stream must fail on its first poll, got {other:?}"),
+        }
+    }
+
+    /// The retry policy of the fallback: only a broadcast materialization that fails before the
+    /// stream produced a batch, and only once, replays the query.
+    #[tokio::test]
+    async fn test_broadcast_fallback_policy() {
+        let marker = first_error(failing_stream(broadcast_materialize_error())).await;
+        let resource = first_error(failing_stream(DataFusionError::ResourcesExhausted(
+            "the pool is full".to_string(),
+        )))
+        .await;
+
+        assert!(
+            BroadcastFallbackPolicy::default().allows_retry(&marker),
+            "a broadcast materialization failing before the first batch is retried"
+        );
+        assert!(
+            !BroadcastFallbackPolicy {
+                retried: true,
+                yielded: 0
+            }
+            .allows_retry(&marker),
+            "the original plan must not replace itself a second time"
+        );
+        assert!(
+            !BroadcastFallbackPolicy {
+                retried: false,
+                yielded: 1
+            }
+            .allows_retry(&marker),
+            "a query that already produced a batch cannot be replayed"
+        );
+        assert!(
+            !BroadcastFallbackPolicy::default().allows_retry(&resource),
+            "a resource failure of the rest of the query keeps its error"
+        );
+    }
+
+    /// The fallback replans and runs the query without the broadcast materialization, and the
+    /// client reads its batches instead of the failure of the materialization.
+    #[tokio::test]
+    async fn test_broadcast_fallback_runs_the_original_plan() {
+        common_telemetry::init_default_ut_logging();
+
+        let fallback = BroadcastFallback {
+            engine: broadcast_fallback_engine(),
+            plan: one_row_plan(),
+            query_ctx: QueryContext::arc(),
+        };
+        let mut stream =
+            BroadcastFallbackStream::new(failing_stream(broadcast_materialize_error()), fallback);
+
+        let batch = stream
+            .next()
+            .await
+            .expect("the original plan must produce the batch")
+            .unwrap();
+        assert_eq!(1, batch.num_rows());
+        assert!(stream.next().await.is_none(), "one batch and then the end");
+        assert!(stream.policy.retried, "the query must be replayed once");
+        assert_eq!(1, stream.policy.yielded);
+    }
+
+    /// Any other failure of the query, and a failure of the original plan itself, reach the client:
+    /// the fallback neither swallows an error nor loops.
+    #[tokio::test]
+    async fn test_broadcast_fallback_keeps_other_failures() {
+        let fallback = BroadcastFallback {
+            engine: broadcast_fallback_engine(),
+            plan: one_row_plan(),
+            query_ctx: QueryContext::arc(),
+        };
+        let resource = DataFusionError::ResourcesExhausted("the pool is full".to_string());
+        let mut stream = BroadcastFallbackStream::new(failing_stream(resource), fallback);
+
+        assert!(
+            stream.next().await.expect("the error is reported").is_err(),
+            "a failure of the rest of the query keeps its error"
+        );
+        assert!(!stream.policy.retried, "nothing is replayed for it");
+        assert!(stream.next().await.is_none());
+    }
+
+    /// The materialized logical plan of `plan`, as the engine executes it for `query_ctx`.
+    async fn materialized_plan(
+        engine: &DatafusionQueryEngine,
+        query_ctx: QueryContextRef,
+        plan: &LogicalPlan,
+    ) -> LogicalPlan {
+        let mut ctx = engine.engine_context(query_ctx).unwrap();
+        let stats = engine.dist_join_stats(&ctx, plan).await.unwrap();
+        ctx.state_mut()
+            .config_mut()
+            .options_mut()
+            .extensions
+            .insert(stats);
+
+        let state = ctx.state();
+        let analyzed = state
+            .analyzer()
+            .execute_and_check(plan.clone(), state.config_options(), |_, _| {})
+            .unwrap();
+        engine
+            .maybe_materialize_volatile_broadcast(&analyzed, &ctx)
+            .await
+            .unwrap()
+    }
+
+    /// The internal switch of the fallback keeps the frontend join: the second plan of a failed
+    /// broadcast materialization does not take the rewrite again, while the same query without the
+    /// switch materializes the build side.
+    #[tokio::test]
+    async fn test_disable_broadcast_materialize_keeps_the_frontend_join() {
+        common_telemetry::init_default_ut_logging();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let engine = dist_join_engine(dist_join_reports(), calls.clone(), true).await;
+        let query_engine = engine
+            .as_any()
+            .downcast_ref::<DatafusionQueryEngine>()
+            .unwrap();
+        let plan = dist_join_test_plan();
+
+        let materialized = materialized_plan(query_engine, dist_join_query_ctx(true), &plan).await;
+        assert!(
+            materialized
+                .display_indent()
+                .to_string()
+                .contains("MaterializeBroadcastJoin"),
+            "without the switch the build side of the join is materialized, got:\n{}",
+            materialized.display_indent()
+        );
+
+        // With the switch, as the fallback replans, the analyzed plan stays the frontend join.
+        let mut retry_ctx = (*dist_join_query_ctx(true)).clone();
+        retry_ctx.set_disable_broadcast_materialize();
+        let retry_ctx = Arc::new(retry_ctx);
+        assert!(
+            retry_ctx.disable_broadcast_materialize(),
+            "the switch is set on the query context of the retry"
+        );
+        let fallback = materialized_plan(query_engine, retry_ctx, &plan).await;
+        assert!(
+            !fallback
+                .display_indent()
+                .to_string()
+                .contains("MaterializeBroadcastJoin"),
+            "the switch must keep the frontend join, got:\n{}",
+            fallback.display_indent()
+        );
+    }
+
+    /// The fallback wraps the output stream of a plan that materializes a broadcast build side
+    /// only, and never for a statement that consumes the stream itself.
+    #[test]
+    fn test_needs_broadcast_fallback() {
+        let arrow_schema = Arc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+            "n",
+            arrow_schema::DataType::Int64,
+            false,
+        )]));
+        let batches = vec![common_recordbatch::DfRecordBatch::new_empty(
+            arrow_schema.clone(),
+        )];
+        let memory_exec = || -> Arc<dyn ExecutionPlan> {
+            Arc::new(
+                TestMemoryExec::try_new(std::slice::from_ref(&batches), arrow_schema.clone(), None)
+                    .unwrap(),
+            )
+        };
+
+        let materialized: Arc<dyn ExecutionPlan> = Arc::new(MaterializeExec::new(memory_exec()));
+        assert!(needs_broadcast_fallback(&materialized, true));
+        assert!(
+            !needs_broadcast_fallback(&materialized, false),
+            "a statement that consumes the stream itself must not replay it"
+        );
+
+        assert!(
+            !needs_broadcast_fallback(&memory_exec(), true),
+            "a plan without the stage has nothing to fall back from"
+        );
     }
 }

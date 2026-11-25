@@ -36,9 +36,9 @@ use derive_builder::Builder;
 use sql::dialect::{Dialect, GenericDialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
 
 pub use crate::hints::{
-    EXPERIMENTAL_DIST_JOIN_EXTENSION_KEY, LIVE_ANALYZE_METRICS_EXTENSION_KEY,
-    READ_PREFERENCE_EXTENSION_KEY, REMOTE_QUERY_ID_EXTENSION_KEY,
-    SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY,
+    DISABLE_BROADCAST_MATERIALIZE_EXTENSION_KEY, EXPERIMENTAL_DIST_JOIN_EXTENSION_KEY,
+    LIVE_ANALYZE_METRICS_EXTENSION_KEY, READ_PREFERENCE_EXTENSION_KEY,
+    REMOTE_QUERY_ID_EXTENSION_KEY, SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY,
 };
 use crate::protocol_ctx::ProtocolCtx;
 use crate::query_id::QueryId;
@@ -607,6 +607,20 @@ impl QueryContext {
         self.remote_query_id()
             .zip(self.extension(LIVE_ANALYZE_METRICS_EXTENSION_KEY))
             .is_some_and(|(remote_query_id, value)| value == remote_query_id)
+    }
+
+    /// Turns off the broadcast materialization of the distributed join rewrite for this query.
+    ///
+    /// The query level fallback of a failed broadcast materialization replans with this switch, so
+    /// the second plan is the frontend join the default planner produces.
+    pub fn set_disable_broadcast_materialize(&mut self) {
+        self.set_extension(DISABLE_BROADCAST_MATERIALIZE_EXTENSION_KEY, "true");
+    }
+
+    /// Whether this query must keep the frontend join instead of materializing a broadcast side.
+    pub fn disable_broadcast_materialize(&self) -> bool {
+        self.extension(DISABLE_BROADCAST_MATERIALIZE_EXTENSION_KEY)
+            .is_some()
     }
 
     pub fn extensions(&self) -> HashMap<String, String> {

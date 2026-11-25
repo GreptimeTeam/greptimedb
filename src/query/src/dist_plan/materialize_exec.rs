@@ -24,12 +24,15 @@
 //! * dropping the pollers pauses the read instead of leaving it running in the
 //!   background.
 //!
-//! The materialization collects every batch of the build side and has no run-time row or byte
-//! limit: an oversized build side never fails a running query. Whether a build side is small
-//! enough to broadcast is a planning decision, taken from the table statistics
-//! (`MAX_BROADCAST_BUILD_BYTES` of the nested broadcast join planner), so the memory a
-//! query-local broadcast needs is what DataFusion's memory pool and the operating system
-//! account for, like any other frontend-side allocation.
+//! The materialization collects every batch of the build side and has no run-time row limit of its
+//! own: whether a build side is small enough to broadcast is a planning decision, taken from the
+//! table statistics (`MAX_BROADCAST_BUILD_BYTES` of the nested broadcast join planner). The
+//! collected batches are charged to the query's memory pool as they arrive, so a pool that refuses
+//! the growth fails the materialization. That failure is reported as
+//! [`BroadcastMaterializeError`], which identifies the stage in an error chain: the query then
+//! falls back to the plan it would have run without the broadcast
+//! (`DatafusionQueryEngine::exec_query_plan`), because nothing of this stage has been shipped to
+//! the client yet.
 
 use std::fmt::{self, Debug, Formatter};
 use std::future::Future;
@@ -39,6 +42,7 @@ use std::sync::{Arc, Mutex};
 
 use arrow::array::RecordBatch;
 use arrow_schema::SchemaRef;
+use datafusion::execution::memory_pool::MemoryConsumer;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
@@ -56,6 +60,52 @@ use futures_util::StreamExt;
 /// The shared failure type of [`OnceAsync`], so a failed evaluation is handed to every
 /// waiter without cloning the error.
 type SharedResult<T> = std::result::Result<T, Arc<DataFusionError>>;
+
+/// The failure of a broadcast materialization, as opposed to a failure of the rest of the query.
+///
+/// The resource failure of a time series query is reported as
+/// [`DataFusionError::ResourcesExhausted`], which the query level fallback cannot tell apart from
+/// any other resource failure. The materialization therefore reports its own pool rejection, so
+/// that the consumer of the output stream can recognize the stage in the error chain
+/// ([`BroadcastMaterializeError::is_in_chain`]) and retry the query with the plan it would have
+/// run without the broadcast.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BroadcastMaterializeError {
+    /// The memory pool of the query refused to hold another batch of the build side.
+    ExceededMemoryPool { requested: usize },
+}
+
+impl BroadcastMaterializeError {
+    /// Whether `err` is, or wraps, a failure of a broadcast materialization.
+    ///
+    /// A failed stage reaches the consumer of the output stream through the error chain of the
+    /// stream item (`common_recordbatch::Error` over `DataFusionError` over this error), so the
+    /// source chain is walked instead of matching a single wrapper.
+    pub fn is_in_chain(err: &(dyn std::error::Error + 'static)) -> bool {
+        let mut current = Some(err);
+        while let Some(err) = current {
+            if err.downcast_ref::<Self>().is_some() {
+                return true;
+            }
+            current = err.source();
+        }
+        false
+    }
+}
+
+impl fmt::Display for BroadcastMaterializeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ExceededMemoryPool { requested } => write!(
+                f,
+                "broadcast materialize exceeded the memory pool: cannot reserve {requested} bytes \
+                 of the build side"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for BroadcastMaterializeError {}
 
 /// Runs an async computation once and shares its value as well as its error.
 pub(crate) struct OnceAsync<T> {
@@ -195,7 +245,8 @@ impl MaterializeExec {
         }
     }
 
-    /// Fully consumes the build side, whatever its size.
+    /// Fully consumes the build side, whatever its size, as long as the memory pool of the query
+    /// holds the batches it collects.
     async fn evaluate(
         build: Arc<dyn ExecutionPlan>,
         context: Arc<TaskContext>,
@@ -203,11 +254,25 @@ impl MaterializeExec {
         // The build side is distributed by region: coalesce all of its partitions,
         // otherwise only the first region of the build side is broadcast.
         let coalesced = CoalescePartitionsExec::new(build);
-        let mut stream = coalesced.execute(0, context)?;
+        let mut stream = coalesced.execute(0, context.clone())?;
+
+        // Charging the batches to the pool of the query keeps the read inside the query's memory
+        // budget: a pool that refuses the growth fails the stage with the marker error, which the
+        // query level fallback recognizes and answers by replanning without the broadcast. The
+        // reservation covers the read itself; the consumers of the shared batches then read the
+        // memory the pool admitted.
+        let reservation = MemoryConsumer::new("MaterializeExec").register(context.memory_pool());
 
         let mut batches = Vec::new();
         while let Some(batch) = stream.next().await {
-            batches.push(batch?);
+            let batch = batch?;
+            let requested = batch.get_array_memory_size();
+            reservation.try_grow(requested).map_err(|_| {
+                DataFusionError::External(Box::new(BroadcastMaterializeError::ExceededMemoryPool {
+                    requested,
+                }))
+            })?;
+            batches.push(batch);
         }
         Ok(batches)
     }
@@ -302,6 +367,8 @@ impl ExecutionPlan for MaterializeExec {
 mod tests {
     use arrow::array::Int64Array;
     use arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::execution::memory_pool::GreedyMemoryPool;
+    use datafusion::execution::runtime_env::RuntimeEnvBuilder;
     use datafusion::physical_plan::test::TestMemoryExec;
 
     use super::*;
@@ -321,6 +388,15 @@ mod tests {
 
     fn context() -> Arc<TaskContext> {
         Arc::new(TaskContext::default())
+    }
+
+    /// A task context whose query memory pool holds at most `limit` bytes.
+    fn context_with_memory_limit(limit: usize) -> Arc<TaskContext> {
+        let runtime = RuntimeEnvBuilder::new()
+            .with_memory_pool(Arc::new(GreedyMemoryPool::new(limit)))
+            .build()
+            .unwrap();
+        Arc::new(TaskContext::default().with_runtime(Arc::new(runtime)))
     }
 
     #[tokio::test]
@@ -356,8 +432,9 @@ mod tests {
         assert!(batches.is_empty());
     }
 
-    /// There is no run-time size limit on the build side: a build side far above the former row
-    /// budget is collected completely and shared, instead of failing the query.
+    /// There is no run-time row limit on the build side: a build side far above the former row
+    /// budget is collected completely and shared, instead of failing the query. Only the memory
+    /// pool of the query bounds the stage.
     #[tokio::test]
     async fn materializes_a_build_side_beyond_any_row_budget() {
         let build = vec![batch(vec![1i64; 10_001]), batch(vec![2i64; 10_001])];
@@ -396,5 +473,72 @@ mod tests {
             reset.materialize(context()).await.unwrap()
         );
         assert_eq!(1, reset.result().init_count());
+    }
+
+    /// A build side that the memory pool of the query does not hold fails the stage with the
+    /// marker error, not with a plain resource error: the query level fallback recognizes the
+    /// stage by it.
+    #[tokio::test]
+    async fn fails_with_the_marker_error_when_the_pool_refuses_the_build_side() {
+        let build = batch(vec![1i64; 10_001]);
+        let requested = build.get_array_memory_size();
+        let exec = materialize_exec(vec![build]);
+
+        let err = exec
+            .materialize(context_with_memory_limit(requested / 2))
+            .await
+            .expect_err("the pool holds less than one batch");
+        assert!(
+            BroadcastMaterializeError::is_in_chain(&err),
+            "the failure must carry the marker error, got: {err:?}"
+        );
+        assert!(
+            err.to_string()
+                .contains("broadcast materialize exceeded the memory pool"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// A pool that holds the build side changes nothing: the batches are collected completely and
+    /// the reservation is returned to the pool once the read is done.
+    #[tokio::test]
+    async fn collects_the_build_side_the_pool_holds() {
+        let build = vec![batch(vec![1i64; 128]), batch(vec![2i64; 128])];
+        let held: usize = build
+            .iter()
+            .map(|batch| batch.get_array_memory_size())
+            .sum();
+        let runtime = RuntimeEnvBuilder::new()
+            .with_memory_pool(Arc::new(GreedyMemoryPool::new(held)))
+            .build()
+            .unwrap();
+        let pool = runtime.memory_pool.clone();
+        let context = Arc::new(TaskContext::default().with_runtime(Arc::new(runtime)));
+        let exec = materialize_exec(build.clone());
+
+        assert_eq!(0, pool.reserved());
+        assert_eq!(build, exec.materialize(context).await.unwrap());
+        assert_eq!(
+            0,
+            pool.reserved(),
+            "the reservation of the stage is returned to the pool"
+        );
+    }
+
+    /// The marker error survives the wrapping of a failed shared evaluation, which is how a
+    /// failure of the build side reaches the consumer of the output stream.
+    #[test]
+    fn marker_error_is_found_through_the_shared_failure() {
+        let marker =
+            DataFusionError::External(Box::new(BroadcastMaterializeError::ExceededMemoryPool {
+                requested: 8,
+            }));
+        let shared = DataFusionError::Shared(Arc::new(marker));
+        let err = DataFusionError::Context("executing the stage".to_string(), Box::new(shared));
+
+        assert!(BroadcastMaterializeError::is_in_chain(&err));
+        assert!(!BroadcastMaterializeError::is_in_chain(
+            &DataFusionError::ResourcesExhausted("the pool is full".to_string())
+        ));
     }
 }

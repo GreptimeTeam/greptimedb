@@ -42,7 +42,7 @@ pub(crate) use dist_join_planner::{
 pub use filter_id::{FilterFingerprint, FilterId, ParseFilterIdError, RemoteDynFilterProducerId};
 pub(crate) use materialize::MaterializeLogicalPlan;
 pub(crate) use materialize_broadcast_join::MaterializeBroadcastJoin;
-pub(crate) use materialize_exec::{MaterializeExec, OnceAsync};
+pub(crate) use materialize_exec::{BroadcastMaterializeError, MaterializeExec, OnceAsync};
 pub(crate) use materialized_input::MaterializedInput;
 pub use merge_scan::{MergeScanExec, MergeScanLogicalPlan};
 pub(crate) use merge_sort::{MergeSortExec, MergeSortLogicalPlan};

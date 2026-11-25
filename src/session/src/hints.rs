@@ -29,13 +29,18 @@ pub const INSERT_SKIP_WAL_HINT: &str = "insert_skip_wal";
 pub const READ_PREFERENCE_HINT: &str = "read_preference";
 pub const READ_PREFERENCE_EXTENSION_KEY: &str = "query.read_preference";
 pub const EXPERIMENTAL_DIST_JOIN_EXTENSION_KEY: &str = "query.experimental_dist_join";
-pub const RESERVED_EXTENSION_KEYS: [&str; 6] = [
+/// Internal switch of the query level fallback: it replans a query without the broadcast
+/// materialization, so that the second plan is the frontend join of the default planner. Clients
+/// cannot set it; the frontend sets it on the query context it replans with.
+pub const DISABLE_BROADCAST_MATERIALIZE_EXTENSION_KEY: &str = "query.disable_broadcast_materialize";
+pub const RESERVED_EXTENSION_KEYS: [&str; 7] = [
     REMOTE_QUERY_ID_EXTENSION_KEY,
     INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY,
     SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY,
     LIVE_ANALYZE_METRICS_EXTENSION_KEY,
     READ_PREFERENCE_EXTENSION_KEY,
     EXPERIMENTAL_DIST_JOIN_EXTENSION_KEY,
+    DISABLE_BROADCAST_MATERIALIZE_EXTENSION_KEY,
 ];
 
 /// Deprecated, use `HINTS_KEY` instead.
@@ -70,6 +75,9 @@ mod tests {
             LIVE_ANALYZE_METRICS_EXTENSION_KEY
         ));
         assert!(is_reserved_extension_key(READ_PREFERENCE_EXTENSION_KEY));
+        assert!(is_reserved_extension_key(
+            DISABLE_BROADCAST_MATERIALIZE_EXTENSION_KEY
+        ));
         assert!(!is_reserved_extension_key(READ_PREFERENCE_HINT));
     }
 }
