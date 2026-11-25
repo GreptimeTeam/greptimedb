@@ -13,7 +13,7 @@ Cache the partial states of an aggregation over a region scan on the node that r
 
 Dashboards over logs and traces run the same SQL aggregation again and again over a window that slides forward: `count(*)`, `avg(latency)`, or `sum(bytes)`, grouped by a time bucket and a few tags over the last day or week. Each refresh scans and aggregates the whole window again, even though only the newest minutes have changed since the previous refresh.
 
-Our own front ends issue such queries:
+GreptimeDB's own front ends issue such queries:
 
 - The GreptimeDB Dashboard's trace view draws request rate, errors, and a duration heatmap with `date_bin` over the selected window and ranks services by count.
 - Its log view draws log volume by level and the top values of a label.
@@ -151,7 +151,7 @@ Benefits:
 Drawbacks:
 
 - The first execution of a query does more work. The prototype measured up to 12% more time on a first run. When the rule must add a grouping key, the key multiplies the groups by the number of slices.
-- Slices are not cached while a memtable overlaps them, and a memtable spans everything from its oldest row to its newest. A late write therefore disables the cache from its timestamp to the present until the next flush. A dashboard that only shows the last 15 or 30 minutes, the default window of several of the front ends above, gains little.
+- Slices are not cached while a memtable overlaps them, and a memtable spans everything from its oldest row to its newest. A late write therefore disables the cache from its timestamp to the present until the next flush. A dashboard that only shows the last 15 or 30 minutes, the default window of several of these front ends, gains little.
 - Aggregations whose states grow with their input, such as an exact `count(DISTINCT)`, exceed the per-query bound and are never cached; their first run pays for the extra grouping.
 - Only aggregations with a partial stage are rewritten. A query that groups by the whole primary key aggregates each series within one partition, and a `min` or `max` without grouping pushes its own dynamic filter into the scan; neither uses the cache.
 - Correctness depends on the fingerprint observing every change to the rows of a range. A new engine operation that changes rows without replacing files or bumping one of the versions in the fingerprint would make the cache return stale results. The engine contract and its tests must cover this requirement.
