@@ -13326,30 +13326,76 @@ async fn native_promql_answers_a_numeric_field_where_the_shape_publishes_a_float
     ] {
         let sql = format!("TQL EVAL (2, 2, '1s') {query}");
         observer.clear();
-        native_run_ignoring_the_answer(&instance, &sql, true).await;
+        let native = native_text_or_error(&instance, &sql, true).await;
         assert!(
             observer.fused().is_none(),
             "`{query}`: a string field has no raw representation"
         );
+        let legacy = native_text_or_error(&instance, &sql, false).await;
+        assert_eq!(
+            native, legacy,
+            "`{query}`: a text column is a value column, not a label, so the route answers what \
+             the existing plan answers - a table of it, or the refusal the existing plan states"
+        );
+    }
+
+    // A text column beside a numeric one is the same answer: the route has no frame that carries a
+    // text value, and a label is one of the table's keys, so the existing plan answers here too.
+    const MIXED_TABLE: &str = "native_numeric_shape_mixed";
+    execute_all(
+        &instance,
+        &format!(
+            "CREATE TABLE {MIXED_TABLE} (host STRING, ts TIMESTAMP(3) TIME INDEX, l STRING, v DOUBLE, PRIMARY KEY (host)); \
+             INSERT INTO {MIXED_TABLE} (host, ts, l, v) VALUES ('a', 0, 'x', 1), ('a', 1000, 'y', 2); \
+             ADMIN FLUSH_TABLE('{MIXED_TABLE}');"
+        ),
+        QueryContext::arc(),
+    )
+    .await;
+    for query in [
+        MIXED_TABLE.to_string(),
+        format!("sum({MIXED_TABLE})"),
+        format!("rate({MIXED_TABLE}[2s])"),
+    ] {
+        let sql = format!("TQL EVAL (2, 2, '1s') {query}");
+        observer.clear();
+        let native = native_text_or_error(&instance, &sql, true).await;
+        assert!(
+            observer.fused().is_none(),
+            "`{query}`: a text column is a value column of the existing plan, and no raw frame \
+             carries one"
+        );
+        let legacy = native_text_or_error(&instance, &sql, false).await;
+        assert_eq!(
+            native, legacy,
+            "`{query}`: the route must answer what the existing plan answers"
+        );
     }
 }
 
-/// Runs a TQL statement and drops whatever it answered.
+/// Runs a TQL statement and answers its printed table, or the error it failed with.
 ///
 /// A statement the existing planner refuses is answered by that refusal - `sum` of a string has no
 /// fold - and the route must not replace it with an answer of its own, so a test that only means to
 /// hold the route to the existing plan must not unwrap the answer.
-async fn native_run_ignoring_the_answer(instance: &Arc<Instance>, sql: &str, enabled: bool) {
-    let Ok(output) = instance
+async fn native_text_or_error(instance: &Arc<Instance>, sql: &str, enabled: bool) -> String {
+    let output = match instance
         .do_query(sql, native_query_context(enabled, 4))
         .await
         .remove(0)
-    else {
-        return;
+    {
+        Ok(output) => output,
+        Err(error) => return format!("{error:?}"),
     };
-    if let OutputData::Stream(stream) = output.data {
-        let _ = collect_batches(stream).await;
-    }
+    let batches = match output.data {
+        OutputData::Stream(stream) => match collect_batches(stream).await {
+            Ok(batches) => batches,
+            Err(error) => return format!("{error:?}"),
+        },
+        OutputData::RecordBatches(batches) => batches,
+        _ => return "the statement answered no record batches".to_string(),
+    };
+    batches.pretty_print().unwrap()
 }
 
 /// An arithmetic operator casts both operands, but the cast is the operator's, so it reaches whatever

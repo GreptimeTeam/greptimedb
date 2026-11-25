@@ -341,7 +341,7 @@ impl PromPlanner {
         // same fields, in the same order. A matcher naming a column the table does not carry is an
         // error there, so that selection is left to the existing plan rather than answered here.
         let reads_a_field_selection = self.ctx.field_column_matcher.is_some();
-        let fields = match &self.ctx.field_column_matcher {
+        let selected_fields = match &self.ctx.field_column_matcher {
             Some(field_matchers) => {
                 let Ok(fields) =
                     Self::field_columns_selected_by(field_matchers, &self.ctx.field_columns)
@@ -352,11 +352,6 @@ impl PromPlanner {
             }
             None => self.ctx.field_columns.clone(),
         };
-        // A selection no field is left of has no column to read a value from, so it keeps the
-        // existing plan.
-        if fields.is_empty() {
-            return Ok(declined("selector_reads_no_field"));
-        }
         // Delta samples are increments: the existing planner sums them for `increase` and
         // divides by the range for `rate`, while the native tree assumes cumulative samples.
         // Decline only when this selector is read by one of those calls.
@@ -372,6 +367,41 @@ impl PromPlanner {
         // scan here instead would let the two paths disagree about the columns they read.
         let table_ref = self.table_ref()?;
         let mut input = self.create_table_scan_plan(table_ref).await?;
+        // The columns this input reads, split the way the existing planner splits a rows layout's
+        // columns ([`Self::string_value_data_type`]): a text column is a label and every other
+        // column is a value. A Prometheus sample carries no text value, and this route declares one
+        // value column per field of one kind, so a text column is not one of them.
+        //
+        // A row's labels are the table's keys, and a region binds them from its primary key: it
+        // refuses a column it stores as a field, which is what `DESC TABLE` reports a text column
+        // that is not a key as, and its raw scan has no text field to read either. Such a column
+        // therefore has neither a label nor a value to be here, and the existing plan - which reads
+        // it as the value column it is - answers instead. A selection that names one keeps the
+        // existing plan for the same reason: a `__field__` matcher selects value columns.
+        let mut fields = Vec::with_capacity(selected_fields.len());
+        let mut label_fields = Vec::new();
+        for name in selected_fields {
+            let Some(data_type) = Self::field_column_type(input.schema(), &name) else {
+                return Ok(declined("field_missing_from_source_schema"));
+            };
+            if Self::string_value_data_type(data_type).is_some() {
+                label_fields.push(name);
+            } else {
+                fields.push(name);
+            }
+        }
+        // A selection no value column is left of has no column to read a value from, so it keeps the
+        // existing plan.
+        if fields.is_empty() {
+            return Ok(declined("selector_reads_no_field"));
+        }
+        if !label_fields.is_empty() {
+            return Ok(declined(if reads_a_field_selection {
+                "field_selector_names_a_text_column"
+            } else {
+                "text_field_is_not_a_table_key"
+            }));
+        }
         let logical_scan = metric_scan_and_table_id(&input);
         let has_verified_metric_rewrite = logical_scan.is_some();
         // A metric logical table's id is part of the identity its own scan reads: two logical tables served
