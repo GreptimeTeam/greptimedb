@@ -260,6 +260,17 @@ impl Instance {
         self.rollup_cache.as_ref()
     }
 
+    /// Empties this frontend's local rollup cache.
+    ///
+    /// The cache is process-local. This does not affect other frontends, source
+    /// data, or in-flight queries; those either finish with their own plan or
+    /// refill the cache on their next read.
+    pub fn clear_rollup_cache(&self) {
+        if let Some(cache) = self.rollup_cache.as_ref() {
+            cache.clear();
+        }
+    }
+
     pub fn suspend_state(&self) -> Arc<AtomicBool> {
         self.suspend.clone()
     }

@@ -53,6 +53,11 @@ pub struct RollupCacheOptions {
     /// reaching it is dropped, and the next request for that chunk reads storage.
     #[serde(with = "humantime_serde")]
     pub ttl: Duration,
+    /// Optional admin token for `POST /internal/resetRollupResultCache`.
+    ///
+    /// `None` disables the endpoint. Resetting only clears this frontend's
+    /// process-local cache; it does not touch source data or other frontends.
+    pub reset_token: Option<String>,
 }
 
 impl Default for RollupCacheOptions {
@@ -63,6 +68,7 @@ impl Default for RollupCacheOptions {
             chunk: Duration::from_secs(300),
             tail: Duration::from_secs(600),
             ttl: Duration::from_secs(3_600),
+            reset_token: None,
         }
     }
 }

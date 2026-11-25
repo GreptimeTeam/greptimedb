@@ -881,9 +881,8 @@ impl RollupCache {
 
     /// Empties the cache, dropping every entry of every request.
     ///
-    /// Nothing on the request path calls it, so it is the seam a test resets a
-    /// cache with.
-    #[cfg(any(test, feature = "testing"))]
+    /// This is the local reset used by the internal reset endpoint; it does not
+    /// touch source data or other frontends.
     pub fn clear(&self) {
         self.entries.invalidate_all();
         self.entries.run_pending_tasks();
