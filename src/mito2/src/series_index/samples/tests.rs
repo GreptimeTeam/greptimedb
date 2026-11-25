@@ -379,6 +379,53 @@ fn sample_codecs_preserve_bits_and_reject_corruption() {
         );
     }
 }
+
+#[test]
+fn sample_float_codec_round_trips_all_null_columns() {
+    for rows in [1, 7, 8, 9, MAX_ROWS] {
+        let bits = vec![None; rows];
+        let bytes = codec::encode_float(&bits);
+        // An all-null column keeps its self-describing validity kind and bitmap and stores no
+        // value bytes at all.
+        assert_eq!(1 + rows.div_ceil(8), bytes.len(), "rows {rows}");
+        assert!(bytes[0] == 1 && bytes[1..].iter().all(|byte| *byte == 0));
+        assert_eq!(
+            codec::decode_float(&bytes, rows, rows as u32).unwrap(),
+            bits
+        );
+        // A null count above the row count stays invalid.
+        assert!(codec::decode_float(&bytes, rows, rows as u32 + 1).is_err());
+        // A short bitmap stays invalid.
+        assert!(codec::decode_float(&bytes[..bytes.len() - 1], rows, rows as u32).is_err());
+        // Value bytes behind an all-null bitmap stay invalid.
+        let mut bad = bytes.clone();
+        bad.push(0);
+        assert!(codec::decode_float(&bad, rows, rows as u32).is_err());
+        // A set bitmap bit contradicts the all-null count.
+        let mut bad = bytes;
+        bad[1] |= 1;
+        assert!(codec::decode_float(&bad, rows, rows as u32).is_err());
+    }
+}
+
+#[test]
+fn sample_float_codec_round_trips_mixed_nulls() {
+    for rows in [2, 3, 7, 8, 9, MAX_ROWS] {
+        // Every third row is null; the rest keep distinct bit patterns, including NaN payloads.
+        let bits = (0..rows)
+            .map(|i| (i % 3 != 0).then_some(0x7ff8000000000000 | i as u64))
+            .collect::<Vec<_>>();
+        let nulls = bits.iter().filter(|value| value.is_none()).count() as u32;
+        assert!(nulls > 0 && (nulls as usize) < rows);
+        let bytes = codec::encode_float(&bits);
+        assert_eq!(codec::decode_float(&bytes, rows, nulls).unwrap(), bits);
+        // The same bytes with an off-by-one null count stay invalid.
+        assert!(codec::decode_float(&bytes, rows, nulls - 1).is_err());
+        assert!(codec::decode_float(&bytes, rows, nulls + 1).is_err());
+        // Truncating a value byte is corruption, not an all-null column.
+        assert!(codec::decode_float(&bytes[..bytes.len() - 1], rows, nulls).is_err());
+    }
+}
 #[tokio::test]
 async fn lossless_round_trip_all_units_and_input_batches() {
     for timestamp_type in [
