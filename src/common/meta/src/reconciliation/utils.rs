@@ -485,8 +485,7 @@ pub(crate) fn build_table_meta_from_column_metadatas(
         column_name_to_index.insert(col.column_schema.name.as_str(), idx);
     }
 
-    // Takes the primary key order from the input tags, which the reconcile paths feed in the
-    // regions' key order; the column order still comes from `table_meta`.
+    // Physical-table reconciliation supplies tags in region primary key order.
     for col in column_metadata
         .iter()
         .filter(|c| c.semantic_type == SemanticType::Tag)
@@ -1354,7 +1353,8 @@ mod tests {
 
     #[test]
     fn test_build_table_meta_preserves_column_order_and_primary_key_indices() {
-        let (table_meta, name_to_ids) = new_test_q8_raw_table_info();
+        let (mut table_meta, name_to_ids) = new_test_q8_raw_table_info();
+        table_meta.partition_key_indices = vec![2, 1];
         let table_id = 100;
         let table_ref = TableReference::full("test_catalog", "test_schema", "test_table");
 
@@ -1393,10 +1393,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(new_table_meta.primary_key_indices, vec![1, 2]);
-        assert_eq!(
-            new_table_meta.partition_key_indices,
-            table_meta.partition_key_indices
-        );
+        assert_eq!(new_table_meta.partition_key_indices, vec![2, 1]);
         assert_eq!(new_table_meta.column_ids, table_meta.column_ids);
 
         // 2. Case where input column metadata has reordered tags (e.g. ts, b, a):
