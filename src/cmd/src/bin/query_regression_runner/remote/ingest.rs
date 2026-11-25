@@ -20,27 +20,67 @@ use std::time::{Duration, Instant};
 use reqwest::Client;
 use serde_json::{Value, json};
 
-use crate::query_regression_runner::model::{PromStore, RemoteWrite};
+use crate::query_regression_runner::model::{PromStore, RemoteWrite, RollupCache};
 use crate::query_regression_runner::plan::normalized_remote_write;
 use crate::query_regression_runner::sql::{
     extract_count_value, http_post_sql, sql_ident, sql_string, value_f64, value_u64,
 };
-use crate::query_regression_runner::{PrepareRemoteArgs, RenderRemoteConfigArgs, Result};
+use crate::query_regression_runner::{
+    PrepareRemoteArgs, RemoteTarget, RenderRemoteConfigArgs, Result,
+};
 
 pub(super) async fn run_render_remote_config(args: RenderRemoteConfigArgs) -> Result<()> {
     let (_, remote) = normalized_remote_write(&args.fixture_generator, &args.case)?;
-    fs::write(args.output, frontend_prom_config(&remote.prom_store)?)?;
+    fs::write(
+        args.output,
+        frontend_prom_config(&remote.prom_store, args.target)?,
+    )?;
     Ok(())
 }
 
-fn frontend_prom_config(prom: &PromStore) -> Result<String> {
-    Ok(format!(
+/// Renders the frontend configuration of one target.
+///
+/// `[prom_store]` is identical for both targets, because both ingest the same
+/// case. `[rollup_cache]` is not: the base render applies the shared
+/// `rollup_cache` only, while the candidate render prefers
+/// `candidate_rollup_cache`, so a case that configures only the candidate side
+/// compares an uncached base against a cached candidate. A target with no cache
+/// configuration gets no `[rollup_cache]` table at all, which leaves the
+/// frontend default: disabled.
+fn frontend_prom_config(prom: &PromStore, target: RemoteTarget) -> Result<String> {
+    let mut text = format!(
         "[prom_store]\nenable = true\nwith_metric_engine = true\npending_rows_flush_interval = {}\nmax_batch_rows = {}\nmax_concurrent_flushes = {}\nworker_channel_capacity = {}\nmax_inflight_requests = {}\n",
         serde_json::to_string(&prom.pending_rows_flush_interval)?,
         prom.max_batch_rows,
         prom.max_concurrent_flushes,
         prom.worker_channel_capacity,
         prom.max_inflight_requests,
+    );
+    let rollup_cache = match target {
+        RemoteTarget::Base => prom.rollup_cache.as_ref(),
+        RemoteTarget::Candidate => prom
+            .candidate_rollup_cache
+            .as_ref()
+            .or(prom.rollup_cache.as_ref()),
+    };
+    if let Some(rollup_cache) = rollup_cache {
+        text.push_str(&render_rollup_cache(rollup_cache)?);
+    }
+    Ok(text)
+}
+
+/// Renders the `[rollup_cache]` table with the units the frontend parses.
+///
+/// The four bounds are the whole configuration: the cache is read-through and
+/// bounded by `ttl`, so there is no refresh schedule and no separate age limit.
+fn render_rollup_cache(rollup_cache: &RollupCache) -> Result<String> {
+    Ok(format!(
+        "\n[rollup_cache]\nenable = {}\nmax_bytes = {}\nchunk = {}\ntail = {}\nttl = {}\n",
+        rollup_cache.enable,
+        serde_json::to_string(&rollup_cache.max_bytes)?,
+        serde_json::to_string(&rollup_cache.chunk)?,
+        serde_json::to_string(&rollup_cache.tail)?,
+        serde_json::to_string(&rollup_cache.ttl)?,
     ))
 }
 
@@ -467,6 +507,86 @@ mod tests {
     use super::*;
     use crate::query_regression_runner::model::{PromStore, RemoteValue};
 
+    fn prom_store(
+        rollup_cache: Option<RollupCache>,
+        candidate_rollup_cache: Option<RollupCache>,
+    ) -> PromStore {
+        PromStore {
+            pending_rows_flush_interval: "1s".to_string(),
+            max_batch_rows: 100_000,
+            max_concurrent_flushes: 256,
+            worker_channel_capacity: 65_536,
+            max_inflight_requests: 3_000,
+            rollup_cache,
+            candidate_rollup_cache,
+        }
+    }
+
+    fn rollup_cache(max_bytes: &str, chunk: &str, tail: &str, ttl: &str) -> RollupCache {
+        RollupCache {
+            enable: true,
+            max_bytes: max_bytes.to_string(),
+            chunk: chunk.to_string(),
+            tail: tail.to_string(),
+            ttl: ttl.to_string(),
+        }
+    }
+
+    #[test]
+    fn renders_prom_store_alone_when_no_rollup_cache_is_configured() {
+        let config = frontend_prom_config(&prom_store(None, None), RemoteTarget::Base).unwrap();
+        assert_eq!(
+            "[prom_store]\nenable = true\nwith_metric_engine = true\n\
+             pending_rows_flush_interval = \"1s\"\nmax_batch_rows = 100000\n\
+             max_concurrent_flushes = 256\nworker_channel_capacity = 65536\n\
+             max_inflight_requests = 3000\n",
+            config
+        );
+        assert_eq!(
+            config,
+            frontend_prom_config(&prom_store(None, None), RemoteTarget::Candidate).unwrap()
+        );
+    }
+
+    #[test]
+    fn base_render_omits_the_candidate_only_rollup_cache() {
+        let store = prom_store(None, Some(rollup_cache("256MB", "5m", "10m", "1h")));
+        let base = frontend_prom_config(&store, RemoteTarget::Base).unwrap();
+        assert!(!base.contains("[rollup_cache]"));
+
+        let candidate = frontend_prom_config(&store, RemoteTarget::Candidate).unwrap();
+        assert!(
+            candidate.ends_with(
+                "\n[rollup_cache]\nenable = true\nmax_bytes = \"256MB\"\nchunk = \"5m\"\n\
+                 tail = \"10m\"\nttl = \"1h\"\n"
+            ),
+            "{candidate}"
+        );
+    }
+
+    #[test]
+    fn candidate_render_prefers_the_candidate_cache_over_the_shared_one() {
+        let store = prom_store(
+            Some(rollup_cache("64MB", "1m", "1h", "5m")),
+            Some(rollup_cache("512MB", "5m", "10m", "1h")),
+        );
+        let base = frontend_prom_config(&store, RemoteTarget::Base).unwrap();
+        assert!(base.contains("[rollup_cache]"));
+        assert!(base.contains("max_bytes = \"64MB\""));
+        assert!(!base.contains("512MB"));
+
+        let candidate = frontend_prom_config(&store, RemoteTarget::Candidate).unwrap();
+        assert!(candidate.contains("max_bytes = \"512MB\""));
+        assert!(!candidate.contains("64MB"));
+    }
+
+    #[test]
+    fn shared_rollup_cache_applies_to_the_candidate_without_an_override() {
+        let store = prom_store(Some(rollup_cache("64MB", "1m", "1h", "5m")), None);
+        let candidate = frontend_prom_config(&store, RemoteTarget::Candidate).unwrap();
+        assert!(candidate.contains("max_bytes = \"64MB\""));
+    }
+
     async fn read_http_request(stream: &mut TcpStream) -> Vec<u8> {
         let mut request = Vec::new();
         let mut chunk = [0; 1024];
@@ -588,6 +708,8 @@ mod tests {
                 max_concurrent_flushes: 1,
                 worker_channel_capacity: 1,
                 max_inflight_requests: 1,
+                rollup_cache: None,
+                candidate_rollup_cache: None,
             },
             value: RemoteValue {
                 pattern: "linear".to_string(),

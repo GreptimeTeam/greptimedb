@@ -326,6 +326,12 @@ pub(super) fn round_ties_even(value: f64) -> isize {
     }
 }
 
+/// The threshold that requires the candidate to be faster than the base: the
+/// share of the base median latency the candidate has to save. `50` requires a
+/// candidate at least twice as fast, so a case that enables a cache cannot pass
+/// when the cache did not take effect.
+const MIN_CANDIDATE_LATENCY_SPEEDUP_PCT: &str = "min_candidate_latency_speedup_pct";
+
 fn enforce_thresholds(
     queries: &[Query],
     base: &QueryResult,
@@ -369,10 +375,38 @@ fn enforce_thresholds(
             };
             results.push(result);
         }
-        for key in thresholds
-            .keys()
-            .filter(|key| *key != "max_candidate_latency_regression_pct")
+        if let Some(limit) = thresholds
+            .get(MIN_CANDIDATE_LATENCY_SPEEDUP_PCT)
+            .filter(|value| !value.is_null())
+            .map(value_as_f64)
+            .transpose()?
         {
+            let result = match base_measurement {
+                None => {
+                    json!({"query": candidate_measurement.name, "threshold": MIN_CANDIDATE_LATENCY_SPEEDUP_PCT, "status": "failed", "reason": "missing base measurement"})
+                }
+                Some(base) if matches!(base.latency_ms_median, None | Some(0.0)) => {
+                    json!({"query": candidate_measurement.name, "threshold": MIN_CANDIDATE_LATENCY_SPEEDUP_PCT, "status": "failed", "reason": "base median latency is missing or zero", "base_latency_ms_median": base.latency_ms_median})
+                }
+                Some(_) if candidate_measurement.latency_ms_median.is_none() => {
+                    json!({"query": candidate_measurement.name, "threshold": MIN_CANDIDATE_LATENCY_SPEEDUP_PCT, "status": "failed", "reason": "missing candidate measurement"})
+                }
+                Some(base) => {
+                    // The share of the base latency the candidate saved: 50 means the
+                    // candidate has to be at least twice as fast as the base.
+                    let actual = (base.latency_ms_median.unwrap()
+                        - candidate_measurement.latency_ms_median.unwrap())
+                        / base.latency_ms_median.unwrap()
+                        * 100.0;
+                    json!({"query": candidate_measurement.name, "threshold": MIN_CANDIDATE_LATENCY_SPEEDUP_PCT, "status": if actual >= limit { "passed" } else { "failed" }, "actual_pct": actual, "limit_pct": limit})
+                }
+            };
+            results.push(result);
+        }
+        for key in thresholds.keys().filter(|key| {
+            *key != "max_candidate_latency_regression_pct"
+                && *key != MIN_CANDIDATE_LATENCY_SPEEDUP_PCT
+        }) {
             results.push(json!({"query": candidate_measurement.name, "threshold": key, "status": "failed", "reason": "unsupported threshold"}));
         }
     }
@@ -473,5 +507,70 @@ mod tests {
             "base median latency is missing or zero"
         );
         assert_eq!(results[1]["reason"], "unsupported threshold");
+    }
+
+    fn speedup_query(limit: f64) -> Query {
+        Query {
+            name: Some("q".to_string()),
+            kind: Some("prom_http".to_string()),
+            query: "q".to_string(),
+            start: None,
+            end: None,
+            step: None,
+            warmup: 0,
+            iterations: 3,
+            thresholds: Map::from_iter([(
+                MIN_CANDIDATE_LATENCY_SPEEDUP_PCT.to_string(),
+                json!(limit),
+            )]),
+        }
+    }
+
+    fn measured_result(median: f64) -> QueryResult {
+        QueryResult {
+            validation: vec![],
+            validation_errors: vec![],
+            measurements: vec![Measurement {
+                name: Some("q".to_string()),
+                kind: Some("prom_http".to_string()),
+                iterations: 3,
+                samples: vec![],
+                latency_ms_median: Some(median),
+                latency_ms_p95: Some(median),
+                status: "ok".to_string(),
+            }],
+            status: "ok".to_string(),
+        }
+    }
+
+    #[test]
+    fn speedup_threshold_requires_a_faster_candidate() {
+        let base = measured_result(200.0);
+        let candidate = measured_result(20.0);
+        let results = enforce_thresholds(&[speedup_query(50.0)], &base, &candidate).unwrap();
+        assert_eq!(1, results.len());
+        assert_eq!("passed", results[0]["status"]);
+        assert_eq!(results[0]["actual_pct"], json!(90.0));
+
+        // The same case with the cache silently ineffective.
+        let candidate = measured_result(200.0);
+        let results = enforce_thresholds(&[speedup_query(50.0)], &base, &candidate).unwrap();
+        assert_eq!("failed", results[0]["status"]);
+        assert_eq!(results[0]["actual_pct"], json!(0.0));
+        assert_eq!(results[0]["limit_pct"], json!(50.0));
+    }
+
+    #[test]
+    fn speedup_threshold_fails_without_a_base_measurement() {
+        let base = QueryResult {
+            validation: vec![],
+            validation_errors: vec![],
+            measurements: vec![],
+            status: "ok".to_string(),
+        };
+        let results =
+            enforce_thresholds(&[speedup_query(50.0)], &base, &measured_result(20.0)).unwrap();
+        assert_eq!("failed", results[0]["status"]);
+        assert_eq!("missing base measurement", results[0]["reason"]);
     }
 }

@@ -56,10 +56,12 @@ class QueryRegressionCaseSelectionTest(unittest.TestCase):
             runner.split_cases(["heavy"]),
             [
                 "tests/perf/query_cases/prom_remote_write_7913/case.toml",
+                "tests/perf/query_cases/prom_rollup_cache_warm_range/case.toml",
                 "tests/perf/query_cases/promql_constant_tag_concat_ms_10k/case.toml",
                 "tests/perf/query_cases/promql_constant_tag_concat_ms_100k/case.toml",
             ],
         )
+        self.assertEqual(len(runner.HEAVY_CASES), 4)
 
     def test_explicit_paths_remain_selectable(self) -> None:
         case = "tests/perf/query_cases/sql_topk_order_by/case.toml"

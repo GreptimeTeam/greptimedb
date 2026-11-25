@@ -161,6 +161,17 @@ pub(super) struct PromStoreConfig {
     pub(super) worker_channel_capacity: u64,
     #[serde(default = "default_max_inflight_requests")]
     pub(super) max_inflight_requests: u64,
+    /// Rollup cache rendered into both frontend configurations. `None` renders
+    /// no `[rollup_cache]` table at all, which leaves the frontend default
+    /// (disabled).
+    #[serde(default)]
+    pub(super) rollup_cache: Option<RollupCacheConfig>,
+    /// Rollup cache rendered only into the candidate frontend configuration.
+    /// It takes precedence over `rollup_cache` there, so a case that sets only
+    /// this one compares an uncached base against a cached candidate instead of
+    /// a cache against a cache.
+    #[serde(default)]
+    pub(super) candidate_rollup_cache: Option<RollupCacheConfig>,
 }
 
 impl Default for PromStoreConfig {
@@ -171,8 +182,57 @@ impl Default for PromStoreConfig {
             max_concurrent_flushes: default_max_concurrent_flushes(),
             worker_channel_capacity: default_worker_channel_capacity(),
             max_inflight_requests: default_max_inflight_requests(),
+            rollup_cache: None,
+            candidate_rollup_cache: None,
         }
     }
+}
+
+/// The frontend `[rollup_cache]` section, as the strings the frontend parses
+/// itself.
+///
+/// `max_bytes` is a `ReadableSize` (`256MB`) and the three durations are
+/// `humantime` (`5m`, `10m`, `1h`), so a case can express any value the
+/// frontend accepts without this schema re-implementing its parsers. The
+/// defaults mirror `RollupCacheOptions::default()`, except `enable`: naming the
+/// table at all means the cache is meant to be on.
+#[derive(Debug, Deserialize, Serialize)]
+pub(super) struct RollupCacheConfig {
+    #[serde(default = "default_true")]
+    pub(super) enable: bool,
+    #[serde(default = "default_rollup_max_bytes")]
+    pub(super) max_bytes: String,
+    #[serde(default = "default_rollup_chunk")]
+    pub(super) chunk: String,
+    #[serde(default = "default_rollup_tail")]
+    pub(super) tail: String,
+    #[serde(default = "default_rollup_ttl")]
+    pub(super) ttl: String,
+}
+
+impl Default for RollupCacheConfig {
+    fn default() -> Self {
+        Self {
+            enable: default_true(),
+            max_bytes: default_rollup_max_bytes(),
+            chunk: default_rollup_chunk(),
+            tail: default_rollup_tail(),
+            ttl: default_rollup_ttl(),
+        }
+    }
+}
+
+pub(super) fn default_rollup_max_bytes() -> String {
+    "256MB".to_string()
+}
+pub(super) fn default_rollup_chunk() -> String {
+    "5m".to_string()
+}
+pub(super) fn default_rollup_tail() -> String {
+    "10m".to_string()
+}
+pub(super) fn default_rollup_ttl() -> String {
+    "1h".to_string()
 }
 
 pub(super) fn default_pending_rows_flush_interval() -> String {
@@ -495,6 +555,97 @@ candidate_setup_sql = ["CREATE TABLE candidate_table", "ALTER TABLE candidate_ta
                 "ALTER TABLE candidate_table SET 'x'='y'"
             ]
         );
+    }
+
+    #[test]
+    fn rollup_cache_defaults_to_absent_and_fills_every_field() {
+        let case: CaseFile = toml::from_str(
+            r#"
+[scenario]
+kind = "prom_remote_write_then_query"
+
+[scenario.remote_write]
+metric = "metric"
+"#,
+        )
+        .unwrap();
+        let Scenario::PromRemoteWriteThenQuery(scenario) = case.scenario else {
+            panic!("expected prom_remote_write_then_query scenario");
+        };
+        assert!(scenario.remote_write.prom_store.rollup_cache.is_none());
+        assert!(
+            scenario
+                .remote_write
+                .prom_store
+                .candidate_rollup_cache
+                .is_none()
+        );
+
+        let case: CaseFile = toml::from_str(
+            r#"
+[scenario]
+kind = "prom_remote_write_then_query"
+
+[scenario.remote_write]
+metric = "metric"
+
+[scenario.remote_write.prom_store.candidate_rollup_cache]
+chunk = "5m"
+tail = "0s"
+ttl = "10m"
+"#,
+        )
+        .unwrap();
+        let Scenario::PromRemoteWriteThenQuery(scenario) = case.scenario else {
+            panic!("expected prom_remote_write_then_query scenario");
+        };
+        let prom_store = scenario.remote_write.prom_store;
+        assert!(prom_store.rollup_cache.is_none());
+        let cache = prom_store.candidate_rollup_cache.unwrap();
+        assert!(cache.enable);
+        assert_eq!("256MB", cache.max_bytes);
+        assert_eq!("5m", cache.chunk);
+        assert_eq!("0s", cache.tail);
+        assert_eq!("10m", cache.ttl);
+    }
+
+    #[test]
+    fn rollup_cache_roundtrips_through_the_plan_json() {
+        let case: CaseFile = toml::from_str(
+            r#"
+[scenario]
+kind = "prom_remote_write_then_query"
+
+[scenario.remote_write]
+metric = "metric"
+
+[scenario.remote_write.prom_store.rollup_cache]
+enable = false
+max_bytes = "64MB"
+
+[scenario.remote_write.prom_store.candidate_rollup_cache]
+max_bytes = "1GB"
+tail = "15m"
+"#,
+        )
+        .unwrap();
+
+        let roundtrip: CaseFile =
+            serde_json::from_str(&serde_json::to_string(&case).unwrap()).unwrap();
+        let Scenario::PromRemoteWriteThenQuery(scenario) = roundtrip.scenario else {
+            panic!("expected prom_remote_write_then_query scenario");
+        };
+        let prom_store = scenario.remote_write.prom_store;
+        let shared = prom_store.rollup_cache.unwrap();
+        assert!(!shared.enable);
+        assert_eq!("64MB", shared.max_bytes);
+        assert_eq!("5m", shared.chunk);
+        assert_eq!("10m", shared.tail);
+        assert_eq!("1h", shared.ttl);
+        let candidate = prom_store.candidate_rollup_cache.unwrap();
+        assert!(candidate.enable);
+        assert_eq!("1GB", candidate.max_bytes);
+        assert_eq!("15m", candidate.tail);
     }
 }
 

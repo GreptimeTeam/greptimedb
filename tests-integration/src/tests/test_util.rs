@@ -15,9 +15,12 @@
 use std::collections::HashMap;
 use std::env;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
+use axum::Router;
 use client::OutputData;
+use common_base::readable_size::ReadableSize;
 use common_meta::DatanodeId;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::range_stream::{DEFAULT_PAGE_SIZE, PaginationStream};
@@ -34,11 +37,13 @@ use common_wal::config::kafka::{DatanodeKafkaConfig, MetasrvKafkaConfig};
 use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 use datanode::datanode::Datanode;
 use frontend::instance::Instance;
+use frontend::service_config::RollupCacheOptions;
 use futures::TryStreamExt;
 use meta_srv::metasrv::Metasrv;
 use rstest_reuse::{self, template};
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{QueryContext, QueryContextRef};
+use tower::ServiceExt;
 
 use crate::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
 use crate::standalone::{GreptimeDbStandalone, GreptimeDbStandaloneBuilder};
@@ -226,6 +231,163 @@ pub(crate) async fn standalone() -> Arc<dyn MockInstance> {
     let test_name = uuid::Uuid::new_v4().to_string();
     let instance = GreptimeDbStandaloneBuilder::new(&test_name).build().await;
     Arc::new(instance)
+}
+
+/// The admin token the rollup cache of an end-to-end test is configured with.
+pub(crate) const ROLLUP_CACHE_RESET_TOKEN: &str = "rollup-cache-e2e-token";
+
+/// The rollup cache options an end-to-end test runs with.
+///
+/// The cache is read-through, so nothing has to run for it between requests and
+/// these bounds are the whole configuration: five-minute chunks, so a ten-minute
+/// range is cut into whole chunks; a ten-minute tail, which every fixed point of a
+/// historical test range is older than; and the frontend's hour-long ttl, far
+/// longer than a test, so a chunk a request filled is still served by the next
+/// request. A test that needs a different bound (a short ttl, say) states it with
+/// [`standalone_with_rollup_cache_options`].
+pub(crate) fn rollup_cache_options() -> RollupCacheOptions {
+    RollupCacheOptions {
+        enable: true,
+        max_bytes: ReadableSize::mb(256),
+        chunk: Duration::from_secs(300),
+        tail: Duration::from_secs(600),
+        ttl: Duration::from_secs(3_600),
+        reset_token: Some(ROLLUP_CACHE_RESET_TOKEN.to_string()),
+    }
+}
+
+/// A standalone instance whose frontend installs the rollup cache with
+/// [`rollup_cache_options`].
+pub(crate) async fn standalone_with_rollup_cache() -> Arc<dyn MockInstance> {
+    standalone_with_rollup_cache_options(rollup_cache_options()).await
+}
+
+/// A standalone instance whose frontend installs the rollup cache with `options`.
+pub(crate) async fn standalone_with_rollup_cache_options(
+    options: RollupCacheOptions,
+) -> Arc<dyn MockInstance> {
+    let test_name = uuid::Uuid::new_v4().to_string();
+    let instance = GreptimeDbStandaloneBuilder::new(&test_name)
+        .with_rollup_cache(options)
+        .build()
+        .await;
+    Arc::new(instance)
+}
+
+/// The HTTP application of `frontend`, wired the way the frontend serves it.
+///
+/// A test reads its answers through this because the HTTP range endpoint is the user
+/// entry that marks its result order irrelevant to the caller
+/// ([`servers::http::prometheus::range_query`] runs the statement as unordered). A
+/// direct `PrometheusHandler::do_query` builds an ordered statement, and an ordered
+/// request keeps its own plan and never reaches the rollup cache, so it cannot show
+/// a hit or a fill.
+pub(crate) fn prometheus_http_app(frontend: &Arc<Instance>) -> Router {
+    let server = crate::test_util::build_test_prom_server(frontend.clone(), false, None).build();
+    server.build(server.make_app()).unwrap()
+}
+
+/// The parameters of one Prometheus HTTP range query.
+pub(crate) struct PromRangeQuery<'a> {
+    pub(crate) query: &'a str,
+    pub(crate) start: &'a str,
+    pub(crate) end: &'a str,
+    pub(crate) step: &'a str,
+    /// The lookback each point folds, stated explicitly because a chunk depends on
+    /// the input history its first point reaches back to.
+    pub(crate) lookback: &'a str,
+    /// Ask the range endpoint to skip the rollup cache (`nocache=1`).
+    pub(crate) nocache: bool,
+}
+
+impl<'a> PromRangeQuery<'a> {
+    pub(crate) fn new(
+        query: &'a str,
+        start: &'a str,
+        end: &'a str,
+        step: &'a str,
+        lookback: &'a str,
+    ) -> Self {
+        Self {
+            query,
+            start,
+            end,
+            step,
+            lookback,
+            nocache: false,
+        }
+    }
+
+    /// The same query with `nocache=1`, which the range endpoint turns into the
+    /// query context's "do not use the rollup cache" hint.
+    pub(crate) fn without_cache(mut self) -> Self {
+        self.nocache = true;
+        self
+    }
+}
+
+/// The `(timestamp_ms, value)` points of the PromQL range answer of `app`.
+///
+/// `request` is what a Prometheus client sends; the answer is read out of the JSON
+/// the API returns, so the test states the numbers the user sees rather than the
+/// layout of a batch.
+pub(crate) async fn promql_range_points(
+    app: &Router,
+    request: &PromRangeQuery<'_>,
+) -> Vec<(i64, f64)> {
+    let mut uri = format!(
+        "/v1/prometheus/api/v1/query_range?query={}&start={}&end={}&step={}&lookback={}",
+        request.query, request.start, request.end, request.step, request.lookback
+    );
+    if request.nocache {
+        uri.push_str("&nocache=1");
+    }
+    let http_request = axum::http::Request::builder()
+        .method("GET")
+        .uri(uri)
+        // The handler reads its parameters from the query string or from a form body,
+        // and its form extractor requires the header even when the body is empty.
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(http_request).await.unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap_or_else(|_| {
+        panic!(
+            "the range answer is not JSON: {}",
+            String::from_utf8_lossy(&body)
+        )
+    });
+    assert!(
+        status.is_success(),
+        "the range query failed: {status} {body}"
+    );
+    assert_eq!("success", body["status"], "{body}");
+    let series = body["data"]["result"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the range answer holds a result: {body}"));
+    assert_eq!(1, series.len(), "one series answers the range: {body}");
+    let values = series[0]["values"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the series holds its samples: {body}"));
+    values
+        .iter()
+        .map(|sample| {
+            let timestamp = sample[0]
+                .as_f64()
+                .unwrap_or_else(|| panic!("a sample timestamp is a number: {body}"));
+            let value = sample[1]
+                .as_str()
+                .unwrap_or_else(|| panic!("a sample value is a string: {body}"))
+                .parse::<f64>()
+                .unwrap_or_else(|_| panic!("a sample value is a float: {body}"));
+            // The API reports seconds since the epoch; the query states milliseconds.
+            ((timestamp * 1000.0).round() as i64, value)
+        })
+        .collect()
 }
 
 pub(crate) async fn distributed() -> Arc<dyn MockInstance> {
