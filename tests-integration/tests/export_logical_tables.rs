@@ -185,6 +185,49 @@ async fn roundtrip(instance: &Arc<Instance>) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn copy_table_to_csv_respects_limit() {
+    let standalone = GreptimeDbStandaloneBuilder::new("copy_table_to_csv_limit")
+        .build()
+        .await;
+    let instance = standalone.fe_instance();
+    let destination = tempfile::tempdir_in(common_test_util::find_workspace_path(".")).unwrap();
+    sql(instance, "CREATE TABLE copy_source (ts TIMESTAMP TIME INDEX)").await;
+    sql(instance, "INSERT INTO copy_source VALUES (1000), (2000), (3000)").await;
+
+    for (name, filter, limit, expected_rows) in [
+        ("all", "", "", 3),
+        (
+            "limited",
+            ", start_time='1970-01-01T00:00:02Z'",
+            "LIMIT 1",
+            1,
+        ),
+        ("empty", "", "LIMIT 0", 0),
+        ("large", "", "LIMIT 18446744073709551615", 3),
+    ] {
+        let path = destination.path().join(format!("{name}.csv"));
+        let uri = url::Url::from_file_path(&path).unwrap();
+        let output = sql(
+            instance,
+            &format!(
+                "COPY copy_source TO '{uri}' WITH (FORMAT='csv', timestamp_format='%S'{filter}) {limit}"
+            ),
+        )
+        .await;
+        assert!(matches!(output.data, OutputData::AffectedRows(rows) if rows == expected_rows));
+        if expected_rows == 0 {
+            assert!(!path.try_exists().unwrap());
+        } else {
+            let csv = std::fs::read_to_string(path).unwrap();
+            assert_eq!(csv.lines().skip(1).count(), expected_rows);
+            if name == "limited" {
+                assert!(matches!(csv.lines().nth(1), Some("02" | "03")));
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn physical_export_standalone_roundtrip() {
     common_telemetry::init_default_ut_logging();
     let standalone = GreptimeDbStandaloneBuilder::new("physical_export")
