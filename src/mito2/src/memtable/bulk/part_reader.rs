@@ -12,26 +12,40 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
+use std::ops::BitAnd;
+use std::sync::Arc;
 use std::time::Instant;
 
-use datatypes::arrow::array::BooleanArray;
+use common_telemetry::debug;
+use datatypes::arrow::array::{Array, ArrayRef, BooleanArray, BooleanBufferBuilder};
+use datatypes::arrow::buffer::BooleanBuffer;
+use datatypes::arrow::datatypes::{Field, Schema};
 use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::data_type::DataType;
 use mito_codec::row_converter::PrimaryKeyFilter;
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReader;
+use partition::expr::PartitionExpr;
 use snafu::ResultExt;
-use store_api::storage::SequenceRange;
+use store_api::codec::PrimaryKeyEncoding;
+use store_api::storage::{ColumnId, SequenceNumber, SequenceRange};
 
-use crate::error::{self, ComputeArrowSnafu, DecodeArrowRowGroupSnafu};
+use crate::error::{
+    self, ComputeArrowSnafu, DecodeArrowRowGroupSnafu, EvalPartitionFilterSnafu,
+    SerializePartitionExprSnafu, UnexpectedSnafu,
+};
 use crate::memtable::bulk::context::{BulkIterContext, BulkIterContextRef};
 use crate::memtable::bulk::part::EncodedBulkPart;
 use crate::memtable::bulk::row_group_reader::MemtableRowGroupReaderBuilder;
 use crate::memtable::{MemScanMetrics, MemScanMetricsData};
 use crate::metrics::{READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
 use crate::sst::parquet::file_range::TagDecodeState;
-use crate::sst::parquet::flat_format::{primary_key_column_index, sequence_column_index};
+use crate::sst::parquet::flat_format::{
+    DecodedPrimaryKeys, decode_primary_keys, primary_key_column_index, sequence_column_index,
+};
 use crate::sst::parquet::prefilter::{CachedPrimaryKeyFilter, prefilter_flat_batch_by_primary_key};
+use crate::sst::tag_maybe_to_dictionary_field;
 
 /// Iterator for reading data inside a bulk part.
 pub struct EncodedBulkPartIter {
@@ -41,6 +55,9 @@ pub struct EncodedBulkPartIter {
     builder: MemtableRowGroupReaderBuilder,
     /// Sequence number filter.
     sequence: Option<SequenceRange>,
+    /// Cursor of each piece a row of this part may belong to
+    /// ([`crate::memtable::RangesOptions::creator_slices`]).
+    creator_slices: Option<Arc<Vec<(PartitionExpr, SequenceNumber)>>>,
     /// Cached skip_fields for current row group.
     current_skip_fields: bool,
     /// Primary key filter for prefiltering before convert_batch.
@@ -92,6 +109,7 @@ impl EncodedBulkPartIter {
             current_reader: init_reader,
             builder,
             sequence,
+            creator_slices: None,
             current_skip_fields,
             pk_filter,
             metrics: MemScanMetricsData {
@@ -106,6 +124,15 @@ impl EncodedBulkPartIter {
         if let Some(mem_scan_metrics) = self.mem_scan_metrics.take() {
             mem_scan_metrics.merge_inner(&self.metrics);
         }
+    }
+
+    /// Sets the cursor of each piece a row of this part may belong to.
+    pub fn with_creator_slices(
+        mut self,
+        creator_slices: Option<Arc<Vec<(PartitionExpr, SequenceNumber)>>>,
+    ) -> Self {
+        self.creator_slices = creator_slices;
+        self
     }
 
     /// Fetches next non-empty record batch.
@@ -123,6 +150,7 @@ impl EncodedBulkPartIter {
             if let Some(batch) = apply_combined_filters(
                 &self.context,
                 &self.sequence,
+                self.creator_slices.as_deref().map(Vec::as_slice),
                 batch,
                 self.current_skip_fields,
                 self.pk_filter
@@ -151,6 +179,7 @@ impl EncodedBulkPartIter {
                 if let Some(batch) = apply_combined_filters(
                     &self.context,
                     &self.sequence,
+                    self.creator_slices.as_deref().map(Vec::as_slice),
                     batch,
                     self.current_skip_fields,
                     self.pk_filter
@@ -222,6 +251,9 @@ pub struct BulkPartBatchIter {
     context: BulkIterContextRef,
     /// Sequence number filter.
     sequence: Option<SequenceRange>,
+    /// Cursor of each piece a row of this part may belong to
+    /// ([`crate::memtable::RangesOptions::creator_slices`]).
+    creator_slices: Option<Arc<Vec<(PartitionExpr, SequenceNumber)>>>,
     /// Primary key filter for prefiltering before convert_batch.
     pk_filter: Option<CachedPrimaryKeyFilter>,
     /// Metrics for this iterator.
@@ -245,6 +277,7 @@ impl BulkPartBatchIter {
             batches: VecDeque::from(batches),
             context,
             sequence,
+            creator_slices: None,
             pk_filter,
             metrics: MemScanMetricsData {
                 total_series: series_count,
@@ -269,6 +302,15 @@ impl BulkPartBatchIter {
             series_count,
             mem_scan_metrics,
         )
+    }
+
+    /// Sets the cursor of each piece a row of this part may belong to.
+    pub fn with_creator_slices(
+        mut self,
+        creator_slices: Option<Arc<Vec<(PartitionExpr, SequenceNumber)>>>,
+    ) -> Self {
+        self.creator_slices = creator_slices;
+        self
     }
 
     fn report_mem_scan_metrics(&mut self) {
@@ -305,6 +347,7 @@ impl BulkPartBatchIter {
         let Some(filtered_batch) = apply_combined_filters(
             &self.context,
             &self.sequence,
+            self.creator_slices.as_deref().map(Vec::as_slice),
             projected_batch,
             skip_fields,
             self.pk_filter
@@ -373,14 +416,20 @@ impl Drop for BulkPartBatchIter {
     }
 }
 
-/// Applies both predicate filtering and sequence filtering in a single pass.
+/// Applies the predicate, sequence and creator-cursor filtering in a single pass.
 /// Returns None if the filtered batch is empty.
+///
+/// `sequence` bounds every row by the region-level sequence range and
+/// `creator_slices` bounds each row by the cursor of the piece it belongs to
+/// (`RangesOptions::creator_slices`); the two are combined so the per-piece rule only
+/// replaces the lower floor of the region-level range.
 ///
 /// # Panics
 /// Panics if the format is not flat.
 fn apply_combined_filters(
     context: &BulkIterContext,
     sequence: &Option<SequenceRange>,
+    creator_slices: Option<&[(PartitionExpr, SequenceNumber)]>,
     record_batch: RecordBatch,
     skip_fields: bool,
     pk_filter: Option<&mut dyn PrimaryKeyFilter>,
@@ -436,15 +485,12 @@ fn apply_combined_filters(
         let sequence_filter = sequence
             .filter(&sequence_column)
             .context(ComputeArrowSnafu)?;
-        // Combine with existing filter using AND operation
-        combined_filter = match combined_filter {
-            None => Some(sequence_filter),
-            Some(existing_filter) => {
-                let and_result = datatypes::arrow::compute::and(&existing_filter, &sequence_filter)
-                    .context(ComputeArrowSnafu)?;
-                Some(and_result)
-            }
-        };
+        combined_filter = Some(and_mask(combined_filter, sequence_filter)?);
+    }
+
+    // Filters rows by the cursor of the piece each row belongs to.
+    if let Some(creator_mask) = creator_slice_mask(context, creator_slices, &record_batch)? {
+        combined_filter = Some(and_mask(combined_filter, creator_mask)?);
     }
 
     // Apply the combined filter if any filters were applied
@@ -464,6 +510,252 @@ fn apply_combined_filters(
             .context(ComputeArrowSnafu)?;
 
     Ok(Some(filtered_batch))
+}
+
+/// Combines `next` into the mask accumulated so far with a logical AND.
+fn and_mask(current: Option<BooleanArray>, next: BooleanArray) -> error::Result<BooleanArray> {
+    match current {
+        None => Ok(next),
+        Some(existing) => {
+            datatypes::arrow::compute::and(&existing, &next).context(ComputeArrowSnafu)
+        }
+    }
+}
+
+/// Computes the mask of rows of `record_batch` a physical-sequence read has **not** consumed
+/// yet, or `None` when the region-level bound is the whole rule.
+///
+/// A bulk part keeps the tag columns and the physical sequence of every row as real
+/// columns, so the piece a row belongs to is resolved per row: the candidate partition
+/// expressions are evaluated over the whole batch, and a row is kept only when its own
+/// `__sequence` is above the cursor of the candidate that selects it. This is the bulk
+/// memtable counterpart of the per-row slice selection a physical-sequence read of an SST
+/// applies (`FileRangeContext::evaluate_creator_slices`).
+///
+/// A row no candidate selects is bounded by the **least** advanced cursor of the set, which
+/// is the floor of the whole region: re-reading a consumed row is recoverable, dropping a
+/// live one is not. The same bound applies when the expressions cannot be resolved,
+/// planned or evaluated, and when several candidates select one row the least advanced of
+/// them decides.
+///
+/// `None` or an empty set applies no filter, and so does a set whose cursors all carry one
+/// value: that value is the region-level floor the read already states.
+fn creator_slice_mask(
+    context: &BulkIterContext,
+    slices: Option<&[(PartitionExpr, SequenceNumber)]>,
+    record_batch: &RecordBatch,
+) -> error::Result<Option<BooleanArray>> {
+    let Some(slices) = slices.filter(|slices| !slices.is_empty()) else {
+        return Ok(None);
+    };
+    let Some(&(_, first)) = slices.first() else {
+        return Ok(None);
+    };
+    // A single cursor value is the floor of the region: which piece a row belongs to cannot
+    // change the outcome, so the batch needs no evaluation.
+    if slices.iter().all(|(_, cursor)| *cursor == first) {
+        return Ok(None);
+    }
+
+    // A row no slice explains is attributed to the least advanced candidate.
+    let fallback = slices
+        .iter()
+        .map(|(_, cursor)| *cursor)
+        .min()
+        .unwrap_or_default();
+    let sequence_column = record_batch.column(sequence_column_index(record_batch.num_columns()));
+    let fallback_mask = SequenceRange::Gt { min: fallback }
+        .filter(sequence_column)
+        .context(ComputeArrowSnafu)?;
+
+    // Per row, the candidate slice whose expression holds.
+    let selected = match creator_slice_selection(context, slices, record_batch) {
+        Ok(selected) => selected,
+        Err(e) => {
+            // Deciding a row's piece by guesswork would drop rows: keep the floor.
+            debug!(
+                "Cannot resolve the creator cursor slices of a bulk part, bounding every row by {}: {}",
+                fallback, e
+            );
+            return Ok(Some(fallback_mask));
+        }
+    };
+    // Per candidate, the rows whose own sequence is above its cursor.
+    let mut not_consumed = Vec::with_capacity(slices.len());
+    for (_, cursor) in slices {
+        not_consumed.push(
+            SequenceRange::Gt { min: *cursor }
+                .filter(sequence_column)
+                .context(ComputeArrowSnafu)?,
+        );
+    }
+
+    let num_rows = record_batch.num_rows();
+    let mut kept = BooleanBufferBuilder::new(num_rows);
+    let mut unmatched = 0;
+    for row in 0..num_rows {
+        let mut matched = false;
+        let mut keep = false;
+        // The slices are disjoint, so at most one expression selects a row. If more than one
+        // does (a domain that was not split cleanly), any candidate above its cursor keeps
+        // the row, which is the least advanced cursor among them.
+        for (index, mask) in selected.iter().enumerate() {
+            if mask.value(row) {
+                matched = true;
+                keep |= not_consumed[index].value(row);
+            }
+        }
+        if !matched {
+            unmatched += 1;
+            keep = fallback_mask.value(row);
+        }
+        kept.append(keep);
+    }
+    if unmatched > 0 {
+        debug!(
+            "{} of {} rows of a bulk part match no creator cursor slice; bounding them by the least advanced cursor {}",
+            unmatched, num_rows, fallback
+        );
+    }
+
+    Ok(Some(BooleanArray::from(kept.finish())))
+}
+
+/// Evaluates the candidate creator cursor slice expressions against the tag columns of
+/// `record_batch` and returns the mask of rows each expression selects.
+///
+/// The expressions are planned against a probe batch holding only the columns they
+/// reference, the same way a physical-sequence read of an SST compiles them. Fails when a
+/// referenced column is neither carried by the batch nor decodable from its primary key, or
+/// when an expression cannot be planned or evaluated.
+fn creator_slice_selection(
+    context: &BulkIterContext,
+    slices: &[(PartitionExpr, SequenceNumber)],
+    record_batch: &RecordBatch,
+) -> error::Result<Vec<BooleanBuffer>> {
+    let metadata = context.read_format().metadata();
+    let mut referenced = HashSet::new();
+    for (expr, _) in slices {
+        expr.collect_column_names(&mut referenced);
+    }
+
+    let mut fields = Vec::with_capacity(referenced.len());
+    let mut columns = Vec::with_capacity(referenced.len());
+    let mut decoded_pks: Option<DecodedPrimaryKeys> = None;
+    for column_metadata in &metadata.column_metadatas {
+        let name = &column_metadata.column_schema.name;
+        if !referenced.remove(name) {
+            continue;
+        }
+        let column_id = column_metadata.column_id;
+        let Some((field, column)) =
+            creator_slice_probe_column(context, column_id, record_batch, &mut decoded_pks)?
+        else {
+            return UnexpectedSnafu {
+                reason: format!(
+                    "a creator cursor slice references column '{}' (id {}), which the bulk part batch neither carries nor encodes in its primary key",
+                    name, column_id
+                ),
+            }
+            .fail();
+        };
+        fields.push(field);
+        columns.push(column);
+    }
+    if let Some(missing) = referenced.into_iter().next() {
+        return UnexpectedSnafu {
+            reason: format!(
+                "a creator cursor slice references column '{}', which this region does not have",
+                missing
+            ),
+        }
+        .fail();
+    }
+
+    let probe =
+        RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).context(ComputeArrowSnafu)?;
+    let mut selected = Vec::with_capacity(slices.len());
+    for (expr, _) in slices {
+        let filter = expr
+            .try_as_physical_expr(probe.schema_ref())
+            .context(SerializePartitionExprSnafu)?;
+        let columnar_value = filter.evaluate(&probe).context(EvalPartitionFilterSnafu)?;
+        let array = columnar_value
+            .into_array(probe.num_rows())
+            .context(EvalPartitionFilterSnafu)?;
+        let boolean = array
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .ok_or_else(|| {
+                UnexpectedSnafu {
+                    reason: format!(
+                        "a partition expression must evaluate to a boolean array, got {:?}",
+                        array.data_type()
+                    ),
+                }
+                .build()
+            })?;
+        // A null result is "not selected", the same rule the region partition filter applies.
+        let mut mask = boolean.values().clone();
+        if let Some(nulls) = boolean.nulls() {
+            mask = mask.bitand(nulls.inner());
+        }
+        selected.push(mask);
+    }
+
+    Ok(selected)
+}
+
+/// Returns the field and the array of `column_id` for the rows of `record_batch`.
+///
+/// The column is taken from the batch when the projection carries it, and otherwise decoded
+/// from the primary key the batch states, the way the predicate filters resolve a tag
+/// outside the projection. `None` means the column cannot be resolved at all.
+fn creator_slice_probe_column(
+    context: &BulkIterContext,
+    column_id: ColumnId,
+    record_batch: &RecordBatch,
+    decoded_pks: &mut Option<DecodedPrimaryKeys>,
+) -> error::Result<Option<(Arc<Field>, ArrayRef)>> {
+    if let Some(index) = context.read_format().projected_index_by_id(column_id) {
+        let Some(field) = record_batch.schema_ref().fields().get(index).cloned() else {
+            return Ok(None);
+        };
+
+        return Ok(Some((field, record_batch.column(index).clone())));
+    }
+
+    let metadata = context.read_format().metadata();
+    let (Some(pk_index), Some(column_metadata)) = (
+        metadata.primary_key_index(column_id),
+        metadata.column_by_id(column_id),
+    ) else {
+        return Ok(None);
+    };
+    let decoded = match decoded_pks {
+        Some(decoded) => decoded,
+        None => decoded_pks.insert(decode_primary_keys(
+            context.base.codec.as_ref(),
+            record_batch,
+        )?),
+    };
+    let pk_index = if context.base.codec.encoding() == PrimaryKeyEncoding::Sparse {
+        None
+    } else {
+        Some(pk_index)
+    };
+    let data_type = &column_metadata.column_schema.data_type;
+    let column = decoded.get_tag_column(column_id, pk_index, data_type)?;
+    let field = tag_maybe_to_dictionary_field(
+        data_type,
+        &Arc::new(Field::new(
+            &column_metadata.column_schema.name,
+            data_type.as_arrow_type(),
+            column_metadata.column_schema.is_nullable(),
+        )),
+    );
+
+    Ok(Some((field, column)))
 }
 
 #[cfg(test)]

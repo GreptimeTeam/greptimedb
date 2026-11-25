@@ -6819,6 +6819,100 @@ async fn test_read_row_sequence_splits_memtable_rows_by_the_expression_of_each_r
     );
 }
 
+/// The same per-row rule for a **bulk** memtable: a bulk part keeps the tag columns and the
+/// physical sequence of every row as real columns, so the piece a row belongs to is resolved
+/// per row there too, instead of by the single floor of the region.
+///
+/// As above, the rows of the piece consumed up to 5 (3, 4 and 5) are not delivered again
+/// while the row at 6 of the piece consumed up to 2 still is.
+#[tokio::test]
+async fn test_read_row_sequence_splits_bulk_memtable_rows_by_the_expression_of_each_row() {
+    let mut env = TestEnv::with_prefix("test_read_row_sequence_splits_bulk_memtable_rows").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region = RegionId::new(1, 1);
+
+    // Five rows of the left expression (numbers 1..5) and one row of the right one
+    // (number 6), all of them in the bulk memtable: no flush, so no file takes part in the
+    // read, and `preserve_row_sequence` keeps the exact `(C, H]` delta admissible.
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .insert_option("memtable.type", "bulk")
+        .build();
+    let schema = test_util::rows_schema(&request);
+    engine
+        .handle_request(region, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let mut rows = test_util::build_rows_for_key("1", 0, 5, 0);
+    rows.extend(test_util::build_rows_for_key("6", 5, 6, 0));
+    test_util::put_rows(&engine, region, Rows { schema, rows }).await;
+
+    // The rows really are in a bulk memtable, so the read below goes through a bulk part
+    // and the per-row rule there, not through the time-series memtable.
+    assert!(
+        matches!(
+            engine
+                .get_region(region)
+                .unwrap()
+                .version_control
+                .current()
+                .version
+                .options
+                .memtable,
+            Some(crate::region::options::MemtableOptions::Bulk(_))
+        ),
+        "the region must hold the bulk memtable"
+    );
+
+    // One cursor value for every piece: the delivered rows are exactly the rows above the
+    // region-level floor 2, which is what the read delivered before the per-row rule.
+    let mut rows = scan_flat_row_sequences(
+        &engine,
+        region,
+        creator_cursor_scan(
+            region,
+            vec![
+                partition_str_slice_cursor("0", "5", 2),
+                partition_str_slice_cursor("5", "9", 2),
+            ],
+            2,
+            20,
+        ),
+    )
+    .await;
+    rows.sort_unstable();
+    assert_eq!(
+        vec![(2000, 3), (3000, 4), (4000, 5), (5000, 6)],
+        rows,
+        "one cursor value for every piece is the region-level floor of the whole read"
+    );
+
+    // The pieces advanced differently: the rows of the left one (3, 4 and 5) are consumed,
+    // the row at 6 belongs to the right one and stays live.
+    let mut rows = scan_flat_row_sequences(
+        &engine,
+        region,
+        creator_cursor_scan(
+            region,
+            vec![
+                partition_str_slice_cursor("0", "5", 5),
+                partition_str_slice_cursor("5", "9", 2),
+            ],
+            2,
+            20,
+        ),
+    )
+    .await;
+    rows.sort_unstable();
+    assert_eq!(
+        vec![(5000, 6)],
+        rows,
+        "each bulk memtable row is filtered by the cursor of the piece it belongs to: the \
+         rows at 3, 4 and 5 were consumed by the piece advanced to 5, the row at 6 was not"
+    );
+}
+
 /// A row whose number a substitution produced is hidden **and reported** by the substitution
 /// rule (`SubstitutedRowRanges`), so per-row slice selection must leave it to that rule
 /// instead of dropping it silently: its number says nothing about progress.
