@@ -191,8 +191,16 @@ async fn copy_table_to_csv_respects_limit() {
         .await;
     let instance = standalone.fe_instance();
     let destination = tempfile::tempdir_in(common_test_util::find_workspace_path(".")).unwrap();
-    sql(instance, "CREATE TABLE copy_source (ts TIMESTAMP TIME INDEX)").await;
-    sql(instance, "INSERT INTO copy_source VALUES (1000), (2000), (3000)").await;
+    sql(
+        instance,
+        "CREATE TABLE copy_source (ts TIMESTAMP TIME INDEX)",
+    )
+    .await;
+    sql(
+        instance,
+        "INSERT INTO copy_source VALUES (1000), (2000), (3000)",
+    )
+    .await;
 
     for (name, filter, limit, expected_rows) in [
         ("all", "", "", 3),
