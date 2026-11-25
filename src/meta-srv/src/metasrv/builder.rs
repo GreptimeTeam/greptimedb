@@ -32,7 +32,9 @@ use common_meta::ddl::{
 use common_meta::ddl_manager::{
     DdlManager, DdlManagerConfiguratorRef, RepartitionProcedureFactoryRef,
 };
-use common_meta::distributed_time_constants::default_distributed_time_constants;
+use common_meta::distributed_time_constants::{
+    DistributedTimeConstants, default_distributed_time_constants,
+};
 use common_meta::key::TableMetadataManager;
 use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::flow::flow_state::FlowStateManager;
@@ -681,9 +683,12 @@ impl MetasrvBuilder {
         let mut resource_stat = ResourceStatImpl::default();
         resource_stat.start_collect_cpu_usage();
 
+        let datanode_lease =
+            DistributedTimeConstants::from_heartbeat_interval(options.heartbeat_interval)
+                .datanode_lease;
         let node_expiry_listener = Arc::new(
             NodeExpiryListener::new(options.node_max_idle_time, in_memory.clone())
-                .with_role_idle_limit(Role::Datanode, Duration::from_secs(60)),
+                .with_role_idle_limit(Role::Datanode, datanode_lease.saturating_mul(5)),
         );
 
         Ok(Metasrv {
@@ -1046,35 +1051,63 @@ mod tests {
         use common_meta::peer::Peer;
         use common_meta::rpc::store::PutRequest;
 
-        let metasrv = MetasrvBuilder::new().build().await.unwrap();
-        assert!(metasrv.election().is_none());
-        crate::test_util::put_datanodes(metasrv.meta_peer_client(), vec![Peer::empty(1)]).await;
-        let backend = metasrv.in_memory();
-        let key = Vec::from(&NodeInfoKey {
-            role: Role::Datanode,
-            node_id: 1,
-        });
-        let record = backend.get(&key).await.unwrap().unwrap();
-        let mut node = NodeInfo::try_from(record.value).unwrap();
-        node.last_activity_ts -= 61_000;
-        backend
-            .put(
-                PutRequest::new()
-                    .with_key(key.clone())
-                    .with_value(Vec::try_from(node).unwrap()),
+        // Seed two registrations on opposite sides of the expected cleanup threshold.
+        for (heartbeat_secs, global_secs, retained_age, expired_age) in [
+            (90, 86_400, 70, 1_360),
+            (3, 86_400, 40, 55),
+            (90, 86_400, 1_350, 1_360),
+            (90, 30, 20, 35),
+        ] {
+            let metasrv = MetasrvBuilder::new()
+                .options(MetasrvOptions {
+                    heartbeat_interval: Duration::from_secs(heartbeat_secs),
+                    node_max_idle_time: Duration::from_secs(global_secs),
+                    ..Default::default()
+                })
+                .build()
+                .await
+                .unwrap();
+            assert!(metasrv.election().is_none());
+            crate::test_util::put_datanodes(
+                metasrv.meta_peer_client(),
+                vec![Peer::empty(1), Peer::empty(2)],
             )
-            .await
-            .unwrap();
-
-        metasrv.try_start().await.unwrap();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while backend.get(&key).await.unwrap().is_some() {
-                tokio::time::sleep(Duration::from_millis(10)).await;
+            .await;
+            let backend = metasrv.in_memory();
+            let key = |node_id| {
+                Vec::from(&NodeInfoKey {
+                    role: Role::Datanode,
+                    node_id,
+                })
+            };
+            for (id, age) in [(1, retained_age), (2, expired_age)] {
+                let record = backend.get(&key(id)).await.unwrap().unwrap();
+                let mut node = NodeInfo::try_from(record.value).unwrap();
+                node.last_activity_ts -= age * 1000;
+                backend
+                    .put(
+                        PutRequest::new()
+                            .with_key(key(id))
+                            .with_value(Vec::try_from(node).unwrap()),
+                    )
+                    .await
+                    .unwrap();
             }
-        })
-        .await
-        .unwrap();
-        metasrv.shutdown().await.unwrap();
+
+            metasrv.try_start().await.unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while backend.get(&key(2)).await.unwrap().is_some() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("expired datanode should be removed on the first cleanup tick");
+            assert!(
+                backend.get(&key(1)).await.unwrap().is_some(),
+                "heartbeat={heartbeat_secs}s, age={retained_age}s"
+            );
+            metasrv.shutdown().await.unwrap();
+        }
     }
 
     #[tokio::test]

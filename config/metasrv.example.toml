@@ -74,7 +74,8 @@ region_failure_detector_initialization_delay = '10m'
 ## **This option is not recommended to be set to true, because it may lead to data loss during failover.**
 allow_region_failover_on_local_wal = false
 
-## Maximum idle time before node registrations become eligible for cleanup. Datanode registrations are capped at 1 minute.
+## Maximum idle time before node registrations become eligible for cleanup.
+## For datanodes, the shorter of this duration and five datanode leases applies.
 node_max_idle_time = "24hours"
 
 ## Base heartbeat interval for calculating distributed time constants.
