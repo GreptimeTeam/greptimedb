@@ -103,6 +103,10 @@ mod repartition_chaos_test;
 #[cfg(test)]
 mod repartition_dup_row_test;
 #[cfg(test)]
+mod repartition_mbt_model;
+#[cfg(test)]
+mod repartition_mbt_oracle;
+#[cfg(test)]
 mod repartition_mbt_test;
 #[cfg(test)]
 mod repartition_merge_matrix_test;
