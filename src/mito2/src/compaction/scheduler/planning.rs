@@ -612,7 +612,7 @@ impl CompactionScheduler {
         };
         units.retain(|unit| {
             let estimated_bytes =
-                unit.estimated_memory_bytes(compaction_region.compaction_output_parallelism());
+compaction_region.estimated_memory_bytes(unit);
             let Some(limit_bytes) = self.exceeds_compaction_memory_limit(estimated_bytes) else { return true };
             COMPACTION_MEMORY_REJECTED
                 .with_label_values(&["oversized"])

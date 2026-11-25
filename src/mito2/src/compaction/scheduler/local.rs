@@ -287,10 +287,13 @@ impl CompactionScheduler {
             cancellation_requested: false,
         };
         let context = CompactionContext::try_from(&region)?;
-        let read_parallelism = region.compaction_output_parallelism();
+        let estimated_memory: Vec<_> = units
+            .iter()
+            .map(|unit| region.estimated_memory_bytes(unit))
+            .collect();
         // Planning is complete; unit tasks must not pin the other units' inputs.
         drop(region);
-        for unit in units {
+        for (unit, estimated_memory_bytes) in units.into_iter().zip(estimated_memory) {
             let files = reserved.for_inputs(&unit.inputs);
             let id = Self::next_plan_id(&mut self.next_plan_id);
             let execution = CompactionExecution::new(id, files);
@@ -309,7 +312,7 @@ impl CompactionScheduler {
                 compaction_context: context.clone(),
                 request_sender: self.request_sender.clone(),
                 listener: self.listener.clone(),
-                estimated_memory_bytes: unit.estimated_memory_bytes(read_parallelism),
+                estimated_memory_bytes,
                 unit,
                 memory_manager: self.memory_manager.clone(),
                 memory_policy: self.memory_policy,

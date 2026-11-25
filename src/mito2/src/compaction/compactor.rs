@@ -397,11 +397,13 @@ impl CompactionRegionOpener {
 }
 
 impl CompactionRegion {
-    /// Parallelism of encoding an output, which is also the parallelism of reading its inputs.
-    pub(crate) fn compaction_output_parallelism(&self) -> usize {
-        self.region_options.compaction_output_parallelism_or(
-            self.engine_config
-                .experimental_compaction_output_parallelism,
+    /// Estimates the memory admission reserves for merging `unit`, with the read parallelism and
+    /// merge mode the merge uses.
+    pub(crate) fn estimated_memory_bytes(&self, unit: &CompactionUnit) -> u64 {
+        let options = &self.current_version.options;
+        unit.estimated_memory_bytes(
+            compaction_output_parallelism(&self.region_options, &self.engine_config),
+            !options.append_mode && options.merge_mode() == MergeMode::LastNonNull,
         )
     }
 
@@ -602,6 +604,16 @@ fn sst_info_from_file_meta(meta: &FileMeta) -> SstInfo {
         format: meta.format.clone(),
         ..Default::default()
     }
+}
+
+/// Parallelism of encoding an output, which is also the parallelism of reading its inputs.
+/// Admission sizes the read-ahead with it, so every caller must use this function.
+pub(crate) fn compaction_output_parallelism(
+    region_options: &RegionOptions,
+    engine_config: &MitoConfig,
+) -> usize {
+    region_options
+        .compaction_output_parallelism_or(engine_config.experimental_compaction_output_parallelism)
 }
 
 /// `[MergeOutput]` represents the output of merging SST files.
@@ -1029,13 +1041,10 @@ impl<M: SstMerger> DefaultCompactor<M> {
                         // Narrowed by the decoded sizes of the inputs once their footers are read.
                         row_group_size: context.region_options.row_group_size(),
                         float_field_encoding: context.region_options.float_field_encoding,
-                        encode_parallelism: context
-                            .region_options
-                            .compaction_output_parallelism_or(
-                                context
-                                    .engine_config
-                                    .experimental_compaction_output_parallelism,
-                            ),
+                        encode_parallelism: compaction_output_parallelism(
+                            &context.region_options,
+                            &context.engine_config,
+                        ),
                         encode_runtime: EncodeRuntime::Compact,
                     },
                     self.cancel_token.clone(),
@@ -1110,7 +1119,10 @@ where
                 // Narrowed by the decoded sizes of the inputs once their footers are read.
                 row_group_size: compaction_region.region_options.row_group_size(),
                 float_field_encoding: compaction_region.region_options.float_field_encoding,
-                encode_parallelism: compaction_region.compaction_output_parallelism(),
+                encode_parallelism: compaction_output_parallelism(
+                    &compaction_region.region_options,
+                    &compaction_region.engine_config,
+                ),
                 encode_runtime: EncodeRuntime::Compact,
             };
             let merger = self.merger.clone();
