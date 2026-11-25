@@ -828,6 +828,7 @@ impl<S: LogStore> WorkerStarter<S> {
                 series_index_purger = Some(purger.clone());
                 spawn_series_index_tasks(
                     self.id,
+                    self.schema_metadata_manager.clone(),
                     store,
                     regions.clone(),
                     state,

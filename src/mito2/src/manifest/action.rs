@@ -1724,7 +1724,9 @@ mod tests {
         let mut spanning = restored.files.values().next().unwrap().as_ref().clone();
         spanning.sequence = std::num::NonZeroU64::new(80);
         assert!(proof.covers(&spanning));
-        spanning.sequence = std::num::NonZeroU64::new(81);
+        spanning.sequence = std::num::NonZeroU64::new(90);
+        assert!(proof.covers(&spanning));
+        spanning.sequence = std::num::NonZeroU64::new(91);
         assert!(!proof.covers(&spanning));
         let legacy = include_bytes!(
             "../../../../tests/compatibility/manifest/table_compaction/legacy-edit.json"

@@ -14,7 +14,7 @@
 
 //! Worker-owned background maintenance for series indexes.
 
-use std::collections::HashSet;
+use common_meta::key::SchemaMetadataManagerRef;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
@@ -34,12 +34,10 @@ use crate::metrics::{
 use crate::read::series_candidate::is_sparse_metric_metadata;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionMapRef, RegionRoleState};
 use crate::request::{RegionEditKind, RegionEditRequest, WorkerRequest, WorkerRequestWithTime};
-use crate::series_index::SeriesIndexFileHandle;
 use crate::series_index::bucket::{group_files_into_series_buckets, rounded_bucket_width};
-use crate::series_index::columnar::reader::ColumnarReader;
 use crate::series_index::maintenance::{ReconcileStats, reconcile_series_indexes_with_mode};
 use crate::series_index::purger::{IndexFilePurger, PurgeRequest, run_index_purge_task};
-use crate::sst::file::{CertifiedWindow, FileFormat, FileHandle, NarthexCoverage, RegionFileId};
+use crate::sst::file::{FileFormat, FileHandle, NarthexCoverage, SeriesFrontiers};
 use crate::time_provider::TimeProviderRef;
 
 /// Commands serialized with periodic series-index maintenance.
@@ -119,6 +117,7 @@ impl SeriesIndexTaskState {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_series_index_tasks(
     worker_id: u32,
+    schema_manager: SchemaMetadataManagerRef,
     store: ObjectStore,
     regions: RegionMapRef,
     state: Arc<SeriesIndexTaskState>,
@@ -140,6 +139,7 @@ pub(crate) fn spawn_series_index_tasks(
     ));
     common_runtime::spawn_compact(async move {
         SeriesIndexTask {
+            schema_manager,
             worker_id,
             store,
             regions,
@@ -161,6 +161,7 @@ pub(crate) fn spawn_series_index_tasks(
 
 /// Periodic series-index maintenance for one region worker.
 struct SeriesIndexTask {
+    schema_manager: SchemaMetadataManagerRef,
     store: ObjectStore,
     regions: RegionMapRef,
     bucket_width: Duration,
@@ -242,60 +243,26 @@ impl SeriesIndexTask {
     async fn reconcile_manual(&mut self, region: MitoRegionRef) -> Result<ReconcileStats> {
         self.validate_manual_region(&region)?;
         self.refresh_usage();
-        let mut unusable = HashSet::new();
-        let native = region.version().options.sst_format == Some(crate::sst::FormatType::Narthex);
-        if native {
-            let ssts = region.version().ssts.clone();
-            for index in ssts.series_indexes().values() {
-                let dir = region.access_layer.build_region_dir(index.region_id());
-                let handle = SeriesIndexFileHandle::from_narthex(index.clone(), &dir)?;
-                let store = region.access_layer.object_store().clone();
-                let readable = match ColumnarReader::open(store, handle).await {
-                    Ok(reader) => reader.parts_exist().await?,
-                    Err(error) if error.is_unusable_series_index() => false,
-                    Err(error) => return Err(error),
-                };
-                if !readable {
-                    unusable.insert(index.file_id());
-                }
-            }
-        }
-        let mut total = ReconcileStats::default();
-        loop {
-            let result = self
-                .reconcile_region_with_mode(region.clone(), true, &unusable)
-                .await;
-            self.refresh_usage();
-            let next = result?;
-            self.validate_manual_region(&region)?;
-            if !native {
-                return Ok(next);
-            }
-            total.built_series += next.built_series;
-            total.removed_series += next.removed_series;
-            total.source_files += next.source_files;
-            if next.built_series == 0 {
-                return Ok(total);
-            }
-        }
+        let result = self.reconcile_region_with_mode(region.clone(), true).await;
+        self.refresh_usage();
+        self.validate_manual_region(&region)?;
+        result
     }
 
     async fn reconcile_region(&self, region: MitoRegionRef) -> Result<ReconcileStats> {
-        self.reconcile_region_with_mode(region, false, &HashSet::new())
-            .await
+        self.reconcile_region_with_mode(region, false).await
     }
 
     async fn reconcile_region_with_mode(
         &self,
         region: MitoRegionRef,
         manual: bool,
-        unusable: &HashSet<RegionFileId>,
     ) -> Result<ReconcileStats> {
         if region.version().options.sst_format == Some(crate::sst::FormatType::Narthex) {
             if region.state() != RegionRoleState::Leader(RegionLeaderState::Writable) {
                 return Ok(ReconcileStats::default());
             }
-            return self.reconcile_native(region, manual, unusable).await;
+            return self.reconcile_native(region, manual).await;
         }
         // Full capacity defers builds, but cleanup must still reclaim published usage.
         let allow_builds = self.disk_usage.load(Ordering::Relaxed) < self.max_size;
@@ -326,147 +293,208 @@ impl SeriesIndexTask {
         &self,
         region: MitoRegionRef,
         manual: bool,
-        unusable: &HashSet<RegionFileId>,
     ) -> Result<ReconcileStats> {
         let mut stats = ReconcileStats::default();
-        let (ssts, metadata, flushed_sequence, truncated_entry_id, window) = {
+        let (ssts, metadata, frontier, truncated_entry_id, window, options) = {
             let current = region.version_control.current();
             let version = current.version;
-            // A completed flush published its inputs and committed boundary together.
-            // Defer during in-flight admissions, unflushed writes and WAL recovery.
-            if current.last_sequence != version.flushed_sequence
-                || current.committed_sequence != version.flushed_sequence
-                || !version.memtables.is_empty()
-                || !version.pending_tails.is_empty()
-            {
+            if !version.pending_tails.is_empty() {
                 return Ok(stats);
             }
-            let Some(window) = version
-                .compaction_time_window
-                .or(manual.then_some(self.bucket_width))
-            else {
-                return Ok(stats);
+            let frontier = if version.memtables.is_empty()
+                && current.last_sequence == current.committed_sequence
+            {
+                current.committed_sequence
+            } else {
+                version.flushed_sequence
             };
             (
                 version.ssts.clone(),
                 version.metadata.clone(),
-                version.flushed_sequence,
+                frontier,
                 version.truncated_entry_id,
-                window,
+                version
+                    .compaction_time_window
+                    .or(manual.then_some(self.bucket_width)),
+                version.options.clone(),
             )
         };
-        let Some(width) = rounded_bucket_width(self.bucket_width, window) else {
-            return Ok(stats);
+        let ttl = match options.ttl {
+            Some(ttl) => ttl,
+            None => crate::compaction::find_dynamic_options(
+                region.region_id,
+                &options,
+                &self.schema_manager,
+            )
+            .await
+            .map(|(_, ttl)| ttl)
+            .unwrap_or_else(|error| {
+                warn!(error; "Failed to resolve database TTL for region {}", region.region_id);
+                common_time::TimeToLive::Forever
+            }),
         };
+        let now = common_time::Timestamp::new_millisecond(self.time_provider.current_time_millis());
+        let expired = |f: &FileHandle| ttl.is_expired(&f.time_range().1, &now).unwrap_or(false);
         let files: Vec<_> = ssts
             .levels()
             .iter()
             .flat_map(|l| l.files.values().cloned())
             .collect();
-        let buckets =
-            group_files_into_series_buckets(&files, width, (window.as_secs() as i64).max(1));
         let indexes = ssts.series_indexes();
+        let mut proofs = Vec::new();
+        let mut edit = crate::manifest::action::RegionEdit::default();
+        for index in indexes.values() {
+            let FileFormat::NarthexSeriesIndex(meta) = &index.meta_ref().format else {
+                continue;
+            };
+            let Some(proof) = &meta.coverage else {
+                if expired(index) {
+                    edit.series_indexes_to_remove.push(index.file_id());
+                }
+                continue;
+            };
+            let live = !expired(index)
+                && proof.region_id == region.region_id
+                && proof.schema_version == metadata.schema_version
+                && files.iter().any(|f| {
+                    !expired(f)
+                        && proof
+                            .intervals()
+                            .any(|(_, w)| w.start <= f.time_range().1 && f.time_range().0 < w.end)
+                });
+            if live {
+                proofs.push((index.file_id(), proof));
+            } else {
+                edit.series_indexes_to_remove.push(index.file_id());
+            }
+        }
+        // Remove redundant and disconnected increments, including stale full indexes
+        // from older writers. All contributors to a contiguous chain stay live.
+        proofs.sort_unstable_by_key(|(id, _)| id.file_id());
+        let mut used = vec![false; proofs.len()];
+        let coverage =
+            SeriesFrontiers::from_proofs(proofs.iter().map(|(_, p)| *p), |i| used[i] = true);
+        edit.series_indexes_to_remove.extend(
+            proofs
+                .into_iter()
+                .zip(used)
+                .filter_map(|((id, _), used)| (!used).then_some(id)),
+        );
+
         let worker = self
             .state
             .worker
             .as_ref()
             .ok_or_else(|| WorkerStoppedSnafu { id: self.worker_id }.build())?;
+        let mut handles: Vec<FileHandle> = Vec::new();
+        let mut buckets = Vec::new();
+        if let Some(window) = window
+            && let Some(width) = rounded_bucket_width(self.bucket_width, window)
+        {
+            buckets =
+                group_files_into_series_buckets(&files, width, (window.as_secs() as i64).max(1));
+        }
         for bucket in buckets {
-            let eligible = |f: &FileHandle| {
-                f.meta_ref()
-                    .sequence
-                    .is_some_and(|seq| seq.get() <= flushed_sequence)
-                    && f.time_range().0 >= bucket.start
-                    && f.time_range().1 < bucket.end
-            };
-            if !bucket.files.iter().any(eligible) {
-                continue;
+            // If expired files were omitted, certify only the still-live portion of the bucket.
+            let mut start = bucket.start;
+            if bucket.files.iter().any(&expired)
+                && let common_time::TimeToLive::Duration(d) = ttl
+                && let Ok(cutoff) = now.sub_duration(d)
+            {
+                start = start.max(cutoff);
             }
-            let existing: Vec<_> = indexes
-                .values()
-                .filter_map(|file| {
-                    let FileFormat::NarthexSeriesIndex(index) = &file.meta_ref().format else {
-                        return None;
-                    };
-                    let proof = index.coverage.as_ref()?;
-                    (proof.region_id == region.region_id
-                        && proof
-                            .windows
-                            .iter()
-                            .all(|w| bucket.start <= w.start && w.end <= bucket.end))
-                    .then_some((file, proof))
+            let sources: Vec<_> = bucket
+                .files
+                .iter()
+                .filter(|f| {
+                    !expired(f)
+                        && f.meta_ref().sequence.is_some_and(|seq| {
+                            seq.get() <= frontier
+                                && !coverage.covers_range(
+                                    f.time_range().0.max(start),
+                                    f.time_range().1,
+                                    seq.get(),
+                                )
+                        })
                 })
+                .cloned()
                 .collect();
-            if bucket.files.iter().filter(|f| eligible(f)).all(|f| {
-                existing.iter().any(|(index, p)| {
-                    !unusable.contains(&index.file_id())
-                        && p.schema_version == metadata.schema_version
-                        && p.covers(f.meta_ref())
-                })
-            }) {
+            if sources.is_empty() {
                 continue;
             }
-
-            let coverage = NarthexCoverage {
+            let mut proof = NarthexCoverage {
                 region_id: region.region_id,
                 schema_version: metadata.schema_version,
-                windows: vec![CertifiedWindow {
-                    start: bucket.start,
-                    end: bucket.end,
-                    frontier: flushed_sequence,
-                }],
+                windows: Vec::new(),
+                increments: Vec::new(),
             };
-            let output = crate::sst::narthex::write_series(
+            coverage.extend(&mut proof, start, bucket.end, frontier);
+            let output = match crate::sst::narthex::write_series(
                 &region.access_layer,
                 metadata.clone(),
-                &bucket.files,
-                Some(coverage),
+                &sources,
+                Some(proof),
             )
-            .await?;
-            let handle = FileHandle::new(output.clone(), region.file_purger.clone());
-            let edit = crate::manifest::action::RegionEdit {
-                series_indexes_to_add: vec![output],
-                series_indexes_to_remove: existing.iter().map(|(file, _)| file.file_id()).collect(),
-                ..Default::default()
-            };
-            if !self.state.is_running() {
-                handle.mark_deleted();
-                return WorkerStoppedSnafu { id: self.worker_id }.fail();
-            }
-            let (tx, rx) = oneshot::channel();
-            let mut request = RegionEditRequest::new(region.region_id, edit, false, tx);
-            request.kind = RegionEditKind::NativeSeries {
-                origin: region.clone(),
-                schema_version: metadata.schema_version,
-                truncated_entry_id,
-                index_ids: indexes.keys().copied().collect(),
-            };
-            if worker
-                .send(WorkerRequestWithTime::new(WorkerRequest::EditRegion(
-                    request,
-                )))
-                .await
-                .is_err()
+            .await
             {
-                handle.mark_deleted();
-                return WorkerStoppedSnafu { id: self.worker_id }.fail();
+                Ok(output) => output,
+                Err(error) => {
+                    for handle in handles {
+                        handle.mark_deleted();
+                    }
+                    return Err(error);
+                }
+            };
+            handles.push(FileHandle::new(output.clone(), region.file_purger.clone()));
+            edit.series_indexes_to_add.push(output);
+            stats.source_files += sources.len();
+            if !manual {
+                break;
             }
-            if let Err(error) = rx
-                .await
-                .map_err(|_| WorkerStoppedSnafu { id: self.worker_id }.build())?
+        }
+        stats.built_series = handles.len();
+        stats.removed_series = edit.series_indexes_to_remove.len();
+        if stats.built_series + stats.removed_series == 0 {
+            return Ok(stats);
+        }
+        if !self.state.is_running() {
+            for handle in &handles {
+                handle.mark_deleted();
+            }
+            return WorkerStoppedSnafu { id: self.worker_id }.fail();
+        }
+        let (tx, rx) = oneshot::channel();
+        let mut request = RegionEditRequest::new(region.region_id, edit, false, tx);
+        request.kind = RegionEditKind::NativeSeries {
+            origin: region.clone(),
+            schema_version: metadata.schema_version,
+            truncated_entry_id,
+            index_ids: indexes.keys().copied().collect(),
+        };
+        if worker
+            .send(WorkerRequestWithTime::new(WorkerRequest::EditRegion(
+                request,
+            )))
+            .await
+            .is_err()
+        {
+            for handle in &handles {
+                handle.mark_deleted();
+            }
+            return WorkerStoppedSnafu { id: self.worker_id }.fail();
+        }
+        if let Err(error) = rx
+            .await
+            .map_err(|_| WorkerStoppedSnafu { id: self.worker_id }.build())?
+        {
+            if matches!(error, crate::error::Error::RegionBusy { .. })
+                || !error.may_have_persisted_manifest_update()
             {
-                if matches!(error, crate::error::Error::RegionBusy { .. })
-                    || !error.may_have_persisted_manifest_update()
-                {
+                for handle in &handles {
                     handle.mark_deleted();
                 }
-                return Err(error);
             }
-            stats.built_series += 1;
-            stats.source_files += bucket.files.len();
-            stats.removed_series += existing.len();
-            // The index set changed. Capture a fresh snapshot for the next publication.
-            break;
+            return Err(error);
         }
         Ok(stats)
     }
@@ -582,6 +610,7 @@ mod tests {
         let (state, receiver) = SeriesIndexTaskState::new(0, 1);
         (
             SeriesIndexTask {
+                schema_manager: crate::test_util::mock_schema_metadata_manager().0,
                 store,
                 regions,
                 bucket_width: Duration::from_secs(100),
@@ -664,6 +693,102 @@ mod tests {
         let (result, ()) = tokio::join!(build, flush_during_build);
         result.unwrap();
         assert!(!region.version().ssts.series_indexes().is_empty());
+        engine.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_native_import_frontier_and_index_ttl() {
+        let mut env = TestEnv::new().await;
+        let clock = Arc::new(crate::time_provider::mock::MockTimeProvider::new(2000));
+        let engine = env
+            .create_engine_with_time(
+                MitoConfig {
+                    experimental_enable_series_index: true,
+                    ..Default::default()
+                },
+                None,
+                None,
+                clock.clone(),
+            )
+            .await;
+        let source = RegionId::new(1, 0);
+        let target = RegionId::new(1, 1);
+        for id in [source, target] {
+            engine
+                .handle_request(
+                    id,
+                    RegionRequest::Create(sparse_metric_create_request("narthex")),
+                )
+                .await
+                .unwrap();
+        }
+        let owner = engine.get_region(source).unwrap();
+        let key = new_sparse_primary_key(&["api"], &owner.metadata(), 42, 7);
+        engine
+            .handle_request(source, sparse_metric_put(key.clone(), 1000, Some(1.0)))
+            .await
+            .unwrap();
+        flush_region(&engine, source, None).await;
+        // A dirty memtable must not prevent indexing the previous flush.
+        engine
+            .handle_request(source, sparse_metric_put(key, 2000, Some(2.0)))
+            .await
+            .unwrap();
+        engine
+            .handle_request(source, build_series_index_request())
+            .await
+            .unwrap();
+        assert_eq!(owner.version().ssts.series_indexes().len(), 1);
+
+        let region = engine.get_region(target).unwrap();
+        let sample = owner.version().ssts.levels()[0]
+            .files
+            .values()
+            .next()
+            .unwrap()
+            .meta_ref()
+            .clone();
+        engine
+            .edit_region(
+                target,
+                crate::manifest::action::RegionEdit {
+                    files_to_add: vec![sample],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(region.version().flushed_sequence, 0);
+        let mut options = region.version().options.clone();
+        options.ttl = Some(common_time::TimeToLive::Duration(Duration::from_secs(1)));
+        region.version_control.alter_options(options);
+        engine
+            .handle_request(target, build_series_index_request())
+            .await
+            .unwrap();
+        let pinned = region.version();
+        assert_eq!(pinned.ssts.series_indexes().len(), 1);
+        clock.set_now(2001);
+        engine
+            .handle_request(target, build_series_index_request())
+            .await
+            .unwrap();
+        assert!(region.version().ssts.series_indexes().is_empty());
+        let index = pinned.ssts.series_indexes().values().next().unwrap();
+        for object in index
+            .meta_ref()
+            .narthex_objects(&region.access_layer.build_region_dir(target))
+            .unwrap()
+        {
+            assert!(
+                region
+                    .access_layer
+                    .object_store()
+                    .exists(&object.path)
+                    .await
+                    .unwrap()
+            );
+        }
         engine.stop().await.unwrap();
     }
 
@@ -971,6 +1096,7 @@ mod tests {
         regions.insert_region(region.clone());
         let (state, receiver) = SeriesIndexTaskState::new(0, 2);
         let mut task = SeriesIndexTask {
+            schema_manager: crate::test_util::mock_schema_metadata_manager().0,
             store: store.clone(),
             regions,
             bucket_width: Duration::from_secs(100),
@@ -1055,6 +1181,7 @@ mod tests {
         let usage = Arc::new(AtomicU64::new(0));
         let (state, command_receiver) = SeriesIndexTaskState::new(0, 1);
         let mut task = SeriesIndexTask {
+            schema_manager: crate::test_util::mock_schema_metadata_manager().0,
             store: store.clone(),
             regions,
             bucket_width: Duration::from_secs(100),
@@ -1192,6 +1319,7 @@ mod tests {
         let make_task = || {
             let (state, command_receiver) = SeriesIndexTaskState::new(0, 1);
             SeriesIndexTask {
+                schema_manager: crate::test_util::mock_schema_metadata_manager().0,
                 store: store.clone(),
                 regions: Arc::new(RegionMap::default()),
                 bucket_width: Duration::from_secs(100),

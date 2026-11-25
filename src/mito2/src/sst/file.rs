@@ -14,7 +14,7 @@
 
 //! Structures to describe metadata of files.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::hash::{Hash, Hasher};
@@ -290,27 +290,110 @@ pub struct NarthexCoverage {
     pub region_id: RegionId,
     /// Windows in ascending start order. Gaps are allowed.
     pub windows: Vec<CertifiedWindow>,
+    /// Contributions above an already certified frontier. Legacy readers see only full windows.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub increments: Vec<IncrementalWindow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IncrementalWindow {
+    pub after: u64,
+    #[serde(flatten)]
+    pub window: CertifiedWindow,
 }
 
 impl NarthexCoverage {
+    pub(crate) fn intervals(&self) -> impl Iterator<Item = (u64, &CertifiedWindow)> {
+        self.windows
+            .iter()
+            .map(|w| (0, w))
+            .chain(self.increments.iter().map(|i| (i.after, &i.window)))
+    }
+
+    #[cfg(test)]
     pub(crate) fn covers(&self, file: &FileMeta) -> bool {
-        let Some(sequence) = file.sequence else {
-            return false;
-        };
-        let (mut cursor, last) = file.time_range;
-        for window in &self.windows {
-            if window.start > cursor {
-                return false;
+        SeriesFrontiers::new([self]).covers(file)
+    }
+}
+
+/// Piecewise contiguous sequence coverage across the available series indexes.
+pub(crate) struct SeriesFrontiers(BTreeMap<Timestamp, u64>);
+
+impl SeriesFrontiers {
+    pub(crate) fn new<'a>(proofs: impl IntoIterator<Item = &'a NarthexCoverage>) -> Self {
+        Self::from_proofs(proofs, |_| {})
+    }
+
+    /// Reports indexes that advance contiguous coverage on at least one time interval.
+    pub(crate) fn from_proofs<'a>(
+        proofs: impl IntoIterator<Item = &'a NarthexCoverage>,
+        mut used: impl FnMut(usize),
+    ) -> Self {
+        let mut intervals: Vec<_> = proofs
+            .into_iter()
+            .enumerate()
+            .flat_map(|(i, proof)| proof.intervals().map(move |(after, w)| (after, w, i)))
+            .collect();
+        intervals.sort_unstable_by_key(|(after, w, i)| (*after, std::cmp::Reverse(w.frontier), *i));
+        let mut points = BTreeMap::new();
+        for (_, window, _) in &intervals {
+            points.insert(window.start, 0);
+            points.insert(window.end, 0);
+        }
+        for (after, window, i) in intervals {
+            if window.start >= window.end {
+                continue;
             }
-            if window.frontier >= sequence.get() && cursor < window.end {
-                // File bounds are inclusive, while window ends are exclusive.
-                if last < window.end {
-                    return true;
+            for (_, frontier) in points.range_mut(window.start..window.end) {
+                if after <= *frontier && *frontier < window.frontier {
+                    used(i);
+                    *frontier = window.frontier;
                 }
-                cursor = window.end;
             }
         }
-        false
+        Self(points)
+    }
+
+    fn at(&self, time: Timestamp) -> u64 {
+        self.0.range(..=time).next_back().map_or(0, |(_, f)| *f)
+    }
+
+    pub(crate) fn covers(&self, file: &FileMeta) -> bool {
+        let (start, end) = file.time_range;
+        file.sequence
+            .is_some_and(|seq| self.covers_range(start, end, seq.get()))
+    }
+
+    pub(crate) fn covers_range(&self, start: Timestamp, end: Timestamp, sequence: u64) -> bool {
+        start <= end
+            && self.at(start) >= sequence
+            && self.0.range(start..=end).all(|(_, f)| *f >= sequence)
+    }
+
+    pub(crate) fn extend(
+        &self,
+        proof: &mut NarthexCoverage,
+        start: Timestamp,
+        end: Timestamp,
+        frontier: u64,
+    ) {
+        let mut cursor = start;
+        for next in self.0.range(start..end).map(|(t, _)| *t).chain([end]) {
+            let after = self.at(cursor);
+            if cursor < next && after < frontier {
+                let window = CertifiedWindow {
+                    start: cursor,
+                    end: next,
+                    frontier,
+                };
+                if after == 0 {
+                    proof.windows.push(window);
+                } else {
+                    proof.increments.push(IncrementalWindow { after, window });
+                }
+            }
+            cursor = next;
+        }
     }
 }
 
@@ -1471,6 +1554,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn incremental_coverage_requires_a_contiguous_chain_across_split_windows() {
+        let ts = Timestamp::new_second;
+        let proof = |start, end, frontier| NarthexCoverage {
+            schema_version: 0,
+            region_id: RegionId::new(1, 0),
+            windows: vec![CertifiedWindow {
+                start: ts(start),
+                end: ts(end),
+                frontier,
+            }],
+            increments: Vec::new(),
+        };
+        let left = proof(0, 10, 4);
+        let right = proof(10, 20, 7);
+        let base = SeriesFrontiers::new([&left, &right]);
+        let mut delta = proof(0, 20, 10);
+        delta.windows.clear();
+        base.extend(&mut delta, ts(0), ts(20), 10);
+        assert!(delta.windows.is_empty());
+        assert_eq!(delta.increments.len(), 2);
+        let all = SeriesFrontiers::new([&delta, &right, &left]);
+        assert!(all.covers_range(ts(5), ts(15), 10));
+        assert!(!all.covers_range(ts(5), ts(20), 10));
+        let missing = SeriesFrontiers::new([&delta, &right]);
+        assert!(!missing.covers_range(ts(5), ts(15), 10));
+        assert!(missing.covers_range(ts(10), ts(15), 10));
+    }
+
+    #[test]
     fn spanning_file_requires_contiguous_sufficient_frontiers() {
         let ts = Timestamp::new_millisecond;
         let window = |start, end, frontier| CertifiedWindow {
@@ -1481,6 +1593,7 @@ mod tests {
         let mut coverage = NarthexCoverage {
             schema_version: 0,
             region_id: RegionId::new(1, 0),
+            increments: Vec::new(),
             windows: vec![window(0, 10, 100), window(10, 20, 80)],
         };
         let mut file = FileMeta {

@@ -166,18 +166,18 @@ impl ColumnarWriter {
         Ok(())
     }
 
-    /// Aggregates one row of input.
+    /// Aggregates the input rows represented by one exact key.
     ///
     /// Identity is the exact sparse primary key, never `(table_id, tsid)`: distinct
     /// series may share a `tsid`, and both keep their own row and labels. Rows carry
     /// their tags and are ordered by exact key, so the format can represent the pair
     /// without inventing a second identity.
-    pub(crate) async fn append_key(&mut self, key: &[u8]) -> Result<()> {
+    pub(crate) async fn append_key(&mut self, key: &[u8], count: u64) -> Result<()> {
         if self.current.is_some() && key == self.last_key.as_slice() {
             if let Some(row) = self.current.as_mut() {
                 row.count = row
                     .count
-                    .checked_add(1)
+                    .checked_add(count)
                     .ok_or_else(|| invalid("series row count overflow"))?;
             }
             return Ok(());
@@ -197,7 +197,7 @@ impl ColumnarWriter {
         self.push_current().await?;
         self.current = Some(Row {
             key: exact,
-            count: 1,
+            count,
             tags,
         });
         self.last_key.clear();
@@ -213,7 +213,7 @@ impl ColumnarWriter {
         if let Some(keys) = pk.as_any().downcast_ref::<BinaryArray>() {
             require(keys.null_count() == 0, "null series primary key")?;
             for key in keys.iter().flatten() {
-                self.append_key(key).await?;
+                self.append_key(key, 1).await?;
             }
         } else if let Some(keys) = pk.as_any().downcast_ref::<DictionaryArray<UInt32Type>>() {
             require(keys.null_count() == 0, "null series primary key")?;
@@ -227,7 +227,7 @@ impl ColumnarWriter {
                     (*key as usize) < values.len() && !values.is_null(*key as usize),
                     "invalid series dictionary primary key",
                 )?;
-                self.append_key(values.value(*key as usize)).await?;
+                self.append_key(values.value(*key as usize), 1).await?;
             }
         } else {
             return Err(invalid(

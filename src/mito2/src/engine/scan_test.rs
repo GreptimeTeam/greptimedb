@@ -91,7 +91,8 @@ async fn test_narthex_sparse_upsert_after_adding_nullable_tag() -> WhateverResul
 }
 
 #[tokio::test]
-async fn test_narthex_manual_repair_with_full_sidecar_budget() -> WhateverResult<()> {
+async fn test_narthex_manual_build_trusts_manifest_with_full_sidecar_budget() -> WhateverResult<()>
+{
     let mut env = TestEnv::new().await;
     let budget = ReadableSize(1024);
     let engine = env
@@ -156,19 +157,22 @@ async fn test_narthex_manual_repair_with_full_sidecar_budget() -> WhateverResult
         .handle_request(native, build_series_index_request())
         .await?;
     assert!(
-        !region
+        region
             .version()
             .ssts
             .series_indexes()
             .contains_key(&index.meta_ref().file_id)
     );
-    let repaired = region.version();
-    let index = repaired.ssts.series_indexes().values().next().unwrap();
-    let handle = crate::series_index::SeriesIndexFileHandle::from_narthex(
-        index.clone(),
-        &region.access_layer.build_region_dir(native),
-    )?;
-    crate::series_index::columnar::reader::ColumnarReader::open(store.clone(), handle).await?;
+    let batches = RecordBatches::try_collect(
+        engine
+            .scan_to_stream(native, ScanRequest::default())
+            .await?,
+    )
+    .await?;
+    assert_eq!(
+        64,
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>()
+    );
     engine.stop().await?;
     Ok(())
 }
@@ -180,9 +184,7 @@ async fn check_sparse_upsert_after_adding_nullable_tag(format: &str) -> Whatever
         let reads = series_reads.clone();
         let layer = object_store::layers::mock::MockLayerBuilder::default()
             .reader_factory(Arc::new(move |path, _, inner| {
-                if path.ends_with(".series") {
-                    reads.lock().unwrap().push(path.to_owned());
-                }
+                reads.lock().unwrap().push(path.to_owned());
                 inner
             }))
             .build()
@@ -401,7 +403,14 @@ async fn check_sparse_upsert_after_adding_nullable_tag(format: &str) -> Whatever
                 .collect(),
             ..Default::default()
         })?;
-        assert!(old_series.try_next().await?.is_some());
+        let batch = old_series.try_next().await?.unwrap();
+        let counts = batch
+            .column_by_name(crate::series_index::ROW_COUNT_COLUMN)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<datatypes::arrow::array::UInt64Array>()
+            .unwrap();
+        assert_eq!(counts.values().as_ref(), &[2]);
         assert!(
             samples_reader
                 .read(Default::default())?
@@ -456,6 +465,46 @@ async fn check_sparse_upsert_after_adding_nullable_tag(format: &str) -> Whatever
         test_util::flush_region(&engine, region_id, None).await;
         let rows = scan().await?;
         assert!(rows.contains("late") && rows.contains("api"), "{rows}");
+        series_reads.lock().unwrap().clear();
+        engine
+            .handle_request(region_id, build_series_index_request())
+            .await?;
+        let covered_paths: Vec<_> = outputs
+            .iter()
+            .flat_map(|file| {
+                file.meta_ref()
+                    .narthex_objects(&region.access_layer.build_region_dir(region_id))
+                    .unwrap()
+            })
+            .collect();
+        assert!(!series_reads.lock().unwrap().iter().any(|path| {
+            covered_paths
+                .iter()
+                .any(|obj| path.trim_start_matches('/') == obj.path.trim_start_matches('/'))
+        }));
+        let indexed = region.version();
+        assert_eq!(indexed.ssts.series_indexes().len(), 2);
+        assert!(indexed.ssts.series_indexes().contains_key(&index_id));
+        assert!(indexed.ssts.series_indexes().values().any(|file| matches!(
+            &file.meta_ref().format, crate::sst::file::FileFormat::NarthexSeriesIndex(meta)
+                if meta.coverage.as_ref().is_some_and(|p| !p.increments.is_empty())
+        )));
+        series_reads.lock().unwrap().clear();
+        engine
+            .handle_request(region_id, build_series_index_request())
+            .await?;
+        assert!(
+            series_reads.lock().unwrap().is_empty(),
+            "covered build read an object"
+        );
+        assert!(
+            indexed.ssts.series_indexes().keys().all(|id| region
+                .version()
+                .ssts
+                .series_indexes()
+                .contains_key(id))
+        );
+        assert_eq!(scan().await?, rows);
         region
             .access_layer
             .object_store()

@@ -20,7 +20,13 @@ Each part record contains its encoded `file_size` in bytes.
 In the region manifest, a native series index may carry a `coverage` object
 with `region_id`, `schema_version`, and an ordered array of `windows`. Each
 window describes a half-open timestamp interval `[start, end)` and an inclusive
-sequence upper bound `frontier`. Gaps between windows are permitted.
+sequence upper bound `frontier`. Optional `increments` use the same timestamp
+bounds and certify the sequence interval `(after, frontier]`. At each timestamp,
+a scan combines full windows and increments from readable indexes with matching
+region and schema. It skips sample-key discovery only when contiguous sequence
+coverage reaches the sample SST's bound across its entire inclusive time range.
+A gap or unknown sample sequence requires sample-key discovery. Maintenance
+expires an index using the maximum source timestamp recorded in its file metadata.
 
 ## Wire specification
 

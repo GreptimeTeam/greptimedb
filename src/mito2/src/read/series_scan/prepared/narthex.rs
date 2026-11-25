@@ -90,7 +90,7 @@ pub(crate) async fn open_sources(
     let mut samples = Vec::<Arc<dyn SamplesFormatReader>>::new();
     let mut series = Vec::<Box<dyn FormatReader>>::new();
     let indices = file_indices(context, ranges)?;
-    let mut covered = std::collections::HashSet::new();
+    let mut proofs = Vec::new();
     let indexes = if use_indexes {
         context.input.narthex_series_indexes.as_slice()
     } else {
@@ -109,13 +109,12 @@ pub(crate) async fn open_sources(
         {
             continue;
         }
-        let selected: Vec<_> = indices
-            .iter()
-            .map(|i| &context.input.files[*i])
-            .filter(|sample| proof.covers(sample.meta_ref()))
-            .map(|sample| sample.file_id())
-            .collect();
-        if selected.is_empty() {
+        if !indices.iter().any(|i| {
+            let (start, end) = context.input.files[*i].time_range();
+            proof
+                .intervals()
+                .any(|(_, w)| w.start <= end && start < w.end)
+        }) {
             continue;
         }
         let reader = match crate::series_index::columnar::reader::ColumnarReader::open_cached(
@@ -148,9 +147,10 @@ pub(crate) async fn open_sources(
         {
             continue;
         }
-        covered.extend(selected);
+        proofs.push(proof);
         series.push(Box::new(reader));
     }
+    let frontiers = crate::sst::file::SeriesFrontiers::new(proofs);
     for i in indices {
         let file = &context.input.files[i];
         let namespace = file.meta_ref().file_id;
@@ -176,7 +176,7 @@ pub(crate) async fn open_sources(
         };
         let reader: Arc<dyn SamplesFormatReader> =
             Arc::new(NarthexSamplesReader { reader, sequence });
-        if !covered.contains(&file.file_id()) {
+        if !frontiers.covers(file.meta_ref()) {
             series.push(Box::new(NarthexSeriesReader::new(
                 context.input.region_metadata().clone(),
                 reader.clone(),

@@ -222,18 +222,14 @@ pub(crate) async fn write_series(
             // Empty projection and no time predicate read only metadata and exact keys.
             let mut stream = reader.read(Default::default())?;
             if let Some(block) = stream.try_next().await? {
-                heads.push(Reverse((block.key, streams.len())));
+                heads.push(Reverse((block.key, streams.len(), block.batch.num_rows())));
             }
             streams.push(stream);
         }
-        let mut previous = None;
-        while let Some(Reverse((key, index))) = heads.pop() {
-            if previous.as_ref() != Some(&key) {
-                writer.append_key(key.bytes()).await?;
-                previous = Some(key);
-            }
+        while let Some(Reverse((key, index, rows))) = heads.pop() {
+            writer.append_key(key.bytes(), rows as u64).await?;
             if let Some(block) = streams[index].try_next().await? {
-                heads.push(Reverse((block.key, index)));
+                heads.push(Reverse((block.key, index, block.batch.num_rows())));
             }
         }
         Ok(())

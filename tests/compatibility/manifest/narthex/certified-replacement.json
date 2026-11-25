@@ -35,6 +35,14 @@
                 "coverage": {
                   "region_id": 98784247841,
                   "schema_version": 0,
+                  "increments": [
+                    {
+                      "start": {"value": 5, "unit": "Millisecond"},
+                      "end": {"value": 11, "unit": "Millisecond"},
+                      "after": 80,
+                      "frontier": 90
+                    }
+                  ],
                   "windows": [
                     {
                       "start": {

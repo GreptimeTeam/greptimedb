@@ -905,6 +905,7 @@ async fn test_maintenance_wakeup_and_timer(#[case] enable_range_index: bool) {
     regions.insert_region(region.clone());
     let task = super::task::spawn_series_index_tasks(
         0,
+        crate::test_util::mock_schema_metadata_manager().0,
         store,
         regions,
         state.clone(),
@@ -987,6 +988,7 @@ async fn test_drop_catalogs_and_retained_snapshot_after_task_stop() {
     state.stop();
     super::task::spawn_series_index_tasks(
         0,
+        crate::test_util::mock_schema_metadata_manager().0,
         store.clone(),
         Arc::new(RegionMap::default()),
         state,
@@ -1091,6 +1093,7 @@ async fn test_manual_reconcile_returns_storage_failure(#[case] catalog_failure: 
     regions.insert_region(region.clone());
     let task = super::task::spawn_series_index_tasks(
         0,
+        crate::test_util::mock_schema_metadata_manager().0,
         store,
         regions,
         state.clone(),
