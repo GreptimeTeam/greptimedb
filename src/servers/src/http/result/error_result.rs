@@ -73,12 +73,22 @@ impl ErrorResponse {
     pub fn error(&self) -> &str {
         &self.error
     }
+
+    /// The status code carried in this response.
+    ///
+    /// Derived from the encoded code the same way [`IntoResponse`] does, so handlers
+    /// that report this status in their own payload cannot disagree with the status
+    /// of the response body.
+    pub fn status_code(&self) -> StatusCode {
+        StatusCode::from_u32(self.code).unwrap_or(StatusCode::Unknown)
+    }
 }
 
 impl IntoResponse for ErrorResponse {
     fn into_response(self) -> Response {
         let code = self.code;
         let execution_time = self.execution_time_ms;
+        let status_code = status_code_to_http_status(&self.status_code());
         let new_header = from_err_code_msg_to_header(
             code,
             &format!(
@@ -88,9 +98,6 @@ impl IntoResponse for ErrorResponse {
         );
         let mut resp = Json(self).into_response();
         resp.headers_mut().extend(new_header);
-
-        let status = StatusCode::from_u32(code).unwrap_or(StatusCode::Unknown);
-        let status_code = status_code_to_http_status(&status);
 
         (status_code, resp).into_response()
     }
