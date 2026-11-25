@@ -507,7 +507,6 @@ async fn assert_append_count(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Exemplar writes require pre-encoded keys: https://github.com/GreptimeTeam/greptimedb/issues/10598"]
 async fn test_exemplar_sparse_repartition_compaction() {
     let (cluster, _home_guard) = repartition_cluster("exemplar_sparse_repartition").await;
     let instance = cluster.fe_instance();
@@ -580,6 +579,71 @@ async fn test_exemplar_sparse_repartition_compaction() {
         "+----------+\n| count(*) |\n+----------+\n| 4        |\n+----------+",
     )
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_sparse_alter_first_after_split_and_compaction() {
+    let (cluster, _home_guard) = repartition_cluster("sparse_alter_repartition").await;
+    let instance = cluster.fe_instance();
+    let ctx = QueryContext::arc();
+    for sql in [
+        "CREATE TABLE sparse_alter_repartition (
+            __table_id INT UNSIGNED NOT NULL, __tsid BIGINT UNSIGNED NOT NULL,
+            host STRING, site STRING DEFAULT 'east', ts TIMESTAMP TIME INDEX, val DOUBLE,
+            PRIMARY KEY (__table_id, __tsid, host, site)
+         ) PARTITION ON COLUMNS(host) (host < 'm', host >= 'm')
+         WITH ('primary_key_encoding'='SpArSe', 'append_mode'='true')",
+        "INSERT INTO sparse_alter_repartition (__table_id, __tsid, host, ts, val) VALUES
+            (1, 10, 'b', 1, 1.0),
+            (2, 20, 'z', 2, 2.0)",
+        "ADMIN FLUSH_TABLE('sparse_alter_repartition')",
+        "ALTER TABLE sparse_alter_repartition ADD COLUMN env STRING PRIMARY KEY FIRST",
+        "ALTER TABLE sparse_alter_repartition ADD COLUMN az STRING PRIMARY KEY AFTER host",
+        "INSERT INTO sparse_alter_repartition (__table_id, __tsid, host, site, ts, val, env, az) VALUES
+            (1, 10, 'b', 'east', 3, 3.0, '', NULL),
+            (3, 30, 'h', 'west', 4, 4.0, 'staging', 'us-east')",
+        "ADMIN FLUSH_TABLE('sparse_alter_repartition')",
+        "ALTER TABLE sparse_alter_repartition SPLIT PARTITION (host < 'm')
+         INTO (host < 'g', host >= 'g' AND host < 'm')",
+    ] {
+        run_sql(instance, sql, ctx.clone()).await.unwrap();
+    }
+    instance.cache_invalidator().invalidate_all().unwrap();
+    for sql in [
+        "INSERT INTO sparse_alter_repartition (__table_id, __tsid, host, ts, val, env) VALUES
+            (4, 40, 'b', 5, 5.0, 'prod'),
+            (5, 50, 'j', 6, 6.0, 'prod'),
+            (6, 60, 'z', 7, 7.0, 'prod')",
+        "ADMIN FLUSH_TABLE('sparse_alter_repartition')",
+    ] {
+        run_sql(instance, sql, ctx.clone()).await.unwrap();
+    }
+    let expected = "\
++------+------+---------+---------+-----+
+| host | site | env_tag | az_tag  | val |
++------+------+---------+---------+-----+
+| b    | east | <null>  | <null>  | 1.0 |
+| b    | east |         | <null>  | 3.0 |
+| b    | east | prod    | <null>  | 5.0 |
+| h    | west | staging | us-east | 4.0 |
+| j    | east | prod    | <null>  | 6.0 |
+| z    | east | <null>  | <null>  | 2.0 |
+| z    | east | prod    | <null>  | 7.0 |
++------+------+---------+---------+-----+";
+    let query = "SELECT host, site, COALESCE(env, '<null>') AS env_tag, COALESCE(az, '<null>') AS az_tag, val
+         FROM sparse_alter_repartition ORDER BY host, val";
+    let output = run_sql(instance, query, ctx.clone()).await.unwrap();
+    check_output_stream(output.data, expected).await;
+
+    run_sql(
+        instance,
+        "ADMIN COMPACT_TABLE('sparse_alter_repartition', 'swcs', '3600')",
+        ctx.clone(),
+    )
+    .await
+    .unwrap();
+    let output = run_sql(instance, query, ctx).await.unwrap();
+    check_output_stream(output.data, expected).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

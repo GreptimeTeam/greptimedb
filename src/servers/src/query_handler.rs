@@ -141,11 +141,11 @@ pub trait PromStoreProtocolHandler {
     /// Writes exemplars using table identities captured while preparing the source metrics.
     async fn write_exemplars_with_sources(
         &self,
-        request: RowInsertRequests,
+        exemplars: operator::insert::ExemplarBatch,
         ctx: QueryContextRef,
         _sources: &[TableInfoRef],
     ) -> Result<Output> {
-        self.write_exemplars_prepared(request, ctx).await
+        self.write_exemplars_prepared(exemplars, ctx).await
     }
 
     /// Authorizes source series, including inputs with no metric samples.
@@ -162,13 +162,22 @@ pub trait PromStoreProtocolHandler {
 
     async fn write_exemplars_prepared(
         &self,
-        _request: RowInsertRequests,
+        _exemplars: operator::insert::ExemplarBatch,
         _ctx: QueryContextRef,
     ) -> Result<Output> {
         crate::error::NotSupportedSnafu {
             feat: "exemplar ingestion",
         }
         .fail()
+    }
+
+    /// Runs pre-write checks/hooks for prometheus remote write exemplars.
+    async fn pre_write_exemplars(
+        &self,
+        _exemplars: &operator::insert::ExemplarBatch,
+        _ctx: QueryContextRef,
+    ) -> Result<()> {
+        Ok(())
     }
 
     /// Runs pre-write checks/hooks for prometheus remote write requests.

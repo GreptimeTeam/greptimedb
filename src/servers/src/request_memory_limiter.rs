@@ -84,6 +84,34 @@ impl ServerMemoryLimiter {
         }
     }
 
+    /// Non-blockingly reserves additional conversion memory while caller permits may be held.
+    pub(crate) fn reserve_conversion_memory(
+        &self,
+        estimated_bytes: usize,
+        held_bytes: u64,
+    ) -> Result<Option<MemoryGuard<RequestMemoryMetrics>>> {
+        if self.limit_bytes() == 0 {
+            return Ok(None);
+        }
+        let bytes = u64::try_from(estimated_bytes).unwrap_or(u64::MAX);
+        self.check_request_fits(bytes, held_bytes)?;
+        self.try_acquire(bytes).map(Some).ok_or_else(|| {
+            let source = common_memory_manager::Error::MemoryLimitExceeded {
+                requested_bytes: bytes,
+                limit_bytes: self.limit_bytes(),
+            };
+            // Remote Write senders must retry contention under the wait policy.
+            match self.policy() {
+                OnExhaustedPolicy::Wait { .. } => {
+                    crate::error::OtherSnafu.into_error(common_error::ext::BoxedError::new(source))
+                }
+                OnExhaustedPolicy::Fail => {
+                    crate::error::MemoryLimitExceededSnafu.into_error(source)
+                }
+            }
+        })
+    }
+
     pub(crate) fn policy(&self) -> OnExhaustedPolicy {
         self.policy
     }
@@ -96,5 +124,23 @@ impl ServerMemoryLimiter {
     /// Returns currently reserved (in-flight) bytes.
     pub fn used_bytes(&self) -> u64 {
         self.manager.used_bytes()
+    }
+}
+
+impl operator::batcher::ConversionMemoryLimiter for ServerMemoryLimiter {
+    fn limit_bytes(&self) -> u64 {
+        self.limit_bytes()
+    }
+
+    fn reserve(
+        &self,
+        estimated_bytes: usize,
+        held_bytes: u64,
+    ) -> operator::error::Result<operator::batcher::PendingRowsPermit> {
+        let guard = self
+            .reserve_conversion_memory(estimated_bytes, held_bytes)
+            .map_err(common_error::ext::BoxedError::new)
+            .context(operator::error::ExternalSnafu)?;
+        Ok(Arc::new(guard))
     }
 }

@@ -19,12 +19,18 @@ use api::v1::{JsonValue, Rows, json_value};
 use arrow::datatypes::DataType;
 use arrow_schema::extension::ExtensionType;
 use datatypes::extension::json::Json2ExtensionType;
-use datatypes::json::JSON2_DEFAULT_MAX_AUTO_EXPANDED_PATHS;
 use datatypes::json::value::JsonVariant;
+use datatypes::json::{JSON2_DEFAULT_MAX_AUTO_EXPANDED_PATHS, JsonSettings};
 use datatypes::schema::ColumnDefaultConstraint;
 use datatypes::value::Value;
 use datatypes::vectors::json;
+use store_api::metric_engine_consts::{
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
+};
+use store_api::storage::consts::ReservedColumnId;
 use table::metadata::TableInfo;
+
+use crate::insert::ExemplarBatch;
 
 const ARRAY_OVERHEAD: usize = 512;
 const VIEW_BLOCK_BYTES: usize = 8192;
@@ -64,7 +70,6 @@ pub(crate) fn estimated_record_batch_bytes(rows: &Rows, table: &TableInfo) -> Op
             values.scratch = values.scratch.checked_mul(rows.rows.len())?;
         }
 
-        let count = rows.rows.len().checked_add(values.items)?;
         let extension = column.extension_type::<Json2ExtensionType>().ok()?;
         // Only supplied v2 JSON2 values use the settings-aware builder; defaults use the datatype.
         let settings = extension
@@ -75,32 +80,237 @@ pub(crate) fn estimated_record_batch_bytes(rows: &Rows, table: &TableInfo) -> Op
                     && extension.metadata().is_version_2()
             })
             .map(|extension| extension.metadata().json_settings());
-        let (mut bytes, paths) = if let Some(settings) = settings {
-            let limit = settings
-                .max_auto_expanded_paths()
-                .unwrap_or(JSON2_DEFAULT_MAX_AUTO_EXPANDED_PATHS);
-            (
-                array_bytes(&json::json2_physical_data_type(settings), count)?,
-                values.expanded_paths(usize::try_from(limit).ok()?)?,
-            )
-        } else {
-            (array_bytes(field.data_type(), count)?, values.paths.len())
-        };
-        // Each selected path can need buffers for every row or nested element.
-        let path_bytes = count
-            .checked_add(1)?
-            .checked_mul(48)?
-            .checked_add(3 * ARRAY_OVERHEAD + VIEW_BLOCK_BYTES)?;
-        bytes = bytes.checked_add(paths.checked_mul(path_bytes)?)?;
-        // Builders can double capacity; payload and JSON scratch can coexist with
-        // the final arrays. Fixed per-array slack covers alignment and empty buffers.
-        total = total
-            .checked_add(bytes.checked_mul(2)?)?
-            .checked_add(field.size().checked_mul(2)?)?
-            .checked_add(values.payload.checked_mul(4)?)?
-            .checked_add(values.scratch)?;
+        total = total.checked_add(estimate_column_arrow_bytes(
+            field.data_type(),
+            rows.rows.len(),
+            field.size(),
+            settings,
+            &values,
+        )?)?;
     }
     Some(total)
+}
+
+/// Estimates Arrow conversion bytes for an ordinary sparse table written as `__primary_key` + non-tag columns.
+pub(crate) fn estimated_sparse_record_batch_bytes(rows: &Rows, table: &TableInfo) -> Option<usize> {
+    let source = rows
+        .schema
+        .iter()
+        .enumerate()
+        .map(|(i, column)| (column.column_name.as_str(), i))
+        .collect::<HashMap<_, _>>();
+    let pk_set: HashSet<usize> = table.meta.primary_key_indices.iter().copied().collect();
+    let row_count = rows.rows.len();
+    let mut total = 0usize;
+    let mut pk_encoded_bytes = row_count.checked_mul(16)?;
+    let mut pk_scratch = 0usize;
+    let pk_meta_scratch = pk_set.len().checked_mul(128)?.checked_add(256)?;
+
+    for (index, (column, field)) in table
+        .meta
+        .schema
+        .column_schemas()
+        .iter()
+        .zip(table.meta.schema.arrow_schema().fields())
+        .enumerate()
+    {
+        let mut values = ValueSize::default();
+        let source_index = source.get(column.name.as_str());
+        if pk_set.contains(&index) {
+            let reserved_col_id = table.meta.column_ids.get(index).copied();
+            let is_reserved = column.name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME
+                || column.name == DATA_SCHEMA_TSID_COLUMN_NAME
+                || reserved_col_id == Some(ReservedColumnId::table_id())
+                || reserved_col_id == Some(ReservedColumnId::tsid());
+            if let Some(&src_idx) = source_index {
+                if is_reserved {
+                    for row in &rows.rows {
+                        let _ = row.values.get(src_idx)?;
+                    }
+                } else {
+                    let mut non_null_rows = 0usize;
+                    for row in &rows.rows {
+                        if let Some(vd) = row.values.get(src_idx)?.value_data.as_ref() {
+                            non_null_rows += 1;
+                            values.proto(Some(vd))?;
+                        }
+                    }
+                    pk_encoded_bytes = pk_encoded_bytes
+                        .checked_add(non_null_rows.checked_mul(16)?)?
+                        .checked_add(values.payload.checked_mul(2)?)?;
+                    pk_scratch = pk_scratch.checked_add(values.scratch)?;
+                }
+            } else if !is_reserved {
+                match column.default_constraint() {
+                    Some(ColumnDefaultConstraint::Value(value)) if !value.is_null() => {
+                        values.default_value(value)?;
+                        let per_row = 16usize.checked_add(values.payload.checked_mul(2)?)?;
+                        pk_encoded_bytes =
+                            pk_encoded_bytes.checked_add(row_count.checked_mul(per_row)?)?;
+                        pk_scratch =
+                            pk_scratch.checked_add(values.scratch.checked_mul(row_count)?)?;
+                    }
+                    Some(ColumnDefaultConstraint::Function(_)) => {
+                        pk_encoded_bytes =
+                            pk_encoded_bytes.checked_add(row_count.checked_mul(16)?)?;
+                    }
+                    _ => {}
+                }
+            }
+            continue;
+        }
+
+        if let Some(&src_idx) = source_index {
+            for row in &rows.rows {
+                values.proto(row.values.get(src_idx)?.value_data.as_ref())?;
+            }
+        } else if let Some(ColumnDefaultConstraint::Value(value)) = column.default_constraint() {
+            values.default_value(value)?;
+            values.payload = values.payload.checked_mul(row_count)?;
+            values.items = values.items.checked_mul(row_count)?;
+            values.scratch = values.scratch.checked_mul(row_count)?;
+        }
+
+        let extension = column.extension_type::<Json2ExtensionType>().ok()?;
+        let settings = extension
+            .as_ref()
+            .filter(|extension| {
+                source_index.is_some()
+                    && column.data_type.is_json2()
+                    && extension.metadata().is_version_2()
+            })
+            .map(|extension| extension.metadata().json_settings());
+        total = total.checked_add(estimate_column_arrow_bytes(
+            field.data_type(),
+            row_count,
+            field.size(),
+            settings,
+            &values,
+        )?)?;
+    }
+
+    let min_builder_data = row_count.checked_mul(64)?;
+    let pk_data_bytes = pk_encoded_bytes.max(min_builder_data).checked_mul(2)?;
+    let pk_array = array_bytes(&DataType::Binary, row_count)?
+        .checked_mul(2)?
+        .checked_add(pk_data_bytes)?
+        .checked_add(pk_scratch)?
+        .checked_add(pk_meta_scratch)?;
+    total.checked_add(pk_array)
+}
+
+/// Estimates Arrow conversion bytes for an exemplar batch against the resolved destination schema.
+///
+/// Accounts for destination-dependent JSON2 `type_hints` and `expanded_paths` while keeping
+/// absent inherited catalog tags compact inside `__primary_key`.
+pub(crate) fn estimated_exemplar_record_batch_bytes(
+    exemplars: &ExemplarBatch,
+    table: &TableInfo,
+) -> Option<usize> {
+    let row_count = exemplars.len();
+    let schema = &table.meta.schema;
+    let arrow_schema = schema.arrow_schema();
+
+    let mut pk_payload = 0usize;
+    let mut label_values = ValueSize::default();
+    for exemplar in exemplars.exemplars() {
+        // 22B for (__table_id, __tsid) + encoded metric name + present inherited tags.
+        pk_payload = pk_payload
+            .checked_add(22)?
+            .checked_add(exemplar.metric.len().checked_mul(2)?)?;
+        for value in exemplar.series_labels.values() {
+            pk_payload = pk_payload
+                .checked_add(6)?
+                .checked_add(value.len().checked_mul(2)?)?;
+        }
+        label_values.scratch = label_values.scratch.checked_add(VALUE_SCRATCH_BYTES)?;
+        for (k, v) in &exemplar.labels {
+            label_values.payload(k.len().checked_add(v.len())?)?;
+            label_values.scratch = label_values.scratch.checked_add(VALUE_SCRATCH_BYTES)?;
+            let key_path = [PathComponent::Key(k.as_str())];
+            if !label_values.paths.contains(key_path.as_slice()) {
+                label_values.paths.insert(key_path.to_vec());
+            }
+        }
+    }
+
+    let mut total = array_bytes(&DataType::Binary, row_count)?
+        .checked_mul(2)?
+        .checked_add(pk_payload.checked_mul(2)?)?;
+
+    if let Some(ts_idx) = schema.timestamp_index() {
+        let field = &arrow_schema.fields()[ts_idx];
+        total = total.checked_add(estimate_column_arrow_bytes(
+            field.data_type(),
+            row_count,
+            field.size(),
+            None,
+            &ValueSize::default(),
+        )?)?;
+    }
+    if let Some(val_idx) = schema.column_index_by_name(common_query::prelude::greptime_value()) {
+        let field = &arrow_schema.fields()[val_idx];
+        total = total.checked_add(estimate_column_arrow_bytes(
+            field.data_type(),
+            row_count,
+            field.size(),
+            None,
+            &ValueSize::default(),
+        )?)?;
+    }
+    if let Some(labels_idx) =
+        schema.column_index_by_name(common_query::prelude::greptime_exemplar_labels())
+    {
+        let column = &schema.column_schemas()[labels_idx];
+        let field = &arrow_schema.fields()[labels_idx];
+        let extension = column.extension_type::<Json2ExtensionType>().ok()?;
+        let settings = extension
+            .as_ref()
+            .filter(|ext| column.data_type.is_json2() && ext.metadata().is_version_2())
+            .map(|ext| ext.metadata().json_settings());
+        total = total.checked_add(estimate_column_arrow_bytes(
+            field.data_type(),
+            row_count,
+            field.size(),
+            settings,
+            &label_values,
+        )?)?;
+    }
+    Some(total)
+}
+
+fn estimate_column_arrow_bytes(
+    data_type: &DataType,
+    row_count: usize,
+    field_size: usize,
+    settings: Option<&JsonSettings>,
+    values: &ValueSize<'_>,
+) -> Option<usize> {
+    let count = row_count.checked_add(values.items)?;
+    let (mut bytes, paths) = if let Some(settings) = settings {
+        let limit = settings
+            .max_auto_expanded_paths()
+            .unwrap_or(JSON2_DEFAULT_MAX_AUTO_EXPANDED_PATHS);
+        (
+            array_bytes(&json::json2_physical_data_type(settings), count)?,
+            values.expanded_paths(usize::try_from(limit).ok()?)?,
+        )
+    } else {
+        (array_bytes(data_type, count)?, values.paths.len())
+    };
+    // Each selected path can need buffers for every row or nested element.
+    let path_bytes = count
+        .checked_add(1)?
+        .checked_mul(48)?
+        .checked_add(3 * ARRAY_OVERHEAD + VIEW_BLOCK_BYTES)?;
+    bytes = bytes.checked_add(paths.checked_mul(path_bytes)?)?;
+    // Builders can double capacity; payload and JSON scratch can coexist with
+    // the final arrays. Fixed per-array slack covers alignment and empty buffers.
+    bytes
+        .checked_mul(2)?
+        .checked_add(field_size.checked_mul(2)?)?
+        .checked_add(values.payload.checked_mul(4)?)?
+        .checked_add(values.scratch)
 }
 
 fn array_bytes(data_type: &DataType, count: usize) -> Option<usize> {

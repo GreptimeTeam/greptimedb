@@ -22,18 +22,21 @@ use api::v1::region::{
 use api::v1::{ArrowIpc, PartitionExprVersion, Rows};
 use common_error::ext::BoxedError;
 use common_grpc::flight::{self, FlightDecoder};
-use datatypes::arrow::array::{Array, BinaryArray, StringBuilder};
+use datatypes::arrow::array::{Array, BinaryArray, StringBuilder, UInt32Builder, UInt64Builder};
 use datatypes::arrow::compute;
 use datatypes::arrow::datatypes::{DataType, Field, Schema};
 use datatypes::arrow::record_batch::RecordBatch;
-use mito_codec::row_converter::sparse::{SparseOffsetsCache, SparsePrimaryKeyView};
+use mito_codec::row_converter::sparse::{
+    SparseOffsetsCache, SparsePrimaryKeyCodec, SparsePrimaryKeyView,
+};
 use partition::PartitionRuleRef;
 use partition::manager::PartitionRuleManager;
 use partition::partition::RegionMask;
 use partition::splitter::RowSplitter;
 use snafu::{OptionExt, ResultExt, ensure};
+use store_api::metric_engine_consts;
 use store_api::storage::consts;
-use store_api::storage::{RegionId, RegionNumber, TableId};
+use store_api::storage::{ColumnId, RegionId, RegionNumber, TableId};
 use table::metadata::TableInfo;
 
 use crate::error::{self, Result, SplitDeleteSnafu, SplitInsertSnafu};
@@ -44,11 +47,35 @@ pub struct Partitioner<'a> {
     partition_manager: &'a PartitionRuleManager,
 }
 
+/// Returns whether `table_info` specifies case-insensitive `'primary_key_encoding'='sparse'`.
+pub(crate) fn is_sparse_primary_key_table(table_info: &TableInfo) -> bool {
+    table_info
+        .meta
+        .options
+        .extra_options
+        .get(metric_engine_consts::PRIMARY_KEY_ENCODING)
+        .is_some_and(|v| v.eq_ignore_ascii_case("sparse"))
+}
+
+#[derive(Clone, Debug)]
+enum SparsePartitionColumnKind {
+    TableId,
+    Tsid,
+    StringTag(ColumnId),
+}
+
+#[derive(Clone, Debug)]
+struct SparsePartitionColumn {
+    name: String,
+    kind: SparsePartitionColumnKind,
+}
+
 /// A single snapshot of a table's partition rule and expression versions.
 pub(crate) struct TablePartitioner {
     table_id: TableId,
     rule: PartitionRuleRef,
     versions: HashMap<RegionNumber, Option<PartitionExprVersion>>,
+    sparse_partition_columns: Vec<SparsePartitionColumn>,
 }
 
 impl<'a> Partitioner<'a> {
@@ -138,9 +165,10 @@ impl TablePartitioner {
                 .map(|request| (request, WriteAttribution::default()))
                 .collect());
         }
+        let routing = restore_partition_tags_for_columns(&batch, &self.sparse_partition_columns)?;
         let masks = self
             .rule
-            .split_record_batch(&batch)
+            .split_record_batch(routing.as_ref().unwrap_or(&batch))
             .context(SplitInsertSnafu)?;
         self.build_attributed_bulk_requests(batch, masks, None, skip_wal, attribution)
     }
@@ -274,9 +302,10 @@ impl TablePartitioner {
         owners: Vec<usize>,
         skip_wal: bool,
     ) -> Result<Vec<(BulkInsertRequest, Vec<usize>)>> {
+        let routing = restore_partition_tags_for_columns(&batch, &self.sparse_partition_columns)?;
         let masks = self
             .rule
-            .split_record_batch(&batch)
+            .split_record_batch(routing.as_ref().unwrap_or(&batch))
             .context(SplitInsertSnafu)?;
         self.build_tracked_bulk_insert_requests(batch, masks, owners, None, skip_wal)
     }
@@ -331,6 +360,8 @@ impl TablePartitioner {
         let (rule, versions) = partition_manager
             .find_table_partition_rule(table_info)
             .await?;
+        let sparse_partition_columns =
+            resolve_sparse_partition_columns(rule.partition_columns(), table_info);
         Ok(Self {
             table_id: table_info.table_id(),
             rule,
@@ -340,6 +371,7 @@ impl TablePartitioner {
                     (region, version.map(|value| PartitionExprVersion { value }))
                 })
                 .collect(),
+            sparse_partition_columns,
         })
     }
 
@@ -420,9 +452,10 @@ impl TablePartitioner {
         original_ipc: Option<ArrowIpc>,
         skip_wal: bool,
     ) -> Result<Vec<BulkInsertRequest>> {
+        let routing = restore_partition_tags_for_columns(&batch, &self.sparse_partition_columns)?;
         let masks = self
             .rule
-            .split_record_batch(&batch)
+            .split_record_batch(routing.as_ref().unwrap_or(&batch))
             .context(SplitInsertSnafu)?;
         self.build_bulk_insert_requests(batch, masks, original_ipc, skip_wal)
     }
@@ -561,78 +594,14 @@ impl TablePartitioner {
             .collect())
     }
 
-    /// Restores omitted physical-table tags for routing without changing the write payload.
+    /// Restores omitted sparse/physical-table tags for routing without changing the write payload.
     fn restore_partition_tags(
         &self,
         batch: &RecordBatch,
         table_info: &TableInfo,
     ) -> Result<Option<RecordBatch>> {
-        let meta = &table_info.meta;
-        if !table_info.is_physical_table() || meta.column_ids.len() != meta.schema.num_columns() {
-            return Ok(None);
-        }
-        let missing = self
-            .rule
-            .partition_columns()
-            .iter()
-            .filter(|name| batch.column_by_name(name).is_none())
-            .filter_map(|name| {
-                let index = meta.schema.column_index_by_name(name)?;
-                (meta.primary_key_indices.contains(&index)
-                    && meta.schema.column_schemas()[index].data_type.is_string())
-                .then_some((name, meta.column_ids[index]))
-            })
-            .collect::<Vec<_>>();
-        if missing.is_empty() {
-            return Ok(None);
-        }
-        let Some(primary_key) = batch.column_by_name(consts::PRIMARY_KEY_COLUMN_NAME) else {
-            return Ok(None);
-        };
-        let primary_key =
-            primary_key
-                .as_any()
-                .downcast_ref::<BinaryArray>()
-                .context(error::UnexpectedSnafu {
-                    violated: "Sparse primary key column must be Binary",
-                })?;
-        let mut builders = missing
-            .iter()
-            .map(|_| StringBuilder::new())
-            .collect::<Vec<_>>();
-        let mut cache = SparseOffsetsCache::new();
-        let mut buffer = Vec::new();
-        for row in 0..batch.num_rows() {
-            ensure!(
-                !primary_key.is_null(row),
-                error::UnexpectedSnafu {
-                    violated: "Sparse primary key must not be null",
-                }
-            );
-            let mut key = SparsePrimaryKeyView::new(primary_key.value(row), &mut cache)
-                .map_err(BoxedError::new)
-                .context(error::ExternalSnafu)?;
-            for ((_, column_id), builder) in missing.iter().zip(&mut builders) {
-                let label = key
-                    .label(*column_id, &mut buffer)
-                    .map_err(BoxedError::new)
-                    .context(error::ExternalSnafu)?;
-                builder.append_option(label);
-            }
-        }
-        let schema = batch.schema();
-        let mut fields = schema.fields().to_vec();
-        let mut columns = batch.columns().to_vec();
-        for ((name, _), mut builder) in missing.into_iter().zip(builders) {
-            fields.push(Arc::new(Field::new(name, DataType::Utf8, true)));
-            columns.push(Arc::new(builder.finish()));
-        }
-        RecordBatch::try_new(
-            Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone())),
-            columns,
-        )
-        .map(Some)
-        .context(error::ComputeArrowSnafu)
+        let columns = resolve_sparse_partition_columns(self.rule.partition_columns(), table_info);
+        restore_partition_tags_for_columns(batch, &columns)
     }
 
     /// Whether the request's region still exists with the same partition expression version.
@@ -652,6 +621,175 @@ impl TablePartitioner {
     fn version(&self, region: RegionNumber) -> Option<PartitionExprVersion> {
         self.versions.get(&region).copied().flatten()
     }
+}
+
+fn resolve_sparse_partition_columns(
+    partition_columns: &[String],
+    table_info: &TableInfo,
+) -> Vec<SparsePartitionColumn> {
+    let meta = &table_info.meta;
+    if (!table_info.is_physical_table() && !is_sparse_primary_key_table(table_info))
+        || meta.column_ids.len() != meta.schema.num_columns()
+    {
+        return Vec::new();
+    }
+    partition_columns
+        .iter()
+        .filter_map(|name| {
+            let index = meta.schema.column_index_by_name(name)?;
+            if !meta.primary_key_indices.contains(&index) {
+                return None;
+            }
+            let column = &meta.schema.column_schemas()[index];
+            let column_id = meta.column_ids[index];
+            let kind = if (name == metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME
+                || column_id == consts::ReservedColumnId::table_id())
+                && column.data_type == datatypes::data_type::ConcreteDataType::uint32_datatype()
+            {
+                SparsePartitionColumnKind::TableId
+            } else if (name == metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME
+                || column_id == consts::ReservedColumnId::tsid())
+                && column.data_type == datatypes::data_type::ConcreteDataType::uint64_datatype()
+            {
+                SparsePartitionColumnKind::Tsid
+            } else if column.data_type.is_string() {
+                SparsePartitionColumnKind::StringTag(column_id)
+            } else {
+                return None;
+            };
+            Some(SparsePartitionColumn {
+                name: name.clone(),
+                kind,
+            })
+        })
+        .collect()
+}
+
+fn restore_partition_tags_for_columns(
+    batch: &RecordBatch,
+    columns: &[SparsePartitionColumn],
+) -> Result<Option<RecordBatch>> {
+    let missing: Vec<&SparsePartitionColumn> = columns
+        .iter()
+        .filter(|col| batch.column_by_name(&col.name).is_none())
+        .collect();
+    if missing.is_empty() {
+        return Ok(None);
+    }
+    let Some(primary_key) = batch.column_by_name(consts::PRIMARY_KEY_COLUMN_NAME) else {
+        return Ok(None);
+    };
+    let primary_key =
+        primary_key
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .context(error::UnexpectedSnafu {
+                violated: "Sparse primary key column must be Binary",
+            })?;
+
+    enum RestoredBuilder {
+        TableId(UInt32Builder),
+        Tsid(UInt64Builder),
+        StringTag(ColumnId, StringBuilder),
+    }
+
+    let num_rows = batch.num_rows();
+    let mut need_ids = false;
+    let mut need_tags = false;
+    let mut builders: Vec<RestoredBuilder> = missing
+        .iter()
+        .map(|col| match col.kind {
+            SparsePartitionColumnKind::TableId => {
+                need_ids = true;
+                RestoredBuilder::TableId(UInt32Builder::with_capacity(num_rows))
+            }
+            SparsePartitionColumnKind::Tsid => {
+                need_ids = true;
+                RestoredBuilder::Tsid(UInt64Builder::with_capacity(num_rows))
+            }
+            SparsePartitionColumnKind::StringTag(column_id) => {
+                need_tags = true;
+                RestoredBuilder::StringTag(column_id, StringBuilder::new())
+            }
+        })
+        .collect();
+
+    let codec = SparsePrimaryKeyCodec::schemaless();
+    let mut cache = SparseOffsetsCache::new();
+    let mut buffer = Vec::new();
+    for row in 0..num_rows {
+        ensure!(
+            !primary_key.is_null(row),
+            error::UnexpectedSnafu {
+                violated: "Sparse primary key must not be null",
+            }
+        );
+        let pk = primary_key.value(row);
+        let ids = if need_ids {
+            Some(
+                codec
+                    .decode_ids(pk)
+                    .map_err(BoxedError::new)
+                    .context(error::ExternalSnafu)?,
+            )
+        } else {
+            None
+        };
+        let mut key = if need_tags {
+            Some(
+                SparsePrimaryKeyView::new(pk, &mut cache)
+                    .map_err(BoxedError::new)
+                    .context(error::ExternalSnafu)?,
+            )
+        } else {
+            None
+        };
+        for builder in &mut builders {
+            match builder {
+                RestoredBuilder::TableId(builder) => {
+                    builder.append_value(ids.unwrap().0);
+                }
+                RestoredBuilder::Tsid(builder) => {
+                    builder.append_value(ids.unwrap().1);
+                }
+                RestoredBuilder::StringTag(column_id, builder) => {
+                    let label = key
+                        .as_mut()
+                        .unwrap()
+                        .label(*column_id, &mut buffer)
+                        .map_err(BoxedError::new)
+                        .context(error::ExternalSnafu)?;
+                    builder.append_option(label);
+                }
+            }
+        }
+    }
+
+    let schema = batch.schema();
+    let mut fields = schema.fields().to_vec();
+    let mut batch_columns = batch.columns().to_vec();
+    for (col, builder) in missing.into_iter().zip(builders) {
+        match builder {
+            RestoredBuilder::TableId(mut builder) => {
+                fields.push(Arc::new(Field::new(&col.name, DataType::UInt32, false)));
+                batch_columns.push(Arc::new(builder.finish()));
+            }
+            RestoredBuilder::Tsid(mut builder) => {
+                fields.push(Arc::new(Field::new(&col.name, DataType::UInt64, false)));
+                batch_columns.push(Arc::new(builder.finish()));
+            }
+            RestoredBuilder::StringTag(_, mut builder) => {
+                fields.push(Arc::new(Field::new(&col.name, DataType::Utf8, true)));
+                batch_columns.push(Arc::new(builder.finish()));
+            }
+        }
+    }
+    RecordBatch::try_new(
+        Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone())),
+        batch_columns,
+    )
+    .map(Some)
+    .context(error::ComputeArrowSnafu)
 }
 
 #[cfg(test)]
@@ -683,6 +821,7 @@ mod tests {
     use mito_codec::row_converter::sparse;
     use mito_codec::row_converter::{PrimaryKeyCodec, SparsePrimaryKeyCodec};
     use moka::future::Cache;
+    use partition::PartitionRule;
     use partition::expr;
     use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
     use partition::multi_dim::MultiDimPartitionRule;
@@ -715,6 +854,7 @@ mod tests {
             ]
             .into_iter()
             .collect(),
+            sparse_partition_columns: Vec::new(),
         }
     }
 
@@ -798,6 +938,7 @@ mod tests {
             table_id: 1,
             rule: Arc::new(MultiDimPartitionRule::try_new(vec![], vec![1], vec![], false).unwrap()),
             versions: HashMap::from([(1, Some(PartitionExprVersion { value: 1 }))]),
+            sparse_partition_columns: Vec::new(),
         };
         let requests = initial
             .partition_bulk_insert_requests(batch.clone(), None, false)
@@ -823,6 +964,7 @@ mod tests {
                 (1, Some(PartitionExprVersion { value: 2 })),
                 (2, Some(PartitionExprVersion { value: 2 })),
             ]),
+            sparse_partition_columns: Vec::new(),
         };
         assert_eq!(
             refreshed.rule.eval_context(),
@@ -2004,5 +2146,181 @@ mod tests {
             );
             assert!(wrong.is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn test_initial_sparse_partition_restores_tags_without_leaking_payload() {
+        use datatypes::arrow::array::{Float64Array, TimestampMillisecondArray};
+
+        let backend = Arc::new(MemoryKvBackend::new());
+        let table_route_cache = test_new_table_route_cache(backend.clone());
+        let partition_info_cache = test_new_partition_info_cache(table_route_cache.clone());
+        let manager = PartitionRuleManager::new(backend, table_route_cache, partition_info_cache);
+
+        let mut table_info = test_util::new_test_table_info(1, "sparse_sql", [1, 2].into_iter());
+        table_info.meta.schema = Arc::new(schema::Schema::new(vec![
+            schema::ColumnSchema::new(
+                metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                ConcreteDataType::uint32_datatype(),
+                false,
+            ),
+            schema::ColumnSchema::new(
+                metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME,
+                ConcreteDataType::uint64_datatype(),
+                false,
+            ),
+            schema::ColumnSchema::new("zone", ConcreteDataType::string_datatype(), true),
+            schema::ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            schema::ColumnSchema::new("val", ConcreteDataType::float64_datatype(), true),
+        ]));
+        table_info.meta.primary_key_indices = vec![0, 1, 2];
+        table_info.meta.partition_key_indices = vec![0, 1, 2];
+        table_info.meta.column_ids = vec![
+            consts::ReservedColumnId::table_id(),
+            consts::ReservedColumnId::tsid(),
+            20,
+            21,
+            22,
+        ];
+        table_info.meta.options.extra_options.insert(
+            metric_engine_consts::PRIMARY_KEY_ENCODING.to_string(),
+            "SpArSe".to_string(),
+        );
+
+        let codec = SparsePrimaryKeyCodec::schemaless();
+        let rows_meta = [
+            (10_u32, 1_u64, Some("east"), 1.0_f64),
+            (50_u32, 9_u64, Some("west"), 2.0_f64),
+            (60_u32, 2_u64, Some(""), 3.0_f64),
+        ];
+        let keys: Vec<Vec<u8>> = rows_meta
+            .iter()
+            .map(|(tid, tsid, zone, _)| {
+                let mut key = Vec::new();
+                codec.encode_internal(*tid, *tsid, &mut key).unwrap();
+                if let Some(zone) = zone {
+                    codec
+                        .encode_raw_tag_value([(20, zone.as_bytes())].into_iter(), &mut key)
+                        .unwrap();
+                }
+                key
+            })
+            .collect();
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new(consts::PRIMARY_KEY_COLUMN_NAME, DataType::Binary, false),
+                Field::new(
+                    "ts",
+                    DataType::Timestamp(arrow_schema::TimeUnit::Millisecond, None),
+                    false,
+                ),
+                Field::new("val", DataType::Float64, true),
+            ])),
+            vec![
+                Arc::new(BinaryArray::from_iter_values(keys.iter())),
+                Arc::new(TimestampMillisecondArray::from(vec![1000, 2000, 3000])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            ],
+        )
+        .unwrap();
+
+        let versions = HashMap::from([
+            (1, Some(PartitionExprVersion { value: 1 })),
+            (2, Some(PartitionExprVersion { value: 1 })),
+        ]);
+        for (col, rule) in [
+            (
+                "zone",
+                Arc::new(
+                    MultiDimPartitionRule::try_new(
+                        vec!["zone".to_string()],
+                        vec![1, 2],
+                        vec![
+                            expr::col("zone").lt(DataValue::String("m".into())),
+                            expr::col("zone").gt_eq(DataValue::String("m".into())),
+                        ],
+                        true,
+                    )
+                    .unwrap(),
+                ),
+            ),
+            (
+                metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                Arc::new(
+                    MultiDimPartitionRule::try_new(
+                        vec![metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_string()],
+                        vec![1, 2],
+                        vec![
+                            expr::col(metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
+                                .lt(DataValue::UInt32(45)),
+                            expr::col(metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
+                                .gt_eq(DataValue::UInt32(45)),
+                        ],
+                        true,
+                    )
+                    .unwrap(),
+                ),
+            ),
+            (
+                metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME,
+                Arc::new(
+                    MultiDimPartitionRule::try_new(
+                        vec![metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME.to_string()],
+                        vec![1, 2],
+                        vec![
+                            expr::col(metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME)
+                                .lt(DataValue::UInt64(5)),
+                            expr::col(metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME)
+                                .gt_eq(DataValue::UInt64(5)),
+                        ],
+                        true,
+                    )
+                    .unwrap(),
+                ),
+            ),
+        ] {
+            let partitioner = TablePartitioner {
+                table_id: 1,
+                rule: rule.clone(),
+                versions: versions.clone(),
+                sparse_partition_columns: resolve_sparse_partition_columns(
+                    rule.partition_columns(),
+                    &table_info,
+                ),
+            };
+            let plain = partitioner
+                .partition_bulk_insert_requests(batch.clone(), None, false)
+                .unwrap();
+            let tracked = partitioner
+                .partition_tracked_bulk_insert_requests(batch.clone(), vec![10, 20, 30], false)
+                .unwrap();
+            let attributed = partitioner
+                .partition_attributed_bulk_requests(
+                    batch.clone(),
+                    false,
+                    WriteAttribution::default(),
+                )
+                .unwrap();
+            assert_eq!(plain.len(), 2, "{col}");
+            assert_eq!(tracked.len(), 2, "{col}");
+            assert_eq!(attributed.len(), 2, "{col}");
+            let mut total_rows = 0;
+            for req in &plain {
+                let Some(bulk_insert_request::Body::ArrowIpc(ipc)) = &req.body else {
+                    unreachable!()
+                };
+                let decoded = decode_ipc(ipc);
+                assert_eq!(decoded.num_columns(), 3, "{col}");
+                assert!(decoded.column_by_name(col).is_none());
+                total_rows += decoded.num_rows();
+            }
+            assert_eq!(total_rows, 3, "{col}");
+        }
+        let _ = manager;
     }
 }

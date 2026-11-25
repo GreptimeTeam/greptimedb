@@ -101,6 +101,7 @@ itertools.workspace = true
 jsonb.workspace = true
 log-query.workspace = true
 loki-proto.workspace = true
+mito-codec.workspace = true
 mito2 = { workspace = true, features = ["test", "test-shared-fs-region-migration"] }
 mysql_async = { version = "0.37", default-features = false, features = [
     "time",

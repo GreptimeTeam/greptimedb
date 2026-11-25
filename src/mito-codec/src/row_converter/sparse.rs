@@ -15,12 +15,14 @@
 mod checked;
 
 use std::collections::{HashMap, HashSet};
+use std::hash::Hasher;
 use std::sync::Arc;
 
 use bytes::BufMut;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::{Value, ValueRef};
+use fxhash::FxHasher;
 use memcomparable::{Deserializer, Serializer};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
@@ -681,6 +683,45 @@ fn validate_prefix(pk: &[u8]) -> Result<()> {
         }
     );
     Ok(())
+}
+
+/// Deterministic 64-bit hash generator for `__tsid` from sorted tag pairs.
+#[derive(Default)]
+pub struct TsidGenerator {
+    hasher: FxHasher,
+}
+
+impl TsidGenerator {
+    /// Computes the metric TSID from non-null tags sorted by name, retaining empty values.
+    pub fn from_sorted_tags<'a>(tags: impl Iterator<Item = (&'a str, &'a str)> + Clone) -> u64 {
+        let mut names = Self::default();
+        for (name, _) in tags.clone() {
+            names.write_str(name);
+        }
+        let mut values = Self::new(names.finish());
+        for (_, value) in tags {
+            values.write_str(value);
+        }
+        values.finish()
+    }
+
+    /// Creates a [`TsidGenerator`] seeded with a precomputed label-name hash.
+    pub fn new(label_name_hash: u64) -> Self {
+        let mut hasher = FxHasher::default();
+        hasher.write_u64(label_name_hash);
+        Self { hasher }
+    }
+
+    /// Writes a label name or value into the TSID hash stream.
+    pub fn write_str(&mut self, value: &str) {
+        self.hasher.write(value.as_bytes());
+        self.hasher.write_u8(0xff);
+    }
+
+    /// Returns the finished 64-bit TSID hash.
+    pub fn finish(&mut self) -> u64 {
+        self.hasher.finish()
+    }
 }
 
 #[cfg(test)]

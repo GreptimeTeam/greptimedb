@@ -13249,7 +13249,6 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
 }
 
 #[tokio::test]
-#[ignore = "Exemplar writes require pre-encoded keys: https://github.com/GreptimeTeam/greptimedb/issues/10598"]
 async fn test_otlp_cumulative_histogram_with_exemplars() {
     let (app, mut guard) =
         setup_test_http_app_with_frontend(StorageType::File, "cumulative_histogram_exemplars")

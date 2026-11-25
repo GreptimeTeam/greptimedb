@@ -443,6 +443,14 @@ pub trait PromStoreProtocolInterceptor {
         Ok(())
     }
 
+    fn pre_write_exemplars(
+        &self,
+        _exemplars: &operator::insert::ExemplarBatch,
+        _ctx: QueryContextRef,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
     fn pre_read(&self, _read_req: &ReadRequest, _ctx: QueryContextRef) -> Result<(), Self::Error> {
         Ok(())
     }
@@ -461,6 +469,18 @@ impl<E: ErrorExt> PromStoreProtocolInterceptor for Option<PromStoreProtocolInter
     ) -> Result<(), Self::Error> {
         if let Some(this) = self {
             this.pre_write(write_req, ctx)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn pre_write_exemplars(
+        &self,
+        exemplars: &operator::insert::ExemplarBatch,
+        ctx: QueryContextRef,
+    ) -> Result<(), Self::Error> {
+        if let Some(this) = self {
+            this.pre_write_exemplars(exemplars, ctx)
         } else {
             Ok(())
         }

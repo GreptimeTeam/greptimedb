@@ -25,6 +25,15 @@ use crate::error::Result;
 /// Keeps a request's admission slot and conversion memory alive across its submissions.
 pub type PendingRowsPermit = Arc<dyn Send + Sync>;
 
+/// Reserves conversion memory without waiting so callers holding body permits never deadlock.
+pub trait ConversionMemoryLimiter: Send + Sync {
+    /// Returns the conversion memory limit, or zero when byte admission is disabled.
+    fn limit_bytes(&self) -> u64;
+
+    /// Checks and acquires additional conversion memory non-blockingly.
+    fn reserve(&self, estimated_bytes: usize, held_bytes: u64) -> Result<PendingRowsPermit>;
+}
+
 /// Accepts prepared table writes without coupling the inserter to a batcher implementation.
 /// Schema creation, alteration and default evaluation remain the caller's responsibility.
 #[async_trait]

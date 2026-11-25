@@ -17,17 +17,12 @@
 pub mod query;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 
-use api::v1::value::ValueData;
-use api::v1::{ColumnDataType, Row, RowInsertRequests, Value};
-use common_catalog::consts::METRICS_EXEMPLARS_TABLE;
-use common_grpc::precision::Precision;
 use common_query::prelude::{
     EXEMPLAR_METRIC_COLUMN, greptime_exemplar_labels, greptime_timestamp, greptime_value,
 };
 use datatypes::json;
-use metric_engine::row_modifier::TsidGenerator;
+pub use operator::insert::{Exemplar, ExemplarBatch};
 use snafu::{OptionExt, ensure};
 use store_api::metric_engine_consts::{
     DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
@@ -35,35 +30,22 @@ use store_api::metric_engine_consts::{
 use store_api::storage::consts::is_internal_column;
 
 use crate::error::{InvalidPromRemoteRequestSnafu, Result};
-use crate::row_writer::{self, MultiTableData};
-
-/// One observation belonging to a query-visible metric series.
-/// Metric names and inherited labels are shared until row construction.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Exemplar {
-    pub metric: Arc<str>,
-    pub series_labels: Arc<BTreeMap<String, String>>,
-    pub timestamp: i64,
-    pub value: f64,
-    pub labels: BTreeMap<String, String>,
-}
 
 /// Exemplars grouped by the source series' optional database routing control.
 pub type ExemplarRequests = BTreeMap<Option<String>, Vec<Exemplar>>;
 
-/// Bounds row capacity after each database's metrics share one exemplar schema.
+/// Bounds linear sparse conversion memory without quadratic `rows * tags` blowup.
 pub fn estimated_row_bytes<'a>(
     requests: impl IntoIterator<Item = &'a [Exemplar]>,
 ) -> Option<usize> {
     requests.into_iter().try_fold(0usize, |total, exemplars| {
         let mut tags = BTreeSet::new();
         let mut payload = 0usize;
-        // Shared series data is copied into each output row.
         for exemplar in exemplars {
             tags.extend(exemplar.series_labels.keys());
             payload = payload.checked_add(exemplar.metric.len().checked_mul(4)?)?;
             for (name, value) in exemplar.series_labels.iter().chain(&exemplar.labels) {
-                // Include owned strings, label-map entries and JSON2 encoding scratch.
+                // Include owned strings, encoded keys/labels and JSON2 encoding scratch.
                 payload = payload.checked_add(
                     name.len()
                         .checked_add(value.len())?
@@ -72,17 +54,9 @@ pub fn estimated_row_bytes<'a>(
                 )?;
             }
         }
-        // Include the source table ID attached after conversion, and Vec growth.
         let columns = tags.len().checked_add(6)?;
-        let values = exemplars
-            .len()
-            .checked_mul(columns)?
-            .checked_mul(2 * std::mem::size_of::<Value>())?;
-        let rows = exemplars
-            .len()
-            .checked_mul(2 * std::mem::size_of::<Row>() + std::mem::size_of::<Exemplar>())?;
+        let rows = exemplars.len().checked_mul(512)?;
         total
-            .checked_add(values)?
             .checked_add(rows)?
             .checked_add(columns.checked_mul(512)?)?
             .checked_add(payload)
@@ -162,81 +136,15 @@ pub fn timestamp_from_millis(timestamp: i64) -> Result<i64> {
         })
 }
 
-/// Builds ordinary-table rows and retains source targets for authorization.
-pub fn into_rows(exemplars: Vec<Exemplar>) -> Result<(RowInsertRequests, BTreeSet<String>)> {
-    let mut tables = MultiTableData::default();
-    let mut sources = BTreeSet::new();
-    for exemplar in exemplars {
-        ensure!(
-            !exemplar.metric.is_empty() && exemplar.metric.as_ref() != METRICS_EXEMPLARS_TABLE,
-            InvalidPromRemoteRequestSnafu {
-                msg: "invalid or reserved exemplar source metric name"
-            }
-        );
-        sources.insert(exemplar.metric.to_string());
-        let table = tables.get_or_default_table_data(
-            METRICS_EXEMPLARS_TABLE,
-            exemplar.series_labels.len() + 6,
-            1,
-        );
-        let mut row = table.alloc_one_row();
-        let tsid = TsidGenerator::from_sorted_tags(
-            exemplar
-                .series_labels
-                .iter()
-                .map(|(name, value)| (name.as_str(), value.as_str())),
-        );
-        row_writer::write_by_schema(
-            table,
-            std::iter::once((
-                api::v1::helper::tag_column_schema(
-                    DATA_SCHEMA_TSID_COLUMN_NAME,
-                    ColumnDataType::Uint64,
-                ),
-                Some(ValueData::U64Value(tsid)),
-            )),
-            &mut row,
-        )?;
-        row_writer::write_tag(table, EXEMPLAR_METRIC_COLUMN, &exemplar.metric, &mut row)?;
-        row_writer::write_tags(
-            table,
-            exemplar
-                .series_labels
-                .iter()
-                .map(|(name, value)| (name.as_str(), value.clone())),
-            &mut row,
-        )?;
-        row_writer::write_fields(
-            table,
-            std::iter::once((
-                greptime_value().to_string(),
-                ColumnDataType::Float64,
-                Some(ValueData::F64Value(exemplar.value)),
-            )),
-            &mut row,
-        )?;
-        row_writer::write_ts_to_nanos(
-            table,
-            greptime_timestamp(),
-            Some(exemplar.timestamp),
-            Precision::Nanosecond,
-            &mut row,
-        )?;
-        row_writer::write_by_schema(
-            table,
-            std::iter::once((
-                row_writer::build_json2_column_schema(greptime_exemplar_labels())?,
-                Some(row_writer::encode_json2(exemplar.labels)?),
-            )),
-            &mut row,
-        )?;
-        table.add_row(row);
-    }
-    Ok((tables.into_row_insert_requests().0, sources))
+/// Validates exemplar observations into a sparse [`ExemplarBatch`].
+pub fn prepare(exemplars: Vec<Exemplar>) -> Result<ExemplarBatch> {
+    Ok(ExemplarBatch::try_new(exemplars)?)
 }
 
 #[cfg(test)]
 mod tests {
+    use metric_engine::row_modifier::TsidGenerator;
+
     use super::*;
     use crate::prom_remote_write::validation::validate_label_name;
 
@@ -304,20 +212,20 @@ mod tests {
         let mut other = exemplar.clone();
         other.metric = "memory".into();
         other.labels.insert("trace_id".into(), "b".into());
-        let (requests, _) = into_rows(vec![exemplar, other]).unwrap();
-        let rows = requests.inserts[0].rows.as_ref().unwrap();
-        let index = rows
-            .schema
+        let batch = prepare(vec![exemplar, other]).unwrap();
+        assert_eq!(batch.sources().len(), 2);
+        let tsids: Vec<u64> = batch
+            .exemplars()
             .iter()
-            .position(|c| c.column_name == DATA_SCHEMA_TSID_COLUMN_NAME)
-            .unwrap();
-        let expected = ValueData::U64Value(TsidGenerator::from_sorted_tags(
-            [("job", "api")].into_iter(),
-        ));
-        assert!(
-            rows.rows
-                .iter()
-                .all(|row| row.values[index].value_data.as_ref() == Some(&expected))
-        );
+            .map(|e| {
+                TsidGenerator::from_sorted_tags(
+                    e.series_labels
+                        .iter()
+                        .map(|(name, value)| (name.as_str(), value.as_str())),
+                )
+            })
+            .collect();
+        let expected = TsidGenerator::from_sorted_tags([("job", "api")].into_iter());
+        assert_eq!(tsids, vec![expected, expected]);
     }
 }

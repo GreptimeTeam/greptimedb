@@ -31,13 +31,12 @@ use common_batcher::flush_policy::timing::TimingFlushPolicy;
 use common_batcher::request_limiter::RequestLimiter;
 use common_batcher::worker_registry::WorkerRegistry;
 use common_error::ext::BoxedError;
-use common_memory_manager::OnExhaustedPolicy;
 use common_query::{Output, WriteCompletion, WriteProgress};
 use operator::batcher::{PendingRowsBatcher, PendingRowsPermit};
 use operator::error::{ExternalSnafu, Result, UnexpectedSnafu};
 use operator::insert::Inserter;
 use session::context::QueryContextRef;
-use snafu::{IntoError, ResultExt};
+use snafu::ResultExt;
 use table::metadata::TableInfoRef;
 use tokio::sync::{Semaphore, broadcast, oneshot};
 
@@ -173,29 +172,11 @@ impl PendingRowsBatcher for TablePendingRowsBatcher {
             }
             .build()
         })?;
-        if self.memory_limit_bytes() == 0 {
-            return Ok(permit);
-        }
-        let bytes = u64::try_from(estimated_bytes).unwrap_or(u64::MAX);
-        let reserve = || {
-            self.memory_limiter.check_request_fits(bytes, held_bytes)?;
-            self.memory_limiter.try_acquire(bytes).ok_or_else(|| {
-                let source = common_memory_manager::Error::MemoryLimitExceeded {
-                    requested_bytes: bytes,
-                    limit_bytes: self.memory_limit_bytes(),
-                };
-                // Remote Write senders must retry contention under the wait policy.
-                match self.memory_limiter.policy() {
-                    OnExhaustedPolicy::Wait { .. } => {
-                        crate::error::OtherSnafu.into_error(BoxedError::new(source))
-                    }
-                    OnExhaustedPolicy::Fail => {
-                        crate::error::MemoryLimitExceededSnafu.into_error(source)
-                    }
-                }
-            })
-        };
-        let memory = reserve().map_err(BoxedError::new).context(ExternalSnafu)?;
+        let memory = self
+            .memory_limiter
+            .reserve_conversion_memory(estimated_bytes, held_bytes)
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
         Ok(Arc::new((permit, memory)))
     }
 

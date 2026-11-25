@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub(crate) mod exemplar;
 mod otlp;
 
+pub use exemplar::{Exemplar, ExemplarBatch};
 pub use otlp::MetricInsertPreflight;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -25,7 +27,7 @@ use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use api::v1::alter_table_expr::Kind;
 use api::v1::column_def::{options_from_compression, options_from_skipping, try_as_column_def};
 use api::v1::region::{
-    InsertRequest as RegionInsertRequest, InsertRequests as RegionInsertRequests,
+    InsertRequest as RegionInsertRequest, InsertRequests as RegionInsertRequests, RegionRequest,
     RegionRequestHeader,
 };
 use api::v1::value::ValueData;
@@ -34,6 +36,7 @@ use api::v1::{
     RowInsertRequest, RowInsertRequests, Rows, SemanticType,
 };
 use arrow::datatypes::{DataType as ArrowDataType, Schema as ArrowSchema};
+use arrow::record_batch::RecordBatch;
 use arrow_schema::extension::ExtensionType;
 use catalog::CatalogManagerRef;
 use client::{OutputData, OutputMeta};
@@ -95,7 +98,7 @@ use table::requests::{
 use table::table_reference::TableReference;
 use tokio_util::sync::CancellationToken;
 
-use crate::batcher::PendingRowsBatcher;
+use crate::batcher::{ConversionMemoryLimiter, PendingRowsBatcher, PendingRowsPermit};
 use crate::error::{
     CatalogSnafu, ColumnOptionsSnafu, CreatePartitionRulesSnafu, InvalidInsertRequestSnafu,
     JoinTaskSnafu, RequestInsertsSnafu, Result, TableNotFoundSnafu, WriteRejectedSnafu,
@@ -105,8 +108,11 @@ use crate::region_req_factory::RegionRequestFactory;
 use crate::req_convert::common::preprocess_row_insert_requests;
 use crate::req_convert::insert::{
     ColumnToRow, ImpureDefaultFiller, RowToRegion, StatementToRegion, TableToRegion,
-    fill_reqs_with_impure_default, rows_to_record_batch, value_matches_type,
+    estimated_exemplar_record_batch_bytes, estimated_sparse_record_batch_bytes,
+    exemplars_to_sparse_record_batch, fill_reqs_with_impure_default, rows_to_record_batch,
+    sparse_rows_to_record_batch,
 };
+use crate::req_convert::{TablePartitioner, is_sparse_primary_key_table};
 use crate::statement::StatementExecutor;
 use crate::statement::ddl::is_retention_ttl;
 use crate::write_dispatcher::{WriteDispatcher, WriteDispatcherRef};
@@ -127,6 +133,7 @@ pub struct Inserter {
     /// Defaults to milliseconds for compatibility.
     auto_create_physical_table_timestamp_unit: TimeUnit,
     pending_rows_batcher: Option<Arc<dyn PendingRowsBatcher>>,
+    conversion_memory_limiter: Option<Arc<dyn ConversionMemoryLimiter>>,
     /// Rows handed to detached flow mirror tasks that have not finished yet.
     /// Bounds how much row data in-flight mirror writes may keep alive, see
     /// [`MAX_MIRROR_PENDING_ROWS`].
@@ -350,6 +357,7 @@ impl Inserter {
             auto_create_table,
             auto_create_physical_table_timestamp_unit: TimeUnit::Millisecond,
             pending_rows_batcher: None,
+            conversion_memory_limiter: None,
             mirror_pending_rows: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -372,6 +380,15 @@ impl Inserter {
         batcher: Option<Arc<dyn PendingRowsBatcher>>,
     ) -> Self {
         self.pending_rows_batcher = batcher;
+        self
+    }
+
+    /// Installs a non-blocking memory limiter for unbatched sparse conversion paths.
+    pub fn with_conversion_memory_limiter(
+        mut self,
+        limiter: Option<Arc<dyn ConversionMemoryLimiter>>,
+    ) -> Self {
+        self.conversion_memory_limiter = limiter;
         self
     }
 
@@ -407,47 +424,86 @@ impl Inserter {
         .await
     }
 
-    /// Inserts exemplars using ordinary Mito storage and nanosecond auto-create defaults.
+    /// Inserts exemplars using sparse bulk ingestion, Flow mirroring, and nanosecond auto-create defaults.
     pub async fn handle_exemplar_inserts(
         &self,
-        mut requests: RowInsertRequests,
+        exemplars: ExemplarBatch,
         ctx: QueryContextRef,
         statement_executor: &StatementExecutor,
         sources: &[TableInfoRef],
     ) -> Result<Output> {
-        ensure!(
-            requests
-                .inserts
-                .iter()
-                .all(|r| r.table_name == METRICS_EXEMPLARS_TABLE),
-            InvalidInsertRequestSnafu {
-                reason: "invalid exemplar destination"
-            }
-        );
-        validate_column_count_match(&requests)?;
-        preprocess_row_insert_requests(&mut requests.inserts)?;
-        self.bind_exemplar_table_ids(&mut requests, &ctx, sources, statement_executor)
+        if exemplars.is_empty() {
+            let catalog = ctx.current_catalog();
+            let schema = ctx.current_schema();
+            let metered = InstantAndNormalInsertRequests::default();
+            let write_cost = write_meter!(
+                catalog,
+                schema.clone(),
+                metered,
+                ctx.write_rows_to_admit(catalog, &schema, 0),
+                ctx.channel() as u8
+            )
+            .await
+            .context(WriteRejectedSnafu)?;
+            return Ok(Output::new(
+                OutputData::AffectedRows(0),
+                OutputMeta::new_with_cost(write_cost as _),
+            ));
+        }
+
+        let resolved_table_ids = self
+            .resolve_exemplar_sources(&exemplars, &ctx, sources, statement_executor)
             .await?;
-        self.handle_row_inserts_with_create_type(
-            requests,
+
+        let mut schema_requests = RowInsertRequests {
+            inserts: vec![RowInsertRequest {
+                table_name: METRICS_EXEMPLARS_TABLE.to_string(),
+                rows: Some(Rows {
+                    schema: exemplars.request_schema()?,
+                    rows: Vec::new(),
+                }),
+            }],
+        };
+        let CreateAlterTableResult {
+            instant_table_ids,
+            table_infos,
+        } = self
+            .create_or_alter_tables_on_demand(
+                &mut schema_requests,
+                &ctx,
+                AutoCreateTableType::Exemplar,
+                statement_executor,
+                false,
+                false,
+                Some(TimeUnit::Nanosecond),
+            )
+            .await?;
+        let destination = table_infos
+            .values()
+            .next()
+            .cloned()
+            .context(TableNotFoundSnafu {
+                table_name: METRICS_EXEMPLARS_TABLE,
+            })?;
+
+        self.execute_exemplar_write(
+            exemplars,
+            resolved_table_ids,
+            destination,
+            !instant_table_ids.is_empty(),
             ctx,
-            statement_executor,
-            AutoCreateTableType::Exemplar,
-            false,
-            false,
         )
         .await
     }
 
-    async fn bind_exemplar_table_ids(
+    async fn resolve_exemplar_sources(
         &self,
-        requests: &mut RowInsertRequests,
+        exemplars: &ExemplarBatch,
         ctx: &QueryContextRef,
         sources: &[TableInfoRef],
         statement_executor: &StatementExecutor,
-    ) -> Result<()> {
+    ) -> Result<HashMap<String, TableId>> {
         let mut tables = HashMap::new();
-        let mut required_tags = BTreeMap::<String, BTreeSet<String>>::new();
         for info in sources.iter().filter(|info| {
             info.catalog_name == ctx.current_catalog() && info.schema_name == ctx.current_schema()
         }) {
@@ -463,72 +519,54 @@ impl Inserter {
                 );
             }
         }
-        for request in &mut requests.inserts {
-            let Some(rows) = request.rows.as_mut() else {
-                continue;
-            };
-            validate_exemplar_rows(rows)?;
-            ensure!(
-                !rows
-                    .schema
-                    .iter()
-                    .any(|c| c.column_name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME),
-                InvalidInsertRequestSnafu {
-                    reason: "exemplar table IDs must be resolved from their source tables",
-                }
-            );
-            let metric_index = rows
-                .schema
-                .iter()
-                .position(|c| c.column_name == EXEMPLAR_METRIC_COLUMN)
-                .context(InvalidInsertRequestSnafu {
-                    reason: "missing exemplar source metric",
-                })?;
-            for row in &mut rows.rows {
-                let Some(ValueData::StringValue(name)) = &row.values[metric_index].value_data
-                else {
-                    return InvalidInsertRequestSnafu {
-                        reason: "invalid exemplar source metric",
-                    }
-                    .fail();
-                };
-                if !tables.contains_key(name) {
-                    let table = self.get_table(ctx.current_catalog(), &ctx.current_schema(), name).await?
-                        .with_context(|| InvalidInsertRequestSnafu {
-                            reason: format!("exemplar source {name} must be an existing logical metric-engine table"),
-                        })?;
-                    tables.insert(name.clone(), table.table_info());
-                }
-                let info = &tables[name];
-                ensure!(
-                    info.meta.engine == METRIC_ENGINE_NAME
-                        && info
-                            .meta
-                            .options
-                            .extra_options
-                            .contains_key(LOGICAL_TABLE_METADATA_KEY),
-                    InvalidInsertRequestSnafu {
+
+        for name in exemplars.sources() {
+            if !tables.contains_key(name) {
+                let table = self
+                    .get_table(ctx.current_catalog(), &ctx.current_schema(), name)
+                    .await?
+                    .with_context(|| InvalidInsertRequestSnafu {
                         reason: format!(
                             "exemplar source {name} must be an existing logical metric-engine table"
                         ),
-                    }
-                );
-                let tags = required_tags.entry(name.clone()).or_default();
-                for (column, value) in rows.schema.iter().zip(&row.values) {
-                    if column.semantic_type == SemanticType::Tag as i32
-                        && column.column_name != EXEMPLAR_METRIC_COLUMN
-                        && column.column_name != DATA_SCHEMA_TSID_COLUMN_NAME
-                        && value.value_data.is_some()
-                    {
-                        tags.insert(column.column_name.clone());
-                    }
-                }
-                row.values.push(ValueData::U32Value(info.table_id()).into());
+                    })?;
+                tables.insert(name.clone(), table.table_info());
             }
-            rows.schema.push(api::v1::helper::tag_column_schema(
-                DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
-                ColumnDataType::Uint32,
-            ));
+            let info = &tables[name];
+            ensure!(
+                info.meta.engine == METRIC_ENGINE_NAME
+                    && info
+                        .meta
+                        .options
+                        .extra_options
+                        .contains_key(LOGICAL_TABLE_METADATA_KEY),
+                InvalidInsertRequestSnafu {
+                    reason: format!(
+                        "exemplar source {name} must be an existing logical metric-engine table"
+                    ),
+                }
+            );
+        }
+
+        let mut required_tags = BTreeMap::<String, BTreeSet<String>>::new();
+        let mut last_series: Option<(&str, &BTreeMap<String, String>)> = None;
+        for exemplar in exemplars.exemplars() {
+            let series_ref: &BTreeMap<String, String> = &exemplar.series_labels;
+            if let Some((prev_metric, prev_series)) = last_series
+                && prev_metric == exemplar.metric.as_ref()
+                && std::ptr::eq(prev_series, series_ref)
+            {
+                continue;
+            }
+            let tags = required_tags
+                .entry(exemplar.metric.to_string())
+                .or_default();
+            for name in series_ref.keys() {
+                if !tags.contains(name) {
+                    tags.insert(name.clone());
+                }
+            }
+            last_series = Some((exemplar.metric.as_ref(), series_ref));
         }
 
         let mut alters = Vec::new();
@@ -557,7 +595,7 @@ impl Inserter {
                         kind: Some(Kind::AddColumns(add_columns)),
                     },
                 ));
-                refresh.push((info, tags));
+                refresh.push((info.clone(), tags));
             }
         }
         if !alters.is_empty() {
@@ -605,9 +643,156 @@ impl Inserter {
                         ),
                     }
                 );
+                tables.insert(pinned.name.clone(), info);
             }
         }
-        Ok(())
+
+        Ok(tables
+            .into_iter()
+            .map(|(name, info)| (name, info.table_id()))
+            .collect())
+    }
+
+    async fn meter_and_mirror_exemplars(
+        &self,
+        exemplars: &ExemplarBatch,
+        resolved_table_ids: &HashMap<String, TableId>,
+        destination: &TableInfoRef,
+        is_instant: bool,
+        has_flow: bool,
+        ctx: &QueryContextRef,
+    ) -> Result<u64> {
+        let catalog = destination.catalog_name.as_str();
+        let schema = destination.schema_name.clone();
+        let rows_to_admit = ctx.write_rows_to_admit(catalog, &schema, exemplars.len() as u64);
+        let channel = ctx.channel() as u8;
+        if has_flow {
+            let metered = build_exemplar_metered_requests(
+                exemplars.to_unpadded_region_requests(resolved_table_ids, destination)?,
+                is_instant,
+            );
+            let write_cost = write_meter!(catalog, schema, metered, rows_to_admit, channel)
+                .await
+                .context(WriteRejectedSnafu)?;
+            let requests = if is_instant {
+                metered.instant_requests.requests.iter()
+            } else {
+                metered.normal_requests.requests.iter()
+            };
+            let flow_mirror_task =
+                FlowMirrorTask::new(&self.table_flownode_set_cache, requests).await?;
+            flow_mirror_task.detach(
+                self.node_manager.clone(),
+                self.mirror_pending_rows.clone(),
+                is_instant,
+            )?;
+            return Ok(write_cost);
+        }
+
+        write_meter!(
+            catalog,
+            schema,
+            build_exemplar_metered_requests(
+                exemplars.to_unpadded_region_requests(resolved_table_ids, destination)?,
+                is_instant,
+            ),
+            rows_to_admit,
+            channel
+        )
+        .await
+        .context(WriteRejectedSnafu)
+    }
+
+    async fn execute_exemplar_write(
+        &self,
+        exemplars: ExemplarBatch,
+        resolved_table_ids: HashMap<String, TableId>,
+        destination: TableInfoRef,
+        is_instant: bool,
+        ctx: QueryContextRef,
+    ) -> Result<Output> {
+        let is_instant = is_instant || destination.is_ttl_instant_table();
+        let has_flow = self.table_has_flow(destination.table_id()).await;
+
+        if is_instant {
+            if !has_flow {
+                exemplars.validate_for_destination(&resolved_table_ids, &destination)?;
+            }
+            let write_cost = self
+                .meter_and_mirror_exemplars(
+                    &exemplars,
+                    &resolved_table_ids,
+                    &destination,
+                    true,
+                    has_flow,
+                    &ctx,
+                )
+                .await?;
+            return Ok(Output::new(
+                OutputData::AffectedRows(0),
+                OutputMeta::new_with_cost(write_cost as _),
+            ));
+        }
+
+        if !has_flow && let Some(batcher) = self.table_batcher(&destination, &ctx) {
+            let estimated_bytes = if batcher.memory_limit_bytes() != 0 {
+                estimated_exemplar_record_batch_bytes(&exemplars, &destination)
+            } else {
+                Some(0)
+            };
+            let permit = batcher
+                .acquire(
+                    estimated_bytes.unwrap_or(usize::MAX),
+                    ctx.held_memory_bytes(),
+                )
+                .await?;
+            let batch =
+                exemplars_to_sparse_record_batch(&exemplars, &resolved_table_ids, &destination)?;
+            let write_cost = self
+                .meter_and_mirror_exemplars(
+                    &exemplars,
+                    &resolved_table_ids,
+                    &destination,
+                    false,
+                    false,
+                    &ctx,
+                )
+                .await?;
+
+            if batch.num_rows() == 0 {
+                return Ok(Output::new(
+                    OutputData::AffectedRows(0),
+                    OutputMeta::new_with_cost(write_cost as _),
+                ));
+            }
+            let mut target_ctx = ctx.fork();
+            target_ctx.set_current_catalog(&destination.catalog_name);
+            target_ctx.set_current_schema(&destination.schema_name);
+            let result = batcher
+                .submit(destination, batch, Arc::new(target_ctx), permit)
+                .await;
+            return collect_batcher_outputs(vec![result], write_cost as _, &ctx).await;
+        }
+
+        let permit = self.reserve_conversion_memory_with(
+            || estimated_exemplar_record_batch_bytes(&exemplars, &destination),
+            &ctx,
+        )?;
+        let batch =
+            exemplars_to_sparse_record_batch(&exemplars, &resolved_table_ids, &destination)?;
+        let write_cost = self
+            .meter_and_mirror_exemplars(
+                &exemplars,
+                &resolved_table_ids,
+                &destination,
+                false,
+                has_flow,
+                &ctx,
+            )
+            .await?;
+
+        self.dispatch_sparse_bulk_batch(&destination, batch, &ctx, write_cost as _, permit)
+            .await
     }
 
     /// Handles row inserts request and creates a log table on demand.
@@ -712,14 +897,31 @@ impl Inserter {
 
         // Instant tables have no persisted data for dirty-window Flow to read.
         // Metric tables keep their existing dedicated ingestion path.
+        // Subscribed Flow sources stay off the batcher so streaming Flows receive rows.
         if let Some(batcher) = batcher
             && instant_table_ids.is_empty()
             && table_infos
                 .values()
                 .all(|info| info.meta.engine == default_engine())
+            && !self.any_table_has_flow(table_infos.keys().copied()).await
         {
             return self
                 .submit_pending_rows(requests, table_infos, ctx, batcher)
+                .await;
+        }
+
+        if table_infos
+            .values()
+            .any(|info| is_sparse_primary_key_table(info))
+        {
+            return self
+                .dispatch_direct_sparse_row_inserts(
+                    requests,
+                    table_infos,
+                    instant_table_ids,
+                    skip_wal,
+                    &ctx,
+                )
                 .await;
         }
 
@@ -770,11 +972,12 @@ impl Inserter {
             };
             ImpureDefaultFiller::new((*table_info).clone())?.fill_rows(rows);
             if batcher.memory_limit_bytes() != 0 {
-                estimated_bytes = estimated_bytes.and_then(|bytes| {
-                    bytes.checked_add(crate::req_convert::insert::estimated_record_batch_bytes(
-                        rows, table_info,
-                    )?)
-                });
+                let item_bytes = if is_sparse_primary_key_table(table_info) {
+                    estimated_sparse_record_batch_bytes(rows, table_info)
+                } else {
+                    crate::req_convert::insert::estimated_record_batch_bytes(rows, table_info)
+                };
+                estimated_bytes = estimated_bytes.and_then(|bytes| bytes.checked_add(item_bytes?));
             }
         }
         // Reserve once for the whole request before constructing any Arrow arrays.
@@ -795,7 +998,12 @@ impl Inserter {
         for request in &requests.inserts {
             let table_info = by_name[request.table_name.as_str()];
             if let Some(rows) = &request.rows {
-                prepared.push((table_info.clone(), rows_to_record_batch(rows, table_info)?));
+                let batch = if is_sparse_primary_key_table(table_info) {
+                    sparse_rows_to_record_batch(rows, table_info)?
+                } else {
+                    rows_to_record_batch(rows, table_info)?
+                };
+                prepared.push((table_info.clone(), batch));
             }
         }
         // Preserve the existing meter input and original request boundary. These
@@ -841,35 +1049,7 @@ impl Inserter {
         } else {
             Vec::new()
         };
-        let mut affected_rows = 0;
-        let mut meta = OutputMeta::new_with_cost(write_cost as _);
-        let mut first_error = None;
-        for result in results {
-            match result {
-                Ok(output) => {
-                    affected_rows += output.extract_rows_and_cost().0;
-                    meta.write_completions.extend(output.meta.write_completions);
-                }
-                Err(error) if ctx.confirmed_writes() => {
-                    meta.write_completions
-                        .push(common_query::WriteCompletion::with_progress(async move {
-                            common_query::WriteProgress::failed(common_error::ext::BoxedError::new(
-                                error,
-                            ))
-                        }));
-                }
-                Err(error) => {
-                    first_error.get_or_insert(error);
-                }
-            }
-        }
-        if let Some(error) = first_error {
-            for completion in meta.write_completions {
-                let _ = completion.wait().await;
-            }
-            return Err(error);
-        }
-        Ok(Output::new(OutputData::AffectedRows(affected_rows), meta))
+        collect_batcher_outputs(results, write_cost as _, &ctx).await
     }
 
     /// Handles row inserts request with metric engine.
@@ -1000,6 +1180,343 @@ impl Inserter {
             .await
     }
 
+    async fn table_has_flow(&self, table_id: TableId) -> bool {
+        match self.table_flownode_set_cache.get(table_id).await {
+            Ok(None) => false,
+            Ok(Some(flows)) if flows.is_empty() => false,
+            _ => true,
+        }
+    }
+
+    async fn any_table_has_flow(&self, table_ids: impl IntoIterator<Item = TableId>) -> bool {
+        stream::iter(table_ids)
+            .map(|table_id| self.table_has_flow(table_id))
+            .buffer_unordered(MAX_CONCURRENT_FLOW_LOOKUPS)
+            .any(future::ready)
+            .await
+    }
+
+    async fn eligible_table_batcher(
+        &self,
+        table_info: &TableInfoRef,
+        ctx: &QueryContextRef,
+    ) -> Option<&Arc<dyn PendingRowsBatcher>> {
+        let batcher = self.table_batcher(table_info, ctx)?;
+        (!self.table_has_flow(table_info.table_id()).await).then_some(batcher)
+    }
+
+    fn reserve_conversion_memory_with(
+        &self,
+        estimate: impl FnOnce() -> Option<usize>,
+        ctx: &QueryContextRef,
+    ) -> Result<Option<PendingRowsPermit>> {
+        let Some(limiter) = &self.conversion_memory_limiter else {
+            return Ok(None);
+        };
+        if limiter.limit_bytes() == 0 {
+            return Ok(None);
+        }
+        let bytes = estimate().unwrap_or(usize::MAX);
+        Ok(Some(limiter.reserve(bytes, ctx.held_memory_bytes())?))
+    }
+
+    async fn dispatch_single_sparse_table_rows(
+        &self,
+        rows: Rows,
+        table_info: TableInfoRef,
+        skip_wal: bool,
+        ctx: &QueryContextRef,
+    ) -> Result<Output> {
+        let mut instant_table_ids = HashSet::new();
+        if table_info.is_ttl_instant_table() {
+            instant_table_ids.insert(table_info.table_id());
+        }
+        let requests = RowInsertRequests {
+            inserts: vec![RowInsertRequest {
+                table_name: table_info.name.clone(),
+                rows: Some(rows),
+            }],
+        };
+        let table_infos = HashMap::from_iter([(table_info.table_id(), table_info)]);
+        self.dispatch_direct_sparse_row_inserts(
+            requests,
+            table_infos,
+            instant_table_ids,
+            skip_wal,
+            ctx,
+        )
+        .await
+    }
+
+    async fn dispatch_direct_sparse_row_inserts(
+        &self,
+        mut requests: RowInsertRequests,
+        table_infos: HashMap<TableId, Arc<TableInfo>>,
+        instant_table_ids: HashSet<TableId>,
+        skip_wal: bool,
+        ctx: &QueryContextRef,
+    ) -> Result<Output> {
+        requests
+            .inserts
+            .retain(|req| req.rows.as_ref().is_some_and(|rows| !rows.rows.is_empty()));
+        let table_info = table_infos.values().next();
+        let catalog = table_info.map_or(ctx.current_catalog(), |info| info.catalog_name.as_str());
+        let schema =
+            table_info.map_or_else(|| ctx.current_schema(), |info| info.schema_name.clone());
+
+        if requests.inserts.is_empty() {
+            let metered = InstantAndNormalInsertRequests::default();
+            let write_cost = write_meter!(
+                catalog,
+                schema.clone(),
+                metered,
+                ctx.write_rows_to_admit(catalog, &schema, 0),
+                ctx.channel() as u8
+            )
+            .await
+            .context(WriteRejectedSnafu)?;
+            return Ok(Output::new(
+                OutputData::AffectedRows(0),
+                OutputMeta::new_with_cost(write_cost as _),
+            ));
+        }
+
+        let by_name = table_infos
+            .values()
+            .map(|info| (info.name.clone(), info.clone()))
+            .collect::<HashMap<_, _>>();
+        for request in &mut requests.inserts {
+            let info = by_name
+                .get(&request.table_name)
+                .context(TableNotFoundSnafu {
+                    table_name: &request.table_name,
+                })?;
+            if let Some(rows) = &mut request.rows {
+                ImpureDefaultFiller::new(info.clone())?.fill_rows(rows);
+            }
+        }
+
+        let is_instant_table = |info: &TableInfo| {
+            instant_table_ids.contains(&info.table_id()) || info.is_ttl_instant_table()
+        };
+
+        let permit = self.reserve_conversion_memory_with(
+            || {
+                let mut total = 0usize;
+                for request in &requests.inserts {
+                    let info = by_name.get(&request.table_name)?;
+                    if !is_instant_table(info)
+                        && is_sparse_primary_key_table(info)
+                        && let Some(rows) = &request.rows
+                    {
+                        total =
+                            total.checked_add(estimated_sparse_record_batch_bytes(rows, info)?)?;
+                    }
+                }
+                Some(total)
+            },
+            ctx,
+        )?;
+
+        let mut sparse_batches = Vec::new();
+        let mut non_sparse_inserts = Vec::new();
+        let mut metered = InstantAndNormalInsertRequests::default();
+        for request in requests.inserts {
+            let info = &by_name[&request.table_name];
+            let Some(rows) = request.rows else {
+                continue;
+            };
+            let is_instant = is_instant_table(info);
+            if is_sparse_primary_key_table(info) {
+                if !is_instant {
+                    let batch = sparse_rows_to_record_batch(&rows, info)?;
+                    sparse_batches.push((info.clone(), batch));
+                }
+                let region_req = RegionInsertRequest {
+                    region_id: RegionId::new(info.table_id(), 0).as_u64(),
+                    rows: Some(rows),
+                    ..Default::default()
+                };
+                if is_instant {
+                    metered.instant_requests.requests.push(region_req);
+                } else {
+                    metered.normal_requests.requests.push(region_req);
+                }
+            } else {
+                let partitioned = crate::req_convert::common::partitioner::Partitioner::new(
+                    &self.partition_manager,
+                )
+                .partition_insert_requests(info, rows, skip_wal)
+                .await?;
+                if is_instant {
+                    metered.instant_requests.requests.extend(partitioned);
+                } else {
+                    metered.normal_requests.requests.extend(partitioned.clone());
+                    non_sparse_inserts.extend(partitioned);
+                }
+            }
+        }
+
+        let write_cost = write_meter!(
+            catalog,
+            schema.clone(),
+            metered,
+            ctx.write_rows_to_admit(catalog, &schema, count_insert_rows(&metered)?),
+            ctx.channel() as u8
+        )
+        .await
+        .context(WriteRejectedSnafu)?;
+
+        let flow_mirror_task = FlowMirrorTask::new(
+            &self.table_flownode_set_cache,
+            metered
+                .normal_requests
+                .requests
+                .iter()
+                .chain(metered.instant_requests.requests.iter()),
+        )
+        .await?;
+        let has_instant_rows = metered.instant_requests.requests.iter().any(|request| {
+            request
+                .rows
+                .as_ref()
+                .is_some_and(|rows| !rows.rows.is_empty())
+        });
+        flow_mirror_task.detach(
+            self.node_manager.clone(),
+            self.mirror_pending_rows.clone(),
+            has_instant_rows,
+        )?;
+        drop(metered);
+
+        let mut results = Vec::new();
+        for (info, batch) in sparse_batches {
+            if batch.num_rows() == 0 {
+                continue;
+            }
+            results.push(
+                self.dispatch_sparse_bulk_batch(&info, batch, ctx, 0, permit.clone())
+                    .await,
+            );
+        }
+        if !non_sparse_inserts.is_empty() {
+            results.push(
+                self.dispatch_normal_region_requests(
+                    RegionInsertRequests {
+                        requests: non_sparse_inserts,
+                    },
+                    0,
+                    ctx,
+                )
+                .await,
+            );
+        }
+        collect_batcher_outputs(results, write_cost as usize, ctx).await
+    }
+
+    async fn dispatch_sparse_bulk_batch(
+        &self,
+        table_info: &TableInfoRef,
+        batch: RecordBatch,
+        ctx: &QueryContextRef,
+        write_cost: usize,
+        permit: Option<PendingRowsPermit>,
+    ) -> Result<Output> {
+        let partitioner = TablePartitioner::try_new(&self.partition_manager, table_info)
+            .await
+            .context(crate::error::InvalidPartitionSnafu)?;
+        let header = Some(RegionRequestHeader {
+            tracing_context: TracingContext::from_current_span().to_w3c(),
+            dbname: ctx.get_db_string(),
+            ..Default::default()
+        });
+        let dispatcher = self.write_dispatcher.clone();
+
+        if ctx.confirmed_writes() {
+            let num_rows = batch.num_rows();
+            let partitioned = partitioner.partition_tracked_bulk_insert_requests(
+                batch,
+                vec![0; num_rows],
+                ctx.skip_wal(),
+            )?;
+            let writes = partitioned
+                .into_iter()
+                .map(|(request, owners)| crate::write_dispatcher::TrackedWrite {
+                    request: RegionRequest {
+                        header: header.clone(),
+                        body: Some(api::v1::region::region_request::Body::BulkInsert(request)),
+                    },
+                    owners,
+                })
+                .collect();
+            let (writes, progress) = dispatcher.prepare_tracked(writes, 1).await;
+            let cancellation = CancellationToken::new();
+            let _guard = cancellation.clone().drop_guard();
+            let counter = ctx.write_progress().cloned();
+            let progress = common_runtime::spawn_global(async move {
+                let _permit = permit;
+                let progress = dispatcher
+                    .execute_tracked(writes, progress, None, Some(&cancellation))
+                    .await;
+                if let Some(counter) = counter {
+                    counter.add_written(progress.iter().map(|part| part.affected_rows).sum());
+                }
+                progress
+            })
+            .await
+            .context(JoinTaskSnafu)?
+            .into_iter()
+            .fold(
+                common_query::WriteProgress::default(),
+                |mut result, part| {
+                    result.merge(part);
+                    result
+                },
+            );
+            crate::metrics::DIST_INGEST_ROW_COUNT
+                .with_label_values(&[ctx.get_db_string().as_str()])
+                .inc_by(progress.affected_rows as u64);
+            let mut meta = OutputMeta::new_with_cost(write_cost);
+            let rows = progress.affected_rows;
+            meta.write_completions
+                .push(common_query::WriteCompletion::with_progress(async move {
+                    progress
+                }));
+            return Ok(Output::new(OutputData::AffectedRows(rows), meta));
+        }
+
+        let partitioned =
+            partitioner.partition_bulk_insert_requests(batch, None, ctx.skip_wal())?;
+        let requests = partitioned
+            .into_iter()
+            .map(|request| RegionRequest {
+                header: header.clone(),
+                body: Some(api::v1::region::region_request::Body::BulkInsert(request)),
+            })
+            .collect();
+        let writes = dispatcher.prepare(requests).await?;
+        let cancellation = CancellationToken::new();
+        let _guard = cancellation.clone().drop_guard();
+        let progress = ctx.write_progress().cloned();
+        let affected_rows = common_runtime::spawn_global(async move {
+            let _permit = permit;
+            dispatcher
+                .execute_with_progress(writes, None, Some(&cancellation), progress)
+                .await
+        })
+        .await
+        .context(JoinTaskSnafu)?
+        .context(RequestInsertsSnafu)?
+        .affected_rows;
+        crate::metrics::DIST_INGEST_ROW_COUNT
+            .with_label_values(&[ctx.get_db_string().as_str()])
+            .inc_by(affected_rows as u64);
+        Ok(Output::new(
+            OutputData::AffectedRows(affected_rows),
+            OutputMeta::new_with_cost(write_cost),
+        ))
+    }
+
     pub async fn handle_table_insert(
         &self,
         request: TableInsertRequest,
@@ -1017,8 +1534,13 @@ impl Inserter {
         let converter = TableToRegion::new(&table_info, &self.partition_manager);
         let skip_wal = request.skip_wal;
         let rows = converter.prepare(request)?;
-        if let Some(batcher) = self.table_batcher(&table_info, &ctx) {
+        if let Some(batcher) = self.eligible_table_batcher(&table_info, &ctx).await {
             return self.submit_table_rows(rows, table_info, ctx, batcher).await;
+        }
+        if is_sparse_primary_key_table(&table_info) {
+            return self
+                .dispatch_single_sparse_table_rows(rows, table_info, skip_wal, &ctx)
+                .await;
         }
         let inserts = converter.partition(rows, skip_wal).await?;
 
@@ -1035,9 +1557,14 @@ impl Inserter {
         let converter =
             StatementToRegion::new(self.catalog_manager.as_ref(), &self.partition_manager, ctx);
         let (rows, table_info) = converter.prepare(insert, ctx).await?;
-        if let Some(batcher) = self.table_batcher(&table_info, ctx) {
+        if let Some(batcher) = self.eligible_table_batcher(&table_info, ctx).await {
             return self
                 .submit_table_rows(rows, table_info, ctx.clone(), batcher)
+                .await;
+        }
+        if is_sparse_primary_key_table(&table_info) {
+            return self
+                .dispatch_single_sparse_table_rows(rows, table_info, ctx.skip_wal(), ctx)
                 .await;
         }
         let inserts = converter.partition(rows, table_info.clone(), ctx).await?;
@@ -1067,11 +1594,14 @@ pub async fn admit_write(rows: u64, ctx: &QueryContextRef) -> Result<QueryContex
 
 /// Admits all database totals before dispatching any batch of a finite request.
 /// Each batch keeps its own protocol options and target database.
-pub async fn admit_row_insert_batches(
-    batches: &mut [(QueryContextRef, RowInsertRequests)],
+/// Admits a finite set of per-request row counts across one shared per-database
+/// pass and marks every context to prevent a duplicate downstream row debit.
+pub async fn admit_insert_row_counts<'a>(
+    batches: impl IntoIterator<Item = (&'a mut QueryContextRef, u64)>,
 ) -> Result<()> {
+    let batches: Vec<(&'a mut QueryContextRef, u64)> = batches.into_iter().collect();
     let mut totals = BTreeMap::<_, (QueryContextRef, u64)>::new();
-    for (ctx, requests) in batches.iter() {
+    for (ctx, rows) in &batches {
         let catalog = ctx.current_catalog();
         let schema = ctx.current_schema();
 
@@ -1080,15 +1610,12 @@ pub async fn admit_row_insert_batches(
         }
         let (_, total) = totals
             .entry((catalog.to_string(), schema.clone()))
-            .or_insert_with(|| (ctx.clone(), 0));
-        for rows in requests.inserts.iter().filter_map(|r| r.rows.as_ref()) {
-            *total =
-                total
-                    .checked_add(rows.rows.len() as u64)
-                    .context(InvalidInsertRequestSnafu {
-                        reason: "Insert row count exceeds u64::MAX",
-                    })?;
-        }
+            .or_insert_with(|| ((*ctx).clone(), 0));
+        *total = total
+            .checked_add(*rows)
+            .context(InvalidInsertRequestSnafu {
+                reason: "Insert row count exceeds u64::MAX",
+            })?;
     }
     for (ctx, rows) in totals.values() {
         admit_write(*rows, ctx).await?;
@@ -1097,6 +1624,85 @@ pub async fn admit_row_insert_batches(
         *ctx = Arc::new(ctx.with_write_admission());
     }
     Ok(())
+}
+
+pub async fn admit_row_insert_batches(
+    batches: &mut [(QueryContextRef, RowInsertRequests)],
+) -> Result<()> {
+    let mut counts = Vec::with_capacity(batches.len());
+    for (_, requests) in batches.iter() {
+        let mut total = 0u64;
+        for rows in requests.inserts.iter().filter_map(|r| r.rows.as_ref()) {
+            total =
+                total
+                    .checked_add(rows.rows.len() as u64)
+                    .context(InvalidInsertRequestSnafu {
+                        reason: "Insert row count exceeds u64::MAX",
+                    })?;
+        }
+        counts.push(total);
+    }
+    admit_insert_row_counts(
+        batches
+            .iter_mut()
+            .zip(counts)
+            .map(|((ctx, _), count)| (ctx, count)),
+    )
+    .await
+}
+
+fn build_exemplar_metered_requests(
+    requests: Vec<RegionInsertRequest>,
+    is_instant: bool,
+) -> InstantAndNormalInsertRequests {
+    let wrapped = RegionInsertRequests { requests };
+    if is_instant {
+        InstantAndNormalInsertRequests {
+            normal_requests: RegionInsertRequests::default(),
+            instant_requests: wrapped,
+        }
+    } else {
+        InstantAndNormalInsertRequests {
+            normal_requests: wrapped,
+            instant_requests: RegionInsertRequests::default(),
+        }
+    }
+}
+
+async fn collect_batcher_outputs(
+    results: Vec<Result<Output>>,
+    write_cost: usize,
+    ctx: &QueryContextRef,
+) -> Result<Output> {
+    let mut affected_rows = 0;
+    let mut meta = OutputMeta::new_with_cost(write_cost);
+    let mut first_error = None;
+    for result in results {
+        match result {
+            Ok(output) => {
+                affected_rows += output.extract_rows_and_cost().0;
+                meta.write_completions.extend(output.meta.write_completions);
+            }
+            Err(error) if ctx.confirmed_writes() => {
+                meta.write_completions
+                    .push(common_query::WriteCompletion::with_progress(async move {
+                        common_query::WriteProgress::failed(common_error::ext::BoxedError::new(
+                            error,
+                        ))
+                    }));
+            }
+            Err(error) => {
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+    if let Some(error) = first_error {
+        for completion in meta.write_completions {
+            let _ = completion.wait().await;
+        }
+        return Err(error);
+    }
+    Ok(Output::new(OutputData::AffectedRows(affected_rows), meta))
 }
 
 fn count_insert_rows(requests: &InstantAndNormalInsertRequests) -> Result<u64> {
@@ -1140,11 +1746,6 @@ impl Inserter {
         )
         .await
         .context(WriteRejectedSnafu)?;
-        let request_factory = RegionRequestFactory::new(RegionRequestHeader {
-            tracing_context: TracingContext::from_current_span().to_w3c(),
-            dbname: ctx.get_db_string(),
-            ..Default::default()
-        });
 
         let InstantAndNormalInsertRequests {
             normal_requests,
@@ -1172,6 +1773,21 @@ impl Inserter {
             has_instant_rows,
         )?;
 
+        self.dispatch_normal_region_requests(normal_requests, write_cost as _, ctx)
+            .await
+    }
+
+    async fn dispatch_normal_region_requests(
+        &self,
+        normal_requests: RegionInsertRequests,
+        write_cost: usize,
+        ctx: &QueryContextRef,
+    ) -> Result<Output> {
+        let request_factory = RegionRequestFactory::new(RegionRequestHeader {
+            tracing_context: TracingContext::from_current_span().to_w3c(),
+            dbname: ctx.get_db_string(),
+            ..Default::default()
+        });
         let dispatcher = self.write_dispatcher.clone();
         if ctx.confirmed_writes() {
             let writes = normal_requests
@@ -1213,7 +1829,7 @@ impl Inserter {
             crate::metrics::DIST_INGEST_ROW_COUNT
                 .with_label_values(&[ctx.get_db_string().as_str()])
                 .inc_by(progress.affected_rows as u64);
-            let mut meta = OutputMeta::new_with_cost(write_cost as _);
+            let mut meta = OutputMeta::new_with_cost(write_cost);
             let rows = progress.affected_rows;
             meta.write_completions
                 .push(common_query::WriteCompletion::with_progress(async move {
@@ -1241,7 +1857,7 @@ impl Inserter {
             .inc_by(affected_rows as u64);
         Ok(Output::new(
             OutputData::AffectedRows(affected_rows),
-            OutputMeta::new_with_cost(write_cost as _),
+            OutputMeta::new_with_cost(write_cost),
         ))
     }
 
@@ -2326,73 +2942,6 @@ fn validate_column_count_match(requests: &RowInsertRequests) -> Result<()> {
     Ok(())
 }
 
-fn validate_exemplar_rows(rows: &Rows) -> Result<()> {
-    let mut names = HashSet::new();
-    for (index, column) in rows.schema.iter().enumerate() {
-        let data_type: datatypes::prelude::ConcreteDataType =
-            api::helper::ColumnDataTypeWrapper::try_new(
-                column.datatype,
-                column.datatype_extension.clone(),
-            )
-            .context(crate::error::ColumnDataTypeSnafu)?
-            .into();
-        let valid = match column.column_name.as_str() {
-            DATA_SCHEMA_TSID_COLUMN_NAME => {
-                data_type == datatypes::prelude::ConcreteDataType::uint64_datatype()
-                    && column.semantic_type == SemanticType::Tag as i32
-            }
-            EXEMPLAR_METRIC_COLUMN => {
-                data_type.is_string() && column.semantic_type == SemanticType::Tag as i32
-            }
-            name if name == greptime_timestamp() => {
-                data_type.is_timestamp() && column.semantic_type == SemanticType::Timestamp as i32
-            }
-            name if name == greptime_value() => {
-                data_type == datatypes::prelude::ConcreteDataType::float64_datatype()
-                    && column.semantic_type == SemanticType::Field as i32
-            }
-            name if name == greptime_exemplar_labels() => {
-                data_type.is_json2() && column.semantic_type == SemanticType::Field as i32
-            }
-            _ => data_type.is_string() && column.semantic_type == SemanticType::Tag as i32,
-        };
-        ensure!(
-            valid && names.insert(column.column_name.as_str()),
-            InvalidInsertRequestSnafu {
-                reason: format!(
-                    "invalid or duplicate exemplar column {}",
-                    column.column_name
-                ),
-            }
-        );
-        ensure!(
-            rows.rows.iter().all(|row| value_matches_type(
-                &row.values[index],
-                column.datatype,
-                column.datatype_extension.as_ref(),
-            )),
-            InvalidInsertRequestSnafu {
-                reason: format!("invalid value for exemplar column {}", column.column_name),
-            }
-        );
-    }
-    ensure!(
-        [
-            DATA_SCHEMA_TSID_COLUMN_NAME,
-            EXEMPLAR_METRIC_COLUMN,
-            greptime_timestamp(),
-            greptime_value(),
-            greptime_exemplar_labels(),
-        ]
-        .iter()
-        .all(|name| names.contains(name)),
-        InvalidInsertRequestSnafu {
-            reason: "missing required exemplar columns",
-        }
-    );
-    Ok(())
-}
-
 fn exemplar_source_add_columns(
     info: &TableInfo,
     tags: &[ColumnSchema],
@@ -2818,6 +3367,9 @@ fn mirror_drop_log_millis() -> u64 {
     START.elapsed().as_millis() as u64
 }
 
+// A cold table needs a prefix scan to discover its flow partitions.
+const MAX_CONCURRENT_FLOW_LOOKUPS: usize = 8;
+
 struct FlowMirrorTask {
     requests: HashMap<Peer, RegionInsertRequests>,
 }
@@ -2827,9 +3379,6 @@ impl FlowMirrorTask {
         cache: &TableFlownodeSetCacheRef,
         requests: impl Iterator<Item = &RegionInsertRequest>,
     ) -> Result<Self> {
-        // A cold table needs a prefix scan to discover its flow partitions.
-        const MAX_CONCURRENT_FLOW_LOOKUPS: usize = 8;
-
         let mut by_table: HashMap<TableId, Vec<&RegionInsertRequest>> = HashMap::new();
         for req in requests {
             let table_id = RegionId::from_u64(req.region_id).table_id();
@@ -3641,6 +4190,34 @@ mod tests {
         assert!(starts.try_recv().is_err());
     }
 
+    async fn register_unpartitioned_table_route(
+        kv_backend: &common_meta::kv_backend::KvBackendRef,
+        table_info: &TableInfo,
+    ) {
+        common_meta::key::TableMetadataManager::new(kv_backend.clone())
+            .create_table_metadata(
+                table_info.clone(),
+                common_meta::key::table_route::TableRouteValue::physical(vec![
+                    common_meta::rpc::router::RegionRoute {
+                        region: common_meta::rpc::router::Region {
+                            id: RegionId::new(table_info.table_id(), 1),
+                            name: "r0".to_string(),
+                            attrs: BTreeMap::new(),
+                            partition_expr: String::new(),
+                        },
+                        leader_peer: Some(common_meta::peer::Peer::new(1, "")),
+                        follower_peers: vec![],
+                        leader_state: None,
+                        leader_down_since: None,
+                        write_route_policy: None,
+                    },
+                ]),
+                std::collections::HashMap::new(),
+            )
+            .await
+            .unwrap();
+    }
+
     // Keep global meter registration in one test, isolated by nextest's per-test process.
     #[tokio::test]
     async fn test_write_meter_admission() {
@@ -3725,7 +4302,7 @@ mod tests {
             Arc::new(new_table_flownode_set_cache(
                 String::new(),
                 Cache::new(100),
-                kv_backend,
+                kv_backend.clone(),
             )),
             true,
         );
@@ -4024,6 +4601,250 @@ mod tests {
             assert_eq!(result.unwrap(), 0);
         }
         assert_eq!(requests, original);
+
+        // Verify direct sparse writes and exemplar writes meter through `InstantAndNormalInsertRequests`.
+        {
+            use common_query::prelude::greptime_exemplar_labels;
+            use datatypes::schema::{ColumnSchema, Schema};
+            use table::metadata::{TableInfoBuilder, TableMetaBuilder};
+
+            meter.attempts.lock().unwrap().clear();
+            meter.reject.store(false, Ordering::Relaxed);
+
+            let mut sparse_info = new_test_table_info(10, "table_10", [1].into_iter());
+            sparse_info.catalog_name = CATALOG.to_string();
+            sparse_info.schema_name = "target_db".to_string();
+            sparse_info.meta.schema = Arc::new(Schema::new(vec![
+                ColumnSchema::new(
+                    DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                    datatypes::data_type::ConcreteDataType::uint32_datatype(),
+                    false,
+                ),
+                ColumnSchema::new(
+                    DATA_SCHEMA_TSID_COLUMN_NAME,
+                    datatypes::data_type::ConcreteDataType::uint64_datatype(),
+                    false,
+                ),
+                ColumnSchema::new(
+                    "ts",
+                    datatypes::data_type::ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+                ColumnSchema::new(
+                    "val",
+                    datatypes::data_type::ConcreteDataType::float64_datatype(),
+                    true,
+                ),
+            ]));
+            sparse_info.meta.primary_key_indices = vec![0, 1];
+            sparse_info.meta.column_ids =
+                vec![ReservedColumnId::table_id(), ReservedColumnId::tsid(), 2, 3];
+            sparse_info.meta.options.extra_options.insert(
+                store_api::metric_engine_consts::PRIMARY_KEY_ENCODING.to_string(),
+                "sparse".to_string(),
+            );
+            let sparse_info = Arc::new(sparse_info);
+            register_unpartitioned_table_route(&kv_backend, &sparse_info).await;
+            let sparse_rows = Rows {
+                schema: vec![
+                    api::v1::helper::tag_column_schema(
+                        DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                        ColumnDataType::Uint32,
+                    ),
+                    api::v1::helper::tag_column_schema(
+                        DATA_SCHEMA_TSID_COLUMN_NAME,
+                        ColumnDataType::Uint64,
+                    ),
+                    time_index_column_schema("ts", ColumnDataType::TimestampMillisecond),
+                    field_column_schema("val", ColumnDataType::Float64),
+                ],
+                rows: vec![
+                    api::v1::Row {
+                        values: vec![
+                            ValueData::U32Value(10).into(),
+                            ValueData::U64Value(20).into(),
+                            ValueData::TimestampMillisecondValue(1).into(),
+                            ValueData::F64Value(1.5).into(),
+                        ],
+                    },
+                    api::v1::Row {
+                        values: vec![
+                            ValueData::U32Value(10).into(),
+                            ValueData::U64Value(21).into(),
+                            ValueData::TimestampMillisecondValue(2).into(),
+                            ValueData::F64Value(2.5).into(),
+                        ],
+                    },
+                ],
+            };
+            let sparse_ctx = Arc::new(QueryContext::with_channel(
+                CATALOG,
+                "target_db",
+                Channel::Postgres,
+            ));
+            let out = inserter
+                .dispatch_single_sparse_table_rows(
+                    sparse_rows.clone(),
+                    sparse_info.clone(),
+                    false,
+                    &sparse_ctx,
+                )
+                .await
+                .unwrap();
+            assert_eq!(out.meta.cost, if enabled { 17 } else { 0 });
+            assert!(matches!(out.data, OutputData::AffectedRows(2)));
+            dispatched.try_recv().unwrap();
+
+            meter.reject.store(true, Ordering::Relaxed);
+            let err_or_ok = inserter
+                .dispatch_single_sparse_table_rows(sparse_rows, sparse_info, false, &sparse_ctx)
+                .await;
+            if enabled {
+                assert_eq!(
+                    err_or_ok.unwrap_err().status_code(),
+                    StatusCode::RateLimited
+                );
+                assert!(dispatched.try_recv().is_err());
+            } else {
+                assert_eq!(err_or_ok.unwrap().meta.cost, 0);
+                dispatched.try_recv().unwrap();
+            }
+
+            // Exemplar batch WCU metering.
+            meter.attempts.lock().unwrap().clear();
+            meter.reject.store(false, Ordering::Relaxed);
+            let mut labels_col = ColumnSchema::new(
+                greptime_exemplar_labels(),
+                datatypes::data_type::ConcreteDataType::json2(
+                    datatypes::types::json_type::JsonNativeType::Null,
+                ),
+                true,
+            );
+            labels_col.with_extension_type(&datatypes::extension::json::Json2ExtensionType::new(
+                Arc::new(datatypes::extension::json::JsonMetadata::new(
+                    datatypes::json::JsonSettings::new_v2(),
+                )),
+            ));
+            let exemplar_schema = Schema::new(vec![
+                ColumnSchema::new(
+                    DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                    datatypes::data_type::ConcreteDataType::uint32_datatype(),
+                    false,
+                ),
+                ColumnSchema::new(
+                    DATA_SCHEMA_TSID_COLUMN_NAME,
+                    datatypes::data_type::ConcreteDataType::uint64_datatype(),
+                    false,
+                ),
+                ColumnSchema::new(
+                    EXEMPLAR_METRIC_COLUMN,
+                    datatypes::data_type::ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                ColumnSchema::new(
+                    greptime_timestamp(),
+                    datatypes::data_type::ConcreteDataType::timestamp_nanosecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+                ColumnSchema::new(
+                    greptime_value(),
+                    datatypes::data_type::ConcreteDataType::float64_datatype(),
+                    true,
+                ),
+                labels_col,
+            ]);
+            let mut exemplar_info = TableInfoBuilder::default()
+                .table_id(11)
+                .table_version(0)
+                .name(METRICS_EXEMPLARS_TABLE)
+                .meta(
+                    TableMetaBuilder::empty()
+                        .schema(Arc::new(exemplar_schema))
+                        .primary_key_indices(vec![0, 1, 2])
+                        .column_ids(vec![
+                            ReservedColumnId::table_id(),
+                            ReservedColumnId::tsid(),
+                            10,
+                            11,
+                            12,
+                            13,
+                        ])
+                        .next_column_id(14)
+                        .engine("mito")
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap();
+            exemplar_info.catalog_name = CATALOG.to_string();
+            exemplar_info.schema_name = "target_db".to_string();
+            exemplar_info
+                .meta
+                .options
+                .extra_options
+                .insert(APPEND_MODE_KEY.to_string(), "true".to_string());
+            exemplar_info.meta.options.extra_options.insert(
+                store_api::metric_engine_consts::PRIMARY_KEY_ENCODING.to_string(),
+                "sparse".to_string(),
+            );
+            let exemplar_info = Arc::new(exemplar_info);
+            register_unpartitioned_table_route(&kv_backend, &exemplar_info).await;
+            let ex_batch = ExemplarBatch::try_new(vec![
+                Exemplar {
+                    metric: "cpu".into(),
+                    series_labels: BTreeMap::new().into(),
+                    timestamp: 1_000,
+                    value: 1.0,
+                    labels: BTreeMap::new(),
+                },
+                Exemplar {
+                    metric: "cpu".into(),
+                    series_labels: BTreeMap::new().into(),
+                    timestamp: 2_000,
+                    value: 2.0,
+                    labels: BTreeMap::new(),
+                },
+            ])
+            .unwrap();
+            let resolved = HashMap::from_iter([("cpu".to_string(), 100)]);
+            let ex_ctx = Arc::new(QueryContext::with_channel(
+                CATALOG,
+                "target_db",
+                Channel::Otlp,
+            ));
+            let ex_out = inserter
+                .execute_exemplar_write(
+                    ex_batch.clone(),
+                    resolved.clone(),
+                    exemplar_info.clone(),
+                    false,
+                    ex_ctx.clone(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(ex_out.meta.cost, if enabled { 17 } else { 0 });
+            dispatched.try_recv().unwrap();
+            {
+                let attempts = meter.attempts.lock().unwrap();
+                assert_eq!(attempts.len(), if enabled { 1 } else { 0 });
+                if enabled {
+                    assert_eq!((attempts[0].rows, attempts[0].value), (2, 17));
+                }
+            }
+            meter.reject.store(true, Ordering::Relaxed);
+            let rejected = inserter
+                .execute_exemplar_write(ex_batch, resolved, exemplar_info, false, ex_ctx)
+                .await;
+            if enabled {
+                assert_eq!(rejected.unwrap_err().status_code(), StatusCode::RateLimited);
+                assert!(dispatched.try_recv().is_err());
+            } else {
+                assert_eq!(rejected.unwrap().meta.cost, 0);
+                dispatched.try_recv().unwrap();
+            }
+        }
     }
 
     #[test]
@@ -4640,6 +5461,19 @@ mod tests {
                     .filter_map(|request| request.rows.as_ref())
                     .map(|rows| rows.rows.len())
                     .sum(),
+                Some(api::v1::region::region_request::Body::BulkInsert(bulk)) => {
+                    let Some(api::v1::region::bulk_insert_request::Body::ArrowIpc(ipc)) =
+                        bulk.body.as_ref()
+                    else {
+                        return Ok(api::region::RegionResponse::new(0));
+                    };
+                    common_grpc::flight::FlightDecoder::try_from_schema_bytes(&ipc.schema)
+                        .and_then(|mut decoder| {
+                            decoder.try_decode_record_batch(&ipc.data_header, &ipc.payload)
+                        })
+                        .map(|batch| batch.num_rows())
+                        .unwrap_or(0)
+                }
                 _ => 0,
             };
             let _ = self.manager.datanode_dispatch.send(rows);
@@ -4961,6 +5795,99 @@ mod tests {
         }
         assert!(task.await.unwrap().requests.is_empty());
         assert_eq!(seen.len(), 12);
+    }
+
+    #[tokio::test]
+    async fn batch_eligibility_bounds_concurrent_flow_lookups_and_fails_closed() {
+        let kv_backend = prepare_mocked_backend().await;
+        let partition_manager = create_partition_rule_manager(kv_backend.clone()).await;
+        let inserter_with_cache = |flow_cache| {
+            Inserter::new(
+                catalog::memory::MemoryCatalogManager::new(),
+                partition_manager.clone(),
+                Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler)),
+                flow_cache,
+                true,
+            )
+        };
+
+        let (started, mut loads) = tokio::sync::mpsc::unbounded_channel();
+        let gated_cache = Arc::new(common_meta::cache::CacheContainer::new(
+            "test_batch_eligibility".into(),
+            Cache::new(32),
+            Arc::new(move |&id| {
+                let (resume, gate) = tokio::sync::oneshot::channel();
+                started.send((id, resume)).unwrap();
+                Box::pin(async move {
+                    gate.await.unwrap();
+                    Ok(Some(Default::default()))
+                })
+            }),
+            common_meta::instruction::CacheIdent::table_id_key,
+        ));
+        let inserter = inserter_with_cache(gated_cache);
+
+        let mut check = Box::pin(inserter.any_table_has_flow(1..=12));
+        let mut seen = BTreeSet::new();
+        for expected in [8, 4] {
+            assert!(futures_util::poll!(&mut check).is_pending());
+            let mut gates = Vec::new();
+            while let Ok((id, resume)) = loads.try_recv() {
+                assert!(seen.insert(id));
+                gates.push(resume);
+            }
+            assert_eq!(gates.len(), expected);
+            for gate in gates {
+                gate.send(()).unwrap();
+            }
+        }
+        assert!(!check.await);
+        assert_eq!(seen.len(), 12);
+        // Warm cache hits do not issue extra loads.
+        assert!(!inserter.any_table_has_flow(1..=12).await);
+        assert!(loads.try_recv().is_err());
+
+        // Subscribed flow source forces batching bypass.
+        let subscribed_cache = Arc::new(new_table_flownode_set_cache(
+            String::new(),
+            Cache::new(32),
+            kv_backend,
+        ));
+        cache_test_flow(
+            &subscribed_cache,
+            CreateFlow {
+                flow_id: 1,
+                source_table_ids: vec![2],
+                partition_to_peer_mapping: vec![(0, flownode_peer())],
+            },
+        )
+        .await;
+        assert!(
+            inserter_with_cache(subscribed_cache)
+                .any_table_has_flow(1..=4)
+                .await
+        );
+
+        // Lookup error fails closed and bypasses batching.
+        let failing_cache = Arc::new(common_meta::cache::CacheContainer::new(
+            "test_failing".into(),
+            Cache::new(32),
+            Arc::new(move |&id| {
+                Box::pin(async move {
+                    if id == 2 {
+                        common_meta::error::UnexpectedSnafu { err_msg: "kv down" }.fail()
+                    } else {
+                        Ok(None)
+                    }
+                })
+            }),
+            common_meta::instruction::CacheIdent::table_id_key,
+        ));
+        assert!(
+            inserter_with_cache(failing_cache)
+                .any_table_has_flow(1..=4)
+                .await
+        );
     }
 
     #[tokio::test]
@@ -5293,7 +6220,188 @@ mod tests {
             .filter_map(|thread| thread.join().unwrap())
             .collect::<Vec<_>>();
         assert_eq!(winners.len(), 1);
-        let residual = concurrent.events.swap(0, Ordering::Relaxed);
-        assert_eq!(winners[0] + residual, 8);
+        assert!(concurrent.events.swap(0, Ordering::Relaxed) + winners[0] == 8);
+    }
+
+    #[tokio::test]
+    async fn test_exemplar_flow_mirror_and_instant_ttl_bypass() {
+        use common_query::prelude::greptime_exemplar_labels;
+        use common_time::ttl::TimeToLive;
+        use datatypes::schema::{ColumnSchema, Schema};
+        use table::metadata::{TableInfoBuilder, TableMetaBuilder};
+
+        let _guard = lock_mirror_metrics().await;
+        let kv_backend = prepare_mocked_backend().await;
+        let partition_manager = create_partition_rule_manager(kv_backend.clone()).await;
+        let (datanode_tx, mut datanode_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (flownode_tx, mut flownode_rx) = tokio::sync::mpsc::unbounded_channel();
+        let node_manager = Arc::new(RecordingNodeManager {
+            datanode_dispatch: datanode_tx,
+            flownode_dispatch: flownode_tx,
+            gates: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            fail_flownode: false,
+        });
+        let flow_cache = Cache::new(10);
+        let flow_cache_backend = prepare_mocked_backend().await;
+        let inserter = Inserter::new(
+            catalog::memory::MemoryCatalogManager::new(),
+            partition_manager,
+            node_manager,
+            Arc::new(new_table_flownode_set_cache(
+                String::new(),
+                flow_cache,
+                flow_cache_backend,
+            )),
+            true,
+        )
+        .with_pending_rows_batcher(Some(Arc::new(UnexpectedBatcher {
+            allow_acquire: false,
+        })));
+
+        let peer = flownode_peer();
+        cache_test_flow(
+            &inserter.table_flownode_set_cache,
+            CreateFlow {
+                flow_id: 1,
+                source_table_ids: vec![10, 11],
+                partition_to_peer_mapping: vec![(0, peer)],
+            },
+        )
+        .await;
+
+        let make_exemplar_table = |id: TableId, instant: bool| {
+            let mut labels_col = ColumnSchema::new(
+                greptime_exemplar_labels(),
+                datatypes::data_type::ConcreteDataType::json2(
+                    datatypes::types::json_type::JsonNativeType::Null,
+                ),
+                true,
+            );
+            labels_col.with_extension_type(&datatypes::extension::json::Json2ExtensionType::new(
+                Arc::new(datatypes::extension::json::JsonMetadata::new(
+                    datatypes::json::JsonSettings::new_v2(),
+                )),
+            ));
+            let schema = Schema::new(vec![
+                ColumnSchema::new(
+                    DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                    datatypes::data_type::ConcreteDataType::uint32_datatype(),
+                    false,
+                ),
+                ColumnSchema::new(
+                    DATA_SCHEMA_TSID_COLUMN_NAME,
+                    datatypes::data_type::ConcreteDataType::uint64_datatype(),
+                    false,
+                ),
+                ColumnSchema::new(
+                    EXEMPLAR_METRIC_COLUMN,
+                    datatypes::data_type::ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                ColumnSchema::new(
+                    "job",
+                    datatypes::data_type::ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                ColumnSchema::new(
+                    greptime_timestamp(),
+                    datatypes::data_type::ConcreteDataType::timestamp_nanosecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+                ColumnSchema::new(
+                    greptime_value(),
+                    datatypes::data_type::ConcreteDataType::float64_datatype(),
+                    true,
+                ),
+                labels_col,
+            ]);
+            let mut info = TableInfoBuilder::default()
+                .table_id(id)
+                .table_version(0)
+                .name(METRICS_EXEMPLARS_TABLE)
+                .meta(
+                    TableMetaBuilder::empty()
+                        .schema(Arc::new(schema))
+                        .primary_key_indices(vec![0, 1, 2, 3])
+                        .column_ids(vec![
+                            ReservedColumnId::table_id(),
+                            ReservedColumnId::tsid(),
+                            10,
+                            11,
+                            12,
+                            13,
+                            14,
+                        ])
+                        .next_column_id(15)
+                        .engine("mito")
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap();
+            info.meta
+                .options
+                .extra_options
+                .insert(APPEND_MODE_KEY.to_string(), "true".to_string());
+            info.meta.options.extra_options.insert(
+                store_api::metric_engine_consts::PRIMARY_KEY_ENCODING.to_string(),
+                "sparse".to_string(),
+            );
+            if instant {
+                info.meta.options.ttl = Some(TimeToLive::Instant);
+            }
+            Arc::new(info)
+        };
+
+        let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+        ctx.set_batching_enabled(true);
+        let ctx = Arc::new(ctx);
+        let resolved = HashMap::from_iter([("cpu".to_string(), 100)]);
+        let batch = || {
+            ExemplarBatch::try_new(vec![Exemplar {
+                metric: "cpu".into(),
+                series_labels: BTreeMap::from([("job".into(), "api".into())]).into(),
+                timestamp: 1_000,
+                value: 1.5,
+                labels: BTreeMap::from([("trace_id".into(), "abc".into())]),
+            }])
+            .unwrap()
+        };
+
+        // Normal subscribed exemplar table bypasses batcher, mirrors to flownode, and writes datanode.
+        let normal_dest = make_exemplar_table(10, false);
+        register_unpartitioned_table_route(&kv_backend, &normal_dest).await;
+        let output = inserter
+            .execute_exemplar_write(batch(), resolved.clone(), normal_dest, false, ctx.clone())
+            .await
+            .unwrap();
+        assert!(matches!(output.data, OutputData::AffectedRows(1)));
+        assert_eq!(datanode_rx.try_recv().unwrap(), 1);
+        tokio::time::timeout(std::time::Duration::from_secs(5), flownode_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Instant-TTL exemplar table mirrors to flownode and skips datanode storage.
+        let instant_dest = make_exemplar_table(11, true);
+        register_unpartitioned_table_route(&kv_backend, &instant_dest).await;
+        let output = inserter
+            .execute_exemplar_write(batch(), resolved, instant_dest, true, ctx)
+            .await
+            .unwrap();
+        assert!(matches!(output.data, OutputData::AffectedRows(0)));
+        assert!(datanode_rx.try_recv().is_err());
+        tokio::time::timeout(std::time::Duration::from_secs(5), flownode_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        let pending = inserter.mirror_pending_rows.clone();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while pending.load(Ordering::Relaxed) != 0 {
+            assert!(std::time::Instant::now() < deadline);
+            tokio::task::yield_now().await;
+        }
     }
 }

@@ -289,7 +289,8 @@ impl FrontendBuilder {
         };
         let inserter = Arc::new(
             create_inserter()
-                .with_pending_rows_batcher(build_batcher(self.options.table_batcher_options())),
+                .with_pending_rows_batcher(build_batcher(self.options.table_batcher_options()))
+                .with_conversion_memory_limiter(Some(Arc::new(server_memory_limiter.clone()))),
         );
         let deleter = Arc::new(
             Deleter::new(

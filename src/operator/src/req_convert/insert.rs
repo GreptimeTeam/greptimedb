@@ -24,8 +24,13 @@ use api::v1::SemanticType;
 pub use column_to_row::ColumnToRow;
 pub(crate) use fill_impure_default::ImpureDefaultFiller;
 pub use fill_impure_default::fill_reqs_with_impure_default;
-pub use row_to_batch::rows_to_record_batch;
-pub(crate) use row_to_batch::{estimated_record_batch_bytes, value_matches_type};
+pub(crate) use row_to_batch::{
+    estimated_exemplar_record_batch_bytes, estimated_record_batch_bytes,
+    estimated_sparse_record_batch_bytes, value_matches_type,
+};
+pub use row_to_batch::{
+    exemplars_to_sparse_record_batch, rows_to_record_batch, sparse_rows_to_record_batch,
+};
 pub use row_to_region::RowToRegion;
 use snafu::{OptionExt, ResultExt};
 pub use stmt_to_region::StatementToRegion;

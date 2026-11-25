@@ -82,7 +82,6 @@ async fn test_sparse_primary_key_schema_validation(instance: Arc<dyn MockInstanc
 }
 
 #[apply(both_instances_cases)]
-#[ignore = "Raw sparse SQL writes require pre-encoded keys: https://github.com/GreptimeTeam/greptimedb/issues/10598"]
 async fn test_sparse_reserved_key_round_trip(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
     execute_sql(
@@ -4572,7 +4571,6 @@ async fn test_histogram_ingestion_storage_lifecycle(#[case] metric_engine: bool)
 #[case::unbatched(false)]
 #[case::batched(true)]
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Exemplar writes require pre-encoded keys: https://github.com/GreptimeTeam/greptimedb/issues/10598"]
 async fn test_exemplar_preserves_physical_table_routing(#[case] batching: bool) {
     use api::greptime_proto::io::prometheus::write::v2;
     use api::prom_store::remote::{Exemplar, Label, Sample, TimeSeries, WriteRequest};
@@ -4743,7 +4741,6 @@ async fn test_exemplar_preserves_physical_table_routing(#[case] batching: bool) 
 #[case::schema_alias("schema_alias")]
 #[case::physical_conflict("physical_conflict")]
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Exemplar writes require pre-encoded keys: https://github.com/GreptimeTeam/greptimedb/issues/10598"]
 async fn test_exemplar_unpinned_batches(#[case] kind: &str, #[values(false, true)] batching: bool) {
     use api::greptime_proto::io::prometheus::write::v2;
     use axum::body::{Body, to_bytes};
@@ -4886,19 +4883,13 @@ async fn test_exemplar_unpinned_batches(#[case] kind: &str, #[values(false, true
 }
 
 #[rstest]
-#[ignore = "Exemplar writes require pre-encoded keys: https://github.com/GreptimeTeam/greptimedb/issues/10598"]
 #[case::lowercase("sparse", true, true, 9)]
-#[ignore = "Exemplar writes require pre-encoded keys: https://github.com/GreptimeTeam/greptimedb/issues/10598"]
 #[case::uppercase("SPARSE", true, true, 9)]
-#[ignore = "Exemplar writes require pre-encoded keys: https://github.com/GreptimeTeam/greptimedb/issues/10598"]
 #[case::mixed_case("SpArSe", true, true, 9)]
 #[case::dense("dense", true, false, 9)]
 #[case::not_append_only("sparse", false, false, 9)]
-#[ignore = "Exemplar writes require pre-encoded keys: https://github.com/GreptimeTeam/greptimedb/issues/10598"]
 #[case::seconds("sparse", true, true, 0)]
-#[ignore = "Exemplar writes require pre-encoded keys: https://github.com/GreptimeTeam/greptimedb/issues/10598"]
 #[case::milliseconds("sparse", true, true, 3)]
-#[ignore = "Exemplar writes require pre-encoded keys: https://github.com/GreptimeTeam/greptimedb/issues/10598"]
 #[case::microseconds("sparse", true, true, 6)]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_exemplar_precreated_table_options(
@@ -4909,7 +4900,7 @@ async fn test_exemplar_precreated_table_options(
 ) {
     use std::collections::BTreeMap;
 
-    use servers::exemplar::{Exemplar, into_rows};
+    use servers::exemplar::{Exemplar, prepare};
     use servers::query_handler::PromStoreProtocolHandler;
 
     use crate::standalone::GreptimeDbStandaloneBuilder;
@@ -4923,7 +4914,7 @@ async fn test_exemplar_precreated_table_options(
     execute_sql(frontend, &format!(
         "CREATE TABLE {METRICS_EXEMPLARS_TABLE} (__table_id INT UNSIGNED NOT NULL, __tsid BIGINT UNSIGNED NOT NULL, greptime_metric STRING, greptime_timestamp TIMESTAMP({precision}) TIME INDEX, greptime_value DOUBLE, greptime_exemplar_labels JSON2, PRIMARY KEY (__table_id, __tsid, greptime_metric)) ENGINE=mito WITH ('append_mode'='{append_mode}', 'primary_key_encoding'='{encoding}', 'compaction.type'='twcs')"
     )).await;
-    let (request, _) = into_rows(vec![Exemplar {
+    let request = prepare(vec![Exemplar {
         metric: "metric_source".into(),
         series_labels: BTreeMap::from([("job".into(), "api".into())]).into(),
         timestamp: 1_234_567_890,
@@ -4972,11 +4963,10 @@ async fn test_exemplar_precreated_table_options(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Exemplar writes require pre-encoded keys: https://github.com/GreptimeTeam/greptimedb/issues/10598"]
 async fn test_exemplar_source_identity_policy() {
     use std::collections::BTreeMap;
 
-    use servers::exemplar::{Exemplar, into_rows};
+    use servers::exemplar::{Exemplar, prepare};
     use servers::query_handler::PromStoreProtocolHandler;
 
     use crate::standalone::GreptimeDbStandaloneBuilder;
@@ -4986,7 +4976,7 @@ async fn test_exemplar_source_identity_policy() {
         .await;
     let frontend = instance.fe_instance();
     let request = |name: &str| {
-        into_rows(vec![Exemplar {
+        prepare(vec![Exemplar {
             metric: name.into(),
             series_labels: BTreeMap::from([("job".into(), "api".into())]).into(),
             timestamp: 1,
@@ -4994,7 +4984,6 @@ async fn test_exemplar_source_identity_policy() {
             labels: BTreeMap::new(),
         }])
         .unwrap()
-        .0
     };
     execute_sql(
         frontend,
@@ -5035,15 +5024,18 @@ async fn test_exemplar_source_identity_policy() {
     execute_sql(frontend, create).await;
     let replacement = get_table(frontend, "metric_source").await.table_info();
     assert_ne!(source.table_id(), replacement.table_id());
-    let mut missing_tag_request = request("metric_source");
-    let rows = missing_tag_request.inserts[0].rows.as_mut().unwrap();
-    rows.schema.push(api::v1::helper::tag_column_schema(
-        "new_tag",
-        api::v1::ColumnDataType::String,
-    ));
-    rows.rows[0]
-        .values
-        .push(api::v1::value::ValueData::StringValue("present".into()).into());
+    let missing_tag_request = prepare(vec![Exemplar {
+        metric: "metric_source".into(),
+        series_labels: BTreeMap::from([
+            ("job".into(), "api".into()),
+            ("new_tag".into(), "present".into()),
+        ])
+        .into(),
+        timestamp: 1,
+        value: 2.0,
+        labels: BTreeMap::new(),
+    }])
+    .unwrap();
     assert!(
         frontend
             .write_exemplars_with_sources(
@@ -5496,12 +5488,12 @@ async fn create_exemplar_source(frontend: &Arc<Instance>, schema: &str, name: &s
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Exemplar writes require pre-encoded keys: https://github.com/GreptimeTeam/greptimedb/issues/10598"]
 async fn test_exemplar_source_tag_reconciliation() {
     use std::collections::BTreeMap;
 
+    use mito_codec::row_converter::TsidGenerator;
     use servers::exemplar::query::Query;
-    use servers::exemplar::{Exemplar, into_rows};
+    use servers::exemplar::{Exemplar, prepare};
     use servers::prometheus_handler::PrometheusHandler;
     use servers::query_handler::PromStoreProtocolHandler;
     use table::requests::AUTO_CREATE_TABLE_KEY;
@@ -5527,23 +5519,17 @@ async fn test_exemplar_source_tag_reconciliation() {
         exemplar("second", "second_only", "present"),
         exemplar("first", "later", "present"),
     ];
-    let requests = into_rows(exemplars.clone()).unwrap().0;
-    let rows = requests.inserts[0].rows.as_ref().unwrap();
-    let tsid_index = rows
-        .schema
+    let requests = prepare(exemplars.clone()).unwrap();
+    let tsids = exemplars
         .iter()
-        .position(|c| c.column_name == "__tsid")
-        .unwrap();
-    let tsids = rows
-        .rows
-        .iter()
-        .map(|row| {
-            let Some(api::v1::value::ValueData::U64Value(tsid)) =
-                &row.values[tsid_index].value_data
-            else {
-                panic!("expected a source TSID")
-            };
-            tsid.to_string()
+        .map(|exemplar| {
+            TsidGenerator::from_sorted_tags(
+                exemplar
+                    .series_labels
+                    .iter()
+                    .map(|(name, value)| (name.as_str(), value.as_str())),
+            )
+            .to_string()
         })
         .collect::<Vec<_>>();
     frontend
@@ -5593,41 +5579,25 @@ async fn test_exemplar_source_tag_reconciliation() {
     let source = get_table(frontend, "first").await.table_info();
     let mut ctx = QueryContext::arc().fork();
     ctx.set_extension(AUTO_CREATE_TABLE_KEY, "false");
-    let blocked = into_rows(vec![exemplar("first", "blocked", "present")])
-        .unwrap()
-        .0;
+    let blocked = prepare(vec![exemplar("first", "blocked", "present")]).unwrap();
     assert!(
         frontend
-            .write_exemplars_prepared(blocked.clone(), Arc::new(ctx))
+            .write_exemplars_prepared(blocked, Arc::new(ctx))
             .await
             .is_err()
     );
-    let mut malformed = blocked;
-    let rows = malformed.inserts[0].rows.as_mut().unwrap();
-    let index = rows
-        .schema
-        .iter()
-        .position(|c| c.column_name == "blocked")
-        .unwrap();
-    rows.rows[0].values[index] = api::v1::value::ValueData::F64Value(1.0).into();
-    assert!(
-        frontend
-            .write_exemplars_prepared(malformed, QueryContext::arc())
-            .await
-            .is_err()
-    );
+    assert!(prepare(vec![exemplar("first", "__table_id", "present")]).is_err());
     let after = get_table(frontend, "first").await.table_info();
     assert_eq!(source, after);
 
     execute_sql(frontend, "CREATE TABLE conflict_physical (ts TIMESTAMP TIME INDEX, occupied_field DOUBLE) ENGINE=metric WITH ('physical_metric_table'='')").await;
     execute_sql(frontend, "CREATE TABLE conflicting_source (ts TIMESTAMP TIME INDEX, occupied_field DOUBLE) ENGINE=metric WITH ('on_physical_table'='conflict_physical')").await;
-    let request = into_rows(vec![exemplar(
+    let request = prepare(vec![exemplar(
         "conflicting_source",
         "occupied_field",
         "present",
     )])
-    .unwrap()
-    .0;
+    .unwrap();
     let error = frontend
         .write_exemplars_prepared(request, QueryContext::arc())
         .await
@@ -5696,7 +5666,6 @@ async fn test_exemplar_source_tag_reconciliation() {
 #[case::standalone_batched_sync(false, true, false, true)]
 #[case::distributed_batched_sync(true, true, false, true)]
 #[test]
-#[ignore = "Exemplar writes require pre-encoded keys: https://github.com/GreptimeTeam/greptimedb/issues/10598"]
 fn test_exemplar_protocol_storage_lifecycle(
     #[case] distributed: bool,
     #[case] batching: bool,
@@ -6156,7 +6125,6 @@ async fn exemplar_protocol_storage_lifecycle(distributed: bool, batching: bool, 
 
 #[rstest]
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Exemplar writes require pre-encoded keys: https://github.com/GreptimeTeam/greptimedb/issues/10598"]
 async fn test_exemplar_query_bounds_and_malformed_rows(
     #[values(http::Method::GET, http::Method::POST)] method: http::Method,
 ) {
@@ -6289,12 +6257,11 @@ async fn test_exemplar_query_bounds_and_malformed_rows(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Exemplar writes require pre-encoded keys: https://github.com/GreptimeTeam/greptimedb/issues/10598"]
 async fn test_exemplar_concurrent_ddl_and_precreated_contract() {
     use std::collections::BTreeMap;
 
     use servers::exemplar::query::Query;
-    use servers::exemplar::{Exemplar, into_rows};
+    use servers::exemplar::{Exemplar, prepare};
     use servers::prometheus_handler::PrometheusHandler;
     use servers::query_handler::PromStoreProtocolHandler;
 
@@ -6306,7 +6273,7 @@ async fn test_exemplar_concurrent_ddl_and_precreated_contract() {
     let frontend = instance.fe_instance();
     create_exemplar_source(frontend, "public", "concurrent").await;
     let request = |tag: String, timestamp: i64| {
-        into_rows(vec![Exemplar {
+        prepare(vec![Exemplar {
             metric: "concurrent".into(),
             series_labels: BTreeMap::from([(tag, "present".into())]).into(),
             timestamp,
@@ -6314,7 +6281,6 @@ async fn test_exemplar_concurrent_ddl_and_precreated_contract() {
             labels: BTreeMap::from([("trace_id".into(), "abc".into())]),
         }])
         .unwrap()
-        .0
     };
     // Disjoint first creators and repeated additions must converge on one schema.
     for repeated in [false, true] {
@@ -6430,7 +6396,6 @@ async fn test_exemplar_concurrent_ddl_and_precreated_contract() {
 #[case::batched_auto_create_disabled(false, false, true)]
 #[case::batched_hint_disabled(true, true, true)]
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Exemplar writes require pre-encoded keys: https://github.com/GreptimeTeam/greptimedb/issues/10598"]
 async fn test_exemplar_precreated_precision_and_label_defaults(
     #[case] auto_create: bool,
     #[case] hint_disabled: bool,
@@ -6441,7 +6406,7 @@ async fn test_exemplar_precreated_precision_and_label_defaults(
     use frontend::service_config::BatcherOptions;
     use servers::batcher::BatchingProtocol;
     use servers::exemplar::query::Query;
-    use servers::exemplar::{Exemplar, into_rows};
+    use servers::exemplar::{Exemplar, prepare};
     use servers::prometheus_handler::PrometheusHandler;
     use servers::query_handler::PromStoreProtocolHandler;
     use table::requests::AUTO_CREATE_TABLE_KEY;
@@ -6481,15 +6446,14 @@ async fn test_exemplar_precreated_precision_and_label_defaults(
             ),
         )
         .await;
-        let request = into_rows(vec![Exemplar {
+        let request = prepare(vec![Exemplar {
             metric: "metric".into(),
             series_labels: BTreeMap::new().into(),
             timestamp: -1,
             value: 1.0,
             labels: BTreeMap::new(),
         }])
-        .unwrap()
-        .0;
+        .unwrap();
         let result = frontend
             .write_exemplars_prepared(request, ctx.clone())
             .await;
@@ -6525,12 +6489,11 @@ async fn test_exemplar_precreated_precision_and_label_defaults(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Exemplar writes require pre-encoded keys: https://github.com/GreptimeTeam/greptimedb/issues/10598"]
 async fn test_exemplar_cross_schema_exact_identity() {
     use std::collections::BTreeMap;
 
     use servers::exemplar::query::Query;
-    use servers::exemplar::{Exemplar, into_rows};
+    use servers::exemplar::{Exemplar, prepare};
     use servers::prometheus_handler::PrometheusHandler;
     use servers::query_handler::PromStoreProtocolHandler;
 
@@ -6566,7 +6529,7 @@ async fn test_exemplar_cross_schema_exact_identity() {
                 })
             })
             .collect();
-        let requests = into_rows(observations).unwrap().0;
+        let requests = prepare(observations).unwrap();
         let ctx = Arc::new(QueryContext::with("greptime", schema));
         frontend
             .write_exemplars_prepared(requests, ctx)
@@ -6602,4 +6565,134 @@ async fn test_exemplar_cross_schema_exact_identity() {
         }
     }
     assert!(encoded.contains("\"timestamp\":-0.001"), "{encoded}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_exemplar_typed_interceptor_hook() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use api::prom_store::remote::{Exemplar, Label, Sample, TimeSeries, WriteRequest};
+    use axum::body::Body;
+    use common_base::Plugins;
+    use http::Request;
+    use operator::insert::ExemplarBatch;
+    use prost::Message;
+    use servers::interceptor::{PromStoreProtocolInterceptor, PromStoreProtocolInterceptorRef};
+    use servers::prom_store::snappy_compress;
+    use tower::ServiceExt;
+
+    use crate::standalone::GreptimeDbStandaloneBuilder;
+    use crate::test_util::build_test_prom_server;
+
+    struct TypedInterceptor {
+        pre_write_exemplar_calls: AtomicUsize,
+        last_len: AtomicUsize,
+    }
+
+    impl PromStoreProtocolInterceptor for TypedInterceptor {
+        type Error = server_error::Error;
+
+        fn pre_write_exemplars(
+            &self,
+            exemplars: &ExemplarBatch,
+            _ctx: QueryContextRef,
+        ) -> server_error::Result<()> {
+            self.pre_write_exemplar_calls
+                .fetch_add(1, Ordering::Relaxed);
+            self.last_len.store(exemplars.len(), Ordering::Relaxed);
+            if exemplars
+                .exemplars()
+                .iter()
+                .any(|e| e.labels.get("deny").map(String::as_str) == Some("yes"))
+            {
+                return server_error::InvalidPromRemoteRequestSnafu {
+                    msg: "exemplar blocked by typed interceptor",
+                }
+                .fail();
+            }
+            Ok(())
+        }
+    }
+
+    let interceptor = Arc::new(TypedInterceptor {
+        pre_write_exemplar_calls: AtomicUsize::new(0),
+        last_len: AtomicUsize::new(0),
+    });
+    let plugins = Plugins::new();
+    plugins.insert::<PromStoreProtocolInterceptorRef<server_error::Error>>(interceptor.clone());
+
+    let instance = GreptimeDbStandaloneBuilder::new("exemplar_typed_interceptor")
+        .with_plugin(plugins)
+        .build()
+        .await;
+    let frontend = instance.fe_instance();
+    let server = build_test_prom_server(frontend.clone(), false, None).build();
+    let app = server.build(server.make_app()).unwrap();
+
+    let send = |deny_value: &str| {
+        let app = app.clone();
+        let req = WriteRequest {
+            timeseries: vec![TimeSeries {
+                labels: vec![
+                    Label {
+                        name: "__name__".into(),
+                        value: "interceptor_metric".into(),
+                    },
+                    Label {
+                        name: "job".into(),
+                        value: "api".into(),
+                    },
+                ],
+                samples: vec![Sample {
+                    value: 1.0,
+                    timestamp: 1_000,
+                }],
+                exemplars: vec![Exemplar {
+                    labels: vec![Label {
+                        name: "deny".into(),
+                        value: deny_value.into(),
+                    }],
+                    value: 0.5,
+                    timestamp: 1_000,
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        async move {
+            app.oneshot(
+                Request::post("/v1/prometheus/write")
+                    .header("content-type", "application/x-protobuf")
+                    .header("content-encoding", "snappy")
+                    .body(Body::from(snappy_compress(&req.encode_to_vec()).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        }
+    };
+
+    assert_eq!(send("no").await.status(), http::StatusCode::NO_CONTENT);
+    assert_eq!(
+        interceptor.pre_write_exemplar_calls.load(Ordering::Relaxed),
+        1
+    );
+    assert_eq!(interceptor.last_len.load(Ordering::Relaxed), 1);
+
+    assert_eq!(send("yes").await.status(), http::StatusCode::BAD_REQUEST);
+    assert_eq!(
+        interceptor.pre_write_exemplar_calls.load(Ordering::Relaxed),
+        2
+    );
+
+    let output = execute_sql(
+        frontend,
+        &format!("SELECT COUNT(*) FROM {METRICS_EXEMPLARS_TABLE}"),
+    )
+    .await;
+    check_output_stream(
+        output.data,
+        "+----------+\n| count(*) |\n+----------+\n| 1        |\n+----------+",
+    )
+    .await;
 }
