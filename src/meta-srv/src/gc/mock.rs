@@ -107,26 +107,56 @@ pub struct MockSchedulerCtx {
     pub gc_regions_per_region_errors: Arc<Mutex<HashMap<RegionId, crate::error::Error>>>,
 }
 
+/// One table's route as the mock builders take it: the physical table id plus every
+/// region's leader peer, where `None` is a route entry that carries no leader.
+pub type MockRouteLeaders = HashMap<TableId, (TableId, Vec<(RegionId, Option<Peer>)>)>;
+
 impl MockSchedulerCtx {
     pub fn with_table_routes(
         self,
         table_routes: HashMap<TableId, (TableId, Vec<(RegionId, Peer)>)>,
     ) -> Self {
+        self.with_region_leaders(
+            table_routes
+                .into_iter()
+                .map(|(table_id, (physical_table_id, region_peers))| {
+                    (
+                        table_id,
+                        (
+                            physical_table_id,
+                            region_peers
+                                .into_iter()
+                                .map(|(region_id, peer)| (region_id, Some(peer)))
+                                .collect(),
+                        ),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    /// Same as [`Self::with_table_routes`], but names every region's leader
+    /// explicitly.
+    ///
+    /// `None` models the state the routes can be in: the region is still reported by
+    /// the datanodes as a leader (its [`RegionStat`] says so) while its route entry
+    /// carries no leader peer, so the region cannot be dispatched to at all.
+    pub fn with_region_leaders(self, table_routes: MockRouteLeaders) -> Self {
         *self.table_routes.lock().unwrap() = table_routes
             .into_iter()
-            .map(|(k, (phy_id, region2peer))| {
-                let phy = PhysicalTableRouteValue::new(
-                    region2peer
+            .map(|(table_id, (physical_table_id, region_leaders))| {
+                let route = PhysicalTableRouteValue::new(
+                    region_leaders
                         .into_iter()
-                        .map(|(region_id, peer)| RegionRoute {
+                        .map(|(region_id, leader_peer)| RegionRoute {
                             region: Region::new_test(region_id),
-                            leader_peer: Some(peer),
+                            leader_peer,
                             ..Default::default()
                         })
                         .collect(),
                 );
 
-                (k, (phy_id, phy))
+                (table_id, (physical_table_id, route))
             })
             .collect();
         self
@@ -240,6 +270,12 @@ impl SchedulerCtx for MockSchedulerCtx {
         &self,
         table_ids: &[TableId],
     ) -> Result<HashMap<TableId, PhysicalTableRouteValue>> {
+        // The injected error models a failing route read in general, so the batch
+        // accessor reports it as well: the scheduler may read routes through either.
+        if let Some(error) = self.get_table_route_error.lock().unwrap().take() {
+            return Err(error);
+        }
+
         let mut result = HashMap::new();
         for &table_id in table_ids {
             let route = self
