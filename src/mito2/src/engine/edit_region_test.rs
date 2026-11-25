@@ -102,6 +102,7 @@ async fn test_delayed_series_index_notification_after_removal() -> WhateverResul
                             series_indexes_to_add: vec![index.meta_ref().clone()],
                             ..Default::default()
                         },
+                        kind: crate::request::RegionEditKind::Import,
                         waiters: crate::request::Waiters::one(tx),
                         result: Ok(()),
                         is_staging: false,

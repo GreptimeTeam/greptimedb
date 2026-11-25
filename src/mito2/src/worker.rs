@@ -1688,6 +1688,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 WorkerRequest::CopyRegionFrom(req) => {
                     self.handle_copy_region_from_request(req);
                 }
+                WorkerRequest::CopyInstalled(req) => {
+                    self.handle_copy_installed(req);
+                }
             }
         }
 
@@ -1875,9 +1878,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 let _ = drained.send(());
             }
             BackgroundNotify::RegionEdit(req) => self.handle_region_edit_result(req).await,
-            BackgroundNotify::CopyRegionFromFinished(req) => {
-                self.handle_copy_region_from_finished(req)
-            }
             BackgroundNotify::RegionFenced => {}
             BackgroundNotify::RegionReloaded { old, result } => {
                 self.handle_region_reloaded(region_id, old, result).await

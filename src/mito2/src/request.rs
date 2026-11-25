@@ -869,6 +869,10 @@ pub(crate) enum WorkerRequest {
 
     /// Copy region from request.
     CopyRegionFrom(CopyRegionFromRequest),
+
+    /// Checks that the entries a COPY found already manifested are installed in the live
+    /// version of the region.
+    CopyInstalled(CopyInstalledRequest),
 }
 
 impl WorkerRequest {
@@ -1203,8 +1207,6 @@ pub(crate) enum BackgroundNotify {
     /// The region left [RegionLeaderState::EndingStaging](crate::region::RegionLeaderState::EndingStaging),
     /// so writes stalled meanwhile can be handled. The sender is notified once they are.
     StagingEnded(oneshot::Sender<()>),
-    /// Copy region result.
-    CopyRegionFromFinished(CopyRegionFromFinished),
     /// A commit outside the worker fenced the region until it is reloaded.
     RegionFenced,
     /// The reload of a fenced region has finished.
@@ -1282,7 +1284,6 @@ impl BackgroundNotify {
             | Self::IndexBuildRetry(_)
             | Self::Truncate(_)
             | Self::DiscardUnflushed(_)
-            | Self::CopyRegionFromFinished(_)
             | Self::RegionFenced
             | Self::RegionReloaded { .. }
             | Self::CaughtUpAgain(_)
@@ -1497,16 +1498,6 @@ pub(crate) struct EnterStagingResult {
     pub(crate) result: Result<()>,
 }
 
-#[derive(Debug)]
-pub(crate) struct CopyRegionFromFinished {
-    /// Region id.
-    pub(crate) region_id: RegionId,
-    /// Region edit to apply.
-    pub(crate) edit: RegionEdit,
-    /// Result sender.
-    pub(crate) sender: Sender<Result<MitoCopyRegionFromResponse>>,
-}
-
 #[derive(Debug, Default)]
 pub(crate) struct Waiters(SmallVec<[Sender<Result<()>>; 1]>);
 
@@ -1531,7 +1522,13 @@ impl Waiters {
 /// Transient execution semantics; this is never serialized into the manifest.
 #[derive(Debug)]
 pub(crate) enum RegionEditKind {
+    /// An import of SST references: the worker assigns an admission sequence to every
+    /// added file and may schedule a compaction afterwards.
     Import,
+    /// Publication of a prepared physical COPY. Every added file already describes
+    /// its objects and cleared source sequence trust, so the worker installs the edit
+    /// as it is: no sequence assignment and no compaction triggered by the import.
+    Copy,
     #[cfg(feature = "enterprise")]
     Compaction(Box<crate::engine::table_compaction::PublicationContext>),
 }
@@ -1546,6 +1543,11 @@ pub(crate) struct RegionEditRequest {
     pub(crate) preload_sst_cache: bool,
     /// The waiters that are waiting for this region edit's result.
     pub(crate) waiters: Waiters,
+    /// The instance the edit was prepared against, for an edit whose preparation ran outside
+    /// the worker (a physical copy copies objects before it submits). Admission rejects the
+    /// edit when the region was reopened or replaced meanwhile, so a stale preparation can
+    /// never publish into its replacement.
+    pub(crate) prepared_for: Option<MitoRegionRef>,
     /// The partition expression of the staging this edit belongs to, if any.
     /// The edit must not run unless the region is staging for that expression.
     pub(crate) staging_partition_expr: Option<String>,
@@ -1564,8 +1566,39 @@ impl RegionEditRequest {
             preload_sst_cache,
             kind: RegionEditKind::Import,
             waiters: Waiters::one(waiter),
+            prepared_for: None,
             staging_partition_expr: None,
         }
+    }
+
+    /// Creates an edit that installs the metadata of a prepared physical copy as it is.
+    ///
+    /// The objects of a physical copy are already in the target region dir and its files
+    /// keep the sequence trust the copy cleared, so the edit must not be prepared as an
+    /// import. `prepared_for` is the instance the copy prepared the edit against.
+    pub(crate) fn for_physical_copy(
+        prepared_for: MitoRegionRef,
+        edit: RegionEdit,
+        waiter: Sender<Result<()>>,
+    ) -> Self {
+        Self {
+            region_id: prepared_for.region_id,
+            edit,
+            preload_sst_cache: false,
+            kind: RegionEditKind::Copy,
+            waiters: Waiters::one(waiter),
+            prepared_for: Some(prepared_for),
+            staging_partition_expr: None,
+        }
+    }
+
+    /// Binds the edit to the instance its preparation observed.
+    ///
+    /// Every edit a COPY prepares is bound this way: the copy reads the target manifest and
+    /// copies objects outside the worker, so the region may be reopened before admission.
+    pub(crate) fn prepared_against(mut self, region: MitoRegionRef) -> Self {
+        self.prepared_for = Some(region);
+        self
     }
 
     /// Binds the edit to the staging for `partition_expr`.
@@ -1586,6 +1619,8 @@ pub(crate) struct RegionEditResult {
     pub(crate) waiters: Waiters,
     /// Region edit to apply.
     pub(crate) edit: RegionEdit,
+    /// The transient semantics the edit was admitted with.
+    pub(crate) kind: RegionEditKind,
     /// Result from the manifest manager.
     pub(crate) result: std::result::Result<(), Arc<Error>>,
     /// Whether region state need to be set to Writable after handling this request.
@@ -1644,6 +1679,18 @@ pub(crate) struct RemapManifestsRequest {
     ///
     /// The result is a map from region IDs to their corresponding staging manifest paths.
     pub(crate) sender: Sender<Result<HashMap<RegionId, String>>>,
+}
+
+/// Asks the worker whether the samples a COPY found in the target manifest are installed in
+/// the live version of the region.
+#[derive(Debug)]
+pub(crate) struct CopyInstalledRequest {
+    /// The region the COPY targeted.
+    pub(crate) region_id: RegionId,
+    /// Sample file ids the target manifest already lists.
+    pub(crate) file_ids: Vec<FileId>,
+    /// Receives the result.
+    pub(crate) sender: Sender<Result<()>>,
 }
 
 #[derive(Debug)]
