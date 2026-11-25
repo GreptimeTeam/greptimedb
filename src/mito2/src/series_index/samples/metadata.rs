@@ -224,11 +224,15 @@ pub(super) struct Column {
 /// This reference is the descriptor's whole identity. The key bytes themselves are stored
 /// once per series in the part's key area, outside every bounded metadata page, so a key may
 /// be longer than a page and the descriptor stays 12 bytes whatever its length is.
+///
+/// The area stores only the bytes after the series' `(table_id, tsid)` prefix, which the
+/// descriptor already carries as its [`Block::id`]: `length` counts those suffix bytes and may be
+/// zero for a series whose key is the prefix alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct KeyRef {
-    /// Absolute offset of the first key byte from the start of the part.
+    /// Absolute offset of the first stored (suffix) byte from the start of the part.
     pub offset: u64,
-    /// Key length in bytes; nonzero.
+    /// Stored suffix length in bytes; zero for a series with no labels.
     pub length: u32,
 }
 
@@ -241,8 +245,8 @@ impl KeyRef {
 
     /// End of this key's stored entry: its bytes followed by its checksum.
     ///
-    /// `length` covers the key only, so the stored checksum is exactly [`KEY_CHECKSUM_BYTES`]
-    /// past [`Self::end`] and never part of what the reference itself names.
+    /// `length` covers the stored key bytes only, so the stored checksum is exactly
+    /// [`KEY_CHECKSUM_BYTES`] past [`Self::end`] and never part of what the reference itself names.
     pub fn checksum_end(&self) -> Result<u64> {
         self.end()?
             .checked_add(KEY_CHECKSUM_BYTES)
@@ -261,24 +265,28 @@ impl KeyRef {
         })
     }
 
-    /// Requires this reference to name a nonempty key entry inside `area`.
+    /// Requires this reference to name a key entry inside `area`.
     ///
     /// The entry includes the stored checksum, so a reference whose key ends inside the area but
-    /// whose checksum would not is rejected like any other out-of-area reference.
+    /// whose checksum would not is rejected like any other out-of-area reference. The stored bytes
+    /// are a suffix, so a zero length is a real series - one whose key is the reserved prefix
+    /// alone - and not a corrupt descriptor; the entry's checksum still has to fit.
     pub fn validate(&self, area: KeyArea) -> Result<()> {
         require(
-            self.length > 0 && self.offset >= area.start && self.checksum_end()? <= area.end,
+            self.offset >= area.start && self.checksum_end()? <= area.end,
             "sample key reference outside key area",
         )
     }
 }
 
-/// Bytes of the XXH64 stored after each key, seed zero.
+/// Bytes of the XXH64 stored after each key area entry, seed zero.
 ///
-/// A key copy is `[key bytes][checksum]`; the descriptor's reference names only the key, so a
-/// fetched key can be verified before it is used to attribute rows to a series. Without it a
-/// flipped label byte would silently move rows to another series, which the old inline-key layout
-/// could not suffer: its keys sat in a page whose stored bytes were already checksummed.
+/// An entry is `[stored key bytes][checksum]`; the descriptor's reference names only the stored
+/// bytes, so a fetched entry can be verified before it is used to attribute rows to a series.
+/// Without it a flipped label byte would silently move rows to another series, which the old
+/// inline-key layout could not suffer: its keys sat in a page whose stored bytes were already
+/// checksummed. The checksum covers the whole reconstructed key, not just the stored suffix, so it
+/// also catches a descriptor whose identifier disagrees with the bytes.
 pub(super) const KEY_CHECKSUM_BYTES: u64 = std::mem::size_of::<u64>() as u64;
 
 /// A part's key area: exact series keys stored back to back, outside every metadata page.
@@ -287,6 +295,11 @@ pub(super) const KEY_CHECKSUM_BYTES: u64 = std::mem::size_of::<u64>() as u64;
 /// the part, not by `PAGE_LIMIT`. Every copy is followed by its checksum. Because blocks are
 /// ordered by exact key, every block of one series is adjacent and shares a single copy of the
 /// key, which makes an equal [`KeyRef`] mean "the same exact series".
+///
+/// Each copy holds only the bytes after the series' fixed `(table_id, tsid)` prefix, which the
+/// block descriptor already carries as its identifier and which the sparse key codec rebuilds
+/// exactly. Two series that share an identifier but differ in their labels still have different
+/// suffixes, so they keep their own copies and their own references.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct KeyArea {
     pub start: u64,
@@ -309,9 +322,10 @@ pub(super) struct Block {
     /// Coarse `(table_id, tsid)` prefix decoded from the block's exact key.
     ///
     /// It prunes candidates but never names the owner: `(table_id, tsid)` is a hash, so two
-    /// distinct series can share it. The owner is the key [`Self::key`] references.
+    /// distinct series can share it. The owner is the key [`Self::key`] references. It is also the
+    /// exact source of that key's reconstructed prefix: the key area stores only the suffix.
     pub id: MetricSeriesId,
-    /// Fixed-size reference to the block's exact key in the part's key area.
+    /// Fixed-size reference to the stored suffix of the block's exact key in the part's key area.
     ///
     /// Equal references mean the same exact series; a different series that collides on the
     /// identifier always carries a different reference.

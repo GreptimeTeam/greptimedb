@@ -36,7 +36,9 @@ use crate::error::{ComputeArrowSnafu, NewRecordBatchSnafu, OpenDalSnafu, Result}
 use crate::metrics::ColumnarReadMetrics;
 use crate::series_index::artifact::{ArtifactFormat, SamplesFileHandle};
 use crate::series_index::format::{SamplesBatch, SamplesFormatReader, SamplesReadRequest};
-use crate::series_index::identity::{ExactSeriesKey, IdentityEncoding};
+use crate::series_index::identity::{
+    ExactSeriesKey, IdentityEncoding, SERIES_KEY_PREFIX_LEN, series_key_bytes,
+};
 use crate::series_index::samples::metadata::{
     self, Areas, Block, BlockOrder, Bounds, Column, Page, PageReference, Trailer,
 };
@@ -140,8 +142,13 @@ impl SamplesReader {
             return Err(unsupported("samples manifest version"));
         }
         // Old artifacts can be structurally valid and perfectly ordered, so identity
-        // encoding is the only thing that keeps their lost labels out of reads.
-        if manifest.identity_encoding != IdentityEncoding::CURRENT_SAMPLES {
+        // encoding is the only thing that keeps their lost labels out of reads. Two layouts store
+        // an exact key in a key area and both decode here; the retired inline-key layout is not
+        // one of them, and a future layout is refused rather than guessed at.
+        if !matches!(
+            manifest.identity_encoding,
+            IdentityEncoding::ExactSparseKeyAreaSuffix | IdentityEncoding::ExactSparseKeyArea
+        ) {
             return Err(unsupported(
                 "samples manifest identity encoding; rebuild the samples artifact",
             ));
@@ -344,6 +351,7 @@ impl SamplesFormatReader for SamplesReader {
                         blocks,
                         &request,
                         ids.as_ref(),
+                        manifest.identity_encoding,
                         &mut part_keys,
                         keys_reservation.as_ref(),
                         &mut key_offsets,
@@ -387,6 +395,7 @@ impl SamplesFormatReader for SamplesReader {
                                     reader,
                                     trailer.areas(),
                                     block,
+                                    manifest.identity_encoding,
                                     keys_reservation.as_ref(),
                                     &mut key_offsets,
                                     &mut metrics,
@@ -503,12 +512,16 @@ fn owns(key: &[u8], request: &SamplesReadRequest) -> bool {
 /// per-block identity allowance, so a page of short keys still fits a small scan pool.
 const KEY_ENTRY_BYTES: usize = std::mem::size_of::<ExactSeriesKey>() + BUFFER_ALIGNMENT;
 
-/// Bytes of the checksum stored after each key in the key area.
+/// Bytes of the checksum stored after each key entry in the key area.
 const KEY_CHECKSUM_BYTES: usize = metadata::KEY_CHECKSUM_BYTES as usize;
 
-/// Retained bytes of one cached key: its bytes, the boxed key, and the allocator's rounding.
-fn retained_key_bytes(length: u32) -> usize {
-    length as usize + KEY_ENTRY_BYTES
+/// Retained bytes of one cached key: the whole key it rebuilds, the boxed key, and the
+/// allocator's rounding.
+///
+/// The reference counts only the stored suffix, so the fixed prefix every key starts with is
+/// added here: the cache holds the reconstructed key, which is what a batch hands out.
+fn retained_key_bytes(stored_length: u32) -> usize {
+    SERIES_KEY_PREFIX_LEN + stored_length as usize + KEY_ENTRY_BYTES
 }
 
 /// Replaces the exact key that carries one series across a part boundary.
@@ -576,23 +589,40 @@ impl Drop for KeyPeak<'_> {
     }
 }
 
-/// Splits one stored key entry into its key bytes after verifying the stored checksum.
+/// Rebuilds one stored key entry into the block's exact key, verifying the stored checksum.
 ///
-/// The reference's length covers the key only, so the entry is exactly one key followed by
-/// [`KEY_CHECKSUM_BYTES`]. A flipped label byte keeps the key's framing and identifier valid, so
-/// this is the only place that notices it before the bytes attribute rows to a series.
-fn verified_key(entry: &[u8], length: u32) -> Result<&[u8]> {
-    let length = length as usize;
+/// The reference's length covers the stored key bytes only, so the entry is exactly those bytes
+/// followed by [`KEY_CHECKSUM_BYTES`]. What they are depends on the layout the manifest names:
+///
+/// * [`IdentityEncoding::ExactSparseKeyAreaSuffix`] stores only the bytes after the fixed
+///   `(table_id, tsid)` prefix, which the block descriptor carries as [`Block::id`]; the prefix is
+///   rebuilt from it exactly as the key codec encodes it. A zero length is a real series whose key
+///   is that prefix alone.
+/// * [`IdentityEncoding::ExactSparseKeyArea`] stores the whole key.
+///
+/// Either way the checksum is verified over the whole reconstructed key, so a flipped label byte
+/// keeps the key's framing and identifier valid but still fails here, and so does a stored suffix
+/// recombined under the wrong identifier.
+fn verified_key(entry: &[u8], block: &Block, encoding: IdentityEncoding) -> Result<Vec<u8>> {
+    let length = block.key.length as usize;
     require(
         entry.len() == length + KEY_CHECKSUM_BYTES,
         "sample key entry length mismatch",
     )?;
-    let (key, stored) = entry.split_at(length);
-    let stored: [u8; KEY_CHECKSUM_BYTES] = stored
+    let (stored, checksum) = entry.split_at(length);
+    let checksum: [u8; KEY_CHECKSUM_BYTES] = checksum
         .try_into()
         .map_err(|_| invalid("sample key checksum framing"))?;
+    let key = match encoding {
+        IdentityEncoding::ExactSparseKeyAreaSuffix => series_key_bytes(block.id, stored)?,
+        IdentityEncoding::ExactSparseKeyArea => stored.to_vec(),
+        // A manifest of any other layout is refused when it is opened, so no block reaches here.
+        IdentityEncoding::ExactSparseKey => {
+            return Err(unsupported("samples key area encoding"));
+        }
+    };
     require(
-        codec::checksum(key) == u64::from_le_bytes(stored),
+        codec::checksum(&key) == u64::from_le_bytes(checksum),
         "sample key checksum mismatch",
     )?;
     Ok(key)
@@ -609,6 +639,7 @@ async fn load_block_key(
     reader: &Reader,
     areas: Areas,
     block: &Block,
+    encoding: IdentityEncoding,
     reservation: Option<&MemoryReservation>,
     offsets: &mut mito_codec::row_converter::SparseOffsetsCache,
     metrics: &mut ColumnarReadMetrics,
@@ -627,9 +658,10 @@ async fn load_block_key(
     let entry = fetched
         .pop()
         .ok_or_else(|| invalid("missing sample key response"))?;
-    let key = ExactSeriesKey::from_sparse_key(verified_key(&entry, block.key.length)?, offsets)?;
+    let key = ExactSeriesKey::from_sparse_key(&verified_key(&entry, block, encoding)?, offsets)?;
     // A key that parses but claims another identifier is a malformed reference: ownership would
-    // silently point at the wrong series.
+    // silently point at the wrong series. The suffix layout rebuilds the prefix from the
+    // descriptor, so this only catches a whole-key copy; there the check is the whole guard.
     require(
         key.id() == block.id,
         "sample block series key disagrees with its identifier",
@@ -669,6 +701,7 @@ async fn load_page_keys(
     blocks: &[Block],
     request: &SamplesReadRequest,
     ids: Option<&BTreeSet<MetricSeriesId>>,
+    encoding: IdentityEncoding,
     keys: &mut HashMap<(u64, u32), ExactSeriesKey>,
     reservation: Option<&MemoryReservation>,
     offsets: &mut mito_codec::row_converter::SparseOffsetsCache,
@@ -723,9 +756,10 @@ async fn load_page_keys(
     let fetched = fetch_ranges(reader, &ranges, metrics).await?;
     for (block, entry) in wanted.iter().take(window).zip(fetched) {
         let key =
-            ExactSeriesKey::from_sparse_key(verified_key(&entry, block.key.length)?, offsets)?;
+            ExactSeriesKey::from_sparse_key(&verified_key(&entry, block, encoding)?, offsets)?;
         // A key that parses but claims another identifier is a malformed reference: ownership
-        // would silently point at the wrong series.
+        // would silently point at the wrong series. The suffix layout rebuilds the prefix from
+        // the descriptor, so only a stored whole key can disagree with it.
         require(
             key.id() == block.id,
             "sample block series key disagrees with its identifier",
@@ -946,9 +980,12 @@ async fn read_block(
         - scratch.ranges.iter().map(|r| r.end - r.start).sum::<u64>();
     // The block's exact key is returned with the batch, once per block rather than once per
     // row, so it costs one key regardless of how many rows the block holds. Time pruning
-    // cannot add output rows, so no per-row term is needed for identity at all.
-    let key_bytes =
-        std::mem::size_of::<ExactSeriesKey>() + block.key.length as usize + BUFFER_ALIGNMENT;
+    // cannot add output rows, so no per-row term is needed for identity at all. The key is the
+    // whole reconstructed one, so the prefix the key area leaves out is charged here.
+    let key_bytes = std::mem::size_of::<ExactSeriesKey>()
+        + SERIES_KEY_PREFIX_LEN
+        + block.key.length as usize
+        + BUFFER_ALIGNMENT;
     let bytes = 2 * gap_bytes as usize
         + columns
             .iter()

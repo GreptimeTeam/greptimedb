@@ -36,7 +36,9 @@ use crate::error::{ComputeArrowSnafu, Result, SerdeJsonSnafu};
 use crate::series_index::artifact::{ArtifactFormat, ArtifactMetadata, ArtifactObject};
 use crate::series_index::artifact_writer::Outputs;
 use crate::series_index::format::FormatWriter;
-use crate::series_index::identity::{ExactSeriesKey, IdentityEncoding, decode_series_id};
+use crate::series_index::identity::{
+    ExactSeriesKey, IdentityEncoding, decode_series_id, series_key_suffix,
+};
 use crate::series_index::samples::histogram::ChunkBound;
 use crate::series_index::samples::metadata::{
     self, Block, Column, KeyRef, Page, PageReference, Trailer, pack,
@@ -499,9 +501,11 @@ impl SamplesWriter {
         // here and the writer starts the next block's values empty.
         let (mut columns, chunks) = encode_block(&rows, fields, key.id(), &self.manifest)?;
         let ordinal = self.ordinal;
-        // Bytes one copy of this series' key costs in a part's key area: the key and its stored
-        // checksum.
-        let key_len = key.bytes().len() as u64 + metadata::KEY_CHECKSUM_BYTES;
+        // Bytes one copy of this series' key costs in a part's key area: the stored suffix and
+        // its stored checksum. Splitting here also refuses a key whose prefix disagrees with the
+        // identifier it is about to be stored under, before any of its bytes are written.
+        let key_len =
+            series_key_suffix(key.bytes(), key.id())?.len() as u64 + metadata::KEY_CHECKSUM_BYTES;
         self.ordinal = ordinal
             .checked_add(1)
             .ok_or_else(|| invalid("sample ordinal overflow"))?;
@@ -590,20 +594,25 @@ impl SamplesWriter {
     /// series therefore reuse the same [`KeyRef`], while every new series appends its bytes after
     /// the previous copy, exactly as a per-block key comparison would: references are ordered,
     /// disjoint, and unique per series, which is what lets a reader treat an equal reference as
-    /// the same series without reading the bytes. Each copy is followed by its XXH64, which the
-    /// reference does not count: a reader verifies the bytes before they can name a series.
+    /// the same series without reading the bytes.
+    ///
+    /// Each copy holds the key's bytes after its fixed `(table_id, tsid)` prefix, which the block
+    /// descriptor already carries, and is followed by the XXH64 of the *whole* key. The reference
+    /// counts the stored suffix only; a series whose key is the prefix alone stores no key bytes
+    /// and is referenced with length zero.
     async fn write_key_area(&mut self, keys: &[ExactSeriesKey]) -> Result<Vec<KeyRef>> {
         let mut references = Vec::with_capacity(keys.len());
         for key in keys {
-            let length = u32::try_from(key.bytes().len())
+            // The descriptor rebuilds this series' prefix from its identifier, so the stored bytes
+            // must really follow that prefix: a key that does not is refused, never truncated.
+            let suffix = series_key_suffix(key.bytes(), key.id())?;
+            let length = u32::try_from(suffix.len())
                 .map_err(|_| invalid("sample series key exceeds 4 GiB"))?;
             references.push(KeyRef {
                 offset: self.position,
                 length,
             });
-            self.output_buffer
-                .write(&mut self.outputs, key.bytes())
-                .await?;
+            self.output_buffer.write(&mut self.outputs, suffix).await?;
             self.output_buffer
                 .write(
                     &mut self.outputs,
@@ -876,6 +885,7 @@ mod tests {
     use store_api::codec::PrimaryKeyEncoding;
 
     use super::*;
+    use crate::series_index::identity::SERIES_KEY_PREFIX_LEN;
     use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
 
     fn outputs() -> Outputs {
@@ -1278,6 +1288,93 @@ mod tests {
             container_bytes / blocks,
             part_keys as f64 / blocks as f64,
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Key-area and total bytes for the shape the key area dominates: 10M series, one row each.
+    ///
+    /// The part limits are lifted so the only boundary is the root page's child capacity, which
+    /// keeps the shape independent of the options: every part holds one key-area copy per series
+    /// and nothing else, and the sums below are the artifact's. The stored copy is the key without
+    /// its fixed `(table_id, tsid)` prefix, which the block descriptor already carries as the
+    /// block's identifier, so the line prints both the stored suffix length and the whole key
+    /// length: a part written by the whole-key layout keeps `22` more bytes per series, and that
+    /// difference times `series` is exactly what the suffix layout saves.
+    ///
+    /// Run with `--ignored --nocapture`; it prints one `key=value` line.
+    #[allow(clippy::print_stdout)] // The sizes exist to be read off stdout.
+    #[tokio::test]
+    #[ignore]
+    async fn benchmark_key_area_suffix() {
+        common_telemetry::init_default_ut_logging();
+        const SERIES: usize = 10_000_000;
+        const SERIES_PER_BATCH: usize = 1000;
+        let metadata = metadata();
+        // Column limits roll the part instead of the byte target, so the shape does not depend on
+        // the packing options: no boundary comes from `part_bytes` or `metadata_bytes`.
+        let options = ColumnarSamplesFormat {
+            block_rows: 1,
+            part_bytes: u64::MAX,
+            metadata_bytes: usize::MAX,
+            ..Default::default()
+        };
+        let (store, root) = fs_store("key-area");
+        let mut writer = SamplesWriter::new(
+            options,
+            metadata.clone(),
+            store.clone(),
+            "bench/",
+            FileId::random(),
+            FileId::random(),
+        )
+        .unwrap();
+        let key_len = new_sparse_primary_key(&["a", "b"], &metadata, 1, 0).len();
+        let started = std::time::Instant::now();
+        let mut written = 0;
+        while written < SERIES {
+            let count = SERIES_PER_BATCH.min(SERIES - written);
+            let keys: Vec<_> = (written..written + count)
+                .map(|series| new_sparse_primary_key(&["a", "b"], &metadata, 1, series as u64))
+                .collect();
+            let times: Vec<_> = (written..written + count).map(|row| row as i64).collect();
+            writer
+                .write(&sparse_batch(&metadata, &keys, &times))
+                .await
+                .unwrap();
+            written += count;
+        }
+        writer.flush_block().await.unwrap();
+        let artifact = writer.complete().await.unwrap();
+        let elapsed = started.elapsed();
+        let mut key_area = 0u64;
+        let mut part_bytes = 0u64;
+        for part in &writer.manifest.files {
+            part_bytes += part.file_size;
+            // The trailer records where the key area starts and ends; the rest of the part is
+            // payload and pages, which the suffix layout does not change.
+            let tail = store
+                .read_with(&writer.manifest.part_path(part.part_id))
+                .range(part.file_size - metadata::TRAILER_SIZE..part.file_size)
+                .await
+                .unwrap()
+                .to_bytes();
+            let trailer = Trailer::decode(&tail, part.file_size).unwrap();
+            key_area += trailer.key_end - trailer.payload_end;
+        }
+        let series = writer
+            .manifest
+            .files
+            .iter()
+            .map(|part| part.num_rows)
+            .sum::<u64>();
+        println!(
+            "series={series} key_len={key_len} suffix_len={} key_area_bytes={key_area} \
+             part_bytes={part_bytes} artifact_bytes={} parts={} elapsed={elapsed:?}",
+            key_len - SERIES_KEY_PREFIX_LEN,
+            artifact.file_size,
+            writer.manifest.files.len(),
+        );
+        assert_eq!(SERIES as u64, series, "every series is written");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -26,7 +26,11 @@ discriminator, not by a version bump.
 
 Every block names the exact series identity (the canonical sparse primary key), which
 the part stores once per series in its [key area](#key-area), followed by that copy's
-checksum.
+checksum. The copy holds only the bytes after the key's fixed 22-byte
+`(table_id, tsid)` prefix: every block descriptor already carries that prefix as its
+identifier, and the sparse key codec rebuilds it exactly, so the stored identity is
+the whole key even though the prefix is written once per block rather than once per
+key copy.
 An artifact written before exact identity has the same version number and recorded
 only `(table_id, tsid)`, a hash; it can be structurally valid and perfectly ordered
 while two distinct series were merged. Nothing in such an artifact proves
@@ -35,8 +39,10 @@ rejected, and its artifact rebuilt from SSTs; there is no dual reader. The same
 applies to an artifact of the earlier layout of this format, whose keys sat inside
 the block descriptors: its `identity_encoding` value is the older
 `exact-sparse-key`, so it is refused when the manifest is opened rather than when a
-part is first read. It shares artifact conventions with
-[Narthex series-index format](mito-series.md).
+part is first read. The earlier key-area layout, `exact-sparse-key-area`, kept the
+whole key in each copy and is still readable: the layout a manifest names tells the
+reader whether to rebuild the prefix, and both decode to the same identity. It shares
+artifact conventions with [Narthex series-index format](mito-series.md).
 
 Samples store nullable Float64 and native histogram fields, timestamps, sequences,
 and operation types in single-series blocks bounded by rows and decoded bytes.
@@ -85,7 +91,7 @@ generation is unique for each build. A manifest contains:
 | --- | --- |
 | `format` | String `columnar-samples` |
 | `version` | Integer 1 |
-| `identity_encoding` | String `exact-sparse-key-area`; required, never defaulted. It names the identity *and* the layout that stores it, so `exact-sparse-key` (keys inline in the block descriptors) is different and not readable |
+| `identity_encoding` | String `exact-sparse-key-area-suffix`; required, never defaulted. It names the identity *and* the layout that stores it, so `exact-sparse-key` (keys inline in the block descriptors) is different and not readable. `exact-sparse-key-area` (whole keys in the key area) is the previous layout of this format and is still readable; `exact-sparse-key-area-suffix` is the only layout written |
 | `region_id` | Physical region ID, u64 |
 | `source_file_id` | Artifact owner ID matching `SamplesEntry.file_id`; the SST ID for legacy artifacts, or the generation ID for daily artifacts |
 | `generation` | `FileId` matching the catalog artifact generation |
@@ -260,30 +266,43 @@ series of the part, ordered by exact key. A descriptor's key reference is unique
 series, ordered, and disjoint from every other series' copy, which is why an equal
 reference means "the same exact series" without reading the bytes.
 
+Each copy stores the key **without** its fixed 22-byte `(table_id, tsid)` prefix,
+which is the codec's encoding of the two reserved columns. A block descriptor already
+carries that prefix as its table ID and TSID fields, and the committed sparse key
+encoding fixes it, so the reader rebuilds it from the descriptor's identifier and
+nothing else is lost. The stored bytes are therefore the encoded label sequence, which
+is empty for a series whose labels are all null; that series' reference length is zero
+and its reconstructed key is the prefix alone.
+
 A key's length is bounded by the part, not by a page or a chunk. Version 1 puts no
 page inside the key area, so one key may be far longer than the 65,536-byte page
 limit; the `u32` length in a descriptor is validated against `key_end`, so a
 corrupt length can never address bytes outside the part.
 
-Each copy is `[key bytes][checksum]`, where the checksum is the u64 XXH64 of those
-key bytes with seed zero, stored little-endian. A reference's `length` counts the key
-bytes only, so the checksum is always the eight bytes after `offset + length` and is
-never part of what the reference names. There is no per-key compression and no other
-framing: the key bytes between them are stored exactly as the SST encodes them, and
-their own primary-key framing (a fixed reserved prefix plus dense or sparse label
-encoding) is what decodes them. The checksum is what protects them. A key previously
-sat inside a metadata page, whose stored bytes the page reference already checksummed;
-without a per-key checksum, flipping one label byte would keep the framing and the
+Each copy is `[stored key bytes][checksum]`, where the stored bytes are the key's bytes
+after the reserved prefix and the checksum is the u64 XXH64, seed zero, of the
+**whole reconstructed key** - the descriptor's prefix followed by the stored bytes -
+stored little-endian. A reference's `length` counts the stored bytes only, may be
+zero, and the checksum is always the eight bytes after `offset + length`, never part
+of what the reference names. There is no per-key compression and no other framing: the
+stored bytes are a contiguous slice of the key the SST encodes, and the sparse
+primary-key framing (a fixed reserved prefix plus label encoding) decodes the
+reconstruction. The checksum is what protects them. A key previously sat inside a
+metadata page, whose stored bytes the page reference already checksummed; without a
+per-key checksum, flipping one label byte would keep the framing and the
 `(table_id, tsid)` prefix valid and silently attribute the block's rows to another
-series.
+series. Covering the whole key rather than the stored bytes alone also binds a stored
+copy to the identifier of the descriptor that references it.
 
 Reading stays lazy. A reader reads only the byte ranges of the keys of the blocks a
-request selects, at most once per series, and validates a fetched key's checksum, its
-framing, and its `(table_id, tsid)` prefix against the descriptor that referenced it. A
-reference is rejected as soon as its descriptor is decoded — before any row is emitted
-— when it starts before `payload_end`, when `offset + length + 8` exceeds `key_end`,
-when the length is zero, or when two consecutive descriptors of one part that do not
-name one series overlap.
+request selects, at most once per series, reconstructs each key from the referencing
+descriptor's identifier, and validates the checksum over the reconstruction, its
+framing, and its `(table_id, tsid)` prefix against that identifier. A reference is
+rejected as soon as its descriptor is decoded — before any row is emitted — when it
+starts before `payload_end`, when `offset + length + 8` exceeds `key_end`, or when two
+consecutive descriptors of one part that do not name one series overlap. A zero length
+is a real series, not a corrupt descriptor: it is the series whose key is the reserved
+prefix alone.
 
 A key reference is an offset into one part's key area, so the references of two parts
 are unrelated numbers and are never compared. Whether one exact series continues in
@@ -334,7 +353,7 @@ descriptors only: it no longer bounds the length of a series key.
 | Table ID | 4 | Coarse prefix of the constant key in this block |
 | TSID | 8 | Coarse prefix of the constant key in this block |
 | Key offset | 8 | Absolute offset of the block's exact key in the part's key area |
-| Key length | 4 | Nonzero; the key's `(table_id, tsid)` prefix must equal the two fields above |
+| Key length | 4 | Stored suffix length; zero for a series with no labels. The key's `(table_id, tsid)` prefix is rebuilt from the two fields above |
 | Minimum timestamp | 8 | Signed i64, first row's timestamp |
 | Maximum timestamp | 8 | Signed i64, last row's timestamp |
 | Block ordinal | 8 | Per-identifier ordinal across the artifact |
@@ -619,8 +638,9 @@ field values.
 An individual chunk has at most 1 MiB of encoded bytes after decompression and
 1 MiB plus 64 KiB of stored bytes. Pages have at most 65,536 decoded and 131,072
 stored bytes. Series keys are stored in the key area rather than in a page or a
-chunk, so a key's length is bounded by the part and by its `u32` reference length,
-not by `PAGE_LIMIT`; a key longer than a page is a supported part of this version. Bound sizes before allocating, fetching, or decompressing. Validate
+chunk, so a key's length is bounded by the part and by its `u32` reference length
+(which counts only the stored suffix), not by `PAGE_LIMIT`; a key longer than a page
+is a supported part of this version. Bound sizes before allocating, fetching, or decompressing. Validate
 counts against enclosing bytes before allocating descriptor vectors; row counts
 must also satisfy the decoded-block formula. Null output materialization remains
 subject to the same block bound even when chunks are omitted.
@@ -658,8 +678,8 @@ the SSTs before regions open, and ordinary SST reads remain available meanwhile.
 That is the only cache migration this layout has. An artifact written by an earlier
 build of this branch — keys inside the block descriptors, a key area without stored
 checksums, a 112-byte trailer without `key_end` — carries a different
-`identity_encoding` value, `exact-sparse-key` instead of `exact-sparse-key-area`, so
-it is refused when its manifest is opened. Maintenance treats that refusal as "not
+`identity_encoding` value, `exact-sparse-key` instead of a key-area layout, so it is
+refused when its manifest is opened. Maintenance treats that refusal as "not
 reusable" and rebuilds the artifact, so an old artifact is never marked reusable and
 then fails on the first part read. A part reached without that check would also be
 rejected: the reader locates a trailer from the recorded object size, reads the last

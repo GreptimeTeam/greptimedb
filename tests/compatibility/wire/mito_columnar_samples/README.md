@@ -50,6 +50,54 @@ when the approved format changes. This is a frozen-byte compatibility check,
 not a cross-binary upgrade/downgrade test. Older binaries are not promised to
 understand the new opt-in `columnar-samples` catalog identifier.
 
+## Mito columnar samples version 1 with the suffix key area
+
+`suffix-v1-manifest.json` and `suffix-v1-part.hex` freeze the suffix key area at manifest
+version 1, the shape this format writes while it needs no compact internal page, and they are
+exercised by the owning Mito Rust test:
+
+```shell
+cargo nextest run -p mito2 frozen_suffix_samples_fixture_is_readable
+```
+
+The part is 1,115 bytes: two leaves under one depth-two root, three one-row
+blocks, and a 54-byte key area. Its manifest names
+`identity_encoding: exact-sparse-key-area-suffix`.
+
+| Block | `(table_id, tsid)` | Labels | Rows | Stored key area entry |
+| --- | --- | --- | --- | --- |
+| 0 | 7, 42 | `tag_0="a"` | 100 ms, put, 1.5 | 15 suffix bytes + checksum |
+| 1 | 7, 42 | `tag_0="b"` | 200 ms, delete, 2.5 | 15 suffix bytes + checksum |
+| 2 | 7, 43 | none | 300 ms, put, null | checksum only (length 0) |
+
+| Range | Content |
+| --- | --- |
+| 0..16 | Header |
+| 16..84 | Column payloads of blocks 0 and 1, raw |
+| 84..109 | Column payloads of block 2, raw (no field column) |
+| 109..163 | Key area: three stored suffixes, each with its XXH64 |
+| 163..639 | Leaf 0: blocks 0 and 1 |
+| 639..839 | Leaf 1: block 2 |
+| 839..995 | Root: two leaf references |
+| 995..1115 | Trailer (120 bytes) with depth 2 and both area ends |
+
+Blocks 0 and 1 share one `(table_id, tsid)` and differ only in their labels, so a
+reader that reconstructs keys from the descriptor's identifier returns two distinct
+series rather than one merged series. Block 2's key is the reserved prefix alone,
+which is the empty-suffix case: its reference length is zero and its stored entry is
+only the checksum of the reconstructed key.
+
+The part was assembled independently of the Rust writer, from the wire
+specification in [`mito-samples.md`](../../../../docs/formats/mito-samples.md), using
+explicit little-endian fields, the sparse key encoding, and XXH64 with seed zero. Do
+not regenerate it to make a reader change pass: it exists to prove that a third
+implementation of this version can read what this build writes.
+
+The older whole-key key area is covered by
+`series_index::samples::tests::keys::whole_key_area_artifact_is_still_readable`, which
+rewrites a written artifact into that layout; the version-1 fixture above stays a
+rejection test.
+
 `legacy-catalog-entry.json` and `daily-catalog-entry.json` freeze the optional
 source-coverage extension, exercised by `frozen_sample_catalog_coverage`. Empty
 object lists isolate catalog decoding; the existing part fixture tests actual
