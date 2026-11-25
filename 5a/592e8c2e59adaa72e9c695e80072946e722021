@@ -1,0 +1,21 @@
+src/metric-engine/src/engine/sync/region.rs
+  s_c311425adc0214::t_02d2be5ee6612c 27,62-63,220-245
+src/metric-engine/src/error.rs
+  s_c311425adc0214::t_e7c6d73e44820b 152-159,499,539
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5a592e8c2e59adaa72e9c695e80072946e722021",
+  "prompts": {},
+  "sessions": {
+    "s_c311425adc0214": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1f2e1-9b9d-7ba2-a9ef-a23895482316",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}

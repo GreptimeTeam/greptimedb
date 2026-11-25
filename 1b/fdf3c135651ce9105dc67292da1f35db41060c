@@ -1,0 +1,26 @@
+src/partition/src/manager.rs
+  s_17057bba187655::t_ddbceb71dd7a34 81-85
+src/cache/src/lib.rs
+  s_17057bba187655::t_4b3244f82f5664 38-67,89,96,103,110,117,124,132,166,174,182,190,198,202,210,219,248,256,270-275,287-299
+  s_17057bba187655::t_27b5e3af35b4b6 276-286
+src/cache/Cargo.toml
+  s_17057bba187655::t_4b3244f82f5664 12
+Cargo.lock
+  s_17057bba187655::t_2d60ed7e98b1a2 1635
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1bfdf3c135651ce9105dc67292da1f35db41060c",
+  "prompts": {},
+  "sessions": {
+    "s_17057bba187655": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c56d-fbcd-75c2-86d2-c4b3f17c03dc",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
