@@ -2129,19 +2129,137 @@ mod tests {
             "with one cursor value the rows are exactly the rows above the region floor"
         );
 
-        // A series no candidate expression selects is bounded by the least advanced cursor
-        // of the set (2), not by the most advanced one (5), so its live row is not dropped.
-        assert_eq!(
-            vec![(0, 3), (1, 4), (2, 6)],
-            read(vec![
+        // A series no candidate expression selects cannot be attributed to a piece while the
+        // candidates disagree: bounding it by the least advanced cursor (2) would deliver the
+        // rows the piece at 5 already consumed, so the read fails instead of replaying them.
+        let options = RangesOptions::default()
+            .with_sequence(Some(SequenceRange::GtLtEq { min: 2, max: 100 }))
+            .with_creator_slices(Some(Arc::new(vec![
                 (col("k0").lt(Operand::Value(Value::String("a".into()))), 5),
                 (
                     col("k0").gt_eq(Operand::Value(Value::String("z".into()))),
-                    2
+                    2,
                 ),
-            ]),
-            "a row no slice explains is attributed to the least advanced candidate, which \
-             delivers every row above the region floor"
+            ])));
+        let mut iter = memtable.ranges(None, options).unwrap().build(None).unwrap();
+        let err = iter
+            .find_map(|batch| batch.err())
+            .expect("a row no candidate explains fails the read while the cursors disagree");
+        assert!(
+            err.to_string().contains("cannot be resolved while the pieces"),
+            "the failure names the unresolved piece: {err}"
+        );
+    }
+
+    /// A batch whose piece cannot be resolved is bounded by the least advanced cursor only
+    /// while every candidate carries it. With several cursor values that floor re-delivers
+    /// the rows a more advanced piece has already consumed — a duplicate, not a replay — so
+    /// the read fails instead of degrading silently.
+    ///
+    /// The piece is unresolvable here because the slice expressions reference `v0`, a *field*
+    /// column: a memtable batch states the tags of its series only, so the probe batch of the
+    /// piece cannot be built.
+    #[test]
+    fn test_memtable_fails_closed_when_slices_disagree_and_piece_is_unresolved() {
+        use partition::expr::{Operand, col};
+
+        let schema = schema_for_test();
+        let memtable = TimeSeriesMemtable::new(schema.clone(), 1, None, false, MergeMode::LastRow);
+
+        let column_schema = schema
+            .column_metadatas
+            .iter()
+            .map(|c| api::v1::ColumnSchema {
+                column_name: c.column_schema.name.clone(),
+                datatype: ColumnDataTypeWrapper::try_from(c.column_schema.data_type.clone())
+                    .unwrap()
+                    .datatype() as i32,
+                semantic_type: c.semantic_type as i32,
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        // Rows 3 and 4 belong to the series `a`, row 6 to the series `z`.
+        for (k0, ts, sequence) in [("a", 0, 3), ("a", 1, 4), ("z", 2, 6)] {
+            let mutation = Mutation {
+                op_type: 1,
+                sequence,
+                rows: Some(Rows {
+                    schema: column_schema.clone(),
+                    rows: vec![row(vec![
+                        ValueData::StringValue(k0.to_string()),
+                        ValueData::I64Value(0),
+                        ValueData::TimestampMillisecondValue(ts),
+                        ValueData::I64Value(ts),
+                        ValueData::F64Value(0.0),
+                    ])],
+                }),
+                write_hint: None,
+            };
+            memtable
+                .write(&KeyValues::new(schema.as_ref(), mutation).unwrap())
+                .unwrap();
+        }
+
+        // Two candidate pieces over a column the batch states no value for.
+        let slices = |left: u64, right: u64| {
+            vec![
+                (col("v0").gt_eq(Operand::Value(Value::Int64(0))), left),
+                (col("v0").lt(Operand::Value(Value::Int64(0))), right),
+            ]
+        };
+        let options = |pieces| {
+            RangesOptions::default()
+                .with_sequence(Some(SequenceRange::GtLtEq { min: 2, max: 100 }))
+                .with_creator_slices(Some(Arc::new(pieces)))
+        };
+
+        // Cursors 5 and 2: the least advanced one (2) would deliver the rows 3 and 4 again,
+        // which the piece consumed up to 5 already consumed.
+        let mut iter = memtable
+            .ranges(None, options(slices(5, 2)))
+            .unwrap()
+            .build(None)
+            .unwrap();
+        let err = match iter.next() {
+            Some(Err(err)) => err,
+            Some(Ok(_)) => panic!("an unresolvable piece with disagreeing cursors must fail"),
+            None => panic!("the read must fail instead of yielding no batch at all"),
+        };
+        let message = format!("{err}");
+        assert!(
+            message.contains("exact sequence range unavailable"),
+            "the shared exact-range contract prefix must reach the caller: {message}"
+        );
+        assert!(
+            message.contains("cannot be resolved while the pieces"),
+            "the failure must say that the pieces disagree: {message}"
+        );
+
+        // Both cursors 2: one cursor value for every piece is the region floor, so the batch
+        // is bounded by it without any evaluation of its own and the rows above 2 are
+        // delivered exactly as before.
+        let mut iter = memtable
+            .ranges(None, options(slices(2, 2)))
+            .unwrap()
+            .build(None)
+            .unwrap();
+        let mut rows = Vec::new();
+        for batch in iter.by_ref() {
+            let batch = batch.unwrap();
+            let timestamps = batch.timestamps().to_arrow_array();
+            let timestamps = timestamps
+                .as_any()
+                .downcast_ref::<datatypes::arrow::array::TimestampMillisecondArray>()
+                .unwrap();
+            for (idx, sequence) in batch.sequences().iter_data().enumerate() {
+                rows.push((timestamps.value(idx), sequence.unwrap()));
+            }
+        }
+        rows.sort_unstable();
+        assert_eq!(
+            vec![(0, 3), (1, 4), (2, 6)],
+            rows,
+            "one cursor value for every piece keeps the batch-level floor of the whole region"
         );
     }
 

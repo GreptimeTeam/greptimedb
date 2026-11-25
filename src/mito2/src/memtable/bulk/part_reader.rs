@@ -33,7 +33,7 @@ use store_api::storage::{ColumnId, SequenceNumber, SequenceRange};
 
 use crate::error::{
     self, ComputeArrowSnafu, DecodeArrowRowGroupSnafu, EvalPartitionFilterSnafu,
-    SerializePartitionExprSnafu, UnexpectedSnafu,
+    SequenceRangeUnsupportedSnafu, SerializePartitionExprSnafu, UnexpectedSnafu,
 };
 use crate::memtable::bulk::context::{BulkIterContext, BulkIterContextRef};
 use crate::memtable::bulk::part::EncodedBulkPart;
@@ -532,11 +532,11 @@ fn and_mask(current: Option<BooleanArray>, next: BooleanArray) -> error::Result<
 /// memtable counterpart of the per-row slice selection a physical-sequence read of an SST
 /// applies (`FileRangeContext::evaluate_creator_slices`).
 ///
-/// A row no candidate selects is bounded by the **least** advanced cursor of the set, which
-/// is the floor of the whole region: re-reading a consumed row is recoverable, dropping a
-/// live one is not. The same bound applies when the expressions cannot be resolved,
-/// planned or evaluated, and when several candidates select one row the least advanced of
-/// them decides.
+/// A row whose piece cannot be decided is answered by [`unresolved_creator_slices`]: the
+/// least advanced cursor is exact while every candidate carries it, and the read fails
+/// otherwise. That covers a row no candidate selects and an expression that cannot be
+/// resolved, planned or evaluated. When several candidates select one row the least advanced
+/// of them decides.
 ///
 /// `None` or an empty set applies no filter, and so does a set whose cursors all carry one
 /// value: that value is the region-level floor the read already states.
@@ -572,12 +572,14 @@ fn creator_slice_mask(
     let selected = match creator_slice_selection(context, slices, record_batch) {
         Ok(selected) => selected,
         Err(e) => {
-            // Deciding a row's piece by guesswork would drop rows: keep the floor.
-            debug!(
-                "Cannot resolve the creator cursor slices of a bulk part, bounding every row by {}: {}",
-                fallback, e
+            // Deciding a row's piece by guesswork would drop rows, and the least advanced
+            // cursor only answers for the pieces that carry it.
+            return unresolved_creator_slices(
+                context,
+                slices,
+                fallback_mask,
+                &format!("the slice expressions cannot be resolved: {e}"),
             );
-            return Ok(Some(fallback_mask));
         }
     };
     // Per candidate, the rows whose own sequence is above its cursor.
@@ -613,12 +615,66 @@ fn creator_slice_mask(
     }
     if unmatched > 0 {
         debug!(
-            "{} of {} rows of a bulk part match no creator cursor slice; bounding them by the least advanced cursor {}",
+            "{} of {} rows of a bulk part match no creator cursor slice (least advanced cursor {})",
             unmatched, num_rows, fallback
+        );
+        return unresolved_creator_slices(
+            context,
+            slices,
+            fallback_mask,
+            &format!(
+                "{unmatched} of {num_rows} rows of the part match no candidate expression, so \
+                 the piece they belong to cannot be resolved"
+            ),
         );
     }
 
     Ok(Some(BooleanArray::from(kept.finish())))
+}
+
+/// The mask of rows an unresolvable piece of a bulk part is bounded by, or a failure when the
+/// candidate cursors disagree.
+///
+/// This is the one rule for every row of a bulk part whose piece cannot be resolved — no
+/// candidate expression selects it, or one cannot be resolved, planned or evaluated. When the
+/// candidates all carry the **same** cursor value, that value is the least advanced one and
+/// the mask is exact: it keeps exactly the rows the per-row rule keeps, so the fallback stays,
+/// silently and without any evaluation of its own. When they carry several values, the least
+/// advanced one keeps the rows a more advanced piece has already consumed: that is a
+/// **duplicate**, not a replay, and an exact read must not degrade that way without saying so.
+/// The bounds the error reports are the cursors' own span, which is the disagreement the read
+/// cannot resolve.
+fn unresolved_creator_slices(
+    context: &BulkIterContext,
+    slices: &[(PartitionExpr, SequenceNumber)],
+    fallback_mask: BooleanArray,
+    detail: &str,
+) -> error::Result<Option<BooleanArray>> {
+    let Some(min) = slices.iter().map(|(_, cursor)| *cursor).min() else {
+        return Ok(Some(fallback_mask));
+    };
+    let max = slices
+        .iter()
+        .map(|(_, cursor)| *cursor)
+        .max()
+        .unwrap_or(min);
+    if min == max {
+        return Ok(Some(fallback_mask));
+    }
+    let region_id = context.read_format().metadata().region_id;
+    SequenceRangeUnsupportedSnafu {
+        region_id,
+        min_seq: min,
+        max_seq: max,
+        reason: format!(
+            "the per-piece cursor of a bulk memtable part of region {} cannot be resolved while \
+             the pieces of the region disagree on the last consumed sequence ({}..={}): bounding \
+             every row by the least advanced cursor {} would deliver the rows a more advanced \
+             piece has already consumed. {}",
+            region_id, min, max, min, detail
+        ),
+    }
+    .fail()
 }
 
 /// Evaluates the candidate creator cursor slice expressions against the tag columns of
@@ -1064,5 +1120,157 @@ mod tests {
         // Existing valid Arrow batches retain their boundaries even when the merge hint is lower.
         let result: Vec<_> = iter.map(|rb| rb.unwrap()).collect();
         assert_eq!(expect_batches, result);
+    }
+
+    /// A bulk part resolves the piece of every row from its own tag columns, so a slice
+    /// expression over a column the part neither carries nor encodes in its primary key
+    /// cannot be evaluated. Bounding the part by the least advanced cursor is exact only while
+    /// every candidate carries it: with several cursor values it re-delivers the rows a more
+    /// advanced piece has already consumed, so the read fails instead.
+    #[test]
+    fn test_bulk_part_fails_closed_when_slices_disagree_and_probe_is_unresolved() {
+        use datatypes::value::Value;
+        use partition::expr::Operand;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("key1", DataType::Utf8, false),
+            Field::new("field1", DataType::Int64, false),
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(datatypes::arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(
+                "__primary_key",
+                DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Binary)),
+                false,
+            ),
+            Field::new("__sequence", DataType::UInt64, false),
+            Field::new("__op_type", DataType::UInt8, false),
+        ]));
+
+        // Three rows of two series, numbered 3, 4 and 6.
+        let keys = ["key1", "key1", "key2"];
+        let key1 = Arc::new(StringArray::from_iter_values(keys));
+        let field1 = Arc::new(Int64Array::from(vec![0, 0, 0]));
+        let timestamp = Arc::new(datatypes::arrow::array::TimestampMillisecondArray::from(
+            vec![0, 1000, 2000],
+        ));
+        let values = Arc::new(BinaryArray::from_iter_values(
+            keys.iter().map(|key| new_primary_key(&[*key])),
+        ));
+        let primary_key = Arc::new(DictionaryArray::new(
+            UInt32Array::from(vec![0, 0, 1]),
+            values,
+        ));
+        let sequence = Arc::new(UInt64Array::from(vec![3, 4, 6]));
+        let op_type = Arc::new(UInt8Array::from(vec![1, 1, 1]));
+        let record_batch = RecordBatch::try_new(
+            schema,
+            vec![key1, field1, timestamp, primary_key, sequence, op_type],
+        )
+        .unwrap();
+
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "key1",
+                    ConcreteDataType::string_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 0,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "field1",
+                    ConcreteDataType::int64_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "timestamp",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 2,
+            })
+            .primary_key(vec![0]);
+        // The projection drops `field1`, so the batch carries no value of it, and it is not a
+        // primary-key column either: the probe of a slice over it cannot be built.
+        let context = Arc::new(
+            BulkIterContext::new(
+                Arc::new(builder.build().unwrap()),
+                Some(&[0, 2]),
+                None,
+                false,
+                crate::sst::parquet::DEFAULT_READ_BATCH_SIZE,
+            )
+            .unwrap(),
+        );
+
+        // Two candidate pieces over the column the part cannot state.
+        let slices = |left: u64, right: u64| {
+            let slices = vec![
+                (
+                    partition::expr::col("field1").gt_eq(Operand::Value(Value::Int64(0))),
+                    left,
+                ),
+                (
+                    partition::expr::col("field1").lt(Operand::Value(Value::Int64(0))),
+                    right,
+                ),
+            ];
+            Some(Arc::new(slices))
+        };
+        let sequence_filter = Some(SequenceRange::GtLtEq { min: 2, max: 100 });
+
+        // Cursors 5 and 2: the least advanced one (2) would deliver the rows 3 and 4 the piece
+        // consumed up to 5 has already consumed.
+        let mut iter = BulkPartBatchIter::from_single(
+            record_batch.clone(),
+            context.clone(),
+            sequence_filter,
+            0,
+            None,
+        )
+        .with_creator_slices(slices(5, 2));
+        let err = match iter.next() {
+            Some(Err(err)) => err,
+            Some(Ok(_)) => panic!("an unresolvable piece with disagreeing cursors must fail"),
+            None => panic!("the read must fail instead of yielding no batch at all"),
+        };
+        let message = format!("{err}");
+        assert!(
+            message.contains("exact sequence range unavailable"),
+            "the shared exact-range contract prefix must reach the caller: {message}"
+        );
+        assert!(
+            message.contains("cannot be resolved while the pieces"),
+            "the failure must say that the pieces disagree: {message}"
+        );
+
+        // Both cursors 2: one cursor value for every piece is the region floor, so every row
+        // above it is delivered without any evaluation of the expressions, exactly as before.
+        let iter =
+            BulkPartBatchIter::from_single(record_batch.clone(), context, sequence_filter, 0, None)
+                .with_creator_slices(slices(2, 2));
+        let result: Vec<_> = iter.map(|rb| rb.unwrap()).collect();
+        assert_eq!(1, result.len());
+        let sequences = result[0]
+            .column(result[0].num_columns() - 2)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        assert_eq!(
+            vec![3, 4, 6],
+            sequences.values().to_vec(),
+            "one cursor value for every piece keeps the part-level floor of the whole region"
+        );
     }
 }

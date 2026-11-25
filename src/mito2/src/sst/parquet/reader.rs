@@ -49,7 +49,7 @@ use partition::expr::PartitionExpr;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::region_request::PathType;
-use store_api::storage::{ColumnId, FileId};
+use store_api::storage::{ColumnId, FileId, RegionId, SequenceNumber};
 use table::predicate::Predicate;
 
 use crate::cache::index::result_cache::PredicateKey;
@@ -59,7 +59,7 @@ use crate::cache::{
 };
 use crate::error::{
     InvalidPartitionExprSnafu, ParquetToArrowSchemaSnafu, ReadDataPartSnafu, Result,
-    SerializePartitionExprSnafu, UnexpectedSnafu,
+    SequenceRangeUnsupportedSnafu, SerializePartitionExprSnafu, UnexpectedSnafu,
 };
 use crate::metrics::{READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
 use crate::read::prune::FlatPruneReader;
@@ -784,6 +784,53 @@ impl ParquetReaderBuilder {
         Ok((region_partition_expr, is_same))
     }
 
+    /// Fails when the candidate creator cursor slices of `file` disagree on the last consumed
+    /// sequence, and succeeds when they all carry the same value.
+    ///
+    /// The one caller is the per-row rule of a physical-sequence read: an identity this build
+    /// cannot read back cannot be evaluated, and approximating it would decide a row's domain
+    /// by guesswork, so the file is left with its file-level bound — the least advanced
+    /// candidate. That floor is exact while every candidate carries it; once they differ, it
+    /// delivers the rows a more advanced piece has already consumed again, so the read fails
+    /// with [`SequenceRangeUnsupported`](crate::error::Error::SequenceRangeUnsupported)
+    /// instead of degrading an exact read into a duplicate.
+    ///
+    /// The bounds the error reports are the cursors' own span, which is the disagreement the
+    /// read cannot resolve.
+    fn reject_disagreeing_slice_cursors(
+        &self,
+        file: &FileHandle,
+        region_id: RegionId,
+        slice_cursors: &[(String, SequenceNumber)],
+    ) -> Result<()> {
+        let Some(min) = slice_cursors.iter().map(|(_, cursor)| *cursor).min() else {
+            return Ok(());
+        };
+        let max = slice_cursors
+            .iter()
+            .map(|(_, cursor)| *cursor)
+            .max()
+            .unwrap_or(min);
+        if min == max {
+            return Ok(());
+        }
+        let meta = file.meta_ref();
+        SequenceRangeUnsupportedSnafu {
+            region_id,
+            min_seq: min,
+            max_seq: max,
+            reason: format!(
+                "the physical-sequence read of file {} of region {} cannot resolve a per-piece \
+                 cursor: it cannot read back the partition expression of its candidate slice, \
+                 while the candidate slices of that region disagree on the last consumed \
+                 sequence ({}..={}), so bounding the file by the least advanced cursor {} would \
+                 deliver the rows a more advanced piece has already consumed",
+                meta.file_id, meta.region_id, min, max, min
+            ),
+        }
+        .fail()
+    }
+
     /// Builds the dependency-only schema for row-level partition evaluation.
     /// Its indices are independent of both Parquet and converted batch projections;
     /// precise filtering gathers these columns temporarily before compatibility.
@@ -835,12 +882,19 @@ impl ParquetReaderBuilder {
                 .context(InvalidPartitionExprSnafu { expr: identity })?
             else {
                 // An identity this build cannot read back cannot be evaluated, and
-                // approximating it would decide a row's domain by guesswork: leave the
-                // whole context out so the caller keeps the conservative file-level bound.
+                // approximating it would decide a row's domain by guesswork. Only an
+                // unresolvable piece leaves the file-level bound, and that bound is the least
+                // advanced candidate: exact while every candidate carries it, a duplicate of
+                // the rows a more advanced piece consumed otherwise.
                 debug!(
-                    "Cannot read back creator cursor slice expression {}; falling back to the file-level bound",
+                    "Cannot read back creator cursor slice expression {}; bounding the file by its least advanced candidate",
                     identity
                 );
+                self.reject_disagreeing_slice_cursors(
+                    &self.file_handle,
+                    read_format.metadata().region_id,
+                    slice_cursors,
+                )?;
                 return Ok(None);
             };
             expr.collect_column_names(&mut referenced_columns);

@@ -97,6 +97,11 @@ use crate::sst::parquet::file_range::{CreatorSliceCursors, PreFilterMode};
 use crate::sst::parquet::reader::ReaderMetrics;
 use crate::sst::primary_key::PrimaryKeyRangeMapper;
 
+/// The cursor of each piece a row of this region's own data may belong to, as the read
+/// compiles them: `(partition expression, last consumed sequence)` pairs
+/// (`RangesOptions::creator_slices`).
+type RegionCreatorSlices = Arc<Vec<(PartitionExpr, SequenceNumber)>>;
+
 /// A scanner scans a region and returns a [SendableRecordBatchStream].
 pub(crate) enum Scanner {
     /// Sequential scan.
@@ -106,7 +111,6 @@ pub(crate) enum Scanner {
     /// Per-series scan.
     Series(SeriesScan),
 }
-
 impl Scanner {
     /// Returns a [SendableRecordBatchStream] to retrieve scan results from all partitions.
     #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
@@ -580,42 +584,65 @@ impl ScanRegion {
     /// of the piece its tag values fall into instead of against the single floor of the
     /// region, which is only the least advanced piece.
     ///
-    /// `None` when there is no per-piece rule to state: the scan is not a physical-sequence
-    /// read, it may cross an invalid boundary (which applies no lower bound at all), the
-    /// region states one whole-domain cursor, or a stated expression cannot be read back.
-    /// The region-level floor then stays the whole rule.
-    fn memtable_creator_slices(&self) -> Option<Arc<Vec<(PartitionExpr, SequenceNumber)>>> {
+    /// `Ok(None)` when there is no per-piece rule to state: the scan is not a
+    /// physical-sequence read, it may cross an invalid boundary (which applies no lower bound
+    /// at all), the region states one whole-domain cursor, or a stated expression cannot be
+    /// read back. The last two keep the region-level floor only while the candidates agree on
+    /// it ([`reject_disagreeing_creator_cursors`]); otherwise the read fails closed
+    /// instead of delivering the rows of a more advanced piece again.
+    fn memtable_creator_slices(&self) -> Result<Option<RegionCreatorSlices>> {
         if !self.request.read_row_sequence || self.request.read_across_invalid_boundary {
-            return None;
+            return Ok(None);
         }
-        let shards = self
+        let Some(shards) = self
             .request
             .creator_cursor_shards
-            .as_ref()?
-            .get(&self.region_id().as_u64())?;
+            .as_ref()
+            .and_then(|shards| shards.get(&self.region_id().as_u64()))
+        else {
+            return Ok(None);
+        };
         let mut slices = Vec::with_capacity(shards.len());
         for shard in shards {
             let Some(identity) = shard.partition_expr.as_deref() else {
-                // A whole-domain cursor applies to every row of the region: the
-                // region-level floor is the exact rule and no evaluation is needed.
-                return None;
+                // A whole-domain cursor applies to every row of the region, so no slice
+                // expression can tell which piece a row belongs to: only the region-level
+                // floor is left, and it is the least advanced candidate.
+                reject_disagreeing_creator_cursors(
+                    self.region_id(),
+                    &format!("the memtable of region {}", self.region_id()),
+                    &shards.iter().collect::<Vec<_>>(),
+                    "one cursor slice of the region covers the whole value domain, so no row \
+                     of the memtable can be attributed to a piece",
+                )?;
+                return Ok(None);
             };
             let Ok(Some(expr)) = PartitionExpr::from_json_str(identity) else {
                 // An identity this build cannot read back cannot decide a row's piece;
-                // approximating it would be guesswork, so keep the conservative floor.
+                // approximating it would be guesswork, so only the region-level floor is left.
                 debug!(
                     "Cannot read back creator cursor slice expression {}; keeping the region-level floor",
                     identity
                 );
-                return None;
+                reject_disagreeing_creator_cursors(
+                    self.region_id(),
+                    &format!("the memtable of region {}", self.region_id()),
+                    &shards.iter().collect::<Vec<_>>(),
+                    &format!(
+                        "the slice expression {} cannot be read back by this build, so no row \
+                         of the memtable can be attributed to a piece",
+                        identity
+                    ),
+                )?;
+                return Ok(None);
             };
             slices.push((expr, shard.seq));
         }
         if slices.is_empty() {
-            return None;
+            return Ok(None);
         }
 
-        Some(Arc::new(slices))
+        Ok(Some(Arc::new(slices)))
     }
 
     /// Creates a scan input.
@@ -699,7 +726,7 @@ impl ScanRegion {
         };
         // The per-piece cursors of this region's own slices: they replace the single floor
         // `memtable_min_sequence` states (the least advanced piece) while the maximum stays.
-        let memtable_creator_slices = self.memtable_creator_slices();
+        let memtable_creator_slices = self.memtable_creator_slices()?;
 
         for m in memtables {
             // check if memtable is empty by reading stats.
@@ -2295,6 +2322,13 @@ impl ScanInput {
     /// same way — the candidates are then this region's own pieces — so that a row is
     /// compared against the cursor of the piece it belongs to rather than against one floor
     /// for the whole region.
+    ///
+    /// `Ok(None)` means the per-row rule cannot narrow the file's floor any further: no cursor
+    /// of the file's region is known, no candidate may hold a row of it, or one candidate
+    /// covers the whole value domain. The first two are "no cursor to resolve", and the last
+    /// one keeps the file-level floor only while the candidates agree on it
+    /// ([`reject_disagreeing_creator_cursors`]); otherwise an exact read fails closed
+    /// rather than re-delivering the rows a more advanced piece has already consumed.
     fn creator_slice_cursors(&self, file: &FileHandle) -> Result<Option<CreatorSliceCursors>> {
         if !self.read_row_sequence {
             return Ok(None);
@@ -2305,21 +2339,41 @@ impl ScanInput {
             .as_ref()
             .and_then(|shards| shards.get(&meta.region_id.as_u64()))
         else {
+            // No cursor of the file's creator region is known: there is no per-piece cursor
+            // to resolve (`row_sequence_filter` still fails an adopted file closed).
             return Ok(None);
         };
-        let mut cursors = Vec::new();
+        // The candidate set first. A whole-domain slice is a candidate of every file, so its
+        // own early return cannot stand in for the whole set: whether the *other* candidates
+        // carry its cursor is exactly what decides if the file-level floor is exact.
+        let mut candidates = Vec::with_capacity(shards.len());
         for shard in shards {
-            let Some(identity) = shard.partition_expr.as_ref() else {
-                // A whole-domain cursor applies to every row: the file-level bound is the
-                // most precise answer available.
-                return Ok(None);
-            };
             if cursor_slice_may_hold_file_rows(shard, meta)? {
-                cursors.push((identity.clone(), shard.seq));
+                candidates.push(shard);
             }
         }
-        if cursors.is_empty() {
+        if candidates.is_empty() {
+            // No slice may hold a row of the file, so no piece's cursor is attributable to one
+            // of its rows: there is nothing to decide, and the file keeps its current bound
+            // (`row_sequence_filter` still fails an adopted file closed).
             return Ok(None);
+        }
+        let mut cursors = Vec::with_capacity(candidates.len());
+        for shard in &candidates {
+            let Some(identity) = shard.partition_expr.as_ref() else {
+                // A whole-domain cursor applies to every row, so no slice expression can tell
+                // which piece a row belongs to: only the file-level floor is left, and it is
+                // the least advanced candidate.
+                reject_disagreeing_creator_cursors(
+                    self.region_metadata().region_id,
+                    &format!("file {} of region {}", meta.file_id, meta.region_id),
+                    &candidates,
+                    "one cursor slice of its region covers the whole value domain, so no row of \
+                     the file can be attributed to a piece",
+                )?;
+                return Ok(None);
+            };
+            cursors.push((identity.clone(), shard.seq));
         }
         Ok(Some(Arc::new(cursors)))
     }
@@ -2507,6 +2561,67 @@ fn pre_filter_mode(append_mode: bool, merge_mode: MergeMode) -> PreFilterMode {
         MergeMode::LastRow => PreFilterMode::SkipFields,
         MergeMode::LastNonNull => PreFilterMode::SkipFields,
     }
+}
+
+/// Fails when the candidate cursor slices of one region disagree on the last consumed
+/// sequence, and succeeds when they all carry the same value.
+///
+/// This is the one rule for every case in which the per-row rule of a physical-sequence read
+/// cannot be applied — a file of an adopted creator, this region's own memtable, or a
+/// memtable part. When the candidates all carry the **same** cursor value, that value is the
+/// least advanced one and the bound the fallback states is exact: it delivers exactly the rows
+/// the per-row rule delivers, so the fallback stays, silently and without any evaluation of
+/// its own. When they carry several values, the least advanced one re-delivers the rows of the
+/// slices a more advanced piece has already consumed: that is a **duplicate**, not a replay,
+/// and an exact read must not degrade that way without saying so, so the read fails with
+/// [`SequenceRangeUnsupported`](crate::error::Error::SequenceRangeUnsupported).
+///
+/// The bounds the error reports are the cursors' own span, which is the disagreement the read
+/// cannot resolve. `target` names what could not be resolved.
+fn reject_disagreeing_creator_cursors(
+    region_id: RegionId,
+    target: &str,
+    candidates: &[&CursorShard],
+    detail: &str,
+) -> Result<()> {
+    let Some((min, max)) = candidate_cursor_bounds(candidates) else {
+        return Ok(());
+    };
+    if min == max {
+        return Ok(());
+    }
+    SequenceRangeUnsupportedSnafu {
+        region_id,
+        min_seq: min,
+        max_seq: max,
+        reason: format!(
+            "the physical-sequence read of {} cannot resolve a per-piece cursor while the \
+             candidate slices of the region that allocated its numbers disagree on the last \
+             consumed sequence ({}..={}): bounding it by the least advanced cursor {} would \
+             deliver the rows a more advanced piece has already consumed. {}",
+            target, min, max, min, detail
+        ),
+    }
+    .fail()
+}
+
+/// The least and the greatest cursor value of a candidate slice set, or `None` when the set
+/// is empty.
+///
+/// Equal bounds mean every candidate carries the same cursor value — the only case in which
+/// the least advanced cursor answers an unresolvable piece exactly
+/// ([`reject_disagreeing_creator_cursors`]).
+fn candidate_cursor_bounds(
+    candidates: &[&CursorShard],
+) -> Option<(SequenceNumber, SequenceNumber)> {
+    let mut bounds: Option<(SequenceNumber, SequenceNumber)> = None;
+    for shard in candidates {
+        bounds = Some(match bounds {
+            None => (shard.seq, shard.seq),
+            Some((min, max)) => (min.min(shard.seq), max.max(shard.seq)),
+        });
+    }
+    bounds
 }
 
 /// Whether `meta` may hold rows of the value domain the cursor slice `shard` was consumed in,

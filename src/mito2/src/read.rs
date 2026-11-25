@@ -77,7 +77,7 @@ use store_api::storage::{ColumnId, SequenceNumber, SequenceRange};
 
 use crate::error::{
     ComputeArrowSnafu, ComputeVectorSnafu, ConvertVectorSnafu, DecodeSnafu,
-    EvalPartitionFilterSnafu, InvalidBatchSnafu, Result,
+    EvalPartitionFilterSnafu, InvalidBatchSnafu, Result, SequenceRangeUnsupportedSnafu,
 };
 use crate::memtable::BoxedRecordBatchIterator;
 
@@ -160,7 +160,7 @@ struct DensePkCache {
 ///
 /// `None` means the piece cannot be decided: a referenced column is missing from the region
 /// or is not part of its primary key, or a value does not convert to the column's type. The
-/// caller then keeps the conservative floor of the whole set.
+/// caller then applies [`Batch::unresolved_creator_cursor`] to the candidate cursors.
 fn creator_slice_probe_batch(
     metadata: &RegionMetadataRef,
     slices: &[(PartitionExpr, SequenceNumber)],
@@ -203,6 +203,26 @@ fn creator_slice_probe_batch(
     }
 
     RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).ok()
+}
+
+/// The least and the greatest cursor value of a candidate slice set.
+///
+/// Equal bounds mean every candidate carries the same cursor value — the only case in which
+/// the least advanced cursor is exact for a piece that cannot be resolved.
+fn creator_cursor_range(
+    slices: &[(PartitionExpr, SequenceNumber)],
+) -> (SequenceNumber, SequenceNumber) {
+    let min = slices
+        .iter()
+        .map(|(_, cursor)| *cursor)
+        .min()
+        .unwrap_or_default();
+    let max = slices
+        .iter()
+        .map(|(_, cursor)| *cursor)
+        .max()
+        .unwrap_or(min);
+    (min, max)
 }
 
 /// Evaluates a partition expression against the single row of a probe batch, treating a
@@ -516,9 +536,10 @@ impl Batch {
     /// neither a row a more advanced piece consumed again nor drops a row a less advanced
     /// one still holds.
     ///
-    /// A batch no candidate expression selects is filtered by the **least** advanced cursor
-    /// of the set, which is the floor of the whole region: re-reading a consumed row is
-    /// recoverable, dropping a live one is not.
+    /// A batch whose piece **cannot be resolved** is decided by
+    /// [`Self::unresolved_creator_cursor`]: the least advanced cursor is exact when every
+    /// candidate carries it, and the read fails otherwise, because that floor re-delivers
+    /// the rows a more advanced piece has already consumed.
     ///
     /// `None` or an empty set applies no filter, and a set whose cursors all carry one value
     /// needs no evaluation at all — that value is the region's floor and the outcome is
@@ -546,8 +567,9 @@ impl Batch {
         self.filter_by_sequence_range(SequenceRange::Gt { min: cursor })
     }
 
-    /// Returns the cursor of the piece the rows of `self` belong to, or the least advanced
-    /// cursor of `slices` when the piece cannot be resolved.
+    /// Returns the cursor of the piece the rows of `self` belong to, or the floor the batch
+    /// must be bounded by when the piece cannot be resolved
+    /// ([`Self::unresolved_creator_cursor`]).
     ///
     /// The candidate expressions are the pieces a row may belong to; they are disjoint, so
     /// at most one of them selects a series. If more than one does (a domain that was not
@@ -559,31 +581,35 @@ impl Batch {
         metadata: &RegionMetadataRef,
         codec: Option<&dyn PrimaryKeyCodec>,
     ) -> Result<SequenceNumber> {
-        // A row no slice explains is attributed to the least advanced candidate.
-        let fallback = slices
-            .iter()
-            .map(|(_, cursor)| *cursor)
-            .min()
-            .unwrap_or_default();
         let Some(codec) = codec else {
             // Without a primary key the pieces cannot be told apart.
-            return Ok(fallback);
+            return Self::unresolved_creator_cursor(
+                metadata,
+                slices,
+                "the batch states no primary key codec, so its tag values are unknown",
+            );
         };
         let pk_values = match self.pk_values() {
             Some(pk_values) => Cow::Borrowed(pk_values),
             None => match codec.decode(self.primary_key()) {
                 Ok(pk_values) => Cow::Owned(pk_values),
                 Err(e) => {
-                    debug!(
-                        "Cannot decode the primary key of a batch to resolve its creator cursor slice, bounding it by {}: {}",
-                        fallback, e
+                    return Self::unresolved_creator_cursor(
+                        metadata,
+                        slices,
+                        &format!("the primary key of the batch cannot be decoded: {e}"),
                     );
-                    return Ok(fallback);
                 }
             },
         };
         let Some(probe) = creator_slice_probe_batch(metadata, slices, &pk_values) else {
-            return Ok(fallback);
+            return Self::unresolved_creator_cursor(
+                metadata,
+                slices,
+                "the probe batch of the series' tag values cannot be built: a slice expression \
+                 references a column that is not part of this region's primary key, or a value \
+                 does not convert to the column's type",
+            );
         };
 
         let mut matched: Option<SequenceNumber> = None;
@@ -592,20 +618,19 @@ impl Batch {
                 Ok(filter) => match evaluate_partition_filter(filter.as_ref(), &probe) {
                     Ok(selected) => selected,
                     Err(e) => {
-                        // Deciding a piece by guesswork would drop rows: keep the floor.
-                        debug!(
-                            "Cannot evaluate a creator cursor slice expression, bounding the batch by {}: {}",
-                            fallback, e
+                        return Self::unresolved_creator_cursor(
+                            metadata,
+                            slices,
+                            &format!("a slice expression cannot be evaluated: {e}"),
                         );
-                        return Ok(fallback);
                     }
                 },
                 Err(e) => {
-                    debug!(
-                        "Cannot plan a creator cursor slice expression, bounding the batch by {}: {}",
-                        fallback, e
+                    return Self::unresolved_creator_cursor(
+                        metadata,
+                        slices,
+                        &format!("a slice expression cannot be planned: {e}"),
                     );
-                    return Ok(fallback);
                 }
             };
             if selected {
@@ -616,7 +641,52 @@ impl Batch {
             }
         }
 
-        Ok(matched.unwrap_or(fallback))
+        match matched {
+            Some(matched) => Ok(matched),
+            None => Self::unresolved_creator_cursor(
+                metadata,
+                slices,
+                "no candidate expression selects the series of the batch",
+            ),
+        }
+    }
+
+    /// The floor to bound a batch by when the piece its rows belong to cannot be resolved.
+    ///
+    /// One rule decides every such case. When the candidate slices of the region all carry
+    /// the **same** cursor value, that value is the least advanced one and bounding the batch
+    /// by it delivers exactly the rows the per-piece rule delivers: the floor stays, silent
+    /// and without any evaluation of its own. When they carry several values, the least
+    /// advanced one is not exact — it delivers the rows a more advanced piece has already
+    /// consumed, so the batch would be *duplicated*, not merely replayed — and an exact read
+    /// must not degrade that way without saying so, so the read fails with
+    /// [`crate::error::Error::SequenceRangeUnsupported`].
+    fn unresolved_creator_cursor(
+        metadata: &RegionMetadataRef,
+        slices: &[(PartitionExpr, SequenceNumber)],
+        detail: &str,
+    ) -> Result<SequenceNumber> {
+        let (min, max) = creator_cursor_range(slices);
+        debug!(
+            "Cannot resolve the creator cursor slice of a batch of region {} (candidate cursors {}..={}), detail: {}",
+            metadata.region_id, min, max, detail
+        );
+        if min == max {
+            return Ok(min);
+        }
+        SequenceRangeUnsupportedSnafu {
+            region_id: metadata.region_id,
+            min_seq: min,
+            max_seq: max,
+            reason: format!(
+                "the per-piece cursor of a time-series memtable batch of region {} cannot be \
+                 resolved while the pieces of the region disagree on the last consumed \
+                 sequence ({}..={}): bounding the batch by the least advanced cursor {} would \
+                 deliver the rows a more advanced piece has already consumed. {}",
+                metadata.region_id, min, max, min, detail
+            ),
+        }
+        .fail()
     }
 
     /// Applies `seq_range` to the rows of the batch, skipping the mask when every row
