@@ -167,6 +167,11 @@ impl RangesOptions {
 pub struct MemtableStats {
     /// The estimated bytes allocated by this memtable from heap.
     pub estimated_bytes: usize,
+    /// Estimated bytes of the rows once decoded, for sizing reads and counting written data.
+    /// `None` means `estimated_bytes`, as the memtable keeps its rows decoded. A memtable that
+    /// encodes rows in memory reports the bytes written into it, including rows deduplicated
+    /// later.
+    pub decoded_bytes: Option<usize>,
     /// The inclusive time range that this memtable contains. It is None if
     /// and only if the memtable is empty.
     pub time_range: Option<(Timestamp, Timestamp)>,
@@ -201,6 +206,11 @@ impl MemtableStats {
     /// Returns the estimated bytes allocated by this memtable.
     pub fn bytes_allocated(&self) -> usize {
         self.estimated_bytes
+    }
+
+    /// Returns the estimated bytes of the rows once decoded.
+    pub fn decoded_bytes(&self) -> usize {
+        self.decoded_bytes.unwrap_or(self.estimated_bytes)
     }
 
     /// Returns the time range of the memtable.

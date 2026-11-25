@@ -282,6 +282,7 @@ impl Memtable for SimpleBulkMemtable {
 
                     let range_stats = MemtableStats {
                         estimated_bytes,
+                        decoded_bytes: None,
                         time_range,
                         num_rows,
                         num_ranges: 1,
@@ -333,6 +334,7 @@ impl Memtable for SimpleBulkMemtable {
             // no rows ever written
             return MemtableStats {
                 estimated_bytes,
+                decoded_bytes: None,
                 time_range: None,
                 num_rows: 0,
                 num_ranges: 0,
@@ -346,6 +348,7 @@ impl Memtable for SimpleBulkMemtable {
         let min_timestamp = ts_type.create_timestamp(self.min_timestamp.load(Ordering::Relaxed));
         MemtableStats {
             estimated_bytes,
+            decoded_bytes: None,
             time_range: Some((min_timestamp, max_timestamp)),
             num_rows,
             num_ranges: 1,

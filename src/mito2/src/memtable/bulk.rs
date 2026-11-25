@@ -455,6 +455,9 @@ pub struct BulkMemtable {
     max_sequence: AtomicU64,
     min_sequence: AtomicU64,
     num_rows: AtomicUsize,
+    /// Bytes written into this memtable before encoding. Unlike the write buffer charges, it
+    /// does not shrink when parts are encoded, so it sizes flush reads and counts written data.
+    written_bytes: AtomicUsize,
     /// Compactor for merging bulk parts
     compactor: Arc<Mutex<MemtableCompactor>>,
     /// Dispatcher for scheduling compaction tasks
@@ -665,9 +668,11 @@ impl Memtable for BulkMemtable {
             (bulk_parts.held_bytes(), bulk_parts.num_parts())
         };
 
+        let decoded_bytes = Some(self.written_bytes.load(Ordering::Relaxed));
         if estimated_bytes == 0 || self.num_rows.load(Ordering::Relaxed) == 0 {
             return MemtableStats {
                 estimated_bytes,
+                decoded_bytes,
                 time_range: None,
                 num_rows: 0,
                 num_ranges: 0,
@@ -690,6 +695,7 @@ impl Memtable for BulkMemtable {
 
         MemtableStats {
             estimated_bytes,
+            decoded_bytes,
             time_range: Some((min_timestamp, max_timestamp)),
             num_rows: self.num_rows.load(Ordering::Relaxed),
             num_ranges,
@@ -740,6 +746,7 @@ impl BulkMemtable {
             max_sequence: AtomicU64::new(0),
             min_sequence: AtomicU64::new(u64::MAX),
             num_rows: AtomicUsize::new(0),
+            written_bytes: AtomicUsize::new(0),
             compactor: Arc::new(Mutex::new(
                 MemtableCompactor::new(
                     metadata.region_id,
@@ -832,6 +839,7 @@ impl BulkMemtable {
             max_sequence: AtomicU64::new(0),
             min_sequence: AtomicU64::new(u64::MAX),
             num_rows: AtomicUsize::new(0),
+            written_bytes: AtomicUsize::new(0),
             compactor: Arc::new(Mutex::new(MemtableCompactor::new(
                 region_id,
                 id,
@@ -881,6 +889,8 @@ impl BulkMemtable {
         self.min_sequence
             .fetch_min(stats.min_sequence, Ordering::Relaxed);
         self.num_rows.fetch_add(stats.num_rows, Ordering::Relaxed);
+        self.written_bytes
+            .fetch_add(stats.key_bytes + stats.value_bytes, Ordering::Relaxed);
     }
 
     /// Returns the estimated time series count.
@@ -1242,20 +1252,7 @@ impl PartToMerge {
         match self {
             PartToMerge::Bulk { part, .. } => part.estimated_size() as u64,
             PartToMerge::Multi { part, .. } => part.estimated_size() as u64,
-            PartToMerge::Encoded { part, .. } => {
-                let metadata = part.metadata();
-                let encoded: u64 =
-                    part.parquet_metadata()
-                        .map_or(part.size_bytes() as u64, |metadata| {
-                            metadata
-                                .row_groups()
-                                .iter()
-                                .flat_map(|row_group| row_group.columns())
-                                .map(|column| column.uncompressed_size() as u64)
-                                .sum()
-                        });
-                encoded.max(metadata.var_len_bytes)
-            }
+            PartToMerge::Encoded { part, .. } => part.decoded_size(),
         }
     }
 
@@ -2623,7 +2620,19 @@ mod tests {
         // Encoded parts hold far fewer bytes than the batches written into them, including their
         // parsed metadata.
         assert!(held * 4 < written, "held {held}, written {written}");
-        assert_eq!(held, memtable.stats().estimated_bytes);
+        let stats = memtable.stats();
+        assert_eq!(held, stats.estimated_bytes);
+        // Flush sizes reads and region statistics count written data by the decoded size.
+        assert_eq!(written, stats.decoded_bytes());
+        let ranges = memtable
+            .ranges(None, RangesOptions::for_flush())
+            .unwrap()
+            .ranges;
+        assert!(ranges.values().all(|range| range.encoded().is_some()));
+        for range in ranges.values() {
+            let stats = range.stats();
+            assert!(stats.decoded_bytes() > stats.estimated_bytes, "{stats:?}");
+        }
     }
 
     #[test]
