@@ -55,6 +55,16 @@
 //! process list: the caller keeps all of them around this call, so they behave as
 //! they do on the original path.
 //!
+//! # Metrics
+//!
+//! Every lookup takes exactly one outcome of
+//! [`PROMQL_ROLLUP_CACHE_LOOKUPS`], every miss names its reason in
+//! [`PROMQL_ROLLUP_CACHE_MISSES`], every fill reports what it did in
+//! [`PROMQL_ROLLUP_CACHE_FILLS`], and every refused request names its reason in
+//! [`PROMQL_ROLLUP_CACHE_BYPASSES`]. The resident gauges are read after a fill and
+//! after a reset only, so counting what the cache holds never reaches a lookup: a
+//! read is one map access whether or not anything is scraped.
+//!
 //! [`windowed_eval_stmt`]: query::promql::window::windowed_eval_stmt
 
 use std::sync::Arc;
@@ -69,9 +79,13 @@ use query::promql::window::{EvalGrid, windowed_eval_stmt};
 use servers::error::{self as server_error, ExecuteQuerySnafu, UnexpectedResultSnafu};
 use snafu::ResultExt;
 
+use crate::metrics::{
+    PROMQL_ROLLUP_CACHE_BYPASSES, PROMQL_ROLLUP_CACHE_BYTES, PROMQL_ROLLUP_CACHE_ENTRIES,
+    PROMQL_ROLLUP_CACHE_FILLS, PROMQL_ROLLUP_CACHE_LOOKUPS, PROMQL_ROLLUP_CACHE_MISSES,
+};
 use crate::query_cache::{
-    CachedAnnotations, ChunkPlan, DirectSpan, Lookup, QueryIdentity, RollupCache, TimeChunk,
-    TimeChunkKey,
+    BypassReason, CachedAnnotations, ChunkPlan, DirectSpan, Insert, Lookup, MissReason,
+    QueryIdentity, RollupCache, TimeChunk, TimeChunkKey,
 };
 
 /// Executes one PromQL evaluation subwindow.
@@ -135,11 +149,15 @@ where
     E: WindowExecutor + ?Sized,
 {
     let planned = match cache.plan(identity, stmt, now) {
-        ChunkPlan::Bypass(_) => return Ok(RangeOutcome::Bypassed),
+        ChunkPlan::Bypass(reason) => {
+            count_plan_bypass(reason);
+            return Ok(RangeOutcome::Bypassed);
+        }
         ChunkPlan::Planned(planned) => planned,
     };
     if planned.chunks().is_empty() {
         // Everything would be read directly: splitting it would change nothing.
+        count_bypass("no_chunks");
         return Ok(RangeOutcome::Bypassed);
     }
     let grid = EvalGrid::of(stmt).map_err(|error| {
@@ -162,6 +180,7 @@ where
         if !merged.push(window.rows) {
             // The spans disagree on their schema, so they are not one result. Do not
             // report a merge no plan produced: let the caller run its original plan.
+            count_bypass("schema_mismatch");
             return Ok(RangeOutcome::Bypassed);
         }
     }
@@ -181,28 +200,45 @@ async fn chunk_rows<E>(
 where
     E: WindowExecutor + ?Sized,
 {
-    if let Lookup::Hit {
-        payload,
-        annotations,
-    } = cache.lookup(key, now)
-    {
-        // The rows and the messages of one read are served together, so a hit reports
-        // what the read it replaces reported.
-        return Ok(WindowOutput {
-            rows: clone_rows(&payload)?,
-            annotations: (*annotations).clone(),
-        });
+    match cache.lookup(key, now) {
+        Lookup::Hit {
+            payload,
+            annotations,
+        } => {
+            // The rows and the messages of one read are served together, so a hit
+            // reports what the read it replaces reported.
+            count_lookup("hit");
+            return Ok(WindowOutput {
+                rows: clone_rows(&payload)?,
+                annotations: (*annotations).clone(),
+            });
+        }
+        Lookup::Miss(reason) => {
+            count_lookup("miss");
+            count_miss(miss_label(reason));
+        }
+        Lookup::Bypass(reason) => {
+            // The only chunk a lookup refuses is an empty one, and it is refused for
+            // the reason a miss is: nothing was ever served for it.
+            debug_assert_eq!(BypassReason::EmptyChunk, reason);
+            count_lookup("bypass");
+            count_miss("empty_chunk");
+        }
     }
     let window = execute_span(executor, stmt, grid, key.chunk()).await?;
     // Only a fully consumed chunk is inserted: `execute_span` returns rows it read to
     // the end, and a failure returned above without inserting anything. Its
     // annotations are stored beside them, and the same ones are returned, so the
     // request that filled the chunk reports them exactly as a later hit does.
-    cache.insert(
+    let inserted = cache.insert(
         key,
         Arc::new(clone_rows(&window.rows)?),
         Arc::new(window.annotations.clone()),
     );
+    count_fill(inserted);
+    // The gauges report what the cache holds once this fill settled: no lookup counts
+    // anything of the sort.
+    record_resident_usage(cache);
     Ok(window)
 }
 
@@ -326,6 +362,70 @@ impl MergedRows {
             .context(ExecuteQuerySnafu)?;
         Ok(RangeOutcome::Merged { rows, annotations })
     }
+}
+
+/// Counts one chunk lookup, by the `outcome` label of
+/// [`PROMQL_ROLLUP_CACHE_LOOKUPS`].
+fn count_lookup(outcome: &str) {
+    PROMQL_ROLLUP_CACHE_LOOKUPS
+        .with_label_values(&[outcome])
+        .inc();
+}
+
+/// Counts why a lookup served no chunk, by the `reason` label of
+/// [`PROMQL_ROLLUP_CACHE_MISSES`].
+fn count_miss(reason: &str) {
+    PROMQL_ROLLUP_CACHE_MISSES
+        .with_label_values(&[reason])
+        .inc();
+}
+
+/// Counts what the cache did with the chunk a miss read, by the `result` label of
+/// [`PROMQL_ROLLUP_CACHE_FILLS`].
+fn count_fill(result: Insert) {
+    let result = match result {
+        Insert::Stored => "stored",
+        Insert::Bypassed => "bypassed",
+    };
+    PROMQL_ROLLUP_CACHE_FILLS.with_label_values(&[result]).inc();
+}
+
+/// Counts one whole request the cache refused, by the `reason` label of
+/// [`PROMQL_ROLLUP_CACHE_BYPASSES`].
+fn count_bypass(reason: &str) {
+    PROMQL_ROLLUP_CACHE_BYPASSES
+        .with_label_values(&[reason])
+        .inc();
+}
+
+/// Counts a refusal planning alone decided, under the reason that names it.
+///
+/// Planning refuses a statement or a span of it, never a chunk: an empty chunk is
+/// refused by [`RollupCache::lookup`] and [`RollupCache::insert`], so it is counted
+/// where the chunk metrics count it.
+fn count_plan_bypass(reason: BypassReason) {
+    match reason {
+        BypassReason::NotWindowable => count_bypass("not_windowable"),
+        BypassReason::InvalidSpan => count_bypass("invalid_span"),
+        BypassReason::Overflow => count_bypass("overflow"),
+        BypassReason::StepMismatch => count_bypass("step_mismatch"),
+        BypassReason::EmptyChunk => count_miss("empty_chunk"),
+    }
+}
+
+/// The `reason` label of a chunk miss.
+fn miss_label(reason: MissReason) -> &'static str {
+    match reason {
+        MissReason::NotFound => "not_found",
+        MissReason::Expired => "expired",
+    }
+}
+
+/// Reports what the cache holds, which is only read once a fill settled: a lookup
+/// never counts the entries it did not touch.
+fn record_resident_usage(cache: &RollupCache) {
+    PROMQL_ROLLUP_CACHE_ENTRIES.set(i64::try_from(cache.entry_count()).unwrap_or(i64::MAX));
+    PROMQL_ROLLUP_CACHE_BYTES.set(i64::try_from(cache.byte_count()).unwrap_or(i64::MAX));
 }
 
 #[cfg(test)]

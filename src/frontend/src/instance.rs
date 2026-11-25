@@ -125,6 +125,10 @@ use crate::error::{
     ExternalSnafu, InvalidSqlSnafu, ParseSqlSnafu, PermissionSnafu, PlanStatementSnafu, Result,
     SqlExecInterceptedSnafu, StatementTimeoutSnafu, TableOperationSnafu,
 };
+use crate::metrics::{
+    PROMQL_ROLLUP_CACHE_BYPASSES, PROMQL_ROLLUP_CACHE_BYTES, PROMQL_ROLLUP_CACHE_ENTRIES,
+    PROMQL_ROLLUP_CACHE_RESETS,
+};
 use crate::query_cache::{CachedAnnotations, QueryIdentity, QueryRoute, RollupCache};
 use crate::service_config::InfluxdbMergeMode;
 use crate::stream_wrapper::CancellableStreamWrapper;
@@ -269,6 +273,9 @@ impl Instance {
     pub fn clear_rollup_cache(&self) {
         if let Some(cache) = self.rollup_cache.as_ref() {
             cache.clear();
+            PROMQL_ROLLUP_CACHE_RESETS.inc();
+            PROMQL_ROLLUP_CACHE_ENTRIES.set(0);
+            PROMQL_ROLLUP_CACHE_BYTES.set(0);
         }
     }
 
@@ -1853,6 +1860,11 @@ impl Instance {
             .extension(session::hints::ROLLUP_CACHE_NOCACHE)
             .is_some()
         {
+            // The request is refused here, before it is planned into chunks, so this is
+            // the one bypass no plan reports.
+            PROMQL_ROLLUP_CACHE_BYPASSES
+                .with_label_values(&["nocache"])
+                .inc();
             return Ok(None);
         }
         // An instant query is one point, and the cache keys whole chunks of a grid.

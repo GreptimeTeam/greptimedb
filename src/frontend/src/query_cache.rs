@@ -873,13 +873,26 @@ impl RollupCache {
 
     /// How many entries the cache holds once pending maintenance has run.
     ///
-    /// Tests state with it that a request filled exactly the chunks it read, or that
-    /// it filled nothing because it never took the cached path. Production reads
-    /// nothing of the sort, so it is not part of the cache's surface.
-    #[cfg(any(test, feature = "testing"))]
+    /// The gauges report it after a fill and after a reset, so a request path never
+    /// pays for it: a lookup reads at most one entry and never walks the map. Tests
+    /// also state with it that a request filled exactly the chunks it read, or that it
+    /// filled nothing because it never took the cached path.
     pub fn entry_count(&self) -> u64 {
         self.entries.run_pending_tasks();
         self.entries.entry_count()
+    }
+
+    /// The bytes the resident entries are charged, summed over their weights once
+    /// pending maintenance has run.
+    ///
+    /// Like [`Self::entry_count`], it is read when the gauges are updated (after a
+    /// fill and after a reset), and never on a lookup, which stays one map read.
+    pub fn byte_count(&self) -> u64 {
+        self.entries.run_pending_tasks();
+        self.entries
+            .iter()
+            .map(|(_, entry)| u64::from(entry.weight))
+            .sum()
     }
 
     /// How many lookups this cache has answered from an existing entry.
