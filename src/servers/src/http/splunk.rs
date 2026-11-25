@@ -586,7 +586,16 @@ async fn resolve_pipeline_and_ingest(
     .await
     {
         // HEC code 0 == "Success".
-        Ok(_) => hec_response(StatusCode::OK, 0, "Success"),
+        Ok(response) => match response.error_details() {
+            // The events were parsed but the write failed, so the batch must not be
+            // acknowledged as successful. Mirrors the error branch below.
+            Some((status, reason)) => {
+                error!("failed to insert splunk hec events: {}", reason);
+                let code = if status.is_client_error() { 6 } else { 8 };
+                hec_response(status, code, &reason)
+            }
+            None => hec_response(StatusCode::OK, 0, "Success"),
+        },
         Err(e) => {
             error!(e; "failed to ingest splunk hec events");
             // client errors -> HEC code 6, else 8.
@@ -600,7 +609,17 @@ async fn resolve_pipeline_and_ingest(
 
 #[cfg(test)]
 mod tests {
+    use api::v1::RowInsertRequests;
+    use async_trait::async_trait;
+    use common_query::Output;
+    use datatypes::timestamp::TimestampNanosecond;
+    use pipeline::{Pipeline, PipelineInfo, PipelineOptions, PipelineVersion};
+    use snafu::Location;
+
     use super::*;
+    use crate::error::Error as ServersError;
+    use crate::error::Result as ServersResult;
+    use crate::query_handler::PipelineHandler;
 
     fn events_for(body: &[u8]) -> Vec<VrlValue> {
         parse_hec_events(body).unwrap()
@@ -1154,6 +1173,139 @@ mod tests {
                 other => panic!("unexpected table {other}"),
             };
             assert_eq!(region.semantic_type, expected, "table {}", r.table_name);
+        }
+    }
+
+    /// A write that fails after the events were parsed must not be acknowledged with
+    /// `"code":0`: HEC clients read that code as "the events were indexed".
+    #[tokio::test]
+    async fn failed_insert_is_not_acknowledged() {
+        let response = resolve_pipeline_and_ingest(
+            LogState {
+                log_handler: Arc::new(FailingInsertHandler {
+                    options: PipelineOptions::default(),
+                }),
+                log_validator: None,
+                ingest_interceptor: None,
+            },
+            QueryContext::with("greptime", "public"),
+            &HeaderMap::new(),
+            None,
+            None,
+            vec![PipelineIngestRequest {
+                table: DEFAULT_SPLUNK_TABLE.to_string(),
+                values: vec![
+                    json!({greptime_timestamp(): 1700000000000000000i64, "age": "abc"}).into(),
+                ],
+            }],
+            HashMap::new(),
+        )
+        .await;
+
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("Failed to read the HEC response body");
+        let body: serde_json::Value =
+            serde_json::from_slice(&body).expect("Failed to parse the HEC response body");
+        assert_eq!(StatusCode::BAD_REQUEST, status, "unexpected body: {body}");
+        assert_ne!(
+            0,
+            body["code"].as_u64().unwrap(),
+            "a failed insert must not be reported as success: {body}"
+        );
+    }
+
+    /// A pipeline handler whose inserts fail per batch, which is the shape
+    /// `execute_log_context_req` reports as an `HttpResponse::Error`.
+    struct FailingInsertHandler {
+        options: PipelineOptions,
+    }
+
+    #[async_trait]
+    impl PipelineHandler for FailingInsertHandler {
+        async fn insert(
+            &self,
+            _input: RowInsertRequests,
+            _ctx: QueryContextRef,
+        ) -> ServersResult<Output> {
+            unimplemented!()
+        }
+
+        async fn insert_all(
+            &self,
+            inputs: Vec<(QueryContextRef, RowInsertRequests)>,
+        ) -> ServersResult<Vec<ServersResult<Output>>> {
+            Ok(inputs
+                .iter()
+                .map(|_| {
+                    Err(ServersError::InvalidParameter {
+                        reason: "column age expect type Int64, given: STRING".to_string(),
+                        location: Location::default(),
+                    })
+                })
+                .collect())
+        }
+
+        fn check_pipeline_query_permission(
+            &self,
+            _query_ctx: &QueryContextRef,
+        ) -> ServersResult<()> {
+            Ok(())
+        }
+
+        async fn get_pipeline(
+            &self,
+            _name: &str,
+            _version: PipelineVersion,
+            _query_ctx: QueryContextRef,
+        ) -> ServersResult<Arc<Pipeline>> {
+            unimplemented!()
+        }
+
+        async fn insert_pipeline(
+            &self,
+            _name: &str,
+            _content_type: &str,
+            _pipeline: &str,
+            _query_ctx: QueryContextRef,
+        ) -> ServersResult<PipelineInfo> {
+            unimplemented!()
+        }
+
+        async fn delete_pipeline(
+            &self,
+            _name: &str,
+            _version: PipelineVersion,
+            _query_ctx: QueryContextRef,
+        ) -> ServersResult<Option<()>> {
+            unimplemented!()
+        }
+
+        async fn get_table(
+            &self,
+            _table: &str,
+            _query_ctx: &QueryContext,
+        ) -> std::result::Result<Option<Arc<table::Table>>, catalog::error::Error> {
+            // No existing table, so the identity pipeline infers the schema.
+            Ok(None)
+        }
+
+        fn pipeline_options(&self) -> &PipelineOptions {
+            &self.options
+        }
+
+        fn build_pipeline(&self, _pipeline: &str) -> ServersResult<Pipeline> {
+            unimplemented!()
+        }
+
+        async fn get_pipeline_str(
+            &self,
+            _name: &str,
+            _version: PipelineVersion,
+            _query_ctx: QueryContextRef,
+        ) -> ServersResult<(String, TimestampNanosecond)> {
+            unimplemented!()
         }
     }
 }
