@@ -626,6 +626,25 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn test_decoded_row_group_size_is_optional_in_manifests() {
+        let legacy = FileMeta::default();
+        let encoded = serde_json::to_value(&legacy).unwrap();
+        assert!(encoded.get("max_row_group_decoded_size").is_none());
+        let decoded: FileMeta = serde_json::from_value(encoded).unwrap();
+        assert_eq!(0, decoded.max_row_group_decoded_size);
+        let file = FileMeta {
+            max_row_group_decoded_size: 128 << 20,
+            ..legacy
+        };
+        let encoded = serde_json::to_value(&file).unwrap();
+        assert_eq!(
+            serde_json::json!(128 << 20),
+            encoded["max_row_group_decoded_size"]
+        );
+        assert_eq!(file, serde_json::from_value::<FileMeta>(encoded).unwrap());
+    }
+
     // These tests are used to ensure backward compatibility of manifest files.
     // DO NOT modify the serialized string when they fail, check if your
     // modification to manifest-related structs is compatible with older manifests.

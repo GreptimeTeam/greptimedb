@@ -461,7 +461,7 @@ mod tests {
     use object_store::ObjectStore;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use parquet::arrow::{ArrowWriter, AsyncArrowWriter};
-    use parquet::basic::{Compression, Encoding};
+    use parquet::basic::{Compression, Encoding, ZstdLevel};
     use parquet::file::metadata::{KeyValue, PageIndexPolicy};
     use parquet::file::properties::WriterProperties;
     use parquet::schema::types::ColumnPath;

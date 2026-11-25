@@ -1,0 +1,8 @@
+name = "wide_sst_row_groups"
+reason = "Verify old SSTs remain readable and can be compacted with new SSTs carrying decoded row group statistics."
+introduced_by = "PR #10528"
+topologies = ["standalone", "distributed"]
+from_range = [">=v1.2.0"]
+to_range = [">=v1.3.2"]
+features = ["table", "sst", "compaction"]
+owner = "storage"

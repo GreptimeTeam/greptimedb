@@ -29,7 +29,7 @@ use datafusion_expr::physical_planning_context::PhysicalPlanningContext;
 use datafusion_expr::{Between, BinaryExpr, Operator};
 use datafusion_physical_expr::execution_props::ExecutionProps;
 use datafusion_physical_expr::expressions::{
-    BinaryExpr as PhysicalBinaryExpr, DynamicFilterPhysicalExpr,
+    DynamicFilterPhysicalExpr,
 };
 use datafusion_physical_expr::{PhysicalExpr, create_physical_expr};
 use datatypes::arrow;

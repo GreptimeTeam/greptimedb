@@ -188,7 +188,6 @@ async fn inverted_segments_keep_the_configured_size_across_row_groups() {
     let mut options = IndexOptions::default();
     options.inverted_index.segment_row_count = 2048;
     let builder = IndexerBuilderImpl {
-        index_build_inputs: None,
         build_type: IndexBuildType::Flush,
         metadata: metadata.clone(),
         puffin_manager: puffin.clone(),
@@ -197,11 +196,9 @@ async fn inverted_segments_keep_the_configured_size_across_row_groups() {
             .await
             .unwrap(),
         index_options: options,
-        registry: Arc::new(crate::sst::index::registry::IndexRegistry::new(
-            Default::default(),
-            Default::default(),
-            Default::default(),
-        )),
+        inverted_index_config: Default::default(),
+        fulltext_index_config: Default::default(),
+        bloom_filter_index_config: Default::default(),
     };
     let file = RegionFileId::new(metadata.region_id, FileId::random());
     // 64,512 rows per row group is not a multiple of 2,048. Widening the segments to whole row

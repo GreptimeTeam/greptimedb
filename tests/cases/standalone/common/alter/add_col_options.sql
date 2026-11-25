@@ -6,7 +6,7 @@ ALTER TABLE add_col_options ADD COLUMN az STRING PRIMARY KEY COMMENT 'availabili
 
 ALTER TABLE add_col_options ADD COLUMN body STRING NOT NULL DEFAULT '' COMMENT 'log body';
 
-ALTER TABLE add_col_options ADD COLUMN prompt STRING COMPRESSION WITH (level = 5, page_size = '1MiB');
+ALTER TABLE add_col_options ADD COLUMN prompt STRING;
 
 SHOW CREATE TABLE add_col_options;
 
@@ -21,7 +21,7 @@ CREATE TABLE create_col_options (
     host STRING,
     az STRING COMMENT 'availability zone',
     body STRING NOT NULL DEFAULT '' COMMENT 'log body',
-    prompt STRING COMPRESSION WITH (level = 5, page_size = '1MiB'),
+    prompt STRING,
     PRIMARY KEY (host, az),
 );
 

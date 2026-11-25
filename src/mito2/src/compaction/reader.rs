@@ -265,9 +265,7 @@ mod tests {
     use store_api::storage::RegionId;
 
     use super::*;
-    use crate::test_util::{
-        CreateRequestBuilder, TestEnv, build_rows_for_key, put_rows, rows_schema,
-    };
+    use crate::test_util::{CreateRequestBuilder, TestEnv, put_rows, rows_schema};
 
     #[tokio::test]
     async fn test_compaction_counts_decoded_values() {
