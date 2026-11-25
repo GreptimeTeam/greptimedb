@@ -2146,7 +2146,8 @@ mod tests {
             .find_map(|batch| batch.err())
             .expect("a row no candidate explains fails the read while the cursors disagree");
         assert!(
-            err.to_string().contains("cannot be resolved while the pieces"),
+            err.to_string()
+                .contains("cannot be resolved while the pieces"),
             "the failure names the unresolved piece: {err}"
         );
     }

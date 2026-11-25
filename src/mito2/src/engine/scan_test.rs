@@ -7834,6 +7834,105 @@ async fn test_read_row_sequence_fails_closed_when_pieces_disagree_and_piece_is_u
     );
 }
 
+/// The third shape the per-row rule cannot answer: a row of the file that **no** candidate
+/// expression selects, i.e. a row outside the value domain of every piece of the creator.
+///
+/// Such a row has no piece to attribute it to, so only the least advanced candidate is left.
+/// That floor is exact while every candidate carries the same cursor value — it then *is* what
+/// the row's own piece states — and says nothing once they differ: it delivers the rows a more
+/// advanced piece already consumed, so the read fails instead of replaying them.
+#[tokio::test]
+async fn test_read_row_sequence_fails_closed_when_no_piece_selects_a_row() {
+    let mut env = TestEnv::with_prefix("test_read_row_sequence_fails_closed_unselected_row").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let source = RegionId::new(1, 2);
+    let target = RegionId::new(1, 1);
+
+    // One file of the creator: four rows of the series `k0 = "1"`, inside the domain of the
+    // left piece (`k0 < "5"`), and one row of `k0 = "9"`, outside the domain of both candidates.
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    let schema = test_util::rows_schema(&request);
+    engine
+        .handle_request(source, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let mut rows = test_util::build_rows_for_key("1", 0, 4, 0);
+    rows.extend(test_util::build_rows_for_key("9", 4, 5, 0));
+    test_util::put_rows(&engine, source, Rows { schema, rows }).await;
+    test_util::flush_region(&engine, source, None).await;
+    let source_file = manifest_files(&engine, source)
+        .await
+        .into_values()
+        .next()
+        .expect("flushed file");
+    create_foreign_target(&engine, target).await;
+    adopt_foreign_file(&engine, target, source_file, 6, true, None);
+
+    // The candidates carry 5 and 2. The row at 5 (`k0 = "9"`) belongs to no piece, and the
+    // least advanced cursor (2) does not stand for the pieces: it would deliver the rows 3 and
+    // 4 the left piece already consumed up to 5.
+    let mut stream = engine
+        .scan_batch(
+            target,
+            creator_cursor_scan(
+                source,
+                vec![
+                    partition_str_slice_cursor("0", "5", 5),
+                    partition_str_slice_cursor("5", "9", 2),
+                ],
+                0,
+                10,
+            ),
+            true,
+        )
+        .await
+        .unwrap();
+    let err = match stream.try_next().await {
+        Err(err) => err,
+        Ok(_) => panic!("a row no candidate selects with disagreeing cursors must fail the read"),
+    };
+    let message = error_chain(&err);
+    assert!(
+        message.contains("exact sequence range unavailable"),
+        "the shared exact-range contract prefix must reach the caller: {message}"
+    );
+    assert!(
+        message.contains("cannot resolve a per-piece cursor"),
+        "the failure must say what could not be resolved: {message}"
+    );
+    assert!(
+        message.contains("match no candidate creator cursor slice") && message.contains("(2..=5)"),
+        "the failure must name the unselected row and the cursors' own span: {message}"
+    );
+
+    // One cursor value for every candidate: the least advanced cursor is then every piece's
+    // cursor, so the row outside both domains keeps today's treatment and nothing is dropped.
+    let mut rows = scan_flat_row_sequences(
+        &engine,
+        target,
+        creator_cursor_scan(
+            source,
+            vec![
+                partition_str_slice_cursor("0", "5", 2),
+                partition_str_slice_cursor("5", "9", 2),
+            ],
+            0,
+            10,
+        ),
+    )
+    .await;
+    rows.sort_unstable();
+    assert_eq!(
+        vec![(2000, 3), (3000, 4), (4000, 5)],
+        rows,
+        "with one cursor value the row no candidate selects is bounded by it exactly, so the \
+         rows above 2 are delivered and the rows at or below it are not"
+    );
+}
+
 /// The creator's cursor and the holder's snapshot are two different sequence domains, so a
 /// foreign file is filtered by the creator's cursor alone — never by the holder's `(C, H]`,
 /// which is what bounds the rows of every *local* file of the same scan.

@@ -43,7 +43,8 @@ use tokio::sync::OnceCell;
 use crate::cache::CacheStrategy;
 use crate::error::{
     ComputeArrowSnafu, DecodeStatsSnafu, EvalPartitionFilterSnafu, InvalidRecordBatchSnafu,
-    NewRecordBatchSnafu, RecordBatchSnafu, Result, StatsNotPresentSnafu, UnexpectedSnafu,
+    NewRecordBatchSnafu, RecordBatchSnafu, Result, SequenceRangeUnsupportedSnafu,
+    StatsNotPresentSnafu, UnexpectedSnafu,
 };
 use crate::read::compat::FlatCompatBatch;
 use crate::read::last_row::FlatRowGroupLastRowCachedReader;
@@ -608,8 +609,11 @@ pub(crate) struct PartitionFilterContext {
     /// Cursor applied to a row of the creator's domain that no slice expression selects.
     /// `None` when [`Self::creator_slices`] is empty.
     ///
-    /// A row no slice explains is attributed to the least advanced candidate: re-reading a
-    /// consumed row is recoverable, dropping a live one is not.
+    /// A row no slice explains is bounded by the least advanced candidate. That bound is the
+    /// row's own piece's answer only while every candidate carries it: when the candidates
+    /// disagree, the read fails with
+    /// [`SequenceRangeUnsupported`](crate::error::Error::SequenceRangeUnsupported) instead of
+    /// delivering the rows a more advanced piece has already consumed.
     pub(crate) fallback_cursor: Option<SequenceNumber>,
     /// The file's own substituted cut
     /// (`FileMeta::substituted_up_to`), when it states one.
@@ -632,6 +636,21 @@ pub(crate) struct CreatorSliceFilter {
     /// Last sequence consumed in that slice: a row this expression selects is delivered
     /// only when its own sequence is above this value.
     pub(crate) cursor: SequenceNumber,
+}
+
+/// The least and the greatest cursor value of a candidate slice set.
+///
+/// Equal bounds mean every candidate carries the same cursor value — the only case in which
+/// [`PartitionFilterContext::fallback_cursor`] bounds a row no candidate selects exactly.
+fn creator_cursor_span(slices: &[CreatorSliceFilter]) -> (SequenceNumber, SequenceNumber) {
+    let mut span: Option<(SequenceNumber, SequenceNumber)> = None;
+    for slice in slices {
+        span = Some(match span {
+            None => (slice.cursor, slice.cursor),
+            Some((min, max)) => (min.min(slice.cursor), max.max(slice.cursor)),
+        });
+    }
+    span.unwrap_or_default()
 }
 
 /// Common fields for a range to read and filter batches.
@@ -981,9 +1000,13 @@ impl RangeBase {
     /// into narrower ones whose cursors advanced differently, and free of lost rows when
     /// the file's own expression is narrower than the rows it holds.
     ///
-    /// A row no slice expression selects is attributed to the least advanced candidate
-    /// ([`PartitionFilterContext::fallback_cursor`]) and reported, because dropping it
-    /// would lose live data while re-reading it only repeats a consumed row.
+    /// A row no slice expression selects has no piece to attribute it to, so only the least
+    /// advanced candidate ([`PartitionFilterContext::fallback_cursor`]) can bound it. That
+    /// bound is exact while every candidate carries the same cursor value — it then *is* the
+    /// row's own piece's answer — and states nothing about the row once the candidates differ:
+    /// it delivers the rows a more advanced piece has already consumed, which is a duplicate,
+    /// not a replay, so the read fails with
+    /// [`SequenceRangeUnsupported`](crate::error::Error::SequenceRangeUnsupported) instead.
     fn evaluate_creator_slices(
         &self,
         input: &RecordBatch,
@@ -1027,7 +1050,13 @@ impl RangeBase {
 
         let mut kept = BooleanBufferBuilder::new(num_rows);
         let mut unmatched = 0;
+        // The candidates' own span, resolved on the first row no candidate selects: while
+        // every candidate carries the same value the fallback below is that row's answer and
+        // the span is never asked for.
+        let mut cursor_span: Option<(SequenceNumber, SequenceNumber)> = None;
         for row in 0..num_rows {
+            // A row at or below the substituted cut is re-read on purpose by the substitution
+            // rule, so no cursor decision — and no disagreement — applies to it.
             if substituted_mask
                 .as_ref()
                 .is_some_and(|mask| mask.value(row))
@@ -1039,6 +1068,26 @@ impl RangeBase {
                 Some(index) => not_consumed[index].value(row),
                 None => {
                     unmatched += 1;
+                    let (min, max) =
+                        *cursor_span.get_or_insert_with(|| creator_cursor_span(slices));
+                    if min != max {
+                        let region_id = self.read_format.metadata().region_id;
+                        return SequenceRangeUnsupportedSnafu {
+                            region_id,
+                            min_seq: min,
+                            max_seq: max,
+                            reason: format!(
+                                "the physical-sequence read of a file of region {} cannot \
+                                 resolve a per-piece cursor: {} of {} rows of the file match no \
+                                 candidate creator cursor slice, while the candidate slices of \
+                                 that region disagree on the last consumed sequence ({}..={}), \
+                                 so bounding those rows by the least advanced cursor {} would \
+                                 deliver the rows a more advanced piece has already consumed",
+                                region_id, unmatched, num_rows, min, max, min
+                            ),
+                        }
+                        .fail();
+                    }
                     fallback_mask.value(row)
                 }
             };
@@ -1046,7 +1095,7 @@ impl RangeBase {
         }
         if unmatched > 0 {
             debug!(
-                "{} of {} rows of an adopted file match no creator cursor slice; bounding them by the least advanced cursor {}",
+                "{} of {} rows of an adopted file match no creator cursor slice; bounding them by the least advanced cursor {}, which every candidate carries",
                 unmatched, num_rows, fallback_cursor
             );
         }
