@@ -4251,3 +4251,71 @@ async fn test_automatic_units_share_engine_capacity_and_wait_for_batch_exit(
     }
     engine.stop().await.unwrap();
 }
+
+#[tokio::test]
+async fn test_scanner_time_range_fingerprint() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = crate::test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let scanner = async || {
+        engine
+            .handle_query(region_id, ScanRequest::default())
+            .await
+            .unwrap()
+    };
+    let fp = |scanner: &store_api::region_engine::RegionScannerRef, start: i64, end: i64| {
+        scanner.time_range_fingerprint(Timestamp::new_second(start), Timestamp::new_second(end))
+    };
+    let put = |start: usize, end: usize| {
+        put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: column_schemas.clone(),
+                rows: crate::test_util::build_rows(start, end),
+            },
+        )
+    };
+
+    put(0, 10).await;
+    // Unflushed rows make their range unfingerprintable; other ranges are not affected.
+    let s = scanner().await;
+    assert_eq!(None, fp(&s, 0, 10));
+    let empty = fp(&s, 20, 30).unwrap();
+
+    crate::test_util::flush_region(&engine, region_id, None).await;
+    let before_late_write = scanner().await;
+    let flushed = fp(&before_late_write, 0, 10).unwrap();
+    assert_eq!(Some(empty.clone()), fp(&before_late_write, 20, 30));
+
+    // A late write into the flushed range, then flushed.
+    put(5, 6).await;
+    assert_eq!(None, fp(&scanner().await, 0, 10));
+    crate::test_util::flush_region(&engine, region_id, None).await;
+    let s = scanner().await;
+    let rewritten = fp(&s, 0, 10).unwrap();
+    assert_ne!(flushed, rewritten);
+    assert_eq!(Some(empty.clone()), fp(&s, 20, 30));
+    // A scanner keeps describing the files it was built on.
+    assert_eq!(Some(flushed), fp(&before_late_write, 0, 10));
+
+    // Compaction rewrites the rows into new files.
+    compact(&engine, region_id).await;
+    let compacted = fp(&scanner().await, 0, 10);
+    assert!(compacted.is_some());
+    assert_ne!(Some(rewritten), compacted);
+
+    // A sequential scan merges the memtable range [8, 11] with the file range [0, 9] and
+    // reads the live memtable up to the merged bounds, so [0, 5) is not fingerprintable
+    // although the memtable does not overlap it.
+    put(8, 12).await;
+    let s = scanner().await;
+    assert_eq!(None, fp(&s, 0, 5));
+    assert_eq!(Some(empty), fp(&s, 20, 30));
+}
