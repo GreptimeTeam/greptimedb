@@ -28,9 +28,7 @@ use datafusion_expr::expr::{Expr, InList};
 use datafusion_expr::physical_planning_context::PhysicalPlanningContext;
 use datafusion_expr::{Between, BinaryExpr, Operator};
 use datafusion_physical_expr::execution_props::ExecutionProps;
-use datafusion_physical_expr::expressions::{
-    DynamicFilterPhysicalExpr,
-};
+use datafusion_physical_expr::expressions::DynamicFilterPhysicalExpr;
 use datafusion_physical_expr::{PhysicalExpr, create_physical_expr};
 use datatypes::arrow;
 use datatypes::value::scalar_value_to_timestamp;
