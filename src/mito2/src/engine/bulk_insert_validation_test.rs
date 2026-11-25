@@ -16,7 +16,8 @@
 
 use std::sync::Arc;
 
-use api::v1::{ArrowIpc, Rows};
+use api::v1::value::ValueData;
+use api::v1::{ArrowIpc, ColumnDataType, Rows, SemanticType, WriteHint};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::{DfRecordBatch, RecordBatches};
@@ -27,11 +28,13 @@ use datatypes::arrow::array::{
 };
 use datatypes::arrow::datatypes::{Field, Int64Type, Schema};
 use datatypes::prelude::ConcreteDataType;
+use mito_codec::row_converter::SparsePrimaryKeyCodec;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{
     AlterKind, ModifyColumnType, RegionAlterRequest, RegionBulkInsertsRequest, RegionPutRequest,
     RegionRequest,
 };
+use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
@@ -91,17 +94,94 @@ async fn scan_num_rows(engine: &MitoEngine, region_id: RegionId) -> usize {
     batches.iter().map(|batch| batch.num_rows()).sum()
 }
 
+/// The schema of a row `Put` that carries a pre-encoded sparse key instead of the tag columns.
+fn sparse_put_schema() -> Vec<api::v1::ColumnSchema> {
+    [
+        (
+            PRIMARY_KEY_COLUMN_NAME,
+            ColumnDataType::Binary,
+            SemanticType::Tag,
+        ),
+        (
+            "ts",
+            ColumnDataType::TimestampMillisecond,
+            SemanticType::Timestamp,
+        ),
+        ("field_0", ColumnDataType::Float64, SemanticType::Field),
+    ]
+    .into_iter()
+    .map(|(name, datatype, semantic_type)| api::v1::ColumnSchema {
+        column_name: name.to_string(),
+        datatype: datatype as i32,
+        semantic_type: semantic_type as i32,
+        ..Default::default()
+    })
+    .collect()
+}
+
+/// Encodes one sparse key: the reserved `(table_id, tsid)` prefix and `labels` in the given order.
+fn sparse_key(
+    codec: &SparsePrimaryKeyCodec,
+    table_id: u32,
+    tsid: u64,
+    labels: &[(u32, &str)],
+) -> Vec<u8> {
+    let mut key = Vec::new();
+    codec.encode_internal(table_id, tsid, &mut key).unwrap();
+    codec
+        .encode_raw_tag_value(
+            labels.iter().map(|(id, value)| (*id, value.as_bytes())),
+            &mut key,
+        )
+        .unwrap();
+    key
+}
+
+/// Writes the two encoded keys `keys`, as one bulk insert or as row `Put`s with a sparse hint.
+fn sparse_keys_request(region_id: RegionId, bulk: bool, keys: [&[u8]; 2]) -> RegionRequest {
+    if bulk {
+        bulk_request(
+            region_id,
+            vec![
+                column(
+                    PRIMARY_KEY_COLUMN_NAME,
+                    Arc::new(BinaryArray::from_vec(keys.to_vec())),
+                ),
+                field(),
+                ts(),
+            ],
+        )
+    } else {
+        let mut rows = build_rows(0, 2);
+        for (row, key) in rows.iter_mut().zip(keys) {
+            row.values[0].value_data = Some(ValueData::BinaryValue(key.to_vec()));
+            row.values.swap(1, 2);
+        }
+        RegionRequest::Put(RegionPutRequest {
+            rows: Rows {
+                schema: sparse_put_schema(),
+                rows,
+            },
+            hint: Some(WriteHint {
+                primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse as i32,
+            }),
+            skip_wal: false,
+            partition_expr_version: None,
+        })
+    }
+}
+
+/// A batch of encoded sparse keys is rejected as a whole, both as a bulk insert and as row `Put`s
+/// with a sparse hint, when a key no decoder accepts or no reader can find is present.
 #[tokio::test]
 async fn test_encoded_sparse_keys_reject_whole_batch_and_replay() {
-    use api::v1::value::ValueData;
-    use api::v1::{ColumnDataType, WriteHint};
-    use mito_codec::row_converter::SparsePrimaryKeyCodec;
-
     for bulk in [false, true] {
         let mut env = TestEnv::new().await;
         let engine = env.create_engine(MitoConfig::default()).await;
         let region_id = RegionId::new(1, 1);
+        // Two labels, so their order inside a key is observable.
         let mut create = CreateRequestBuilder::new()
+            .tag_num(2)
             .insert_option("primary_key_encoding", "sparse")
             .build();
         let reserved = crate::test_util::sst_util::sst_region_metadata_with_encoding(
@@ -115,73 +195,113 @@ async fn test_encoded_sparse_keys_reject_whole_batch_and_replay() {
             .splice(0..0, reserved.primary_key.into_iter().take(2));
         let table_dir = create.table_dir.clone();
         let options = create.options.clone();
-        let mut schema = rows_schema(&create);
-        schema.truncate(3);
-        schema[0].column_name = "__primary_key".to_string();
-        schema[0].datatype = ColumnDataType::Binary as i32;
-        schema.swap(1, 2);
         engine
             .handle_request(region_id, RegionRequest::Create(create))
             .await
             .unwrap();
 
         let codec = SparsePrimaryKeyCodec::schemaless();
-        let mut key = Vec::new();
-        codec.encode_internal(42, 7, &mut key).unwrap();
-        codec
-            .encode_raw_tag_value([(0, "1234567🦀".as_bytes())].into_iter(), &mut key)
-            .unwrap();
+        // `tag_0` (column 0) comes before `tag_1` (column 1) in canonical label-name order.
+        let key = sparse_key(&codec, 42, 7, &[(0, "1234567🦀"), (1, "tag_1")]);
         let mut malformed = key.clone();
         malformed.push(0); // A truncated label ID after a valid Unicode label.
-        let request = |second: &[u8]| {
-            if bulk {
-                bulk_request(
+        // The same series with swapped labels: stored, no reader would ever find it again.
+        let swapped = sparse_key(&codec, 42, 7, &[(1, "tag_1"), (0, "1234567🦀")]);
+
+        for rejected in [&malformed, &swapped] {
+            let error = engine
+                .handle_request(
                     region_id,
-                    vec![
-                        column(
-                            "__primary_key",
-                            Arc::new(BinaryArray::from_vec(vec![key.as_slice(), second])),
-                        ),
-                        field(),
-                        ts(),
-                    ],
+                    sparse_keys_request(region_id, bulk, [&key, rejected]),
                 )
-            } else {
-                let mut rows = build_rows(0, 2);
-                for (row, key) in rows.iter_mut().zip([key.as_slice(), second]) {
-                    row.values[0].value_data = Some(ValueData::BinaryValue(key.to_vec()));
-                    row.values.swap(1, 2);
-                }
-                RegionRequest::Put(RegionPutRequest {
-                    rows: Rows {
-                        schema: schema.clone(),
-                        rows,
-                    },
-                    hint: Some(WriteHint {
-                        primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse as i32,
-                    }),
-                    skip_wal: false,
-                    partition_expr_version: None,
-                })
-            }
-        };
-        let error = engine
-            .handle_request(region_id, request(&malformed))
-            .await
-            .unwrap_err();
-        assert_eq!(StatusCode::InvalidArguments, error.status_code());
-        assert_eq!(0, scan_num_rows(&engine, region_id).await);
-        // Byte validation follows WAL append; replay must also discard the malformed batch.
-        reopen_region(&engine, region_id, table_dir.clone(), true, options.clone()).await;
-        assert_eq!(0, scan_num_rows(&engine, region_id).await);
+                .await
+                .unwrap_err();
+            assert_eq!(
+                StatusCode::InvalidArguments,
+                error.status_code(),
+                "{bulk}: {error:?}"
+            );
+            assert_eq!(0, scan_num_rows(&engine, region_id).await, "{bulk}");
+            // Byte validation follows WAL append; replay must also discard the bad batch.
+            reopen_region(&engine, region_id, table_dir.clone(), true, options.clone()).await;
+            assert_eq!(0, scan_num_rows(&engine, region_id).await, "{bulk}");
+        }
         engine
-            .handle_request(region_id, request(&key))
+            .handle_request(
+                region_id,
+                sparse_keys_request(region_id, bulk, [&key, &key]),
+            )
             .await
             .unwrap();
-        assert_eq!(2, scan_num_rows(&engine, region_id).await);
+        assert_eq!(2, scan_num_rows(&engine, region_id).await, "{bulk}");
 
         reopen_region(&engine, region_id, table_dir, true, options).await;
-        assert_eq!(2, scan_num_rows(&engine, region_id).await);
+        assert_eq!(2, scan_num_rows(&engine, region_id).await, "{bulk}");
+        engine.stop().await.unwrap();
+    }
+}
+
+/// Sparse labels are ordered by name, not by column id: the metric engine legitimately reverses
+/// id order, so a name-ordered key whose ids descend is accepted while the id-ordered key is
+/// rejected.
+#[tokio::test]
+async fn test_encoded_sparse_keys_follow_label_name_order_not_column_ids() {
+    for bulk in [false, true] {
+        let mut env = TestEnv::new().await;
+        let engine = env.create_engine(MitoConfig::default()).await;
+        let region_id = RegionId::new(1, 1);
+        let mut create = CreateRequestBuilder::new()
+            .tag_num(2)
+            .insert_option("primary_key_encoding", "sparse")
+            .build();
+        let reserved = crate::test_util::sst_util::sst_region_metadata_with_encoding(
+            store_api::codec::PrimaryKeyEncoding::Sparse,
+        );
+        create
+            .column_metadatas
+            .extend(reserved.column_metadatas.into_iter().take(2));
+        create
+            .primary_key
+            .splice(0..0, reserved.primary_key.into_iter().take(2));
+        // `tag_0` takes column id 1 and `tag_1` column id 0, so label-name order descends by id
+        // while the primary key keeps its id order.
+        create.column_metadatas[0].column_id = 1;
+        create.column_metadatas[1].column_id = 0;
+        let table_dir = create.table_dir.clone();
+        let options = create.options.clone();
+        engine
+            .handle_request(region_id, RegionRequest::Create(create))
+            .await
+            .unwrap();
+
+        let codec = SparsePrimaryKeyCodec::schemaless();
+        let name_ordered = sparse_key(&codec, 42, 7, &[(1, "tag_0"), (0, "tag_1")]);
+        let id_ordered = sparse_key(&codec, 42, 7, &[(0, "tag_1"), (1, "tag_0")]);
+        let error = engine
+            .handle_request(
+                region_id,
+                sparse_keys_request(region_id, bulk, [&name_ordered, &id_ordered]),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            StatusCode::InvalidArguments,
+            error.status_code(),
+            "{bulk}: {error:?}"
+        );
+        assert_eq!(0, scan_num_rows(&engine, region_id).await, "{bulk}");
+
+        engine
+            .handle_request(
+                region_id,
+                sparse_keys_request(region_id, bulk, [&name_ordered, &name_ordered]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(2, scan_num_rows(&engine, region_id).await, "{bulk}");
+
+        reopen_region(&engine, region_id, table_dir, true, options).await;
+        assert_eq!(2, scan_num_rows(&engine, region_id).await, "{bulk}");
         engine.stop().await.unwrap();
     }
 }

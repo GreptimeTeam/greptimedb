@@ -45,6 +45,11 @@ use store_api::storage::consts::{PRIMARY_KEY_COLUMN_NAME, ReservedColumnId};
 const ROWS_PER_BATCH: usize = 4096;
 const TABLE_ID: u32 = 1024;
 
+/// Name of the label column `column_id`: its order need not match the column ID order.
+fn label_name(column_id: u32) -> String {
+    format!("tag_{column_id}")
+}
+
 fn build_metadata(num_tags: u32) -> RegionMetadataRef {
     let mut builder = RegionMetadataBuilder::new(RegionId::new(TABLE_ID, 0));
     let mut primary_key = vec![ReservedColumnId::table_id(), ReservedColumnId::tsid()];
@@ -70,7 +75,7 @@ fn build_metadata(num_tags: u32) -> RegionMetadataRef {
         let column_id = index * 17 % num_tags;
         builder.push_column_metadata(ColumnMetadata {
             column_schema: ColumnSchema::new(
-                format!("tag_{column_id}"),
+                label_name(column_id),
                 ConcreteDataType::string_datatype(),
                 true,
             ),
@@ -103,7 +108,7 @@ fn build_keys(num_series: usize, num_tags: u32, value_bytes: usize, unicode: boo
     let codec = SparsePrimaryKeyCodec::schemaless();
     (0..num_series)
         .map(|series| {
-            let tags: Vec<_> = (0..num_tags)
+            let mut tags: Vec<_> = (0..num_tags)
                 .map(|index| {
                     // Label name order need not match physical column ID order.
                     let column_id = index * 17 % num_tags;
@@ -118,6 +123,8 @@ fn build_keys(num_series: usize, num_tags: u32, value_bytes: usize, unicode: boo
                     (column_id, value)
                 })
                 .collect();
+            // Keys are stored with their labels in label-name order, whatever their column IDs.
+            tags.sort_unstable_by_key(|(column_id, _)| label_name(*column_id));
             let mut key = Vec::new();
             // Permute distinct TSIDs so even one-row-per-series input needs sorting.
             let tsid = (series * 17 % num_series) as u64;
