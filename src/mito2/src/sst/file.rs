@@ -654,16 +654,11 @@ impl FileMeta {
     /// stores, so a range built in memory compares equal to the same range decoded.
     /// Canonicalizing first matches the decoder, which canonicalizes on read.
     ///
-    /// [`PartitionExpr`] holds only column names, operators and values, so
-    /// serialization does not fail in practice; a range that somehow did would be
-    /// keyed by its `Display` form rather than compared equal to everything.
+    /// The identity itself is [`PartitionExpr::exact_key`], shared with the reader,
+    /// the planner and the remap so all of them agree on what "the same predicate"
+    /// means.
     pub(crate) fn owned_range_key(&self) -> Option<String> {
-        self.owned_range.as_deref().map(|expr| {
-            expr.clone()
-                .canonicalize()
-                .as_json_str()
-                .unwrap_or_else(|_| expr.to_string())
-        })
+        self.owned_range.as_deref().map(|expr| expr.exact_key())
     }
 
     /// Whether both references authorize exactly the same rows.

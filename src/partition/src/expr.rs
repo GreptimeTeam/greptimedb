@@ -409,6 +409,40 @@ impl PartitionExpr {
         }
     }
 
+    /// Exact, persistable identity of this predicate.
+    ///
+    /// [Self]'s own equality compares literals as Rust values, so two coercible
+    /// literals (`TIME 1 second` and `TIME 1000 milliseconds`) compare equal
+    /// although they are different physical predicates. Every decision that asks
+    /// whether a predicate *changed* - a reference's row authorization, or whether a
+    /// reader may skip its own region predicate - must compare this key instead: it
+    /// is the serialized form, which keeps each literal's physical type, and it is
+    /// what storage persists, so a predicate built in memory compares equal to the
+    /// same predicate decoded. Canonicalizing first matches the decoder, which
+    /// canonicalizes on read.
+    ///
+    /// [Self] holds only column names, operators and values, so serialization does
+    /// not fail in practice; a predicate that somehow would is keyed by its
+    /// [Display] form rather than compared equal to everything.
+    pub fn exact_key(&self) -> String {
+        self.clone()
+            .canonicalize()
+            .as_json_str()
+            .unwrap_or_else(|_| self.to_string())
+    }
+
+    /// Compares two optional predicates by [Self::exact_key].
+    ///
+    /// `None` means "no predicate" and only equals another `None`, so callers can use
+    /// this wherever two partition expressions may be absent.
+    pub fn same_exact(left: Option<&Self>, right: Option<&Self>) -> bool {
+        match (left, right) {
+            (None, None) => true,
+            (Some(left), Some(right)) => left.exact_key() == right.exact_key(),
+            _ => false,
+        }
+    }
+
     /// Converts [Self] to [Partition].
     pub fn as_pb_partition(&self) -> error::Result<Partition> {
         Ok(Partition {
@@ -507,6 +541,29 @@ mod tests {
             assert_eq!(expr, decoded);
             assert_eq!(hasher.hash_one(&expr), hasher.hash_one(&decoded));
         }
+    }
+
+    /// Two literals of different physical types are one predicate to `==` but two
+    /// predicates to every decision that asks whether a filter changed.
+    #[test]
+    fn test_exact_key_tells_coercible_literals_apart() {
+        use common_time::Timestamp;
+
+        let seconds = col("ts").gt(Value::Timestamp(Timestamp::new_second(1)));
+        let millis = col("ts").gt(Value::Timestamp(Timestamp::new_millisecond(1000)));
+        assert_eq!(seconds, millis, "`==` cannot tell the two apart");
+        assert_ne!(seconds.exact_key(), millis.exact_key());
+        assert!(!PartitionExpr::same_exact(Some(&seconds), Some(&millis)));
+        // The key is the persisted form, so a decoded predicate keys identically.
+        let decoded = PartitionExpr::from_json_str(&seconds.exact_key())
+            .unwrap()
+            .unwrap();
+        assert_eq!(seconds.exact_key(), decoded.exact_key());
+        assert!(PartitionExpr::same_exact(Some(&seconds), Some(&decoded)));
+
+        assert!(PartitionExpr::same_exact(None, None));
+        assert!(!PartitionExpr::same_exact(Some(&seconds), None));
+        assert!(!PartitionExpr::same_exact(None, Some(&seconds)));
     }
 
     #[test]

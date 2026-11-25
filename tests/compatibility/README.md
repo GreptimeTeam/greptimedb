@@ -85,6 +85,13 @@ these descriptors through an OSS writer.
 Frozen region manifests that carry pending WAL tails are checked by the manifest tests of `mito2`.
 No SQL statement records a pending tail. See the [fixture notes](manifest/pending_tails/README.md).
 
+Repartition references carry an `owned_range` that only they can read, and a build
+that predates it ignores the range instead of failing. Drain in-flight repartitions
+before upgrading the first node, and reopen repartition only after every node that can
+read, replay or compact these regions enforces scope; a downgrade to a reader without
+it silently reads too many rows. The full boundary is documented in
+[`.agents/architecture-invariants.md`](../../.agents/architecture-invariants.md).
+
 ## Quick Start
 
 ```shell

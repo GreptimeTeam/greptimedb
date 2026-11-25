@@ -201,9 +201,11 @@ pub(crate) fn validate_inputs(context: &StreamContext, ranges: &[PartitionRange]
 /// Collects the assigned SSTs and their covering columnar series indexes.
 ///
 /// `None` means the assignments are structurally valid but not ready for columnar reads: an
-/// assigned memtable, an SST without columnar series coverage, or an SST without columnar
-/// samples. Structural corruption is still an error, and every assignment is validated before
-/// either answer is returned, so a later invalid assignment is never masked by missing artifacts.
+/// assigned memtable, an SST without columnar series coverage, an SST without columnar samples,
+/// or a reference restricted by `owned_range` (the artifacts cover the whole file, so the
+/// ordinary reader has to apply the range per file). Structural corruption is still an error,
+/// and every assignment is validated before either answer is returned, so a later invalid
+/// assignment is never masked by missing artifacts.
 fn collect_inputs(
     context: &StreamContext,
     ranges: &[PartitionRange],
@@ -277,6 +279,14 @@ fn collect_inputs(
             return Err(invalid(
                 "columnar prepared reads do not support foreign SSTs",
             ));
+        }
+        // `owned_range` authorizes fewer rows than the physical SST holds: a
+        // repartition narrows it without rewriting the file, and the artifacts cover
+        // the whole file. The Parquet reader applies the range per file, but these
+        // samples are read per candidate, so the ordinary reader has to answer
+        // instead of the sidecar exposing rows the reference does not own.
+        if file.meta_ref().owned_range.is_some() {
+            ready = false;
         }
         let mut covered = false;
         for handle in index.version.series_indexes.values() {

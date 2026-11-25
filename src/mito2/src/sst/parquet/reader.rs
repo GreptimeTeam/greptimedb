@@ -729,6 +729,14 @@ impl ParquetReaderBuilder {
         Ok(Some((context, selection)))
     }
 
+    /// Whether the file's creator expression is the region's own expression.
+    ///
+    /// Compared by [`PartitionExpr::same_exact`], the same exact serialized
+    /// identity the remap uses to decide whether the source reader skipped its
+    /// region predicate: two expressions that only compare equal as Rust values
+    /// (`TIME 1 second` and `TIME 1000 milliseconds`) are different physical
+    /// filters, so skipping on their account and then dropping the term from a
+    /// remapped reference would hide rows the source region made visible.
     fn is_same_region_partition(
         region_partition_expr_str: Option<&str>,
         file_partition_expr: Option<&PartitionExpr>,
@@ -738,7 +746,8 @@ impl ParquetReaderBuilder {
             None => None,
         };
 
-        let is_same = region_partition_expr.as_ref() == file_partition_expr;
+        let is_same =
+            PartitionExpr::same_exact(region_partition_expr.as_ref(), file_partition_expr);
         Ok((region_partition_expr, is_same))
     }
 
@@ -3168,6 +3177,57 @@ mod tests {
         assert_eq!(
             expected, rows,
             "rows outside the owned range must be filtered out"
+        );
+    }
+
+    /// The reader skips the region predicate only when the file's creator expression
+    /// *is* the region's expression, by exact serialized identity.
+    ///
+    /// The remap depends on this being the same rule: it drops the source term from a
+    /// published reference exactly when the source reader skipped it. Two expressions
+    /// that only compare equal as Rust `Value`s (`TIME 1 second` and `TIME 1000
+    /// milliseconds`) are different physical filters, so the reader has to apply the
+    /// region predicate instead of trusting a skip the remap would not mirror.
+    #[test]
+    fn test_is_same_region_partition_compares_exact_identity() {
+        let seconds = partition::expr::col("ts").gt_eq(datatypes::value::Value::Timestamp(
+            common_time::Timestamp::new_second(1),
+        ));
+        let millis = partition::expr::col("ts").gt_eq(datatypes::value::Value::Timestamp(
+            common_time::Timestamp::new_millisecond(1000),
+        ));
+        assert_eq!(seconds, millis, "`==` cannot tell the two apart");
+        let millis_json = millis.as_json_str().unwrap();
+
+        let (region_expr, same) =
+            ParquetReaderBuilder::is_same_region_partition(Some(&millis_json), Some(&millis))
+                .unwrap();
+        assert_eq!(Some(millis), region_expr);
+        assert!(
+            same,
+            "a file scoped by the region's own expression is redundant"
+        );
+
+        let (region_expr, same) =
+            ParquetReaderBuilder::is_same_region_partition(Some(&millis_json), Some(&seconds))
+                .unwrap();
+        assert_eq!(Some(seconds), region_expr);
+        assert!(
+            !same,
+            "a respelled expression is a different physical filter, so the region \
+             predicate still applies"
+        );
+
+        assert!(
+            ParquetReaderBuilder::is_same_region_partition(None, None)
+                .unwrap()
+                .1,
+            "no predicate on either side is the same predicate"
+        );
+        assert!(
+            !ParquetReaderBuilder::is_same_region_partition(Some(&millis_json), None)
+                .unwrap()
+                .1
         );
     }
 

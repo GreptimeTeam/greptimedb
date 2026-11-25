@@ -35,6 +35,35 @@ vice versa.
 - Wire types are generated from the external `greptime-proto` crate; change the
   format there first, then bump the dependency (see invariant 6's pattern).
 
+### Repartition (`owned_range`) upgrade and rollback boundary
+
+A repartition shares physical SSTs with the regions it produces: instead of copying
+objects, it publishes one *reference* per target, and that reference carries an
+`owned_range` — the only rows it may read from the shared file. Scope is enforced at
+read time and only there, so a build that predates `owned_range` ignores it instead
+of failing. This is the one persisted-format boundary where mixed versions return
+wrong answers rather than errors.
+
+- Stop admitting new repartitions and drain the in-flight ones before upgrading the
+  first node. An old remap can persist `staging_manifest_paths` whose entries carry
+  no `owned_range` just before a new node applies them, and the new apply requires an
+  `owned_range` on every file
+  (`check_remap_owned_range` in `src/mito2/src/worker/handle_apply_staging.rs`).
+- Reopen repartition only after every node that can read, replay or compact these
+  regions runs a scope-enforcing version (a build whose reads, replays and compactions
+  filter by `owned_range`). Once a narrowed reference is published, an old reader
+  silently reads too many rows: the region returns rows its sibling also returns, with
+  no error and no log line.
+- Rolling back to an old reader after a narrowed reference was published is unsafe for
+  the same reason. The recovery from a bad rollout is a forward fix, not a downgrade.
+
+The drain itself is an operational step driven from meta-srv
+(`src/meta-srv/src/procedure/repartition.rs`); this repo cannot test it from `mito2`.
+What `mito2` can pin, and does, is the boundary behaviour: the apply path refuses an
+entry without a range
+(`test_remap_install_without_an_owned_range_is_refused`), and the remap path produces
+one for every target (`test_every_remapped_entry_carries_an_owned_range`).
+
 ## 2. Respect crate layering and dependency direction
 
 The workspace is layered; dependencies point downward only.

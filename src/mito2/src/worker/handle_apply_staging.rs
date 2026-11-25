@@ -370,13 +370,11 @@ fn collect_disjuncts(expr: &PartitionExpr, out: &mut Vec<Vec<String>>) -> bool {
     }
 }
 
-/// Exact identity of one predicate: the serialized form, which keeps the
-/// literal's physical type. `PartitionExpr`'s own equality cannot tell
-/// `TIME 1 second` from `TIME 1000 milliseconds` apart. Canonicalizing first
-/// matches what the decoder produces, so a range this node built and the same
-/// range read back from storage compare equal.
+/// Exact identity of one predicate, by the shared [PartitionExpr::exact_key]: the
+/// serialized form, which keeps the literal's physical type. `PartitionExpr`'s own
+/// equality cannot tell `TIME 1 second` from `TIME 1000 milliseconds` apart.
 fn range_key(expr: &PartitionExpr) -> Option<String> {
-    expr.clone().canonicalize().as_json_str().ok()
+    Some(expr.exact_key())
 }
 
 /// Renders a range for an error message.
@@ -408,6 +406,15 @@ mod tests {
 
     /// A remap always conjoins the target expression, so an entry without a range
     /// did not come from one: installing it would authorize every physical row.
+    ///
+    /// This models the rolling-upgrade boundary: an *old* remap (a build without
+    /// `owned_range`) can persist `staging_manifest_paths` whose entries carry no
+    /// range, and the new node that applies them must refuse rather than install a
+    /// reference authorizing every physical row. It is the one half of the boundary
+    /// that is reachable from this crate; the drain that keeps the two from meeting
+    /// lives in `meta-srv` (`src/meta-srv/src/procedure/repartition.rs`), so the
+    /// test for it belongs there. See the upgrade note in
+    /// `.agents/architecture-invariants.md`.
     #[test]
     fn test_remap_install_without_an_owned_range_is_refused() {
         let region_id = RegionId::new(1, 1);

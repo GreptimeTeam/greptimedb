@@ -220,7 +220,7 @@ impl RemapManifest {
             )?;
             // Keep sharing the source reference when the authorization is unchanged.
             let file_meta_clone =
-                if Self::exact_eq(owned_range.as_ref(), file_meta.owned_range.as_deref())? {
+                if Self::exact_eq(owned_range.as_ref(), file_meta.owned_range.as_deref()) {
                     file_meta.clone()
                 } else {
                     let mut meta = (**file_meta).clone();
@@ -248,7 +248,7 @@ impl RemapManifest {
                         e.get().owned_range.as_deref(),
                         file_meta_clone.owned_range.as_deref(),
                     )?;
-                    if !Self::exact_eq(union.as_ref(), e.get().owned_range.as_deref())? {
+                    if !Self::exact_eq(union.as_ref(), e.get().owned_range.as_deref()) {
                         let mut meta = (**e.get()).clone();
                         meta.owned_range = union.map(PartitionExprRef::from);
                         *e.get_mut() = FileMetaRef::from(meta);
@@ -312,7 +312,7 @@ impl RemapManifest {
         // equal as Rust `Value`s (`TIME 1 second` and `TIME 1000 milliseconds`)
         // are different physical filters, and the source never admitted the rows
         // the second one excludes.
-        if !Self::exact_eq(source_domain, creator)? {
+        if !Self::exact_eq(source_domain, creator) {
             push(&mut operands, source_domain);
         }
 
@@ -352,24 +352,20 @@ impl RemapManifest {
     /// so the key and the decoder agree on what "the same predicate" means; the
     /// expression is canonicalized first because decoding canonicalizes, and a
     /// predicate built in memory must compare equal to the one that was stored.
-    fn exact_key(expr: &PartitionExpr) -> Result<String> {
-        expr.clone()
-            .canonicalize()
-            .as_json_str()
-            .context(error::SerializePartitionExprSnafu)
+    fn exact_key(expr: &PartitionExpr) -> String {
+        expr.exact_key()
     }
 
-    /// Compares two optional predicates by [Self::exact_key].
+    /// Compares two optional predicates by [PartitionExpr::same_exact].
     ///
     /// Every decision that drops or replaces a term goes through this instead of
     /// `PartitionExpr` equality, which cannot tell two literals of different
-    /// physical types apart.
-    fn exact_eq(left: Option<&PartitionExpr>, right: Option<&PartitionExpr>) -> Result<bool> {
-        match (left, right) {
-            (None, None) => Ok(true),
-            (Some(left), Some(right)) => Ok(Self::exact_key(left)? == Self::exact_key(right)?),
-            _ => Ok(false),
-        }
+    /// physical types apart. The reader (`ParquetFileReader::is_same_region_partition`)
+    /// and the scan planner (`ScanInput::should_skip_region_partition`) ask the same
+    /// question with the same helper, so a source that skipped its region predicate
+    /// is exactly one whose creator expression keys equal to the source domain.
+    fn exact_eq(left: Option<&PartitionExpr>, right: Option<&PartitionExpr>) -> bool {
+        PartitionExpr::same_exact(left, right)
     }
 
     /// Folds `terms` into one expression of `op` with a bounded shape.
@@ -397,7 +393,7 @@ impl RemapManifest {
         let mut keys = HashSet::new();
         let mut flat: Vec<PartitionExpr> = Vec::new();
         for term in terms {
-            if keys.insert(Self::exact_key(&term)?) {
+            if keys.insert(Self::exact_key(&term)) {
                 flat.push(term);
             }
         }
@@ -501,8 +497,8 @@ impl RemapManifest {
         for term in terms {
             let mut conjuncts: Vec<(String, PartitionExpr)> = term
                 .into_iter()
-                .map(|expr| Ok((Self::exact_key(&expr)?, expr)))
-                .collect::<Result<_>>()?;
+                .map(|expr| (Self::exact_key(&expr), expr))
+                .collect();
             conjuncts.sort_by(|left, right| left.0.cmp(&right.0));
             conjuncts.dedup_by(|left, right| left.0 == right.0);
             let (keys, exprs) = conjuncts.into_iter().unzip();
@@ -1266,6 +1262,92 @@ mod tests {
         );
     }
 
+    /// A remap never hands the apply path an entry it would refuse: every entry of
+    /// every target carries a range, because the target expression is always one of
+    /// its operands.
+    ///
+    /// Together with
+    /// `worker::handle_apply_staging::tests::test_remap_install_without_an_owned_range_is_refused`
+    /// (an entry without a range is refused, which is how an old remap's output is
+    /// stopped by a new node) this pins the upgrade boundary from both sides: what a
+    /// build that understands `owned_range` publishes, and what it accepts.
+    #[test]
+    fn test_every_remapped_entry_carries_an_owned_range() {
+        let source = RegionId::new(1, 1);
+        let co_holder = RegionId::new(1, 2);
+        let split_left = RegionId::new(1, 3);
+        let split_right = RegionId::new(1, 4);
+        let merged = RegionId::new(1, 5);
+
+        let whole = range_expr("k", 0, 100);
+        let left = range_expr("k", 0, 50);
+        let right = range_expr("k", 50, 100);
+
+        // One physical file, two holders, each authorized for one half; its creator
+        // expression is the whole domain, so no holder's range is redundant.
+        let mut holder = create_manifest(source, 1, Some(whole.clone()), 1, 1);
+        set_manifest_domain(&mut holder, Some(left.clone()));
+        let file_id = *holder.files.keys().next().unwrap();
+        let mut held = (*holder.files[&file_id]).clone();
+        held.owned_range = Some(PartitionExprRef::from(left.clone()));
+        holder.files.insert(file_id, FileMetaRef::from(held));
+        let mut co = create_manifest(co_holder, 0, Some(whole.clone()), 1, 1);
+        set_manifest_domain(&mut co, Some(right.clone()));
+        let mut co_held = (*holder.files[&file_id]).clone();
+        co_held.owned_range = Some(PartitionExprRef::from(right.clone()));
+        co.files.insert(file_id, FileMetaRef::from(co_held));
+
+        // Both halves of a split, and a merge of both holders into one region.
+        let remapped = RemapManifest::new(
+            HashMap::from([(source, holder), (co_holder, co)]),
+            HashMap::from([
+                (split_left, left.clone()),
+                (split_right, right.clone()),
+                (merged, whole.clone()),
+            ]),
+            HashMap::from([
+                (source, vec![split_left, merged]),
+                (co_holder, vec![split_right, merged]),
+            ]),
+        )
+        .remap_manifests()
+        .unwrap()
+        .new_manifests;
+
+        for (region_id, manifest) in &remapped {
+            assert!(
+                !manifest.files.is_empty(),
+                "region {region_id} kept no file"
+            );
+            for (file_id, entry) in &manifest.files {
+                assert!(
+                    entry.owned_range.is_some(),
+                    "region {region_id} entry {file_id:?} must carry a range"
+                );
+            }
+        }
+        // A target that sees the reference once only publishes its own domain.
+        assert_eq!(
+            Some(&left),
+            remapped[&split_left].files[&file_id].owned_range.as_deref()
+        );
+        assert_eq!(
+            Some(&right),
+            remapped[&split_right].files[&file_id]
+                .owned_range
+                .as_deref()
+        );
+        // The merge sees both holders, so the survivor may read their union.
+        let merged_range = remapped[&merged].files[&file_id]
+            .owned_range
+            .as_deref()
+            .expect("the merge must authorize rows");
+        assert!(
+            merged_range != &left && merged_range != &right,
+            "the merged reference must keep both halves, got {merged_range:?}"
+        );
+    }
+
     /// Nesting depth of an ownership expression.
     fn owned_range_depth(expr: &PartitionExpr) -> usize {
         RemapManifest::depth(expr)
@@ -1406,6 +1488,10 @@ mod tests {
     /// `TIME 1 second` and `TIME 1000 milliseconds` compare equal as Rust
     /// `Value`s but are different physical filters, so dropping the source term
     /// would hand back rows the source never admitted.
+    ///
+    /// This pins the expression a remap publishes. The rows it decides are checked
+    /// end to end (write, remap twice, scan) by
+    /// `engine::repartition_dup_row_test::test_respelled_domain_keeps_the_same_rows_across_a_remap`.
     #[test]
     fn test_expression_equal_but_distinct_source_domain_still_restricts() {
         use common_time::time::Time;

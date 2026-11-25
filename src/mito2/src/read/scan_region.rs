@@ -1586,14 +1586,18 @@ impl ScanInput {
         }
     }
 
+    /// Whether the region predicate is redundant because the region's expression
+    /// *is* the file's creator expression.
+    ///
+    /// Compared by [`PartitionExpr::same_exact`], the exact serialized identity the
+    /// reader (`is_same_region_partition`) and the remap use, so the three agree:
+    /// when this says the file is not scoped by its creator, the reader applies the
+    /// region predicate and the remap keeps the source term as a restriction.
     fn should_skip_region_partition(&self, file: &FileHandle) -> bool {
-        match (
+        PartitionExpr::same_exact(
             self.region_partition_expr.as_ref(),
-            file.meta_ref().partition_expr.as_ref(),
-        ) {
-            (Some(region_expr), Some(file_expr)) => region_expr == file_expr.as_ref(),
-            _ => false,
-        }
+            file.meta_ref().partition_expr.as_deref(),
+        )
     }
 
     /// Tries to build file-level pruning statistics from the [FileHandle]'s time range and
@@ -2715,6 +2719,57 @@ mod tests {
                     .build(),
             )))
             .with_files(vec![file])
+    }
+
+    /// The region predicate is skipped only when the file's creator expression *is*
+    /// the region's expression, compared by exact serialized identity. The Parquet
+    /// reader decides the same question the same way, and the remap relies on exactly
+    /// that agreement to drop the source term from a published reference: two
+    /// expressions that merely compare equal as Rust values (`TIME 1 second` and
+    /// `TIME 1000 milliseconds`) are different physical filters, so the planner must
+    /// keep the region predicate instead of trusting a filter the reader did not skip.
+    #[tokio::test]
+    async fn test_should_skip_region_partition_compares_exact_identity() {
+        let seconds = partition_col("ts").gt_eq(Value::Timestamp(Timestamp::new_second(1)));
+        let millis = partition_col("ts").gt_eq(Value::Timestamp(Timestamp::new_millisecond(1000)));
+        assert_eq!(seconds, millis, "the two spellings agree as expressions");
+
+        let mut metadata = metadata_with_primary_key(vec![0, 1], false);
+        metadata.set_partition_expr(Some(seconds.as_json_str().unwrap()));
+        let metadata = Arc::new(metadata);
+        let env = SchedulerEnv::new().await;
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
+        let predicate = PredicateGroup::new(metadata.as_ref(), &[]).unwrap();
+        let file = |partition_expr: Option<PartitionExpr>| {
+            FileHandle::new(
+                FileMeta {
+                    partition_expr: partition_expr.map(Into::into),
+                    ..Default::default()
+                },
+                Arc::new(crate::sst::file_purger::NoopFilePurger),
+            )
+        };
+        let input = ScanInput::builder(env.access_layer.clone(), mapper)
+            .with_predicate(predicate)
+            .with_files(vec![
+                file(Some(seconds.clone())),
+                file(Some(millis.clone())),
+                file(None),
+            ])
+            .build();
+
+        assert!(
+            input.should_skip_region_partition(&file(Some(seconds.clone()))),
+            "the creator's own expression is redundant"
+        );
+        assert!(
+            !input.should_skip_region_partition(&file(Some(millis))),
+            "a respelled expression is not the creator's own expression"
+        );
+        assert!(
+            !input.should_skip_region_partition(&file(None)),
+            "an unscoped file keeps the region predicate"
+        );
     }
 
     #[test]

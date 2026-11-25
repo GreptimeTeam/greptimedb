@@ -875,3 +875,156 @@ async fn test_two_generation_split_compaction_merge_does_not_duplicate() {
     run_two_generations(Gen2Compaction::CompactedHalf, "compacted-half").await;
     run_two_generations(Gen2Compaction::OriginalHalf, "original-half").await;
 }
+
+/// The same predicate in two physical types: `ts >= TIME 1 second` and
+/// `ts >= TIME 1000 milliseconds` compare equal as `PartitionExpr`s, yet they are
+/// different physical filters, so the reader, the scan planner and the remap all
+/// compare them by exact serialized identity (see `PartitionExpr::exact_key`). A
+/// repartition that respells a domain therefore keeps the source domain as a
+/// restriction on what it publishes, and the rows a source region made visible stay
+/// visible - exactly once - after the remap.
+///
+/// `remap_manifest::tests::test_expression_equal_but_distinct_source_domain_still_restricts`
+/// pins the published expression; this pins the rows it cannot see.
+#[tokio::test]
+async fn test_respelled_domain_keeps_the_same_rows_across_a_remap() {
+    use common_time::Timestamp;
+
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("respelled-domain-rows").await;
+    let engine = env
+        .create_engine(MitoConfig {
+            schedule_compaction_after_edit: false,
+            ..Default::default()
+        })
+        .await;
+
+    let source = RegionId::new(1, 1);
+    let respelled = RegionId::new(1, 2);
+    let merged = RegionId::new(1, 3);
+
+    // One instant, two spellings: `==` cannot tell them apart, the serialized form
+    // (which is what a manifest stores) can.
+    let seconds = col("ts").gt_eq(Value::Timestamp(Timestamp::new_second(1)));
+    let millis = col("ts").gt_eq(Value::Timestamp(Timestamp::new_millisecond(1000)));
+    assert_eq!(
+        seconds, millis,
+        "the two spellings are equal as expressions"
+    );
+    let seconds_json = seconds.as_json_str().unwrap();
+    let millis_json = millis.as_json_str().unwrap();
+    assert_ne!(seconds_json, millis_json);
+    // Admits every row, so nothing a retained row depends on comes from the target.
+    let whole = col("ts").gt_eq(Value::Timestamp(Timestamp::new_second(0)));
+
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .partition_expr_json(Some(seconds_json))
+        .build();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(source, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+
+    // Both rows are inside the source domain: `build_rows` writes `ts = i * 1000ms`.
+    put_rows(
+        &engine,
+        source,
+        Rows {
+            schema,
+            rows: build_rows(1, 3),
+        },
+    )
+    .await;
+    engine
+        .handle_request(source, RegionRequest::Flush(RegionFlushRequest::default()))
+        .await
+        .unwrap();
+
+    let expected = vec![("1".to_string(), 1.0), ("2".to_string(), 2.0)];
+    assert_eq!(expected, scan_rows(&engine, source).await);
+    let source_files = manifest_files(&engine, source).await;
+    assert_eq!(1, source_files.len(), "the source must flush one SST");
+    let shared = *source_files.iter().next().unwrap();
+
+    // ---- Hop 1: repartition into a region that respells the same domain. ----
+    engine
+        .set_region_role_state_gracefully(source, SettableRegionRoleState::StagingLeader)
+        .await
+        .unwrap();
+    let split = engine
+        .remap_manifests(RemapManifestsRequest {
+            region_id: source,
+            input_regions: vec![source],
+            region_mapping: [(source, vec![respelled])].into_iter().collect(),
+            new_partition_exprs: [(respelled, millis_json.clone())].into_iter().collect(),
+        })
+        .await
+        .unwrap();
+    engine
+        .handle_request(respelled, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+    apply_staging_manifest(
+        &engine,
+        respelled,
+        &millis_json,
+        source,
+        &split.manifest_paths[&respelled],
+    )
+    .await;
+    assert_eq!(
+        expected,
+        scan_rows(&engine, respelled).await,
+        "respelling the domain must not change which rows are visible"
+    );
+
+    // ---- Hop 2: remap again, into a target broad enough to retain every row. ----
+    let whole_json = whole.as_json_str().unwrap();
+    engine
+        .handle_request(merged, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    apply_staging_manifest_prepare(&engine, merged, &whole_json).await;
+    let merge = engine
+        .remap_manifests(RemapManifestsRequest {
+            region_id: merged,
+            input_regions: vec![respelled],
+            region_mapping: [(respelled, vec![merged])].into_iter().collect(),
+            new_partition_exprs: [(merged, whole_json.clone())].into_iter().collect(),
+        })
+        .await
+        .unwrap();
+    engine
+        .handle_request(
+            merged,
+            RegionRequest::ApplyStagingManifest(ApplyStagingManifestRequest {
+                partition_expr: whole_json,
+                central_region_id: merged,
+                manifest_path: merge.manifest_paths[&merged].clone(),
+            }),
+        )
+        .await
+        .unwrap();
+
+    // The domain the respelled region reports is not its files' creator expression,
+    // so the remap kept it as a restriction instead of dropping it as redundant.
+    let entry = engine
+        .get_region(merged)
+        .unwrap()
+        .manifest_ctx
+        .manifest()
+        .await
+        .files[&shared]
+        .clone();
+    assert!(
+        entry.owned_range.is_some(),
+        "a remap entry always carries a range"
+    );
+    assert_eq!(
+        expected,
+        scan_rows(&engine, merged).await,
+        "the remap must neither hide nor duplicate the source rows"
+    );
+}
