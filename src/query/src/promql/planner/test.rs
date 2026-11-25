@@ -47,6 +47,7 @@ use datafusion::logical_expr::{Extension, UserDefinedLogicalNodeCore, col};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema, is_metric_name_field};
 use datatypes::series::SeriesOrdering;
+use datatypes::series::frame::SeriesFrameDeclaration;
 use promql::extension_plan::FieldKind;
 use promql::extension_plan::{
     FusedSeries, HistogramFold, InputLocality, RawSeriesSource, input_locality,
@@ -2546,6 +2547,129 @@ async fn native_metric_discovery_without_a_matching_metric_answers_absent_and_or
     );
 }
 
+/// A `__field__` matcher on a selection that matches no table declares the field it names.
+///
+/// The matcher is what decides which of a scan's field columns a selection keeps, and no metric
+/// table matched this one, so the only field names this input can be given are the ones the matcher
+/// states itself. The empty frame declares exactly those and the statement answers the empty
+/// vector, with the layout any one-field selection publishes: the time index, the value named after
+/// the expression, and the labels. The frame is what the matcher decides, not the answer.
+///
+/// A matcher whose answer is a set over a table's field columns - `!=`, `=~`, `!~` - has no such
+/// columns to read here, so that selection keeps the existing plan rather than claiming a layout
+/// nothing decided; `native_empty_discovery_keeps_a_field_operator_it_cannot_apply` holds that.
+#[tokio::test]
+async fn native_empty_discovery_declares_the_field_its_matcher_names() {
+    let layout = |plan: &LogicalPlan| {
+        plan.schema()
+            .fields()
+            .iter()
+            .map(|field| field.data_type().clone())
+            .collect::<Vec<_>>()
+    };
+    // The same statement without a matcher: the value column is named after the expression, so the
+    // rows layouts are compared by the types they carry rather than by that name.
+    let (plain, _) = execute_no_match_discovery(r#"{job="api"}"#).await;
+    for (query, field) in [
+        (r#"{__field__="field_0", job="api"}"#, "field_0"),
+        // The matcher decides the name: the input declares the field the statement asks for, not
+        // the default one this route gives a selection that names no field.
+        (r#"{__field__="measured", job="api"}"#, "measured"),
+    ] {
+        let (plan, batches) = execute_no_match_discovery(query).await;
+        let fused = find_fused_series(&plan)
+            .unwrap_or_else(|| panic!("`{query}` left the native route: {plan:?}"));
+        assert_eq!(
+            0,
+            batch_rows(&batches),
+            "`{query}` answered rows over a selection that matches no metric: {plan:?}"
+        );
+        // The one input is the typed empty frame, and it declares the field the matcher names.
+        let [LogicalPlan::EmptyRelation(relation)] = fused.children() else {
+            panic!("`{query}`: the empty input is the node's only child: {plan:?}");
+        };
+        let declaration = SeriesFrameDeclaration::parse(relation.schema.as_arrow())
+            .unwrap_or_else(|error| panic!("`{query}` declares no raw series frame: {error}"));
+        assert_eq!(
+            vec![field.to_string()],
+            declaration
+                .series()
+                .fields
+                .iter()
+                .map(|field| field.name.to_string())
+                .collect::<Vec<_>>(),
+            "`{query}`: the empty frame declares the field the matcher names"
+        );
+        assert_eq!(
+            layout(&plain),
+            layout(&plan),
+            "`{query}` publishes the layout a selection of one field publishes: {plan:?}"
+        );
+        assert_eq!(
+            METRIC_NAME,
+            plan.schema().fields().last().unwrap().name(),
+            "`{query}`: {plan:?}"
+        );
+    }
+}
+
+/// The zero-match answer of a `__field__` operator this route cannot apply keeps the existing plan.
+///
+/// The field operators other than `=` keep or drop columns by a rule over every field a table
+/// carries, and an input that reads no table has none: there is no layout to state, so the
+/// selection is not one this route answers and the statement is planned the way it was without the
+/// route - the existing planner's own answer, including the refusal it raises when it has no table
+/// to bind.
+#[tokio::test]
+async fn native_empty_discovery_keeps_a_field_operator_it_cannot_apply() {
+    for query in [
+        r#"{__field__=~"field.*", job="api"}"#,
+        r#"{__field__!="field_0", job="api"}"#,
+    ] {
+        let native = PromPlanner::stmt_to_plan_with_annotations(
+            metric_discovery_provider(&["alpha_total", "beta_total"]).await,
+            &build_eval_stmt(query),
+            &build_query_engine_state(),
+            None,
+            true,
+        )
+        .await;
+        let without_flag = PromPlanner::stmt_to_plan_with_annotations(
+            metric_discovery_provider(&["alpha_total", "beta_total"]).await,
+            &build_eval_stmt(query),
+            &build_query_engine_state(),
+            None,
+            false,
+        )
+        .await;
+        match (native, without_flag) {
+            (Ok(native), Ok(without_flag)) => {
+                assert!(
+                    find_fused_series(&native).is_none(),
+                    "`{query}` claimed a field layout nothing decided: {}",
+                    native.display_indent()
+                );
+                assert_eq!(
+                    without_flag.display_indent().to_string(),
+                    native.display_indent().to_string(),
+                    "`{query}` must keep the existing plan"
+                );
+            }
+            // The existing planner has no table to bind, which is the answer this route leaves it.
+            (Err(native), Err(without_flag)) => assert_eq!(
+                without_flag.to_string(),
+                native.to_string(),
+                "`{query}` reports the existing planner's own refusal"
+            ),
+            (native, without_flag) => panic!(
+                "`{query}`: the route answered {} where the existing planner answered {}",
+                native.is_ok(),
+                without_flag.is_ok()
+            ),
+        }
+    }
+}
+
 /// A zero-match discovery selector is a real input even when another selector reads a metric.
 #[tokio::test]
 async fn native_zero_match_discovery_with_real_selector_binds_both_inputs() {
@@ -4214,36 +4338,51 @@ async fn label_functions_reject_a_destination_label_that_names_a_value_field() {
     }
 }
 
-/// A label rewrite that collapses the partition column cannot be answered by one region.
+/// A label rewrite that collapses the partition column runs as a canonical boundary.
 ///
-/// The canonical boundary's router only collects the pieces its own region's producer holds, so a
-/// table split into several regions would answer a canonical label set from whichever region held a
-/// piece of it. The route therefore declines that tree - and only that tree: `rate` on the same
-/// partitioned table keeps fusing, which the test above asserts. Declining means the existing
-/// planner's plan, exactly.
+/// The rewrite gives series from different regions one label set, so the pieces of that set have to
+/// meet before the answer is written. A region-local producer only sees the partitions of the region
+/// it runs in, which is why this shape used to keep the existing plan. Reading the occurrence through
+/// its own `RawSeriesSource` instead puts the merge's producer on the frontend, above every region,
+/// with its canonical router above all of them - the placement the distributed planner already used -
+/// so each label set is collected from every region's contribution.
+///
+/// Only a tree with a canonical merge claims a label-set answer: `rate` on the same partitioned table
+/// keeps fusing over the bare scan it read, which the tag-partitioned test above asserts.
 #[tokio::test]
-async fn native_fused_partitioned_table_label_rewrite_falls_back() {
+async fn native_fused_partitioned_table_label_rewrite_plans_a_canonical_boundary() {
     let query = r#"label_replace(some_metric, "tag_0", "same", "tag_0", ".*")"#;
-    let native =
+    let plan =
         build_native_fused_plan_with_provider(query, true, native_engine_provider(vec![0]).await)
             .await;
-    let fallback =
-        build_native_fused_plan_with_provider(query, false, native_engine_provider(vec![0]).await)
-            .await;
+    let fused = find_fused_series(&plan).unwrap_or_else(|| {
+        panic!(
+            "a collapsing rewrite over a partitioned table must fuse: {}",
+            plan.display_indent()
+        )
+    });
+    // The boundary is the two nodes: the producer merges the pieces of one label set on the
+    // frontend, and the consumer above it publishes the rows.
     assert!(
-        find_fused_series(&native).is_none(),
-        "a collapsing rewrite over a partitioned table must keep the existing plan: {}",
-        native.display_indent()
+        matches!(fused.tree().root().expr, NativeExpr::Input(_)),
+        "the statement's rows are read from the boundary below: {}",
+        plan.display_indent()
     );
+    let trees = fused_trees(&plan);
     assert!(
-        !native.display_indent().to_string().contains("FusedSeries"),
-        "{}",
-        native.display_indent()
+        trees
+            .iter()
+            .any(|tree| tree.contains("Merge: canonical label-set merge")),
+        "{query} answers without the boundary the rewrite needs: {trees:?}\n{}",
+        plan.display_indent()
     );
+    // The occurrence reads through its own raw source, which is what the producer above the regions
+    // reads: a bare scan would be read region-locally and the frame would never reach the producer.
     assert_eq!(
-        native.display_indent().to_string(),
-        fallback.display_indent().to_string(),
-        "the native setting must plan exactly what the existing planner plans"
+        vec![("some_metric".to_string(), vec!["field_0".to_string()])],
+        fused_sources(&plan),
+        "{query}: the boundary reads the occurrence through its own source: {}",
+        plan.display_indent()
     );
 }
 
@@ -4860,46 +4999,182 @@ async fn native_fused_engine_without_raw_series_falls_back() {
     );
 }
 
+/// The plan `query` gets, or `None` when the planner refuses it.
+///
+/// A field the raw series scan cannot read must not change what the statement answers, and some of
+/// these statements the existing planner refuses outright: that refusal is its answer, so a test has
+/// to be able to hold the route to it instead of unwrapping a plan.
+async fn plan_or_refusal(
+    query: &str,
+    native_fused: bool,
+    table_provider: DfTableSourceProvider,
+) -> Option<LogicalPlan> {
+    PromPlanner::stmt_to_plan_with_annotations(
+        table_provider,
+        &build_eval_stmt(query),
+        &build_query_engine_state(),
+        None,
+        native_fused,
+    )
+    .await
+    .ok()
+}
+
 /// A value field the raw-series readers cannot serve keeps the existing plan.
 ///
 /// The route admits two kinds: a `Float64`, which every reader serves, and the canonical native
 /// histogram struct, which the ordinary scan reads while the columnar samples - `Float64` only -
-/// are skipped for that selection. Everything else, including numeric types the columnar samples
-/// do not store, has no raw representation and keeps the existing plan; a bare selector over such
-/// a field answered normally before this route existed.
+/// are skipped for that selection. Everything else - a string, a boolean, a decimal - has no raw
+/// representation and keeps the existing plan whatever the shape of the statement, including the
+/// shapes that publish a `Float64` for a numeric field: `some_metric * 2` casts a string as readily
+/// as an integer, and the route still refuses it because no raw frame can hold the values.
 #[tokio::test]
 async fn native_fused_unsupported_field_type_falls_back() {
     for field_type in [
         ConcreteDataType::string_datatype(),
         ConcreteDataType::boolean_datatype(),
-        // Arrow's `is_numeric` includes the decimals while the region's preflight does not, so
-        // asking Arrow would let a decimal field through to a planning error.
+        // Arrow's `is_numeric` includes the decimals, so a decimal field only stays out because
+        // the route's own numeric set leaves the decimals out; asking Arrow would let it through.
         ConcreteDataType::decimal128_datatype(10, 2),
-        // Numeric, but not the `Float64` the columnar samples store.
-        ConcreteDataType::int64_datatype(),
-        ConcreteDataType::float32_datatype(),
+    ] {
+        for query in [
+            "some_metric",
+            "some_metric * 2",
+            "sum(some_metric)",
+            "min(some_metric)",
+            "rate(some_metric[5m])",
+        ] {
+            let native = plan_or_refusal(
+                query,
+                true,
+                build_test_table_provider_with_field_type(field_type.clone()).await,
+            )
+            .await;
+            let without_flag = plan_or_refusal(
+                query,
+                false,
+                build_test_table_provider_with_field_type(field_type.clone()).await,
+            )
+            .await;
+            match (&native, &without_flag) {
+                (Some(native_plan), Some(legacy_plan)) => {
+                    assert!(
+                        find_fused_series(native_plan).is_none(),
+                        "{field_type} must not reach the native route: {query}"
+                    );
+                    assert_eq!(
+                        native_plan.display_indent().to_string(),
+                        legacy_plan.display_indent().to_string(),
+                        "{field_type} must keep the existing plan: {query}"
+                    );
+                }
+                _ => assert_eq!(
+                    native.is_some(),
+                    without_flag.is_some(),
+                    "{field_type}: the route must answer what the existing planner answers for \
+                     {query}"
+                ),
+            }
+        }
+    }
+}
+
+/// A numeric field the raw scan casts is admitted only under the shapes whose existing plan
+/// publishes a `Float64` for it too.
+///
+/// The scan hands the node a `Float64` (`series_scan/raw.rs` casts every numeric field), while the
+/// fused node declares one `Float64` value column per field. The existing planner publishes that same
+/// float for an arithmetic argument, for `min`/`max`/`avg`/`stddev`/`stdvar`/`quantile`/`group` and for
+/// a range function, but copies the field's own type through a bare selector, `sum` over an integer,
+/// `count`, `count_values`, `abs` and the other math functions. Admission therefore follows the shape,
+/// and a shape whose existing plan publishes the field's own type keeps that plan.
+#[tokio::test]
+async fn native_fused_numeric_field_admission_follows_the_shape() {
+    use ConcreteDataType as Dt;
+
+    for (field_type, query, admitted) in [
+        // A bare selector reports the field's own type, so it keeps the existing plan.
+        (Dt::int64_datatype(), "some_metric", false),
+        (Dt::float32_datatype(), "some_metric", false),
+        (Dt::uint64_datatype(), "some_metric", false),
+        // Arithmetic casts both operands, so the answer is a float under either route.
+        (Dt::int64_datatype(), "some_metric * 2", true),
+        (Dt::int64_datatype(), "some_metric + some_metric", true),
+        (Dt::float32_datatype(), "some_metric * 2", true),
+        (Dt::uint64_datatype(), "some_metric + some_metric", true),
+        // An aggregate whose UDAF answers a float for every numeric input.
+        (Dt::int64_datatype(), "min(some_metric)", true),
+        (Dt::int64_datatype(), "max(some_metric)", true),
+        (Dt::int64_datatype(), "avg(some_metric)", true),
+        (Dt::int64_datatype(), "stddev(some_metric)", true),
+        (Dt::uint64_datatype(), "quantile(0.5, some_metric)", true),
+        (Dt::int64_datatype(), "group(some_metric)", true),
+        // `sum` folds a float as a `Float64` and keeps an integer's own type.
+        (Dt::float32_datatype(), "sum(some_metric)", true),
+        (Dt::int64_datatype(), "sum(some_metric)", false),
+        (Dt::uint64_datatype(), "sum(some_metric)", false),
+        // `sum` publishes what it folds, so an integer answer one level down stays out as well.
+        (
+            Dt::float32_datatype(),
+            r#"sum(count_values("v", some_metric))"#,
+            false,
+        ),
+        // A range function answers a `Float64` for every numeric input.
+        (Dt::int64_datatype(), "rate(some_metric[5m])", true),
+        (Dt::int64_datatype(), "increase(some_metric[5m])", true),
+        (Dt::int64_datatype(), "sum_over_time(some_metric[5m])", true),
+        (Dt::uint64_datatype(), "changes(some_metric[5m])", true),
+        (Dt::float32_datatype(), "rate(some_metric[5m])", true),
+        // A count is an `Int64` whatever the field holds.
+        (Dt::int64_datatype(), "count(some_metric)", false),
+        (
+            Dt::float32_datatype(),
+            r#"count_values("v", some_metric)"#,
+            false,
+        ),
+        // A math function keeps the type it is given, and so does a negation.
+        (Dt::int64_datatype(), "abs(some_metric)", false),
+        (Dt::int64_datatype(), "-some_metric", false),
+        // A comparison without `bool` filters on the field's own column.
+        (Dt::int64_datatype(), "some_metric > 2", false),
     ] {
         let native = build_native_fused_plan_with_provider(
-            "some_metric",
+            query,
             true,
             build_test_table_provider_with_field_type(field_type.clone()).await,
         )
         .await;
-        let without_flag = build_native_fused_plan_with_provider(
-            "some_metric",
-            false,
-            build_test_table_provider_with_field_type(field_type.clone()).await,
-        )
-        .await;
-        assert!(
-            find_fused_series(&native).is_none(),
-            "{field_type} must not reach the native route"
-        );
-        assert_eq!(
-            native.display_indent().to_string(),
-            without_flag.display_indent().to_string(),
-            "{field_type} must keep the existing plan"
-        );
+        if admitted {
+            let fused = find_fused_series(&native).unwrap_or_else(|| {
+                panic!(
+                    "{query} over {field_type} must reach the native route: {}",
+                    native.display_indent_schema()
+                )
+            });
+            // The value column is the one kind the node publishes, which is what the existing plan
+            // publishes for this shape too.
+            assert_eq!(
+                &ArrowDataType::Float64,
+                native_value_field(fused, query).data_type(),
+                "{query} over {field_type} publishes a float"
+            );
+        } else {
+            let without_flag = build_native_fused_plan_with_provider(
+                query,
+                false,
+                build_test_table_provider_with_field_type(field_type.clone()).await,
+            )
+            .await;
+            assert!(
+                find_fused_series(&native).is_none(),
+                "{query} over {field_type} must not reach the native route"
+            );
+            assert_eq!(
+                native.display_indent().to_string(),
+                without_flag.display_indent().to_string(),
+                "{query} over {field_type} must keep the existing plan"
+            );
+        }
     }
 }
 
@@ -5836,32 +6111,6 @@ async fn native_composed_binary_admits_complex_operands() {
 /// because the existing route answers them.
 #[tokio::test]
 async fn native_composed_binary_declines_to_the_existing_plan() {
-    // A comparison between a histogram and a float has no kernel, so the pair is not admitted, and
-    // nothing below it composes either: the whole statement stays on the existing plan.
-    let query = "hist > on(tag_0) floats";
-    let plan =
-        build_native_fused_plan_with_provider(query, true, native_mixed_kind_provider().await)
-            .await;
-    let display = plan.display_indent().to_string();
-    let legacy = PromPlanner::stmt_to_plan_with_annotations(
-        native_mixed_kind_provider().await,
-        &build_eval_stmt(query),
-        &build_query_engine_state(),
-        None,
-        false,
-    )
-    .await
-    .unwrap_or_else(|error| panic!("`{query}`: the existing route must answer it: {error}"));
-    assert!(
-        find_fused_series(&plan).is_none(),
-        "`{query}` has no native answer: {display}"
-    );
-    assert_eq!(
-        legacy.display_indent().to_string(),
-        display,
-        "`{query}` must keep the existing plan"
-    );
-
     // An operand that is not a frame leaves the statement's own wrapper in place: the pair is
     // refused, so the existing plan answers the statement. The offer is the statement's, and the
     // binary that makes it spends it for the whole subtree below: the operand is planned by the
@@ -5873,9 +6122,11 @@ async fn native_composed_binary_declines_to_the_existing_plan() {
         "(hist * on(tag_0) floats) * 2",
         // Neither is a scalar function, however it is written.
         "(hist * on(tag_0) floats) / time()",
-        // A comparison between a histogram and a float has no kernel at this pair either, so the
-        // whole statement stops where the pair was refused.
-        "(hist * on(tag_0) floats) > on(tag_0) floats",
+        // A comparison between a histogram and a float is not a refusal: its two sides pair no
+        // sample, so the column is the empty float layout and the statement composes.
+        // `native_fused_mixed_comparison_answers_the_empty_float_layout` states that shape, and
+        // `native_promql_kind_rules_match_legacy` (tests-integration) holds both routes' rows to
+        // the same empty answer.
     ] {
         let plan =
             build_native_fused_plan_with_provider(query, true, native_mixed_kind_provider().await)
@@ -5902,6 +6153,95 @@ async fn native_composed_binary_declines_to_the_existing_plan() {
             legacy.display_indent().to_string(),
             display,
             "`{query}` must keep the existing plan"
+        );
+    }
+}
+
+/// A ranking hands on the samples it ranked, so `topk` over a histogram metric stays a histogram.
+///
+/// The constant-`k` ranking is a whole-vector node, and the walk that names a statement's output
+/// column answered nothing for it - which kept every statement whose sources carry native histograms
+/// on the existing plan, since a column the walk cannot name is not a float by default. Naming it
+/// admits the statement and keeps the histogram column it read.
+///
+/// What the answer is worth is checked row for row against the existing plan in
+/// `native_promql_kind_rules_match_legacy` (tests-integration), which runs both routes over one
+/// fixture: this harness's in-memory scan is not a region scan, so a region-backed native plan
+/// cannot execute here.
+#[tokio::test]
+async fn native_fused_topk_over_a_histogram_keeps_its_histogram_column() {
+    let query = "topk(1, hist)";
+    let native =
+        build_native_fused_plan_with_provider(query, true, native_mixed_kind_provider().await)
+            .await;
+    let display = native.display_indent().to_string();
+    let fused = find_fused_series(&native)
+        .unwrap_or_else(|| panic!("`{query}` must run natively: {display}"));
+    assert!(
+        matches!(
+            fused.tree().root().expr,
+            NativeExpr::Vector {
+                op: BoundVectorOp::TopK { .. },
+                ..
+            }
+        ),
+        "`{query}` binds the ranking: {display}"
+    );
+    // The ranking keeps the kind it read, so the statement declares a histogram column rather than
+    // the float layout an answer that can emit no sample keeps.
+    assert_eq!(
+        &native_histogram_value_type().as_arrow_type(),
+        native_value_field(fused, query).data_type(),
+        "`{query}` keeps its histogram column: {display}"
+    );
+
+    let legacy =
+        build_native_fused_plan_with_provider(query, false, native_mixed_kind_provider().await)
+            .await;
+    assert!(
+        find_fused_series(&legacy).is_none(),
+        "the existing plan answers `{query}`: {legacy}"
+    );
+}
+
+/// A comparison over two kinds answers no sample, so its one column is a float.
+///
+/// `hist > on(tag_0) floats` pairs a native histogram with a float at every point, and the kernel
+/// reports such a pair as unsupported and skips it without keeping the left element
+/// (`vector_match::elem_binop`). The answer is therefore empty rather than mixed, and the column the
+/// statement declares is the empty float layout - which is what admits the statement to this route
+/// instead of leaving it on the existing plan.
+///
+/// Both routes' answers are compared row for row in `native_promql_kind_rules_match_legacy`
+/// (tests-integration), for the reason the ranking test above states.
+#[tokio::test]
+async fn native_fused_mixed_comparison_answers_the_empty_float_layout() {
+    for query in [
+        // Two operands of their own, which the composition binds as two frames.
+        "hist > on(tag_0) floats",
+        // The same pair with the left side computed by a composed binary: the comparison is what a
+        // statement stops at, so the nested shape must be admitted through the same rule.
+        "(hist * on(tag_0) floats) > on(tag_0) floats",
+    ] {
+        let native =
+            build_native_fused_plan_with_provider(query, true, native_mixed_kind_provider().await)
+                .await;
+        let display = native.display_indent().to_string();
+        let fused = find_fused_series(&native)
+            .unwrap_or_else(|| panic!("`{query}` must run natively: {display}"));
+        assert_eq!(
+            &ArrowDataType::Float64,
+            native_value_field(fused, query).data_type(),
+            "`{query}` declares the empty float layout: {display}"
+        );
+        assert!(!display.contains("Join:"), "{query}: {display}");
+
+        let legacy =
+            build_native_fused_plan_with_provider(query, false, native_mixed_kind_provider().await)
+                .await;
+        assert!(
+            find_fused_series(&legacy).is_none(),
+            "the existing plan answers `{query}`: {legacy}"
         );
     }
 }
@@ -7297,6 +7637,35 @@ async fn native_fused_topk_above_aggregate_declines_the_split_in_every_form() {
         assert!(
             find_final_split(&plan).is_none(),
             "`{query}` must not split: {display}"
+        );
+    }
+}
+
+/// A whole-vector operator standing on an evaluated aggregate is the shape it is over a bare scan:
+/// it reads the whole vector at a point, so it runs in the one node above the cut and the fold
+/// below it is that node's own input rather than a split boundary.
+#[tokio::test]
+async fn native_fused_whole_vector_operators_over_an_aggregate_stay_native() {
+    for query in [
+        "topk(1, sum(some_metric))",
+        "bottomk(2, avg(some_metric))",
+        // The two rankings the existing planner cannot answer at all are admitted here too: the
+        // shape is the operator, not the ranking it computes.
+        "limitk(2, sum(some_metric))",
+        "limit_ratio(0.5, sum(some_metric))",
+        "sort(sum by (tag_0) (some_metric))",
+        // The same ranking over a bare scan, which was never the refused shape.
+        "topk(1, some_metric)",
+    ] {
+        let plan = build_native_fused_plan(query, true).await;
+        let display = plan.display_indent_schema().to_string();
+        assert!(
+            find_fused_series(&plan).is_some(),
+            "`{query}` ranks the whole vector, so it must stay native: {display}"
+        );
+        assert!(
+            find_final_split(&plan).is_none(),
+            "`{query}` needs a whole-vector boundary, so it must not split: {display}"
         );
     }
 }
@@ -11429,6 +11798,136 @@ async fn native_sum_by_name_separates_discovered_metrics() {
             .map(|field| field.name().as_str())
             .collect::<Vec<_>>(),
         "{plan}"
+    );
+}
+
+/// Every raw source the plan reads, as the metric it names and the field columns it declares.
+///
+/// A source's tags are the scan's own columns, which never hold `__name__`: the name is the metric
+/// the source binds, which the frame reports as a label of its own.
+fn fused_sources(plan: &LogicalPlan) -> Vec<(String, Vec<String>)> {
+    fn visit(plan: &LogicalPlan, sources: &mut Vec<(String, Vec<String>)>) {
+        if let LogicalPlan::Extension(Extension { node }) = plan
+            && let Some(source) = node.as_any().downcast_ref::<RawSeriesSource>()
+        {
+            sources.push((source.metric_name().to_string(), source.fields().to_vec()));
+        }
+        for input in plan.inputs() {
+            visit(input, sources);
+        }
+    }
+    let mut sources = Vec::new();
+    visit(plan, &mut sources);
+    sources
+}
+
+/// A tree reading more than one metric-bound input declares the name each input reports.
+///
+/// `__name__` is not a column of any scan: it is the name every series of a metric-bound input
+/// carries, so a source names it and nothing else. A statement reading one input can only ever
+/// report the one name it binds, which no grouping by the name can use to tell two of its groups
+/// apart - but a statement reading two binds two names, and `by (__name__)` groups by exactly that
+/// identity. Each of those sources therefore declares the name it reports, as a discovered source
+/// does, and the output layout names the label the grouping keeps instead of publishing the two
+/// metrics under one label set.
+#[tokio::test]
+async fn native_multi_input_grouping_by_name_declares_each_input_name() {
+    for query in [
+        // Two aggregates, one per metric table, in one binary.
+        "sum by (__name__) (some_metric) + sum by (__name__) (other_metric)",
+        // The same pair through set membership, which keeps the left side's answer.
+        "sum by (__name__) (some_metric) or sum by (__name__) (other_metric)",
+    ] {
+        let plan = build_native_fused_plan_with_provider(
+            query,
+            true,
+            native_two_table_provider(vec![]).await,
+        )
+        .await;
+        assert!(
+            find_fused_series(&plan).is_some(),
+            "`{query}` left the native route: {}",
+            plan.display_indent()
+        );
+        // Each occurrence is bound to the metric table it reads, which is the name the grouping
+        // above it groups by.
+        let mut metrics = fused_input_metrics(&plan);
+        metrics.sort();
+        assert_eq!(
+            vec!["other_metric".to_string(), "some_metric".to_string()],
+            metrics,
+            "`{query}`: one input per metric table: {}",
+            plan.display_indent()
+        );
+        // The tree groups by the name on both sides, which is the label the declaration has to
+        // carry: `by (__name__)` keeps a label no scan column holds.
+        let fused = find_fused_series(&plan).expect("a fused node");
+        let (left, right) = match &fused.tree().root().expr {
+            NativeExpr::Binary { left, right, .. } => (left, right),
+            NativeExpr::Set { left, right, .. } => (left, right),
+            other => panic!(
+                "`{query}` reads both inputs in one node, not {other:?}: {}",
+                plan.display_indent()
+            ),
+        };
+        for side in [left, right] {
+            let NativeExpr::Aggregate { op, .. } = &side.expr else {
+                panic!(
+                    "`{query}`: an operand is not the aggregate it was written as: {}",
+                    plan.display_indent()
+                );
+            };
+            assert_eq!(
+                Grouping::By(Arc::new([Arc::from(METRIC_NAME)])),
+                op.group,
+                "`{query}`: both sides group by the name: {}",
+                plan.display_indent()
+            );
+        }
+        let declared_names = plan
+            .schema()
+            .fields()
+            .iter()
+            .filter(|field| is_metric_name_field(field))
+            .count();
+        assert_eq!(
+            1,
+            declared_names,
+            "`{query}`: the rows layout declares the name once: {:?}",
+            plan.schema()
+        );
+        assert_eq!(
+            METRIC_NAME,
+            plan.schema().fields().last().unwrap().name(),
+            "`{query}`: the name column comes after the labels: {}",
+            plan.display_indent()
+        );
+    }
+}
+
+/// A statement reading one metric-bound input keeps the layout it had: its one name cannot tell
+/// two of its own groups apart, so the column stays the appended one rather than a group label.
+#[tokio::test]
+async fn native_single_input_grouping_by_name_keeps_the_appended_column() {
+    let query = "sum by (__name__) (some_metric)";
+    let plan =
+        build_native_fused_plan_with_provider(query, true, native_two_table_provider(vec![]).await)
+            .await;
+    assert!(
+        find_fused_series(&plan).is_some(),
+        "`{query}` left the native route: {}",
+        plan.display_indent()
+    );
+    let expression = parser::parse(query).unwrap().to_string();
+    assert_eq!(
+        vec!["timestamp", expression.as_str(), METRIC_NAME],
+        plan.schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect::<Vec<_>>(),
+        "{query}: {}",
+        plan.display_indent()
     );
 }
 

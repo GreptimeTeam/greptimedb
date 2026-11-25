@@ -2547,6 +2547,271 @@ async fn native_promql_rows_name_each_row_after_its_metric() {
     }
 }
 
+/// `sum by (__name__)` over metric-bound inputs groups by the identity of the series.
+///
+/// `__name__` is not a column of any scan: it is the name every series of a metric-bound input
+/// carries. A statement reading one input binds one name, which is what the appended name column
+/// reports; one reading two binds two, and the grouping keeps the name as a group label, so the two
+/// metrics stay in groups of their own instead of folding into one label set.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_group_by_name_over_several_metrics() {
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_group_by_name").with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE native_gbn_phy (ts TIMESTAMP TIME INDEX, v DOUBLE) \
+             ENGINE=metric WITH (\"physical_metric_table\" = \"\"); \
+         CREATE TABLE native_gbn_demo (host STRING NULL, ts TIMESTAMP NOT NULL, v DOUBLE NULL, \
+             TIME INDEX (ts), PRIMARY KEY (host)) \
+             ENGINE=metric WITH (on_physical_table = 'native_gbn_phy'); \
+         CREATE TABLE native_gbn_other (host STRING NULL, ts TIMESTAMP NOT NULL, v DOUBLE NULL, \
+             TIME INDEX (ts), PRIMARY KEY (host)) \
+             ENGINE=metric WITH (on_physical_table = 'native_gbn_phy'); \
+         INSERT INTO native_gbn_demo (host, ts, v) VALUES ('a', 0, 2), ('b', 0, 5); \
+         INSERT INTO native_gbn_other (host, ts, v) VALUES ('c', 0, 8)",
+        QueryContext::arc(),
+    )
+    .await;
+
+    // One name per statement is the appended column: the existing route declares no such column,
+    // so the comparison is the one every native rows test makes.
+    for (query, reported) in [
+        // One metric, grouped by its own name: the column reports what the aggregate grouped by.
+        (
+            "sum by (__name__) (native_gbn_demo)",
+            ReportedName::Metric("native_gbn_demo"),
+        ),
+        // Two metric-bound inputs in one tree, each summed by its own name and then matched. The sum
+        // computes a value of its own and drops the name it read, as Prometheus does, so the column
+        // is there and null.
+        (
+            "sum by (__name__) (native_gbn_demo) + sum by (__name__) (native_gbn_other)",
+            ReportedName::Nothing,
+        ),
+    ] {
+        let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+        observer.clear();
+        let native = eval_text_rows(native_tql_output(&instance, &sql, true).await, reported);
+        assert_native_rows_plan(&observer);
+        let legacy = eval_text(native_tql_output(&instance, &sql, false).await);
+        assert_eq!(
+            legacy, native,
+            "{query}: the native answer is the existing one"
+        );
+    }
+
+    // A cross-metric tree whose answer keeps the name reports the metric its row was read from, so
+    // the grouping names the metric it grouped. `or` keeps the series whose label set the left side
+    // does not hold, and a metric-bound input's name is not one of its tags: both sides are summed
+    // to one series with no labels, so the left side's row is the answer - as it is on the existing
+    // route, whose answer differs only in the name column it does not declare.
+    let query = "sum by (__name__) (native_gbn_demo) or sum by (__name__) (native_gbn_other)";
+    let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+    observer.clear();
+    let (rows, names) =
+        native_rows_and_names(native_tql_output(&instance, &sql, true).await, None).await;
+    assert_native_rows_plan(&observer);
+    assert_eq!(
+        Some(vec![Some("native_gbn_demo".to_string())]),
+        names,
+        "{query}: the row reports the metric it was read from"
+    );
+    assert_eq!(
+        vec![(0, "__name__=native_gbn_demo".to_string(), 7.0)],
+        rows,
+        "{query}: the left side's series is the answer"
+    );
+    let legacy_rows = native_rows(native_tql_output(&instance, &sql, false).await, None).await;
+    assert_eq!(
+        vec![7.0],
+        legacy_rows
+            .iter()
+            .map(|(_, _, value)| *value)
+            .collect::<Vec<_>>(),
+        "{query}: the existing route answers the same series"
+    );
+}
+
+/// The layout a native one-field answer publishes: the time index, one value, then the labels with
+/// the metric name last.
+fn assert_one_field_native_layout(batches: &common_recordbatch::RecordBatches, query: &str) {
+    let declared = batches.schema();
+    let schema = declared.arrow_schema();
+    let fields = schema.fields();
+    assert!(
+        matches!(fields[0].data_type(), DataType::Timestamp(..)),
+        "{query}: the time index comes first: {schema:?}"
+    );
+    assert_eq!(
+        1,
+        fields
+            .iter()
+            .filter(|field| field.data_type() == &DataType::Float64)
+            .count(),
+        "{query}: one value column: {schema:?}"
+    );
+    assert!(
+        datatypes::schema::is_metric_name_field(fields.last().unwrap()),
+        "{query}: the metric name comes after the labels: {schema:?}"
+    );
+}
+
+/// A `__field__` selection that matches no metric table answers the empty vector.
+///
+/// The matcher decides which of a scan's field columns a selection keeps, and no table matched this
+/// one, so the field names the empty input declares are exactly the ones the matcher states. The
+/// statement answers the empty vector rather than the existing planner's missing-table error, under
+/// the layout every one-field selection publishes.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_field_selector_over_no_table_answers_empty() {
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_field_selector_empty")
+            .with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE native_fs_phy (ts TIMESTAMP TIME INDEX, v DOUBLE) \
+             ENGINE=metric WITH (\"physical_metric_table\" = \"\"); \
+         CREATE TABLE native_fs_demo (host STRING NULL, ts TIMESTAMP NOT NULL, v DOUBLE NULL, \
+             TIME INDEX (ts), PRIMARY KEY (host)) \
+             ENGINE=metric WITH (on_physical_table = 'native_fs_phy'); \
+         CREATE TABLE native_fs_other (host STRING NULL, ts TIMESTAMP NOT NULL, v DOUBLE NULL, \
+             TIME INDEX (ts), PRIMARY KEY (host)) \
+             ENGINE=metric WITH (on_physical_table = 'native_fs_phy'); \
+         INSERT INTO native_fs_demo (host, ts, v) VALUES ('a', 0, 2); \
+         INSERT INTO native_fs_other (host, ts, v) VALUES ('b', 0, 8)",
+        QueryContext::arc(),
+    )
+    .await;
+    // A selector that names no metric is answered from the metric tables discovery is authorized to
+    // read, which the caller states: this fixture passes its two, and the selector's own name
+    // matcher is what leaves it with no table at all.
+    let scoped = || {
+        let mut ctx = QueryContext::with_db_name(None);
+        ctx.set_extension(QUERY_PARALLELISM_HINT, "4".to_string());
+        ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, "true".to_string());
+        ctx.set_metric_discovery_scope(MetricDiscoveryScope::allowed([
+            (
+                DEFAULT_CATALOG_NAME.to_string(),
+                DEFAULT_SCHEMA_NAME.to_string(),
+                "native_fs_demo".to_string(),
+            ),
+            (
+                DEFAULT_CATALOG_NAME.to_string(),
+                DEFAULT_SCHEMA_NAME.to_string(),
+                "native_fs_other".to_string(),
+            ),
+        ]));
+        Arc::new(ctx)
+    };
+    for (query, answered) in [
+        // The matcher names the field the selection reads, and no metric table matched it.
+        (
+            r#"TQL EVAL (0, 0, '1s') {__name__=~"no_such_metric_.+", __field__="v"}"#,
+            false,
+        ),
+        // The same statement without the matcher: the field set is not what decides the answer, so
+        // the two layouts have to agree.
+        (
+            r#"TQL EVAL (0, 0, '1s') {__name__=~"no_such_metric_.+"}"#,
+            false,
+        ),
+        // A selection that does read a table, for the layout both empty answers have to match.
+        (r#"TQL EVAL (0, 0, '1s') {host=~"a|b"}"#, true),
+    ] {
+        observer.clear();
+        let output = instance.do_query(query, scoped()).await.remove(0).unwrap();
+        let batches = rows_batches(output).await;
+        let rows = batches.iter().map(|batch| batch.num_rows()).sum::<usize>();
+        if answered {
+            assert_eq!(2, rows, "{query}: the fixture holds two series");
+        } else {
+            assert_eq!(
+                0, rows,
+                "{query}: a selection that matches no metric answers the empty vector"
+            );
+            assert_native_rows_plan(&observer);
+        }
+        assert_one_field_native_layout(&batches, query);
+    }
+}
+
+/// A canonical merge over a partitioned table runs as a boundary above the regions.
+///
+/// A rewrite that writes a label its input carries can give two stored series one label set, and
+/// the partition column decides where those series are stored: the pieces of that one set can land
+/// in different regions, which no region-local producer can see. The occurrence therefore reads
+/// through its own raw source, its producer merges what each partition holds above the regions, and
+/// the canonical router above the producer collects each label set from every contribution.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_canonical_merge_over_partitioned_table() {
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_canonical_partitioned")
+            .with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE native_canon_part (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, \
+         PRIMARY KEY(host)) PARTITION ON COLUMNS (host) (host < 'first', host >= 'first' AND \
+         host < 'second', host >= 'second'); \
+         INSERT INTO native_canon_part (host, val, ts) VALUES ('first', 10, 0), \
+         ('second', 20, 600000)",
+        QueryContext::arc(),
+    )
+    .await;
+    // The two hosts land in different partitions, and the rewrite stores both under one `host`, so
+    // the pieces of that label set are ten minutes apart and never collide.
+    let sql = r#"TQL EVAL (0, 600, '600s') label_replace(native_canon_part, "host", "same", "host", ".*")"#;
+    observer.clear();
+    let native = eval_text_rows(
+        native_tql_output(&instance, sql, true).await,
+        ReportedName::Metric("native_canon_part"),
+    );
+    let router = canonical_router(&observer).unwrap_or_else(|| {
+        panic!(
+            "a collapsing rewrite over a partitioned table must run a canonical boundary: {native}"
+        )
+    });
+    assert_eq!(
+        "FusedSeriesExec",
+        router.children()[0].name(),
+        "the router reads the canonical producer: {native}"
+    );
+    let legacy = eval_text(native_tql_output(&instance, sql, false).await);
+    assert_eq!(
+        legacy, native,
+        "the boundary collects every region's contribution into the existing route's rows"
+    );
+    for expected in ["10.0", "20.0", "same"] {
+        assert!(
+            native.contains(expected),
+            "the label set carries every piece's value: {expected} missing from {native}"
+        );
+    }
+}
+
 /// The plan the last query ran is the native one, so a row assertion above is about this route.
 fn assert_native_rows_plan(observer: &NativePlanObserver) {
     let root = observer.root_plan();
@@ -3987,6 +4252,160 @@ async fn native_promql_composed_binary_canonical_operand() {
         canonical_router(&observer).is_some(),
         "the canonical producer must check the overlapping series"
     );
+}
+
+/// The shapes the native route used to refuse answer what the existing plan answers.
+///
+/// A ranking keeps the kind it read, so `topk` over a native-histogram metric declares the
+/// histogram column and runs natively. It ranks no histogram sample - Prometheus ignores them in a
+/// ranking, which `select::topk` states - so both routes answer that column empty.
+///
+/// A comparison between a native histogram and a float pairs no sample at all: the kernel reports
+/// `(Histogram, Float)` as unsupported and skips it without keeping the left element, so its one
+/// column is the empty float layout both routes answer with no rows.
+///
+/// The observer says which route ran - the native one while the option is on, the existing plan
+/// when it is off - and the rows are compared with the existing plan's.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_kind_rules_match_legacy() {
+    use api::greptime_proto::io::prometheus::write::v2::histogram::{Count, ZeroCount};
+    use api::greptime_proto::io::prometheus::write::v2::{Histogram, Sample};
+    use axum::body::{Body, to_bytes};
+    use http::Request;
+    use prost::Message;
+    use servers::prom_remote_write::v2::test_util as remote_write_v2;
+    use servers::prom_store::snappy_compress;
+    use tower::ServiceExt;
+
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_kind_rules").with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    let server = crate::test_util::build_test_prom_server(instance.clone(), false, None).build();
+    let router = server.build(server.make_app()).unwrap();
+    // One histogram metric and one float metric, written through the same remote-write endpoint so
+    // the two tables carry the same column layout: what the existing plan's mixed-kind binary reads
+    // is then the shape it was written for, and a difference in the answers is a difference in the
+    // answer rather than in the fixture.
+    for request in [
+        remote_write_v2::request_with_labels_and_histograms(
+            vec![("__name__", "kind_hist"), ("job", "api")],
+            [0, 600_000]
+                .into_iter()
+                .map(|timestamp| Histogram {
+                    timestamp,
+                    count: Some(Count::CountInt(4)),
+                    zero_count: Some(ZeroCount::ZeroCountInt(4)),
+                    sum: 8.0,
+                    ..Default::default()
+                })
+                .collect(),
+        ),
+        remote_write_v2::request_with_labels_and_samples(
+            vec![("__name__", "kind_float"), ("job", "api")],
+            [(0, 2.0), (600_000, 3.0)]
+                .into_iter()
+                .map(|(timestamp, value)| Sample {
+                    timestamp,
+                    value,
+                    ..Default::default()
+                })
+                .collect(),
+        ),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/v1/prometheus/write")
+                    .header("Content-Encoding", "snappy")
+                    .header(
+                        "Content-Type",
+                        "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+                    )
+                    .body(Body::from(
+                        snappy_compress(&request.encode_to_vec()).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            204,
+            "{:?}",
+            to_bytes(response.into_body(), usize::MAX).await.unwrap()
+        );
+    }
+
+    // A ranking keeps the kind it read, so the statement declares a histogram column and runs
+    // natively. It ranks no histogram sample - Prometheus ignores them in a ranking, which
+    // `select::topk` states - so both routes answer the empty column rather than a sample.
+    let ranking = "TQL EVAL (0, 600, '600s') topk(1, kind_hist)";
+    observer.clear();
+    let native = native_tql_output(&instance, ranking, true).await;
+    assert!(
+        observer.fused().is_some(),
+        "{ranking} did not run natively: {:#?}",
+        observer.root_plan()
+    );
+    let native_ranking_rows = answer_rows(native).await;
+    observer.clear();
+    let legacy = native_tql_output(&instance, ranking, false).await;
+    assert!(
+        observer.fused().is_none(),
+        "{ranking} must keep the existing plan when the native route is off"
+    );
+    assert_eq!(
+        0, native_ranking_rows,
+        "{ranking} ranks no histogram sample, as Prometheus does"
+    );
+    assert_eq!(
+        answer_rows(legacy).await,
+        native_ranking_rows,
+        "{ranking} must answer the existing plan's rows"
+    );
+
+    // A comparison over two kinds pairs no sample: both routes answer no rows at all.
+    let comparison = "TQL EVAL (0, 600, '600s') kind_hist > on(job) kind_float";
+    observer.clear();
+    let native = native_tql_output(&instance, comparison, true).await;
+    assert!(
+        observer.fused().is_some(),
+        "{comparison} did not run natively: {:#?}",
+        observer.root_plan()
+    );
+    let native_rows = answer_rows(native).await;
+    observer.clear();
+    let legacy = native_tql_output(&instance, comparison, false).await;
+    assert!(
+        observer.fused().is_none(),
+        "{comparison} must keep the existing plan when the native route is off"
+    );
+    assert_eq!(
+        0, native_rows,
+        "{comparison} pairs no histogram with a float"
+    );
+    assert_eq!(
+        answer_rows(legacy).await,
+        native_rows,
+        "{comparison} must answer the existing plan's rows"
+    );
+}
+
+/// How many rows `output` answers, whatever its columns hold.
+async fn answer_rows(output: Output) -> usize {
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!("PromQL answers record batches"),
+    };
+    batches.iter().map(|batch| batch.num_rows()).sum()
 }
 
 /// Two independently planned histogram frames whose reset hints contradict: the pair is dropped and
@@ -12706,16 +13125,323 @@ async fn native_promql_fallback_options_keep_expected_answer() {
     }
 }
 
-/// A store configured for the columnar series format must not change the answer of a query over a
-/// field that format cannot serve: the columnar samples carry `Float64` series only, so an integer
-/// field has no raw frame to fold and the route has to decline it while the existing plan answers.
+/// What a TQL answer says, in a form both routes can be held to.
+///
+/// The two routes neither order their columns alike nor name a value column alike - the fused node
+/// names it after the expression it answers (`avg(m).i`), the existing plan after the aggregate it
+/// folds (`avg(m.field_0)`) - so neither the column order nor a value column's name is compared.
+/// What is the same column on both routes is the time index, each label, and one value column per
+/// field: a row is the time, its labels by name, and its values in column order, and the value types
+/// are compared apart from the rows. The rows root of the native route also appends a `__name__`
+/// column that reports no name for a computed value; it is not one of the answer's labels, so it is
+/// left out here.
+#[derive(Debug, PartialEq)]
+struct Answer {
+    value_types: Vec<DataType>,
+    rows: Vec<(i64, std::collections::BTreeMap<String, String>, Vec<String>)>,
+}
+
+/// Reads a TQL answer into an [`Answer`].
+async fn native_answer(output: Output) -> Answer {
+    use datafusion::arrow::util::display::array_value_to_string;
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!("TQL EVAL returns record batches"),
+    };
+    let mut value_types: Option<Vec<DataType>> = None;
+    let mut rows = Vec::new();
+    for batch in batches.iter() {
+        let batch = batch.df_record_batch();
+        let schema = batch.schema();
+        let mut time = None;
+        let mut labels = Vec::new();
+        let mut values = Vec::new();
+        for (index, (field, _)) in schema.fields().iter().zip(batch.columns()).enumerate() {
+            match field.data_type() {
+                DataType::Timestamp(..) => time = Some(index),
+                DataType::Utf8 | DataType::Dictionary(_, _) => {
+                    if !datatypes::schema::is_metric_name_field(field) {
+                        labels.push((index, field.name().clone()));
+                    }
+                }
+                _ => values.push(index),
+            }
+        }
+        let time = time.expect("the answer reports a time index");
+        assert!(!values.is_empty(), "the answer reports a value column");
+        let types = values
+            .iter()
+            .map(|index| schema.field(*index).data_type().clone())
+            .collect::<Vec<_>>();
+        match &value_types {
+            Some(seen) => assert_eq!(seen, &types, "every batch declares the same values"),
+            None => value_types = Some(types),
+        }
+        let timestamps = cast(batch.column(time).as_ref(), &DataType::Int64)
+            .expect("the time index is a timestamp")
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .clone();
+        for row in 0..batch.num_rows() {
+            rows.push((
+                timestamps.value(row),
+                labels
+                    .iter()
+                    .map(|(index, name)| {
+                        (
+                            name.clone(),
+                            array_value_to_string(batch.column(*index).as_ref(), row).unwrap(),
+                        )
+                    })
+                    .collect(),
+                values
+                    .iter()
+                    .map(|index| array_value_to_string(batch.column(*index).as_ref(), row).unwrap())
+                    .collect(),
+            ));
+        }
+    }
+    rows.sort();
+    Answer {
+        value_types: value_types.expect("the answer reports a value column"),
+        rows,
+    }
+}
+
+/// A numeric field the raw series scan casts to a float is admitted only under the shapes whose
+/// existing plan publishes a `Float64` for it too, and the answer is that plan's answer.
+///
+/// The table holds one integer and one float field, so every statement below reads both: the scan
+/// casts the integer to a `Float64` and the fused node declares one `Float64` value column per field.
+/// That is the column the existing plan publishes for an arithmetic operand, for a range function and
+/// for `min`/`max`/`avg`, so those shapes are admitted and must answer the same columns and rows. A
+/// bare selector and `sum` keep the existing plan instead: the first copies the field's own type and
+/// the second folds an integer as an integer, so a `Float64` column would not be the column reported.
 #[tokio::test(flavor = "multi_thread")]
-async fn native_promql_columnar_config_falls_back_for_integer_field() {
+async fn native_promql_answers_a_numeric_field_where_the_shape_publishes_a_float() {
     common_telemetry::init_default_ut_logging();
-    const TABLE: &str = "native_columnar_int";
-    // Both functions are exact over the two samples inside the window: 10 + 30 and their mean.
-    const SUM: f64 = 40.0;
-    const AVG: f64 = 20.0;
+    const TABLE: &str = "native_numeric_shape";
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_numeric_shape",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        &format!(
+            "CREATE TABLE {TABLE} (host STRING, ts TIMESTAMP(3) TIME INDEX, i BIGINT, f DOUBLE, PRIMARY KEY (host)); \
+             INSERT INTO {TABLE} (host, ts, i, f) VALUES \
+             ('a', 0, 1, 1.5), ('b', 0, 2, 2.5), \
+             ('a', 1000, 3, 3.5), ('b', 1000, 4, 4.5), \
+             ('a', 2000, 5, 5.5), ('b', 2000, 6, 6.5);"
+        ),
+        QueryContext::arc(),
+    )
+    .await;
+    execute_all(
+        &instance,
+        &format!("ADMIN FLUSH_TABLE('{TABLE}')"),
+        QueryContext::arc(),
+    )
+    .await;
+
+    for query in [
+        // Arithmetic casts both operands, so `i` and `f` are folded as floats.
+        format!("{TABLE} * 2"),
+        format!("{TABLE} - {TABLE}"),
+        // `min`, `max` and `avg` answer a `Float64` for every numeric input.
+        format!("min({TABLE})"),
+        format!("max({TABLE})"),
+        format!("avg({TABLE})"),
+        // A range function's value window and answer are both `Float64`.
+        format!("rate({TABLE}[2s])"),
+        format!("sum(rate({TABLE}[2s]))"),
+    ] {
+        let sql = format!("TQL EVAL (2, 2, '1s') {query}");
+        observer.clear();
+        let native = native_answer(native_tql_output(&instance, &sql, true).await).await;
+        let answering_node = observer.answering_node();
+        assert_eq!(
+            Some("FusedSeriesExec".to_string()),
+            answering_node,
+            "`{query}` must answer from the fused node, not the existing plan"
+        );
+        // Both fields of the table are value columns, whatever the shape: the integer is read as the
+        // float the existing plan publishes for this shape.
+        assert_eq!(
+            vec![DataType::Float64, DataType::Float64],
+            native.value_types,
+            "`{query}`: one float value column per field of the table"
+        );
+        let legacy = native_answer(native_tql_output(&instance, &sql, false).await).await;
+        assert_eq!(
+            native, legacy,
+            "`{query}`: the value types and the rows must be the existing plan's"
+        );
+    }
+
+    // A bare selector copies the value column's own type, so it keeps the existing plan: the
+    // `BIGINT` field would come back as a `Float64` under the fused node.
+    for query in [TABLE.to_string(), format!("sum({TABLE})")] {
+        let sql = format!("TQL EVAL (2, 2, '1s') {query}");
+        observer.clear();
+        let native = native_answer(native_tql_output(&instance, &sql, true).await).await;
+        assert!(
+            observer.fused().is_none(),
+            "`{query}` must keep the existing plan: a shape that does not publish a float for an \
+             integer field would report a different column than the existing plan"
+        );
+        let legacy = native_answer(native_tql_output(&instance, &sql, false).await).await;
+        assert_eq!(native, legacy, "`{query}`: the existing plan answers it");
+        // The reason the shape keeps the existing plan: the integer field is reported as an integer,
+        // which is the column the fused node would have to publish as a `Float64`.
+        assert!(
+            native.value_types.contains(&DataType::Int64),
+            "`{query}`: the existing plan reports the integer field as an `Int64`: {:?}",
+            native.value_types
+        );
+    }
+
+    // A field the raw series preflight refuses has no float to publish, whatever the shape is. These
+    // keep the existing plan, which is where their answer comes from - for some of them an error
+    // (`sum` of a string has no fold), and that error is the answer the route must not replace.
+    const TEXT_TABLE: &str = "native_numeric_shape_text";
+    execute_all(
+        &instance,
+        &format!(
+            "CREATE TABLE {TEXT_TABLE} (host STRING, ts TIMESTAMP(3) TIME INDEX, v STRING, PRIMARY KEY (host)); \
+             INSERT INTO {TEXT_TABLE} (host, ts, v) VALUES ('a', 0, 'x'), ('a', 1000, 'y'); \
+             ADMIN FLUSH_TABLE('{TEXT_TABLE}');"
+        ),
+        QueryContext::arc(),
+    )
+    .await;
+    for query in [
+        TEXT_TABLE.to_string(),
+        format!("sum({TEXT_TABLE})"),
+        format!("{TEXT_TABLE} * 2"),
+        format!("rate({TEXT_TABLE}[2s])"),
+    ] {
+        let sql = format!("TQL EVAL (2, 2, '1s') {query}");
+        observer.clear();
+        native_run_ignoring_the_answer(&instance, &sql, true).await;
+        assert!(
+            observer.fused().is_none(),
+            "`{query}`: a string field has no raw representation"
+        );
+    }
+}
+
+/// Runs a TQL statement and drops whatever it answered.
+///
+/// A statement the existing planner refuses is answered by that refusal - `sum` of a string has no
+/// fold - and the route must not replace it with an answer of its own, so a test that only means to
+/// hold the route to the existing plan must not unwrap the answer.
+async fn native_run_ignoring_the_answer(instance: &Arc<Instance>, sql: &str, enabled: bool) {
+    let Ok(output) = instance
+        .do_query(sql, native_query_context(enabled, 4))
+        .await
+        .remove(0)
+    else {
+        return;
+    };
+    if let OutputData::Stream(stream) = output.data {
+        let _ = collect_batches(stream).await;
+    }
+}
+
+/// An arithmetic operator casts both operands, but the cast is the operator's, so it reaches whatever
+/// an operand answers. Where that operand *folds* raw samples into an integer, the existing plan folds
+/// exactly and casts the fold, while the raw series scan casts every sample and only then folds: two
+/// integers above `2^53` that cancel answer `1` before the cast and `0` after it. The shape therefore
+/// keeps the existing plan, while a fold that is a float fold - `sum` over a range function's window -
+/// is admitted as before.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_declines_a_cast_over_an_integer_fold() {
+    common_telemetry::init_default_ut_logging();
+    const TABLE: &str = "native_late_cast";
+    let (standalone, observer) =
+        native_test_instance(GreptimeDbStandaloneBuilder::new("native_promql_late_cast")).await;
+    let instance = standalone.fe_instance().clone();
+    // `9007199254740993` is not a `Float64`: it rounds to `9007199254740992`, which is what makes the
+    // order of the cast and the fold visible. Two series, so `sum` folds them into one value per step.
+    execute_all(
+        &instance,
+        &format!(
+            "CREATE TABLE {TABLE} (host STRING, ts TIMESTAMP(3) TIME INDEX, v BIGINT, PRIMARY KEY (host)); \
+             INSERT INTO {TABLE} (host, ts, v) VALUES \
+             ('a', 0, 9007199254740993), ('a', 60000, 9007199254740993), \
+             ('b', 0, -9007199254740992), ('b', 60000, -9007199254740992);"
+        ),
+        QueryContext::arc(),
+    )
+    .await;
+    execute_all(
+        &instance,
+        &format!("ADMIN FLUSH_TABLE('{TABLE}')"),
+        QueryContext::arc(),
+    )
+    .await;
+
+    // The integer sum is 1, and the cast is 1.0 whichever side of it the answer is read from: the
+    // existing plan sums the two `BIGINT`s exactly, so that is the answer these shapes keep.
+    for (query, expected) in [
+        (format!("sum({TABLE}) * 1"), 1.0),
+        (format!("sum({TABLE}) + 1"), 2.0),
+    ] {
+        let sql = format!("TQL EVAL (0, 0, '1m') {query}");
+        let legacy = native_rows(native_tql_output(&instance, &sql, false).await, None).await;
+        assert_eq!(
+            legacy,
+            vec![(0, String::new(), expected)],
+            "`{query}`: the existing plan sums the integers before it casts"
+        );
+        observer.clear();
+        let native = native_rows(native_tql_output(&instance, &sql, true).await, None).await;
+        assert!(
+            observer.fused().is_none(),
+            "`{query}` must keep the existing plan: the raw scan would round each value before it \
+             summed them"
+        );
+        assert_eq!(
+            native, legacy,
+            "`{query}`: an integer fold is exact, and a fused node cannot repeat that"
+        );
+    }
+
+    // The inner fold is a float fold here, so the outer cast reaches values that were floats already:
+    // the route takes the statement and answers the existing plan's rows.
+    let sql = format!("TQL EVAL (60000, 60000, '1m') sum(rate({TABLE}[5m]))");
+    let legacy = native_rows(native_tql_output(&instance, &sql, false).await, None).await;
+    observer.clear();
+    let native = native_rows(native_tql_output(&instance, &sql, true).await, None).await;
+    assert!(
+        observer.fused().is_some(),
+        "`sum(rate(...))` folds a float window and must stay admitted"
+    );
+    assert_eq!(
+        native, legacy,
+        "`sum(rate(...))`: the fused route reports the existing plan's rows"
+    );
+}
+
+/// A store configured for the columnar series format publishes samples for sparse metric regions
+/// only, and a plain table on such a store reads its rows from the ordinary scan - the reader the
+/// existing plan uses for the very same rows. So the raw series path serves the frame from there
+/// instead of refusing it: a refusal here is a planning error no caller can turn into a fallback,
+/// because the logical plan above the leaf is already the fused node when the region is asked.
+///
+/// The answer is therefore the existing plan's answer, on either route. Both value kinds are here
+/// because the limit is the reader's and not the field's: an integer field is cast to the float the
+/// fused node publishes, and a `Double` one is a float already. `sum_over_time` folds the window and
+/// `avg_over_time` folds it and divides - two answers that would look alike if one of them were 0.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_columnar_config_answers_from_the_ordinary_scan() {
+    common_telemetry::init_default_ut_logging();
+    const INTEGER: &str = "native_columnar_int";
+    const FLOAT: &str = "native_columnar_float";
     let mito_config = mito2::config::MitoConfig {
         experimental_enable_series_index: true,
         experimental_series_index_format: mito2::config::SeriesIndexFormat::Columnar,
@@ -12730,44 +13456,57 @@ async fn native_promql_columnar_config_falls_back_for_integer_field() {
     execute_all(
         &instance,
         &format!(
-            "CREATE TABLE {TABLE} (host STRING, ts TIMESTAMP(3) TIME INDEX, val BIGINT, PRIMARY KEY (host)) ENGINE=mito; \
-             INSERT INTO {TABLE} (host, ts, val) VALUES ('a', 60000, 10), ('a', 120000, 30);"
+            "CREATE TABLE {INTEGER} (host STRING, ts TIMESTAMP(3) TIME INDEX, val BIGINT, PRIMARY KEY (host)) ENGINE=mito; \
+             INSERT INTO {INTEGER} (host, ts, val) VALUES ('a', 60000, 10), ('a', 120000, 30); \
+             CREATE TABLE {FLOAT} (host STRING, ts TIMESTAMP(3) TIME INDEX, val DOUBLE, PRIMARY KEY (host)) ENGINE=mito; \
+             INSERT INTO {FLOAT} (host, ts, val) VALUES ('a', 60000, 10), ('a', 120000, 30);"
         ),
         QueryContext::arc(),
     )
     .await;
-    for (query, expected) in [
-        (format!("sum_over_time({TABLE}[2m])"), SUM),
-        (format!("avg_over_time({TABLE}[2m])"), AVG),
-    ] {
-        let sql = format!("TQL EVAL (120, 120, '1m') {query}");
-        observer.clear();
-        let native_rows = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
-        assert_eq!(
-            native_rows.len(),
-            1,
-            "native-on `{query}`: one row for the one series"
-        );
-        assert_eq!(native_rows[0].0, 120_000, "native-on `{query}`: ts");
-        assert_eq!(native_rows[0].1, "a", "native-on `{query}`: label");
-        assert!(
-            (native_rows[0].2 - expected).abs() <= 1e-9 * expected.abs().max(1.0),
-            "native-on `{query}`: expected {expected}, found {}",
-            native_rows[0].2
-        );
-        let legacy_rows = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
-        assert_eq!(
-            native_rows, legacy_rows,
-            "`{query}`: same rows on both routes"
-        );
-        assert!(
-            observer.fused().is_none(),
-            "`{query}`: the native route must decline a field the columnar samples cannot serve"
-        );
+    for table in [INTEGER, FLOAT] {
+        // Both samples of the one series fall in the 2m window: 10 + 30, and that sum over the two
+        // samples it averages.
+        for (query, expected) in [("sum_over_time", 40.0), ("avg_over_time", 20.0)] {
+            let sql = format!("TQL EVAL (120, 120, '1m') {query}({table}[2m])");
+            // The existing plan answer first, so a red native query is about this route.
+            let legacy = native_rows(
+                native_tql_output(&instance, &sql, false).await,
+                Some("host"),
+            )
+            .await;
+            assert_eq!(
+                legacy,
+                vec![(120_000, "a".to_string(), expected)],
+                "`{sql}`: the existing plan answers it"
+            );
+            observer.clear();
+            let native =
+                native_rows(native_tql_output(&instance, &sql, true).await, Some("host")).await;
+            assert_eq!(
+                native, legacy,
+                "`{sql}`: the fused route reports the existing plan's rows"
+            );
+            // The route takes the statement and the region serves it from the ordinary scan, rather
+            // than the statement failing to plan because the columnar reader has no samples for it.
+            assert!(
+                observer.fused().is_some(),
+                "`{sql}`: the fused node reads frames the region serves"
+            );
+        }
     }
+    // A bare selector keeps its plan for a type reason, which is what this route decides: it reports
+    // the column's own `BIGINT`, which no fused node publishes.
+    let sql = format!("TQL EVAL (120, 120, '1m') {INTEGER}");
+    observer.clear();
+    let _ = native_tql_output(&instance, &sql, true).await;
+    assert!(
+        observer.fused().is_none(),
+        "a bare selector over an integer field must keep the existing plan"
+    );
 }
 
-/// The positive counterpart of the fallback above: a sparse physical metric table whose series
+/// The positive counterpart of the test above: a sparse physical metric table whose series
 /// index is published in the columnar format fuses a `Float64` selector and matches the old plan.
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_columnar_fused_series_matches_legacy() {
@@ -14241,6 +14980,93 @@ async fn native_promql_cuts_segments_only_where_a_gather_would_swallow_them() {
     );
     let legacy = eval_text(native_tql_output(&instance, &sql, false).await);
     assert_eq!(native, legacy, "{query}: answers differ");
+}
+
+/// A whole-vector operator standing on an evaluated fold is the shape it is over a bare scan.
+///
+/// `topk`, `bottomk` and `sort` read the whole vector at a point, so the fold below one is not a
+/// boundary the aggregate state can cross: the split declines it and the per-series prefix under the
+/// fold is cut out as a segment instead, leaving the fold and the operator in the one node above the
+/// merged groups. Both routes are run and their rows compared as the row sets they are - a partition
+/// publishes its rows in its own order, so a row's position is not what the two routes can be held
+/// to - which is the one difference `eval_text` normalizes besides the name column and the value
+/// column's name. `limitk` and `limit_ratio` are left out of the comparison: they exist in this
+/// route's own kernels and the existing planner answers neither.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_whole_vector_operators_over_an_aggregate_keep_their_route() {
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_ranking_over_aggregate")
+            .with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE rank_agg (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)); \
+         INSERT INTO rank_agg (host, ts, val) VALUES \
+         ('a', 0, 2), ('b', 0, 7), ('c', 0, 11), ('a', 1000, 3), ('b', 1000, 13), ('c', 1000, 5)",
+        QueryContext::arc(),
+    )
+    .await;
+
+    fn fused_nodes(plan: &Arc<dyn ExecutionPlan>) -> Vec<Arc<dyn ExecutionPlan>> {
+        let mut found = Vec::new();
+        let mut stack = vec![plan.clone()];
+        while let Some(node) = stack.pop() {
+            if node.name() == "FusedSeriesExec" {
+                found.push(node.clone());
+            }
+            stack.extend(node.children().into_iter().cloned());
+        }
+        found
+    }
+
+    for (query, reported) in [
+        // The fold computes a value of its own and drops the name it read, so the ranking above it
+        // reports the null name the fold left.
+        ("topk(1, sum(rank_agg))", ReportedName::Nothing),
+        ("bottomk(2, avg(rank_agg))", ReportedName::Nothing),
+        ("sort(sum by (host) (rank_agg))", ReportedName::Nothing),
+        // The same ranking over a bare scan: the shape that was never cut below.
+        ("topk(1, rank_agg)", ReportedName::Metric("rank_agg")),
+    ] {
+        let sql = format!("TQL EVAL (0, 1000, '1000s') {query}");
+        observer.clear();
+        let native = eval_text_rows(native_tql_output(&instance, &sql, true).await, reported);
+        let root = observer.root_plan();
+        let fused = fused_nodes(&root);
+        assert_eq!(
+            1,
+            fused.len(),
+            "`{query}` answers above one cut prefix: {}",
+            datafusion::physical_plan::displayable(root.as_ref()).indent(true)
+        );
+        let parent = datafusion::physical_plan::displayable(fused[0].as_ref())
+            .one_line()
+            .to_string();
+        let parent_tree = parent
+            .split_once('\n')
+            .expect("the parent renders its tree")
+            .1;
+        assert!(
+            parent_tree.contains("Input: evaluated samples source=0"),
+            "`{query}` ranks the fold's own answer: {parent_tree}"
+        );
+        assert!(
+            !parent_tree.contains("Instant"),
+            "`{query}` reads the cut prefix, so no instant evaluation is left above it: {parent_tree}"
+        );
+        let legacy = eval_text(native_tql_output(&instance, &sql, false).await);
+        assert_eq!(
+            native, legacy,
+            "`{query}`: the routes answer different rows"
+        );
+    }
 }
 
 /// Range-function prefixes on two table sources retain their own samples in each segment.
