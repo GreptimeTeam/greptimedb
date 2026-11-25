@@ -776,8 +776,6 @@ impl TableMeta {
     ) -> Result<TableMetaBuilder> {
         let table_schema = &self.schema;
         let mut meta_builder = self.new_meta_builder();
-        let original_primary_key_indices: HashSet<&usize> =
-            self.primary_key_indices.iter().collect();
 
         let mut names = HashSet::with_capacity(requests.len());
         let mut new_columns = Vec::with_capacity(requests.len());
@@ -860,38 +858,22 @@ impl TableMeta {
             columns_at_last,
             column_names,
         } = self.split_requests_by_column_location(table_name, requests)?;
-        let mut primary_key_indices = Vec::with_capacity(self.primary_key_indices.len());
         let mut columns = Vec::with_capacity(table_schema.num_columns() + requests.len());
         // add new columns with FIRST, and in reverse order of requests.
         columns_at_first.iter().rev().for_each(|request| {
-            if request.is_key {
-                // If a key column is added, we also need to store its index in primary_key_indices.
-                primary_key_indices.push(columns.len());
-            }
             columns.push(request.column_schema.clone());
         });
         // add existed columns in original order and handle new columns with AFTER.
-        for (index, column_schema) in table_schema.column_schemas().iter().enumerate() {
-            if original_primary_key_indices.contains(&index) {
-                primary_key_indices.push(columns.len());
-            }
+        for column_schema in table_schema.column_schemas() {
             columns.push(column_schema.clone());
             if let Some(requests) = columns_at_after.get(&column_schema.name) {
                 requests.iter().rev().for_each(|request| {
-                    if request.is_key {
-                        // If a key column is added, we also need to store its index in primary_key_indices.
-                        primary_key_indices.push(columns.len());
-                    }
                     columns.push(request.column_schema.clone());
                 });
             }
         }
         // add new columns without location info to last.
         columns_at_last.iter().for_each(|request| {
-            if request.is_key {
-                // If a key column is added, we also need to store its index in primary_key_indices.
-                primary_key_indices.push(columns.len());
-            }
             columns.push(request.column_schema.clone());
         });
 
@@ -907,6 +889,23 @@ impl TableMeta {
         let new_schema = builder.build().with_context(|_| error::SchemaBuildSnafu {
             msg: format!("Table {table_name} cannot add new columns {column_names:?}"),
         })?;
+
+        // Regions append new tags to the end of their primary key regardless of the column
+        // location (see `RegionMetadataBuilder::add_columns`), so the table key keeps its order
+        // and appends new key columns in request order.
+        let primary_key_indices = self
+            .primary_key_indices
+            .iter()
+            .map(|idx| table_schema.column_name_by_index(*idx))
+            .chain(
+                requests
+                    .iter()
+                    .filter(|request| request.is_key)
+                    .map(|request| request.column_schema.name.as_str()),
+            )
+            // This unwrap is safe since all these columns are in the new schema.
+            .map(|name| new_schema.column_index_by_name(name).unwrap())
+            .collect();
 
         let partition_key_indices = self
             .partition_key_indices
@@ -1932,6 +1931,46 @@ mod tests {
         assert_eq!(&["col1", "ts", "col2", "my_tag", "my_field"], &names[..]);
         assert_eq!(&[0, 3], &new_meta.primary_key_indices[..]);
         assert_eq!(&[1, 2, 4], &new_meta.value_indices[..]);
+    }
+
+    #[test]
+    fn test_add_columns_keeps_primary_key_order() {
+        let schema = Arc::new(new_test_schema());
+        // The key order differs from the column order, like `PRIMARY KEY(col2, col1)`.
+        let meta = TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices(vec![2, 0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+
+        let key_after_col1 = |name: &str| AddColumnRequest {
+            column_schema: ColumnSchema::new(name, ConcreteDataType::string_datatype(), true),
+            is_key: true,
+            location: Some(AddColumnLocation::After {
+                column_name: "col1".to_string(),
+            }),
+            add_if_not_exists: false,
+        };
+        let alter_kind = AlterKind::AddColumns {
+            columns: vec![key_after_col1("k1"), key_after_col1("k2")],
+        };
+        let new_meta = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let names: Vec<_> = new_meta
+            .schema
+            .column_schemas()
+            .iter()
+            .map(|column_schema| column_schema.name.as_str())
+            .collect();
+        assert_eq!(&["col1", "k2", "k1", "ts", "col2"], &names[..]);
+        // Regions append new tags in request order, not in column order: `col2, col1, k1, k2`.
+        assert_eq!(&[4, 0, 2, 1], &new_meta.primary_key_indices[..]);
     }
 
     #[test]
@@ -3103,7 +3142,8 @@ mod tests {
             ],
             &names[..]
         );
-        assert_eq!(&[0, 1, 3], &new_meta.primary_key_indices[..]);
+        // New key columns follow the existing key `col1` in request order, whatever their location.
+        assert_eq!(&[1, 0, 3], &new_meta.primary_key_indices[..]);
         assert_eq!(&[2, 4, 5], &new_meta.value_indices[..]);
         assert_eq!(&[1, 5], &new_meta.partition_key_indices[..]);
     }
