@@ -21,6 +21,7 @@ use mito2::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use mito2::region::ManifestStats;
 use mito2::sst::file::RegionFileId;
 use mito2::sst::location::{region_dir_from_table_dir, sst_file_path};
+use mito2::sst::parquet::max_row_group_decoded_size;
 use object_store::ObjectStore;
 use parquet::file::FOOTER_SIZE;
 use parquet::file::metadata::{FooterTail, ParquetMetaDataReader};
@@ -166,8 +167,7 @@ impl SstReplaceCommand {
         new_file.num_rows = new_num_rows;
         new_file.num_row_groups = new_num_row_groups;
         new_file.max_row_group_uncompressed_size = max_row_group_uncompressed_size(&parquet_meta);
-        // The old file's decoded size does not describe the replacement.
-        new_file.max_row_group_decoded_size = 0;
+        new_file.max_row_group_decoded_size = max_row_group_decoded_size(&parquet_meta);
 
         println!("{} Region: {}", "[ok]".green(), region_id);
         println!("{} Target SST: {}", "[ok]".green(), target_path.cyan());

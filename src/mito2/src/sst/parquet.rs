@@ -23,7 +23,13 @@ use datatypes::arrow::array::{AsArray, OffsetSizeTrait};
 use datatypes::arrow::datatypes::DataType;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::json::JsonSettings;
+<<<<<<< HEAD
 use parquet::basic::{Compression, Encoding};
+=======
+use datatypes::schema::ColumnEncoding;
+use parquet::arrow::parquet_to_arrow_schema;
+use parquet::basic::{Compression, Encoding, ZstdLevel};
+>>>>>>> 0813fc3527 (fix(mito2): size old SSTs from size statistics and move the downgrade target to v1.2.0 (#10585))
 use parquet::file::metadata::{KeyValue, ParquetMetaData};
 use parquet::file::properties::{EnabledStatistics, WriterPropertiesBuilder};
 use parquet::schema::types::ColumnPath;
@@ -278,29 +284,103 @@ pub(crate) fn max_row_group_uncompressed_size(metadata: &ParquetMetaData) -> u64
 }
 
 /// Returns the size of the largest row group of `metadata`, counting string and binary values
-/// at their decoded size when the footer records it under [MAX_ROW_GROUP_VALUE_BYTES_KEY].
-pub(crate) fn max_row_group_decoded_size(metadata: &ParquetMetaData) -> u64 {
+/// at their decoded size (see [max_row_group_value_bytes]).
+pub fn max_row_group_decoded_size(metadata: &ParquetMetaData) -> u64 {
     max_row_group_uncompressed_size(metadata).max(max_row_group_value_bytes(metadata))
 }
 
-/// Returns the [MAX_ROW_GROUP_VALUE_BYTES_KEY] value of the footer, or 0 when it is absent.
+/// Returns the [MAX_ROW_GROUP_VALUE_BYTES_KEY] value of the footer, or the same quantity derived
+/// from the column chunk size statistics when the footer predates the key.
 pub(crate) fn max_row_group_value_bytes(metadata: &ParquetMetaData) -> u64 {
-    footer_u64(metadata, MAX_ROW_GROUP_VALUE_BYTES_KEY)
+    footer_u64(metadata, MAX_ROW_GROUP_VALUE_BYTES_KEY).unwrap_or_else(|| {
+        row_group_value_bytes_from_size_statistics(metadata)
+            .into_iter()
+            .map(|(_, bytes)| bytes)
+            .max()
+            .unwrap_or(0)
+    })
 }
 
-/// Returns the [MAX_ROW_VALUE_WIDTH_KEY] value of the footer, or 0 when it is absent.
+/// Returns the [MAX_ROW_VALUE_WIDTH_KEY] value of the footer, or the same quantity derived from
+/// the column chunk size statistics when the footer predates the key.
 pub(crate) fn max_row_value_width(metadata: &ParquetMetaData) -> u64 {
-    footer_u64(metadata, MAX_ROW_VALUE_WIDTH_KEY)
+    footer_u64(metadata, MAX_ROW_VALUE_WIDTH_KEY).unwrap_or_else(|| {
+        row_group_value_bytes_from_size_statistics(metadata)
+            .into_iter()
+            .filter(|(rows, _)| *rows > 0)
+            .map(|(rows, bytes)| bytes.div_ceil(rows))
+            .max()
+            .unwrap_or(0)
+    })
 }
 
-fn footer_u64(metadata: &ParquetMetaData, key: &str) -> u64 {
+/// Returns the value of `key`, or `None` when the footer has no parseable value for it.
+fn footer_u64(metadata: &ParquetMetaData, key: &str) -> Option<u64> {
     metadata
         .file_metadata()
-        .key_value_metadata()
-        .and_then(|kvs| kvs.iter().find(|kv| kv.key == key))
-        .and_then(|kv| kv.value.as_deref())
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(0)
+        .key_value_metadata()?
+        .iter()
+        .find(|kv| kv.key == key)?
+        .value
+        .as_deref()?
+        .parse()
+        .ok()
+}
+
+/// Returns `(num_rows, value_bytes)` of each row group, where `value_bytes` sums the
+/// `unencoded_byte_array_data_bytes` size statistic of the column chunks that
+/// [var_len_value_bytes] counts: top-level string and binary columns that readers do not decode
+/// as dictionaries.
+///
+/// This stands in for [MAX_ROW_GROUP_VALUE_BYTES_KEY] in footers written without it. Parquet
+/// writers record the statistic per value, so repeated dictionary-encoded values count every
+/// time. Column chunks written with statistics disabled lack the statistic and count as 0.
+fn row_group_value_bytes_from_size_statistics(metadata: &ParquetMetaData) -> Vec<(u64, u64)> {
+    let file = metadata.file_metadata();
+    let Ok(arrow_schema) = parquet_to_arrow_schema(file.schema_descr(), file.key_value_metadata())
+    else {
+        return Vec::new();
+    };
+    let counted: Vec<bool> = file
+        .schema_descr()
+        .columns()
+        .iter()
+        .enumerate()
+        .map(|(leaf, column)| {
+            if column.path().parts().len() != 1 {
+                return false;
+            }
+            let root = file.schema_descr().get_column_root_idx(leaf);
+            arrow_schema.fields().get(root).is_some_and(|field| {
+                matches!(
+                    field.data_type(),
+                    DataType::Binary
+                        | DataType::LargeBinary
+                        | DataType::Utf8
+                        | DataType::LargeUtf8
+                        | DataType::BinaryView
+                        | DataType::Utf8View
+                )
+            })
+        })
+        .collect();
+
+    metadata
+        .row_groups()
+        .iter()
+        .map(|row_group| {
+            let bytes = row_group
+                .columns()
+                .iter()
+                .zip(&counted)
+                .filter(|(_, counted)| **counted)
+                .map(|(column, _)| {
+                    column.unencoded_byte_array_data_bytes().unwrap_or(0).max(0) as u64
+                })
+                .sum();
+            (row_group.num_rows().max(0) as u64, bytes)
+        })
+        .collect()
 }
 
 /// Values at least this long make min/max statistics of a field column useless for pruning,
@@ -450,9 +530,9 @@ mod tests {
     use datafusion_expr::{BinaryExpr, Expr, Literal, Operator, col, lit};
     use datatypes::arrow;
     use datatypes::arrow::array::{
-        Array, ArrayRef, AsArray, BinaryDictionaryBuilder, Float32Array, Float64Array, Int32Array,
-        RecordBatch, StringArray, StringDictionaryBuilder, TimestampMillisecondArray, UInt8Array,
-        UInt64Array,
+        Array, ArrayRef, AsArray, BinaryArray, BinaryDictionaryBuilder, DictionaryArray,
+        Float32Array, Float64Array, Int32Array, RecordBatch, StringArray, StringDictionaryBuilder,
+        StructArray, TimestampMillisecondArray, UInt8Array, UInt32Array, UInt64Array,
     };
     use datatypes::arrow::datatypes::{DataType, Field, Schema, TimeUnit, UInt32Type};
     use datatypes::arrow::util::pretty::pretty_format_batches;
@@ -462,7 +542,7 @@ mod tests {
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use parquet::arrow::{ArrowWriter, AsyncArrowWriter};
     use parquet::basic::{Compression, Encoding, ZstdLevel};
-    use parquet::file::metadata::{KeyValue, PageIndexPolicy};
+    use parquet::file::metadata::{FileMetaData, KeyValue, PageIndexPolicy, ParquetMetaDataReader};
     use parquet::file::properties::WriterProperties;
     use parquet::schema::types::ColumnPath;
     use store_api::codec::PrimaryKeyEncoding;
@@ -1453,6 +1533,137 @@ mod tests {
         assert_eq!(
             1024,
             estimate_batch_size(widest_row_group_statistic(footer))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_decoded_size_without_value_bytes_keys_uses_size_statistics() {
+        let mut env = TestEnv::new().await;
+        let object_store = env.init_object_store_manager();
+        let handle = sst_file_handle(0, 1000);
+        let file_path = FixedPathProvider {
+            region_file_id: handle.file_id(),
+        };
+        let metadata = build_test_binary_test_region_metadata();
+        // 256 copies of one 32 KiB value decode to 8 MiB but dictionary-encode to one value. They
+        // stay below LARGE_VALUE_STATS_THRESHOLD, so the column keeps its size statistics like
+        // the files written before the footer keys existed. The long tag gives the primary key,
+        // which readers decode as a dictionary, size statistics as well.
+        let tag = "t".repeat(1024);
+        let values = vec![vec![7u8; 32 * 1024]; 256];
+        let batch = new_record_batch_with_binary_values(&tag, &values);
+        let mut metrics = Metrics::new(WriteType::Flush);
+        let mut writer = ParquetWriter::new_with_object_store(
+            object_store,
+            metadata,
+            IndexConfig::default(),
+            NoopIndexBuilder,
+            file_path,
+            &mut metrics,
+        )
+        .await;
+        let info = writer
+            .write_all_flat_as_primary_key(
+                new_flat_source_from_record_batches(vec![batch]),
+                None,
+                &WriteOptions::default(),
+            )
+            .await
+            .unwrap()
+            .remove(0);
+        let footer = info.file_metadata.as_ref().unwrap();
+        let file = footer.file_metadata();
+        let key_value_metadata: Vec<_> = file
+            .key_value_metadata()
+            .unwrap()
+            .iter()
+            .filter(|kv| {
+                kv.key != MAX_ROW_GROUP_VALUE_BYTES_KEY && kv.key != MAX_ROW_VALUE_WIDTH_KEY
+            })
+            .cloned()
+            .collect();
+        assert_eq!(
+            file.key_value_metadata().unwrap().len(),
+            key_value_metadata.len() + 2
+        );
+        let with_key_value_metadata = |key_value_metadata| {
+            ParquetMetaData::new(
+                FileMetaData::new(
+                    file.version(),
+                    file.num_rows(),
+                    file.created_by().map(str::to_string),
+                    Some(key_value_metadata),
+                    file.schema_descr_ptr(),
+                    file.column_orders().cloned(),
+                ),
+                footer.row_groups().to_vec(),
+            )
+        };
+        let mut malformed_key_value_metadata = key_value_metadata.clone();
+        for key in [MAX_ROW_GROUP_VALUE_BYTES_KEY, MAX_ROW_VALUE_WIDTH_KEY] {
+            malformed_key_value_metadata.push(KeyValue::new(key.to_string(), String::new()));
+        }
+        let legacy = with_key_value_metadata(key_value_metadata);
+        let malformed = with_key_value_metadata(malformed_key_value_metadata);
+
+        assert!(max_row_group_uncompressed_size(&legacy) < 1024 * 1024);
+        assert_eq!(256 * 32 * 1024, max_row_group_decoded_size(&legacy));
+        assert_eq!(
+            max_row_group_decoded_size(footer),
+            max_row_group_decoded_size(&legacy)
+        );
+        assert_eq!(
+            2048,
+            estimate_batch_size(widest_row_group_statistic(&legacy))
+        );
+        // Keys without a parseable value fall back like absent ones.
+        assert_eq!(
+            max_row_group_decoded_size(&legacy),
+            max_row_group_decoded_size(&malformed)
+        );
+        assert_eq!(
+            max_row_value_width(&legacy),
+            max_row_value_width(&malformed)
+        );
+    }
+
+    #[test]
+    fn test_size_statistics_fallback_counts_only_top_level_var_len_columns() {
+        // Like the footer keys, the fallback skips dictionary columns, which readers decode as
+        // dictionaries, and leaves nested in a struct, such as JSON2 columns.
+        let rows = 256;
+        let value = vec![7u8; 32 * 1024];
+        let text = "s".repeat(32 * 1024);
+        let binary: ArrayRef = Arc::new(BinaryArray::from_iter_values(
+            (0..rows).map(|_| value.as_slice()),
+        ));
+        let dictionary: ArrayRef = Arc::new(DictionaryArray::<UInt32Type>::new(
+            UInt32Array::from(vec![0; rows]),
+            Arc::new(BinaryArray::from_iter_values([value.as_slice()])),
+        ));
+        let nested: ArrayRef = Arc::new(StructArray::from(vec![(
+            Arc::new(Field::new("s", DataType::Utf8, false)),
+            Arc::new(StringArray::from_iter_values(
+                (0..rows).map(|_| text.as_str()),
+            )) as ArrayRef,
+        )]));
+        let batch = RecordBatch::try_from_iter([
+            ("binary", binary),
+            ("dictionary", dictionary),
+            ("nested", nested),
+        ])
+        .unwrap();
+        let mut writer = ArrowWriter::try_new(Vec::new(), batch.schema(), None).unwrap();
+        writer.write(&batch).unwrap();
+        let footer = ParquetMetaDataReader::new()
+            .parse_and_finish(&Bytes::from(writer.into_inner().unwrap()))
+            .unwrap();
+
+        assert!(max_row_group_uncompressed_size(&footer) < 1024 * 1024);
+        assert_eq!(256 * 32 * 1024, max_row_group_decoded_size(&footer));
+        assert_eq!(
+            2048,
+            estimate_batch_size(widest_row_group_statistic(&footer))
         );
     }
 
