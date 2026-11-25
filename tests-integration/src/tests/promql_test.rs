@@ -13352,18 +13352,93 @@ async fn native_run_ignoring_the_answer(instance: &Arc<Instance>, sql: &str, ena
     }
 }
 
-/// A store configured for the columnar series format cannot hand this route a raw series frame for
-/// any field of a plain table, and that limit is the reader's rather than the field's type's.
-///
-/// The columnar samples carry `Float64` series only, and the region refuses the raw series path for a
-/// scan whose series index is in that format at all - `raw_series_schema` answers `None`, which the
-/// fused node reports as a planning error instead of falling back, because a logical plan cannot be
-/// un-chosen once physical planning starts. A `Double` field fails exactly as an integer one does, so
-/// nothing here is a property of the field's type; what the route must not do is answer a *different*
-/// query than the existing plan, and the existing plan still answers both. Only a bare selector keeps
-/// its plan for a type reason instead (it reports the column's own `BIGINT`).
+/// An arithmetic operator casts both operands, but the cast is the operator's, so it reaches whatever
+/// an operand answers. Where that operand *folds* raw samples into an integer, the existing plan folds
+/// exactly and casts the fold, while the raw series scan casts every sample and only then folds: two
+/// integers above `2^53` that cancel answer `1` before the cast and `0` after it. The shape therefore
+/// keeps the existing plan, while a fold that is a float fold - `sum` over a range function's window -
+/// is admitted as before.
 #[tokio::test(flavor = "multi_thread")]
-async fn native_promql_columnar_config_refuses_the_raw_path_for_every_field() {
+async fn native_promql_declines_a_cast_over_an_integer_fold() {
+    common_telemetry::init_default_ut_logging();
+    const TABLE: &str = "native_late_cast";
+    let (standalone, observer) =
+        native_test_instance(GreptimeDbStandaloneBuilder::new("native_promql_late_cast")).await;
+    let instance = standalone.fe_instance().clone();
+    // `9007199254740993` is not a `Float64`: it rounds to `9007199254740992`, which is what makes the
+    // order of the cast and the fold visible. Two series, so `sum` folds them into one value per step.
+    execute_all(
+        &instance,
+        &format!(
+            "CREATE TABLE {TABLE} (host STRING, ts TIMESTAMP(3) TIME INDEX, v BIGINT, PRIMARY KEY (host)); \
+             INSERT INTO {TABLE} (host, ts, v) VALUES \
+             ('a', 0, 9007199254740993), ('a', 60000, 9007199254740993), \
+             ('b', 0, -9007199254740992), ('b', 60000, -9007199254740992);"
+        ),
+        QueryContext::arc(),
+    )
+    .await;
+    execute_all(
+        &instance,
+        &format!("ADMIN FLUSH_TABLE('{TABLE}')"),
+        QueryContext::arc(),
+    )
+    .await;
+
+    // The integer sum is 1, and the cast is 1.0 whichever side of it the answer is read from: the
+    // existing plan sums the two `BIGINT`s exactly, so that is the answer these shapes keep.
+    for (query, expected) in [
+        (format!("sum({TABLE}) * 1"), 1.0),
+        (format!("sum({TABLE}) + 1"), 2.0),
+    ] {
+        let sql = format!("TQL EVAL (0, 0, '1m') {query}");
+        let legacy = native_rows(native_tql_output(&instance, &sql, false).await, None).await;
+        assert_eq!(
+            legacy,
+            vec![(0, String::new(), expected)],
+            "`{query}`: the existing plan sums the integers before it casts"
+        );
+        observer.clear();
+        let native = native_rows(native_tql_output(&instance, &sql, true).await, None).await;
+        assert!(
+            observer.fused().is_none(),
+            "`{query}` must keep the existing plan: the raw scan would round each value before it \
+             summed them"
+        );
+        assert_eq!(
+            native, legacy,
+            "`{query}`: an integer fold is exact, and a fused node cannot repeat that"
+        );
+    }
+
+    // The inner fold is a float fold here, so the outer cast reaches values that were floats already:
+    // the route takes the statement and answers the existing plan's rows.
+    let sql = format!("TQL EVAL (60000, 60000, '1m') sum(rate({TABLE}[5m]))");
+    let legacy = native_rows(native_tql_output(&instance, &sql, false).await, None).await;
+    observer.clear();
+    let native = native_rows(native_tql_output(&instance, &sql, true).await, None).await;
+    assert!(
+        observer.fused().is_some(),
+        "`sum(rate(...))` folds a float window and must stay admitted"
+    );
+    assert_eq!(
+        native, legacy,
+        "`sum(rate(...))`: the fused route reports the existing plan's rows"
+    );
+}
+
+/// A store configured for the columnar series format publishes samples for sparse metric regions
+/// only, and a plain table on such a store reads its rows from the ordinary scan - the reader the
+/// existing plan uses for the very same rows. So the raw series path serves the frame from there
+/// instead of refusing it: a refusal here is a planning error no caller can turn into a fallback,
+/// because the logical plan above the leaf is already the fused node when the region is asked.
+///
+/// The answer is therefore the existing plan's answer, on either route. Both value kinds are here
+/// because the limit is the reader's and not the field's: an integer field is cast to the float the
+/// fused node publishes, and a `Double` one is a float already. `sum_over_time` folds the window and
+/// `avg_over_time` folds it and divides - two answers that would look alike if one of them were 0.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_columnar_config_answers_from_the_ordinary_scan() {
     common_telemetry::init_default_ut_logging();
     const INTEGER: &str = "native_columnar_int";
     const FLOAT: &str = "native_columnar_float";
@@ -13390,45 +13465,35 @@ async fn native_promql_columnar_config_refuses_the_raw_path_for_every_field() {
     )
     .await;
     for table in [INTEGER, FLOAT] {
-        let sql = format!("TQL EVAL (120, 120, '1m') sum_over_time({table}[2m])");
-        // The existing plan answers the statement: 10 + 30 over the window.
-        let legacy = native_rows(
-            native_tql_output(&instance, &sql, false).await,
-            Some("host"),
-        )
-        .await;
-        assert_eq!(legacy, vec![(120_000, "a".to_string(), 40.0)], "{table}");
-        observer.clear();
-        // The refusal is raised where the region is asked for its raw series, which is during
-        // execution: the plan is answered when its batches are read.
-        let refused = match instance
-            .do_query(&sql, native_query_context(true, 4))
-            .await
-            .remove(0)
-        {
-            Ok(output) => match output.data {
-                OutputData::Stream(stream) => collect_batches(stream)
-                    .await
-                    .err()
-                    .map(|error| format!("{error:?}")),
-                OutputData::RecordBatches(_) => None,
-                _ => unreachable!("TQL EVAL returns record batches"),
-            },
-            // The chain is what names the reason: the outer error only says the query failed.
-            Err(error) => Some(format!("{error:?}")),
-        };
-        assert!(
-            refused
-                .as_deref()
-                .is_some_and(|error| error.contains("could not serve a raw series frame")),
-            "`{sql}`: the region refuses the raw series path: {refused:?}"
-        );
-        // The fused node is planned - the refusal happens when the region is asked for the frame -
-        // which is why this limit has to be stated here rather than answered with the existing plan.
-        assert!(
-            observer.fused().is_some(),
-            "`{sql}`: the plan is the fused node the region cannot feed"
-        );
+        // Both samples of the one series fall in the 2m window: 10 + 30, and that sum over the two
+        // samples it averages.
+        for (query, expected) in [("sum_over_time", 40.0), ("avg_over_time", 20.0)] {
+            let sql = format!("TQL EVAL (120, 120, '1m') {query}({table}[2m])");
+            // The existing plan answer first, so a red native query is about this route.
+            let legacy = native_rows(
+                native_tql_output(&instance, &sql, false).await,
+                Some("host"),
+            )
+            .await;
+            assert_eq!(
+                legacy,
+                vec![(120_000, "a".to_string(), expected)],
+                "`{sql}`: the existing plan answers it"
+            );
+            observer.clear();
+            let native =
+                native_rows(native_tql_output(&instance, &sql, true).await, Some("host")).await;
+            assert_eq!(
+                native, legacy,
+                "`{sql}`: the fused route reports the existing plan's rows"
+            );
+            // The route takes the statement and the region serves it from the ordinary scan, rather
+            // than the statement failing to plan because the columnar reader has no samples for it.
+            assert!(
+                observer.fused().is_some(),
+                "`{sql}`: the fused node reads frames the region serves"
+            );
+        }
     }
     // A bare selector keeps its plan for a type reason, which is what this route decides: it reports
     // the column's own `BIGINT`, which no fused node publishes.
@@ -13441,7 +13506,7 @@ async fn native_promql_columnar_config_refuses_the_raw_path_for_every_field() {
     );
 }
 
-/// The positive counterpart of the fallback above: a sparse physical metric table whose series
+/// The positive counterpart of the test above: a sparse physical metric table whose series
 /// index is published in the columnar format fuses a `Float64` selector and matches the old plan.
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_columnar_fused_series_matches_legacy() {

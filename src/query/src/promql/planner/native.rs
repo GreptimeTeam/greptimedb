@@ -2714,7 +2714,9 @@ enum PublishedValues {
 /// - parentheses and subqueries are not shapes of their own: they publish what their inner expression
 ///   publishes,
 /// - arithmetic binary operators are built by `PromPlanner::prom_token_to_binary_expr_builder`, which
-///   wraps both operands in `cast_float`,
+///   wraps both operands in `cast_float` - but the cast has to be the first thing that reaches the
+///   samples for the answer to stay the same, which is [`folds_before_cast`]: `<float fold> * 1` is
+///   admitted and `sum(integer_field) * 1` is not,
 /// - `min`/`max` fold through `common_function::aggrs::extremum::Extremum`, whose `return_type` is
 ///   `Float64`, and `avg`, `stddev`, `stdvar`, `quantile` and `group` through UDAFs that answer `Float64`
 ///   for every numeric input (`PromPlanner::create_numeric_aggregate_expr`),
@@ -2750,7 +2752,7 @@ fn published_values(statement: &PromExpr, field_type: &ArrowDataType) -> Publish
         // float only when it is written with `bool`, and a set operation hands on the values it was given,
         // so neither is a shape this rule models.
         PromExpr::Binary(binary) => {
-            if matches!(
+            let arithmetic = matches!(
                 binary.op.id(),
                 token::T_ADD
                     | token::T_SUB
@@ -2759,10 +2761,17 @@ fn published_values(statement: &PromExpr, field_type: &ArrowDataType) -> Publish
                     | token::T_MOD
                     | token::T_POW
                     | token::T_ATAN2
-            ) {
-                PublishedValues::Float64
-            } else {
+            );
+            // The cast is the operator's own, so it reaches whatever an operand answers. An operand that
+            // folds raw samples into a non-float answer hands over a value the existing plan computed
+            // exactly, which the raw series scan cannot; such a shape keeps the existing plan.
+            if !arithmetic
+                || folds_before_cast(&binary.lhs, field_type)
+                || folds_before_cast(&binary.rhs, field_type)
+            {
                 PublishedValues::Other
+            } else {
+                PublishedValues::Float64
             }
         }
         PromExpr::Aggregate(aggregate) => match aggregate.op.id() {
@@ -2803,6 +2812,36 @@ fn published_values(statement: &PromExpr, field_type: &ArrowDataType) -> Publish
             }
         }
         _ => PublishedValues::Other,
+    }
+}
+
+/// Whether `statement` folds raw samples into an answer that is not a float, which is what makes the
+/// cast above it late.
+///
+/// An arithmetic operator's `cast_float` makes its column a `Float64`, but a column type is not an
+/// answer: where an operand *folds* the samples before the cast reaches them, the existing plan folds
+/// exactly - `sum` of an `Int64` column adds integers and casts the sum - while the raw series scan
+/// casts every sample and only then folds. Two integers above `2^53` that cancel answer `1` before the
+/// cast and `0` after it, so `sum(integer_field) * 1` keeps the existing plan. `sum(rate(m[5m]))` is
+/// what that bound admits: the fold it applies is already a float fold, which is
+/// [`publishes_float_values`] of the aggregate itself.
+///
+/// A bare selector, a literal and a call hand over one sample at a time, so the cast reaches the same
+/// sample the scan casts and no fold happens in between.
+fn folds_before_cast(statement: &PromExpr, field_type: &ArrowDataType) -> bool {
+    match statement {
+        PromExpr::Paren(ParenExpr { expr }) => folds_before_cast(expr, field_type),
+        PromExpr::Subquery(SubqueryExpr { expr, .. }) => folds_before_cast(expr, field_type),
+        PromExpr::Binary(binary) => {
+            folds_before_cast(&binary.lhs, field_type) || folds_before_cast(&binary.rhs, field_type)
+        }
+        PromExpr::Unary(unary) => folds_before_cast(&unary.expr, field_type),
+        // A fold answers what it folds: an integer `sum` keeps the integer it added, `count` builds an
+        // `Int64`, and the ranking aggregates report the samples they were given. None of them is a
+        // `Float64`, so the cast above one of them is the late cast this refuses.
+        PromExpr::Aggregate(_) => !publishes_float_values(statement, field_type),
+        // A selector, a literal and a call reach one sample at a time; the cast reaches that same sample.
+        _ => false,
     }
 }
 
