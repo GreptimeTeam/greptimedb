@@ -1983,6 +1983,7 @@ async fn test_narthex_shared_samples_and_pinned_index_gc_after_owner_drop() {
     let engine = env
         .create_engine(MitoConfig {
             experimental_enable_series_index: true,
+            native_series_index_min_files: 1,
             gc: GcConfig {
                 enable: true,
                 lingering_time: None,

@@ -107,6 +107,7 @@ async fn test_narthex_series_index_survives_added_label() -> WhateverResult<()> 
     let engine = env
         .create_engine(MitoConfig {
             experimental_enable_series_index: true,
+            native_series_index_min_files: 1,
             schedule_compaction_after_edit: false,
             sst_meta_cache_size: ReadableSize(0),
             ..Default::default()
@@ -206,10 +207,58 @@ async fn test_narthex_series_index_survives_added_label() -> WhateverResult<()> 
 }
 
 #[tokio::test]
+async fn test_narthex_build_threshold_counts_uncovered_files_per_window() -> WhateverResult<()> {
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            experimental_enable_series_index: true,
+            native_series_index_min_files: 4,
+            experimental_series_index_bucket_width: Duration::from_secs(10),
+            ..Default::default()
+        })
+        .await;
+    let id = RegionId::new(1024, 0);
+    engine
+        .handle_request(
+            id,
+            RegionRequest::Create(sparse_metric_create_request("narthex")),
+        )
+        .await?;
+    let pause = engine.pause_compaction(id).await?;
+    let region = engine.get_region(id).unwrap();
+    let key = new_sparse_primary_key(&["api"], &region.metadata(), 42, 7);
+    // The first window starts at 0, the second at 10 seconds.
+    for (times, expected_indexes) in [
+        (&[1000, 2000, 3000, 10000][..], 0),
+        (&[4000][..], 1),
+        (&[5000, 6000, 7000][..], 1),
+        (&[8000][..], 2),
+    ] {
+        for &ts in times {
+            engine
+                .handle_request(id, test_util::sparse_metric_put(key.clone(), ts, Some(1.0)))
+                .await?;
+            test_util::flush_region(&engine, id, None).await;
+        }
+        engine
+            .handle_request(id, build_series_index_request())
+            .await?;
+        assert_eq!(
+            region.version().ssts.series_indexes().len(),
+            expected_indexes
+        );
+    }
+    drop(pause);
+    engine.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_narthex_spanning_sample_keeps_window_width_on_reopen() -> WhateverResult<()> {
     let mut env = TestEnv::new().await;
     let config = MitoConfig {
         experimental_enable_series_index: true,
+        native_series_index_min_files: 1,
         experimental_series_index_bucket_width: Duration::from_secs(10),
         schedule_compaction_after_edit: false,
         ..Default::default()
@@ -278,6 +327,7 @@ async fn test_narthex_build_uses_no_local_sidecar_budget() -> WhateverResult<()>
     let engine = env
         .create_engine(MitoConfig {
             experimental_enable_series_index: true,
+            native_series_index_min_files: 1,
             experimental_series_index_max_size: budget,
             ..Default::default()
         })
@@ -415,6 +465,7 @@ async fn test_narthex_index_counts_rows_across_flushes() -> WhateverResult<()> {
     let engine = env
         .create_engine(MitoConfig {
             experimental_enable_series_index: true,
+            native_series_index_min_files: 1,
             ..Default::default()
         })
         .await;
@@ -480,6 +531,7 @@ async fn test_narthex_incremental_index_after_compaction() -> WhateverResult<()>
     let engine = env
         .create_engine(MitoConfig {
             experimental_enable_series_index: true,
+            native_series_index_min_files: 1,
             sst_meta_cache_size: ReadableSize(0),
             schedule_compaction_after_edit: false,
             ..Default::default()

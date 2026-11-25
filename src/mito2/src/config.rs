@@ -130,6 +130,10 @@ pub struct MitoConfig {
     /// Local series indexes round up to a multiple of the compaction time window.
     #[serde(with = "humantime_serde")]
     pub experimental_series_index_bucket_width: Duration,
+    /// Minimum uncovered live sample SSTs per native series index window.
+    /// Set with GREPTIME_SERIES_INDEX_MIN_FILES (default 4).
+    #[serde(skip, default = "native_series_index_min_files")]
+    pub native_series_index_min_files: usize,
     /// Max number of running background flush jobs (default: 1/2 of cpu cores).
     pub max_background_flushes: usize,
     /// Max number of running background compaction jobs (default: 1/4 of cpu cores).
@@ -250,6 +254,14 @@ pub struct MitoConfig {
     pub gc: GcConfig,
 }
 
+fn native_series_index_min_files() -> usize {
+    std::env::var("GREPTIME_SERIES_INDEX_MIN_FILES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|&value| value > 0)
+        .unwrap_or(4)
+}
+
 impl Default for MitoConfig {
     fn default() -> Self {
         let mut mito_config = MitoConfig {
@@ -262,6 +274,7 @@ impl Default for MitoConfig {
             compress_manifest: false,
             max_background_index_builds: divide_num_cpus(8),
             experimental_enable_series_index: false,
+            native_series_index_min_files: native_series_index_min_files(),
             experimental_series_index_format: SeriesIndexFormat::Legacy,
             experimental_series_index_max_size: ReadableSize::gb(5),
             experimental_enable_range_index: false,

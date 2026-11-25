@@ -55,6 +55,7 @@ async fn test_delayed_series_index_notification_after_removal() -> WhateverResul
     let engine = env
         .create_engine(MitoConfig {
             experimental_enable_series_index: true,
+            native_series_index_min_files: 1,
             ..Default::default()
         })
         .await;

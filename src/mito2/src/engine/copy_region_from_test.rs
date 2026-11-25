@@ -708,6 +708,7 @@ async fn test_narthex_copy_and_remap(
     let engine = env
         .create_engine(MitoConfig {
             experimental_enable_series_index: with_index,
+            native_series_index_min_files: 1,
             schedule_compaction_after_edit: false,
             gc: crate::gc::GcConfig {
                 enable: true,

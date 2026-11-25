@@ -402,6 +402,8 @@ pub(crate) struct Version {
     /// If compaction options contain a time window, it will overwrite this value
     /// when creating a new version from the [VersionBuilder].
     pub(crate) compaction_time_window: Option<Duration>,
+    /// Fixed native series index window width, retained after index removal.
+    pub(crate) series_window_seconds: Option<i64>,
     /// Options of the region.
     pub(crate) options: RegionOptions,
     /// WAL ranges the region still has to recover.
@@ -435,6 +437,7 @@ pub(crate) struct VersionBuilder {
     flushed_sequence: SequenceNumber,
     truncated_entry_id: Option<EntryId>,
     compaction_time_window: Option<Duration>,
+    series_window_seconds: Option<i64>,
     options: RegionOptions,
     pending_tails: Vec<PendingTail>,
 }
@@ -450,6 +453,7 @@ impl VersionBuilder {
             flushed_sequence: 0,
             truncated_entry_id: None,
             compaction_time_window: None,
+            series_window_seconds: None,
             options: RegionOptions::default(),
             pending_tails: Vec::new(),
         }
@@ -465,6 +469,7 @@ impl VersionBuilder {
             flushed_sequence: version.flushed_sequence,
             truncated_entry_id: version.truncated_entry_id,
             compaction_time_window: version.compaction_time_window,
+            series_window_seconds: version.series_window_seconds,
             options: version.options.clone(),
             pending_tails: version.pending_tails.clone(),
         }
@@ -520,6 +525,11 @@ impl VersionBuilder {
         self
     }
 
+    pub(crate) fn series_window_seconds(mut self, width: Option<i64>) -> Self {
+        self.series_window_seconds = width;
+        self
+    }
+
     /// Apply edit to the builder.
     pub(crate) fn apply_edit(mut self, edit: RegionEdit, file_purger: FilePurgerRef) -> Self {
         if let Some(entry_id) = edit.flushed_entry_id {
@@ -531,6 +541,9 @@ impl VersionBuilder {
         if let Some(window) = edit.compaction_time_window {
             self.compaction_time_window = Some(window);
         }
+        self.series_window_seconds = self
+            .series_window_seconds
+            .or_else(|| edit.series_window_seconds());
         if edit.has_file_changes() {
             let mut ssts = (*self.ssts).clone();
             ssts.add_series_indexes(file_purger.clone(), edit.series_indexes_to_add.into_iter());
@@ -617,6 +630,7 @@ impl VersionBuilder {
             flushed_sequence: self.flushed_sequence,
             truncated_entry_id: self.truncated_entry_id,
             compaction_time_window,
+            series_window_seconds: self.series_window_seconds,
             options: self.options,
             pending_tails: self.pending_tails,
         }

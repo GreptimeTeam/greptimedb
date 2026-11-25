@@ -834,6 +834,7 @@ impl<S: LogStore> WorkerStarter<S> {
                     state,
                     receiver,
                     self.config.experimental_series_index_bucket_width,
+                    self.config.native_series_index_min_files,
                     purger,
                     purge_receiver,
                     self.series_index_disk_usage.clone(),

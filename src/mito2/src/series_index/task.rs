@@ -127,6 +127,7 @@ pub(crate) fn spawn_series_index_tasks(
     state: Arc<SeriesIndexTaskState>,
     receiver: Receiver<SeriesIndexCommand>,
     bucket_width: Duration,
+    min_files: usize,
     purger: IndexFilePurger,
     purge_receiver: UnboundedReceiver<PurgeRequest>,
     disk_usage: Arc<AtomicU64>,
@@ -148,6 +149,7 @@ pub(crate) fn spawn_series_index_tasks(
             store,
             regions,
             bucket_width,
+            min_files: min_files.max(1),
             purger,
             disk_usage,
             max_size,
@@ -169,6 +171,7 @@ struct SeriesIndexTask {
     store: ObjectStore,
     regions: RegionMapRef,
     bucket_width: Duration,
+    min_files: usize,
     purger: IndexFilePurger,
     disk_usage: Arc<AtomicU64>,
     max_size: u64,
@@ -299,7 +302,7 @@ impl SeriesIndexTask {
         manual: bool,
     ) -> Result<ReconcileStats> {
         let mut stats = ReconcileStats::default();
-        let (ssts, metadata, frontier, truncated_entry_id, options) = {
+        let (ssts, metadata, frontier, truncated_entry_id, options, series_window_seconds) = {
             let current = region.version_control.current();
             let version = current.version;
             if !version.pending_tails.is_empty() {
@@ -318,6 +321,7 @@ impl SeriesIndexTask {
                 frontier,
                 version.truncated_entry_id,
                 version.options.clone(),
+                version.series_window_seconds,
             )
         };
         let ttl = match options.ttl {
@@ -336,16 +340,11 @@ impl SeriesIndexTask {
         };
         let now = common_time::Timestamp::new_millisecond(self.time_provider.current_time_millis());
         let expired = |f: &FileHandle| ttl.is_expired(&f.time_range().1, &now).unwrap_or(false);
-        let width = region
-            .manifest_ctx
-            .manifest()
-            .await
-            .series_window_seconds
-            .unwrap_or_else(|| {
-                i64::try_from(self.bucket_width.as_secs())
-                    .unwrap_or(i64::MAX)
-                    .max(1)
-            });
+        let width = series_window_seconds.unwrap_or_else(|| {
+            i64::try_from(self.bucket_width.as_secs())
+                .unwrap_or(i64::MAX)
+                .max(1)
+        });
         ensure!(
             width > 0,
             InvalidRequestSnafu {
@@ -390,10 +389,9 @@ impl SeriesIndexTask {
         let mut handles: Vec<FileHandle> = Vec::new();
         // Merge the ordered window starts lazily. One wide SST can span many windows,
         // and a periodic pass only needs the first buildable one.
+        let can_build = !ttl.is_instant() && live_ranges.len() >= self.min_files;
         let mut windows = files()
-            .filter(|f| {
-                !ttl.is_instant() && f.meta_ref().sequence.is_some_and(|s| s.get() <= frontier)
-            })
+            .filter(|f| can_build && f.meta_ref().sequence.is_some_and(|s| s.get() <= frontier))
             .map(|f| {
                 let (mut start, end) = f.time_range();
                 if let Some(first) = first_live_start {
@@ -407,18 +405,18 @@ impl SeriesIndexTask {
         while let Some(&(start, _)) = windows.peek() {
             let previous = watermarks.get(&start).copied().unwrap_or_default();
             let mut sources = Vec::new();
-            let mut live = false;
+            let mut live_sources = 0;
             while let Some((_, file)) = windows.next_if(|(next, _)| *next == start) {
-                live |= !expired(&file);
                 if file
                     .meta_ref()
                     .sequence
                     .is_some_and(|seq| seq.get() > previous)
                 {
+                    live_sources += usize::from(!expired(&file));
                     sources.push(file);
                 }
             }
-            if !live || sources.is_empty() {
+            if live_sources < self.min_files {
                 continue;
             }
             let window = WindowSequence {
@@ -609,6 +607,7 @@ mod tests {
                 store,
                 regions,
                 bucket_width: Duration::from_secs(100),
+                min_files: 1,
                 purger,
                 disk_usage: Arc::default(),
                 max_size: u64::MAX,
@@ -652,6 +651,7 @@ mod tests {
         let engine = env
             .create_engine(MitoConfig {
                 experimental_enable_series_index: true,
+                native_series_index_min_files: 1,
                 ..Default::default()
             })
             .await;
@@ -729,6 +729,7 @@ mod tests {
             .create_engine_with_time(
                 MitoConfig {
                     experimental_enable_series_index: true,
+                    native_series_index_min_files: 1,
                     ..Default::default()
                 },
                 None,
@@ -1125,6 +1126,7 @@ mod tests {
             store: store.clone(),
             regions,
             bucket_width: Duration::from_secs(100),
+            min_files: 1,
             purger,
             disk_usage: Arc::default(),
             max_size: u64::MAX,
@@ -1210,6 +1212,7 @@ mod tests {
             store: store.clone(),
             regions,
             bucket_width: Duration::from_secs(100),
+            min_files: 1,
             purger,
             disk_usage: usage.clone(),
             max_size: u64::MAX,
@@ -1348,6 +1351,7 @@ mod tests {
                 store: store.clone(),
                 regions: Arc::new(RegionMap::default()),
                 bucket_width: Duration::from_secs(100),
+                min_files: 1,
                 purger: series_index_channel(store.clone()).0,
                 disk_usage: usage.clone(),
                 max_size: 1024,

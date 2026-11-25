@@ -159,6 +159,13 @@ pub(crate) fn cap_wal_release(
 }
 
 impl RegionEdit {
+    pub(crate) fn series_window_seconds(&self) -> Option<i64> {
+        self.series_indexes_to_add
+            .iter()
+            .find_map(FileMeta::series_window)
+            .map(|window| window.end - window.start)
+    }
+
     /// Whether this edit adds or removes data files or series indexes.
     pub(crate) fn has_file_changes(&self) -> bool {
         !self.files_to_add.is_empty()
@@ -457,6 +464,9 @@ impl RegionManifestBuilder {
     pub fn apply_edit(&mut self, manifest_version: ManifestVersion, edit: RegionEdit) {
         self.manifest_version = manifest_version;
 
+        self.series_window_seconds = self
+            .series_window_seconds
+            .or_else(|| edit.series_window_seconds());
         let mut removed_files = vec![];
         for file in edit.files_to_add {
             let file = FileMetaRef::from(file);
@@ -470,10 +480,6 @@ impl RegionManifestBuilder {
             }
         }
         for file in edit.series_indexes_to_add {
-            if let Some(window) = file.series_window() {
-                self.series_window_seconds
-                    .get_or_insert(window.end - window.start);
-            }
             let file = self.file_metadata_interner.intern(file.into());
             self.series_indexes.insert(file.file_id, file);
         }
