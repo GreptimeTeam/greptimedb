@@ -99,6 +99,8 @@ mod copy_region_from_test;
 #[cfg(test)]
 mod remap_manifests_test;
 #[cfg(test)]
+mod repartition_chaos_test;
+#[cfg(test)]
 mod repartition_dup_row_test;
 #[cfg(test)]
 mod repartition_mbt_test;

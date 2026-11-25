@@ -76,6 +76,37 @@
 //!   region's authorized rows do not move; multi-region compaction is a byte copy of the
 //!   region's admitted inputs, so it does not move them either.
 //!
+//! # The prediction (the engine rule of this branch)
+//!
+//! [`RefModel::predict_visible_rows`] is the one place that states what a region's scan is
+//! predicted to show, and it mirrors the engine of **this** branch instead of an ideal one:
+//!
+//! - a referenced file contributes the rows whose partition key satisfies the region's domain,
+//!   *except* when the region's partition expression equals the file's creator expression:
+//!   `ScanRegion::should_skip_region_partition` (`src/mito2/src/read/scan_region.rs`) then
+//!   drops the whole partition predicate, so every physical row of that file is visible to the
+//!   region;
+//! - the contribution is intersected with what each reference authorizes, which on this branch
+//!   is the whole file: `FileMeta` carries no row range, so a reference authorizes every row of
+//!   the object it points at;
+//! - rows still in the memtable are always filtered by the domain, because the partition
+//!   predicate belongs to the memtable scan too;
+//! - `split` narrows a target to its domain, `merge` unions the inputs' references, and
+//!   compaction writes a new file holding exactly the rows the compacting region sees, removing
+//!   the consumed references from that region only.
+//!
+//! The prediction is the model's statement *about* the engine, so it is kept apart from the
+//! judgement: neither the ledger oracle nor the invariant categories above read it. The cases
+//! below print `predicted` next to `observed` per region and continue on a divergence instead of
+//! adjusting the model to an observation.
+//!
+//! # Cases the serial generator cannot reach
+//!
+//! `test_mbt_case_*` pins the states the random traces only reach by luck — an out-of-domain row,
+//! a two-hop split, copies across three generations, a repeated merge, an empty split target, two
+//! append-mode events sharing `(key, ts)` — and `test_mbt_case_chaos_close_reopen` interleaves a
+//! region close/reopen (and a merge retry) into the shared-file shape.
+//!
 //! # Model-side assertion (separate from the ledger oracle)
 //!
 //! After every published step [`StorageModel::check_model_authorization`] asserts that a
@@ -177,10 +208,13 @@ use datatypes::value::Value;
 use object_store::ObjectStore;
 use partition::expr::{Operand, PartitionExpr, RestrictedOp, col};
 use store_api::metadata::ColumnMetadata;
-use store_api::region_engine::{RegionEngine, RemapManifestsRequest, SettableRegionRoleState};
+use store_api::region_engine::{
+    RegionEngine, RegionRole, RemapManifestsRequest, SettableRegionRoleState,
+};
 use store_api::region_request::{
-    ApplyStagingManifestRequest, EnterStagingRequest, PathType, RegionCompactRequest,
-    RegionCreateRequest, RegionFlushRequest, RegionRequest, StagingPartitionDirective,
+    ApplyStagingManifestRequest, EnterStagingRequest, PathType, RegionCloseRequest,
+    RegionCompactRequest, RegionCreateRequest, RegionFlushRequest, RegionOpenRequest,
+    RegionRequest, StagingPartitionDirective,
 };
 use store_api::storage::{FileId, RegionId, ScanRequest};
 
@@ -453,6 +487,28 @@ fn describe_keys(keys: &BTreeSet<usize>) -> String {
     )
 }
 
+/// One event's physical presence inside a model file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileRow {
+    /// The partition key of that event's row.
+    key: usize,
+    /// How many physical copies of the row the file holds. A compaction of a region that
+    /// already sees one event twice writes both rows, so a file can legally hold several
+    /// copies of one event.
+    copies: u64,
+}
+
+/// One physical file of the specification: the rows it physically stores and the domain of
+/// the region that produced it.
+#[derive(Debug, Clone)]
+struct PhysicalFile {
+    /// The domain of the region that created the file, i.e. `FileMeta::partition_expr` on
+    /// this branch.
+    creator: Domain,
+    /// Event id -> the row's physical presence in this file.
+    rows: BTreeMap<i64, FileRow>,
+}
+
 /// The three steps of the shape the model exists for, recorded when a transition reaches
 /// one so every report can say what the engine was actually driven through.
 const SHAPE_SPLIT_SHARED: &str = "split handed the shared file to both halves";
@@ -492,6 +548,19 @@ struct RefModel {
     next_file: u64,
     /// Every currently published region.
     regions: BTreeMap<RegionId, SpecRegion>,
+    /// Model-minted file id -> the rows the file physically stores and its creator domain.
+    /// The prediction below is evaluated on this graph, never on an engine observation.
+    files: BTreeMap<u64, PhysicalFile>,
+    /// Event ids of the rows a region wrote and has not flushed yet (its memtable), with the
+    /// partition key of each. Parallel to [`SpecRegion::memtable`], which keeps only the keys
+    /// the authorization statement needs.
+    pending: BTreeMap<RegionId, BTreeMap<i64, usize>>,
+    /// The *engine's* reference set of each published region. A repartition copies every file
+    /// of a source into every target, so a target may reference a file none of whose rows fall
+    /// inside its domain; [`SpecRegion::refs`] is the tighter *authorization* view and drops
+    /// such a reference. The prediction is stated on this set, because this is what the reader
+    /// is handed.
+    engine_refs: BTreeMap<RegionId, BTreeSet<u64>>,
     /// The shapes the transitions have driven the engine through.
     shapes: BTreeSet<&'static str>,
 }
@@ -501,8 +570,90 @@ impl RefModel {
         RefModel {
             next_file: 0,
             regions: BTreeMap::new(),
+            files: BTreeMap::new(),
+            pending: BTreeMap::new(),
+            engine_refs: BTreeMap::new(),
             shapes: BTreeSet::new(),
         }
+    }
+
+    /// What one region's scan sees, predicted by mirroring the engine of **this** branch.
+    ///
+    /// This is the single place the visibility rule lives, and it is deliberately stated
+    /// against the engine as it behaves here, not against an ideal engine:
+    ///
+    /// - `ScanRegion::predicate_for_file` (`src/mito2/src/read/scan_region.rs`) hands a file
+    ///   its predicate *without* the region partition expression exactly when
+    ///   `should_skip_region_partition` holds, i.e. when the region's partition expression
+    ///   equals the file's creator expression. Then every physical row of that file is visible
+    ///   to the region, whatever the region's domain says;
+    /// - otherwise the file contributes the rows whose key satisfies the region's domain;
+    /// - the contribution is intersected with what the reference authorizes, which on this
+    ///   branch is the whole file: `FileMeta` has no row range (`owned_range`), so a reference
+    ///   authorizes every physical row of the object it points at. The model's own, tighter
+    ///   per-key authorization ([`SpecRegion::refs`]) is the *specification* statement that
+    ///   `check_model_authorization` judges; comparing it with this prediction is exactly the
+    ///   per-reference divergence the cases print;
+    /// - rows still in the memtable are always filtered by the domain;
+    /// - the transitions mirror the rest: `split` narrows a target to its domain (its
+    ///   references keep pointing at the same objects), `merge` unions the inputs' references,
+    ///   and compaction writes a new file holding the rows the compacting region *sees* while
+    ///   removing the consumed references from that region only.
+    ///
+    /// `copies` is the number of physical rows of that event the scan returns, so an event that
+    /// two referenced files both carry is reported twice instead of being counted once.
+    fn predict_visible_rows(&self, region: RegionId) -> BTreeMap<i64, FileRow> {
+        let mut visible: BTreeMap<i64, FileRow> = BTreeMap::new();
+        let Some(state) = self.regions.get(&region) else {
+            return visible;
+        };
+        let domain = state.domain;
+        // A reference on this branch carries no row range, so its authorization is the whole
+        // file: `KeyAuth` `None`.
+        let reference_auth: KeyAuth = None;
+        let authorized = auth_keys(&reference_auth);
+        for file in self.engine_refs.get(&region).into_iter().flatten() {
+            let Some(physical) = self.files.get(file) else {
+                continue;
+            };
+            // The mirror of `should_skip_region_partition`: equal expressions mean the reader
+            // drops the region partition predicate for this file.
+            let skips_partition = physical.creator == domain;
+            for (event_id, row) in &physical.rows {
+                if !authorized.contains(&row.key) {
+                    continue;
+                }
+                if !skips_partition && !domain.contains_key(row.key) {
+                    continue;
+                }
+                let entry = visible.entry(*event_id).or_insert(FileRow {
+                    key: row.key,
+                    copies: 0,
+                });
+                entry.copies += row.copies;
+            }
+        }
+        for (event_id, key) in self.pending.get(&region).into_iter().flatten() {
+            if !domain.contains_key(*key) {
+                continue;
+            }
+            visible.insert(
+                *event_id,
+                FileRow {
+                    key: *key,
+                    copies: 1,
+                },
+            );
+        }
+        visible
+    }
+
+    /// The same prediction stated as the `event id -> copies` multiset a scan returns.
+    fn predict_counts(&self, region: RegionId) -> BTreeMap<i64, u64> {
+        self.predict_visible_rows(region)
+            .into_iter()
+            .map(|(event_id, row)| (event_id, row.copies))
+            .collect()
     }
 
     /// A new opaque physical-file id.
@@ -528,39 +679,61 @@ impl RefModel {
     /// `Create` / publication: the region serves `domain` and holds nothing yet.
     fn publish(&mut self, region: RegionId, domain: Domain) {
         self.regions.insert(region, SpecRegion::new(domain));
+        self.engine_refs.insert(region, BTreeSet::new());
     }
 
     /// `write`: the rows land in the destination region's own memtable first.
-    fn note_write(&mut self, region: RegionId, key: usize) {
+    ///
+    /// The key is recorded even when it falls outside the region's domain: write admission
+    /// checks the partition *version* the region serves, never the row's partition value, so
+    /// the engine accepts such a row and the prediction has to place it by rule.
+    fn note_write(&mut self, region: RegionId, event_id: i64, key: usize) {
         if let Some(state) = self.regions.get_mut(&region) {
             state.memtable.insert(key);
         }
+        self.pending
+            .entry(region)
+            .or_default()
+            .insert(event_id, key);
     }
 
     /// `flush`: the memtable becomes one new physical file, authorized for exactly the keys
-    /// it holds. A flush with nothing to write publishes nothing.
+    /// it holds and created by this region. A flush with nothing to write publishes nothing.
     fn flushed(&mut self, region: RegionId) {
-        let keys = {
-            let Some(state) = self.regions.get_mut(&region) else {
-                return;
-            };
-            std::mem::take(&mut state.memtable)
+        let rows = self.pending.remove(&region).unwrap_or_default();
+        let Some(state) = self.regions.get_mut(&region) else {
+            return;
         };
+        let keys = std::mem::take(&mut state.memtable);
+        let domain = state.domain;
         if keys.is_empty() {
             return;
         }
         let file = self.mint();
+        self.files.insert(
+            file,
+            PhysicalFile {
+                creator: domain,
+                rows: rows
+                    .into_iter()
+                    .map(|(event_id, key)| (event_id, FileRow { key, copies: 1 }))
+                    .collect(),
+            },
+        );
         self.regions
             .get_mut(&region)
             .expect("a flushed region is published")
             .refs
             .insert(file, Some(keys));
+        self.engine_refs.entry(region).or_default().insert(file);
     }
 
     /// `split`: each target gets the source's references restricted to its own domain.
     ///
-    /// An empty restriction is not published, so a half whose rows all fall on the other
-    /// side of the cut holds no reference to the shared file at all.
+    /// An empty restriction is not part of the *authorization* view, so a half whose rows all
+    /// fall on the other side of the cut is authorized to read nothing from the shared file.
+    /// The engine still hands that file to both halves (repartition copies every file of the
+    /// source into every target), so the engine view keeps it for both.
     fn split(
         &mut self,
         source: RegionId,
@@ -577,6 +750,7 @@ impl RefModel {
             "the model split region {source} with unflushed rows; a split must flush its \
              source first"
         );
+        let engine_refs = self.engine_refs.remove(&source).unwrap_or_default();
         let mut left_refs: BTreeMap<u64, KeyAuth> = BTreeMap::new();
         let mut right_refs: BTreeMap<u64, KeyAuth> = BTreeMap::new();
         for (file, auth) in &state.refs {
@@ -606,13 +780,18 @@ impl RefModel {
                 memtable: BTreeSet::new(),
             },
         );
+        // The engine view: every file of the source, for both halves.
+        self.engine_refs.insert(left, engine_refs.clone());
+        self.engine_refs.insert(right, engine_refs);
     }
 
     /// `merge`: references combined per physical file, authorized sets unioned.
     fn merge(&mut self, inputs: &[RegionId], survivor: RegionId) {
         let compacted_one_side = self.shapes.contains(SHAPE_ONE_SIDE_COMPACTION);
         let mut refs: BTreeMap<u64, KeyAuth> = BTreeMap::new();
+        let mut engine_refs: BTreeSet<u64> = BTreeSet::new();
         for input in inputs {
+            engine_refs.extend(self.engine_refs.remove(input).unwrap_or_default());
             let Some(state) = self.regions.remove(input) else {
                 continue;
             };
@@ -642,18 +821,46 @@ impl RefModel {
                 memtable: BTreeSet::new(),
             },
         );
+        self.engine_refs.insert(survivor, engine_refs);
+    }
+
+    /// A **retried** merge: the same inputs are remapped again after the first attempt was
+    /// interrupted by a close/reopen, into a fresh survivor.
+    ///
+    /// The inputs' persisted manifests did not move, so the retry republishes exactly the
+    /// reference set the first attempt published: the same physical file ids, with the same
+    /// rows. That is why the state of the previous survivor is what the retry's survivor
+    /// starts from — no row is copied a second time, so a retry cannot add a third copy of an
+    /// event the first merge already published twice.
+    fn retry_merge(&mut self, previous_survivor: RegionId, survivor: RegionId) {
+        let Some(state) = self.regions.remove(&previous_survivor) else {
+            return;
+        };
+        let engine_refs = self
+            .engine_refs
+            .remove(&previous_survivor)
+            .unwrap_or_default();
+        self.regions.insert(survivor, state);
+        self.engine_refs.insert(survivor, engine_refs);
     }
 
     /// `region compaction`: legal even while another holder keeps a file this region holds.
     ///
-    /// The output is a *new* physical file carrying exactly the rows the region owns
-    /// (`domain ∩ authorized`); the consumed references leave this region only, so every
-    /// other holder keeps its own authorization of the same file.
+    /// The output is a *new* physical file holding exactly the rows the region **sees** — the
+    /// mirror of this branch's read path, so a row outside the region's domain that a
+    /// reference still exposes is copied into the output too. Its creator is the compacting
+    /// region, which is what makes the region's next scan skip the partition predicate for it.
+    /// The consumed references leave this region only, so every other holder keeps its own
+    /// reference to the same files.
     fn compact(&mut self, region: RegionId) {
         let Some(state) = self.regions.get(&region) else {
             return;
         };
-        if state.refs.is_empty() {
+        if self
+            .engine_refs
+            .get(&region)
+            .is_none_or(|refs| refs.is_empty())
+        {
             return;
         }
         let domain = state.domain;
@@ -672,7 +879,17 @@ impl RefModel {
             self.shapes.insert(SHAPE_ONE_SIDE_COMPACTION);
         }
 
+        // The rows the engine rewrites are exactly the rows it reads, so the output file is
+        // the prediction evaluated on the input references.
+        let rows = self.predict_visible_rows(region);
         let file = self.mint();
+        self.files.insert(
+            file,
+            PhysicalFile {
+                creator: domain,
+                rows,
+            },
+        );
         let state = self
             .regions
             .get_mut(&region)
@@ -681,6 +898,7 @@ impl RefModel {
         if !owned.is_empty() {
             state.refs.insert(file, Some(owned));
         }
+        self.engine_refs.insert(region, BTreeSet::from([file]));
     }
 
     /// `import`: a byte copy of one of the region's own flushed files, published under a new
@@ -701,12 +919,19 @@ impl RefModel {
             return;
         };
         let new_file = self.mint();
+        if let Some(physical) = self.files.remove(&file) {
+            self.files.insert(new_file, physical);
+        }
         let state = self
             .regions
             .get_mut(&region)
             .expect("an imported region is published");
         state.refs.remove(&file);
         state.refs.insert(new_file, auth);
+        if let Some(refs) = self.engine_refs.get_mut(&region) {
+            refs.remove(&file);
+            refs.insert(new_file);
+        }
     }
 
     /// The keys `region` may read: the union of its references' authorizations plus the keys
@@ -886,6 +1111,116 @@ fn format_violations(violations: &[Violation]) -> String {
         .join("\n")
 }
 
+/// Renders an `event id -> copies` multiset as `{e0, e3x2}`.
+fn render_multiset(counts: &BTreeMap<i64, u64>) -> String {
+    if counts.is_empty() {
+        return "{}".to_string();
+    }
+    format!(
+        "{{{}}}",
+        counts
+            .iter()
+            .map(|(event_id, copies)| if *copies == 1 {
+                format!("e{event_id}")
+            } else {
+                format!("e{event_id}x{copies}")
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+/// One region's predicted-vs-observed visibility at one step of a case.
+struct RegionStep {
+    region: RegionId,
+    domain: Domain,
+    /// The engine rule of this branch evaluated on the specification
+    /// ([`RefModel::predict_visible_rows`]).
+    predicted: BTreeMap<i64, u64>,
+    /// A fresh scan of the same region, as `event id -> copies`.
+    observed: BTreeMap<i64, u64>,
+    /// The keys the specification authorizes, which is tighter than the engine's "a reference
+    /// authorizes the whole file".
+    authorized: BTreeSet<usize>,
+    /// The engine's reference set, one line per file.
+    references: Vec<String>,
+}
+
+impl RegionStep {
+    fn agrees(&self) -> bool {
+        self.predicted == self.observed
+    }
+}
+
+/// One step of a case: what the model predicted, what a scan observed, and every judgement
+/// that fired. A divergence is recorded here and printed; it is never turned into a silent
+/// pass by adjusting the model.
+struct CaseStep {
+    case: String,
+    step: String,
+    regions: Vec<RegionStep>,
+    /// Published regions that are closed at this step, so unobservable.
+    closed: Vec<RegionId>,
+    /// Every judgement that fired, rendered with its category.
+    violations: Vec<String>,
+}
+
+impl CaseStep {
+    fn mismatched(&self) -> Vec<&RegionStep> {
+        self.regions
+            .iter()
+            .filter(|region| !region.agrees())
+            .collect()
+    }
+
+    /// Whether the ledger oracle, the judge of "exactly once", reported something.
+    fn oracle_fired(&self) -> bool {
+        self.violations
+            .iter()
+            .any(|violation| violation.starts_with("[visibility]"))
+    }
+
+    fn render(&self) -> String {
+        let mut lines = vec![format!("=== case `{}` / {} ===", self.case, self.step)];
+        for region in &self.regions {
+            lines.push(format!(
+                "  region {} (domain [{}, {})): predicted {} | observed {} -> {}",
+                region.region,
+                key_name(region.domain.lo),
+                key_name(region.domain.hi),
+                render_multiset(&region.predicted),
+                render_multiset(&region.observed),
+                if region.agrees() {
+                    "prediction agrees"
+                } else {
+                    "PREDICTION DIVERGES from the engine"
+                }
+            ));
+            lines.push(format!(
+                "    the specification authorizes keys {}; references: {:?}",
+                describe_keys(&region.authorized),
+                region.references
+            ));
+        }
+        for region_id in &self.closed {
+            lines.push(format!(
+                "  region {region_id}: closed, so unobservable (a reopen re-reads its manifest)"
+            ));
+        }
+        if self.violations.is_empty() {
+            lines.push("  judgement: no violation".to_string());
+        } else {
+            lines.push("  judgement:".to_string());
+            lines.extend(
+                self.violations
+                    .iter()
+                    .map(|violation| format!("    {violation}")),
+            );
+        }
+        lines.join("\n")
+    }
+}
+
 /// One operation of a trace. Generated up front so a seed replays identically.
 #[derive(Debug, Clone)]
 enum Op {
@@ -970,6 +1305,10 @@ struct StorageModel {
     tracked: BTreeSet<RegionId>,
     /// Live regions with unflushed rows in their memtable.
     dirty: BTreeSet<RegionId>,
+    /// Regions that are currently closed: still part of the published routing, but the engine
+    /// has no live version for them, so they are neither scannable nor observable until a
+    /// reopen reloads their persisted manifest.
+    closed: BTreeSet<RegionId>,
 
     /// The object store the SSTs live in, so "readable" is a real read of that store.
     store: ObjectStore,
@@ -1041,6 +1380,7 @@ impl StorageModel {
             physical: PhysicalView::default(),
             tracked: BTreeSet::new(),
             dirty: BTreeSet::new(),
+            closed: BTreeSet::new(),
             store,
             table_dir,
             path_type,
@@ -1098,6 +1438,12 @@ impl StorageModel {
         let mut holders = BTreeMap::new();
         let mut applied = BTreeMap::new();
         for region_id in self.tracked.clone() {
+            if self.closed.contains(&region_id) {
+                // A closed region has no live version: its references exist only in the
+                // persisted manifest, which the reopen below re-reads. The last observed view
+                // stays as the record of what the close happened on.
+                continue;
+            }
             let region = self
                 .engine
                 .get_region(region_id)
@@ -1485,6 +1831,115 @@ impl StorageModel {
         }
     }
 
+    /// Compares, at one step of a case, the model's *prediction* of this branch's engine rule
+    /// with a fresh scan of every open published region, and collects both judgements.
+    ///
+    /// Nothing is asserted here. A divergence between prediction and observation, and every
+    /// judgement that fires, is recorded and printed: a case reports it and continues instead
+    /// of bending the model to an observation.
+    async fn observe(&mut self, case: &str, step: &str) -> CaseStep {
+        self.refresh_views().await;
+        let live = self.live_regions();
+        let closed: Vec<RegionId> = live
+            .iter()
+            .copied()
+            .filter(|region_id| self.closed.contains(region_id))
+            .collect();
+        let mut regions = Vec::new();
+        for region_id in live
+            .into_iter()
+            .filter(|region_id| !self.closed.contains(region_id))
+        {
+            let domain = self.domain_of(region_id);
+            let predicted = self.spec.predict_counts(region_id);
+            let observed: BTreeMap<i64, u64> = self
+                .scan_counts(region_id)
+                .await
+                .into_iter()
+                .map(|(event_id, copies)| (event_id, copies as u64))
+                .collect();
+            let authorized = self.spec.authorized_keys(region_id);
+            let references = self.reference_lines(region_id);
+            regions.push(RegionStep {
+                region: region_id,
+                domain,
+                predicted,
+                observed,
+                authorized,
+                references,
+            });
+        }
+
+        let ctx = format!("{case} / {step}");
+        let mut violations = Vec::new();
+        if closed.is_empty() {
+            if let Some(report) = self.check(&ctx).await {
+                violations.push(format!("[visibility] {report}"));
+            }
+            violations.extend(
+                self.check_invariants(&ctx)
+                    .await
+                    .into_iter()
+                    .map(|violation| {
+                        format!("[{}] {}", violation.category.name(), violation.detail)
+                    }),
+            );
+        } else {
+            violations.push(format!(
+                "[visibility] not evaluated while {closed:?} {} closed: the ledger oracle needs \
+                 an open region to scan",
+                if closed.len() == 1 { "is" } else { "are" }
+            ));
+        }
+
+        CaseStep {
+            case: case.to_string(),
+            step: step.to_string(),
+            regions,
+            closed,
+            violations,
+        }
+    }
+
+    /// The engine's reference set for `region_id`, one line per file: id, creator domain,
+    /// level, rows and admission sequence.
+    fn reference_lines(&self, region_id: RegionId) -> Vec<String> {
+        self.holders
+            .get(&region_id)
+            .map(|view| {
+                view.files
+                    .values()
+                    .map(|sst| {
+                        format!(
+                            "{:?}(creator [{} ({}, {})], L{}, rows={}, sequence={:?})",
+                            sst.file_id,
+                            key_name(sst.creator_domain.lo),
+                            key_name(sst.creator_domain.hi),
+                            sst.owner,
+                            sst.level,
+                            sst.num_rows,
+                            sst.sequence
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Records one step of a case: prints the prediction next to the observation and the
+    /// judgement, keeps the rendered text in `report`, and returns the whole step so the case
+    /// can assert on it.
+    async fn record_step(&mut self, case: &str, step: &str, report: &mut Vec<String>) -> CaseStep {
+        self.step += 1;
+        let observed = self.observe(case, step).await;
+        let text = observed.render();
+        // Printed, not swallowed: a divergence and every judgement are the product of a case.
+        println!("{text}");
+        common_telemetry::info!("[mbt-case] {text}");
+        report.push(text);
+        observed
+    }
+
     /// Manifest consistency: a holder's persisted manifest file set and its live version
     /// file set must describe the same references.
     fn check_manifest_consistency(&self, ctx: &str, violations: &mut Vec<Violation>) {
@@ -1844,10 +2299,43 @@ impl StorageModel {
             for (event_id, planned, _) in pending {
                 committed.push(self.ledger.commit(event_id, planned));
                 // The row is in this region's memtable until a flush publishes it.
-                self.spec.note_write(region_id, planned.key);
+                self.spec.note_write(region_id, event_id, planned.key);
             }
             self.dirty.insert(region_id);
         }
+        committed
+    }
+
+    /// Appends rows to **`region_id`**, bypassing the routing.
+    ///
+    /// Write admission checks the partition *version* the region serves, not the row's
+    /// partition value, so a row whose key lies outside the region's domain is admitted and
+    /// lands in that region's memtable. The out-of-domain case uses this to hand the engine a
+    /// row it has to place by rule instead of by construction.
+    async fn write_to(&mut self, region_id: RegionId, rows: &[PlannedRow]) -> Vec<Event> {
+        let pending: Vec<(i64, PlannedRow)> = rows
+            .iter()
+            .map(|planned| (self.ledger.reserve(), *planned))
+            .collect();
+        let values: Vec<api::v1::Row> = pending
+            .iter()
+            .map(|(event_id, planned)| event_row(*event_id, *planned))
+            .collect();
+        put_rows(
+            &self.engine,
+            region_id,
+            Rows {
+                schema: self.schema.clone(),
+                rows: values,
+            },
+        )
+        .await;
+        let mut committed = Vec::new();
+        for (event_id, planned) in pending {
+            committed.push(self.ledger.commit(event_id, planned));
+            self.spec.note_write(region_id, event_id, planned.key);
+        }
+        self.dirty.insert(region_id);
         committed
     }
 
@@ -2006,13 +2494,24 @@ impl StorageModel {
             inputs.len() >= 2,
             "a merge needs at least two live regions, got {inputs:?}"
         );
+        let merged = self.publish_merge(&inputs).await;
+        self.spec.merge(&inputs, merged);
+        merged
+    }
+
+    /// Runs the merge machinery for `inputs` into a fresh whole-domain survivor, publishes
+    /// it as the routing and returns it. The caller states the specification transition,
+    /// because a first merge and a retry derive it differently.
+    ///
+    /// Publication: every input stops serving (a synchronous role-state request, exactly
+    /// like the split source), then the merged region is created, consumes the coordinator's
+    /// staging manifest (a synchronous request) and only then becomes the sole published
+    /// region.
+    async fn publish_merge(&mut self, inputs: &[RegionId]) -> RegionId {
         self.flush_dirty().await;
         // A retired region must not keep writing for a domain another region now serves.
-        for input in &inputs {
-            self.engine
-                .set_region_role_state_gracefully(*input, SettableRegionRoleState::StagingLeader)
-                .await
-                .unwrap();
+        for input in inputs {
+            self.retire_region(*input).await;
         }
 
         let merged = self.alloc_region_id();
@@ -2023,7 +2522,7 @@ impl StorageModel {
             .engine
             .remap_manifests(RemapManifestsRequest {
                 region_id: merged,
-                input_regions: inputs.clone(),
+                input_regions: inputs.to_vec(),
                 region_mapping: inputs
                     .iter()
                     .map(|region_id| (*region_id, vec![merged]))
@@ -2038,9 +2537,148 @@ impl StorageModel {
 
         self.tracked.insert(merged);
         self.routing = BTreeMap::from([(merged, Domain::FULL)]);
-        self.spec.merge(&inputs, merged);
         self.refresh_views().await;
         merged
+    }
+
+    /// Retries the merge of `inputs` after an interruption (a close/reopen of the survivor),
+    /// re-running the very same remap into a fresh survivor, exactly as the coordinator does
+    /// when the first attempt did not complete.
+    ///
+    /// The retry reports whether it republished the reference set the first attempt
+    /// published: the observation compares the survivor's references before the close with
+    /// the retried survivor's, which must be the same file ids.
+    async fn retry_merge(&mut self, previous_survivor: RegionId, inputs: &[RegionId]) -> RegionId {
+        // The previous attempt's survivor is superseded: it stops accepting writes so no
+        // region serves the whole domain twice.
+        self.retire_region(previous_survivor).await;
+        let retried = self.publish_merge(inputs).await;
+        self.spec.retry_merge(previous_survivor, retried);
+        retried
+    }
+
+    /// Stops `region_id` from serving its domain before a repartition moves that domain to
+    /// another region.
+    ///
+    /// A writable leader enters staging, exactly like a split source. A region that a
+    /// close/reopen brought back is a **follower** (`region/opener.rs` opens every region read
+    /// only), and a follower cannot write in the first place, so there is nothing to demote:
+    /// the engine refuses the staging transition from a follower, and the harness reports that
+    /// state instead of pretending the region is still a leader.
+    async fn retire_region(&mut self, region_id: RegionId) -> String {
+        let role = self.engine.role(region_id);
+        if role == Some(RegionRole::Follower) {
+            return format!("region {region_id} is a follower: nothing to demote");
+        }
+        self.engine
+            .set_region_role_state_gracefully(region_id, SettableRegionRoleState::StagingLeader)
+            .await
+            .unwrap();
+        format!("region {region_id} entered staging (role before: {role:?})")
+    }
+
+    /// Closes `region_id` and records the references the close happened on.
+    ///
+    /// The region is flushed first, so its rows are already in SSTs and the close does not
+    /// need an implicit flush that would change the file inventory behind the record.
+    async fn close_region(&mut self, region_id: RegionId) -> String {
+        self.flush_region(region_id).await;
+        self.refresh_views().await;
+        let before = self.describe_references(region_id);
+        self.engine
+            .handle_request(
+                region_id,
+                RegionRequest::Close(RegionCloseRequest {
+                    flush_on_close: true,
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(
+            !self.engine.is_region_exists(region_id),
+            "the close must remove {region_id} from the engine"
+        );
+        self.closed.insert(region_id);
+        let line =
+            format!("close region {region_id} (flush_on_close); references before close: {before}");
+        // Printed, not only recorded: the file inventory a close leaves behind is the evidence
+        // of what the reopen has to reload, so it must be visible when the case passes.
+        println!("{line}");
+        common_telemetry::info!("[mbt-case] {line}");
+        line
+    }
+
+    /// Reopens a closed region and re-reads the references its persisted manifest holds.
+    ///
+    /// `skip_wal_replay` is safe here only because [`StorageModel::close_region`] flushed the
+    /// region: every row of it is in an SST, so the reopened region describes the same
+    /// references without a WAL.
+    async fn reopen_region(&mut self, region_id: RegionId) -> String {
+        let before = self.describe_references(region_id);
+        self.engine
+            .handle_request(
+                region_id,
+                RegionRequest::Open(RegionOpenRequest {
+                    engine: MITO_ENGINE_NAME.to_string(),
+                    table_dir: self.request.table_dir.clone(),
+                    path_type: self.path_type,
+                    options: self.request.options.clone(),
+                    skip_wal_replay: true,
+                    checkpoint: None,
+                    requirements: Default::default(),
+                }),
+            )
+            .await
+            .unwrap();
+        self.closed.remove(&region_id);
+        self.refresh_views().await;
+        let line = format!(
+            "reopen region {region_id} (role after reopen: {:?}): references before reopen: \
+             {before}; after reopen: {}",
+            self.engine.role(region_id),
+            self.describe_references(region_id)
+        );
+        // Printed for the same reason: the role the engine assigns on open is what bounds what
+        // a chaos case may do next, so it is reported instead of assumed.
+        println!("{line}");
+        common_telemetry::info!("[mbt-case] {line}");
+        line
+    }
+
+    /// The reference state the engine exposes for `region_id`: every file id with its creator
+    /// domain, level, row count and admission sequence.
+    ///
+    /// The authorized range a reference exposes on this branch is its creator domain:
+    /// `FileMeta::owned_range` does not exist, so there is no narrower range to report.
+    fn describe_references(&self, region_id: RegionId) -> String {
+        let Some(view) = self.holders.get(&region_id) else {
+            return format!("region {region_id} (no observed references)");
+        };
+        if view.files.is_empty() {
+            return format!("region {region_id} (no references)");
+        }
+        let files: Vec<String> = view
+            .files
+            .values()
+            .map(|sst| {
+                format!(
+                    "{:?}(creator {}, authorized range = creator domain [{}, {}) on this branch, \
+                     L{}, rows={}, sequence={:?})",
+                    sst.file_id,
+                    sst.owner,
+                    key_name(sst.creator_domain.lo),
+                    key_name(sst.creator_domain.hi),
+                    sst.level,
+                    sst.num_rows,
+                    sst.sequence
+                )
+            })
+            .collect();
+        format!(
+            "region {region_id} (domain [{}, {})): {files:?}",
+            key_name(self.domain_of(region_id).lo),
+            key_name(self.domain_of(region_id).hi)
+        )
     }
 
     /// Region compaction on one published region.
@@ -3134,6 +3772,14 @@ async fn test_mbt_split_shared_sst_single_side_compaction_duplicates_after_merge
         "the model must record the recombining merge: {:?}",
         model.spec.shapes
     );
+    // The prediction of this branch's engine rule next to the observation: the survivor reads
+    // the original file without its partition predicate (its creator expression is the whole
+    // domain) *and* the compaction's copy, so the row the right half owned is predicted twice.
+    // Printed, never asserted here: the ledger oracle below is the judge of "exactly once".
+    common_telemetry::info!(
+        "[mbt-dup-row-mvp] predicted visibility of the survivor: {:?}",
+        model.spec.predict_counts(merged)
+    );
     assert!(
         violation.is_none(),
         "every committed event must stay visible exactly once after the merge, but the merge \
@@ -3141,6 +3787,947 @@ async fn test_mbt_split_shared_sst_single_side_compaction_duplicates_after_merge
          observations over this fixed trace:\n{}",
         violation.unwrap_or_default(),
         format_violations(&observed)
+    );
+}
+
+/// Case 1: a row whose partition key lies outside the target region's domain.
+///
+/// Write admission checks the partition *version* a region serves, never the value of the row,
+/// so `k07` is admitted into the memtable of a region whose domain is `[k00, k05)`. The
+/// prediction then follows the mirror of this branch's read path: the flush's file is created
+/// by that region, so the region's expression equals the file's creator expression and the scan
+/// skips the partition predicate, showing the out-of-domain row. The split narrows both halves
+/// to their own domains, so the row becomes invisible in every region (the ledger oracle
+/// reports it missing), and the merge into a whole-domain survivor brings it back together with
+/// a second copy of the row the one-side compaction already published.
+#[tokio::test]
+async fn test_mbt_case_out_of_domain_row() {
+    common_telemetry::init_default_ut_logging();
+    const CASE: &str = "out-of-domain row";
+    let mut model = StorageModel::new("mbt-case-out-of-domain").await;
+    let mut report = Vec::new();
+    let mut agreed = true;
+
+    let source = model.live_regions()[0];
+    let (left, right) = model.split(source, 5).await;
+    let step = model
+        .record_step(CASE, "after the split", &mut report)
+        .await;
+    agreed &= step.mismatched().is_empty();
+
+    let in_domain = model
+        .write_to(
+            left,
+            &[
+                PlannedRow {
+                    key: 1,
+                    ts: 0,
+                    payload: 1.0,
+                },
+                PlannedRow {
+                    key: 2,
+                    ts: 1000,
+                    payload: 2.0,
+                },
+            ],
+        )
+        .await;
+    // `k07` belongs to `right`, and is written into `left` anyway.
+    let out_of_domain = model
+        .write_to(
+            left,
+            &[PlannedRow {
+                key: 7,
+                ts: 2000,
+                payload: 7.0,
+            }],
+        )
+        .await;
+    let out_id = out_of_domain[0].event_id;
+    let in_ids: Vec<i64> = in_domain.iter().map(|event| event.event_id).collect();
+    let step = model
+        .record_step(CASE, "after writing the out-of-domain row", &mut report)
+        .await;
+    agreed &= step.mismatched().is_empty();
+    assert_eq!(
+        BTreeMap::new(),
+        model
+            .spec
+            .predict_counts(left)
+            .into_iter()
+            .filter(|(event_id, _)| *event_id == out_id)
+            .collect::<BTreeMap<_, _>>(),
+        "an admitted row is in the memtable, and the memtable scan is filtered by the domain: \
+         the out-of-domain row is predicted invisible before the flush: {}",
+        model.spec.describe(left)
+    );
+    assert_eq!(
+        BTreeMap::from([(in_ids[0], 1), (in_ids[1], 1)]),
+        model
+            .scan_counts(left)
+            .await
+            .into_iter()
+            .filter(|(event_id, _)| in_ids.contains(event_id))
+            .map(|(event_id, copies)| (event_id, copies as u64))
+            .collect(),
+        "the two in-domain rows must be visible from the memtable"
+    );
+
+    model.flush_region(left).await;
+    let step = model
+        .record_step(CASE, "after flushing the left half", &mut report)
+        .await;
+    agreed &= step.mismatched().is_empty();
+    // The flush's file is created by `left`, so the region's expression equals the file's
+    // creator expression and the reader drops the partition predicate: all three rows show.
+    assert_eq!(
+        BTreeMap::from([(in_ids[0], 1), (in_ids[1], 1), (out_id, 1)]),
+        model.spec.predict_counts(left),
+        "the file is created by the region itself, so every physical row of it is predicted \
+         visible to that region: {}",
+        model.spec.describe(left)
+    );
+    assert_eq!(
+        model.spec.predict_counts(left),
+        model
+            .scan_counts(left)
+            .await
+            .into_iter()
+            .map(|(event_id, copies)| (event_id, copies as u64))
+            .collect::<BTreeMap<_, _>>(),
+        "the prediction must agree with the flush's observation"
+    );
+
+    let (narrow, rest) = model.split(left, 2).await;
+    let step = model
+        .record_step(CASE, "after the split of the left half", &mut report)
+        .await;
+    agreed &= step.mismatched().is_empty();
+    assert_eq!(
+        BTreeMap::from([(in_ids[0], 1)]),
+        model.spec.predict_counts(narrow),
+        "the file's creator expression is [k00, k05) and the target's is [k00, k02), so the \
+         partition predicate applies and only the in-domain row survives"
+    );
+    assert_eq!(
+        BTreeMap::from([(in_ids[1], 1)]),
+        model.spec.predict_counts(rest)
+    );
+    assert!(
+        step.oracle_fired(),
+        "the ledger oracle must report the out-of-domain row the split made invisible"
+    );
+
+    model.compact(narrow).await;
+    let step = model
+        .record_step(CASE, "after compacting the narrow half", &mut report)
+        .await;
+    agreed &= step.mismatched().is_empty();
+
+    let merged = model.merge_all().await;
+    let step = model
+        .record_step(CASE, "after merging all halves", &mut report)
+        .await;
+    agreed &= step.mismatched().is_empty();
+    assert_eq!(
+        BTreeMap::from([(in_ids[0], 2), (in_ids[1], 1), (out_id, 1)]),
+        model.spec.predict_counts(merged),
+        "the whole-domain survivor applies no target domain, so the shared file (creator \
+         [k00, k05)) shows all of its rows while the compaction's copy still holds one of them"
+    );
+    assert!(
+        step.oracle_fired(),
+        "the ledger oracle must report the row the one-side compaction duplicated"
+    );
+    assert!(
+        agreed,
+        "the prediction must agree with the engine in every step of this case:\n\n{}",
+        report.join("\n\n")
+    );
+    let _ = (right, rest);
+}
+
+/// Case 2: two hops of splits, the second of which lands a target exactly on a file's creator
+/// expression.
+///
+/// `A -> B1/B2` hands the whole-domain file to both halves; compacting `B2` materializes a file
+/// *created by* `B2`, so a later split of the merge survivor at the same cut produces a target
+/// whose domain equals that file's creator expression — the one case in which the reader skips
+/// the partition predicate. That target then shows both the shared file's rows and the copy's
+/// rows, which the ledger oracle reports as duplicates.
+#[tokio::test]
+async fn test_mbt_case_two_hop_split() {
+    common_telemetry::init_default_ut_logging();
+    const CASE: &str = "two-hop split";
+    let mut model = StorageModel::new("mbt-case-two-hop-split").await;
+    let mut report = Vec::new();
+    let mut agreed = true;
+
+    let source = model.live_regions()[0];
+    let written = model
+        .write(&[
+            PlannedRow {
+                key: 1,
+                ts: 0,
+                payload: 1.0,
+            },
+            PlannedRow {
+                key: 3,
+                ts: 1000,
+                payload: 3.0,
+            },
+            PlannedRow {
+                key: 7,
+                ts: 2000,
+                payload: 7.0,
+            },
+            PlannedRow {
+                key: 9,
+                ts: 3000,
+                payload: 9.0,
+            },
+        ])
+        .await;
+    let ids: Vec<i64> = written.iter().map(|event| event.event_id).collect();
+    model.flush_dirty().await;
+    let step = model
+        .record_step(CASE, "after flushing the whole-domain file", &mut report)
+        .await;
+    agreed &= step.mismatched().is_empty();
+
+    // First hop: `A -> B1/B2`.
+    let (b1, b2) = model.split(source, 5).await;
+    let step = model
+        .record_step(CASE, "after the first split (A -> B1/B2)", &mut report)
+        .await;
+    agreed &= step.mismatched().is_empty();
+    assert_eq!(
+        BTreeMap::from([(ids[0], 1), (ids[1], 1)]),
+        model.spec.predict_counts(b1),
+        "the shared file's creator expression is the whole domain, so the left half applies its \
+         own partition predicate"
+    );
+    assert_eq!(
+        BTreeMap::from([(ids[2], 1), (ids[3], 1)]),
+        model.spec.predict_counts(b2)
+    );
+
+    model.compact(b2).await;
+    let step = model
+        .record_step(CASE, "after compacting the right half", &mut report)
+        .await;
+    agreed &= step.mismatched().is_empty();
+
+    let merged = model.merge_all().await;
+    let step = model
+        .record_step(CASE, "after merging both halves", &mut report)
+        .await;
+    agreed &= step.mismatched().is_empty();
+
+    // Second hop: split the survivor at the same cut. `C2` lands exactly on the creator
+    // expression of the file the compaction materialized.
+    let (c1, c2) = model.split(merged, 5).await;
+    let step = model
+        .record_step(CASE, "after the second split (B -> C1/C2)", &mut report)
+        .await;
+    agreed &= step.mismatched().is_empty();
+    assert_eq!(
+        BTreeMap::from([(ids[0], 1), (ids[1], 1)]),
+        model.spec.predict_counts(c1)
+    );
+    assert_eq!(
+        BTreeMap::from([(ids[2], 2), (ids[3], 2)]),
+        model.spec.predict_counts(c2),
+        "C2's domain equals the creator expression of the compaction's file, so the reader \
+         skips the partition predicate for it while the shared file still shows its rows too"
+    );
+    assert!(
+        step.oracle_fired(),
+        "the ledger oracle must report the duplicated rows of the second split"
+    );
+    assert!(
+        agreed,
+        "the prediction must agree with the engine in every step of this case:\n\n{}",
+        report.join("\n\n")
+    );
+}
+
+/// Case 3: copies across three generations, `F0 -> F1 -> F2`.
+///
+/// The whole-domain flush publishes `F0`; compacting one half materializes `F1` (created by
+/// that half); merging both halves and compacting the survivor materializes `F2` (created by
+/// the survivor), which physically holds *two* copies of the row both `F0` and `F1` carried.
+/// Every scan of `F2` skips the partition predicate, because its creator expression is the
+/// survivor's own.
+#[tokio::test]
+async fn test_mbt_case_multi_generation_copies() {
+    common_telemetry::init_default_ut_logging();
+    const CASE: &str = "multi-generation copies";
+    let mut model = StorageModel::new("mbt-case-multi-generation").await;
+    let mut report = Vec::new();
+    let mut agreed = true;
+
+    let source = model.live_regions()[0];
+    let written = model
+        .write(&[
+            PlannedRow {
+                key: 1,
+                ts: 0,
+                payload: 1.0,
+            },
+            PlannedRow {
+                key: 7,
+                ts: 1000,
+                payload: 7.0,
+            },
+        ])
+        .await;
+    let ids: Vec<i64> = written.iter().map(|event| event.event_id).collect();
+    model.flush_dirty().await;
+    let step = model
+        .record_step(
+            CASE,
+            "after flushing F0 (creator = whole domain)",
+            &mut report,
+        )
+        .await;
+    agreed &= step.mismatched().is_empty();
+
+    // Generation 1: materialize on the left half only.
+    let (left, right) = model.split(source, 5).await;
+    model.compact(left).await;
+    let step = model
+        .record_step(CASE, "after compacting the left half (F1)", &mut report)
+        .await;
+    agreed &= step.mismatched().is_empty();
+
+    // Generation 2: merge, then materialize the whole survivor.
+    let survivor = model.merge_all().await;
+    model.compact(survivor).await;
+    let step = model
+        .record_step(CASE, "after compacting the survivor (F2)", &mut report)
+        .await;
+    agreed &= step.mismatched().is_empty();
+    assert_eq!(
+        BTreeMap::from([(ids[0], 2), (ids[1], 1)]),
+        model.spec.predict_counts(survivor),
+        "F2 is created by the survivor, which holds both the shared file and the copy: the row \
+         both of them carry is physically in F2 twice"
+    );
+
+    // Generation 3: split the survivor, then merge both halves again.
+    let (p, q) = model.split(survivor, 5).await;
+    let step = model
+        .record_step(CASE, "after splitting F2", &mut report)
+        .await;
+    agreed &= step.mismatched().is_empty();
+    assert_eq!(BTreeMap::from([(ids[0], 2)]), model.spec.predict_counts(p));
+    assert_eq!(BTreeMap::from([(ids[1], 1)]), model.spec.predict_counts(q));
+
+    let rejoined = model.merge_all().await;
+    let step = model
+        .record_step(CASE, "after merging both halves again", &mut report)
+        .await;
+    agreed &= step.mismatched().is_empty();
+    assert_eq!(
+        BTreeMap::from([(ids[0], 2), (ids[1], 1)]),
+        model.spec.predict_counts(rejoined),
+        "the whole-domain survivor reads F2 without a partition predicate, so both physical \
+         copies of the shared row are visible"
+    );
+    assert!(
+        step.oracle_fired(),
+        "the ledger oracle must report the row the generations duplicated"
+    );
+    assert!(
+        agreed,
+        "the prediction must agree with the engine in every step of this case:\n\n{}",
+        report.join("\n\n")
+    );
+    let _ = right;
+}
+
+/// Case 4: the same merge twice, and a merge followed immediately by a split at the same cut.
+///
+/// The first merge publishes the survivor; the retry re-runs the same remap over the same
+/// inputs, so it must republish the same file ids and add no third copy. Splitting right after
+/// the merge at the cut the shape started from gives a target whose domain equals the creator
+/// expression of the compaction's file again.
+#[tokio::test]
+async fn test_mbt_case_repeated_merge() {
+    common_telemetry::init_default_ut_logging();
+    const CASE: &str = "repeated merge";
+    let mut model = StorageModel::new("mbt-case-repeated-merge").await;
+    let mut report = Vec::new();
+    let mut agreed = true;
+
+    let source = model.live_regions()[0];
+    let written = model
+        .write(&[
+            PlannedRow {
+                key: 1,
+                ts: 0,
+                payload: 1.0,
+            },
+            PlannedRow {
+                key: 7,
+                ts: 1000,
+                payload: 7.0,
+            },
+        ])
+        .await;
+    let ids: Vec<i64> = written.iter().map(|event| event.event_id).collect();
+    model.flush_dirty().await;
+    let (left, right) = model.split(source, 5).await;
+    model.compact(left).await;
+    let step = model
+        .record_step(
+            CASE,
+            "after the split and the one-side compaction",
+            &mut report,
+        )
+        .await;
+    agreed &= step.mismatched().is_empty();
+
+    let first = model.merge_all().await;
+    let step = model
+        .record_step(CASE, "after the first merge", &mut report)
+        .await;
+    agreed &= step.mismatched().is_empty();
+    assert_eq!(
+        BTreeMap::from([(ids[0], 2), (ids[1], 1)]),
+        model.spec.predict_counts(first)
+    );
+
+    // The same set merged a second time: a merge of a single live region is a no-op, so the
+    // routing is unchanged and nothing is copied.
+    assert_eq!(
+        vec![first],
+        model.live_regions(),
+        "after a merge only the survivor serves the table, so a second merge has nothing to do"
+    );
+    // The same inputs merged a second time, as a coordinator retry would.
+    let retried = model.retry_merge(first, &[left, right]).await;
+    let step = model
+        .record_step(
+            CASE,
+            "after retrying the merge of the same inputs",
+            &mut report,
+        )
+        .await;
+    agreed &= step.mismatched().is_empty();
+    assert_eq!(
+        BTreeMap::from([(ids[0], 2), (ids[1], 1)]),
+        model.spec.predict_counts(retried),
+        "a retry republishes the reference set the first attempt published, so it adds no third \
+         copy of the row the first merge already duplicated"
+    );
+
+    // Merge then immediately split on the same cut.
+    let (again_left, again_right) = model.split(retried, 5).await;
+    let step = model
+        .record_step(
+            CASE,
+            "after splitting the survivor at the same cut",
+            &mut report,
+        )
+        .await;
+    agreed &= step.mismatched().is_empty();
+    assert_eq!(
+        BTreeMap::from([(ids[0], 2)]),
+        model.spec.predict_counts(again_left),
+        "the compaction's file was created by the left half, so the left target skips the \
+         partition predicate for it and shows both physical copies"
+    );
+    assert_eq!(
+        BTreeMap::from([(ids[1], 1)]),
+        model.spec.predict_counts(again_right)
+    );
+    assert!(
+        step.oracle_fired(),
+        "the ledger oracle must report the duplicated row"
+    );
+    assert!(
+        agreed,
+        "the prediction must agree with the engine in every step of this case:\n\n{}",
+        report.join("\n\n")
+    );
+}
+
+/// Case 5: a split target that receives no rows at all.
+///
+/// The engine still hands the shared file to that half (repartition copies every file of the
+/// source into every target), so the observed invariant category reports the reference, while
+/// the specification's authorization view drops it. The prediction is empty either way, and it
+/// stays empty when the empty half compacts the file it cannot read.
+#[tokio::test]
+async fn test_mbt_case_empty_domain() {
+    common_telemetry::init_default_ut_logging();
+    const CASE: &str = "empty split target";
+    let mut model = StorageModel::new("mbt-case-empty-domain").await;
+    let mut report = Vec::new();
+    let mut agreed = true;
+
+    let source = model.live_regions()[0];
+    model
+        .write(&[
+            PlannedRow {
+                key: 1,
+                ts: 0,
+                payload: 1.0,
+            },
+            PlannedRow {
+                key: 2,
+                ts: 1000,
+                payload: 2.0,
+            },
+        ])
+        .await;
+    model.flush_dirty().await;
+    let (left, empty) = model.split(source, 5).await;
+    let step = model
+        .record_step(
+            CASE,
+            "after the split: the right half receives no rows",
+            &mut report,
+        )
+        .await;
+    agreed &= step.mismatched().is_empty();
+    assert!(model.spec.predict_counts(empty).is_empty());
+    assert!(
+        !model.holder_files(empty).is_empty(),
+        "the engine hands the shared file to the half that receives no rows"
+    );
+    assert!(
+        model
+            .spec
+            .region(empty)
+            .expect("the empty half is published")
+            .refs
+            .is_empty(),
+        "the specification authorizes no reference for it: {}",
+        model.spec.describe(empty)
+    );
+
+    model.compact(empty).await;
+    let step = model
+        .record_step(CASE, "after compacting the empty half", &mut report)
+        .await;
+    agreed &= step.mismatched().is_empty();
+    assert!(
+        model.spec.predict_counts(empty).is_empty(),
+        "a region that sees no row produces no row, whatever the compaction writes"
+    );
+
+    let merged = model.merge_all().await;
+    let step = model
+        .record_step(CASE, "after merging the empty half back", &mut report)
+        .await;
+    agreed &= step.mismatched().is_empty();
+    assert_eq!(
+        model
+            .ledger
+            .events
+            .keys()
+            .map(|event_id| (*event_id, 1u64))
+            .collect::<BTreeMap<_, _>>(),
+        model.spec.predict_counts(merged),
+        "every committed event is visible exactly once after the empty half rejoins"
+    );
+    assert!(
+        !step.oracle_fired(),
+        "no row was lost or duplicated by the empty domain"
+    );
+    assert!(
+        agreed,
+        "the prediction must agree with the engine in every step of this case:\n\n{}",
+        report.join("\n\n")
+    );
+    let _ = left;
+}
+
+/// Case 6: two append-mode events with the identical `(key, ts)` inside one file.
+///
+/// `(PK, ts)` is not an event identity in an append table, so the flush, the split, the
+/// compaction and the merge must all keep both events. The case pins that no step dedups them
+/// into one row: the event ids inside the SST are what the ledger counts.
+#[tokio::test]
+async fn test_mbt_case_same_key_and_timestamp() {
+    common_telemetry::init_default_ut_logging();
+    const CASE: &str = "two events sharing (key, ts)";
+    let mut model = StorageModel::new("mbt-case-same-key-ts").await;
+    let mut report = Vec::new();
+    let mut agreed = true;
+
+    let source = model.live_regions()[0];
+    let row = PlannedRow {
+        key: 3,
+        ts: 0,
+        payload: 1.0,
+    };
+    let first = model.write(&[row]).await;
+    let second = model.write(&[row]).await;
+    let (a, b) = (first[0].event_id, second[0].event_id);
+    assert_ne!(
+        a, b,
+        "the two events are distinct rows of the same (key, ts)"
+    );
+    model.flush_dirty().await;
+    let step = model
+        .record_step(
+            CASE,
+            "after flushing two rows with the same (key, ts)",
+            &mut report,
+        )
+        .await;
+    agreed &= step.mismatched().is_empty();
+    assert_eq!(
+        BTreeMap::from([(a, 1), (b, 1)]),
+        model.spec.predict_counts(source),
+        "one file, two events, each visible once"
+    );
+
+    let (left, right) = model.split(source, 5).await;
+    let step = model
+        .record_step(CASE, "after the split", &mut report)
+        .await;
+    agreed &= step.mismatched().is_empty();
+    assert_eq!(
+        BTreeMap::from([(a, 1), (b, 1)]),
+        model.spec.predict_counts(left)
+    );
+    assert!(model.spec.predict_counts(right).is_empty());
+
+    model.compact(left).await;
+    let step = model
+        .record_step(
+            CASE,
+            "after compacting the half that holds both events",
+            &mut report,
+        )
+        .await;
+    agreed &= step.mismatched().is_empty();
+    assert_eq!(
+        BTreeMap::from([(a, 1), (b, 1)]),
+        model.spec.predict_counts(left),
+        "a compaction must not fold two events that share (key, ts) into one row"
+    );
+
+    let merged = model.merge_all().await;
+    let step = model
+        .record_step(CASE, "after merging both halves", &mut report)
+        .await;
+    agreed &= step.mismatched().is_empty();
+    assert_eq!(
+        BTreeMap::from([(a, 2), (b, 2)]),
+        model.spec.predict_counts(merged),
+        "the merge keeps the shared file and the compaction's copy, so each of the two events \
+         is visible twice - but never collapsed into one row"
+    );
+    assert!(
+        agreed,
+        "the prediction must agree with the engine in every step of this case:\n\n{}",
+        report.join("\n\n")
+    );
+}
+
+/// Chaos: the region lifecycle the serial generator cannot interleave.
+///
+/// Three variants, each on its own engine and each recording what was closed and reopened, the
+/// reference state before and after the reopen (file ids plus the range a reference exposes),
+/// and the predicted-vs-observed visibility of every region at every step:
+///
+/// - **A**: split, compact one side, close and reopen the region that still holds the original
+///   file, then merge and judge the ledger;
+/// - **B**: a flush of new rows interleaves between the split and the compaction, and the
+///   compacting half is closed and reopened before its compaction;
+/// - **C**: the merge runs, its survivor is closed and reopened, and then the merge is retried
+///   over the same inputs.
+#[tokio::test]
+async fn test_mbt_case_chaos_close_reopen() {
+    common_telemetry::init_default_ut_logging();
+    chaos_variant_a_original_file_holder().await;
+    chaos_variant_b_interleaved_flush().await;
+    chaos_variant_c_merge_retry().await;
+}
+
+/// Variant A: the region that still holds the original file is closed and reopened.
+async fn chaos_variant_a_original_file_holder() {
+    const CASE: &str = "chaos A: reopen the original-file holder before the merge";
+    let mut model = StorageModel::new("mbt-chaos-a").await;
+    let mut report = Vec::new();
+    let mut agreed = true;
+
+    let source = model.live_regions()[0];
+    let written = model
+        .write(&[
+            PlannedRow {
+                key: 1,
+                ts: 0,
+                payload: 1.0,
+            },
+            PlannedRow {
+                key: 7,
+                ts: 1000,
+                payload: 7.0,
+            },
+        ])
+        .await;
+    let ids: Vec<i64> = written.iter().map(|event| event.event_id).collect();
+    model.flush_dirty().await;
+    let (left, right) = model.split(source, 5).await;
+    model.compact(left).await;
+    let step = model
+        .record_step(CASE, "after the split and one-side compaction", &mut report)
+        .await;
+    agreed &= step.mismatched().is_empty();
+
+    // Close and reopen the half that still holds the original file.
+    let held = model.holder_files(right);
+    report.push(format!("{CASE}: {}", model.close_region(right).await));
+    let step = model
+        .record_step(
+            CASE,
+            "while the original-file holder is closed",
+            &mut report,
+        )
+        .await;
+    agreed &= step.mismatched().is_empty();
+    assert_eq!(
+        vec![right],
+        step.closed,
+        "the closed region must be unobservable while it is closed"
+    );
+    report.push(format!("{CASE}: {}", model.reopen_region(right).await));
+    assert_eq!(
+        held,
+        model.holder_files(right),
+        "the reopen must reload the same file ids from the persisted manifest"
+    );
+    let step = model
+        .record_step(
+            CASE,
+            "after reopening the original-file holder",
+            &mut report,
+        )
+        .await;
+    agreed &= step.mismatched().is_empty();
+    assert_eq!(
+        BTreeMap::from([(ids[1], 1)]),
+        model.spec.predict_counts(right),
+        "the reopened region sees the shared file through its own domain predicate"
+    );
+
+    let merged = model.merge_all().await;
+    let step = model
+        .record_step(CASE, "after merging the reopened holder back", &mut report)
+        .await;
+    agreed &= step.mismatched().is_empty();
+    assert_eq!(
+        BTreeMap::from([(ids[0], 2), (ids[1], 1)]),
+        model.spec.predict_counts(merged),
+        "the reopen changed neither the reference set nor the prediction"
+    );
+    assert!(
+        step.oracle_fired(),
+        "the ledger oracle must report the duplicated row of the one-side compaction"
+    );
+    assert_chaos_agreed(agreed, &report);
+}
+
+/// Variant B: a flush of new rows interleaves between the split and the compaction.
+async fn chaos_variant_b_interleaved_flush() {
+    const CASE: &str = "chaos B: interleaved flush, close/reopen before the compaction";
+    let mut model = StorageModel::new("mbt-chaos-b").await;
+    let mut report = Vec::new();
+    let mut agreed = true;
+
+    let source = model.live_regions()[0];
+    let written = model
+        .write(&[
+            PlannedRow {
+                key: 1,
+                ts: 0,
+                payload: 1.0,
+            },
+            PlannedRow {
+                key: 7,
+                ts: 1000,
+                payload: 7.0,
+            },
+        ])
+        .await;
+    let ids: Vec<i64> = written.iter().map(|event| event.event_id).collect();
+    model.flush_dirty().await;
+    let (left, right) = model.split(source, 5).await;
+    let step = model
+        .record_step(CASE, "after the split", &mut report)
+        .await;
+    agreed &= step.mismatched().is_empty();
+
+    // A flush of new rows interleaves between the split and the compaction.
+    let interleaved = model
+        .write(&[
+            PlannedRow {
+                key: 2,
+                ts: 2000,
+                payload: 2.0,
+            },
+            PlannedRow {
+                key: 8,
+                ts: 3000,
+                payload: 8.0,
+            },
+        ])
+        .await;
+    let late: Vec<i64> = interleaved.iter().map(|event| event.event_id).collect();
+    model.flush_dirty().await;
+    let step = model
+        .record_step(CASE, "after the interleaved flush", &mut report)
+        .await;
+    agreed &= step.mismatched().is_empty();
+
+    // The half that still holds the original file is closed and reopened before the
+    // compaction of the other half. A reopened region is a follower, so the compaction lands
+    // on the half that still accepts writes, exactly as a coordinator would route it.
+    let held = model.holder_files(right);
+    report.push(format!("{CASE}: {}", model.close_region(right).await));
+    let step = model
+        .record_step(
+            CASE,
+            "while the original-file holder is closed",
+            &mut report,
+        )
+        .await;
+    agreed &= step.mismatched().is_empty();
+    report.push(format!("{CASE}: {}", model.reopen_region(right).await));
+    assert_eq!(
+        held,
+        model.holder_files(right),
+        "the reopen must reload the same file ids, including the interleaved flush"
+    );
+    let step = model
+        .record_step(
+            CASE,
+            "after reopening the original-file holder",
+            &mut report,
+        )
+        .await;
+    agreed &= step.mismatched().is_empty();
+
+    model.compact(left).await;
+    let step = model
+        .record_step(CASE, "after compacting the writable half", &mut report)
+        .await;
+    agreed &= step.mismatched().is_empty();
+    assert_eq!(
+        BTreeMap::from([(ids[0], 1), (late[0], 1)]),
+        model.spec.predict_counts(left),
+        "the compaction rewrites every row the compacting half sees, including the row of the \
+         interleaved flush"
+    );
+
+    let merged = model.merge_all().await;
+    let step = model
+        .record_step(CASE, "after merging both halves", &mut report)
+        .await;
+    agreed &= step.mismatched().is_empty();
+    assert_eq!(
+        BTreeMap::from([(ids[0], 2), (late[0], 1), (ids[1], 1), (late[1], 1)]),
+        model.spec.predict_counts(merged),
+        "the survivor holds the shared file, the right half's interleaved flush and the \
+         compaction's copy"
+    );
+    assert!(
+        step.oracle_fired(),
+        "the ledger oracle must report the duplicated row"
+    );
+    assert_chaos_agreed(agreed, &report);
+}
+
+/// Variant C: the merge survivor is closed and reopened, then the merge is retried.
+async fn chaos_variant_c_merge_retry() {
+    const CASE: &str = "chaos C: close/reopen the survivor and retry the merge";
+    let mut model = StorageModel::new("mbt-chaos-c").await;
+    let mut report = Vec::new();
+    let mut agreed = true;
+
+    let source = model.live_regions()[0];
+    let written = model
+        .write(&[
+            PlannedRow {
+                key: 1,
+                ts: 0,
+                payload: 1.0,
+            },
+            PlannedRow {
+                key: 7,
+                ts: 1000,
+                payload: 7.0,
+            },
+        ])
+        .await;
+    let ids: Vec<i64> = written.iter().map(|event| event.event_id).collect();
+    model.flush_dirty().await;
+    let (left, right) = model.split(source, 5).await;
+    model.compact(left).await;
+    let first = model.merge_all().await;
+    let step = model
+        .record_step(CASE, "after the first merge", &mut report)
+        .await;
+    agreed &= step.mismatched().is_empty();
+
+    let held = model.holder_files(first);
+    report.push(format!("{CASE}: {}", model.close_region(first).await));
+    let step = model
+        .record_step(CASE, "while the survivor is closed", &mut report)
+        .await;
+    agreed &= step.mismatched().is_empty();
+    report.push(format!("{CASE}: {}", model.reopen_region(first).await));
+    assert_eq!(
+        held,
+        model.holder_files(first),
+        "the reopen must reload the same file ids the merge published"
+    );
+    let step = model
+        .record_step(CASE, "after reopening the survivor", &mut report)
+        .await;
+    agreed &= step.mismatched().is_empty();
+    assert_eq!(
+        BTreeMap::from([(ids[0], 2), (ids[1], 1)]),
+        model.spec.predict_counts(first),
+        "the reopened survivor sees what the first merge published"
+    );
+
+    // Retry the merge over the same inputs.
+    let retried = model.retry_merge(first, &[left, right]).await;
+    let step = model
+        .record_step(
+            CASE,
+            "after retrying the merge over the same inputs",
+            &mut report,
+        )
+        .await;
+    agreed &= step.mismatched().is_empty();
+    assert_eq!(
+        held,
+        model.holder_files(retried),
+        "the retry republishes the same file ids, so it cannot add a third copy"
+    );
+    assert_eq!(
+        BTreeMap::from([(ids[0], 2), (ids[1], 1)]),
+        model.spec.predict_counts(retried),
+        "the retried merge republishes exactly what the first attempt published"
+    );
+    assert_chaos_agreed(agreed, &report);
+}
+
+/// Closes a chaos case: every step's prediction must have agreed with the engine.
+fn assert_chaos_agreed(agreed: bool, report: &[String]) {
+    assert!(
+        agreed,
+        "the prediction must agree with the engine in every step of this chaos case:\n\n{}",
+        report.join("\n\n")
     );
 }
 
