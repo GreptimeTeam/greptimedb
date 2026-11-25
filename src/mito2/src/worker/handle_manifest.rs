@@ -433,28 +433,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             waiters.reply_with(|| RegionBusySnafu { region_id }.fail());
             return RegionEditDispatch::Rejected;
         }
-        if let RegionEditKind::NativeSeries {
-            origin,
-            schema_version,
-            truncated_entry_id,
-            index_ids,
-        } = &kind
-        {
-            let current = region.version();
-            if !Arc::ptr_eq(origin, &region)
-                || region.is_staging()
-                || current.metadata.schema_version != *schema_version
-                // Full truncate clears published indexes. Fence in-flight builds here
-                // because the index set can be empty on both sides of the truncate.
-                || current.truncated_entry_id != *truncated_entry_id
-                || !current.pending_tails.is_empty()
-                || current.ssts.series_indexes().len() != index_ids.len()
-                || !index_ids.iter().all(|id| current.ssts.series_indexes().contains_key(id))
-            {
-                waiters.reply_with(|| RegionBusySnafu { region_id }.fail());
-                return RegionEditDispatch::Rejected;
-            }
-        }
         if matches!(kind, RegionEditKind::Import)
             && let Err(error) = prepare_region_edit(&region, &mut edit)
         {
@@ -487,7 +465,39 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Updates manifest in background.
         common_runtime::spawn_global(async move {
             let result = match kind {
-                RegionEditKind::Import | RegionEditKind::NativeSeries { .. } => {
+                RegionEditKind::Import => {
+                    // Removing one contributor invalidates the collective watermark.
+                    // Editing excludes new native publications while the import is committed.
+                    if !edit.series_indexes_to_remove.is_empty() {
+                        let manifest = region.manifest_ctx.manifest().await;
+                        let windows: std::collections::HashSet<_> = edit
+                            .series_indexes_to_remove
+                            .iter()
+                            .filter_map(|id| {
+                                manifest
+                                    .series_indexes
+                                    .get(&id.file_id())
+                                    .filter(|f| f.file_id() == *id)?
+                                    .series_window()
+                                    .map(|w| w.start)
+                            })
+                            .collect();
+                        if !windows.is_empty() {
+                            edit.series_indexes_to_remove.extend(
+                                manifest
+                                    .series_indexes
+                                    .values()
+                                    .filter(|f| {
+                                        f.series_window()
+                                            .is_some_and(|w| windows.contains(&w.start))
+                                    })
+                                    .map(|f| f.file_id()),
+                            );
+                            edit.series_indexes_to_remove
+                                .sort_unstable_by_key(|id| id.file_id());
+                            edit.series_indexes_to_remove.dedup();
+                        }
+                    }
                     edit_region(
                         &region,
                         edit.clone(),
@@ -605,12 +615,29 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
             // Only apply the edit if the result is ok and region is not in staging state.
             if edit_result.result.is_ok() {
-                // Applies the edit to the region.
-                region.version_control.apply_edit(
-                    Some(edit_result.edit),
-                    &[],
-                    region.file_purger.clone(),
-                );
+                let mut edit = edit_result.edit;
+                // A background publication can be superseded before its notification arrives.
+                let guard = if !edit_result.update_region_state {
+                    Some(region.manifest_ctx.manifest_manager.read().await)
+                } else {
+                    None
+                };
+                if let Some(manager) = &guard {
+                    let manifest = manager.manifest();
+                    edit.series_indexes_to_add.retain_mut(|file| {
+                        if let Some(current) = manifest.series_indexes.get(&file.file_id) {
+                            *file = current.as_ref().clone();
+                            true
+                        } else {
+                            false
+                        }
+                    });
+                    edit.series_indexes_to_remove
+                        .retain(|id| !manifest.series_indexes.contains_key(&id.file_id()));
+                }
+                region
+                    .version_control
+                    .apply_edit(Some(edit), &[], region.file_purger.clone());
             }
             if edit_result.update_region_state {
                 region.switch_state_to_writable(RegionLeaderState::Editing);
@@ -1012,7 +1039,7 @@ fn prepare_region_edit(region: &MitoRegionRef, edit: &mut RegionEdit) -> Result<
             .series_indexes_to_add
             .iter()
             .any(|file| matches!(&file.format,
-            file::FileFormat::NarthexSeriesIndex(meta) if meta.coverage.is_some())),
+            file::FileFormat::NarthexSeriesIndex(meta) if meta.window.is_some())),
         crate::error::InvalidRequestSnafu {
             region_id,
             reason: "only a pinned native maintenance build can publish sequence coverage",

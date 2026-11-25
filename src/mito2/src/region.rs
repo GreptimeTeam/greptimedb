@@ -1795,6 +1795,60 @@ impl ManifestContext {
         .await
     }
 
+    /// Publish against the same truncate boundary and the watermarks used to select inputs.
+    pub(crate) async fn publish_series_indexes(
+        &self,
+        edit: &crate::manifest::action::RegionEdit,
+        truncated: Option<crate::wal::EntryId>,
+        expected: &HashMap<i64, u64>,
+    ) -> Result<()> {
+        let mut manager = self.manifest_manager.write().await;
+        let manifest = manager.manifest();
+        let region_id = manifest.metadata.region_id;
+        ensure!(
+            !manager.is_stopped()
+                && self.state.load() == RegionRoleState::Leader(RegionLeaderState::Writable)
+                && manifest.truncated_entry_id == truncated
+                && manifest.pending_tails.is_empty(),
+            RegionBusySnafu { region_id }
+        );
+        let mut current = HashMap::<i64, u64>::new();
+        for w in manifest
+            .series_indexes
+            .values()
+            .filter_map(|f| f.series_window())
+        {
+            let seq = current.entry(w.start).or_default();
+            *seq = (*seq).max(w.max_sequence);
+        }
+        for window in edit
+            .series_indexes_to_add
+            .iter()
+            .filter_map(FileMeta::series_window)
+        {
+            ensure!(
+                manifest
+                    .series_window_seconds
+                    .is_none_or(|width| width == window.end - window.start)
+                    && current.get(&window.start) == expected.get(&window.start),
+                RegionBusySnafu { region_id }
+            );
+        }
+        let actions = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
+        match self.update_locked(&mut manager, actions, false).await {
+            Ok(pending) => {
+                self.unlock_and_fire(manager, pending).await;
+            }
+            Err(error) => {
+                if error.may_have_persisted_manifest_update() {
+                    manager.stop().await;
+                }
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
     /// Conditionally publishes rebuilt index metadata for `source`.
     ///
     /// The source SST and schema-generation checks share the manifest write lock

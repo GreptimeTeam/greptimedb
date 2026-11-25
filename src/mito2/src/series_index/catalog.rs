@@ -38,21 +38,7 @@ const RANGE_CATALOG: &str = "range-index.json";
 const SERIES_CATALOG: &str = "series-index.json";
 const SERIES_METADATA_KEY: &str = "greptime.series_index";
 
-/// Summary of SSTs sharing a compaction-window-aligned start.
-///
-/// New data changes must have sequences greater than those already indexed. A new
-/// start adds a map entry; new data at an existing start raises its maximum sequence.
-/// The maximum end and sequence may come from different files, so this summary
-/// does not establish uniform sequence coverage throughout the interval.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct WindowSequence {
-    /// Inclusive start in epoch seconds, equal to the key in `window_sequences`.
-    pub(crate) start: i64,
-    /// Exclusive interval end in epoch seconds.
-    pub(crate) end: i64,
-    /// Maximum sequence among the SSTs sharing this aligned start.
-    pub(crate) max_sequence: u64,
-}
+pub(crate) use crate::sst::file::WindowSequence;
 
 /// Self-describing coverage stored in a series-index Parquet footer.
 ///

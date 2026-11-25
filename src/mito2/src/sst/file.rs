@@ -275,129 +275,53 @@ pub struct NarthexSamplesMeta {
     pub parts: SmallVec<[NarthexPartMeta; 1]>,
 }
 
-/// A closed durable sequence boundary for one half-open time window.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CertifiedWindow {
-    pub start: Timestamp,
-    pub end: Timestamp,
-    pub frontier: u64,
+/// Sequence summary of a half-open time window in Unix seconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowSequence {
+    pub start: i64,
+    pub end: i64,
+    pub max_sequence: u64,
 }
 
-/// Logical coverage in the sequence domain of a pinned region version.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NarthexCoverage {
-    /// User tags encoded by the index. Older proofs require an exact schema version.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tags: Option<Vec<(ColumnId, String)>>,
-    pub schema_version: u64,
-    pub region_id: RegionId,
-    /// Windows in ascending start order. Gaps are allowed.
-    pub windows: Vec<CertifiedWindow>,
-    /// Contributions above an already certified frontier. Legacy readers see only full windows.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub increments: Vec<IncrementalWindow>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct IncrementalWindow {
-    pub after: u64,
-    #[serde(flatten)]
-    pub window: CertifiedWindow,
-}
-
-impl NarthexCoverage {
-    pub(crate) fn intervals(&self) -> impl Iterator<Item = (u64, &CertifiedWindow)> {
-        self.windows
-            .iter()
-            .map(|w| (0, w))
-            .chain(self.increments.iter().map(|i| (i.after, &i.window)))
+impl WindowSequence {
+    /// Every fixed window touched by the inclusive SST bounds, including pre-epoch timestamps.
+    pub(crate) fn starts(range: FileTimeRange, width: i64) -> impl Iterator<Item = i64> {
+        let first = range.0.split().0.div_euclid(width);
+        let last = range.1.split().0.div_euclid(width);
+        (first..=last).filter_map(move |n| {
+            n.checked_mul(width)
+                .filter(|s| s.checked_add(width).is_some())
+        })
     }
 
-    #[cfg(test)]
-    pub(crate) fn covers(&self, file: &FileMeta) -> bool {
-        SeriesFrontiers::new([self]).covers(file)
+    pub(crate) fn intersects(&self, range: FileTimeRange) -> bool {
+        self.start <= range.1.split().0 && range.0.split().0 < self.end
     }
 }
 
-/// Piecewise contiguous sequence coverage across the available series indexes.
-pub(crate) struct SeriesFrontiers(BTreeMap<Timestamp, u64>);
-
-impl SeriesFrontiers {
-    pub(crate) fn new<'a>(proofs: impl IntoIterator<Item = &'a NarthexCoverage>) -> Self {
-        Self::from_proofs(proofs, |_| {})
-    }
-
-    /// Reports indexes that advance contiguous coverage on at least one time interval.
-    pub(crate) fn from_proofs<'a>(
-        proofs: impl IntoIterator<Item = &'a NarthexCoverage>,
-        mut used: impl FnMut(usize),
-    ) -> Self {
-        let mut intervals: Vec<_> = proofs
-            .into_iter()
-            .enumerate()
-            .flat_map(|(i, proof)| proof.intervals().map(move |(after, w)| (after, w, i)))
-            .collect();
-        intervals.sort_unstable_by_key(|(after, w, i)| (*after, std::cmp::Reverse(w.frontier), *i));
-        let mut points = BTreeMap::new();
-        for (_, window, _) in &intervals {
-            points.insert(window.start, 0);
-            points.insert(window.end, 0);
+/// Checks the collective watermark across every window spanned by a sample SST.
+pub(crate) fn series_windows_cover(
+    windows: &BTreeMap<i64, WindowSequence>,
+    file: &FileMeta,
+) -> bool {
+    let Some(seq) = file.sequence else {
+        return false;
+    };
+    let (first, last) = file.time_range;
+    let mut cursor = first.split().0;
+    let Some((&start, _)) = windows.range(..=cursor).next_back() else {
+        return false;
+    };
+    for (_, w) in windows.range(start..) {
+        if w.start > cursor || w.end <= cursor || w.max_sequence < seq.get() {
+            return false;
         }
-        for (after, window, i) in intervals {
-            if window.start >= window.end {
-                continue;
-            }
-            for (_, frontier) in points.range_mut(window.start..window.end) {
-                if after <= *frontier && *frontier < window.frontier {
-                    used(i);
-                    *frontier = window.frontier;
-                }
-            }
+        if last.split().0 < w.end {
+            return true;
         }
-        Self(points)
+        cursor = w.end;
     }
-
-    fn at(&self, time: Timestamp) -> u64 {
-        self.0.range(..=time).next_back().map_or(0, |(_, f)| *f)
-    }
-
-    pub(crate) fn covers(&self, file: &FileMeta) -> bool {
-        let (start, end) = file.time_range;
-        file.sequence
-            .is_some_and(|seq| self.covers_range(start, end, seq.get()))
-    }
-
-    pub(crate) fn covers_range(&self, start: Timestamp, end: Timestamp, sequence: u64) -> bool {
-        start <= end
-            && self.at(start) >= sequence
-            && self.0.range(start..=end).all(|(_, f)| *f >= sequence)
-    }
-
-    pub(crate) fn extend(
-        &self,
-        proof: &mut NarthexCoverage,
-        start: Timestamp,
-        end: Timestamp,
-        frontier: u64,
-    ) {
-        let mut cursor = start;
-        for next in self.0.range(start..end).map(|(t, _)| *t).chain([end]) {
-            let after = self.at(cursor);
-            if cursor < next && after < frontier {
-                let window = CertifiedWindow {
-                    start: cursor,
-                    end: next,
-                    frontier,
-                };
-                if after == 0 {
-                    proof.windows.push(window);
-                } else {
-                    proof.increments.push(IncrementalWindow { after, window });
-                }
-            }
-            cursor = next;
-        }
-    }
+    false
 }
 
 /// Immutable narthex series index. Coverage identifies samples; it does not own them.
@@ -409,7 +333,7 @@ pub struct NarthexSeriesIndexMeta {
     pub parts: SmallVec<[NarthexPartMeta; 1]>,
     /// Absent on older indexes that cannot certify sample coverage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub coverage: Option<NarthexCoverage>,
+    pub window: Option<WindowSequence>,
 }
 
 /// Metadata of a SST file.
@@ -656,6 +580,13 @@ fn is_zero(version: &u8) -> bool {
 }
 
 impl FileMeta {
+    pub(crate) fn series_window(&self) -> Option<WindowSequence> {
+        match &self.format {
+            FileFormat::NarthexSeriesIndex(meta) => meta.window,
+            _ => None,
+        }
+    }
+
     /// Returns the authoritative object path, using the artifact manifest for narthex files.
     pub fn file_path(&self, table_dir: &str, path_type: PathType) -> String {
         match &self.format {
@@ -1557,60 +1488,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn incremental_coverage_requires_a_contiguous_chain_across_split_windows() {
-        let ts = Timestamp::new_second;
-        let proof = |start, end, frontier| NarthexCoverage {
-            tags: None,
-            schema_version: 0,
-            region_id: RegionId::new(1, 0),
-            windows: vec![CertifiedWindow {
-                start: ts(start),
-                end: ts(end),
-                frontier,
-            }],
-            increments: Vec::new(),
-        };
-        let left = proof(0, 10, 4);
-        let right = proof(10, 20, 7);
-        let base = SeriesFrontiers::new([&left, &right]);
-        let mut delta = proof(0, 20, 10);
-        delta.windows.clear();
-        base.extend(&mut delta, ts(0), ts(20), 10);
-        assert!(delta.windows.is_empty());
-        assert_eq!(delta.increments.len(), 2);
-        let all = SeriesFrontiers::new([&delta, &right, &left]);
-        assert!(all.covers_range(ts(5), ts(15), 10));
-        assert!(!all.covers_range(ts(5), ts(20), 10));
-        let missing = SeriesFrontiers::new([&delta, &right]);
-        assert!(!missing.covers_range(ts(5), ts(15), 10));
-        assert!(missing.covers_range(ts(10), ts(15), 10));
-    }
-
-    #[test]
-    fn spanning_file_requires_contiguous_sufficient_frontiers() {
-        let ts = Timestamp::new_millisecond;
-        let window = |start, end, frontier| CertifiedWindow {
-            start: ts(start),
-            end: ts(end),
-            frontier,
-        };
-        let mut coverage = NarthexCoverage {
-            tags: None,
-            schema_version: 0,
-            region_id: RegionId::new(1, 0),
-            increments: Vec::new(),
-            windows: vec![window(0, 10, 100), window(10, 20, 80)],
-        };
-        let mut file = FileMeta {
-            time_range: (ts(5), ts(10)),
-            sequence: NonZeroU64::new(90),
+    fn fixed_windows_cover_spanning_samples() {
+        let file = FileMeta {
+            time_range: (Timestamp::new_millisecond(-1), Timestamp::new_second(10)),
+            sequence: NonZeroU64::new(8),
             ..Default::default()
         };
-        assert!(!coverage.covers(&file));
-        file.sequence = NonZeroU64::new(80);
-        assert!(coverage.covers(&file));
-        coverage.windows[1].start = ts(11);
-        assert!(!coverage.covers(&file));
+        let starts = WindowSequence::starts(file.time_range, 10).collect::<Vec<_>>();
+        assert_eq!(starts, [-10, 0, 10]);
+        let mut windows = starts
+            .into_iter()
+            .map(|start| {
+                (
+                    start,
+                    WindowSequence {
+                        start,
+                        end: start + 10,
+                        max_sequence: 8,
+                    },
+                )
+            })
+            .collect();
+        assert!(series_windows_cover(&windows, &file));
+        windows.get_mut(&0).unwrap().max_sequence = 7;
+        assert!(!series_windows_cover(&windows, &file));
+        windows.remove(&0);
+        assert!(!series_windows_cover(&windows, &file));
     }
 
     #[test]
@@ -1623,7 +1526,7 @@ mod tests {
             ],
         }));
         let series = FileFormat::NarthexSeriesIndex(Box::new(NarthexSeriesIndexMeta {
-            coverage: None,
+            window: None,
             manifest_size: 5,
             parts: smallvec::smallvec![
                 NarthexPartMeta { file_size: 11 },

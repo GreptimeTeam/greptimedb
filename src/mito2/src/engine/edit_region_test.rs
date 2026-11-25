@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use api::v1::{ArrowIpc, Rows};
-use common_error::ext::ErrorExt;
+use common_error::ext::{ErrorExt, WhateverResult};
 use common_error::status_code::StatusCode;
 use common_recordbatch::DfRecordBatch;
 use common_test_util::flight::encode_to_flight_data;
@@ -44,6 +44,77 @@ use crate::sst::file::{ColumnIndexMetadata, FileMeta, IndexType};
 use crate::sst::location;
 use crate::test_util::{CreateRequestBuilder, TestEnv, build_rows, rows_schema};
 use crate::time_provider::mock::MockTimeProvider;
+
+#[tokio::test]
+async fn test_delayed_series_index_notification_after_removal() -> WhateverResult<()> {
+    use crate::test_util::sst_util::new_sparse_primary_key;
+    use crate::test_util::{
+        build_series_index_request, flush_region, sparse_metric_create_request, sparse_metric_put,
+    };
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            experimental_enable_series_index: true,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Create(sparse_metric_create_request("narthex")),
+        )
+        .await?;
+    let region = engine.get_region(region_id).unwrap();
+    let key = new_sparse_primary_key(&["api"], &region.metadata(), 42, 7);
+    engine
+        .handle_request(region_id, sparse_metric_put(key, 1000, Some(1.0)))
+        .await?;
+    flush_region(&engine, region_id, None).await;
+    engine
+        .handle_request(region_id, build_series_index_request())
+        .await?;
+    let version = region.version();
+    let index = version.ssts.series_indexes().values().next().unwrap();
+    engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                series_indexes_to_remove: vec![index.file_id()],
+                ..Default::default()
+            },
+        )
+        .await?;
+    let (tx, rx) = oneshot::channel();
+    engine
+        .inner
+        .workers
+        .submit_to_worker(
+            region_id,
+            WorkerRequest::Background {
+                region_id,
+                notify: crate::request::BackgroundNotify::RegionEdit(
+                    crate::request::RegionEditResult {
+                        region_id,
+                        origin: region.clone(),
+                        edit: RegionEdit {
+                            series_indexes_to_add: vec![index.meta_ref().clone()],
+                            ..Default::default()
+                        },
+                        waiters: crate::request::Waiters::one(tx),
+                        result: Ok(()),
+                        is_staging: false,
+                        update_region_state: false,
+                    },
+                ),
+            },
+        )
+        .await?;
+    rx.await.unwrap()?;
+    assert!(region.version().ssts.series_indexes().is_empty());
+    engine.stop().await?;
+    Ok(())
+}
 
 #[tokio::test]
 async fn test_runtime_edits_share_manifest_file_metadata() {

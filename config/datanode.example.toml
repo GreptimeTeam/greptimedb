@@ -579,8 +579,8 @@ compress_manifest = false
 ## Interval between series-index maintenance runs. Zero uses the default of 5 min.
 #+ experimental_series_index_maintenance_interval = "5m"
 
-## Requested minimum series-index bucket width (default: 5 days), rounded up to
-## an exact multiple of each region's compaction time window.
+## Series-index window width (default: 5 days). Native series indexes persist the
+## width on first build. Local series indexes round up to a compaction window multiple.
 #+ experimental_series_index_bucket_width = "5days"
 
 ## Max number of running background flush jobs (default: 1/2 of cpu cores).

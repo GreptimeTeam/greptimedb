@@ -17,19 +17,24 @@ With `sst_format = 'narthex'`, samples are authoritative SSTs. Each artifact own
 `parts` array in part-ID order.
 Each part record contains its encoded `file_size` in bytes.
 
-In the region manifest, a native series index may carry a `coverage` object
-with `region_id`, `schema_version`, and an ordered array of `windows`. Each
-window describes a half-open timestamp interval `[start, end)` and an inclusive
-sequence upper bound `frontier`. Optional `increments` use the same timestamp
-bounds and certify the sequence interval `(after, frontier]`. At each timestamp,
-a scan combines full windows and increments from readable indexes with matching
-region and compatible tags. New proofs record user tags as ordered
-`[column_id, name]` pairs in `tags`. Field-only changes and additional nullable
-string tags without defaults preserve coverage. Older index rows supply null for
-these added labels. Proofs without a tag list require the original schema version.
-A scan skips sample-key discovery only when contiguous sequence coverage reaches the sample SST's bound across its entire inclusive time range.
-A gap or unknown sample sequence requires sample-key discovery. Maintenance
-expires an index using the maximum source timestamp recorded in its file metadata.
+A native index file belongs to one fixed, epoch-aligned time window. Its region
+manifest entry stores `window` with inclusive `start` and exclusive `end` in
+Unix seconds and the inclusive sequence watermark `max_sequence`. The region
+records `series_window_seconds` on first publication and retains it in
+checkpoints even after every index expires.
+
+All index files in a window contribute series keys. Maintenance indexes sample
+SSTs above the previous watermark through a durable sequence boundary. A
+spanning SST contributes to each overlapping window. Discovery can rely on the
+indexes when every overlapping window reaches the sample's known sequence
+bound. Missing or unreadable artifacts fall back to sample discovery. Expired
+windows are retired as a unit. An explicit removal of a contributing file
+invalidates that window's indexes.
+
+Physical tag IDs and names are stored in the artifact manifest. The reader maps
+IDs to current label names and supplies null for newly added nullable labels.
+Older region manifest entries without `window` remain readable and are rebuilt
+from samples by maintenance.
 
 ## Wire specification
 

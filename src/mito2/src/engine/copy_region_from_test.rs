@@ -1249,7 +1249,7 @@ async fn test_region_storage_format_admission(
         FileFormat::NarthexSeriesIndex(Box::new(NarthexSeriesIndexMeta {
             manifest_size: 1,
             parts: Default::default(),
-            coverage: None,
+            window: None,
         }))
     };
     let error = engine

@@ -14,7 +14,7 @@
 
 //! Authoritative narthex inputs for scanner-wide series preparation.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use datatypes::arrow::array::{ArrayRef, StringArray, UInt32Array, UInt64Array};
@@ -90,7 +90,8 @@ pub(crate) async fn open_sources(
     let mut samples = Vec::<Arc<dyn SamplesFormatReader>>::new();
     let mut series = Vec::<Box<dyn FormatReader>>::new();
     let indices = file_indices(context, ranges)?;
-    let mut proofs = Vec::new();
+    let mut windows = BTreeMap::new();
+    let mut unavailable = BTreeSet::new();
     let indexes = if use_indexes {
         context.input.narthex_series_indexes.as_slice()
     } else {
@@ -100,18 +101,14 @@ pub(crate) async fn open_sources(
         let FileFormat::NarthexSeriesIndex(index) = &file.meta_ref().format else {
             continue;
         };
-        let Some(proof) = &index.coverage else {
+        let Some(window) = index.window else {
             continue;
         };
-        if !proof.matches_metadata(context.input.region_metadata()) {
-            continue;
-        }
-        if !indices.iter().any(|i| {
-            let (start, end) = context.input.files[*i].time_range();
-            proof
-                .intervals()
-                .any(|(_, w)| w.start <= end && start < w.end)
-        }) {
+        if file.region_id() != context.input.region_metadata().region_id
+            || !indices
+                .iter()
+                .any(|i| window.intersects(context.input.files[*i].time_range()))
+        {
             continue;
         }
         let mut reader = match crate::series_index::columnar::reader::ColumnarReader::open_cached(
@@ -131,19 +128,21 @@ pub(crate) async fn open_sources(
         .await
         {
             Ok(reader) => reader,
-            Err(error) if error.is_object_not_found() => continue,
+            Err(error) if error.is_unusable_series_index() => {
+                unavailable.insert(window.start);
+                continue;
+            }
             Err(error) => return Err(error),
         };
-        if reader
-            .adapt_tags(context.input.region_metadata(), proof)
-            .is_err()
-        {
+        if reader.adapt_tags(context.input.region_metadata()).is_err() {
+            unavailable.insert(window.start);
             continue;
         }
-        proofs.push(proof);
+        let current = windows.entry(window.start).or_insert(window);
+        current.max_sequence = current.max_sequence.max(window.max_sequence);
         series.push(Box::new(reader));
     }
-    let frontiers = crate::sst::file::SeriesFrontiers::new(proofs);
+    windows.retain(|start, _| !unavailable.contains(start));
     for i in indices {
         let file = &context.input.files[i];
         let namespace = file.meta_ref().file_id;
@@ -169,7 +168,7 @@ pub(crate) async fn open_sources(
         };
         let reader: Arc<dyn SamplesFormatReader> =
             Arc::new(NarthexSamplesReader { reader, sequence });
-        if !frontiers.covers(file.meta_ref()) {
+        if !crate::sst::file::series_windows_cover(&windows, file.meta_ref()) {
             series.push(Box::new(NarthexSeriesReader::new(
                 context.input.region_metadata().clone(),
                 reader.clone(),

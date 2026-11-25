@@ -15,11 +15,13 @@
 //! Worker-owned background maintenance for series indexes.
 
 use common_meta::key::SchemaMetadataManagerRef;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use common_telemetry::{info, warn};
+use itertools::Itertools;
 use object_store::ObjectStore;
 use snafu::ensure;
 use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedReceiver};
@@ -33,11 +35,13 @@ use crate::metrics::{
 };
 use crate::read::series_candidate::is_sparse_metric_metadata;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionMapRef, RegionRoleState};
-use crate::request::{RegionEditKind, RegionEditRequest, WorkerRequest, WorkerRequestWithTime};
-use crate::series_index::bucket::{group_files_into_series_buckets, rounded_bucket_width};
+use crate::request::{
+    BackgroundNotify, RegionEditResult, Waiters, WorkerRequest, WorkerRequestWithTime,
+};
+
 use crate::series_index::maintenance::{ReconcileStats, reconcile_series_indexes_with_mode};
 use crate::series_index::purger::{IndexFilePurger, PurgeRequest, run_index_purge_task};
-use crate::sst::file::{FileFormat, FileHandle, NarthexCoverage, SeriesFrontiers};
+use crate::sst::file::{FileHandle, WindowSequence};
 use crate::time_provider::TimeProviderRef;
 
 /// Commands serialized with periodic series-index maintenance.
@@ -295,7 +299,7 @@ impl SeriesIndexTask {
         manual: bool,
     ) -> Result<ReconcileStats> {
         let mut stats = ReconcileStats::default();
-        let (ssts, metadata, frontier, truncated_entry_id, window, options) = {
+        let (ssts, metadata, frontier, truncated_entry_id, options) = {
             let current = region.version_control.current();
             let version = current.version;
             if !version.pending_tails.is_empty() {
@@ -313,9 +317,6 @@ impl SeriesIndexTask {
                 version.metadata.clone(),
                 frontier,
                 version.truncated_entry_id,
-                version
-                    .compaction_time_window
-                    .or(manual.then_some(self.bucket_width)),
                 version.options.clone(),
             )
         };
@@ -335,105 +336,101 @@ impl SeriesIndexTask {
         };
         let now = common_time::Timestamp::new_millisecond(self.time_provider.current_time_millis());
         let expired = |f: &FileHandle| ttl.is_expired(&f.time_range().1, &now).unwrap_or(false);
-        let files: Vec<_> = ssts
-            .levels()
-            .iter()
-            .flat_map(|l| l.files.values().cloned())
+        let width = region
+            .manifest_ctx
+            .manifest()
+            .await
+            .series_window_seconds
+            .unwrap_or_else(|| {
+                i64::try_from(self.bucket_width.as_secs())
+                    .unwrap_or(i64::MAX)
+                    .max(1)
+            });
+        ensure!(
+            width > 0,
+            InvalidRequestSnafu {
+                region_id: region.region_id,
+                reason: "invalid series window width"
+            }
+        );
+        let files = || ssts.levels().iter().flat_map(|l| l.files.values());
+        let live_ranges: Vec<_> = files()
+            .filter(|f| !expired(f))
+            .map(FileHandle::time_range)
             .collect();
-        let indexes = ssts.series_indexes();
-        let mut proofs = Vec::new();
+        let cutoff = match ttl {
+            common_time::TimeToLive::Duration(duration) => now.sub_duration(duration).ok(),
+            _ => None,
+        };
+        // Include expired samples in a partly live window: a later watermark covers
+        // the whole window, including samples still present after a TTL change.
+        let first_live_start = cutoff
+            .and_then(|cut| WindowSequence::starts((cut, cut), width).next())
+            .map(common_time::Timestamp::new_second);
         let mut edit = crate::manifest::action::RegionEdit::default();
-        for index in indexes.values() {
-            let FileFormat::NarthexSeriesIndex(meta) = &index.meta_ref().format else {
-                continue;
-            };
-            let Some(proof) = &meta.coverage else {
-                if expired(index) {
-                    edit.series_indexes_to_remove.push(index.file_id());
-                }
-                continue;
-            };
-            let live = !expired(index)
-                && proof.matches_metadata(&metadata)
-                && files.iter().any(|f| {
-                    !expired(f)
-                        && proof
-                            .intervals()
-                            .any(|(_, w)| w.start <= f.time_range().1 && f.time_range().0 < w.end)
-                });
-            if live {
-                proofs.push((index.file_id(), proof));
+        let mut watermarks = HashMap::<i64, u64>::new();
+        for file in ssts.series_indexes().values() {
+            if let Some(w) = file.meta_ref().series_window()
+                && !ttl
+                    .is_expired(&common_time::Timestamp::new_second(w.end), &now)
+                    .unwrap_or(false)
+                && live_ranges.iter().any(|range| w.intersects(*range))
+            {
+                let seq = watermarks.entry(w.start).or_default();
+                *seq = (*seq).max(w.max_sequence);
             } else {
-                edit.series_indexes_to_remove.push(index.file_id());
+                edit.series_indexes_to_remove.push(file.file_id());
             }
         }
-        // Remove redundant and disconnected increments, including stale full indexes
-        // from older writers. All contributors to a contiguous chain stay live.
-        proofs.sort_unstable_by_key(|(id, _)| id.file_id());
-        let mut used = vec![false; proofs.len()];
-        let coverage =
-            SeriesFrontiers::from_proofs(proofs.iter().map(|(_, p)| *p), |i| used[i] = true);
-        edit.series_indexes_to_remove.extend(
-            proofs
-                .into_iter()
-                .zip(used)
-                .filter_map(|((id, _), used)| (!used).then_some(id)),
-        );
-
         let worker = self
             .state
             .worker
             .as_ref()
             .ok_or_else(|| WorkerStoppedSnafu { id: self.worker_id }.build())?;
         let mut handles: Vec<FileHandle> = Vec::new();
-        let mut buckets = Vec::new();
-        if let Some(window) = window
-            && let Some(width) = rounded_bucket_width(self.bucket_width, window)
-        {
-            buckets =
-                group_files_into_series_buckets(&files, width, (window.as_secs() as i64).max(1));
-        }
-        for bucket in buckets {
-            // If expired files were omitted, certify only the still-live portion of the bucket.
-            let mut start = bucket.start;
-            if bucket.files.iter().any(&expired)
-                && let common_time::TimeToLive::Duration(d) = ttl
-                && let Ok(cutoff) = now.sub_duration(d)
-            {
-                start = start.max(cutoff);
+        // Merge the ordered window starts lazily. One wide SST can span many windows,
+        // and a periodic pass only needs the first buildable one.
+        let mut windows = files()
+            .filter(|f| {
+                !ttl.is_instant() && f.meta_ref().sequence.is_some_and(|s| s.get() <= frontier)
+            })
+            .map(|f| {
+                let (mut start, end) = f.time_range();
+                if let Some(first) = first_live_start {
+                    start = start.max(first);
+                }
+                let file = f.clone();
+                WindowSequence::starts((start, end), width).map(move |start| (start, file.clone()))
+            })
+            .kmerge_by(|a, b| a.0 < b.0)
+            .peekable();
+        while let Some(&(start, _)) = windows.peek() {
+            let previous = watermarks.get(&start).copied().unwrap_or_default();
+            let mut sources = Vec::new();
+            let mut live = false;
+            while let Some((_, file)) = windows.next_if(|(next, _)| *next == start) {
+                live |= !expired(&file);
+                if file
+                    .meta_ref()
+                    .sequence
+                    .is_some_and(|seq| seq.get() > previous)
+                {
+                    sources.push(file);
+                }
             }
-            let sources: Vec<_> = bucket
-                .files
-                .iter()
-                .filter(|f| {
-                    !expired(f)
-                        && f.meta_ref().sequence.is_some_and(|seq| {
-                            seq.get() <= frontier
-                                && !coverage.covers_range(
-                                    f.time_range().0.max(start),
-                                    f.time_range().1,
-                                    seq.get(),
-                                )
-                        })
-                })
-                .cloned()
-                .collect();
-            if sources.is_empty() {
+            if !live || sources.is_empty() {
                 continue;
             }
-            let mut proof = NarthexCoverage {
-                tags: Some(super::writer::tag_columns(&metadata)),
-                region_id: region.region_id,
-                schema_version: metadata.schema_version,
-                windows: Vec::new(),
-                increments: Vec::new(),
+            let window = WindowSequence {
+                start,
+                end: start + width,
+                max_sequence: frontier,
             };
-            coverage.extend(&mut proof, start, bucket.end, frontier);
             let output = match crate::sst::narthex::write_series(
                 &region.access_layer,
                 metadata.clone(),
                 &sources,
-                Some(proof),
+                Some(window),
             )
             .await
             {
@@ -464,38 +461,36 @@ impl SeriesIndexTask {
             return WorkerStoppedSnafu { id: self.worker_id }.fail();
         }
         let (tx, rx) = oneshot::channel();
-        let mut request = RegionEditRequest::new(region.region_id, edit, false, tx);
-        request.kind = RegionEditKind::NativeSeries {
-            origin: region.clone(),
-            schema_version: metadata.schema_version,
-            truncated_entry_id,
-            index_ids: indexes.keys().copied().collect(),
-        };
-        if worker
-            .send(WorkerRequestWithTime::new(WorkerRequest::EditRegion(
-                request,
-            )))
-            .await
-            .is_err()
+        let result = region
+            .manifest_ctx
+            .publish_series_indexes(&edit, truncated_entry_id, &watermarks)
+            .await;
+        if let Err(error) = &result
+            && (matches!(error, crate::error::Error::RegionBusy { .. })
+                || !error.may_have_persisted_manifest_update())
         {
             for handle in &handles {
                 handle.mark_deleted();
             }
-            return WorkerStoppedSnafu { id: self.worker_id }.fail();
         }
-        if let Err(error) = rx
+        let notification = WorkerRequest::Background {
+            region_id: region.region_id,
+            notify: BackgroundNotify::RegionEdit(RegionEditResult {
+                region_id: region.region_id,
+                origin: region.clone(),
+                edit,
+                result: result.map_err(Arc::new),
+                waiters: Waiters::one(tx),
+                is_staging: false,
+                update_region_state: false,
+            }),
+        };
+        worker
+            .send(WorkerRequestWithTime::new(notification))
             .await
-            .map_err(|_| WorkerStoppedSnafu { id: self.worker_id }.build())?
-        {
-            if matches!(error, crate::error::Error::RegionBusy { .. })
-                || !error.may_have_persisted_manifest_update()
-            {
-                for handle in &handles {
-                    handle.mark_deleted();
-                }
-            }
-            return Err(error);
-        }
+            .map_err(|_| WorkerStoppedSnafu { id: self.worker_id }.build())?;
+        rx.await
+            .map_err(|_| WorkerStoppedSnafu { id: self.worker_id }.build())??;
         Ok(stats)
     }
 
@@ -629,8 +624,11 @@ mod tests {
         )
     }
 
+    #[rstest::rstest]
+    #[case(false)]
+    #[case(true)]
     #[tokio::test]
-    async fn test_native_index_build_releases_flushed_memtables() {
+    async fn test_native_index_build_releases_flushed_memtables(#[case] truncate: bool) {
         let entered = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
         let writer_entered = entered.clone();
@@ -688,11 +686,38 @@ mod tests {
                 memtables.upgrade().is_none(),
                 "the build retained the old memtable version"
             );
+            if truncate {
+                engine
+                    .handle_request(
+                        id,
+                        RegionRequest::Truncate(
+                            store_api::region_request::RegionTruncateRequest::All,
+                        ),
+                    )
+                    .await
+                    .unwrap();
+            }
             release.notify_one();
         };
         let (result, ()) = tokio::join!(build, flush_during_build);
-        result.unwrap();
-        assert!(!region.version().ssts.series_indexes().is_empty());
+        if truncate {
+            use common_error::ext::ErrorExt;
+            assert_eq!(
+                result.unwrap_err().status_code(),
+                common_error::status_code::StatusCode::RegionBusy
+            );
+            assert!(
+                region
+                    .manifest_ctx
+                    .manifest()
+                    .await
+                    .series_indexes
+                    .is_empty()
+            );
+        } else {
+            result.unwrap();
+        }
+        assert_eq!(region.version().ssts.series_indexes().is_empty(), truncate);
         engine.stop().await.unwrap();
     }
 

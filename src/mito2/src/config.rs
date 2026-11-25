@@ -126,8 +126,8 @@ pub struct MitoConfig {
     /// Interval between series-index maintenance runs (default 5 min). Zero uses the default.
     #[serde(with = "humantime_serde")]
     pub experimental_series_index_maintenance_interval: Duration,
-    /// Under development; do not enable. Requested minimum bucket width for series indexes.
-    /// It is rounded up to an exact multiple of each region's compaction time window.
+    /// Under development. Native series indexes persist this window width on first build.
+    /// Local series indexes round up to a multiple of the compaction time window.
     #[serde(with = "humantime_serde")]
     pub experimental_series_index_bucket_width: Duration,
     /// Max number of running background flush jobs (default: 1/2 of cpu cores).

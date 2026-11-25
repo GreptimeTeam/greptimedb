@@ -119,6 +119,7 @@ impl RemapManifest {
                 append_mode: None,
                 pending_tails: Default::default(),
                 series_indexes: Default::default(),
+                series_window_seconds: None,
                 handoff_floors: Default::default(),
             };
 
@@ -501,6 +502,7 @@ mod tests {
             append_mode: None,
             pending_tails: Default::default(),
             series_indexes: Default::default(),
+            series_window_seconds: None,
             handoff_floors: Default::default(),
         }
     }
