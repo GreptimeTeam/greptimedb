@@ -75,8 +75,11 @@
 //! The engine is created through `TestEnv::with_mock_layer(...)` and
 //! `TestEnv::create_engine_with(config, None, Some(listener), None)`, with
 //! `manifest_checkpoint_distance = 1` so the manifest cleanup that deletes really runs at
-//! every publication, and with `schedule_compaction_after_edit = false` so every compaction
-//! in a scenario was asked for.
+//! every publication, and with `schedule_compaction_after_edit = false` so no edit publishes
+//! a compaction of its own. A flush *completion* still schedules one in the worker, so a
+//! step boundary can hold a compaction in flight; the view reads wait for the engine's task
+//! list to empty before they compare a region's manifest with its version, because a
+//! publication writes the manifest first and installs the version after it.
 //!
 //! # What is NOT reachable from this crate
 //!
@@ -338,37 +341,60 @@ impl StorageModel {
             .unwrap_or_default()
     }
 
-    /// Reads one region's persisted manifest and live version as a *pair*.
+    /// Reads one region's persisted manifest, live version and role state, once.
+    async fn read_region_views(
+        &self,
+        region_id: RegionId,
+    ) -> (Arc<RegionManifest>, VersionControlData, RegionRoleState) {
+        let region = self
+            .engine
+            .get_region(region_id)
+            .unwrap_or_else(|| panic!("region {region_id} disappeared"));
+        let manifest = region.manifest_ctx.manifest().await;
+        let data = region.version_control.current();
+        (manifest, data, region.state())
+    }
+
+    /// Reads one region's persisted manifest and live version as a *pair*, at a point where
+    /// no publication is in flight.
     ///
-    /// A publication writes the manifest action first and installs the version after it, so
-    /// two sequential reads can tear: the manifest read returns the older file set and the
-    /// version read the newer one, and the pair looks like a persisted disagreement that no
-    /// writer ever committed. This re-reads the pair until the manifest version and the SST
-    /// version are unchanged across it. A genuine divergence is stable and survives the
-    /// retry, so nothing is hidden; only the observer's own race is removed.
+    /// A publication writes its manifest action first and installs the version after it: a
+    /// compaction commits the manifest inside the compaction task and the worker installs the
+    /// version when it handles the result. Between the two halves the persisted manifest
+    /// already names the compacted files while the live version still serves the inputs. That
+    /// is the order the engine publishes in, not a disagreement, and neither half changes
+    /// while it lasts — so an unchanged pair proves nothing about the engine being at rest,
+    /// and `chaos-delete-faults` / `chaos-publication-race` caught exactly that window (a
+    /// flush completion schedules a compaction, so a step boundary can hold a publication in
+    /// flight).
+    ///
+    /// What does prove it is the engine's own accounting: a compaction stays in the task list
+    /// from planning until the worker has installed its version (`handle_compaction_finished`
+    /// applies the edit before it reports the execution finished), and every flush a step
+    /// issues is awaited, so its own half-window is closed by the time the step returns. This
+    /// therefore reads the pair only when the task list is empty on both sides of the read and
+    /// nothing moved in between. A genuine divergence survives that; only the observation of a
+    /// publication in progress is excluded.
     async fn stable_region_views(
         &self,
         region_id: RegionId,
     ) -> (Arc<RegionManifest>, VersionControlData, RegionRoleState) {
-        let mut pair = None;
-        for _ in 0..8 {
-            let region = self
-                .engine
-                .get_region(region_id)
-                .unwrap_or_else(|| panic!("region {region_id} disappeared"));
-            let manifest = region.manifest_ctx.manifest().await;
-            let data = region.version_control.current();
-            let manifest_after = region.manifest_ctx.manifest().await;
-            let data_after = region.version_control.current();
-            let stable = manifest.manifest_version == manifest_after.manifest_version
-                && Arc::ptr_eq(&data.version.ssts, &data_after.version.ssts);
-            pair = Some((manifest, data, region.state()));
-            if stable {
-                break;
+        for _ in 0..4 {
+            let quiet_before = self.settle().await;
+            let first = self.read_region_views(region_id).await;
+            let quiet_after = self.settle().await;
+            let second = self.read_region_views(region_id).await;
+            let unchanged = first.0.manifest_version == second.0.manifest_version
+                && Arc::ptr_eq(&first.1.version.ssts, &second.1.version.ssts);
+            if quiet_before && quiet_after && unchanged {
+                return first;
             }
             tokio::task::yield_now().await;
         }
-        pair.expect("the pair is read at least once")
+        panic!(
+            "region {region_id}: the engine did not come to rest around a read of its manifest \
+             and its version, so the pair cannot be observed without racing a publication"
+        )
     }
 
     /// Refreshes layer 2 (each holder's live version and persisted manifest) and each
@@ -1852,7 +1878,9 @@ impl EventListener for ChaosListener {
 
 fn chaos_config() -> MitoConfig {
     MitoConfig {
-        // No uncontrolled background compaction: every compaction here is requested.
+        // An edit publishes no compaction of its own. A flush completion still schedules one
+        // (`RegionWorkerLoop::schedule_compaction`), so a step boundary can hold a compaction
+        // in flight; the view reads wait for the task list to empty before they judge a pair.
         schedule_compaction_after_edit: false,
         // GC on (the production setting) with the default lingering time, so a co-holder's
         // purge unlinks but does not delete a shared object mid-test.
