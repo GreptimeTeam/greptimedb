@@ -28,7 +28,7 @@ use common_time::Timestamp;
 use datatypes::arrow::array::AsArray;
 use datatypes::arrow::datatypes::TimestampMillisecondType;
 use parquet::basic::{Encoding, Type as PhysicalType};
-use store_api::region_engine::{RegionEngine, RegionRole};
+use store_api::region_engine::{RegionEngine, RegionRole, RegionScanner};
 use store_api::region_request::AlterKind::SetRegionOptions;
 use store_api::region_request::{
     EnterStagingRequest, PathType, RegionAlterRequest, RegionCloseRequest, RegionCompactRequest,
@@ -41,6 +41,7 @@ use tokio::sync::{Notify, Semaphore};
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::engine::listener::{CompactionListener, EventListener};
+use crate::read::scan_region::Scanner;
 use crate::sst::file::RegionFileId;
 use crate::test_util::batch_util::sort_batches_and_print;
 use crate::test_util::{
@@ -4318,4 +4319,38 @@ async fn test_scanner_time_range_fingerprint() {
     let s = scanner().await;
     assert_eq!(None, fp(&s, 0, 5));
     assert_eq!(Some(empty), fp(&s, 20, 30));
+
+    // A row written while a scan runs can reach the scan through a memtable it already
+    // reads, inside a range whose fingerprint the scan reported without that memtable.
+    // States computed by that scan may include the row, so no later scan may report the
+    // same fingerprint for the range.
+    crate::test_util::flush_region(&engine, region_id, None).await;
+    put(20, 22).await;
+    let mut running = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let reported = {
+        let (start, end) = (Timestamp::new_second(0), Timestamp::new_second(10));
+        match &running {
+            Scanner::Seq(s) => s.time_range_fingerprint(start, end),
+            Scanner::Unordered(s) => s.time_range_fingerprint(start, end),
+            Scanner::Series(s) => s.time_range_fingerprint(start, end),
+        }
+        .unwrap()
+    };
+    put(3, 4).await;
+    running.set_target_partitions(1);
+    let batches = RecordBatches::try_collect(running.scan().await.unwrap())
+        .await
+        .unwrap();
+    assert!(
+        batches
+            .pretty_print()
+            .unwrap()
+            .contains("1970-01-01T00:00:03")
+    );
+    assert_eq!(None, fp(&scanner().await, 0, 10));
+    crate::test_util::flush_region(&engine, region_id, None).await;
+    assert_ne!(Some(reported), fp(&scanner().await, 0, 10));
 }
