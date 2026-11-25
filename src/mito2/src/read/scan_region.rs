@@ -1153,9 +1153,10 @@ pub struct ScanInput {
     /// Whether this scan reads the physical `__sequence` of a foreign file and hides
     /// the rows a substitution produced ([`ScanRequest::read_row_sequence`]).
     pub(crate) read_row_sequence: bool,
-    /// Cursor slices of every creator region ([`ScanRequest::creator_cursor_shards`]): an
-    /// adopted file is bounded by the least advanced slice of its creator that may hold its
-    /// rows.
+    /// Cursor slices of every region a file of this one may hold rows of
+    /// ([`ScanRequest::creator_cursor_shards`]): each file is bounded by the least advanced
+    /// slice of the region that allocated its numbers that may hold its rows — this region's
+    /// own slices for a file it created itself, a creator's for an adopted one.
     creator_cursor_shards: Option<Arc<BTreeMap<u64, Vec<CursorShard>>>>,
     /// Collects the timestamp ranges of the rows this scan substituted; `None` turns it off.
     pub(crate) substituted_row_ranges: Option<SubstitutedRowsAccumulatorRef>,
@@ -1904,7 +1905,8 @@ impl ScanInput {
             .force_sequence_override(self.read_across_invalid_boundary)
             .read_row_sequence(self.read_row_sequence)
             // Only the slices whose expression may hold rows of this file are passed on; a file
-            // no slice covers keeps the fail-closed path.
+            // no slice covers keeps the file-level bound, and only a file of another region fails
+            // closed.
             .creator_slice_cursors(self.creator_slice_cursors(file)?)
             .compaction(self.compaction)
             .pre_filter_mode(pre_filter_mode)
@@ -2156,8 +2158,8 @@ impl ScanInput {
     }
 
     /// The row filter of a physical-sequence read of `file`:
-    /// `(candidate creator cursor, candidate creator bound]`, or `(.., +inf)` when no
-    /// candidate slice states an upper bound.
+    /// `(candidate cursor, candidate bound]`, or `(candidate cursor, +inf)` when no candidate
+    /// slice states an upper bound.
     ///
     /// This is the candidate selection of [`cursor_slice_may_hold_file_rows`] followed by one
     /// sequence range for the whole file, so a file whose expressions advanced differently is
@@ -2166,11 +2168,18 @@ impl ScanInput {
     /// ([`CursorShard::until`]). The file-level filter cannot tell which slice a row belongs
     /// to, so it may only prove what the least bound proves: a row above it may belong to the
     /// slice whose delta ends exactly there, and delivering it would report progress this read
-    /// does not stand for. No candidate stating a bound leaves the file unbounded above, which
-    /// is what a creator whose domain states no bound allows.
+    /// does not stand for.
     ///
-    /// `None` means this scan has no cursor for the file's creator, or the file is not foreign
-    /// at all.
+    /// A region's **own** files are bounded the same way: the cursors are keyed by
+    /// `(region, piece)` and the map is keyed by the region that allocated the numbers, which
+    /// for such a file is this region, so the candidates are this region's own pieces. The one
+    /// difference is the upper end: own rows carry this region's numbers, so the scan's own `H`
+    /// bounds them whenever no candidate states a bound, instead of leaving the file unbounded
+    /// above. When a region's pieces carry one cursor value, that value is the minimum, so the
+    /// result is exactly the region-level floor `(C, H]` this read applied before.
+    ///
+    /// `None` means this scan has no cursor of the file's region (or is not a
+    /// physical-sequence read at all).
     pub(crate) fn creator_domain_sequence_range(
         &self,
         file: &FileHandle,
@@ -2180,17 +2189,16 @@ impl ScanInput {
         }
         // A physical-sequence read only exists inside an exact `(C, H]` delta. If this
         // scan could not prove one at all (`sequence_range` is `None`, e.g. a local file
-        // whose barrier cannot be trusted), the foreign file fails closed like every other
-        // uncertain case — but neither `C` nor `H` bounds *this* file's numbers, so the
+        // whose barrier cannot be trusted), a foreign file fails closed like every other
+        // uncertain case — but neither `C` nor `H` bounds *that* file's numbers, so the
         // range itself is not reused below.
         if self.sequence_range.is_none() {
             return Ok(None);
         }
         let meta = file.meta_ref();
-        if meta.region_id == self.region_metadata().region_id {
-            // This region allocated the numbers, so its own cursor already bounds them.
-            return Ok(None);
-        }
+        // Whose numbers the file carries: its own region's, or a creator's this read has to
+        // compare against the creator's cursors.
+        let own_numbers = meta.region_id == self.region_metadata().region_id;
         let Some(shards) = self
             .creator_cursor_shards
             .as_ref()
@@ -2208,6 +2216,18 @@ impl ScanInput {
                 }
             }
         }
+        // Own rows carry this region's numbers, so the scan's own `H` bounds them even when
+        // every candidate piece is open-ended above. A creator's numbers no bound of this
+        // region states anything about, so an adopted file stays unbounded above instead.
+        let own_upper = if own_numbers {
+            match self.sequence_range {
+                Some(SequenceRange::GtLtEq { max, .. } | SequenceRange::LtEq { max }) => Some(max),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let until = until.or(own_upper);
         Ok(cursor.map(|min| match until {
             // `min < number <= max`: the rows of the delta, neither re-read nor read ahead.
             Some(max) => SequenceRange::GtLtEq { min, max },
@@ -2215,15 +2235,18 @@ impl ScanInput {
         }))
     }
 
-    /// The candidate creator cursor slices of `file`, as the reader compiles them:
+    /// The candidate cursor slices of `file`, as the reader compiles them:
     /// `(partition expression identity, last consumed sequence)` pairs whose expression
     /// may select a row of the file.
     ///
     /// This is the same candidate selection as [`Self::creator_domain_sequence_range`]:
     /// the file-level bound it produces stays, and the reader uses the candidates to decide
-    /// per row which cursor applies.
+    /// per row which cursor applies. A file carrying this region's own numbers is read the
+    /// same way — the candidates are then this region's own pieces — so that a row is
+    /// compared against the cursor of the piece it belongs to rather than against one floor
+    /// for the whole region.
     fn creator_slice_cursors(&self, file: &FileHandle) -> Result<Option<CreatorSliceCursors>> {
-        if !self.read_row_sequence || !self.is_foreign_file(file) {
+        if !self.read_row_sequence {
             return Ok(None);
         }
         let meta = file.meta_ref();
@@ -2257,46 +2280,55 @@ impl ScanInput {
         file.meta_ref().region_id != self.region_metadata().region_id
     }
 
-    /// The row filter a physical-sequence read applies to `file`.
+    /// The row filter a physical-sequence read applies to `file`: every row of it is compared
+    /// against the cursor of the **piece it belongs to**, never against one floor for a whole
+    /// region.
     ///
-    /// `Ok(None)` means the file carries this region's own numbers (or this scan is not a
-    /// physical-sequence read at all), so the scan's own `(C, H]` bounds it.
+    /// The cursors are keyed by `(region, piece)`, so a file is filtered by the slices of the
+    /// region that allocated its numbers — `(cursor, until]`, or `(cursor, +inf)` when no
+    /// candidate states a bound ([`Self::creator_domain_sequence_range`]) — with or without a
+    /// substituted cut. A file carrying this region's own numbers gets the same treatment: its
+    /// rows were allocated by this region's own pieces, and dropping the pointwise comparison
+    /// assumed a region has a single cursor value, which the flow model this serves does not
+    /// guarantee. When a region's pieces carry one cursor value, that value is the minimum, so
+    /// the outcome is exactly the region-level floor `(C, H]` of before.
     ///
-    /// A foreign file is filtered by the cursor of its creator's slices — `(cursor, until]`,
-    /// or `(cursor, +inf)` when the creator states no bound
-    /// ([`Self::creator_domain_sequence_range`]), with or without a substituted cut. A file
-    /// whose creator this scan has no cursor slice for fails closed instead of falling back to
-    /// the holder's `(C, H]`. [`exact_sequence_range`] never prunes such a file by this
-    /// region's cursor.
-    pub(crate) fn foreign_row_sequence_filter(
-        &self,
-        file: &FileHandle,
-    ) -> Result<Option<SequenceRange>> {
-        if !self.read_row_sequence || !self.is_foreign_file(file) {
+    /// `Ok(None)` means no slice of the file's region applies (or this scan is not a
+    /// physical-sequence read at all). For a file of **this** region that is not a failure: rows
+    /// carrying this region's numbers are bounded by the scan's own `(C, H]`, which the caller
+    /// applies, exactly as before. For a file of another region it fails closed instead: the
+    /// holder's `(C, H]` states nothing about a number another region allocated.
+    /// [`exact_sequence_range`] never prunes such a file by this region's cursor.
+    pub(crate) fn row_sequence_filter(&self, file: &FileHandle) -> Result<Option<SequenceRange>> {
+        if !self.read_row_sequence {
             return Ok(None);
         }
-        match self.creator_domain_sequence_range(file)? {
-            Some(range) => Ok(Some(range)),
-            None => {
-                let (min_seq, max_seq) = match self.sequence_range {
-                    Some(SequenceRange::GtLtEq { min, max }) => (min, max),
-                    Some(SequenceRange::Gt { min }) => (min, 0),
-                    Some(SequenceRange::LtEq { max }) => (0, max),
-                    None => (0, 0),
-                };
-                let meta = file.meta_ref();
-                SequenceRangeUnsupportedSnafu {
-                    region_id: self.region_metadata().region_id,
-                    min_seq,
-                    max_seq,
-                    reason: format!(
-                        "the physical-sequence read of adopted file {} has no cursor slice of its creator region {}, so its rows cannot be split into consumed and live ones",
-                        meta.file_id, meta.region_id
-                    ),
-                }
-                .fail()
-            }
+        if let Some(range) = self.creator_domain_sequence_range(file)? {
+            return Ok(Some(range));
         }
+        if !self.is_foreign_file(file) {
+            // Every row of the file carries this region's own numbering, which its own
+            // `(C, H]` bounds, and no slice of the region narrowed it further: keep the
+            // region-level floor instead of failing a read of our own data closed.
+            return Ok(None);
+        }
+        let (min_seq, max_seq) = match self.sequence_range {
+            Some(SequenceRange::GtLtEq { min, max }) => (min, max),
+            Some(SequenceRange::Gt { min }) => (min, 0),
+            Some(SequenceRange::LtEq { max }) => (0, max),
+            None => (0, 0),
+        };
+        let meta = file.meta_ref();
+        SequenceRangeUnsupportedSnafu {
+            region_id: self.region_metadata().region_id,
+            min_seq,
+            max_seq,
+            reason: format!(
+                "the physical-sequence read of adopted file {} has no cursor slice of its creator region {}, so its rows cannot be split into consumed and live ones",
+                meta.file_id, meta.region_id
+            ),
+        }
+        .fail()
     }
 
     fn range_pre_filter_mode(&self, source_count: usize) -> PreFilterMode {
@@ -2488,14 +2520,20 @@ fn cursor_slice_may_hold_file_rows(
 ///
 /// A physical-sequence read (`read_row_sequence`) keeps the file's own numbers instead, so a
 /// foreign file is never excluded here and is filtered by the creator's cursor
-/// ([`ScanInput::foreign_row_sequence_filter`]).
+/// ([`ScanInput::row_sequence_filter`]).
+///
+/// That filter bounds every file by the cursor of the piece each row belongs to, this region's
+/// own files included, but the exclusion above still uses the request's region-level floor `C`
+/// only: `C` is the least of a region's cursors, so a file is excluded only when every piece has
+/// consumed it whole. A file whose piece cursors differ is therefore kept — the conservative
+/// direction — and decided row by row instead.
 ///
 /// A **local** file may state a substitution as well: a merge substitutes a file-level constant
 /// for the rows of its foreign inputs and records the bound
 /// ([`crate::sst::file::substituted_up_to_after_merge`]). Such a file is attributable — the read
-/// hides the rows at or below the cut ([`ScanInput::substituted_sequence_cut`]) and the scan's
-/// own `(C, H]` bounds the rest — and keeps the region's exact range. A local file with neither
-/// the marker nor a cut, or a cut outside a physical-sequence read, keeps failing closed.
+/// hides the rows at or below the cut ([`ScanInput::substituted_sequence_cut`]) and the cursors
+/// of this region's pieces bound the rest — and keeps the region's exact range. A local file with
+/// neither the marker nor a cut, or a cut outside a physical-sequence read, keeps failing closed.
 pub(crate) fn exact_sequence_range(
     request: &ScanRequest,
     version: &crate::region::version::Version,

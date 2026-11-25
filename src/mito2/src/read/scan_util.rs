@@ -1622,11 +1622,13 @@ pub fn build_flat_file_range_scan_stream(
                     .substituted_sequence_cut(range.file_handle())
                     .map(|cut| (cut, windows))
             });
-            // Which rows of this file this round has already consumed: a local file uses the
-            // scan's own `(C, H]` on top of the cut above, a foreign file uses the creator's
-            // cursor slice (with or without a cut) and fails closed when it has none.
+            // Which rows of this file this round has already consumed: whichever region
+            // allocated a row's number decides, through the cursor of the piece the row
+            // belongs to (with or without the cut above). Only a file whose region states no
+            // cursor this scan can use falls back to the scan's own `(C, H]`, which bounds a
+            // local file's numbering, and fails closed for a foreign one.
             let (file_sequence_range, file_sequence_trusted) =
-                match stream_ctx.input.foreign_row_sequence_filter(range.file_handle())? {
+                match stream_ctx.input.row_sequence_filter(range.file_handle())? {
                     Some(creator_range) => (Some(creator_range), true),
                     None => (
                         stream_ctx.input.sequence_range,
