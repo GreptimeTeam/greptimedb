@@ -1035,11 +1035,7 @@ fn prepare_region_edit(region: &MitoRegionRef, edit: &mut RegionEdit) -> Result<
         &edit.series_indexes_to_add,
     )?;
     snafu::ensure!(
-        !edit
-            .series_indexes_to_add
-            .iter()
-            .any(|file| matches!(&file.format,
-            file::FileFormat::NarthexSeriesIndex(meta) if meta.window.is_some())),
+        edit.series_indexes_to_add.is_empty(),
         crate::error::InvalidRequestSnafu {
             region_id,
             reason: "only a pinned native maintenance build can publish sequence coverage",

@@ -84,16 +84,11 @@
             "sequence": 7,
             "format": {
               "narthex_series_index": {
-                "sources": [
-                  {
-                    "region_id": 98784247841,
-                    "file_id": "4b220a70-2b03-4641-9687-b65d94641201"
-                  },
-                  {
-                    "region_id": 98784247841,
-                    "file_id": "4b220a70-2b03-4641-9687-b65d94641202"
-                  }
-                ],
+                "window": {
+                  "start": 0,
+                  "end": 10,
+                  "max_sequence": 7
+                },
                 "manifest_size": 10,
                 "parts": [
                   {

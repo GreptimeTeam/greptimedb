@@ -18,7 +18,7 @@ With `sst_format = 'narthex'`, samples are authoritative SSTs. Each artifact own
 Each part record contains its encoded `file_size` in bytes.
 
 A native index file belongs to one fixed, epoch-aligned time window. Its region
-manifest entry stores `window` with inclusive `start` and exclusive `end` in
+manifest entry requires `window` with inclusive `start` and exclusive `end` in
 Unix seconds and the inclusive sequence watermark `max_sequence`. The region
 records `series_window_seconds` on first publication and retains it in
 checkpoints even after every index expires.
@@ -33,8 +33,6 @@ invalidates that window's indexes.
 
 Physical tag IDs and names are stored in the artifact manifest. The reader maps
 IDs to current label names and supplies null for newly added nullable labels.
-Older region manifest entries without `window` remain readable and are rebuilt
-from samples by maintenance.
 
 ## Wire specification
 

@@ -1710,7 +1710,7 @@ mod tests {
         assert_eq!(replaced.files.len(), 1);
         assert_eq!(replaced.series_indexes[&index.file_id].as_ref(), &index);
         assert_eq!(checkpoint.series_indexes.len(), 1);
-        assert!(index.series_window().is_none());
+        assert_eq!(Some(10), replaced.series_window_seconds);
         let bytes =
             include_bytes!("../../../../tests/compatibility/manifest/narthex/fixed-window.json");
         let (_, _, edit) = RegionMetaActionList::decode(bytes)

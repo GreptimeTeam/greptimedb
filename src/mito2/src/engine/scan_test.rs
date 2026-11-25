@@ -648,9 +648,9 @@ async fn test_narthex_incremental_index_after_compaction() -> WhateverResult<()>
     assert_eq!(indexed.ssts.series_indexes().len(), 2);
     assert!(indexed.ssts.series_indexes().contains_key(&index_id));
     assert!(indexed.ssts.series_indexes().values().any(|file| matches!(
-            &file.meta_ref().format, crate::sst::file::FileFormat::NarthexSeriesIndex(meta)
-                if meta.window.is_some_and(|w| w.start == window.start && w.max_sequence > window.max_sequence)
-        )));
+        &file.meta_ref().format, crate::sst::file::FileFormat::NarthexSeriesIndex(meta)
+            if meta.window.start == window.start && meta.window.max_sequence > window.max_sequence
+    )));
     series_reads.lock().unwrap().clear();
     engine
         .handle_request(region_id, build_series_index_request())

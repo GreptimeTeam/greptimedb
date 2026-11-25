@@ -430,7 +430,7 @@ impl SeriesIndexTask {
                 &region.access_layer,
                 metadata.clone(),
                 &sources,
-                Some(window),
+                window,
             )
             .await
             {

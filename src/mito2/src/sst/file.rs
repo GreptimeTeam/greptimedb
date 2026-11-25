@@ -331,9 +331,8 @@ pub struct NarthexSeriesIndexMeta {
     pub manifest_size: u64,
     /// Parts in part-ID order, starting at zero.
     pub parts: SmallVec<[NarthexPartMeta; 1]>,
-    /// Absent on older indexes that cannot certify sample coverage.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub window: Option<WindowSequence>,
+    /// Fixed time window and sequence watermark covered by this index.
+    pub window: WindowSequence,
 }
 
 /// Metadata of a SST file.
@@ -582,7 +581,7 @@ fn is_zero(version: &u8) -> bool {
 impl FileMeta {
     pub(crate) fn series_window(&self) -> Option<WindowSequence> {
         match &self.format {
-            FileFormat::NarthexSeriesIndex(meta) => meta.window,
+            FileFormat::NarthexSeriesIndex(meta) => Some(meta.window),
             _ => None,
         }
     }
@@ -1526,7 +1525,11 @@ mod tests {
             ],
         }));
         let series = FileFormat::NarthexSeriesIndex(Box::new(NarthexSeriesIndexMeta {
-            window: None,
+            window: WindowSequence {
+                start: 0,
+                end: 10,
+                max_sequence: 7,
+            },
             manifest_size: 5,
             parts: smallvec::smallvec![
                 NarthexPartMeta { file_size: 11 },

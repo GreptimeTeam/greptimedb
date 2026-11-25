@@ -101,9 +101,7 @@ pub(crate) async fn open_sources(
         let FileFormat::NarthexSeriesIndex(index) = &file.meta_ref().format else {
             continue;
         };
-        let Some(window) = index.window else {
-            continue;
-        };
+        let window = index.window;
         if file.region_id() != context.input.region_metadata().region_id
             || !indices
                 .iter()

@@ -172,7 +172,7 @@ pub(crate) async fn write_series(
     layer: &AccessLayer,
     metadata: store_api::metadata::RegionMetadataRef,
     sources: &[crate::sst::file::FileHandle],
-    window: Option<crate::sst::file::WindowSequence>,
+    window: crate::sst::file::WindowSequence,
 ) -> Result<crate::sst::file::FileMeta> {
     require(!sources.is_empty(), "narthex series index requires samples")?;
     require(
