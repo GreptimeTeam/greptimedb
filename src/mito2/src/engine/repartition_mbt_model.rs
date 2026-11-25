@@ -22,18 +22,22 @@
 //! - A *published region* has a domain (a range of the trace's own keys), a set of
 //!   *references*, and the keys of the rows it wrote and has not flushed yet (a memtable is
 //!   not a physical file). Every reference is an opaque physical-file id the model minted
-//!   itself plus the set of keys whose rows that reference authorizes inside that file
-//!   ([`KeyAuth`], `None` meaning the whole file).
+//!   itself plus the *authorization* of that reference: the set of keys of that physical file
+//!   the reference may read ([`KeyAuth`], `None` meaning the whole file). A reference is never
+//!   dropped by a transition; an authorization that admits no key is kept, because the engine
+//!   keeps the reference too.
 //! - `write` adds its rows' keys to the destination region's memtable.
-//! - `flush` turns a region's memtable into one new physical file authorized for exactly
-//!   the keys it holds.
-//! - `split(source, cut)` gives each target the source's references restricted to that
-//!   target's domain; a restriction that authorizes no row is not published.
-//! - `merge(inputs, survivor)` combines references per physical file and unions their
-//!   authorized sets.
+//! - `flush` turns a region's memtable into one new physical file authorized for the whole
+//!   file (`FileMeta::owned_range = None`), created by the flushing region.
+//! - `split(source, cut)` republishes each of the source's references in both targets with
+//!   `authorization ∩ source domain ∩ target domain`; the *source* term is elided exactly when
+//!   the source's domain is the file's creator domain (the reader skipped it), the **target**
+//!   term never is.
+//! - `merge(inputs, survivor)` applies the same narrowing per input and unions the
+//!   contributions of one physical file that arrive at the same target.
 //! - `region compaction(region)` is legal while the region holds a file another holder
-//!   keeps: the output is a *new* physical file carrying exactly the rows the region owns
-//!   (`domain ∩ authorized`), and the consumed references leave *that region only*.
+//!   keeps: the output is a *new* physical file carrying exactly the rows the region sees and
+//!   authorized for the whole file, and the consumed references leave *that region only*.
 //! - `import` publishes a byte copy of one of the region's own files under a new id, so the
 //!   region's authorized rows do not move; multi-region compaction is a byte copy of the
 //!   region's admitted inputs, so it does not move them either.
@@ -46,16 +50,16 @@
 //! - a referenced file contributes the rows whose partition key satisfies the region's domain,
 //!   *except* when the region's partition expression equals the file's creator expression:
 //!   `ScanRegion::should_skip_region_partition` (`src/mito2/src/read/scan_region.rs`) then
-//!   drops the whole partition predicate, so every physical row of that file is visible to the
-//!   region;
-//! - the contribution is intersected with what each reference authorizes, which on this branch
-//!   is the whole file: `FileMeta` carries no row range, so a reference authorizes every row of
-//!   the object it points at;
+//!   drops the whole partition predicate;
+//! - the contribution is *always* intersected with what each reference authorizes: the reader
+//!   conjoins a reference's `owned_range` into the file's partition filter even when it skipped
+//!   the region predicate (`SstParquetReader::build_partition_filter`), so dropping the region
+//!   predicate never widens a reference;
 //! - rows still in the memtable are always filtered by the domain, because the partition
 //!   predicate belongs to the memtable scan too;
-//! - `split` narrows a target to its domain, `merge` unions the inputs' references, and
-//!   compaction writes a new file holding exactly the rows the compacting region sees, removing
-//!   the consumed references from that region only.
+//! - `split` and `merge` narrow a reference to `authorized ∩ source ∩ target` (`merge` unions
+//!   the per-input contributions), and compaction writes a new file holding exactly the rows
+//!   the compacting region sees, removing the consumed references from that region only.
 //!
 //! The prediction is the model's statement *about* the engine, so it is kept apart from the
 //! judgement: neither the ledger oracle nor the invariant categories read it. The cases print
@@ -70,10 +74,11 @@
 //! # Model-side assertion (separate from the ledger oracle)
 //!
 //! [`RefModel::authorized_keys`] is the statement the drivers assert: a region's visible rows
-//! are a subset of the union of its own references' authorized sets (plus the keys of its own
-//! unflushed rows). That is "selecting a file does not authorize reading all of it", stated on
+//! are a subset of the keys its references authorize *in that region* plus the keys of its own
+//! unflushed rows. That is "selecting a file does not authorize reading all of it", stated on
 //! the model side: a split that hands both halves the same object still leaves each half
-//! authorized to read only its own rows.
+//! authorized to read only its own rows, and a reference whose authorization excludes a row
+//! keeps it invisible even where the region predicate is skipped.
 //!
 //! This statement and the ledger oracle are independent: the model derives from the
 //! transitions above only, the oracle from the ledger only, and neither hands a mutable
@@ -153,17 +158,39 @@ fn auth_keys(auth: &KeyAuth) -> BTreeSet<usize> {
     auth.clone().unwrap_or_else(key_universe)
 }
 
-/// `auth` restricted to the keys of `domain`.
+/// The keys of `domain`, i.e. what a region-domain term admits on its own.
+fn domain_keys(domain: Domain) -> BTreeSet<usize> {
+    (domain.lo..domain.hi).collect()
+}
+
+/// `auth` restricted to the keys of `domain`: `auth ∧ domain`, the restriction a region-domain
+/// term applies to a reference.
+fn auth_and_domain(auth: &KeyAuth, domain: Domain) -> KeyAuth {
+    match auth {
+        None => Some(domain_keys(domain)),
+        Some(keys) => Some(
+            keys.iter()
+                .copied()
+                .filter(|key| domain.contains_key(*key))
+                .collect(),
+        ),
+    }
+}
+
+/// The authorization a remap (split/merge publication) derives for one reference
+/// (`RemapManifest::narrowed_owned_range`, `src/mito2/src/remap_manifest.rs`):
+/// `old authorization ∩ source region domain ∩ target region domain`.
 ///
-/// The outer `None` means "not published": a reference left authorizing no row is dropped,
-/// so a split can hand out strictly fewer references than it was given. The inner
-/// [`KeyAuth`] keeps its own meaning (`None` = the whole file).
-fn auth_restrict(auth: &KeyAuth, domain: Domain) -> Option<KeyAuth> {
-    let keys: BTreeSet<usize> = auth_keys(auth)
-        .into_iter()
-        .filter(|key| domain.contains_key(*key))
-        .collect();
-    (!keys.is_empty()).then(|| Some(keys))
+/// `source` is [`None`] exactly when the source region's domain is the file's creator domain:
+/// the reader skipped that term for the source, so the source saw every physical row and the
+/// term must not be added back. The *target* term is never elided — it is what routes a row to
+/// this target.
+fn remapped_auth(auth: &KeyAuth, source: Option<Domain>, target: Domain) -> KeyAuth {
+    let narrowed = match source {
+        Some(source) => auth_and_domain(auth, source),
+        None => auth.clone(),
+    };
+    auth_and_domain(&narrowed, target)
 }
 
 /// The union of two authorizations of the *same* physical file.
@@ -222,7 +249,9 @@ pub(crate) const SHAPE_MERGE_RECOMBINES: &str = "merge of both holders after tha
 pub(crate) struct SpecRegion {
     /// The keys this region serves.
     pub(crate) domain: Domain,
-    /// Model-minted physical-file id -> the keys this region may read from that file.
+    /// Model-minted physical-file id -> the authorization of *this* region's reference to that
+    /// file: the keys of the file this region may read, `None` meaning the whole file. It is
+    /// `FileMeta::owned_range` on this branch and is advanced only by the transitions below.
     pub(crate) refs: BTreeMap<u64, KeyAuth>,
     /// Keys of the rows this region wrote and has not flushed. A memtable is not a
     /// physical file, so it is tracked apart from `refs` and counts as authorized.
@@ -257,12 +286,6 @@ pub(crate) struct RefModel<R: RegionKey> {
     /// partition key of each. Parallel to [`SpecRegion::memtable`], which keeps only the keys
     /// the authorization statement needs.
     pending: BTreeMap<R, BTreeMap<i64, usize>>,
-    /// The *engine's* reference set of each published region. A repartition copies every file
-    /// of a source into every target, so a target may reference a file none of whose rows fall
-    /// inside its domain; [`SpecRegion::refs`] is the tighter *authorization* view and drops
-    /// such a reference. The prediction is stated on this set, because this is what the reader
-    /// is handed.
-    engine_refs: BTreeMap<R, BTreeSet<u64>>,
     /// The shapes the transitions have driven the engine through.
     shapes: BTreeSet<&'static str>,
 }
@@ -274,7 +297,6 @@ impl<R: RegionKey> RefModel<R> {
             regions: BTreeMap::new(),
             files: BTreeMap::new(),
             pending: BTreeMap::new(),
-            engine_refs: BTreeMap::new(),
             shapes: BTreeSet::new(),
         }
     }
@@ -282,25 +304,22 @@ impl<R: RegionKey> RefModel<R> {
     /// What one region's scan sees, predicted by mirroring the engine of **this** branch.
     ///
     /// This is the single place the visibility rule lives, and it is deliberately stated
-    /// against the engine as it behaves here, not against an ideal engine:
+    /// against the engine as it behaves here:
     ///
-    /// - `ScanRegion::predicate_for_file` (`src/mito2/src/read/scan_region.rs`) hands a file
-    ///   its predicate *without* the region partition expression exactly when
+    /// - `ScanInput::predicate_for_file` (`src/mito2/src/read/scan_region.rs`) hands a file its
+    ///   predicate *without* the region partition expression exactly when
     ///   `should_skip_region_partition` holds, i.e. when the region's partition expression
-    ///   equals the file's creator expression. Then every physical row of that file is visible
-    ///   to the region, whatever the region's domain says;
-    /// - otherwise the file contributes the rows whose key satisfies the region's domain;
-    /// - the contribution is intersected with what the reference authorizes, which on this
-    ///   branch is the whole file: `FileMeta` has no row range (`owned_range`), so a reference
-    ///   authorizes every physical row of the object it points at. The model's own, tighter
-    ///   per-key authorization ([`SpecRegion::refs`]) is the *specification* statement that
-    ///   the drivers judge; comparing it with this prediction is exactly the per-reference
-    ///   divergence the cases print;
-    /// - rows still in the memtable are always filtered by the domain;
-    /// - the transitions mirror the rest: `split` narrows a target to its domain (its
-    ///   references keep pointing at the same objects), `merge` unions the inputs' references,
-    ///   and compaction writes a new file holding the rows the compacting region *sees* while
-    ///   removing the consumed references from that region only.
+    ///   equals the file's creator expression, so the region-domain term may be skipped;
+    /// - the reference's own authorization is applied in **both** cases:
+    ///   `SstParquetReader::build_partition_filter` conjoins `FileMeta::owned_range` into the
+    ///   file's partition filter even when the region predicate was skipped, so a reference
+    ///   never widens because the region expression matched its creator;
+    /// - rows still in the memtable are always filtered by the domain, because the memtable
+    ///   carries the region predicate of its own;
+    /// - the transitions advance the authorizations: `split` and `merge` narrow a reference to
+    ///   `authorized ∩ source ∩ target` (`merge` unions the per-input contributions of one
+    ///   file), and compaction writes a new file holding the rows the compacting region *sees*
+    ///   while removing the consumed references from that region only.
     ///
     /// `copies` is the number of physical rows of that event the scan returns, so an event that
     /// two referenced files both carry is reported twice instead of being counted once.
@@ -310,14 +329,13 @@ impl<R: RegionKey> RefModel<R> {
             return visible;
         };
         let domain = state.domain;
-        // A reference on this branch carries no row range, so its authorization is the whole
-        // file: `KeyAuth` `None`.
-        let reference_auth: KeyAuth = None;
-        let authorized = auth_keys(&reference_auth);
-        for file in self.engine_refs.get(&region).into_iter().flatten() {
+        for (file, auth) in &state.refs {
             let Some(physical) = self.files.get(file) else {
                 continue;
             };
+            // The reference's authorization, always applied: `owned_range` filters rows of the
+            // reference, not of the physical file.
+            let authorized = auth_keys(auth);
             // The mirror of `should_skip_region_partition`: equal expressions mean the reader
             // drops the region partition predicate for this file.
             let skips_partition = physical.creator == domain;
@@ -381,7 +399,6 @@ impl<R: RegionKey> RefModel<R> {
     /// `Create` / publication: the region serves `domain` and holds nothing yet.
     pub(crate) fn publish(&mut self, region: R, domain: Domain) {
         self.regions.insert(region, SpecRegion::new(domain));
-        self.engine_refs.insert(region, BTreeSet::new());
     }
 
     /// `write`: the rows land in the destination region's own memtable first.
@@ -399,8 +416,10 @@ impl<R: RegionKey> RefModel<R> {
             .insert(event_id, key);
     }
 
-    /// `flush`: the memtable becomes one new physical file, authorized for exactly the keys
-    /// it holds and created by this region. A flush with nothing to write publishes nothing.
+    /// `flush`: the memtable becomes one new physical file, created by this region and
+    /// authorized for the **whole** file — the engine writes `FileMeta::owned_range = None` for
+    /// a flush output, so nothing but the region predicate can hide a row of it. A flush with
+    /// nothing to write publishes nothing.
     pub(crate) fn flushed(&mut self, region: R) {
         let rows = self.pending.remove(&region).unwrap_or_default();
         let Some(state) = self.regions.get_mut(&region) else {
@@ -426,16 +445,17 @@ impl<R: RegionKey> RefModel<R> {
             .get_mut(&region)
             .expect("a flushed region is published")
             .refs
-            .insert(file, Some(keys));
-        self.engine_refs.entry(region).or_default().insert(file);
+            .insert(file, None);
     }
 
-    /// `split`: each target gets the source's references restricted to its own domain.
+    /// `split`: each target gets **every** reference of the source, re-authorized to
+    /// `authorized ∩ source domain ∩ target domain` (the rule `narrowed_owned_range` applies).
     ///
-    /// An empty restriction is not part of the *authorization* view, so a half whose rows all
-    /// fall on the other side of the cut is authorized to read nothing from the shared file.
-    /// The engine still hands that file to both halves (repartition copies every file of the
-    /// source into every target), so the engine view keeps it for both.
+    /// The source term is elided exactly when the source's domain is the file's creator domain:
+    /// the source scan skipped that predicate, so the source saw every physical row and the term
+    /// is true for it. The target term is never elided. A reference whose new authorization
+    /// admits no key is kept, because the engine keeps publishing it; it simply contributes no
+    /// row to either target.
     pub(crate) fn split(
         &mut self,
         source: R,
@@ -452,19 +472,19 @@ impl<R: RegionKey> RefModel<R> {
             "the model split region {source} with unflushed rows; a split must flush its \
              source first"
         );
-        let engine_refs = self.engine_refs.remove(&source).unwrap_or_default();
         let mut left_refs: BTreeMap<u64, KeyAuth> = BTreeMap::new();
         let mut right_refs: BTreeMap<u64, KeyAuth> = BTreeMap::new();
         for (file, auth) in &state.refs {
-            if let Some(restricted) = auth_restrict(auth, left_domain) {
-                left_refs.insert(*file, restricted);
+            let source_term = self.source_term(*file, state.domain);
+            let left_auth = remapped_auth(auth, source_term, left_domain);
+            let right_auth = remapped_auth(auth, source_term, right_domain);
+            // The shape fires when the same object is handed to both halves *and* both are
+            // still allowed to read a row of it: that is the sharing the cases exist for.
+            if !auth_keys(&left_auth).is_empty() && !auth_keys(&right_auth).is_empty() {
+                self.shapes.insert(SHAPE_SPLIT_SHARED);
             }
-            if let Some(restricted) = auth_restrict(auth, right_domain) {
-                right_refs.insert(*file, restricted);
-            }
-        }
-        if left_refs.keys().any(|file| right_refs.contains_key(file)) {
-            self.shapes.insert(SHAPE_SPLIT_SHARED);
+            left_refs.insert(*file, left_auth);
+            right_refs.insert(*file, right_auth);
         }
         self.regions.insert(
             left,
@@ -482,18 +502,27 @@ impl<R: RegionKey> RefModel<R> {
                 memtable: BTreeSet::new(),
             },
         );
-        // The engine view: every file of the source, for both halves.
-        self.engine_refs.insert(left, engine_refs.clone());
-        self.engine_refs.insert(right, engine_refs);
     }
 
-    /// `merge`: references combined per physical file, authorized sets unioned.
+    /// The *source* term of a remap, i.e. what the source region's scan admitted of `file`:
+    /// [`None`] when the source's domain is exactly the file's creator domain (the reader
+    /// skipped the region predicate there), the source domain otherwise.
+    fn source_term(&self, file: u64, source_domain: Domain) -> Option<Domain> {
+        match self.files.get(&file) {
+            Some(physical) if physical.creator == source_domain => None,
+            _ => Some(source_domain),
+        }
+    }
+
+    /// `merge`: the same remap rule applied to several sources at once — every input's
+    /// references are re-authorized by that input's source term and the survivor's domain, and
+    /// the contributions of **one** physical file that arrive at the survivor are *unioned*
+    /// (`RemapManifest::union_owned_range`): the survivor may read what either input could read.
     pub(crate) fn merge(&mut self, inputs: &[R], survivor: R) {
         let compacted_one_side = self.shapes.contains(SHAPE_ONE_SIDE_COMPACTION);
+        let survivor_domain = Domain::FULL;
         let mut refs: BTreeMap<u64, KeyAuth> = BTreeMap::new();
-        let mut engine_refs: BTreeSet<u64> = BTreeSet::new();
         for input in inputs {
-            engine_refs.extend(self.engine_refs.remove(input).unwrap_or_default());
             let Some(state) = self.regions.remove(input) else {
                 continue;
             };
@@ -503,11 +532,11 @@ impl<R: RegionKey> RefModel<R> {
                  inputs first"
             );
             for (file, auth) in state.refs {
-                // A reference is never empty, so the only merge to compute is the union;
-                // `None` (the whole file) absorbs everything else.
+                let source_term = self.source_term(file, state.domain);
+                let contribution = remapped_auth(&auth, source_term, survivor_domain);
                 let authorized = match refs.remove(&file) {
-                    Some(existing) => auth_union(&existing, &auth),
-                    None => auth,
+                    Some(existing) => auth_union(&existing, &contribution),
+                    None => contribution,
                 };
                 refs.insert(file, authorized);
             }
@@ -518,12 +547,11 @@ impl<R: RegionKey> RefModel<R> {
         self.regions.insert(
             survivor,
             SpecRegion {
-                domain: Domain::FULL,
+                domain: survivor_domain,
                 refs,
                 memtable: BTreeSet::new(),
             },
         );
-        self.engine_refs.insert(survivor, engine_refs);
     }
 
     /// A **retried** merge: the same inputs are remapped again after the first attempt was
@@ -531,38 +559,31 @@ impl<R: RegionKey> RefModel<R> {
     ///
     /// The inputs' persisted manifests did not move, so the retry republishes exactly the
     /// reference set the first attempt published: the same physical file ids, with the same
-    /// rows. That is why the state of the previous survivor is what the retry's survivor
-    /// starts from — no row is copied a second time, so a retry cannot add a third copy of an
-    /// event the first merge already published twice.
+    /// authorizations. A remap is idempotent (`auth ∩ source ∩ target` applied twice is the
+    /// same set), so that is why the state of the previous survivor is what the retry's
+    /// survivor starts from — no row is copied a second time and no authorization moves.
     pub(crate) fn retry_merge(&mut self, previous_survivor: R, survivor: R) {
         let Some(state) = self.regions.remove(&previous_survivor) else {
             return;
         };
-        let engine_refs = self
-            .engine_refs
-            .remove(&previous_survivor)
-            .unwrap_or_default();
         self.regions.insert(survivor, state);
-        self.engine_refs.insert(survivor, engine_refs);
     }
 
     /// `region compaction`: legal even while another holder keeps a file this region holds.
     ///
     /// The output is a *new* physical file holding exactly the rows the region **sees** — the
-    /// mirror of this branch's read path, so a row outside the region's domain that a
-    /// reference still exposes is copied into the output too. Its creator is the compacting
-    /// region, which is what makes the region's next scan skip the partition predicate for it.
-    /// The consumed references leave this region only, so every other holder keeps its own
+    /// mirror of this branch's read path, so a row the region sees because its reference
+    /// authorized it (or because the region predicate was skipped for it) is copied into the
+    /// output too. Its creator is the compacting region, which is what makes the region's next
+    /// scan skip the partition predicate for it, and it is authorized for the **whole** file:
+    /// it physically holds only what the region saw, so nothing narrower is needed. The
+    /// consumed references leave this region only, so every other holder keeps its own
     /// reference to the same files.
     pub(crate) fn compact(&mut self, region: R) {
         let Some(state) = self.regions.get(&region) else {
             return;
         };
-        if self
-            .engine_refs
-            .get(&region)
-            .is_none_or(|refs| refs.is_empty())
-        {
+        if state.refs.is_empty() {
             return;
         }
         let domain = state.domain;
@@ -572,11 +593,6 @@ impl<R: RegionKey> RefModel<R> {
             .copied()
             .filter(|file| self.holders_of(*file).len() > 1)
             .collect();
-        let mut owned = BTreeSet::new();
-        for auth in state.refs.values() {
-            owned.extend(auth_keys(auth));
-        }
-        owned.retain(|key| domain.contains_key(*key));
         if !shared.is_empty() {
             self.shapes.insert(SHAPE_ONE_SIDE_COMPACTION);
         }
@@ -597,19 +613,14 @@ impl<R: RegionKey> RefModel<R> {
             .get_mut(&region)
             .expect("the compacted region is published");
         state.refs.clear();
-        if !owned.is_empty() {
-            state.refs.insert(file, Some(owned));
-        }
-        self.engine_refs.insert(region, BTreeSet::from([file]));
+        state.refs.insert(file, None);
     }
 
     /// `import`: a byte copy of one of the region's own flushed files, published under a new
     /// physical id, while the original reference leaves the region in the same edit.
     ///
-    /// The region keeps exactly the rows it had, so only the identity of one reference
-    /// changes. Which reference the engine picked cannot change what any transition below
-    /// derives, because every one of them reads only intersections and unions of the
-    /// authorized sets.
+    /// The region keeps exactly the rows it had and the copy is authorized for exactly what
+    /// the original reference authorized, so only the identity of one reference changes.
     pub(crate) fn remint(&mut self, region: R) {
         let Some((file, auth)) = self.regions.get(&region).and_then(|state| {
             state
@@ -630,23 +641,38 @@ impl<R: RegionKey> RefModel<R> {
             .expect("an imported region is published");
         state.refs.remove(&file);
         state.refs.insert(new_file, auth);
-        if let Some(refs) = self.engine_refs.get_mut(&region) {
-            refs.remove(&file);
-            refs.insert(new_file);
-        }
     }
 
-    /// The keys `region` may read: the union of its references' authorizations plus the keys
-    /// of its own unflushed rows.
+    /// The keys `region` may read: for every reference, its authorization restricted to the
+    /// keys the region's own scan still applies a domain predicate to, plus the keys of its own
+    /// unflushed rows (the memtable is always filtered by the domain).
+    ///
+    /// The restriction matters because the region predicate is skipped exactly when the
+    /// region's domain is the file's creator domain; everywhere else `authorized ∩ domain` is
+    /// what a row must satisfy to be visible.
     pub(crate) fn authorized_keys(&self, region: R) -> BTreeSet<usize> {
         let mut keys = BTreeSet::new();
         let Some(state) = self.regions.get(&region) else {
             return keys;
         };
-        for auth in state.refs.values() {
-            keys.extend(auth_keys(auth));
+        for (file, auth) in &state.refs {
+            let applies_domain = self
+                .files
+                .get(file)
+                .is_none_or(|physical| physical.creator != state.domain);
+            if applies_domain {
+                keys.extend(auth_keys(&auth_and_domain(auth, state.domain)));
+            } else {
+                keys.extend(auth_keys(auth));
+            }
         }
-        keys.extend(state.memtable.iter().copied());
+        keys.extend(
+            state
+                .memtable
+                .iter()
+                .copied()
+                .filter(|key| state.domain.contains_key(*key)),
+        );
         keys
     }
 
@@ -663,7 +689,10 @@ impl<R: RegionKey> RefModel<R> {
                 let refs: Vec<String> = state
                     .refs
                     .iter()
-                    .map(|(file, auth)| format!("f{file} -> {}", describe_keys(&auth_keys(auth))))
+                    .map(|(file, auth)| match auth {
+                        None => format!("f{file} -> whole file"),
+                        Some(keys) => format!("f{file} -> {}", describe_keys(keys)),
+                    })
                     .collect();
                 format!(
                     "region {region} (domain [{}, {})): refs {refs:?}, unflushed keys {}",
@@ -721,7 +750,11 @@ mod tests {
         );
         spec.flushed(1);
         assert_eq!(BTreeMap::from([(0, 1)]), spec.predict_counts(1));
-        assert_eq!(BTreeSet::from([2]), spec.authorized_keys(1));
+        // A flush output is authorized for the whole file (rule 4 of the fixed engine), and
+        // its creator domain is the flushing region's, so the region predicate is skipped for
+        // it: the authorization statement is the whole universe, not the keys it holds.
+        assert_eq!(key_universe(), spec.authorized_keys(1));
+        assert!(spec.describe(1).contains("f0 -> whole file"));
         assert_eq!(BTreeSet::from([1]), spec.holders_of(0));
         // A flush with nothing to write publishes no file.
         spec.flushed(1);
@@ -754,33 +787,76 @@ mod tests {
     fn a_reference_only_contributes_the_rows_inside_the_holder_domain() {
         let mut spec = one_shared_file();
         spec.split(1, 2, Domain::new(0, 5), 3, Domain::new(5, 10));
-        // Both halves hold the same object, but each authorization covers its own rows only.
+        // Both halves hold the same object, but each authorization covers its own rows only:
+        // the split intersected the target domain into it.
         assert_eq!(BTreeSet::from([2, 3]), spec.holders_of(0));
-        assert_eq!(BTreeSet::from([2]), spec.authorized_keys(2));
-        assert_eq!(BTreeSet::from([8]), spec.authorized_keys(3));
+        assert_eq!(domain_keys(Domain::new(0, 5)), spec.authorized_keys(2));
+        assert_eq!(domain_keys(Domain::new(5, 10)), spec.authorized_keys(3));
         assert_eq!(BTreeMap::from([(0, 1)]), spec.predict_counts(2));
         assert_eq!(BTreeMap::from([(1, 1)]), spec.predict_counts(3));
         assert!(spec.shapes().contains(SHAPE_SPLIT_SHARED));
         assert!(spec.region(1).is_none());
     }
 
+    /// Rule 3: the reference authorization applies *even* when the region expression equals
+    /// the file's creator expression, i.e. even where the region predicate is skipped.
     #[test]
-    fn merge_after_one_side_compaction_duplicates_the_shared_row() {
+    fn a_reference_authorization_applies_even_when_the_region_expression_equals_the_creator() {
+        let mut spec = RefModel::<Rid>::new();
+        spec.publish(1, Domain::new(0, 5));
+        // Write admission checks the partition version, so the out-of-domain row is accepted.
+        spec.note_write(1, 0, 7);
+        spec.flushed(1);
+        // The creator domain equals the region's: the reader drops the region predicate, and
+        // the whole-file authorization lets the out-of-domain row through.
+        assert_eq!(BTreeMap::from([(0, 1)]), spec.predict_counts(1));
+
+        spec.split(1, 2, Domain::new(0, 5), 3, Domain::new(5, 10));
+        // Region 2 still serves exactly the file's creator domain, so its scan again skips the
+        // region predicate — but its reference now authorizes `[k00, k05)` only, and the row
+        // at `k07` is outside it. Skipping the region predicate never widens a reference.
+        assert_eq!(domain_keys(Domain::new(0, 5)), spec.authorized_keys(2));
+        assert!(spec.predict_counts(2).is_empty());
+        // Region 3's expression differs from the creator's, so it applies its own domain
+        // predicate; `k07` is inside `[k05, k10)` and inside its authorization, so it sees the
+        // row — the same physical row, visible through one reference and not the other.
+        assert_eq!(BTreeMap::from([(0, 1)]), spec.predict_counts(3));
+    }
+
+    /// Rule 5: a merge unions the authorizations of the references it combines, so one
+    /// physical file reaching the survivor from two holders is readable through both ranges.
+    #[test]
+    fn merge_unions_the_authorizations_of_the_same_physical_file() {
+        let mut spec = one_shared_file();
+        spec.split(1, 2, Domain::new(0, 5), 3, Domain::new(5, 10));
+        spec.merge(&[2, 3], 4);
+        // An intersection would authorize nothing and a single input's set would hide one of
+        // the two rows; the union admits both.
+        assert_eq!(key_universe(), spec.authorized_keys(4));
+        assert_eq!(BTreeMap::from([(0, 1), (1, 1)]), spec.predict_counts(4));
+        assert_eq!(1, spec.region(4).expect("published").refs.len());
+    }
+
+    #[test]
+    fn merge_after_one_side_compaction_keeps_the_shared_row_once() {
         let mut spec = one_shared_file();
         spec.split(1, 2, Domain::new(0, 5), 3, Domain::new(5, 10));
         spec.compact(2);
         assert!(spec.shapes().contains(SHAPE_ONE_SIDE_COMPACTION));
-        // The compacting half keeps its rows; the other half keeps the original object.
+        // The compacting half keeps only the row it saw; the other half keeps the object.
         assert_eq!(BTreeMap::from([(0, 1)]), spec.predict_counts(2));
         assert_eq!(BTreeSet::from([3]), spec.holders_of(0));
-        assert_eq!(BTreeSet::from([2]), spec.authorized_keys(2));
+        assert_eq!(BTreeSet::from([2]), spec.holders_of(1));
+        // The compaction output physically holds that row only, so the region may read the
+        // whole of it; its creator is the region, so the region predicate is skipped too.
+        assert_eq!(key_universe(), spec.authorized_keys(2));
 
         spec.merge(&[2, 3], 4);
         assert!(spec.shapes().contains(SHAPE_MERGE_RECOMBINES));
-        assert_eq!(BTreeSet::from([2, 8]), spec.authorized_keys(4));
-        // The survivor references both the original object and the copy, so the event the
-        // compaction rewrote is read twice: the row the model exists for.
-        assert_eq!(BTreeMap::from([(0, 2), (1, 1)]), spec.predict_counts(4));
+        // The survivor references the original object and the compaction copy. The original's
+        // authorization is the right half, so the row the copy rewrote at `k02` is read only
+        // through the copy: the fixed engine does not duplicate it.
+        assert_eq!(BTreeMap::from([(0, 1), (1, 1)]), spec.predict_counts(4));
     }
 
     #[test]
@@ -789,9 +865,11 @@ mod tests {
         spec.note_write(1, 0, 3);
         spec.flushed(1);
         let before = spec.predict_counts(1);
+        let before_keys = spec.authorized_keys(1);
         spec.remint(1);
         assert_eq!(before, spec.predict_counts(1));
-        assert_eq!(BTreeSet::from([3]), spec.authorized_keys(1));
+        // The copy carries the authorization of the reference it replaced.
+        assert_eq!(before_keys, spec.authorized_keys(1));
         assert_eq!(BTreeSet::from([1]), spec.holders_of(1));
         assert!(spec.holders_of(0).is_empty());
     }
@@ -809,17 +887,22 @@ mod tests {
         assert!(spec.region(4).is_none());
     }
 
+    /// A half whose share of the target domain holds no physical row: the reference is still
+    /// published (the engine keeps it), it just authorizes nothing that the file stores.
     #[test]
-    fn an_empty_split_target_is_published_without_authorization() {
+    fn a_split_target_whose_rows_all_stay_right_authorizes_nothing_it_stores() {
         let mut spec = RefModel::<Rid>::new();
         spec.publish(1, Domain::new(0, 10));
         spec.note_write(1, 0, 8);
         spec.flushed(1);
         spec.split(1, 2, Domain::new(0, 5), 3, Domain::new(5, 10));
-        assert!(spec.authorized_keys(2).is_empty());
+        // The left half holds the reference, but the reference authorizes its own half of the
+        // target domain and the file stores no row there.
+        assert_eq!(domain_keys(Domain::new(0, 5)), spec.authorized_keys(2));
         assert!(spec.predict_counts(2).is_empty());
-        assert!(spec.describe(2).contains("refs []"));
-        // A region that holds no reference compacts into nothing.
+        assert!(spec.describe(2).contains("f0 -> "));
+        assert_eq!(BTreeMap::from([(0, 1)]), spec.predict_counts(3));
+        // A region that sees no row compacts into an output file holding none.
         spec.compact(2);
         assert!(spec.predict_counts(2).is_empty());
         assert_eq!(BTreeMap::from([(0, 1)]), spec.predict_counts(3));

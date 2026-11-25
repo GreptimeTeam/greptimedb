@@ -180,8 +180,9 @@ struct RegionStep {
     predicted: BTreeMap<i64, u64>,
     /// A fresh scan of the same region, as `event id -> copies`.
     observed: BTreeMap<i64, u64>,
-    /// The keys the specification authorizes, which is tighter than the engine's "a reference
-    /// authorizes the whole file".
+    /// The keys the specification authorizes for this region: each reference's authorization
+    /// intersected with the region's own domain (unless the region predicate is skipped for
+    /// that file).
     authorized: BTreeSet<usize>,
     /// The engine's reference set, one line per file.
     references: Vec<String>,
@@ -1331,8 +1332,9 @@ impl StorageModel {
     /// The reference state the engine exposes for `region_id`: every file id with its creator
     /// domain, level, row count and admission sequence.
     ///
-    /// The authorized range a reference exposes on this branch is its creator domain:
-    /// `FileMeta::owned_range` does not exist, so there is no narrower range to report.
+    /// The *authorized* range of a reference is `FileMeta::owned_range`, which this driver
+    /// does not observe (its `SstRef` records the creator domain only), so it is not reported
+    /// here: the specification's own per-reference authorization is what the model asserts.
     fn describe_references(&self, region_id: RegionId) -> String {
         let Some(view) = self.holders.get(&region_id) else {
             return format!("region {region_id} (no observed references)");
@@ -1345,8 +1347,7 @@ impl StorageModel {
             .values()
             .map(|sst| {
                 format!(
-                    "{:?}(creator {}, authorized range = creator domain [{}, {}) on this branch, \
-                     L{}, rows={}, sequence={:?})",
+                    "{:?}(creator {}, creator domain [{}, {}), L{}, rows={}, sequence={:?})",
                     sst.file_id,
                     sst.owner,
                     key_name(sst.creator_domain.lo),
@@ -2205,12 +2206,14 @@ fn parse_seed_spec(spec: &str) -> Vec<u64> {
 /// merged into one survivor whose domain is the whole table.
 ///
 /// The specification names the same trace in its own vocabulary and is asserted at every
-/// step: after the flush `f0` authorizes `{k01, k09}`; after the split both halves hold `f0`
-/// but `P` authorizes only `{k01}` and `R` only `{k09}`; after compacting `R`, `R` holds a
-/// new file `f1` authorized `{k09}` while `P` still holds `f0`; after the merge the survivor
-/// holds `f0` authorized `{k01}` and `f1` authorized `{k09}`, and its rows stay inside that
-/// union. Those per-region statements are what "selecting a file does not authorize reading
-/// all of it" means, and they are why the ledger oracle below is the independent judge.
+/// step: after the flush `f0` is authorized for the whole file (a flush output carries no
+/// `owned_range`) and its creator is the source, so the source reads every row of it; after
+/// the split both halves hold `f0` but `P` is authorized only for `[k00, k05)` and `R` only
+/// for `[k05, k10)`; after compacting `R`, `R` holds a new file `f1` authorized for the whole
+/// of it (it physically holds only what `R` saw) while `P` still holds `f0`; after the merge
+/// the survivor holds `f0` authorized `[k00, k05)` and `f1` authorized for the whole file.
+/// Those per-region statements are what "selecting a file does not authorize reading all of
+/// it" means, and they are why the ledger oracle below is the independent judge.
 ///
 /// The ledger expectation is exactly `{A: 1, B: 1}` and it never relaxes: a fix that
 /// refuses the compaction instead of rewriting it still has to make this assertion pass.
@@ -2250,13 +2253,15 @@ async fn test_mbt_split_shared_sst_single_side_compaction_duplicates_after_merge
         "the flush must produce exactly one SST, got {source_files:?}"
     );
     let shared = *source_files.iter().next().unwrap();
-    // The specification: one model file authorized for exactly the two keys it holds.
+    // The specification: one model file authorized for the *whole* file, because a flush
+    // output carries no `owned_range`; its creator is the source, so the source's own scan
+    // skips the partition predicate and sees every row of it.
     let spec_shared = model.spec.region(source).expect("the source is published");
     assert_eq!(Domain::FULL, spec_shared.domain);
     assert_eq!(
-        vec![Some(BTreeSet::from([1, 9]))],
+        vec![None],
         spec_shared.refs.values().cloned().collect::<Vec<_>>(),
-        "the flush must mint one model file authorized for its own keys: {:?}",
+        "the flush must mint one model file authorized for the whole file: {:?}",
         model.spec.describe(source)
     );
     let spec_file = *spec_shared.refs.keys().next().unwrap();
@@ -2301,12 +2306,12 @@ async fn test_mbt_split_shared_sst_single_side_compaction_duplicates_after_merge
         .region(right)
         .expect("the right half is published");
     assert_eq!(
-        BTreeMap::from([(spec_file, Some(BTreeSet::from([1])))]),
+        BTreeMap::from([(spec_file, Some((0..5).collect()))]),
         spec_left.refs,
         "the left half must authorize only the rows of its own domain"
     );
     assert_eq!(
-        BTreeMap::from([(spec_file, Some(BTreeSet::from([9])))]),
+        BTreeMap::from([(spec_file, Some((5..10).collect()))]),
         spec_right.refs,
         "the right half must authorize only the rows of its own domain"
     );
@@ -2379,7 +2384,7 @@ async fn test_mbt_split_shared_sst_single_side_compaction_duplicates_after_merge
         .region(right)
         .expect("the right half is published");
     assert_eq!(
-        BTreeMap::from([(spec_file, Some(BTreeSet::from([1])))]),
+        BTreeMap::from([(spec_file, Some((0..5).collect()))]),
         spec_left.refs,
         "the un-compacted half must keep the original file, still restricted to its rows"
     );
@@ -2395,9 +2400,10 @@ async fn test_mbt_split_shared_sst_single_side_compaction_duplicates_after_merge
             )
         });
     assert_eq!(
-        BTreeMap::from([(spec_copy, Some(BTreeSet::from([9])))]),
+        BTreeMap::from([(spec_copy, None)]),
         spec_right.refs,
-        "the compaction output authorizes the rows the region owns, not the whole file"
+        "a compaction output holds exactly the rows the region saw and is authorized for the \
+         whole of it"
     );
     assert_eq!(
         BTreeSet::from([right]),
@@ -2428,27 +2434,29 @@ async fn test_mbt_split_shared_sst_single_side_compaction_duplicates_after_merge
     model.assert_model_authorization(&ctx).await;
     // The specification: the survivor holds the original file (authorized only for the rows
     // the remaining holder authorized, because the compacted half's reference left it) and
-    // the compaction's output (authorized for the rows that half owns). The original object
-    // physically carries *both* rows, so the survivor reads a row the reference is not
-    // authorized for and the union covers it — authorization is not counting, which is why
-    // the oracle below is the judge of "exactly once".
+    // the compaction's output (authorized for the whole of it, since it physically holds only
+    // what the compacted half saw). The original object physically carries *both* rows, but
+    // its reference admits only the left half's, and the copy admits only event B: the
+    // survivor reads each event once.
     let spec_merged = model
         .spec
         .region(merged)
         .expect("the survivor is published");
     assert_eq!(
         BTreeMap::from([
-            (spec_file, Some(BTreeSet::from([1]))),
-            (spec_copy, Some(BTreeSet::from([9]))),
+            (spec_file, Some((0..5).collect())),
+            // A remap always intersects the target expression, so the copy's whole-file
+            // authorization becomes the survivor's own domain rather than staying `None`.
+            (spec_copy, Some((0..KEY_COUNT).collect())),
         ]),
         spec_merged.refs,
         "the merge must combine the references per physical file: {:?}",
         model.spec.describe(merged)
     );
     assert_eq!(
-        BTreeSet::from([1, 9]),
+        (0..KEY_COUNT).collect::<BTreeSet<_>>(),
         model.spec.authorized_keys(merged),
-        "together the references authorize every key the survivor serves"
+        "together the references authorize every key the wholly-authorized copy serves"
     );
     assert!(
         model.spec.shapes().contains(SHAPE_MERGE_RECOMBINES),
@@ -2457,7 +2465,8 @@ async fn test_mbt_split_shared_sst_single_side_compaction_duplicates_after_merge
     );
     // The prediction of this branch's engine rule next to the observation: the survivor reads
     // the original file without its partition predicate (its creator expression is the whole
-    // domain) *and* the compaction's copy, so the row the right half owned is predicted twice.
+    // domain) but through its `[k00, k05)` authorization, and the compaction's copy through a
+    // whole-file authorization, so each event is read once.
     // Printed, never asserted here: the ledger oracle below is the judge of "exactly once".
     common_telemetry::info!(
         "[mbt-dup-row-mvp] predicted visibility of the survivor: {:?}",
@@ -2480,9 +2489,10 @@ async fn test_mbt_split_shared_sst_single_side_compaction_duplicates_after_merge
 /// prediction then follows the mirror of this branch's read path: the flush's file is created
 /// by that region, so the region's expression equals the file's creator expression and the scan
 /// skips the partition predicate, showing the out-of-domain row. The split narrows both halves
-/// to their own domains, so the row becomes invisible in every region (the ledger oracle
-/// reports it missing), and the merge into a whole-domain survivor brings it back together with
-/// a second copy of the row the one-side compaction already published.
+/// to their own domains *and* intersects that domain into each reference, so the row becomes
+/// invisible in every region (the ledger oracle reports it missing) and stays invisible after
+/// the merge into a whole-domain survivor: the compaction's copy holds only the rows the
+/// compacting half saw.
 #[tokio::test]
 async fn test_mbt_case_out_of_domain_row() {
     common_telemetry::init_default_ut_logging();
@@ -2613,14 +2623,16 @@ async fn test_mbt_case_out_of_domain_row() {
         .await;
     agreed &= step.mismatched().is_empty();
     assert_eq!(
-        BTreeMap::from([(in_ids[0], 2), (in_ids[1], 1), (out_id, 1)]),
+        BTreeMap::from([(in_ids[0], 1), (in_ids[1], 1)]),
         model.spec.predict_counts(merged),
-        "the whole-domain survivor applies no target domain, so the shared file (creator \
-         [k00, k05)) shows all of its rows while the compaction's copy still holds one of them"
+        "the survivor reads the compaction's copy (authorized for the whole of it) and the \
+         shared file through the right half's authorization only, so each in-domain row is read \
+         once and the out-of-domain row stays unreadable"
     );
     assert!(
         step.oracle_fired(),
-        "the ledger oracle must report the row the one-side compaction duplicated"
+        "the ledger oracle must still report the out-of-domain row the split made unreadable: \
+         no reference of the survivor authorizes it"
     );
     assert!(
         agreed,
@@ -2636,8 +2648,9 @@ async fn test_mbt_case_out_of_domain_row() {
 /// `A -> B1/B2` hands the whole-domain file to both halves; compacting `B2` materializes a file
 /// *created by* `B2`, so a later split of the merge survivor at the same cut produces a target
 /// whose domain equals that file's creator expression — the one case in which the reader skips
-/// the partition predicate. That target then shows both the shared file's rows and the copy's
-/// rows, which the ledger oracle reports as duplicates.
+/// the region partition predicate. Its reference is still authorized only for that target's
+/// range, so the target shows the copy's rows once: skipping the predicate never widens a
+/// reference, and the ledger oracle reports no duplicate.
 #[tokio::test]
 async fn test_mbt_case_two_hop_split() {
     common_telemetry::init_default_ut_logging();
@@ -2719,14 +2732,15 @@ async fn test_mbt_case_two_hop_split() {
         model.spec.predict_counts(c1)
     );
     assert_eq!(
-        BTreeMap::from([(ids[2], 2), (ids[3], 2)]),
+        BTreeMap::from([(ids[2], 1), (ids[3], 1)]),
         model.spec.predict_counts(c2),
         "C2's domain equals the creator expression of the compaction's file, so the reader \
-         skips the partition predicate for it while the shared file still shows its rows too"
+         skips the region predicate for it — but its reference is authorized only for C2's own \
+         range, and the shared file's reference is authorized only for C1's"
     );
     assert!(
-        step.oracle_fired(),
-        "the ledger oracle must report the duplicated rows of the second split"
+        !step.oracle_fired(),
+        "no row was lost or duplicated by the second split: each half reads its own rows once"
     );
     assert!(
         agreed,
@@ -2738,10 +2752,11 @@ async fn test_mbt_case_two_hop_split() {
 /// Case 3: copies across three generations, `F0 -> F1 -> F2`.
 ///
 /// The whole-domain flush publishes `F0`; compacting one half materializes `F1` (created by
-/// that half); merging both halves and compacting the survivor materializes `F2` (created by
-/// the survivor), which physically holds *two* copies of the row both `F0` and `F1` carried.
-/// Every scan of `F2` skips the partition predicate, because its creator expression is the
-/// survivor's own.
+/// that half) holding exactly the rows that half saw; merging both halves and compacting the
+/// survivor materializes `F2` (created by the survivor), which physically holds one copy of
+/// each row the survivor read — the merge sees each row once, because the reference to `F0` is
+/// authorized for the right half only. Every scan of `F2` skips the partition predicate,
+/// because its creator expression is the survivor's own.
 #[tokio::test]
 async fn test_mbt_case_multi_generation_copies() {
     common_telemetry::init_default_ut_logging();
@@ -2792,10 +2807,11 @@ async fn test_mbt_case_multi_generation_copies() {
         .await;
     agreed &= step.mismatched().is_empty();
     assert_eq!(
-        BTreeMap::from([(ids[0], 2), (ids[1], 1)]),
+        BTreeMap::from([(ids[0], 1), (ids[1], 1)]),
         model.spec.predict_counts(survivor),
-        "F2 is created by the survivor, which holds both the shared file and the copy: the row \
-         both of them carry is physically in F2 twice"
+        "F2 is created by the survivor and holds exactly the rows it read: the reference to the \
+         shared file is authorized for the right half only, so the row the copy carries is read \
+         once"
     );
 
     // Generation 3: split the survivor, then merge both halves again.
@@ -2804,7 +2820,7 @@ async fn test_mbt_case_multi_generation_copies() {
         .record_step(CASE, "after splitting F2", &mut report)
         .await;
     agreed &= step.mismatched().is_empty();
-    assert_eq!(BTreeMap::from([(ids[0], 2)]), model.spec.predict_counts(p));
+    assert_eq!(BTreeMap::from([(ids[0], 1)]), model.spec.predict_counts(p));
     assert_eq!(BTreeMap::from([(ids[1], 1)]), model.spec.predict_counts(q));
 
     let rejoined = model.merge_all().await;
@@ -2813,14 +2829,14 @@ async fn test_mbt_case_multi_generation_copies() {
         .await;
     agreed &= step.mismatched().is_empty();
     assert_eq!(
-        BTreeMap::from([(ids[0], 2), (ids[1], 1)]),
+        BTreeMap::from([(ids[0], 1), (ids[1], 1)]),
         model.spec.predict_counts(rejoined),
-        "the whole-domain survivor reads F2 without a partition predicate, so both physical \
-         copies of the shared row are visible"
+        "the survivor reads F2 without a partition predicate and the union of both halves' \
+         authorizations, and F2 holds one physical copy of each row"
     );
     assert!(
-        step.oracle_fired(),
-        "the ledger oracle must report the row the generations duplicated"
+        !step.oracle_fired(),
+        "no row was lost or duplicated by the three generations"
     );
     assert!(
         agreed,
@@ -2832,10 +2848,11 @@ async fn test_mbt_case_multi_generation_copies() {
 
 /// Case 4: the same merge twice, and a merge followed immediately by a split at the same cut.
 ///
-/// The first merge publishes the survivor; the retry re-runs the same remap over the same
-/// inputs, so it must republish the same file ids and add no third copy. Splitting right after
-/// the merge at the cut the shape started from gives a target whose domain equals the creator
-/// expression of the compaction's file again.
+/// The first merge publishes the survivor, reading each event once: the shared file's reference
+/// is authorized for the right half and the compaction's copy for the whole of itself. The retry
+/// re-runs the same remap over the same inputs, so it must republish the same file ids and the
+/// same authorizations. Splitting right after the merge at the cut the shape started from gives
+/// a target whose domain equals the creator expression of the compaction's file again.
 #[tokio::test]
 async fn test_mbt_case_repeated_merge() {
     common_telemetry::init_default_ut_logging();
@@ -2878,7 +2895,7 @@ async fn test_mbt_case_repeated_merge() {
         .await;
     agreed &= step.mismatched().is_empty();
     assert_eq!(
-        BTreeMap::from([(ids[0], 2), (ids[1], 1)]),
+        BTreeMap::from([(ids[0], 1), (ids[1], 1)]),
         model.spec.predict_counts(first)
     );
 
@@ -2900,10 +2917,10 @@ async fn test_mbt_case_repeated_merge() {
         .await;
     agreed &= step.mismatched().is_empty();
     assert_eq!(
-        BTreeMap::from([(ids[0], 2), (ids[1], 1)]),
+        BTreeMap::from([(ids[0], 1), (ids[1], 1)]),
         model.spec.predict_counts(retried),
-        "a retry republishes the reference set the first attempt published, so it adds no third \
-         copy of the row the first merge already duplicated"
+        "a retry republishes the reference set the first attempt published, so no row is copied \
+         or re-authorized a second time"
     );
 
     // Merge then immediately split on the same cut.
@@ -2917,18 +2934,19 @@ async fn test_mbt_case_repeated_merge() {
         .await;
     agreed &= step.mismatched().is_empty();
     assert_eq!(
-        BTreeMap::from([(ids[0], 2)]),
+        BTreeMap::from([(ids[0], 1)]),
         model.spec.predict_counts(again_left),
         "the compaction's file was created by the left half, so the left target skips the \
-         partition predicate for it and shows both physical copies"
+         partition predicate for it, while its reference (and the shared file's) is authorized \
+         for the left half only"
     );
     assert_eq!(
         BTreeMap::from([(ids[1], 1)]),
         model.spec.predict_counts(again_right)
     );
     assert!(
-        step.oracle_fired(),
-        "the ledger oracle must report the duplicated row"
+        !step.oracle_fired(),
+        "no row was lost or duplicated by the merge, the retry or the split that followed"
     );
     assert!(
         agreed,
@@ -2939,9 +2957,9 @@ async fn test_mbt_case_repeated_merge() {
 
 /// Case 5: a split target that receives no rows at all.
 ///
-/// The engine still hands the shared file to that half (repartition copies every file of the
-/// source into every target), so the observed invariant category reports the reference, while
-/// the specification's authorization view drops it. The prediction is empty either way, and it
+/// The engine hands the shared file to that half (repartition copies every file of the source
+/// into every target) narrowed to the half's own domain, so the specification publishes the
+/// same reference and it authorizes no row the file stores. The prediction is empty, and it
 /// stays empty when the empty half compacts the file it cannot read.
 #[tokio::test]
 async fn test_mbt_case_empty_domain() {
@@ -2981,14 +2999,16 @@ async fn test_mbt_case_empty_domain() {
         !model.holder_files(empty).is_empty(),
         "the engine hands the shared file to the half that receives no rows"
     );
-    assert!(
+    assert_eq!(
+        1,
         model
             .spec
             .region(empty)
             .expect("the empty half is published")
             .refs
-            .is_empty(),
-        "the specification authorizes no reference for it: {}",
+            .len(),
+        "the specification publishes the reference the engine hands it, narrowed to the half's \
+         domain: {}",
         model.spec.describe(empty)
     );
 
@@ -3102,10 +3122,11 @@ async fn test_mbt_case_same_key_and_timestamp() {
         .await;
     agreed &= step.mismatched().is_empty();
     assert_eq!(
-        BTreeMap::from([(a, 2), (b, 2)]),
+        BTreeMap::from([(a, 1), (b, 1)]),
         model.spec.predict_counts(merged),
-        "the merge keeps the shared file and the compaction's copy, so each of the two events \
-         is visible twice - but never collapsed into one row"
+        "the merge keeps the shared file and the compaction's copy, but the shared file's \
+         reference is authorized for the right half only: each of the two events is visible \
+         once, and never collapsed into one row"
     );
     assert!(
         agreed,
@@ -3207,13 +3228,13 @@ async fn chaos_variant_a_original_file_holder() {
         .await;
     agreed &= step.mismatched().is_empty();
     assert_eq!(
-        BTreeMap::from([(ids[0], 2), (ids[1], 1)]),
+        BTreeMap::from([(ids[0], 1), (ids[1], 1)]),
         model.spec.predict_counts(merged),
         "the reopen changed neither the reference set nor the prediction"
     );
     assert!(
-        step.oracle_fired(),
-        "the ledger oracle must report the duplicated row of the one-side compaction"
+        !step.oracle_fired(),
+        "the one-side compaction and the reopen lose and duplicate no row"
     );
     assert_chaos_agreed(agreed, &report);
 }
@@ -3316,14 +3337,14 @@ async fn chaos_variant_b_interleaved_flush() {
         .await;
     agreed &= step.mismatched().is_empty();
     assert_eq!(
-        BTreeMap::from([(ids[0], 2), (late[0], 1), (ids[1], 1), (late[1], 1)]),
+        BTreeMap::from([(ids[0], 1), (late[0], 1), (ids[1], 1), (late[1], 1)]),
         model.spec.predict_counts(merged),
-        "the survivor holds the shared file, the right half's interleaved flush and the \
-         compaction's copy"
+        "the survivor holds the shared file (authorized for the right half), the right half's \
+         interleaved flush and the compaction's copy of the left half's rows"
     );
     assert!(
-        step.oracle_fired(),
-        "the ledger oracle must report the duplicated row"
+        !step.oracle_fired(),
+        "the interleaved flush and the one-side compaction lose and duplicate no row"
     );
     assert_chaos_agreed(agreed, &report);
 }
@@ -3377,7 +3398,7 @@ async fn chaos_variant_c_merge_retry() {
         .await;
     agreed &= step.mismatched().is_empty();
     assert_eq!(
-        BTreeMap::from([(ids[0], 2), (ids[1], 1)]),
+        BTreeMap::from([(ids[0], 1), (ids[1], 1)]),
         model.spec.predict_counts(first),
         "the reopened survivor sees what the first merge published"
     );
@@ -3398,7 +3419,7 @@ async fn chaos_variant_c_merge_retry() {
         "the retry republishes the same file ids, so it cannot add a third copy"
     );
     assert_eq!(
-        BTreeMap::from([(ids[0], 2), (ids[1], 1)]),
+        BTreeMap::from([(ids[0], 1), (ids[1], 1)]),
         model.spec.predict_counts(retried),
         "the retried merge republishes exactly what the first attempt published"
     );
