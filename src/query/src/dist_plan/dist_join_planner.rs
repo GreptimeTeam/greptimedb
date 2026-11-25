@@ -337,26 +337,16 @@ pub(crate) fn restore_join_schema(
 /// side of the broadcast join).
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::sync::Arc;
 
-    use arrow_schema::extension::{
-        EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, ExtensionType as _,
-    };
-    use arrow_schema::{DataType, Field, Fields, Schema};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_meta::datanode::RegionManifestInfo;
     use common_meta::rpc::router::Region;
     use datafusion::datasource::DefaultTableSource;
-    use datafusion_common::config::ConfigOptions;
-    use datafusion_common::{DFSchema, DFSchemaRef, NullEquality, TableReference};
+    use datafusion_common::{DFSchemaRef, NullEquality, TableReference};
     use datafusion_expr::JoinConstraint;
-    use datafusion_expr::{
-        Expr, LogicalPlanBuilder, ScalarFunctionArgs, ScalarUDFImpl, Signature, Volatility,
-        build_join_schema, col, lit,
-    };
+    use datafusion_expr::{Expr, LogicalPlanBuilder, build_join_schema, col, lit};
     use datatypes::data_type::ConcreteDataType;
-    use datatypes::extension::json::JsonExtensionType;
     use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
     use pretty_assertions::assert_eq;
     use table::TableRef;
@@ -434,35 +424,6 @@ mod tests {
             null_equality: NullEquality::NullEqualsNothing,
             null_aware: false,
         })
-    }
-
-    #[derive(Debug, PartialEq, Eq, Hash)]
-    struct VolatileTestUdf;
-
-    impl ScalarUDFImpl for VolatileTestUdf {
-        fn name(&self) -> &str {
-            "volatile_test_udf"
-        }
-
-        fn signature(&self) -> &Signature {
-            static SIGNATURE: std::sync::LazyLock<Signature> = std::sync::LazyLock::new(|| {
-                Signature::uniform(1, vec![DataType::UInt32], Volatility::Volatile)
-            });
-            &SIGNATURE
-        }
-
-        fn return_type(&self, _arg_types: &[DataType]) -> datafusion_common::Result<DataType> {
-            Ok(DataType::Float64)
-        }
-
-        fn invoke_with_args(
-            &self,
-            _args: ScalarFunctionArgs,
-        ) -> datafusion_common::Result<datafusion_expr::ColumnarValue> {
-            Ok(datafusion_expr::ColumnarValue::Scalar(
-                datafusion_common::ScalarValue::Float64(Some(0.5)),
-            ))
-        }
     }
 
     /// Original output columns with the same basename but distinct qualifiers remain
@@ -593,13 +554,6 @@ mod tests {
         DistJoinStats {
             tables: tables.iter().copied().collect(),
         }
-    }
-
-    /// Config with the given statistics, as `create_physical_plan` inserts them.
-    fn stats_config(tables: &[(TableId, DistJoinTableStats)]) -> ConfigOptions {
-        let mut config = ConfigOptions::default();
-        config.extensions.insert(stats(tables));
-        config
     }
 
     /// A region route of the tests.
@@ -980,25 +934,5 @@ mod tests {
         for (name, plan, expected) in cases {
             assert_eq!(expected, candidate_joins(&plan), "case: {name}");
         }
-    }
-
-    /// A one-column JSON2 boundary schema, as `JsonSchemaConcretizeRule` expects to fix up.
-    fn json2_boundary_schema() -> DFSchemaRef {
-        let field = Field::new("j", DataType::Struct(Fields::empty()), true).with_metadata(
-            HashMap::from([
-                (
-                    EXTENSION_TYPE_NAME_KEY.to_string(),
-                    JsonExtensionType::NAME.to_string(),
-                ),
-                (
-                    EXTENSION_TYPE_METADATA_KEY.to_string(),
-                    serde_json::json!({ "json_structure_settings": { "Structured": null } })
-                        .to_string(),
-                ),
-            ]),
-        );
-        let schema = DFSchema::try_from(Schema::new(vec![field])).unwrap();
-
-        DFSchemaRef::new(schema)
     }
 }

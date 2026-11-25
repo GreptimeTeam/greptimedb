@@ -726,15 +726,6 @@ fn partition_column_types(table_info: &TableInfo) -> Vec<(String, ConcreteDataTy
         .collect()
 }
 
-/// Returns the resolved name of the first base table found in `plan`.
-#[cfg(test)]
-pub(crate) fn table_name_of(plan: &LogicalPlan) -> Option<TableName> {
-    let mut extractor = TableScanExtractor::default();
-    let _ = plan.visit(&mut extractor).ok()?;
-
-    extractor.table_name
-}
-
 /// Extract the scan name and captured table identity from a logical plan.
 #[derive(Default)]
 struct TableScanExtractor {
@@ -1062,23 +1053,6 @@ mod tests {
 
         let (regions, _) = planner.get_regions(&table_name, &plan).await.unwrap();
         assert_eq!(vec![RegionId::new(LOGICAL_TABLE_ID, 1)], regions);
-    }
-
-    /// Scans the table of `plan` under the qualifier `build` with the same probe predicate,
-    /// so a join of both sides has distinct field qualifiers.
-    fn build_side_plan(plan: &LogicalPlan) -> LogicalPlan {
-        let LogicalPlan::Filter(filter) = plan else {
-            panic!("expected the probe plan to be a filter, got: {plan}");
-        };
-        let LogicalPlan::TableScan(scan) = filter.input.as_ref() else {
-            panic!("expected the probe plan to scan a table, got: {plan}");
-        };
-        LogicalPlanBuilder::scan_with_filters("build", scan.source.clone(), None, vec![])
-            .unwrap()
-            .filter(filter.predicate.clone())
-            .unwrap()
-            .build()
-            .unwrap()
     }
 
     #[tokio::test]
