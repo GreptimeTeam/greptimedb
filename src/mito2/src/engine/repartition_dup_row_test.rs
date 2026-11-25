@@ -38,7 +38,7 @@
 //!   physical object immediately, which is the same gap seen from its worst side: the
 //!   other holder's rows become unreadable instead of being counted twice.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use api::v1::Rows;
 use api::v1::region::{StrictWindow, compact_request};
@@ -46,11 +46,11 @@ use common_recordbatch::RecordBatches;
 use datatypes::arrow::array::AsArray;
 use datatypes::arrow::datatypes::Float64Type;
 use datatypes::value::Value;
-use partition::expr::{PartitionExpr, col};
+use partition::expr::{Operand, PartitionExpr, RestrictedOp, col};
 use store_api::region_engine::{RegionEngine, RemapManifestsRequest, SettableRegionRoleState};
 use store_api::region_request::{
-    ApplyStagingManifestRequest, EnterStagingRequest, RegionCompactRequest, RegionFlushRequest,
-    RegionRequest, StagingPartitionDirective,
+    ApplyStagingManifestRequest, EnterStagingRequest, RegionCompactRequest, RegionCreateRequest,
+    RegionFlushRequest, RegionRequest, StagingPartitionDirective,
 };
 use store_api::storage::{FileId, RegionId};
 
@@ -387,4 +387,491 @@ async fn apply_staging_manifest_prepare(
         )
         .await
         .unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Two-generation regression: split -> compact -> merge -> split -> compact -> merge
+//
+// The single-generation case above is not enough to pin the invariant. A merge hands
+// the surviving references to a fresh region, that region repartitions again, and one
+// of *its* halves materializes a reference into a new physical file once more. Each
+// hop rewrites `owned_range` (intersections on a split, unions on a merge), so a
+// second generation can lose the authorization that kept a row single-counted even
+// when the first one preserves it.
+// ---------------------------------------------------------------------------
+
+/// Which half of the second generation the scenario rewrites.
+#[derive(Clone, Copy, Debug)]
+enum Gen2Compaction {
+    /// Rewrites the half that holds generation 1's materialized copy.
+    CompactedHalf,
+    /// Rewrites the half that still holds the shared original.
+    OriginalHalf,
+}
+
+/// One persisted manifest entry, reduced to what a reference-overlap check needs.
+#[derive(Debug, Clone)]
+struct ManifestEntry {
+    file_id: FileId,
+    /// The region that created the physical file, not the region currently holding it.
+    creator: RegionId,
+    level: u8,
+    /// `None` means "every physical row".
+    owned_range: Option<PartitionExpr>,
+}
+
+impl ManifestEntry {
+    /// `file_id / creator / level / owned_range` on one line, for failure messages.
+    fn describe(&self) -> String {
+        format!(
+            "file_id={}, creator={}, level={}, owned_range={}",
+            self.file_id,
+            self.creator,
+            self.level,
+            self.owned_range
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "None (every physical row)".to_string()),
+        )
+    }
+}
+
+/// The persisted manifest of a live region, sorted by file id.
+async fn manifest_entries(
+    engine: &crate::engine::MitoEngine,
+    region_id: RegionId,
+) -> Vec<ManifestEntry> {
+    let region = engine.get_region(region_id).unwrap();
+    let manifest = region.manifest_ctx.manifest().await;
+    let mut entries: Vec<ManifestEntry> = manifest
+        .files
+        .values()
+        .map(|meta| ManifestEntry {
+            file_id: meta.file_id,
+            creator: meta.region_id,
+            level: meta.level,
+            owned_range: meta.owned_range.as_deref().cloned(),
+        })
+        .collect();
+    entries.sort_by_key(|entry| entry.file_id);
+    for entry in &entries {
+        common_telemetry::info!(
+            "Manifest entry of region {}: {}",
+            region_id,
+            entry.describe()
+        );
+    }
+    entries
+}
+
+/// Whether the row `tag_0 = tag` is inside `expr`.
+///
+/// Every ownership range this test creates is a boolean combination of `tag_0`
+/// comparisons with string literals, so a direct walk of the tree is exact. An
+/// unexpected shape panics instead of guessing: a silently "admitting" fallback
+/// would turn the overlap check below into a no-op.
+fn admits_tag(expr: &PartitionExpr, tag: &str) -> bool {
+    match (&*expr.lhs, &expr.op, &*expr.rhs) {
+        (Operand::Expr(left), RestrictedOp::And, Operand::Expr(right)) => {
+            admits_tag(left, tag) && admits_tag(right, tag)
+        }
+        (Operand::Expr(left), RestrictedOp::Or, Operand::Expr(right)) => {
+            admits_tag(left, tag) || admits_tag(right, tag)
+        }
+        (Operand::Column(column), op, Operand::Value(Value::String(bound))) => {
+            assert_eq!("tag_0", column, "the scenario only splits on tag_0");
+            let bound = bound.as_utf8();
+            match op {
+                RestrictedOp::Eq => tag == bound,
+                RestrictedOp::NotEq => tag != bound,
+                RestrictedOp::Lt => tag < bound,
+                RestrictedOp::LtEq => tag <= bound,
+                RestrictedOp::Gt => tag > bound,
+                RestrictedOp::GtEq => tag >= bound,
+                other => panic!("unsupported comparison {other} in {expr}"),
+            }
+        }
+        _ => panic!("unsupported ownership expression {expr}"),
+    }
+}
+
+/// The `tag_0` values from `universe` this entry may read.
+fn authorized_tags(entry: &ManifestEntry, universe: &[String]) -> Vec<String> {
+    universe
+        .iter()
+        .filter(|tag| match &entry.owned_range {
+            Some(expr) => admits_tag(expr, tag.as_str()),
+            None => true,
+        })
+        .map(|tag| String::from(tag.as_str()))
+        .collect()
+}
+
+/// The `tag_0` values of a scan result.
+fn tags(rows: &[(String, f64)]) -> Vec<String> {
+    rows.iter().map(|(tag, _)| tag.clone()).collect()
+}
+
+/// Fails if two entries of one manifest can both serve the same physical row.
+///
+/// Two references to the same `file_id` are the same entry, so the check is about
+/// distinct files. Comparing `owned_range`s alone is not enough: a range only
+/// authorizes rows and says nothing about what a file contains, and after a rewrite a
+/// holder may legitimately authorize a wider domain than its file physically carries
+/// (`tag_0 >= "1"` over a file that also holds `tag_0 = "0"` is not a duplicate). So
+/// each entry's authorized tags are intersected with the tags its file physically
+/// holds, tracked by [`run_two_generations`] as the files are written: a pair may
+/// overlap only if one row is both physically present in both files and authorized
+/// through both references.
+fn assert_no_overlapping_references(
+    region_id: RegionId,
+    entries: &[ManifestEntry],
+    physical_rows: &HashMap<FileId, Vec<String>>,
+    universe: &[String],
+) {
+    let described: Vec<String> = entries.iter().map(ManifestEntry::describe).collect();
+    for (index, left) in entries.iter().enumerate() {
+        let left_physical = physical_rows.get(&left.file_id).unwrap_or_else(|| {
+            panic!(
+                "no recorded rows for the file of {} in region {}, the scenario must track \
+                 every file it writes; entries: {described:?}",
+                left.describe(),
+                region_id,
+            )
+        });
+        let left_tags = authorized_tags(left, universe);
+        for right in &entries[index + 1..] {
+            if left.file_id == right.file_id {
+                continue;
+            }
+            let right_physical = physical_rows.get(&right.file_id).unwrap_or_else(|| {
+                panic!(
+                    "no recorded rows for the file of {} in region {}, the scenario must track \
+                     every file it writes; entries: {described:?}",
+                    right.describe(),
+                    region_id,
+                )
+            });
+            let right_tags = authorized_tags(right, universe);
+            let overlapping: Vec<String> = universe
+                .iter()
+                .filter(|tag| {
+                    left_tags.contains(*tag)
+                        && left_physical.contains(*tag)
+                        && right_tags.contains(*tag)
+                        && right_physical.contains(*tag)
+                })
+                .map(|tag| String::from(tag.as_str()))
+                .collect();
+            assert!(
+                overlapping.is_empty(),
+                "region {} holds two references that both serve rows {overlapping:?}: \
+                 [{}] (rows {left_physical:?}) and [{}] (rows {right_physical:?}). A row \
+                 authorized through two references is read twice; entries: {described:?}",
+                region_id,
+                left.describe(),
+                right.describe(),
+            );
+        }
+    }
+}
+
+/// Runs a region compaction exactly when the test asks for it.
+async fn compact_region(engine: &crate::engine::MitoEngine, region_id: RegionId) {
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Compact(RegionCompactRequest {
+                options: compact_request::Options::StrictWindow(StrictWindow {
+                    window_seconds: 60,
+                }),
+                parallelism: None,
+                time_range: None,
+            }),
+        )
+        .await
+        .unwrap();
+}
+
+/// Splits `from` into `left`/`right` over the `"0"` / `"1"` cut: the coordinator's half
+/// of a repartition (staging role, remap, create each half, install its manifest).
+///
+/// Both halves keep the same physical SSTs; only their `owned_range`s are narrowed.
+async fn split_region(
+    engine: &crate::engine::MitoEngine,
+    from: RegionId,
+    left: RegionId,
+    right: RegionId,
+    create: &RegionCreateRequest,
+    left_expr: &str,
+    right_expr: &str,
+) {
+    // A no-op when `from` is already a staging leader (the second generation's source
+    // is a merged region that never left staging).
+    engine
+        .set_region_role_state_gracefully(from, SettableRegionRoleState::StagingLeader)
+        .await
+        .unwrap();
+    let split = engine
+        .remap_manifests(RemapManifestsRequest {
+            region_id: from,
+            input_regions: vec![from],
+            region_mapping: [(from, vec![left, right])].into_iter().collect(),
+            new_partition_exprs: [
+                (left, left_expr.to_string()),
+                (right, right_expr.to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        })
+        .await
+        .unwrap();
+    for (region_id, expr) in [(left, left_expr), (right, right_expr)] {
+        engine
+            .handle_request(region_id, RegionRequest::Create(create.clone()))
+            .await
+            .unwrap();
+        apply_staging_manifest(
+            engine,
+            region_id,
+            expr,
+            from,
+            &split.manifest_paths[&region_id],
+        )
+        .await;
+    }
+}
+
+/// Merges `sources` into the fresh region `target`: the coordinator's half of a merge,
+/// i.e. a remap that maps every holder onto one whole-domain region.
+async fn merge_regions(
+    engine: &crate::engine::MitoEngine,
+    target: RegionId,
+    sources: [RegionId; 2],
+    whole_expr: &str,
+    create: &RegionCreateRequest,
+) {
+    engine
+        .handle_request(target, RegionRequest::Create(create.clone()))
+        .await
+        .unwrap();
+    apply_staging_manifest_prepare(engine, target, whole_expr).await;
+    let merge = engine
+        .remap_manifests(RemapManifestsRequest {
+            region_id: target,
+            input_regions: sources.to_vec(),
+            region_mapping: sources
+                .iter()
+                .map(|source| (*source, vec![target]))
+                .collect(),
+            new_partition_exprs: [(target, whole_expr.to_string())].into_iter().collect(),
+        })
+        .await
+        .unwrap();
+    engine
+        .handle_request(
+            target,
+            RegionRequest::ApplyStagingManifest(ApplyStagingManifestRequest {
+                partition_expr: whole_expr.to_string(),
+                central_region_id: target,
+                manifest_path: merge.manifest_paths[&target].clone(),
+            }),
+        )
+        .await
+        .unwrap();
+}
+
+/// Two full generations over the same schema and cut: the first one is the existing
+/// regression, the second one repeats it on the merged region.
+///
+/// One generation is not enough: the merge publishes references whose `owned_range`s
+/// the next split narrows again, and a rewrite inside that narrower second generation
+/// materializes a row for the second time. The rows are asserted as a multiset after
+/// every merge, and the final manifest is checked for two references that both serve
+/// the same row.
+async fn run_two_generations(case: Gen2Compaction, suffix: &str) {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix(&format!("split-shared-file-gen2-{suffix}")).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            // Compaction must only run when the scenario asks for it.
+            schedule_compaction_after_edit: false,
+            gc: GcConfig {
+                enable: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .await;
+
+    let source = RegionId::new(1, 1);
+    let left = RegionId::new(1, 2);
+    let right = RegionId::new(1, 3);
+    let gen1 = RegionId::new(1, 4);
+    let left2 = RegionId::new(1, 5);
+    let right2 = RegionId::new(1, 6);
+    let gen2 = RegionId::new(1, 7);
+
+    let whole = str_range_expr("tag_0", "0", None).as_json_str().unwrap();
+    let left_expr = str_range_expr("tag_0", "0", Some("1"))
+        .as_json_str()
+        .unwrap();
+    let right_expr = str_range_expr("tag_0", "1", None).as_json_str().unwrap();
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .partition_expr_json(Some(whole.clone()))
+        .build();
+
+    // `build_rows(0, 2)` writes `tag_0 = "0"` (field 0.0) and `tag_0 = "1"` (field 1.0).
+    let expected = vec![("0".to_string(), 0.0), ("1".to_string(), 1.0)];
+    let universe = vec!["0".to_string(), "1".to_string()];
+
+    // The `tag_0` values each physical file contains. A range only authorizes rows, so
+    // proving that two references cannot serve the same row needs the row sets too;
+    // every file this scenario writes is recorded with the rows its writer read.
+    let mut physical_rows: HashMap<FileId, Vec<String>> = HashMap::new();
+
+    // ---- Setup: two rows in one flushed SST. ----
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(source, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        source,
+        Rows {
+            schema,
+            rows: build_rows(0, 2),
+        },
+    )
+    .await;
+    engine
+        .handle_request(source, RegionRequest::Flush(RegionFlushRequest::default()))
+        .await
+        .unwrap();
+    let source_files = manifest_files(&engine, source).await;
+    assert_eq!(1, source_files.len(), "the source must flush one SST");
+    let shared = *source_files.iter().next().unwrap();
+    physical_rows.insert(shared, tags(&scan_rows(&engine, source).await));
+
+    // ---- Generation 0: split, rewrite the left half, merge into `gen1`. ----
+    split_region(
+        &engine,
+        source,
+        left,
+        right,
+        &request,
+        &left_expr,
+        &right_expr,
+    )
+    .await;
+    assert_eq!(
+        vec![("0".to_string(), 0.0)],
+        scan_rows(&engine, left).await,
+        "the left half must read only the row in its own domain"
+    );
+    assert_eq!(
+        vec![("1".to_string(), 1.0)],
+        scan_rows(&engine, right).await,
+        "the right half must read only the row in its own domain"
+    );
+
+    compact_region(&engine, left).await;
+    let left_files = manifest_files(&engine, left).await;
+    assert_eq!(1, left_files.len(), "the rewrite replaces the input SST");
+    let copy = *left_files.iter().next().unwrap();
+    assert_ne!(shared, copy, "the copy is a new file_id");
+    assert_eq!(
+        HashSet::from([shared]),
+        manifest_files(&engine, right).await,
+        "the survivor state is: the left half holds the compacted copy, the right half \
+         holds the shared original"
+    );
+    physical_rows.insert(copy, tags(&scan_rows(&engine, left).await));
+
+    merge_regions(&engine, gen1, [left, right], &whole, &request).await;
+    assert_eq!(
+        expected,
+        scan_rows(&engine, gen1).await,
+        "generation 1: split + single-side compaction + merge must expose each row once"
+    );
+
+    // ---- Generation 1: split the merged region again over the same cut. ----
+    split_region(
+        &engine,
+        gen1,
+        left2,
+        right2,
+        &request,
+        &left_expr,
+        &right_expr,
+    )
+    .await;
+    assert_eq!(
+        vec![("0".to_string(), 0.0)],
+        scan_rows(&engine, left2).await,
+        "the second generation's left half must read only the row in its own domain"
+    );
+    assert_eq!(
+        vec![("1".to_string(), 1.0)],
+        scan_rows(&engine, right2).await,
+        "the second generation's right half must read only the row in its own domain"
+    );
+
+    // ---- Generation 2: rewrite one half, then merge into `gen2`. ----
+    let victim = match case {
+        Gen2Compaction::CompactedHalf => left2,
+        Gen2Compaction::OriginalHalf => right2,
+    };
+    let before_rewrite = scan_rows(&engine, victim).await;
+    let victim_files = manifest_files(&engine, victim).await;
+    assert_eq!(
+        2,
+        victim_files.len(),
+        "{case:?}: the half must hold the shared original and generation 1's copy"
+    );
+    compact_region(&engine, victim).await;
+    let victim_after = manifest_files(&engine, victim).await;
+    assert_eq!(
+        1,
+        victim_after.len(),
+        "{case:?}: the rewrite replaces the half's references with one file"
+    );
+    let rewritten = *victim_after.iter().next().unwrap();
+    assert!(
+        !victim_files.contains(&rewritten),
+        "{case:?}: the rewrite produces a new file_id"
+    );
+    physical_rows.insert(rewritten, tags(&before_rewrite));
+    assert_eq!(
+        before_rewrite,
+        scan_rows(&engine, victim).await,
+        "{case:?}: the rewrite must keep the half's own row"
+    );
+
+    merge_regions(&engine, gen2, [left2, right2], &whole, &request).await;
+    let observed = scan_rows(&engine, gen2).await;
+    let entries = manifest_entries(&engine, gen2).await;
+    assert_eq!(
+        expected,
+        observed,
+        "{case:?}: generation 2 must expose each row exactly once, got {} rows {observed:?}; \
+         manifest entries: {:?}",
+        observed.len(),
+        entries
+            .iter()
+            .map(ManifestEntry::describe)
+            .collect::<Vec<_>>()
+    );
+    assert_no_overlapping_references(gen2, &entries, &physical_rows, &universe);
+}
+
+/// A second generation repeats split -> one-side compaction -> merge on the region the
+/// first generation produced. Both choices of the rewritten half are covered: the one
+/// holding generation 1's materialized copy, and the one holding the shared original.
+#[tokio::test]
+async fn test_two_generation_split_compaction_merge_does_not_duplicate() {
+    run_two_generations(Gen2Compaction::CompactedHalf, "compacted-half").await;
+    run_two_generations(Gen2Compaction::OriginalHalf, "original-half").await;
 }
