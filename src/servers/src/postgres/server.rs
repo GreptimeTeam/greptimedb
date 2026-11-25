@@ -20,6 +20,7 @@ use std::sync::Arc;
 use ::auth::UserProviderRef;
 use async_trait::async_trait;
 use catalog::process_manager::ProcessManagerRef;
+use common_base::readable_size::ReadableSize;
 use common_runtime::Runtime;
 use common_runtime::runtime::RuntimeTrait;
 use common_telemetry::{debug, warn};
@@ -29,7 +30,9 @@ use tokio_rustls::TlsAcceptor;
 
 use crate::batcher::logical_table::LogicalTablePendingRowsBatcher;
 use crate::error::Result;
-use crate::postgres::{MakePostgresServerHandler, MakePostgresServerHandlerBuilder};
+use crate::postgres::{
+    COPY_IN_MAX_PAYLOAD_BYTES, MakePostgresServerHandler, MakePostgresServerHandlerBuilder,
+};
 use crate::prom_remote_write::validation::PromValidationMode;
 use crate::query_handler::CopyInHandlerRef;
 use crate::query_handler::InfluxdbLineProtocolHandlerRef;
@@ -51,6 +54,7 @@ pub struct PostgresServer {
     otlp_handler: Option<OpenTelemetryProtocolHandlerRef>,
     otlp_with_metric_engine: bool,
     memory_limiter: ServerMemoryLimiter,
+    max_copy_in_payload: u64,
     prom_write_state: Option<crate::http::prom_store::PromStoreState>,
     bind_addr: Option<SocketAddr>,
     process_manager: Option<ProcessManagerRef>,
@@ -93,6 +97,7 @@ impl PostgresServer {
             otlp_handler: None,
             otlp_with_metric_engine: false,
             memory_limiter: ServerMemoryLimiter::default(),
+            max_copy_in_payload: COPY_IN_MAX_PAYLOAD_BYTES,
             prom_write_state: None,
             bind_addr: None,
             process_manager,
@@ -108,6 +113,15 @@ impl PostgresServer {
     /// Sets the shared memory limiter used for OTLP exemplar expansion.
     pub fn with_memory_limiter(mut self, limiter: ServerMemoryLimiter) -> Self {
         self.memory_limiter = limiter;
+        self
+    }
+
+    /// Sets the upper bound of a table-less `COPY ... FROM STDIN` payload
+    /// (`postgres.max_copy_in_payload`); `0` leaves the payload unbounded.
+    /// The bound is checked before a chunk is charged against the shared
+    /// memory limiter.
+    pub fn with_max_copy_in_payload(mut self, limit: ReadableSize) -> Self {
+        self.max_copy_in_payload = limit.as_bytes();
         self
     }
 
@@ -187,6 +201,7 @@ impl PostgresServer {
             otlp_handler: self.otlp_handler.clone(),
             otlp_with_metric_engine: self.otlp_with_metric_engine,
             memory_limiter: self.memory_limiter.clone(),
+            max_copy_in_payload: self.max_copy_in_payload,
             prom_write_state,
             user_provider: make_handler.user_provider.clone(),
             param_provider: make_handler.param_provider.clone(),

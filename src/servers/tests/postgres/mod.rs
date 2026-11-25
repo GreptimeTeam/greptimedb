@@ -27,8 +27,10 @@ use auth::{
     UserProvider, UserProviderRef, format_pg_scram_sha256_password_verifier,
     user_provider_from_option,
 };
+use common_base::readable_size::ReadableSize;
 use common_base::secrets::ExposeSecret;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_memory_manager::OnExhaustedPolicy;
 use common_runtime::Builder as RuntimeBuilder;
 use common_runtime::runtime::BuilderBuild;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
@@ -42,8 +44,10 @@ use rustls::{Error, SignatureScheme};
 use rustls_pki_types::{CertificateDer, ServerName};
 use servers::error::Result;
 use servers::install_default_crypto_provider;
+use servers::postgres::COPY_IN_MAX_PAYLOAD_BYTES;
 use servers::postgres::PostgresServer;
 use servers::query_handler::OpenTelemetryProtocolHandlerRef;
+use servers::request_memory_limiter::ServerMemoryLimiter;
 use servers::server::Server;
 use servers::tls::{ReloadableTlsServerConfig, TlsOption};
 use table::TableRef;
@@ -1603,6 +1607,237 @@ async fn test_copy_in_multi_statement_rejected() -> Result<()> {
         .to_string();
     assert!(message.contains("alone"), "{message}");
 
+    server.shutdown().await.unwrap();
+    Ok(())
+}
+
+const MIB: usize = 1024 * 1024;
+const OTLP_LOGS_COPY: &str = "COPY FROM STDIN WITH (FORMAT otlp, signal 'logs')";
+
+/// A server wired with the OTLP double, a memory limiter and a table-less
+/// COPY payload bound, so table-less copies can be driven end to end and
+/// checked for whether ingestion was reached.
+async fn start_table_less_copy_server(
+    limiter: ServerMemoryLimiter,
+    max_copy_in_payload: ReadableSize,
+) -> Result<(Box<dyn Server>, u16, Arc<crate::CountingOtlpHandler>)> {
+    common_telemetry::init_default_ut_logging();
+    let _ = install_default_crypto_provider();
+    let otlp_handler = Arc::new(crate::CountingOtlpHandler::new());
+    let instance = Arc::new(create_testing_instance(MemTable::default_numbers_table()));
+    let copy_in_handler = Arc::new(crate::RecordingCopyInHandler::new(
+        instance.catalog_manager(),
+    ));
+    let io_runtime = RuntimeBuilder::default()
+        .worker_threads(2)
+        .thread_name("postgres-io-handlers")
+        .build()
+        .unwrap();
+    let mut server = PostgresServer::new(
+        instance,
+        copy_in_handler,
+        false,
+        Arc::new(ReloadableTlsServerConfig::try_new(Default::default()).unwrap()),
+        0,
+        io_runtime,
+        None,
+        None,
+    )
+    .with_otlp_handler(otlp_handler.clone(), false)
+    .with_memory_limiter(limiter)
+    .with_max_copy_in_payload(max_copy_in_payload);
+    let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
+    server.start(listening).await.unwrap();
+    let port = server.bind_addr().unwrap().port();
+    Ok((Box::new(server), port, otlp_handler))
+}
+
+/// A valid OTLP logs payload of exactly `bytes` bytes: one log record
+/// whose string body is padded to size, so a payload that passes the bound
+/// decodes instead of failing for another reason.
+fn otlp_logs_payload_of_size(bytes: usize) -> bytes::Bytes {
+    use opentelemetry_proto::tonic::common::v1::AnyValue;
+    use opentelemetry_proto::tonic::common::v1::any_value::Value as AnyValueValue;
+    use opentelemetry_proto::tonic::logs::v1::{LogRecord, ScopeLogs};
+    use std::cmp::Ordering;
+
+    let build = |body_len: usize| ExportLogsServiceRequest {
+        resource_logs: vec![ResourceLogs {
+            scope_logs: vec![ScopeLogs {
+                log_records: vec![LogRecord {
+                    body: Some(AnyValue {
+                        value: Some(AnyValueValue::StringValue("x".repeat(body_len))),
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    };
+    let overhead = build(0).encode_to_vec().len();
+    let mut body_len = bytes - overhead;
+    loop {
+        let encoded = build(body_len).encode_to_vec();
+        match encoded.len().cmp(&bytes) {
+            Ordering::Equal => return bytes::Bytes::from(encoded),
+            // The body's varint length prefix grows with the body.
+            Ordering::Greater => body_len -= encoded.len() - bytes,
+            Ordering::Less => body_len += bytes - encoded.len(),
+        }
+    }
+}
+
+/// Splits `payload` into `chunk`-sized CopyData messages.
+fn chunks_of(payload: bytes::Bytes, chunk: usize) -> Vec<bytes::Bytes> {
+    (0..payload.len())
+        .step_by(chunk)
+        .map(|start| payload.slice(start..(start + chunk).min(payload.len())))
+        .collect()
+}
+
+/// Asserts the error is the payload bound's (22P04) and returns its message.
+fn copy_in_bound_message(error: PgError) -> String {
+    let message = error
+        .as_db_error()
+        .filter(|db_error| *db_error.code() == SqlState::BAD_COPY_FILE_FORMAT)
+        .map(|db_error| db_error.message().to_string())
+        .unwrap_or_else(|| panic!("expected the payload bound's 22P04 error, got {error}"));
+    assert!(message.contains("exceeds the"), "{message}");
+    message
+}
+
+/// The default bound accepts a payload of exactly 64 MiB and rejects one
+/// byte more — as bad copy data naming a human-readable size — whether the
+/// excess arrives as many chunks or as one message; nothing is flushed and
+/// the connection stays usable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_copy_in_payload_bound_default() -> Result<()> {
+    let (server, port, otlp_handler) = start_table_less_copy_server(
+        ServerMemoryLimiter::default(),
+        ReadableSize(COPY_IN_MAX_PAYLOAD_BYTES),
+    )
+    .await?;
+    let client = create_plain_connection(port, false).await.unwrap();
+
+    feed_copy_in(
+        &client,
+        OTLP_LOGS_COPY,
+        chunks_of(otlp_logs_payload_of_size(64 * MIB), MIB),
+    )
+    .await
+    .unwrap();
+    assert_eq!(otlp_handler.calls(), 1);
+
+    for chunks in [
+        chunks_of(otlp_logs_payload_of_size(64 * MIB + 1), MIB),
+        vec![otlp_logs_payload_of_size(64 * MIB + 1)],
+    ] {
+        let message = copy_in_bound_message(
+            feed_copy_in(&client, OTLP_LOGS_COPY, chunks)
+                .await
+                .expect_err("one byte over the bound must fail"),
+        );
+        assert!(
+            message.contains(
+                "exceeds the 64.0MiB limit; split the import into multiple COPY statements"
+            ),
+            "{message}"
+        );
+        // Rejected before ingestion.
+        assert_eq!(otlp_handler.calls(), 1);
+        // The connection stays usable.
+        client.simple_query("SELECT 1").await.unwrap();
+    }
+
+    server.shutdown().await.unwrap();
+    Ok(())
+}
+
+/// `postgres.max_copy_in_payload` is honored, and 0 leaves the payload
+/// unbounded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_copy_in_payload_bound_configurable() -> Result<()> {
+    let (server, port, otlp_handler) =
+        start_table_less_copy_server(ServerMemoryLimiter::default(), ReadableSize::mb(8)).await?;
+    let client = create_plain_connection(port, false).await.unwrap();
+
+    feed_copy_in(
+        &client,
+        OTLP_LOGS_COPY,
+        chunks_of(otlp_logs_payload_of_size(8 * MIB), MIB),
+    )
+    .await
+    .unwrap();
+    let message = copy_in_bound_message(
+        feed_copy_in(
+            &client,
+            OTLP_LOGS_COPY,
+            vec![otlp_logs_payload_of_size(8 * MIB + 1)],
+        )
+        .await
+        .expect_err("the configured bound must apply"),
+    );
+    assert!(message.contains("exceeds the 8.0MiB limit"), "{message}");
+    assert_eq!(otlp_handler.calls(), 1);
+    server.shutdown().await.unwrap();
+
+    let (server, port, otlp_handler) =
+        start_table_less_copy_server(ServerMemoryLimiter::default(), ReadableSize(0)).await?;
+    let client = create_plain_connection(port, false).await.unwrap();
+    feed_copy_in(
+        &client,
+        OTLP_LOGS_COPY,
+        chunks_of(otlp_logs_payload_of_size(64 * MIB + 1), MIB),
+    )
+    .await
+    .unwrap();
+    assert_eq!(otlp_handler.calls(), 1);
+    server.shutdown().await.unwrap();
+    Ok(())
+}
+
+/// The bound is checked before a chunk is charged against the memory
+/// limiter: a chunk it rejects fails at once with the bound's error even
+/// when the limiter's Wait policy would otherwise stall it, and the permits
+/// held so far are released.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_copy_in_payload_bound_precedes_memory_quota() -> Result<()> {
+    // The test holds 15 MiB of the 80 MiB budget, so a copy that already
+    // buffers 60 MiB cannot get the next 10 MiB chunk from the limiter
+    // without waiting. That chunk also pushes the payload over the default
+    // bound.
+    let limiter = ServerMemoryLimiter::new(
+        80 * MIB as u64,
+        OnExhaustedPolicy::Wait {
+            timeout: Duration::from_secs(60),
+        },
+    );
+    let held = limiter.acquire(15 * MIB as u64).await.unwrap();
+    let (server, port, otlp_handler) =
+        start_table_less_copy_server(limiter.clone(), ReadableSize(COPY_IN_MAX_PAYLOAD_BYTES))
+            .await?;
+    let client = create_plain_connection(port, false).await.unwrap();
+
+    let payload = otlp_logs_payload_of_size(70 * MIB);
+    let mut chunks = chunks_of(payload.slice(..60 * MIB), MIB);
+    chunks.push(payload.slice(60 * MIB..));
+    // Under the old ordering the chunk would wait out the policy's timeout.
+    let error = tokio::time::timeout(
+        Duration::from_secs(20),
+        feed_copy_in(&client, OTLP_LOGS_COPY, chunks),
+    )
+    .await
+    .expect("the bound must reject the chunk without waiting on the limiter")
+    .expect_err("the chunk exceeds the bound");
+    copy_in_bound_message(error);
+    assert_eq!(otlp_handler.calls(), 0);
+    // Only the test's own reservation is left held.
+    assert_eq!(limiter.used_bytes(), 15 * MIB as u64);
+    client.simple_query("SELECT 1").await.unwrap();
+
+    drop(held);
+    assert_eq!(limiter.used_bytes(), 0);
     server.shutdown().await.unwrap();
     Ok(())
 }

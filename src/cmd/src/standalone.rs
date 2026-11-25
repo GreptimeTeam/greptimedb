@@ -1404,6 +1404,9 @@ mod tests {
             timeout = "33s"
             body_limit = "128MB"
 
+            [postgres]
+            max_copy_in_payload = "0B"
+
             [opentsdb]
             enable = true
 
@@ -1433,6 +1436,8 @@ mod tests {
         assert_eq!("127.0.0.1:4000".to_string(), fe_opts.http.addr);
         assert_eq!(Duration::from_secs(33), fe_opts.http.timeout);
         assert_eq!(ReadableSize::mb(128), fe_opts.http.body_limit);
+        // The standalone mirrors the frontend's `[postgres]` options.
+        assert_eq!(ReadableSize(0), fe_opts.postgres.max_copy_in_payload);
         assert_eq!("127.0.0.1:4001".to_string(), fe_opts.grpc.bind_addr);
         assert!(fe_opts.mysql.enable);
         assert_eq!("127.0.0.1:4002", fe_opts.mysql.addr);

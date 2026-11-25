@@ -1278,6 +1278,30 @@ pub async fn setup_pg_server_for_frontend_instance(
     fe_instance_ref: Arc<Instance>,
     user_provider: Option<UserProviderRef>,
 ) -> Box<dyn Server> {
+    start_pg_server(fe_instance_ref, user_provider, PostgresOptions::default()).await
+}
+
+/// Sets up a standalone instance with a Postgres server configured by the
+/// given `[postgres]` options; the options' `addr` is replaced with a free
+/// port.
+pub async fn setup_pg_server_with_postgres_options(
+    store_type: StorageType,
+    name: &str,
+    opts: PostgresOptions,
+) -> (TestGuard, Arc<Box<dyn Server>>) {
+    let instance = setup_standalone_instance(name, store_type).await;
+    let pg_server = start_pg_server(instance.fe_instance().clone(), None, opts).await;
+
+    (instance.guard, Arc::new(pg_server))
+}
+
+/// Builds and starts a Postgres server on an existing frontend instance
+/// with the given `[postgres]` options, wired like `FrontendServer` does.
+async fn start_pg_server(
+    fe_instance_ref: Arc<Instance>,
+    user_provider: Option<UserProviderRef>,
+    opts: PostgresOptions,
+) -> Box<dyn Server> {
     let runtime = RuntimeBuilder::default()
         .worker_threads(2)
         .thread_name("pg-runtime")
@@ -1288,7 +1312,7 @@ pub async fn setup_pg_server_for_frontend_instance(
 
     let opts = PostgresOptions {
         addr: fe_pg_addr.clone(),
-        ..Default::default()
+        ..opts
     };
     let tls_server_config = Arc::new(
         ReloadableTlsServerConfig::try_new(opts.tls.clone())
@@ -1308,6 +1332,7 @@ pub async fn setup_pg_server_for_frontend_instance(
         )
         .with_influxdb_handler(fe_instance_ref.clone())
         .with_otlp_handler(fe_instance_ref.clone(), true)
+        .with_max_copy_in_payload(opts.max_copy_in_payload)
         .with_prom_remote_write(
             fe_instance_ref.clone(),
             Some(fe_instance_ref.clone()),

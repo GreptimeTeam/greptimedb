@@ -16,12 +16,15 @@
 //! covering the full ingestion path (parser -> insert -> storage).
 
 use bytes::Bytes;
+use common_base::readable_size::ReadableSize;
 use common_telemetry::init_default_ut_logging;
 use datatypes::arrow;
+use frontend::service_config::PostgresOptions;
 use futures::SinkExt;
 use tokio_postgres::NoTls;
+use tokio_postgres::error::SqlState;
 
-use crate::test_util::{StorageType, setup_pg_server};
+use crate::test_util::{StorageType, setup_pg_server, setup_pg_server_with_postgres_options};
 
 async fn connect(port: u16) -> tokio_postgres::Client {
     let url = format!("host=127.0.0.1 port={port} dbname=public connect_timeout=5");
@@ -1069,7 +1072,10 @@ async fn test_postgres_copy_in_influxdb_multiline_quoted_field() {
     server.shutdown().await.unwrap();
 }
 
-/// The payload is bounded by the HTTP write endpoints' own body limit.
+/// A table-less payload is bounded by `postgres.max_copy_in_payload`,
+/// 64 MiB by default: one byte over fails as bad copy data naming the
+/// bound, before the buffered payload is handed to the line-protocol
+/// pipeline, and the connection stays usable.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_postgres_copy_in_influxdb_payload_limit() {
     init_default_ut_logging();
@@ -1077,45 +1083,131 @@ async fn test_postgres_copy_in_influxdb_payload_limit() {
     let port = server.bind_addr().unwrap().port();
     let client = connect(port).await;
 
-    // The HTTP write endpoints' default body limit (64 MiB) — kept in
-    // sync with servers::http::DEFAULT_BODY_LIMIT.
+    // A seed row, so "nothing of the rejected payload was written" is
+    // observable on a table that exists.
+    feed_copy_in(
+        &client,
+        "COPY FROM STDIN WITH (FORMAT influxdb)",
+        vec![Bytes::from_static(b"m,host=seed v=0 1\n")],
+    )
+    .await
+    .unwrap();
+
+    // Several 1 MiB chunks over the default bound, none containing a
+    // record boundary.
     let limit = 64 * 1024 * 1024;
-    // Several chunks over the limit, none containing a record boundary.
-    let chunk = vec![b'x'; 1024 * 1024];
-    let mut sent = 0usize;
-    let mut sink = Box::pin(
-        client
-            .copy_in("COPY FROM STDIN WITH (FORMAT influxdb)")
-            .await
-            .unwrap(),
-    );
-    while sent <= limit {
-        sink.as_mut()
-            .send(Bytes::from(chunk.clone()))
-            .await
-            .unwrap();
-        sent += chunk.len();
+    let chunk = Bytes::from(vec![b'x'; 1024 * 1024]);
+    let mut chunks = Vec::new();
+    while chunks.len() * chunk.len() <= limit {
+        chunks.push(chunk.clone());
     }
-    // The cap fires mid-stream; the error surfaces when the copy
+    // The bound fires mid-stream; the error surfaces when the copy
     // completes (the sink buffers sends locally).
-    let error = sink
-        .as_mut()
-        .finish()
+    let error = feed_copy_in(&client, "COPY FROM STDIN WITH (FORMAT influxdb)", chunks)
         .await
         .expect_err("expected the oversized payload to fail");
+    let db_error = error.as_db_error().expect("expected a db error");
+    assert_eq!(*db_error.code(), SqlState::BAD_COPY_FILE_FORMAT, "{error}");
     assert!(
-        error
-            .as_db_error()
-            .map(|d| d.message().contains("exceeds"))
-            .unwrap_or(false),
+        db_error
+            .message()
+            .contains("exceeds the 64.0MiB limit; split the import into multiple COPY statements"),
         "unexpected error: {error}"
     );
 
-    // The connection stays usable.
-    let messages = client.simple_query("SELECT 1").await.unwrap();
-    assert!(!messages.is_empty());
+    // Only the seed row exists, and the connection stays usable.
+    let rows = count_rows(&client, "SELECT count(*) FROM m").await;
+    assert_eq!(rows, 1);
 
     server.shutdown().await.unwrap();
+}
+
+/// `postgres.max_copy_in_payload` is honored end to end: a payload one
+/// byte over the configured bound is rejected whole, and 0 removes the
+/// bound.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_influxdb_payload_bound_configurable() {
+    init_default_ut_logging();
+    const BOUND: usize = 1024 * 1024;
+    // Valid line protocol a little over the bound, sent in several chunks.
+    let mut lines = String::new();
+    let mut expected: i64 = 0;
+    while lines.len() <= BOUND {
+        lines.push_str(&format!(
+            "m,host=h{expected} v={expected} {}\n",
+            1_000 + expected
+        ));
+        expected += 1;
+    }
+    let payload = Bytes::from(lines);
+    let chunks: Vec<Bytes> = (0..payload.len())
+        .step_by(64 * 1024)
+        .map(|start| payload.slice(start..(start + 64 * 1024).min(payload.len())))
+        .collect();
+
+    let (_guard, server) = setup_pg_server_with_postgres_options(
+        StorageType::File,
+        "pg_copy_in_influxdb_cap_configured",
+        PostgresOptions {
+            max_copy_in_payload: ReadableSize::mb(1),
+            ..Default::default()
+        },
+    )
+    .await;
+    let port = server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+    let error = feed_copy_in(
+        &client,
+        "COPY FROM STDIN WITH (FORMAT influxdb)",
+        chunks.clone(),
+    )
+    .await
+    .expect_err("expected the configured bound to reject the payload");
+    let db_error = error.as_db_error().expect("expected a db error");
+    assert_eq!(*db_error.code(), SqlState::BAD_COPY_FILE_FORMAT, "{error}");
+    assert!(
+        db_error.message().contains("exceeds the 1.0MiB limit"),
+        "unexpected error: {error}"
+    );
+    // Rejected whole: the table was never created.
+    assert!(client.simple_query("SELECT count(*) FROM m").await.is_err());
+    server.shutdown().await.unwrap();
+
+    let (_guard, server) = setup_pg_server_with_postgres_options(
+        StorageType::File,
+        "pg_copy_in_influxdb_cap_unbounded",
+        PostgresOptions {
+            max_copy_in_payload: ReadableSize(0),
+            ..Default::default()
+        },
+    )
+    .await;
+    let port = server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+    let rows = feed_copy_in(&client, "COPY FROM STDIN WITH (FORMAT influxdb)", chunks)
+        .await
+        .unwrap();
+    assert_eq!(rows, expected as u64);
+    assert_eq!(
+        count_rows(&client, "SELECT count(*) FROM m").await,
+        expected
+    );
+    server.shutdown().await.unwrap();
+}
+
+/// Runs a `count(*)` query and returns the single resulting value.
+async fn count_rows(client: &tokio_postgres::Client, sql: &str) -> i64 {
+    let messages = client.simple_query(sql).await.unwrap();
+    let mut counts = messages.iter().filter_map(|message| match message {
+        tokio_postgres::SimpleQueryMessage::Row(row) => row.get(0).map(str::parse::<i64>),
+        _ => None,
+    });
+    let count = counts
+        .next()
+        .expect("one count row")
+        .expect("a valid count");
+    assert!(counts.next().is_none(), "exactly one count row");
+    count
 }
 
 /// The regression for the retired line-splitter's failure mode: with

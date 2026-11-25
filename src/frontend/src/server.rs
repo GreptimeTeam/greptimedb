@@ -435,6 +435,7 @@ where
                 .with_influxdb_handler(instance.clone())
                 .with_otlp_handler(instance.clone(), prom_store.with_metric_engine)
                 .with_memory_limiter(self.server_memory_limiter.clone())
+                .with_max_copy_in_payload(opts.max_copy_in_payload)
                 .with_prom_remote_write(
                     instance.clone(),
                     Some(instance.clone()),
