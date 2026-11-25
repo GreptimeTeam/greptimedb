@@ -226,6 +226,7 @@ impl Memtable for SimpleBulkMemtable {
     ) -> error::Result<MemtableRanges> {
         let predicate = options.predicate;
         let sequence = options.sequence;
+        let creator_slices = options.creator_slices;
         let start_time = Instant::now();
         let read_column_ids = read_column_ids_from_projection(&self.region_metadata, projection);
         let projection = Arc::new(self.build_projection(projection));
@@ -256,11 +257,17 @@ impl Memtable for SimpleBulkMemtable {
         let contexts = values
             .into_par_iter()
             .filter_map(|v| {
+                // This memtable holds one series for the whole region and keeps no
+                // primary key, so a row cannot be attributed to a piece: the per-piece
+                // filter falls back to the least advanced cursor of the set, which is the
+                // region-level floor.
                 let filtered = match v.to_batch(
                     &[],
                     &self.region_metadata,
                     &projection,
                     sequence,
+                    creator_slices.as_deref().map(Vec::as_slice),
+                    None,
                     self.dedup,
                     self.merge_mode,
                 ) {

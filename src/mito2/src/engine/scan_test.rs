@@ -6738,6 +6738,87 @@ async fn test_read_row_sequence_splits_one_file_by_the_expression_of_each_row() 
     );
 }
 
+/// The same per-row rule for a **memtable** of this region: a memtable row is filtered by
+/// the cursor of the piece its own tag values fall into, not by the single floor of the
+/// region.
+///
+/// The region's own pieces are the only candidates, because a memtable holds the rows this
+/// region allocated. The rows of the piece consumed up to 5 (the rows at 3, 4 and 5) are
+/// not delivered again, and the row at 6 of the piece consumed up to 2 still is.
+#[tokio::test]
+async fn test_read_row_sequence_splits_memtable_rows_by_the_expression_of_each_row() {
+    let mut env =
+        TestEnv::with_prefix("test_read_row_sequence_splits_memtable_rows_by_expression").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region = RegionId::new(1, 1);
+
+    // Five rows of the left expression (numbers 1..5) and one row of the right one
+    // (number 6), all of them in the memtable: no flush, so no file takes part in the read.
+    // The primary-key SST format keeps the time-series memtable (the flat format would put
+    // the rows in the bulk memtable, which does not apply the per-piece rule), and
+    // `preserve_row_sequence` keeps the exact `(C, H]` delta admissible.
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .insert_option("sst_format", "primary_key")
+        .build();
+    let schema = test_util::rows_schema(&request);
+    engine
+        .handle_request(region, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let mut rows = test_util::build_rows_for_key("1", 0, 5, 0);
+    rows.extend(test_util::build_rows_for_key("6", 5, 6, 0));
+    test_util::put_rows(&engine, region, Rows { schema, rows }).await;
+
+    // One cursor value for every piece: the delivered rows are exactly the rows above the
+    // region-level floor 2, which is what the read delivered before the per-row rule.
+    let mut rows = scan_flat_row_sequences(
+        &engine,
+        region,
+        creator_cursor_scan(
+            region,
+            vec![
+                partition_str_slice_cursor("0", "5", 2),
+                partition_str_slice_cursor("5", "9", 2),
+            ],
+            2,
+            20,
+        ),
+    )
+    .await;
+    rows.sort_unstable();
+    assert_eq!(
+        vec![(2000, 3), (3000, 4), (4000, 5), (5000, 6)],
+        rows,
+        "one cursor value for every piece is the region-level floor of the whole read"
+    );
+
+    // The pieces advanced differently: the rows of the left one (3, 4 and 5) are consumed,
+    // the row at 6 belongs to the right one and stays live.
+    let mut rows = scan_flat_row_sequences(
+        &engine,
+        region,
+        creator_cursor_scan(
+            region,
+            vec![
+                partition_str_slice_cursor("0", "5", 5),
+                partition_str_slice_cursor("5", "9", 2),
+            ],
+            2,
+            20,
+        ),
+    )
+    .await;
+    rows.sort_unstable();
+    assert_eq!(
+        vec![(5000, 6)],
+        rows,
+        "each memtable row is filtered by the cursor of the piece it belongs to: the rows at \
+         3, 4 and 5 were consumed by the piece advanced to 5, the row at 6 was not"
+    );
+}
+
 /// A row whose number a substitution produced is hidden **and reported** by the substitution
 /// rule (`SubstitutedRowRanges`), so per-row slice selection must leave it to that rule
 /// instead of dropping it silently: its number says nothing about progress.

@@ -572,6 +572,52 @@ impl ScanRegion {
         creators
     }
 
+    /// The cursor of each piece a memtable row of **this region** may belong to.
+    ///
+    /// A memtable holds the rows this region allocated, so the candidates are the region's
+    /// own slices: every one of them may hold a row, and no file metadata narrows the set the
+    /// way it does for the cursor slices of an SST. A row is then compared against the cursor
+    /// of the piece its tag values fall into instead of against the single floor of the
+    /// region, which is only the least advanced piece.
+    ///
+    /// `None` when there is no per-piece rule to state: the scan is not a physical-sequence
+    /// read, it may cross an invalid boundary (which applies no lower bound at all), the
+    /// region states one whole-domain cursor, or a stated expression cannot be read back.
+    /// The region-level floor then stays the whole rule.
+    fn memtable_creator_slices(&self) -> Option<Arc<Vec<(PartitionExpr, SequenceNumber)>>> {
+        if !self.request.read_row_sequence || self.request.read_across_invalid_boundary {
+            return None;
+        }
+        let shards = self
+            .request
+            .creator_cursor_shards
+            .as_ref()?
+            .get(&self.region_id().as_u64())?;
+        let mut slices = Vec::with_capacity(shards.len());
+        for shard in shards {
+            let Some(identity) = shard.partition_expr.as_deref() else {
+                // A whole-domain cursor applies to every row of the region: the
+                // region-level floor is the exact rule and no evaluation is needed.
+                return None;
+            };
+            let Ok(Some(expr)) = PartitionExpr::from_json_str(identity) else {
+                // An identity this build cannot read back cannot decide a row's piece;
+                // approximating it would be guesswork, so keep the conservative floor.
+                debug!(
+                    "Cannot read back creator cursor slice expression {}; keeping the region-level floor",
+                    identity
+                );
+                return None;
+            };
+            slices.push((expr, shard.seq));
+        }
+        if slices.is_empty() {
+            return None;
+        }
+
+        Some(Arc::new(slices))
+    }
+
     /// Creates a scan input.
     #[tracing::instrument(skip_all, fields(region_id = %self.region_id()))]
     async fn scan_input(mut self) -> Result<ScanInput> {
@@ -651,6 +697,9 @@ impl ScanRegion {
         } else {
             self.request.memtable_min_sequence
         };
+        // The per-piece cursors of this region's own slices: they replace the single floor
+        // `memtable_min_sequence` states (the least advanced piece) while the maximum stays.
+        let memtable_creator_slices = self.memtable_creator_slices();
 
         for m in memtables {
             // check if memtable is empty by reading stats.
@@ -670,6 +719,7 @@ impl ScanRegion {
                         memtable_min_sequence,
                         self.request.memtable_max_sequence,
                     ))
+                    .with_creator_slices(memtable_creator_slices.clone())
                     .with_pre_filter_mode(filter_mode),
             )?;
             mem_range_builders.extend(ranges_in_memtable.ranges.into_values().map(|v| {

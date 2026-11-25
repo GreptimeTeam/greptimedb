@@ -28,6 +28,7 @@ use datatypes::arrow::record_batch::RecordBatch;
 use mito_codec::key_values::KeyValue;
 pub use mito_codec::key_values::KeyValues;
 use mito_codec::row_converter::{PrimaryKeyCodec, build_primary_key_codec};
+use partition::expr::PartitionExpr;
 use snafu::ensure;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
@@ -106,6 +107,16 @@ pub struct RangesOptions {
     pub predicate: PredicateGroup,
     /// Sequence range to filter the data.
     pub sequence: Option<SequenceRange>,
+    /// The cursor of each piece a row of this memtable may belong to, as
+    /// `(partition expression, last consumed sequence)` pairs.
+    ///
+    /// When present, a row is delivered only when `seq > cursor(piece of the row)`: the
+    /// cursor of the piece replaces the single floor [`Self::sequence`] states, which is the
+    /// minimum of the pieces and therefore cannot tell a row of a more advanced piece from a
+    /// consumed one. The maximum of [`Self::sequence`] still bounds every row.
+    ///
+    /// `None` (or an empty vector) keeps the region-level floor as the whole rule.
+    pub creator_slices: Option<Arc<Vec<(PartitionExpr, SequenceNumber)>>>,
     /// Maximum number of rows readers should produce in one batch.
     pub batch_size: usize,
 }
@@ -117,6 +128,7 @@ impl Default for RangesOptions {
             pre_filter_mode: PreFilterMode::All,
             predicate: PredicateGroup::default(),
             sequence: None,
+            creator_slices: None,
             batch_size: crate::sst::parquet::DEFAULT_READ_BATCH_SIZE,
         }
     }
@@ -130,6 +142,7 @@ impl RangesOptions {
             pre_filter_mode: PreFilterMode::All,
             predicate: PredicateGroup::default(),
             sequence: None,
+            creator_slices: None,
             batch_size: crate::sst::parquet::DEFAULT_READ_BATCH_SIZE,
         }
     }
@@ -152,6 +165,19 @@ impl RangesOptions {
     #[must_use]
     pub fn with_sequence(mut self, sequence: Option<SequenceRange>) -> Self {
         self.sequence = sequence;
+        self
+    }
+
+    /// Sets the cursor of each piece a row may belong to.
+    ///
+    /// See [`Self::creator_slices`]: the cursor of the piece a row belongs to replaces the
+    /// single floor of [`Self::sequence`], the maximum of it still applies.
+    #[must_use]
+    pub fn with_creator_slices(
+        mut self,
+        creator_slices: Option<Arc<Vec<(PartitionExpr, SequenceNumber)>>>,
+    ) -> Self {
+        self.creator_slices = creator_slices;
         self
     }
 
