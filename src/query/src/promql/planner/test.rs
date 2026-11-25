@@ -7136,6 +7136,35 @@ async fn native_fused_topk_above_aggregate_declines_the_split_in_every_form() {
     }
 }
 
+/// A whole-vector operator standing on an evaluated aggregate is the shape it is over a bare scan:
+/// it reads the whole vector at a point, so it runs in the one node above the cut and the fold
+/// below it is that node's own input rather than a split boundary.
+#[tokio::test]
+async fn native_fused_whole_vector_operators_over_an_aggregate_stay_native() {
+    for query in [
+        "topk(1, sum(some_metric))",
+        "bottomk(2, avg(some_metric))",
+        // The two rankings the existing planner cannot answer at all are admitted here too: the
+        // shape is the operator, not the ranking it computes.
+        "limitk(2, sum(some_metric))",
+        "limit_ratio(0.5, sum(some_metric))",
+        "sort(sum by (tag_0) (some_metric))",
+        // The same ranking over a bare scan, which was never the refused shape.
+        "topk(1, some_metric)",
+    ] {
+        let plan = build_native_fused_plan(query, true).await;
+        let display = plan.display_indent_schema().to_string();
+        assert!(
+            find_fused_series(&plan).is_some(),
+            "`{query}` ranks the whole vector, so it must stay native: {display}"
+        );
+        assert!(
+            find_final_split(&plan).is_none(),
+            "`{query}` needs a whole-vector boundary, so it must not split: {display}"
+        );
+    }
+}
+
 /// A data-free vector stays in the gathered parent while the data-bearing prefix is cut.
 #[tokio::test]
 async fn native_fused_data_free_vector_does_not_block_segmentation() {

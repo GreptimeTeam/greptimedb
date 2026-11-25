@@ -14917,6 +14917,93 @@ async fn native_promql_cuts_segments_only_where_a_gather_would_swallow_them() {
     assert_eq!(native, legacy, "{query}: answers differ");
 }
 
+/// A whole-vector operator standing on an evaluated fold is the shape it is over a bare scan.
+///
+/// `topk`, `bottomk` and `sort` read the whole vector at a point, so the fold below one is not a
+/// boundary the aggregate state can cross: the split declines it and the per-series prefix under the
+/// fold is cut out as a segment instead, leaving the fold and the operator in the one node above the
+/// merged groups. Both routes are run and their rows compared as the row sets they are - a partition
+/// publishes its rows in its own order, so a row's position is not what the two routes can be held
+/// to - which is the one difference `eval_text` normalizes besides the name column and the value
+/// column's name. `limitk` and `limit_ratio` are left out of the comparison: they exist in this
+/// route's own kernels and the existing planner answers neither.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_whole_vector_operators_over_an_aggregate_keep_their_route() {
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_ranking_over_aggregate")
+            .with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE rank_agg (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)); \
+         INSERT INTO rank_agg (host, ts, val) VALUES \
+         ('a', 0, 2), ('b', 0, 7), ('c', 0, 11), ('a', 1000, 3), ('b', 1000, 13), ('c', 1000, 5)",
+        QueryContext::arc(),
+    )
+    .await;
+
+    fn fused_nodes(plan: &Arc<dyn ExecutionPlan>) -> Vec<Arc<dyn ExecutionPlan>> {
+        let mut found = Vec::new();
+        let mut stack = vec![plan.clone()];
+        while let Some(node) = stack.pop() {
+            if node.name() == "FusedSeriesExec" {
+                found.push(node.clone());
+            }
+            stack.extend(node.children().into_iter().cloned());
+        }
+        found
+    }
+
+    for (query, reported) in [
+        // The fold computes a value of its own and drops the name it read, so the ranking above it
+        // reports the null name the fold left.
+        ("topk(1, sum(rank_agg))", ReportedName::Nothing),
+        ("bottomk(2, avg(rank_agg))", ReportedName::Nothing),
+        ("sort(sum by (host) (rank_agg))", ReportedName::Nothing),
+        // The same ranking over a bare scan: the shape that was never cut below.
+        ("topk(1, rank_agg)", ReportedName::Metric("rank_agg")),
+    ] {
+        let sql = format!("TQL EVAL (0, 1000, '1000s') {query}");
+        observer.clear();
+        let native = eval_text_rows(native_tql_output(&instance, &sql, true).await, reported);
+        let root = observer.root_plan();
+        let fused = fused_nodes(&root);
+        assert_eq!(
+            1,
+            fused.len(),
+            "`{query}` answers above one cut prefix: {}",
+            datafusion::physical_plan::displayable(root.as_ref()).indent(true)
+        );
+        let parent = datafusion::physical_plan::displayable(fused[0].as_ref())
+            .one_line()
+            .to_string();
+        let parent_tree = parent
+            .split_once('\n')
+            .expect("the parent renders its tree")
+            .1;
+        assert!(
+            parent_tree.contains("Input: evaluated samples source=0"),
+            "`{query}` ranks the fold's own answer: {parent_tree}"
+        );
+        assert!(
+            !parent_tree.contains("Instant"),
+            "`{query}` reads the cut prefix, so no instant evaluation is left above it: {parent_tree}"
+        );
+        let legacy = eval_text(native_tql_output(&instance, &sql, false).await);
+        assert_eq!(
+            native, legacy,
+            "`{query}`: the routes answer different rows"
+        );
+    }
+}
+
 /// Range-function prefixes on two table sources retain their own samples in each segment.
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_cross_table_aggregate_offsets_keep_independent_scan_bounds() {
