@@ -1276,7 +1276,14 @@ impl EngineInner {
         let version = version_data.version;
         version.ensure_no_pending_tails()?;
 
-        if request.snapshot_on_scan && request.memtable_max_sequence.is_none() {
+        // Remember whether the snapshot upper bound is derived here instead of
+        // being requested by the caller. A derived bound cannot fence immutable
+        // SST rows: a physical COPY installs rows that keep the source region's
+        // encoded sequences, so they may exceed this region's committed
+        // sequence even though the pinned version exposes them.
+        let implicit_snapshot_bound =
+            request.snapshot_on_scan && request.memtable_max_sequence.is_none();
+        if implicit_snapshot_bound {
             request.memtable_max_sequence = Some(version_data.committed_sequence);
         }
 
@@ -1367,6 +1374,7 @@ impl EngineInner {
             CacheStrategy::EnableAll(cache_manager),
         )
         .with_series_index(series_index)
+        .with_implicit_snapshot_bound(implicit_snapshot_bound)
         .with_ignore_range_index(!self.config.experimental_enable_range_index)
         .with_query_stat_counters(region.region_stats.query_stat_counters())
         .with_max_concurrent_scan_files(self.config.max_concurrent_scan_files)

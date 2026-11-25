@@ -1225,19 +1225,27 @@ fn filter_visibility(batch: RecordBatch, context: &StreamContext) -> Result<Reco
             timestamp.name
         )));
     }
+    // A snapshot bound derived at open (no explicit `memtable_max_sequence`)
+    // fences memtable ranges only: immutable SST rows are already selected by the
+    // pinned version, and a physical COPY keeps the source region's encoded
+    // sequences, which may exceed this region's committed sequence. The bound
+    // itself stays on the input because the scanner reports it back.
+    let snapshot_sequence = if context.input.implicit_snapshot_bound {
+        None
+    } else {
+        context.input.snapshot_sequence
+    };
     // Bounds are computed from the actual arrays: sample metadata does not expose
     // sequence bounds here, and format-reader timestamps need not be sorted.
     if sequence.null_count() == 0 && time.null_count() == 0 {
-        let needs_sequence_max = context.input.snapshot_sequence.is_some()
+        let needs_sequence_max = snapshot_sequence.is_some()
             || matches!(
                 context.input.sequence_range,
                 Some(SequenceRange::LtEq { .. } | SequenceRange::GtLtEq { .. })
             );
         let sequence_max = needs_sequence_max.then(|| max(sequence)).flatten();
-        let snapshot_visible = context
-            .input
-            .snapshot_sequence
-            .is_none_or(|bound| sequence_max.is_some_and(|value| value <= bound));
+        let snapshot_visible =
+            snapshot_sequence.is_none_or(|bound| sequence_max.is_some_and(|value| value <= bound));
         let range_visible = context
             .input
             .sequence_range
@@ -1277,10 +1285,7 @@ fn filter_visibility(batch: RecordBatch, context: &StreamContext) -> Result<Reco
             .map(|i| {
                 !sequence.is_null(i)
                     && !time.is_null(i)
-                    && context
-                        .input
-                        .snapshot_sequence
-                        .is_none_or(|max| sequence.value(i) <= max)
+                    && snapshot_sequence.is_none_or(|max| sequence.value(i) <= max)
                     && sequence_filter
                         .as_ref()
                         .is_none_or(|filter| filter.value(i))

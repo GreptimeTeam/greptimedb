@@ -1129,6 +1129,201 @@ async fn test_narthex_copy_and_remap(
     engine.stop().await.unwrap();
 }
 
+/// A physical COPY installs SSTs that keep the source region's encoded row
+/// sequences. A `snapshot_on_scan` that derives its bound at open (no explicit
+/// `memtable_max_sequence`) binds the empty destination's committed sequence
+/// (0), which must fence memtable ranges only: it must not hide rows that the
+/// pinned version already exposes through immutable SSTs.
+#[tokio::test]
+async fn test_narthex_physical_copy_visible_to_snapshot_on_scan() {
+    use crate::test_util::sst_util::sst_region_metadata_with_encoding;
+    use crate::test_util::{flush_region, reopen_region};
+    use store_api::codec::PrimaryKeyEncoding;
+
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            schedule_compaction_after_edit: false,
+            ..Default::default()
+        })
+        .await;
+    let source = RegionId::new(4, 1);
+    let target = RegionId::new(4, 2);
+    let mut request = CreateRequestBuilder::new()
+        .tag_num(1)
+        .field_num(1)
+        .insert_option("primary_key_encoding", "sparse")
+        .insert_option("sst_format", "narthex")
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    let reserved = sst_region_metadata_with_encoding(PrimaryKeyEncoding::Sparse);
+    request
+        .column_metadatas
+        .extend(reserved.column_metadatas.into_iter().take(2));
+    request
+        .primary_key
+        .splice(0..0, reserved.primary_key.into_iter().take(2));
+    for region in [source, target] {
+        engine
+            .handle_request(region, RegionRequest::Create(request.clone()))
+            .await
+            .unwrap();
+    }
+    let metadata = engine.get_region(source).unwrap().metadata();
+    let put = |label: &str, tsid, value| {
+        let key = crate::test_util::sst_util::new_sparse_primary_key(&[label], &metadata, 42, tsid);
+        crate::test_util::sparse_metric_put(key, 1000, Some(value))
+    };
+    // Two distinct series, each flushed into its own source SST.
+    for (label, tsid, value) in [("api", 7, 11.0), ("worker", 8, 22.0)] {
+        engine
+            .handle_request(source, put(label, tsid, value))
+            .await
+            .unwrap();
+        flush_region(&engine, source, None).await;
+    }
+
+    let scanned = |scanner: crate::read::scan_region::Scanner| async move {
+        let batches = RecordBatches::try_collect(scanner.scan().await.unwrap())
+            .await
+            .unwrap();
+        let rows = batches.iter().map(|batch| batch.num_rows()).sum::<usize>();
+        (rows, batches.pretty_print().unwrap())
+    };
+
+    // Opened against the still empty destination.
+    let before_copy = engine
+        .scanner(
+            target,
+            ScanRequest {
+                snapshot_on_scan: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(before_copy.snapshot_sequence(), Some(0));
+
+    let copied = engine
+        .copy_region_from(
+            target,
+            MitoCopyRegionFromRequest {
+                source_region_id: source,
+                parallelism: 2,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(copied.copied_file_ids.len(), 2);
+    assert_eq!(
+        engine
+            .get_region(target)
+            .unwrap()
+            .version_control
+            .committed_sequence(),
+        0
+    );
+
+    // The scanner pinned before the COPY does not observe copied files.
+    let (rows, text) = scanned(before_copy).await;
+    assert_eq!(0, rows, "pre-COPY snapshot scanner saw rows:\n{text}");
+
+    // A scanner opened after the COPY binds the same committed sequence but
+    // must return both copied series.
+    let after_copy = engine
+        .scanner(
+            target,
+            ScanRequest {
+                snapshot_on_scan: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(after_copy.snapshot_sequence(), Some(0));
+    let (rows, text) = scanned(after_copy).await;
+    assert_eq!(2, rows, "physical COPY is invisible to the scan:\n{text}");
+    for expected in ["api", "11.0", "worker", "22.0"] {
+        assert!(text.contains(expected), "{expected} missing:\n{text}");
+    }
+
+    // The bound survives a reopen of the destination.
+    reopen_region(
+        &engine,
+        target,
+        request.table_dir.clone(),
+        true,
+        request.options.clone(),
+    )
+    .await;
+    let after_reopen = engine
+        .scanner(
+            target,
+            ScanRequest {
+                snapshot_on_scan: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(after_reopen.snapshot_sequence(), Some(0));
+    let (rows, text) = scanned(after_reopen).await;
+    assert_eq!(2, rows, "copied rows lost after reopen:\n{text}");
+    for expected in ["api", "11.0", "worker", "22.0"] {
+        assert!(text.contains(expected), "{expected} missing:\n{text}");
+    }
+
+    // The implicit bound still fences memtable ranges: a distinct series
+    // written into the destination after open stays invisible to that scanner
+    // and is returned by a fresh one.
+    engine
+        .handle_request(target, put("db", 9, 33.0))
+        .await
+        .unwrap();
+    let pinned = engine
+        .scanner(
+            target,
+            ScanRequest {
+                snapshot_on_scan: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(pinned.snapshot_sequence(), Some(1));
+    engine
+        .handle_request(target, put("cache", 10, 44.0))
+        .await
+        .unwrap();
+    let (rows, text) = scanned(pinned).await;
+    assert_eq!(3, rows, "pinned scanner result:\n{text}");
+    assert!(text.contains("33.0"), "pre-open write missing:\n{text}");
+    assert!(
+        !text.contains("cache") && !text.contains("44.0"),
+        "write after scan open leaked into the pinned scanner:\n{text}"
+    );
+    let fresh = engine
+        .scanner(
+            target,
+            ScanRequest {
+                snapshot_on_scan: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(fresh.snapshot_sequence(), Some(2));
+    let (rows, text) = scanned(fresh).await;
+    assert_eq!(4, rows, "fresh scanner result:\n{text}");
+    assert!(
+        text.contains("cache") && text.contains("44.0"),
+        "fresh scanner missed the newer write:\n{text}"
+    );
+
+    engine.stop().await.unwrap();
+}
+
 // Storage-family rejection must happen before publication, including empty regions.
 #[rstest::rstest]
 #[case::parquet_to_narthex("flat", "narthex")]
