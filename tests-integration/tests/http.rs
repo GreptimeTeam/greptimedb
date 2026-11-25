@@ -7893,6 +7893,45 @@ transform:
             .await;
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
+    {
+        // the dryrun API accepts at most 10 rows
+        let rows = (0..11)
+            .map(|i| {
+                json!({
+                    "id1": "2436",
+                    "id2": "2528",
+                    "logger": "INTERACT.MANAGER",
+                    "type": "I",
+                    "time": "2024-05-25 20:16:37.217",
+                    "log": format!("row {i}")
+                })
+            })
+            .collect::<Vec<_>>();
+        let data = Value::Array(rows).to_string();
+        let expected =
+            json!("Invalid request parameter: dryrun data must not exceed 10 rows, got 11");
+
+        let body = json!({"pipeline_name": "test", "data": data});
+        let res = client
+            .post("/v1/pipelines/_dryrun")
+            .header("Content-Type", "application/json")
+            .body(body.to_string())
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let body: Value = res.json().await;
+        assert_eq!(body["error"], expected);
+
+        let res = client
+            .post("/v1/pipelines/_dryrun?pipeline_name=test")
+            .header("Content-Type", "application/json")
+            .body(data)
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let body: Value = res.json().await;
+        assert_eq!(body["error"], expected);
+    }
     guard.remove_all().await;
 }
 

@@ -568,12 +568,15 @@ fn check_pipeline_name_exists(pipeline_name: Option<String>) -> Result<String> {
     })
 }
 
-/// Check if the data length less than 10
+/// The maximum number of rows the pipeline dryrun API accepts.
+const MAX_DRYRUN_ROWS: usize = 10;
+
+/// Check that the dryrun data has at most [`MAX_DRYRUN_ROWS`] rows.
 fn check_data_valid(data_len: usize) -> Result<()> {
     ensure!(
-        data_len <= 10,
+        data_len <= MAX_DRYRUN_ROWS,
         InvalidParameterSnafu {
-            reason: "data is required",
+            reason: format!("dryrun data must not exceed {MAX_DRYRUN_ROWS} rows, got {data_len}"),
         }
     );
     Ok(())
@@ -1107,6 +1110,17 @@ mod tests {
     use prometheus::Opts;
 
     use super::*;
+
+    #[test]
+    fn test_check_data_valid() {
+        assert!(check_data_valid(0).is_ok());
+        assert!(check_data_valid(10).is_ok());
+        let err = check_data_valid(11).unwrap_err();
+        assert_eq!(
+            err.output_msg(),
+            "Invalid request parameter: dryrun data must not exceed 10 rows, got 11"
+        );
+    }
 
     #[test]
     fn test_transform_ndjson() {
