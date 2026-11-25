@@ -899,7 +899,7 @@ impl MitoRegion {
         let index_usage = version.ssts.owned_index_usage(self.region_id);
         let flushed_entry_id = version.flushed_entry_id;
 
-        let wal_usage = self.estimated_wal_usage(memtable_usage);
+        let wal_usage = self.estimated_wal_usage(memtables.decoded_bytes() as u64);
         let manifest_usage = self.manifest_size();
         let num_rows = version.ssts.owned_num_rows(self.region_id) + version.memtables.num_rows();
         let num_files = version.ssts.owned_num_files(self.region_id);
@@ -950,9 +950,9 @@ impl MitoRegion {
     }
 
     /// Estimated WAL size in bytes.
-    /// Use the memtables size to estimate the size of wal.
-    fn estimated_wal_usage(&self, memtable_usage: u64) -> u64 {
-        ((memtable_usage as f32) * ESTIMATED_WAL_FACTOR) as u64
+    /// Use the decoded size of the memtable rows to estimate the size of wal.
+    fn estimated_wal_usage(&self, memtable_decoded_bytes: u64) -> u64 {
+        ((memtable_decoded_bytes as f32) * ESTIMATED_WAL_FACTOR) as u64
     }
 
     /// Sets the state of the region to given state if the current state equals to

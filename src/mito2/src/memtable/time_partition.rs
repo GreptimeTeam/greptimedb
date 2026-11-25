@@ -495,6 +495,16 @@ impl TimePartitions {
             .sum()
     }
 
+    /// Returns the estimated bytes of the rows once decoded.
+    pub(crate) fn decoded_bytes(&self) -> usize {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .parts
+            .iter()
+            .map(|part| part.memtable.stats().decoded_bytes())
+            .sum()
+    }
+
     /// Returns the number of rows.
     pub(crate) fn num_rows(&self) -> u64 {
         let inner = self.inner.lock().unwrap();
