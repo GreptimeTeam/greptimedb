@@ -215,15 +215,15 @@ async fn copy_table_to_csv_respects_limit() {
         )
         .await;
         assert!(matches!(output.data, OutputData::AffectedRows(rows) if rows == expected_rows));
-        if expected_rows == 0 {
-            assert!(!path.try_exists().unwrap());
-        } else {
-            let csv = std::fs::read_to_string(path).unwrap();
-            assert_eq!(csv.lines().skip(1).count(), expected_rows);
-            if name == "limited" {
-                assert!(matches!(csv.lines().nth(1), Some("02" | "03")));
-            }
+        let csv = std::fs::read_to_string(path).unwrap();
+        let mut lines = csv.lines();
+        if expected_rows > 0 || !csv.is_empty() {
+            assert_eq!(lines.next(), Some("ts"));
         }
+        if name == "limited" {
+            assert!(matches!(csv.lines().nth(1), Some("02" | "03")));
+        }
+        assert_eq!(lines.count(), expected_rows);
     }
 }
 
