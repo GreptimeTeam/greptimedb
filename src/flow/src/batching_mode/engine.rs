@@ -1017,32 +1017,6 @@ impl BatchingEngine {
         self.runtime.read().await.tasks.contains_key(&flow_id)
     }
 
-    /// Runs the flow-admin `function` of the flow `catalog.flow` on the execution
-    /// factory with the function's own `args`, and returns its result.
-    ///
-    /// This is the one entry point of every flow admin function: the factory
-    /// resolves `function` itself, so a new function needs no new delegate here.
-    pub async fn admin(
-        &self,
-        flow_id: u32,
-        catalog: &str,
-        flow: &str,
-        function: &str,
-        args: &[String],
-    ) -> Result<String, Error> {
-        let Some(execution_factory) = self.execution_factory.as_ref() else {
-            return UnsupportedSnafu {
-                reason: "flow admin functions are not supported: this flownode installs no \
-                         batching execution factory",
-            }
-            .fail();
-        };
-
-        execution_factory
-            .admin(flow_id, catalog, flow, function, args)
-            .await
-    }
-
     async fn rollback_flow_runtime_if_current(&self, flow_id: FlowId, task: &BatchingTask) {
         let (removed_task, removed_shutdown_tx) = {
             let mut runtime = self.runtime.write().await;
@@ -2098,50 +2072,5 @@ GROUP BY l.number, time_window
             .await;
         assert!(!engine.flow_exist_inner(42).await);
         assert!(!engine.runtime.read().await.shutdown_txs.contains_key(&42));
-    }
-
-    #[tokio::test]
-    async fn test_admin_without_execution_factory_is_unsupported() {
-        let engine = new_test_engine().await;
-
-        for err in [
-            engine
-                .admin(1, "greptime", "demo", "flow_backfill", &[])
-                .await
-                .unwrap_err(),
-            engine
-                .admin(1, "greptime", "demo", "flow_backfill_status", &[])
-                .await
-                .unwrap_err(),
-        ] {
-            assert!(matches!(err, Error::Unsupported { .. }), "{err}");
-            assert!(err.to_string().contains("execution factory"), "{err}");
-        }
-    }
-
-    #[tokio::test]
-    async fn test_admin_delegates_to_the_execution_factory() {
-        let factory = Arc::new(TestExecutionFactory {
-            entered: None,
-            release: None,
-            result: std::sync::Mutex::new(None),
-        });
-        let engine = new_test_engine_with_execution(Some(factory)).await;
-
-        // The default trait method refuses: a factory that serves no flow admin
-        // function must not pretend to have an answer.
-        for err in [
-            engine
-                .admin(1, "greptime", "demo", "flow_backfill", &[])
-                .await
-                .unwrap_err(),
-            engine
-                .admin(1, "greptime", "demo", "flow_backfill_status", &[])
-                .await
-                .unwrap_err(),
-        ] {
-            assert!(matches!(err, Error::Unsupported { .. }), "{err}");
-            assert!(err.to_string().contains("does not serve"), "{err}");
-        }
     }
 }

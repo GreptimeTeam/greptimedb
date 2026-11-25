@@ -50,6 +50,7 @@ use crate::error::{
     IllegalCheckTaskStateSnafu, InternalSnafu, InvalidQuerySnafu, JoinTaskSnafu, ListFlowsSnafu,
     NoAvailableFrontendSnafu, SyncCheckTaskSnafu, UnsupportedSnafu,
 };
+use crate::flow_admin::{FlowAdminRegistryRef, FlowAdminRequest};
 use crate::metrics::{METRIC_FLOW_ROWS, METRIC_FLOW_TASK_COUNT};
 use crate::utils::StateReportHandler;
 use crate::{Error, FlowId};
@@ -931,12 +932,21 @@ impl common_meta::node_manager::Flownode for FlowDualEngine {
                     .map_err(to_meta_err(snafu::location!()));
                 };
                 // The one flow-admin route: this arm resolves no function name and
-                // parses no argument, so a new admin function needs no change here.
-                let result = self
-                    .batching_engine
-                    .admin(flow_id.id, &catalog, &flow, &function, &args)
-                    .await
-                    .map_err(to_meta_err(snafu::location!()))?;
+                // parses no argument. The registry this deployment installed decides
+                // which functions exist and who answers them, so a new admin function
+                // needs no change here.
+                let result = dispatch_flow_admin(
+                    &self.plugins,
+                    &function,
+                    FlowAdminRequest {
+                        flow_id: flow_id.id,
+                        catalog: &catalog,
+                        flow: &flow,
+                        args: &args,
+                    },
+                )
+                .await
+                .map_err(to_meta_err(snafu::location!()))?;
 
                 Ok(FlowResponse {
                     extensions: HashMap::from([(
@@ -982,6 +992,31 @@ fn decode_internal_eval_schedule(
             }),
         None => Ok(None),
     }
+}
+
+/// Serves one flow-admin call through the registry this deployment installed.
+///
+/// The route itself owns no function: it resolves the requested name against the
+/// [`FlowAdminRegistryRef`] in `plugins` and hands the request to its handler. A
+/// deployment that installs no registry serves no flow-admin function — an OSS
+/// flownode, or an assembly that injected its own batching execution factory —
+/// and the call is refused as unsupported rather than guessed at.
+async fn dispatch_flow_admin(
+    plugins: &Plugins,
+    function: &str,
+    request: FlowAdminRequest<'_>,
+) -> Result<String, Error> {
+    let Some(registry) = plugins.get::<FlowAdminRegistryRef>() else {
+        return UnsupportedSnafu {
+            reason: format!(
+                "flow admin function `{function}` is not supported: this flownode installs no \
+                 flow admin registry"
+            ),
+        }
+        .fail();
+    };
+
+    registry.dispatch(function, request).await
 }
 
 /// return a function to convert `crate::error::Error` to `common_meta::error::Error`
@@ -1046,11 +1081,17 @@ impl FlowEngine for StreamingEngine {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use common_base::Plugins;
     use common_meta::ddl::create_flow::INTERNAL_EVAL_SCHEDULE_KEY;
 
-    use super::decode_internal_eval_schedule;
+    use super::{decode_internal_eval_schedule, dispatch_flow_admin};
     use crate::error::Error;
+    use crate::flow_admin::{
+        FlowAdminHandler, FlowAdminRegistry, FlowAdminRegistryRef, FlowAdminRequest,
+    };
 
     #[test]
     fn test_malformed_internal_eval_schedule_json_is_error() {
@@ -1067,5 +1108,96 @@ mod tests {
                 if reason.contains("Invalid internal eval schedule payload")
         ));
         assert!(!flow_options.contains_key(INTERNAL_EVAL_SCHEDULE_KEY));
+    }
+
+    /// A handler of one function that records how often it ran.
+    struct RecordingHandler {
+        name: &'static str,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl FlowAdminHandler for RecordingHandler {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        async fn handle(&self, request: FlowAdminRequest<'_>) -> crate::Result<String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(format!(
+                "{}.{}#{}",
+                request.catalog, request.flow, request.flow_id
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_admin_without_a_registry_is_unsupported() {
+        // A flownode installed with no flow-admin registry serves no admin
+        // function: the call is refused by name instead of being answered for a
+        // deployment that has no such function.
+        let plugins = Plugins::new();
+
+        let err = dispatch_flow_admin(
+            &plugins,
+            "flow_demo",
+            FlowAdminRequest {
+                flow_id: 1,
+                catalog: "greptime",
+                flow: "demo",
+                args: &[],
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, Error::Unsupported { .. }), "{err}");
+        assert!(err.to_string().contains("`flow_demo`"), "{err}");
+        assert!(err.to_string().contains("no flow admin registry"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_admin_dispatches_through_the_installed_registry() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let plugin = Plugins::new();
+        plugin.insert::<FlowAdminRegistryRef>(Arc::new(
+            FlowAdminRegistry::try_new(vec![Arc::new(RecordingHandler {
+                name: "flow_demo",
+                calls: calls.clone(),
+            })])
+            .unwrap(),
+        ));
+        let args = vec!["a".to_string()];
+
+        let answer = dispatch_flow_admin(
+            &plugin,
+            "flow_demo",
+            FlowAdminRequest {
+                flow_id: 42,
+                catalog: "greptime",
+                flow: "demo",
+                args: &args,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!("greptime.demo#42", answer);
+
+        // An unknown name reaches no handler, and is refused by name.
+        let err = dispatch_flow_admin(
+            &plugin,
+            "flow_other",
+            FlowAdminRequest {
+                flow_id: 42,
+                catalog: "greptime",
+                flow: "demo",
+                args: &args,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, Error::Unsupported { .. }), "{err}");
+        assert!(err.to_string().contains("`flow_other`"), "{err}");
+        assert_eq!(1, calls.load(Ordering::SeqCst));
     }
 }

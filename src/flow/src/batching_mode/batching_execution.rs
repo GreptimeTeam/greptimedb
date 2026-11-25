@@ -23,7 +23,6 @@ use table::TableRef;
 use crate::Result;
 use crate::batching_mode::frontend_client::FrontendClient;
 use crate::batching_mode::task::{BatchingExecutionGuard, BatchingTask, ExecuteOnceOutcome};
-use crate::error::UnsupportedSnafu;
 
 #[async_trait::async_trait]
 pub trait BatchingExecution: Send + Sync + 'static {
@@ -58,27 +57,4 @@ pub trait BatchingExecutionFactory: Send + Sync + 'static {
         engine: &QueryEngineRef,
         frontend: &Arc<FrontendClient>,
     ) -> Result<Option<Arc<dyn BatchingExecution>>>;
-
-    /// Runs the flow-admin `function` of the flow `catalog.flow` with the
-    /// function's own `args` and returns its result as the string the caller
-    /// answers with.
-    ///
-    /// The route is generic: the factory resolves `function` itself, so adding a
-    /// flow admin function needs no new method here and no new request body on
-    /// the wire. What a function returns is process-local state of the execution
-    /// this factory serves, so a factory that does not serve one refuses the call
-    /// instead of pretending to have an answer.
-    async fn admin(
-        &self,
-        _flow_id: u32,
-        _catalog: &str,
-        _flow: &str,
-        _function: &str,
-        _args: &[String],
-    ) -> Result<String> {
-        UnsupportedSnafu {
-            reason: "this batching execution factory does not serve flow admin functions",
-        }
-        .fail()
-    }
 }
