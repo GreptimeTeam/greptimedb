@@ -11,7 +11,16 @@ Cache the partial states of an aggregation over a region scan on the node that r
 
 # Motivation
 
-Dashboards run the same aggregation every few seconds over a window that slides forward: `count(*)`, `avg(latency)`, or `sum(bytes)`, grouped by a time bucket and a few tags over the last 24 hours. Each refresh scans and aggregates the whole window again, even though only the newest few minutes have changed since the previous refresh.
+Dashboards over logs and traces run the same SQL aggregation again and again over a window that slides forward: `count(*)`, `avg(latency)`, or `sum(bytes)`, grouped by a time bucket and a few tags over the last day or week. Each refresh scans and aggregates the whole window again, even though only the newest minutes have changed since the previous refresh.
+
+Our own front ends issue such queries:
+
+- The GreptimeDB Dashboard's trace view draws request rate, errors, and a duration heatmap with `date_bin` over the selected window and ranks services by count.
+- Its log view draws log volume by level and the top values of a label.
+- The Grafana data source plugin issues a log volume query and ships dashboards whose panels refresh every 30 seconds.
+- A port of Langfuse to GreptimeDB charts trace counts, cost by model, latency percentiles, and scores over the last day or week.
+
+All of them bound the time index on both ends and re-run with a shifted window. The cost is in the scan: on a deployment with 7 days of traces, the trace view's aggregations took about 5 seconds each, nearly all of it in reading files, while the aggregation itself took milliseconds.
 
 GreptimeDB has no cache for this workload. The query layer has no result cache. The mito range result cache stores scanned rows rather than aggregation results, and only for scans with tag filters. Flow can maintain an aggregate continuously, but each query shape must be declared in advance, and ad hoc dashboard queries are not.
 
@@ -42,7 +51,7 @@ This RFC follows the Druid and StarRocks approach, adapted to the GreptimeDB sto
 # Non-Goals
 
 - Caching final results or raw rows. Only partial aggregation states are cached.
-- PromQL. Its range evaluation has a different plan shape. PromQL can reuse the fingerprint later; see [Future Work](#future-work).
+- PromQL. Range dashboards over metrics are evaluated by the windowed PromQL path in #10569.
 - Metric engine tables. The rule does not rewrite scans of metric engine tables. These tables are queried mostly through PromQL and are handled together with it.
 - Sharing cache entries across nodes or persisting them. The cache is in memory and local to a node.
 - Caching slices that still have unflushed data. These slices are recomputed on every query.
@@ -58,13 +67,17 @@ AggregateExec (Final)                     (unchanged)
             └─ RegionScanExec             the original scan; cached slices are pruned
 ```
 
-A physical optimizer rule looks for a `Partial` aggregation that reads a region scan through row-wise operators only (filter and projection), where the scan request bounds the time index on both ends. The rule splits the time range into slices aligned to a fixed width, adds the slice of each row as an extra grouping key of the partial aggregation, and places `SliceAggregateExec` above it.
+A physical optimizer rule looks for a `Partial` aggregation that reads a region scan through row-wise operators only (filter and projection), where the scan request bounds the time index on both ends. The rule splits the time range into slices aligned to a fixed width and places `SliceAggregateExec` above the partial aggregation.
 
-When the query runs, `SliceAggregateExec` asks the scan for the fingerprint of each slice. Slices whose cached entry has the same fingerprint are emitted from the cache, and a dynamic filter lets the scan skip their rows. The remaining slices are computed by the original scan in one pass, and the extra grouping key is removed from their states before they are emitted. Once every partition of the scan has finished, their states are merged across partitions, split by slice, and cached. The final aggregation merges partial states regardless of how the input rows were split, so its output does not change.
+If the aggregation already groups by a time bucket that lies within one slice, such as `date_bin` with a bucket that divides the slice width, the slice of each group follows from its bucket and the aggregation stays as planned. Otherwise, the rule adds the slice of each row as an extra grouping key. An extra key costs time on every run, so the rule adds it only when the same plan runs a second time; a query that runs once does not pay for it.
+
+When the query runs, `SliceAggregateExec` asks the scan for the fingerprint of each slice. Slices whose cached entry has the same fingerprint are emitted from the cache, and a dynamic filter lets the scan skip their rows. The remaining slices are computed by the original scan in one pass, and an extra grouping key is removed from their states before they are emitted. Once every partition of the scan has finished, a background task merges their states across partitions, splits them by slice, and caches them, so the query does not wait for it. A failure there only costs later hits. The final aggregation merges partial states regardless of how the input rows were split, so its output does not change.
 
 The rule runs where the partial aggregation reads the region scan: in-process in standalone mode, and on the datanode in distributed mode. In distributed mode, the aggregation above `SliceAggregateExec` produces the states that the frontend merges. Aggregations that the distributed planner keeps above `MergeScan`, such as those that cannot be split into steps, are not affected. The frontend plan and the region request protocol do not change.
 
-Every slice, cached or computed, describes the data of the version the scan was built on, so a query reads a single region version, as an uncached query does. Results are not bit-identical to those of an uncached run: merging states in a different order can change the last digits of a floating-point `sum` or `avg`, as a different partition count already does.
+Every slice, cached or computed, comes from the files of the version the scan was built on. A plain scan reads memtables without a sequence bound, so a row written while the query runs may or may not be seen, with or without the cache. The cache does not add another outcome: a cached slice does not see the row, which an uncached scan can also miss. A computed slice that sees the row is cached under a fingerprint that never matches again, because afterwards the row is either in a memtable that overlaps the slice or in a new file.
+
+Results are not bit-identical to those of an uncached run: merging states in a different order can change the last digits of a floating-point `sum` or `avg`, as a different partition count already does.
 
 ## Data fingerprint
 
@@ -93,7 +106,8 @@ SST files are immutable. Every operation that changes the persisted rows of a ra
 - Key: the region ID, the partial aggregation and the operators below it, the scan request, the session settings, and the slice bounds. The key is kept in full and compared on lookup, so two plans never share an entry by a hash collision. It leaves out only the time-index range predicates that the slice bounds provably imply, so two queries with different windows can share their interior slices. Any other predicate on the time index, such as `date_part('hour', ts) = 3`, stays in the key. Session settings are in the key because functions read some of them, such as the time zone, at execution time.
 - Exclusions: dynamic filters change while a query runs, so the rule skips scans that hold one, such as a filter pushed down by a TopK or a join, and runs after filter pushdown to see them. Plans with expressions that are not immutable are skipped too, because their values can change between queries.
 - Entry: the fingerprint under which the entry was computed, and the partial state batches.
-- Capacity: one cache per node, bounded in bytes and weighted by batch size. A query whose states exceed a per-query bound caches nothing, and the rule stops rewriting its plan, which would otherwise pay for the extra grouping on every run.
+- Capacity: one cache per node, bounded in bytes and weighted by batch size. Entries not read for an idle timeout are dropped. The states a query collects for the cache are reserved in the query memory pool; if the pool refuses them, the query caches nothing and goes on. A query whose states exceed a per-query bound caches nothing, and the rule stops rewriting its plan for the idle timeout, which would otherwise pay for the extra grouping on every run.
+- Configuration: the cache is experimental and off by default. An option in `[query]` enables it for the node and sets its size, the per-query bound, and the idle timeout. A per-request query option overrides the switch for one query.
 
 ## Worked example
 
@@ -116,28 +130,28 @@ Suppose a late row for 03:10 today arrives between the two runs. The row lands i
 
 Benefits:
 
-- Exact results. A query reads one region version, as an uncached query does, and the fingerprint changes whenever the rows of a slice change, so there is no staleness window to tune and nothing to clear manually.
+- Exact results. The fingerprint changes whenever the persisted rows of a slice change, so there is no staleness window to tune and nothing to clear manually.
 - No new protocol or persisted format. The engine contract is one method with a default implementation, and the cache is in memory.
 - The fingerprint is useful beyond this cache. Any result cache keyed by time range, such as one for PromQL range steps, can use it.
-- A prototype measured four dashboard queries over 384 million request log rows spanning 8 days, in standalone mode, on local disk with a warm OS cache. The table shows median milliseconds. A first run is the first query after the server starts; a slid window starts 5 minutes after the previous one.
+- A prototype measured four dashboard queries over 384 million request log rows spanning 8 days, in standalone mode, on local disk with a warm OS cache. The table shows median milliseconds. A first run is the first query after the server starts; a slid window starts 5 minutes after the previous one. The uncached runs use `main` at 8e885bfed5, which already prunes these windows by time range.
 
 | Query | Window | Uncached, first run | Cached, first run | Uncached, later runs | Cached, slid window | Cached, same window |
 |---|---|---|---|---|---|---|
-| P99 latency per bucket and service | 24 hours | 181.9 | 208.3 | 148.2 | 20.1 | 7.4 |
-| | 7 days | 1164.9 | 1272.5 | 1011.9 | 22.3 | 14.2 |
-| Error count with a full-text term | 24 hours | 315.0 | 322.6 | 269.0 | 21.1 | 5.3 |
-| | 7 days | 2209.9 | 2232.6 | 1931.3 | 32.2 | 13.3 |
-| Top 10 endpoints | 24 hours | 149.4 | 173.8 | 125.0 | 15.2 | 3.4 |
-| | 7 days | 1146.4 | 1491.8 | 1200.4 | 28.2 | 15.0 |
-| Distinct users (`approx_distinct`) | 24 hours | 101.5 | 128.4 | 90.8 | 13.9 | 3.9 |
-| | 7 days | 701.4 | 901.0 | 785.8 | 26.6 | 13.7 |
+| P99 latency per bucket and service | 24 hours | 187.7 | 209.4 | 166.3 | 18.8 | 7.5 |
+| | 7 days | 1187.2 | 1207.4 | 1227.7 | 22.9 | 14.1 |
+| Error count with a full-text term | 24 hours | 325.9 | 338.0 | 279.1 | 22.9 | 5.6 |
+| | 7 days | 2727.0 | 2680.5 | 2853.4 | 39.5 | 15.3 |
+| Top 10 endpoints | 24 hours | 162.0 | 165.3 | 147.7 | 14.3 | 3.4 |
+| | 7 days | 1174.5 | 1197.1 | 1192.7 | 22.9 | 12.9 |
+| Distinct users (`approx_distinct`) | 24 hours | 105.5 | 113.0 | 92.5 | 11.4 | 3.7 |
+| | 7 days | 722.2 | 748.9 | 817.2 | 23.4 | 15.3 |
 
-  Cached and uncached results were identical except for `approx_percentile_cont`, whose result depends on the order in which states are merged: cached values differed from uncached ones by up to 3.3%, and two uncached runs differed by up to 4.3%. A light query, `count(*)` and `avg` per bucket and service over 24 hours of 24 million rows, took 38.5 ms uncached and 9.9 ms cached on a slid window.
+  Cached and uncached results were identical except for `approx_percentile_cont`, whose result depends on the order in which states are merged: cached values differed from uncached ones by up to 4.3%, as much as two uncached runs differed. A light query, `count(*)` and `avg` per bucket and service over 24 hours of 24 million rows, took 38.5 ms uncached and 9.9 ms cached on a slid window.
 
 Drawbacks:
 
-- The first execution of a query does more work. The partial aggregation also groups by slice, which multiplies its groups by the number of slices it covers. The prototype measured 1% to 30% more time on a first run, the most for queries with many groups, such as the top endpoints over 7 days. A query that never repeats pays this cost and gains nothing, so the cache is off by default.
-- Slices are not cached while a memtable overlaps them, and a memtable spans everything from its oldest row to its newest. A late write therefore disables the cache from its timestamp to the present until the next flush. A dashboard that only shows the last 15 minutes gains nothing.
+- The first execution of a query does more work: the scan prunes nothing yet, and the states are collected for the cache. The prototype measured up to 12% more time on a first run. When the plan needs an extra grouping key, that key multiplies the groups by the number of slices and is paid from the plan's second run on, until the slices are cached.
+- Slices are not cached while a memtable overlaps them, and a memtable spans everything from its oldest row to its newest. A late write therefore disables the cache from its timestamp to the present until the next flush. A dashboard that only shows the last 15 or 30 minutes, the default window of several of the front ends above, gains little.
 - Aggregations whose states grow with their input, such as an exact `count(DISTINCT)`, exceed the per-query bound and are never cached; their first run pays for the extra grouping.
 - Only aggregations with a partial stage are rewritten. A query that groups by the whole primary key aggregates each series within one partition, and a `min` or `max` without grouping pushes its own dynamic filter into the scan; neither uses the cache.
 - Correctness depends on the fingerprint observing every change to the rows of a range. A new engine operation that changes rows without replacing files or bumping one of the versions in the fingerprint would make the cache return stale results. The engine contract and its tests must cover this requirement.
@@ -145,8 +159,9 @@ Drawbacks:
 # Implementation Plan
 
 1. Add `RegionScanner::time_range_fingerprint`, implement it for mito, and test every change path listed in [Data fingerprint](#data-fingerprint).
-2. Add the optimizer rule and `SliceAggregateExec`, disabled by default behind a query option, with a node-level cache bounded by its own size option.
-3. Report cache hits and misses, and the metrics of the slice scans, in `EXPLAIN ANALYZE`.
+2. Add the optimizer rule and `SliceAggregateExec`, disabled by default behind an experimental `[query]` option that a per-request option overrides, with a node-level cache bounded by its own size option.
+3. Report slice hits and the reasons for misses in `EXPLAIN ANALYZE` and as a metric.
+4. Test writes that interleave with a query, and run the rule in distributed mode, where the partial aggregation runs on the datanode.
 
 # Alternatives
 
@@ -164,10 +179,12 @@ Drawbacks:
 1. **Slice width.** A fixed one-hour width is simple. Deriving the width from the region's compaction window or from the query's bucket width could raise the hit rate.
 2. **Plan identity.** The prototype identifies the plan by the debug form of its expressions plus the session settings. This relies on the debug form of every expression covering everything that affects its result. A stable serialization of physical expressions would remove that reliance.
 3. **Cost of a full hit.** A 30-day window with hourly slices still takes about 18 ms when every slice hits. Where that time goes has not been measured.
+4. **Sequence fence.** The cache keeps the visibility of an uncached plain scan, in which rows written during the query may or may not appear. Bounding the memtable reads of rewritten scans by the sequence at scan creation would make each query read exactly one version, at the cost of a behavior that differs from uncached scans.
+5. **Distributed mode.** The prototype has been verified in standalone mode only.
 
 # Future Work
 
-- PromQL range queries, with per-step results cached under the same fingerprint, and the metric engine fingerprint that they need. Logical tables share one physical region, so a flush or compaction of the physical region invalidates slices of every logical table it covers.
+- A metric engine fingerprint, which the windowed PromQL evaluation in #10569 could use to cache results. Logical tables share one physical region, so a flush or compaction of the physical region invalidates slices of every logical table it covers.
 - Caching slices of the current hour once flushed data covers part of the hour, by splitting the slice at the memtable's minimum timestamp.
 - Incremental refresh, as StarRocks does for tablets: when a slice has only gained new files since its entry was computed, aggregate the new files and merge the result into the cached states instead of recomputing the slice.
 
