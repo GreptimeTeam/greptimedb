@@ -2511,8 +2511,7 @@ mod tests {
     use store_api::storage::RegionId;
 
     use super::*;
-    use crate::event_listener::NoopRegionServerEventListener;
-    use crate::tests::{MockQueryEngine, MockRegionEngine, mock_region_server};
+    use crate::tests::{MockRegionEngine, mock_region_server};
 
     #[test]
     fn test_is_ingest_request() {
@@ -3555,23 +3554,6 @@ mod tests {
             assert(result);
         }
     }
-    fn mock_region_server_with_limiter(
-        max_concurrent_queries: usize,
-        timeout: Duration,
-    ) -> RegionServer {
-        use common_runtime::runtime::{BuilderBuild, RuntimeTrait};
-
-        RegionServer::with_table_provider(
-            Arc::new(MockQueryEngine),
-            Runtime::builder().build().unwrap(),
-            Box::new(NoopRegionServerEventListener),
-            Arc::new(DummyTableProviderFactory),
-            max_concurrent_queries,
-            timeout,
-            FlightCompression::default(),
-        )
-    }
-
     fn mock_region_metadata(region_id: RegionId) -> RegionMetadata {
         let mut metadata_builder = RegionMetadataBuilder::new(region_id);
         metadata_builder.push_column_metadata(ColumnMetadata {
