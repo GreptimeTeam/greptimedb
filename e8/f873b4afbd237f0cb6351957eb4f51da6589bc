@@ -1,0 +1,29 @@
+config/config.md
+  s_56ec14b9b17926::t_4e5c81e5e9eef3 471
+config/metasrv.example.toml
+  s_56ec14b9b17926::t_eb8cad21d823b4 77
+src/common/meta/src/node_expiry_listener.rs
+  s_56ec14b9b17926::t_8fb0c93073bb42 15,23,26,36,51,56-64,70,77-84,93-94,105-106,108-131,136,138-146,156,170-265
+src/meta-srv/AGENTS.md
+  s_56ec14b9b17926::t_61f7a3e40e4d28 65-67
+src/meta-srv/src/metasrv.rs
+  s_56ec14b9b17926::t_1c52b390d36dc2 588,688,791,809
+src/meta-srv/src/metasrv/builder.rs
+  s_56ec14b9b17926::t_a492ad73636ca4 26,42,684-688,690,1043-1079
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e8f873b4afbd237f0cb6351957eb4f51da6589bc",
+  "prompts": {},
+  "sessions": {
+    "s_56ec14b9b17926": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a211aa-1266-7a00-829a-eb33295d30fa",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
