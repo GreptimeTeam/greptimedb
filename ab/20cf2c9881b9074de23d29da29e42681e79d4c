@@ -1,0 +1,24 @@
+config/config.md
+  s_56ec14b9b17926::t_c9374c2def14c9 471
+config/metasrv.example.toml
+  s_56ec14b9b17926::t_c9374c2def14c9 77-78
+src/meta-srv/src/metasrv/builder.rs
+  s_56ec14b9b17926::t_95cd003c44a17b 1057-1073,1075-1094,1096-1108
+  s_56ec14b9b17926::t_78d1dbd6eab4bf 35-37,686-688,691,1054-1056,1109-1110
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ab20cf2c9881b9074de23d29da29e42681e79d4c",
+  "prompts": {},
+  "sessions": {
+    "s_56ec14b9b17926": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a211aa-1266-7a00-829a-eb33295d30fa",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
