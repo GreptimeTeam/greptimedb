@@ -788,6 +788,8 @@ impl MemtableSstWriter {
             flush_metrics.compact_memtable += compact_cost;
 
             let mem_stats = mem.stats();
+            // Size batches and row groups by the decoded rows, not the held bytes: an encoded
+            // memtable holds far fewer bytes than the batches it decodes to.
             let batch_size = crate::batch_size::estimate_batch_size([(
                 mem_stats.num_rows() as u64,
                 mem_stats.decoded_bytes() as u64,
@@ -1229,6 +1231,7 @@ fn build_flush_source(
         );
         return Ok((FlatSource::new_iter(schema, iter), max_sequence));
     }
+    // Encoded ranges are decoded before merging, so their decoded size sizes the batches.
     let batch_size = crate::batch_size::estimate_batch_size(ranges.iter().map(|range| {
         let stats = range.stats();
         (stats.num_rows() as u64, stats.decoded_bytes() as u64)

@@ -325,6 +325,8 @@ impl RegionWriteCtx {
         }
 
         let mutable_memtable = self.version.memtables.mutable.clone();
+        // Held bytes shrink when the memtable encodes parts, so count written data by the decoded
+        // bytes, which only grow with writes.
         let prev_decoded_bytes = if self.written_bytes.is_some() {
             Some(mutable_memtable.decoded_bytes())
         } else {
@@ -418,6 +420,8 @@ impl RegionWriteCtx {
             .start_timer();
 
         let mutable_memtable = &self.version.memtables.mutable;
+        // Held bytes shrink when the memtable encodes parts, so count written data by the decoded
+        // bytes, which only grow with writes.
         let prev_decoded_bytes = if self.written_bytes.is_some() {
             Some(mutable_memtable.decoded_bytes())
         } else {
