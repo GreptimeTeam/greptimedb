@@ -45,10 +45,12 @@ use datafusion::dataframe::DataFrame;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::analyze::AnalyzeExec;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
-use datafusion_common::ResolvedTableReference;
+use datafusion_common::{DFSchemaRef, ResolvedTableReference};
 use datafusion_expr::{
-    AggregateUDF, DmlStatement, LogicalPlan as DfLogicalPlan, LogicalPlan, WindowUDF, WriteOp,
+    AggregateUDF, DmlStatement, LogicalPlan as DfLogicalPlan, LogicalPlan,
+    UserDefinedLogicalNodeCore, WindowUDF, WriteOp,
 };
+use datatypes::extension::json::is_json2_extension_type;
 use datatypes::prelude::VectorRef;
 use datatypes::schema::{Schema, SchemaRef};
 use futures::future::BoxFuture;
@@ -176,6 +178,15 @@ fn needs_broadcast_fallback(
     allow_broadcast_fallback: bool,
 ) -> bool {
     allow_broadcast_fallback && contains_broadcast_materialization(physical_plan)
+}
+
+/// Whether `schema` describes a JSON2 column at a distributed boundary.
+///
+/// `JsonSchemaConcretizeRule` gives each `MergeScan` the concrete Arrow type its remote stage
+/// emits, so a JSON2 column of a boundary is either still the raw empty `Struct` or the
+/// concretized `large` type. Both keep the JSON2 extension marker.
+fn has_json2_boundary_schema(schema: &DFSchemaRef) -> bool {
+    schema.fields().iter().any(is_json2_extension_type)
 }
 
 /// Whether `plan` evaluates the build side of a broadcast join on the frontend.
@@ -335,6 +346,14 @@ impl DatafusionQueryEngine {
         else {
             return Ok(analyzed_plan.clone());
         };
+        // The materialized payload is encoded from the remote plan, and Substrait/Arrow IPC can
+        // drop the JSON2 extension type that `JsonSchemaConcretizeRule` put on a boundary schema.
+        // A JSON2 column on either side therefore keeps the join on the frontend.
+        if has_json2_boundary_schema(large.schema())
+            || has_json2_boundary_schema(small_scan.schema())
+        {
+            return Ok(analyzed_plan.clone());
+        }
         // Apply the same cost heuristic as the nested rewrite, trying both orientations:
         // the join inputs may be swapped by earlier passes, so the small side is whichever
         // side the heuristic actually favors as the broadcast build.
@@ -1375,6 +1394,7 @@ mod tests {
     use api::v1::SemanticType;
     use arrow::array::{ArrayRef, StringArray, UInt64Array};
     use arrow_schema::SortOptions;
+    use arrow_schema::{DataType as ArrowDataType, Field};
     use async_trait::async_trait;
     use catalog::RegisterTableRequest;
     use catalog::information_schema::{
@@ -1408,6 +1428,7 @@ mod tests {
     use datafusion_common::{DataFusionError, JoinType, NullEquality, ScalarValue};
     use datafusion_expr::LogicalPlanBuilder;
     use datafusion_physical_expr::expressions::Column;
+    use datatypes::extension::json::Json2ExtensionType;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
     use datatypes::vectors::{Helper, UInt32Vector, VectorRef};
@@ -3497,6 +3518,120 @@ mod tests {
             "the switch must keep the frontend join, got:\n{}",
             fallback.display_indent()
         );
+    }
+
+    /// `schema` with a JSON2 column `j` appended, as `JsonSchemaConcretizeRule` leaves a boundary
+    /// schema: the concretized `large` (Binary) type behind the JSON2 extension marker.
+    fn json2_boundary_schema(schema: &DFSchemaRef) -> DFSchemaRef {
+        let qualifier = schema
+            .iter()
+            .next()
+            .and_then(|(qualifier, _)| qualifier.cloned());
+        let json2_column = Field::new("j", ArrowDataType::Binary, true)
+            .with_extension_type(Json2ExtensionType::default());
+        let mut fields = schema
+            .iter()
+            .map(|(qualifier, field)| (qualifier.cloned(), field.clone()))
+            .collect::<Vec<_>>();
+        fields.push((qualifier, Arc::new(json2_column)));
+
+        Arc::new(
+            datafusion_common::DFSchema::new_with_metadata(fields, schema.metadata().clone())
+                .unwrap(),
+        )
+    }
+
+    /// `probe INNER JOIN build ON probe.number = build.number` with both sides already under a
+    /// `MergeScan` boundary, i.e. the shape the broadcast rewrite captures. With `json2_side` set,
+    /// that side's boundary schema carries a concretized JSON2 column.
+    fn merge_scan_join_plan(json2_side: Option<&str>) -> LogicalPlan {
+        let boundary = |alias: &str, table_id: TableId, name: &str| {
+            let merge_scan =
+                MergeScanLogicalPlan::new(dist_join_test_scan(alias, table_id, name), false);
+            let merge_scan = if json2_side == Some(alias) {
+                let schema = json2_boundary_schema(merge_scan.schema());
+                merge_scan.with_output_schema(schema)
+            } else {
+                merge_scan
+            };
+            merge_scan.into_logical_plan()
+        };
+
+        // The equijoin must already be in `on`: the rewrite only captures a join whose
+        // `JoinConstraint` is `On` with a non-empty key list, and the analyzer is what moves the
+        // whole `ON` clause there for a SQL-planned join.
+        LogicalPlan::Join(
+            datafusion_expr::Join::try_new(
+                Arc::new(boundary("probe", PROBE_TABLE_ID, "probe")),
+                Arc::new(boundary("build", BUILD_TABLE_ID, "build")),
+                vec![(col("probe.number"), col("build.number"))],
+                None,
+                JoinType::Inner,
+                datafusion_expr::JoinConstraint::On,
+                NullEquality::NullEqualsNothing,
+                false,
+            )
+            .unwrap(),
+        )
+    }
+
+    /// A JSON2 column on either boundary of the candidate join keeps the frontend join: the
+    /// materialized payload is encoded through Substrait/Arrow IPC, which can drop the concretized
+    /// JSON2 extension type. Without one, the same plan is rewritten.
+    #[tokio::test]
+    async fn test_materialize_broadcast_keeps_json2_boundary() {
+        common_telemetry::init_default_ut_logging();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let engine = dist_join_engine(dist_join_reports(), calls, true).await;
+        let query_engine = engine
+            .as_any()
+            .downcast_ref::<DatafusionQueryEngine>()
+            .unwrap();
+
+        for (json2_side, rewritten_expected) in
+            [(Some("build"), false), (Some("probe"), false), (None, true)]
+        {
+            let plan = merge_scan_join_plan(json2_side);
+            let mut ctx = query_engine
+                .engine_context(dist_join_query_ctx(true))
+                .unwrap();
+            // The cost heuristic favors the build table (1 region of 1_000 bytes against 2
+            // regions of 4_000 and 6_000 bytes), so only the JSON2 boundary can keep the plan.
+            ctx.state_mut()
+                .config_mut()
+                .options_mut()
+                .extensions
+                .insert(DistJoinStats {
+                    tables: dist_join_test_stats(),
+                });
+
+            let original = plan.display_indent().to_string();
+            let materialized = query_engine
+                .maybe_materialize_volatile_broadcast(&plan, &ctx)
+                .await
+                .unwrap()
+                .display_indent()
+                .to_string();
+
+            assert_eq!(
+                rewritten_expected,
+                materialized.contains("MaterializeBroadcastJoin"),
+                "the JSON2 side {json2_side:?} must {} the broadcast rewrite, got:\n{materialized}",
+                if rewritten_expected { "keep" } else { "drop" }
+            );
+            if !rewritten_expected {
+                assert_eq!(
+                    original, materialized,
+                    "a JSON2 boundary must keep the plan as analyzed"
+                );
+                assert_eq!(
+                    2,
+                    materialized.matches("MergeScan [").count(),
+                    "the two boundaries must stay, got:\n{materialized}"
+                );
+            }
+        }
     }
 
     /// The fallback wraps the output stream of a plan that materializes a broadcast build side

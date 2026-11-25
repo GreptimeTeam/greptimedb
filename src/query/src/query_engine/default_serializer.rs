@@ -30,21 +30,6 @@ use datafusion::execution::{FunctionRegistry, SessionStateBuilder};
 use datafusion::logical_expr::{Extension, LogicalPlan};
 use datafusion_expr::{Expr, UserDefinedLogicalNode};
 use greptime_proto::substrait_extension::MergeScan as PbMergeScan;
-use promql::functions::{
-    AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, DoubleExponentialSmoothing,
-    IDelta, IeeeComparison, IeeeSqrt, Increase, LastOverTime, MaxOverTime, MinOverTime, MixedRange,
-    NativeHistogramAbsentOverTime, NativeHistogramAdd, NativeHistogramAggAvg,
-    NativeHistogramAggSum, NativeHistogramAvg, NativeHistogramAvgOverTime, NativeHistogramChanges,
-    NativeHistogramCount, NativeHistogramCountOverTime, NativeHistogramDelta,
-    NativeHistogramDivScalar, NativeHistogramDrop, NativeHistogramEq, NativeHistogramFraction,
-    NativeHistogramIDelta, NativeHistogramIRate, NativeHistogramIncrease,
-    NativeHistogramLastOverTime, NativeHistogramMulScalar, NativeHistogramNeg,
-    NativeHistogramNotEq, NativeHistogramPresentOverTime, NativeHistogramQuantile,
-    NativeHistogramRate, NativeHistogramResets, NativeHistogramScalarMul, NativeHistogramStddev,
-    NativeHistogramStdvar, NativeHistogramSub, NativeHistogramSum, NativeHistogramSumOverTime,
-    NativeHistogramToString, PredictLinear, PresentOverTime, PromqlFloatToString, QuantileOverTime,
-    Rate, Resets, Round, StddevOverTime, StdvarOverTime, SumOverTime, quantile_udaf,
-};
 use prost::Message;
 use session::context::{QueryContext, QueryContextRef};
 use snafu::ResultExt;
@@ -348,84 +333,10 @@ fn register_greptime_functions(
             .context(RegisterUdfSnafu { name })?;
     }
 
-    let _ = session_state.register_udaf(quantile_udaf());
-
-    for udf in IeeeComparison::all() {
-        let _ = session_state.register_udf(Arc::new(udf));
-    }
-    let _ = session_state.register_udf(Arc::new(IeeeSqrt::scalar_udf()));
-
-    let _ = session_state.register_udf(Arc::new(IDelta::<false>::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(IDelta::<true>::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(Rate::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(Increase::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(Delta::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(Resets::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(Changes::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(Deriv::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(Round::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(AvgOverTime::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(MinOverTime::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(MaxOverTime::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(SumOverTime::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(CountOverTime::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(LastOverTime::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(AbsentOverTime::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(PresentOverTime::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(StddevOverTime::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(StdvarOverTime::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(QuantileOverTime::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(PredictLinear::scalar_udf()));
-    let double_exponential_smoothing_udf =
-        DoubleExponentialSmoothing::scalar_udf().with_aliases(["prom_holt_winters"]);
-    let _ = session_state.register_udf(Arc::new(double_exponential_smoothing_udf));
-
-    for udf in [
-        NativeHistogramAbsentOverTime::scalar_udf(),
-        NativeHistogramAdd::scalar_udf(),
-        NativeHistogramAvg::scalar_udf(),
-        NativeHistogramAvgOverTime::scalar_udf(),
-        NativeHistogramChanges::scalar_udf(),
-        NativeHistogramCount::scalar_udf(),
-        NativeHistogramCountOverTime::scalar_udf(),
-        NativeHistogramDelta::scalar_udf(),
-        NativeHistogramDivScalar::scalar_udf(),
-        NativeHistogramDrop::bool_false_udf(String::new(), None),
-        NativeHistogramDrop::bool_true_udf(String::new(), None),
-        NativeHistogramDrop::float_null_udf(String::new(), None),
-        NativeHistogramEq::scalar_udf(),
-        NativeHistogramFraction::scalar_udf(),
-        NativeHistogramIDelta::scalar_udf(),
-        NativeHistogramIRate::scalar_udf(),
-        NativeHistogramIncrease::scalar_udf(),
-        NativeHistogramLastOverTime::scalar_udf(),
-        MixedRange::float_udf(None),
-        MixedRange::histogram_udf(None),
-        NativeHistogramMulScalar::scalar_udf(),
-        NativeHistogramNeg::scalar_udf(),
-        NativeHistogramNotEq::scalar_udf(),
-        NativeHistogramPresentOverTime::scalar_udf(),
-        NativeHistogramQuantile::scalar_udf(),
-        NativeHistogramRate::scalar_udf(),
-        NativeHistogramResets::scalar_udf(),
-        NativeHistogramScalarMul::scalar_udf(),
-        NativeHistogramStddev::scalar_udf(),
-        NativeHistogramStdvar::scalar_udf(),
-        NativeHistogramSub::scalar_udf(),
-        NativeHistogramSum::scalar_udf(),
-        NativeHistogramSumOverTime::scalar_udf(),
-        NativeHistogramToString::scalar_udf(),
-        PromqlFloatToString::scalar_udf(),
-    ] {
-        let _ = session_state.register_udf(Arc::new(udf));
-    }
-
-    for udaf in [
-        NativeHistogramAggAvg::aggregate_udf(),
-        NativeHistogramAggSum::aggregate_udf(),
-    ] {
-        let _ = session_state.register_udaf(Arc::new(udaf));
-    }
+    // The PromQL engine registers its UDFs/UDAFs (the `ieee_*` comparisons, the `prom_*`
+    // functions and `quantile_udaf`) through one shared helper: decoded plans must resolve
+    // exactly the functions the frontend registered when it produced them.
+    promql::functions::register_promql_functions(session_state);
 
     Ok(())
 }
@@ -487,6 +398,10 @@ mod tests {
     use datatypes::data_type::DataType;
     use futures::stream::BoxStream;
     use promql::extension_plan::{RangeManipulate, SeriesNormalize, UnionDistinctOn};
+    use promql::functions::{
+        IeeeComparison, MixedRange, NativeHistogramAggAvg, NativeHistogramAggSum,
+        NativeHistogramCount, NativeHistogramDrop, PromqlFloatToString,
+    };
     use session::context::QueryContext;
     use table::TableRef;
     use table::metadata::{TableId, TableInfoRef};
@@ -549,6 +464,59 @@ mod tests {
             "Filter: devices.k0 = Utf8(\"hello\")
   TableScan: devices",
             decode_plan.to_string(),
+        );
+    }
+
+    /// The decoder state carries the shared PromQL registration, so a request plan that encodes a
+    /// PromQL comparison (`prom_gt` of `IeeeComparison::all()`) or any other PromQL function
+    /// resolves on decode.
+    #[tokio::test]
+    async fn decoder_registers_promql_comparison_functions() {
+        let engine = QueryEngineFactory::new(
+            catalog::memory::new_memory_catalog_manager().unwrap(),
+            None,
+            None,
+            None,
+            None,
+            false,
+            QueryOptions::default(),
+        )
+        .query_engine();
+        let mut state = SessionStateBuilder::new_from_existing(
+            engine
+                .engine_context(QueryContext::arc())
+                .unwrap()
+                .state()
+                .clone(),
+        )
+        .with_serializer_registry(Arc::new(DefaultSerializer))
+        .build();
+        register_greptime_functions(&mut state, &QueryContext::arc()).unwrap();
+
+        for udf in IeeeComparison::all() {
+            assert!(
+                state.scalar_functions().contains_key(udf.name()),
+                "the decoder must register the PromQL comparison {}",
+                udf.name()
+            );
+        }
+        for name in [
+            "prom_sqrt",
+            "prom_idelta",
+            "prom_irate",
+            "prom_rate",
+            "prom_delta",
+            "prom_quantile_over_time",
+            "prom_holt_winters",
+        ] {
+            assert!(
+                state.scalar_functions().contains_key(name),
+                "the decoder must register {name}"
+            );
+        }
+        assert!(
+            state.aggregate_functions().contains_key("quantile"),
+            "the decoder must register the PromQL `quantile_udaf`"
         );
     }
 
