@@ -56,7 +56,7 @@ use promql::native::plan::{
     AggregateKind, AggregateStage, BoundVectorOp, Grouping, NativeExpr, NativeNode, NativeType,
     ParameterizedOp, unifies_its_own_contributions,
 };
-use promql::vector_match::{Cardinality, MatchingLabels};
+use promql::vector_match::{Cardinality, FillValues, MatchingLabels};
 use promql_parser::label::{Labels, METRIC_NAME};
 use promql_parser::parser;
 use session::context::{MetricDiscoveryScope, QueryContext, QueryContextRef};
@@ -6430,9 +6430,9 @@ async fn native_composed_binary_admits_complex_operands() {
 /// A composed binary that meets a shape its kernels refuse keeps the existing plan.
 ///
 /// Admission is the composition's own: an operand the native compiler cannot bind, a value that is
-/// not a frame, or a pair whose output column cannot carry both operands' kinds declines here
-/// exactly as it would on the whole statement. None of these may turn into a planning error,
-/// because the existing route answers them.
+/// neither a frame nor a scalar it can bind, or a pair whose output column cannot carry both
+/// operands' kinds declines here exactly as it would on the whole statement. None of these may turn
+/// into a planning error, because the existing route answers them.
 #[tokio::test]
 async fn native_composed_binary_declines_to_the_existing_plan() {
     // An operand that is not a frame leaves the statement's own wrapper in place: the pair is
@@ -6441,11 +6441,12 @@ async fn native_composed_binary_declines_to_the_existing_plan() {
     // existing path too, because a refused chain of n operators would otherwise compile its
     // subtrees again at every operator.
     for query in [
-        // A scalar root is not a frame: composing it by vector matching would broadcast it as if it
-        // were a one-series vector, which is not what the query asked for.
-        "(hist * on(tag_0) floats) * 2",
-        // Neither is a scalar function, however it is written.
-        "(hist * on(tag_0) floats) / time()",
+        // A scalar this route cannot bind is one that reads data: `scalar(sum(floats))` is a tree
+        // over a scan rather than a value bound on the statement's grid, and a broadcast over the
+        // vector it meets would have to run that tree first.
+        "(hist * on(tag_0) floats) / scalar(sum(floats))",
+        // The same shape written without the fold around it.
+        "(hist * on(tag_0) floats) * scalar(floats)",
         // A comparison between a histogram and a float is not a refusal: its two sides pair no
         // sample, so the column is the empty float layout and the statement composes.
         // `native_fused_mixed_comparison_answers_the_empty_float_layout` states that shape, and
@@ -18585,6 +18586,104 @@ async fn native_composed_binary_admits_a_source_free_frame_operand() {
     );
 }
 
+/// A scalar operand is broadcast over the vector it meets, not matched as a second frame.
+///
+/// `(hist * on(tag_0) floats) * 2` is not one whole tree: its two selectors carry different field
+/// kinds, which no single column can declare, so the statement composes. The right side of that
+/// composition is `2`, which carries one value per grid point and no labels - Prometheus broadcasts
+/// it over the vector it meets - so it enters the node as the compiled scalar rather than as a
+/// second frame the matcher would have to pair. The pair keeps the vector's labels, reads the
+/// vector's one input, and answers the kind the operator produces: a histogram multiplied by a
+/// float is a histogram.
+#[tokio::test]
+async fn native_composed_binary_broadcasts_a_scalar_operand() {
+    for (query, scalar_on_the_left, histogram) in [
+        ("(hist * on(tag_0) floats) * 2", false, true),
+        ("(hist * on(tag_0) floats) / time()", false, true),
+        ("2 * (hist * on(tag_0) floats)", true, true),
+    ] {
+        let plan =
+            build_native_fused_plan_with_provider(query, true, native_mixed_kind_provider().await)
+                .await;
+        let display = plan.display_indent().to_string();
+        assert!(!display.contains("Join:"), "{query}: {display}");
+        let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {display}"));
+        let NativeExpr::Binary {
+            left,
+            right,
+            matching,
+        } = &fused.tree().root().expr
+        else {
+            panic!("{query}: the statement root is the broadcast: {display}");
+        };
+        // The scalar side carries no labels, so the pair matches nothing and fills nothing.
+        assert!(
+            matches!(matching.labels, MatchingLabels::Ignoring(ref names) if names.is_empty())
+                && matching.cardinality == Cardinality::OneToOne
+                && matching.fill == FillValues::default(),
+            "{query}: a broadcast pairs no series: {display}"
+        );
+        let (vector, scalar) = if scalar_on_the_left {
+            (right, left)
+        } else {
+            (left, right)
+        };
+        assert!(
+            matches!(vector.expr, NativeExpr::Input(_)),
+            "{query}: the frame side is the node's one input: {display}"
+        );
+        assert!(
+            matches!(
+                scalar.expr,
+                NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. }
+            ),
+            "{query}: the scalar side is the compiled scalar: {display}"
+        );
+        // The scalar is not a child: only the frame side reads an input.
+        assert_eq!(1, fused.children().len(), "{query}: {display}");
+        assert_eq!(
+            &if histogram {
+                native_histogram_value_type().as_arrow_type()
+            } else {
+                ArrowDataType::Float64
+            },
+            native_value_field(fused, query).data_type(),
+            "{query}: the pair answers the vector's kind: {display}"
+        );
+    }
+}
+
+/// A statement whose scalar side is read from data keeps the existing plan.
+///
+/// `scalar(sum(floats))` is a tree over a scan rather than a value this composition can bind, so the
+/// pair declines to the existing plan, exactly as it did before a scalar could compose at all.
+#[tokio::test]
+async fn native_composed_binary_declines_a_scalar_operand_that_reads_data() {
+    let query = "(hist * on(tag_0) floats) / scalar(sum(floats))";
+    let plan =
+        build_native_fused_plan_with_provider(query, true, native_mixed_kind_provider().await)
+            .await;
+    let display = plan.display_indent().to_string();
+    assert!(
+        find_fused_series(&plan).is_none(),
+        "`{query}` has no composed answer: {display}"
+    );
+    let legacy = PromPlanner::stmt_to_plan_with_annotations(
+        native_mixed_kind_provider().await,
+        &build_eval_stmt(query),
+        &build_query_engine_state(),
+        None,
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        legacy.display_indent().to_string(),
+        display,
+        "`{query}` must keep the existing plan"
+    );
+}
+
 /// A composition descends a parsed expression, so a deep one ends.
 ///
 /// Every operand offered below is a strict part of the expression it came from, which is what bounds
@@ -18688,12 +18787,13 @@ fn a_deep_native_composition_plans_within_a_worker_stack() {
 /// A refused operand leaves the planner's selector state where it found it.
 ///
 /// The composed attempt writes the context while it prepares each operand's scan, so a refusal - here
-/// the left operand plans and the scalar `2` is no frame - must restore it before the refusal is
-/// returned. The same planner then plans another expression natively, from the same context.
+/// the left operand plans and the right one is a scalar that reads data, which this binding does not
+/// take - must restore it before the refusal is returned. The same planner then plans another
+/// expression natively, from the same context.
 #[tokio::test]
 async fn native_composed_binary_restores_the_context_after_a_refused_operand() {
     let state = build_query_engine_state();
-    let stmt = build_eval_stmt("(hist * on(tag_0) floats) / 2");
+    let stmt = build_eval_stmt("(hist * on(tag_0) floats) / scalar(sum(floats))");
     let mut planner = PromPlanner {
         table_provider: native_mixed_kind_provider().await,
         ctx: PromPlannerContext::from_eval_stmt(&stmt).unwrap(),
@@ -18708,7 +18808,7 @@ async fn native_composed_binary_restores_the_context_after_a_refused_operand() {
         .unwrap();
     assert!(
         refused.is_none(),
-        "a scalar operand is no frame, so the pair declines"
+        "a scalar that reads data is no operand of this composition, so the pair declines"
     );
     assert_eq!(
         before,

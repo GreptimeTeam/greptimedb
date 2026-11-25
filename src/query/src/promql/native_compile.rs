@@ -736,6 +736,33 @@ pub(crate) fn bind_evaluated_binary(
     NativeTree::try_new(bind_vector_binary(binary, left, right, op)?)
 }
 
+/// Uses the ordinary broadcast binder for one evaluated frame and one scalar operand.
+///
+/// Prometheus broadcasts a scalar over the vector it meets rather than matching series between the
+/// two, so such a pair carries no `on`, `ignoring`, `group_left`, `group_right` or fill value: those
+/// name labels or match groups of a vector, and a scalar is neither. What the [compile of the same
+/// expression as a whole](binary_operation) refuses for a constant operand is refused here by the
+/// same checks, and the node is the one [`broadcast`] binds, so an operand bound this way computes
+/// what that compiler computes for the same statement.
+pub(crate) fn bind_evaluated_broadcast(
+    binary: &BinaryExpr,
+    left: NativeNode,
+    right: NativeNode,
+) -> Result<NativeTree> {
+    let op = binary_op(&binary.op).ok_or_else(|| {
+        not_implemented(&format!(
+            "the binary operator `{}` in `{binary}`",
+            binary.op
+        ))
+    })?;
+    if refuses_modifier(binary.modifier.as_ref()) {
+        return Err(not_implemented(&format!(
+            "the vector matching in `{binary}`, which a constant operand has nothing to match"
+        )));
+    }
+    NativeTree::try_new(broadcast(left, right, op, binary.return_bool()))
+}
+
 /// Compiles `and`, `or` or `unless` between two vectors, matched by the labels the query wrote.
 ///
 /// The parser already refuses a scalar operand, `bool` and `group_left` / `group_right` on a set

@@ -4611,6 +4611,273 @@ async fn native_promql_kind_rules_match_legacy() {
     );
 }
 
+/// A scalar operand broadcasts over the vector it meets on both routes, row for row.
+///
+/// `(scalar_hist * on(job) scalar_float) * 2` is not one whole tree: its two selectors carry
+/// different field kinds, which no single column declares, so the statement composes - and its right
+/// side is a scalar. Prometheus broadcasts a scalar over the vector it meets rather than matching
+/// series between the two, so the pair keeps that vector's labels and answers the kind the operator
+/// produces: a histogram multiplied by a float is a histogram, and dividing one by `time()` is
+/// another. The existing plan answers the same statements through its own machinery, so its rows are
+/// what says the broadcast computes the same values.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_composed_scalar_operand_matches_legacy() {
+    use api::greptime_proto::io::prometheus::write::v2::histogram::{Count, ZeroCount};
+    use api::greptime_proto::io::prometheus::write::v2::{Histogram, Sample};
+    use axum::body::{Body, to_bytes};
+    use http::Request;
+    use prost::Message;
+    use servers::prom_remote_write::v2::test_util as remote_write_v2;
+    use servers::prom_store::snappy_compress;
+    use tower::ServiceExt;
+
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_composed_scalar").with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    let server = crate::test_util::build_test_prom_server(instance.clone(), false, None).build();
+    let router = server.build(server.make_app()).unwrap();
+    // One histogram metric and one float metric, both written through the remote-write endpoint so
+    // the two tables carry the same column layout: a difference in the answers is then a difference
+    // in the answer rather than in the fixture.
+    for request in [
+        remote_write_v2::request_with_labels_and_histograms(
+            vec![("__name__", "scalar_hist"), ("job", "api"), ("host", "a")],
+            [600_000, 1_200_000]
+                .into_iter()
+                .map(|timestamp| Histogram {
+                    timestamp,
+                    count: Some(Count::CountInt(4)),
+                    zero_count: Some(ZeroCount::ZeroCountInt(4)),
+                    sum: 8.0,
+                    ..Default::default()
+                })
+                .collect(),
+        ),
+        remote_write_v2::request_with_labels_and_samples(
+            vec![("__name__", "scalar_float"), ("job", "api"), ("host", "a")],
+            [(600_000, 2.0), (1_200_000, 3.0)]
+                .into_iter()
+                .map(|(timestamp, value)| Sample {
+                    timestamp,
+                    value,
+                    ..Default::default()
+                })
+                .collect(),
+        ),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/v1/prometheus/write")
+                    .header("Content-Encoding", "snappy")
+                    .header(
+                        "Content-Type",
+                        "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+                    )
+                    .body(Body::from(
+                        snappy_compress(&request.encode_to_vec()).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            204,
+            "{:?}",
+            to_bytes(response.into_body(), usize::MAX).await.unwrap()
+        );
+    }
+
+    // The histogram side is `count = 4, sum = 8` at both steps and the float side is `2` then `3`,
+    // so the match answers `8/16` and then `12/24`. A one-to-one match narrows the labels to the
+    // ones it matched on, which is why every row carries `job` alone: `host` is not a label of the
+    // answer, and the scalar broadcast neither adds nor drops one.
+    let histogram_matches = [
+        // A scalar scales the histogram it is broadcast over.
+        (
+            "(scalar_hist * on(job) scalar_float) * 2",
+            vec![
+                (600_000, vec!["job=api".to_string()], 16.0, 32.0),
+                (1_200_000, vec!["job=api".to_string()], 24.0, 48.0),
+            ],
+        ),
+        // A scalar function is broadcast the same way: `time()` is the step in seconds, which is
+        // `600` and `1200` here. The product is a histogram, so the divisor meets histogram samples
+        // one point at a time.
+        (
+            "(scalar_hist * on(job) scalar_float) / time()",
+            vec![
+                (
+                    600_000,
+                    vec!["job=api".to_string()],
+                    8.0 / 600.0,
+                    16.0 / 600.0,
+                ),
+                (
+                    1_200_000,
+                    vec!["job=api".to_string()],
+                    12.0 / 1200.0,
+                    24.0 / 1200.0,
+                ),
+            ],
+        ),
+    ];
+    for (expression, expected) in histogram_matches {
+        let sql = format!("TQL EVAL (600, 1200, '600s') {expression}");
+        observer.clear();
+        let native = native_tql_output(&instance, &sql, true).await;
+        assert!(
+            observer.fused().is_some(),
+            "{expression} did not run natively: {:#?}",
+            observer.root_plan()
+        );
+        let native_rows = histogram_label_rows(native).await;
+        assert_eq!(expected, native_rows, "{expression}");
+        observer.clear();
+        let legacy = native_tql_output(&instance, &sql, false).await;
+        assert!(
+            observer.fused().is_none(),
+            "{expression} must keep the existing plan when the native route is off"
+        );
+        assert_eq!(
+            histogram_label_rows(legacy).await,
+            native_rows,
+            "{expression} must answer the existing plan's rows row for row"
+        );
+    }
+
+    // The same broadcast on one frame: `scalar_hist * time()` is a whole tree, and its histogram
+    // side is scaled point by point.
+    let whole_tree = "scalar_hist * time()";
+    let sql = format!("TQL EVAL (600, 1200, '600s') {whole_tree}");
+    observer.clear();
+    let native = native_tql_output(&instance, &sql, true).await;
+    assert!(
+        observer.fused().is_some(),
+        "{whole_tree} did not run natively: {:#?}",
+        observer.root_plan()
+    );
+    let native_rows = histogram_label_rows(native).await;
+    assert_eq!(
+        vec![
+            (
+                600_000,
+                vec!["host=a".to_string(), "job=api".to_string()],
+                2_400.0,
+                4_800.0
+            ),
+            (
+                1_200_000,
+                vec!["host=a".to_string(), "job=api".to_string()],
+                4_800.0,
+                9_600.0
+            ),
+        ],
+        native_rows,
+        "{whole_tree}"
+    );
+    observer.clear();
+    let legacy = native_tql_output(&instance, &sql, false).await;
+    assert!(
+        observer.fused().is_none(),
+        "{whole_tree} must keep the existing plan when the native route is off"
+    );
+    assert_eq!(
+        histogram_label_rows(legacy).await,
+        native_rows,
+        "{whole_tree} must answer the existing plan's rows row for row"
+    );
+
+    // A scalar over a float metric that needs no composition still runs natively, and a composed
+    // operand of one - `(x * 2) * 2` - keeps its own node and its own values.
+    let float_expression = "(scalar_float * 2) * 2";
+    let sql = format!("TQL EVAL (600, 1200, '600s') {float_expression}");
+    observer.clear();
+    let native = native_tql_output(&instance, &sql, true).await;
+    assert!(
+        observer.fused().is_some(),
+        "{float_expression} did not run natively: {:#?}",
+        observer.root_plan()
+    );
+    let native_rows = native_rows_value(native).await;
+    observer.clear();
+    let legacy = native_tql_output(&instance, &sql, false).await;
+    assert!(
+        observer.fused().is_none(),
+        "{float_expression} must keep the existing plan when the native route is off"
+    );
+    assert_eq!(
+        vec![
+            (600_000, "api".to_string(), 8.0),
+            (1_200_000, "api".to_string(), 12.0)
+        ],
+        native_rows,
+        "{float_expression}"
+    );
+    assert_eq!(
+        native_rows_value(legacy).await,
+        native_rows,
+        "{float_expression} must answer the existing plan's rows row for row"
+    );
+}
+
+/// The `(time, job, value)` rows of a labelled float answer.
+///
+/// The time index is found by type rather than by name: the two routes name the column differently
+/// (the existing plan answers `ts`, a native rows layout answers its own time index), and the
+/// values, not the names, are what this comparison is about.
+async fn native_rows_value(output: Output) -> Vec<(i64, String, f64)> {
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!("TQL EVAL returns record batches"),
+    };
+    let mut rows = Vec::new();
+    for batch in batches.iter() {
+        let time = batch
+            .columns()
+            .iter()
+            .find(|column| {
+                matches!(
+                    column.data_type(),
+                    DataType::Timestamp(TimeUnit::Millisecond, _)
+                )
+            })
+            .expect("a PromQL result carries its time index");
+        let time = cast(time.as_ref(), &DataType::Int64).unwrap();
+        let time = time.as_any().downcast_ref::<Int64Array>().unwrap();
+        let job = batch
+            .column_by_name("job")
+            .expect("the answer carries the label it matched on");
+        let job = cast(job.as_ref(), &DataType::Utf8).unwrap();
+        let job = job.as_any().downcast_ref::<StringArray>().unwrap();
+        let values = batch
+            .columns()
+            .iter()
+            .filter(|column| column.data_type() == &DataType::Float64)
+            .collect::<Vec<_>>();
+        assert_eq!(values.len(), 1, "expected one Float64 value column");
+        let values = values[0].as_any().downcast_ref::<Float64Array>().unwrap();
+        for row in 0..batch.num_rows() {
+            rows.push((
+                time.value(row),
+                job.value(row).to_string(),
+                values.value(row),
+            ));
+        }
+    }
+    rows.sort_by_key(|row| row.0);
+    rows
+}
+
 /// How many rows `output` answers, whatever its columns hold.
 async fn answer_rows(output: Output) -> usize {
     let batches = match output.data {

@@ -52,8 +52,9 @@ use crate::instant_eval::{
 };
 use crate::map::{
     ArithmeticOp, Comparison, ComparisonOp, ParameterizedMath, ScalarOperand, ScalarSeriesOperand,
-    drop_metric_name, is_float_series, map_arithmetic_literal, map_arithmetic_series,
-    map_compare_literal, map_compare_series, map_math, map_math_with_parameters,
+    drop_metric_name, is_float_series, map_arithmetic_literal,
+    map_arithmetic_series_with_histograms, map_compare_literal, map_compare_series, map_math,
+    map_math_with_parameters,
 };
 use crate::map_time::{self, DateFunction};
 use crate::native::aggregate::{AggregateOutput, AggregateRuntime};
@@ -2149,13 +2150,18 @@ impl BroadcastRuntime {
                 };
                 match self.op {
                     BroadcastOp::Arithmetic(op) => {
-                        if !is_float_series(&chunk.series) {
-                            return Err(DataFusionError::NotImplemented(
-                                "dynamic scalar arithmetic does not support histogram or mixed samples"
-                                    .into(),
-                            ));
-                        }
-                        map_arithmetic_series(&self.sample_schema, &chunk.series, op, operand)?
+                        // A per-point scalar reaches histogram samples through the same forms a
+                        // constant one does: a histogram scales by the factor beside it and divides
+                        // by a divisor on its right, and a position with no such form is dropped
+                        // rather than failing the query.
+                        let (output, dropped_histogram) = map_arithmetic_series_with_histograms(
+                            &self.sample_schema,
+                            &chunk.series,
+                            op,
+                            operand,
+                        )?;
+                        self.record_dropped_histograms(dropped_histogram, op);
+                        output
                     }
                     BroadcastOp::Compare(comparison) => {
                         let (output, dropped_histogram) = map_compare_series(

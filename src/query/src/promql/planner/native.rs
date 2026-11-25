@@ -86,8 +86,8 @@ use store_api::region_engine::RawLabelSource;
 
 use crate::promql::error::{DataFusionPlanningSnafu, DuplicateOutputColumnsSnafu, Result};
 use crate::promql::native_compile::{
-    InfoInput, bind_evaluated_binary, compile_selectors_with_grid, compile_statement_with_grid,
-    info_input, statement_grid, subquery_child_grid,
+    InfoInput, bind_evaluated_binary, bind_evaluated_broadcast, compile_selectors_with_grid,
+    compile_statement_with_grid, info_input, statement_grid, subquery_child_grid,
 };
 use crate::promql::planner::{
     DB_COLUMN_MATCHER, DEFAULT_FIELD_COLUMN, DEFAULT_TIME_INDEX_COLUMN, FIELD_COLUMN_MATCHER,
@@ -693,10 +693,14 @@ impl PromPlanner {
 
     /// Combines two native operands without a legacy join.
     ///
-    /// Each operand is planned the way the whole expression is and bound as one evaluated series frame.
-    /// What admits the pair is the composition itself: the two grids must agree, and the matching, its
-    /// cardinality, its fill values and the output column's kind must all be ones the kernels answer. A
+    /// Each vector operand is planned the way the whole expression is and bound as one evaluated series
+    /// frame. What admits the pair is the composition itself: the two grids must agree, and the matching,
+    /// its cardinality, its fill values and the output column's kind must all be ones the kernels answer. A
     /// shape they refuse declines to the existing plan rather than to an error.
+    ///
+    /// A scalar operand - `2`, `time()` - is the one side that is not a frame: Prometheus broadcasts it
+    /// over the vector it meets, so it enters the node as the compiled scalar rather than as an input. See
+    /// [`Self::native_scalar_operand`].
     ///
     /// Only a binary expression composes, and only its own two operands are offered below.
     async fn try_plan_native_composed_binary(
@@ -726,47 +730,38 @@ impl PromPlanner {
         // Each attempt restores context even when a scan or compiler fails, and the second operand
         // starts from the same context the first one did.
         let saved = self.ctx.clone();
-        let left = self
-            .try_plan_native(
-                &binary.lhs,
-                query_engine_state,
-                FusedOutputFormat::SeriesFrame,
-            )
-            .await;
-        self.ctx = saved.clone();
-        let Some(NativePlanned::Frame(left)) = left? else {
-            return Ok(declined("left_operand_is_not_a_frame"));
-        };
-        let right = self
-            .try_plan_native(
-                &binary.rhs,
-                query_engine_state,
-                FusedOutputFormat::SeriesFrame,
-            )
-            .await;
-        self.ctx = saved;
-        let Some(NativePlanned::Frame(right)) = right? else {
-            return Ok(declined("right_operand_is_not_a_frame"));
-        };
-        if left.grid.spec() != right.grid.spec() {
-            return Ok(declined("operand_grids_differ"));
+        // A scalar operand carries one value per grid point and no labels, so Prometheus broadcasts
+        // it over the vector it meets instead of matching series between the two: `2` and `time()`
+        // are sides this composition answers, not frames it could pair. Only the vector sides are
+        // offered to the attempts below; the scalar one is bound after them, because its binding is
+        // checked against the grid the frame it meets answers on.
+        let is_scalar = |operand: &PromExpr| operand.value_type() == ValueType::Scalar;
+        let (left_scalar, right_scalar) = (is_scalar(&binary.lhs), is_scalar(&binary.rhs));
+        // Two scalars answer one value and no series at all, so there is no frame for a composition
+        // to publish. The whole-statement attempt above already decided that shape, and it is the
+        // one that reports why.
+        if left_scalar && right_scalar {
+            return Ok(None);
         }
-        let NativeFramePlan {
-            plan: left_plan,
-            output: left_output,
-            tags: left_tags,
-            kind: left_kind,
-            time: left_time,
-            grid: left_grid,
-        } = left;
-        let NativeFramePlan {
-            plan: right_plan,
-            output: right_output,
-            tags: right_tags,
-            kind: right_kind,
-            ..
-        } = right;
-        let source_tags = [left_tags, right_tags];
+        let mut frames: [Option<NativeFramePlan>; 2] = [None, None];
+        for (index, operand) in [&binary.lhs, &binary.rhs].into_iter().enumerate() {
+            if is_scalar(operand) {
+                continue;
+            }
+            let planned = self
+                .try_plan_native(operand, query_engine_state, FusedOutputFormat::SeriesFrame)
+                .await;
+            self.ctx = saved.clone();
+            let Some(NativePlanned::Frame(frame)) = planned? else {
+                return Ok(declined(if index == 0 {
+                    "left_operand_is_not_a_frame"
+                } else {
+                    "right_operand_is_not_a_frame"
+                }));
+            };
+            frames[index] = Some(frame);
+        }
+        self.ctx = saved;
         let evaluated = |source_index, output: &NativeType| NativeNode {
             expr: NativeExpr::Input(BoundInput {
                 source_index,
@@ -775,23 +770,181 @@ impl PromPlanner {
             }),
             output: output.clone(),
         };
-        let tree = match bind_evaluated_binary(
-            binary,
-            evaluated(0, &left_output),
-            evaluated(1, &right_output),
-        ) {
+        let [left_frame, right_frame] = frames;
+        let (tree, children, source_tags, time, grid, kinds) = match (left_frame, right_frame) {
+            // Two frames are matched by their labels over the grid both answer on.
+            (Some(left), Some(right)) => {
+                if left.grid.spec() != right.grid.spec() {
+                    return Ok(declined("operand_grids_differ"));
+                }
+                let NativeFramePlan {
+                    plan: left_plan,
+                    output: left_output,
+                    tags: left_tags,
+                    kind: left_kind,
+                    time: left_time,
+                    grid: left_grid,
+                } = left;
+                let NativeFramePlan {
+                    plan: right_plan,
+                    output: right_output,
+                    tags: right_tags,
+                    kind: right_kind,
+                    ..
+                } = right;
+                let tree = match bind_evaluated_binary(
+                    binary,
+                    evaluated(0, &left_output),
+                    evaluated(1, &right_output),
+                ) {
+                    Ok(tree) => tree,
+                    Err(DataFusionError::NotImplemented(_)) => {
+                        return Ok(declined("no_kernel_for_the_operator_pair"));
+                    }
+                    Err(error) => return Err(error).context(DataFusionPlanningSnafu),
+                };
+                (
+                    tree,
+                    vec![left_plan, right_plan],
+                    vec![left_tags, right_tags],
+                    left_time,
+                    left_grid,
+                    (left_kind, right_kind),
+                )
+            }
+            // One side is a scalar, so the operation is a broadcast over the frame side: it keeps
+            // that frame's labels and its fields, and it pairs no series. The scalar enters as the
+            // node the compiler binds for it rather than as a child, which is why the frame is the
+            // node's only input however the expression was written.
+            (left, right) => {
+                let Some(frame) = left.or(right) else {
+                    // Two scalars, which the check above already answered.
+                    return Ok(declined("composition_has_no_frame_operand"));
+                };
+                let scalar_expr = if left_scalar {
+                    &binary.lhs
+                } else {
+                    &binary.rhs
+                };
+                let Some(scalar) = self.native_scalar_operand(scalar_expr, &frame.grid)? else {
+                    // The scalar operand recorded why it is not one this route binds.
+                    return Ok(None);
+                };
+                let NativeFramePlan {
+                    plan,
+                    output,
+                    tags,
+                    kind,
+                    time,
+                    grid,
+                } = frame;
+                let vector = evaluated(0, &output);
+                let (left, right) = if left_scalar {
+                    (scalar, vector)
+                } else {
+                    (vector, scalar)
+                };
+                // A scalar is one float per grid point and carries no field, so the pair answers the
+                // frame's own kind where the operator has a kernel for it - `hist * 2` stays a
+                // histogram - and the empty float layout everywhere else, which is the same answer
+                // the whole-statement attempt declares for the same pair.
+                let kinds = if left_scalar {
+                    (FieldKind::Float, kind)
+                } else {
+                    (kind, FieldKind::Float)
+                };
+                let tree = match bind_evaluated_broadcast(binary, left, right) {
+                    Ok(tree) => tree,
+                    Err(DataFusionError::NotImplemented(_)) => {
+                        return Ok(declined("no_kernel_for_the_operator_pair"));
+                    }
+                    Err(error) => return Err(error).context(DataFusionPlanningSnafu),
+                };
+                (tree, vec![plan], vec![tags], time, grid, kinds)
+            }
+        };
+        Self::publish_native_composition(
+            expr,
+            format,
+            tree,
+            &source_tags,
+            children,
+            time,
+            grid,
+            kinds,
+        )
+    }
+
+    /// The scalar node a composition broadcasts over its vector side, or `None` when this route
+    /// does not bind one.
+    ///
+    /// A scalar is one value per grid point and carries no labels, so it is not a frame: Prometheus
+    /// broadcasts it over the vector it meets rather than matching series between the two, which is
+    /// what `v * 2` and `v / time()` mean. The node is the one the compiler binds for the operand
+    /// alone, so a composition and a whole tree cannot disagree about what that scalar is.
+    ///
+    /// `grid` is the grid the frame side answers on: a broadcast is point-wise, so a scalar bound on
+    /// any other grid is a shape this composition does not answer. An operand that reads data -
+    /// `scalar(sum(x))` - is a tree of its own rather than a value bound here, and keeps the existing
+    /// plan.
+    fn native_scalar_operand(
+        &self,
+        expr: &PromExpr,
+        grid: &Arc<EvalGrid>,
+    ) -> Result<Option<NativeNode>> {
+        let Some(stmt) = self.native_statement(expr) else {
+            return Ok(declined("scalar_operand_has_no_evaluation_grid"));
+        };
+        let Ok(statement) = statement_grid(&stmt) else {
+            return Ok(declined("statement_grid_unavailable"));
+        };
+        if statement.spec() != grid.spec() {
+            return Ok(declined("operand_grids_differ"));
+        }
+        let tree = match compile_statement_with_grid(&stmt, statement) {
             Ok(tree) => tree,
+            // A selector inside the operand is read by a tree of its own, which this binding is not:
+            // the operand is compiled as a statement that reads no data.
             Err(DataFusionError::NotImplemented(_)) => {
-                return Ok(declined("no_kernel_for_the_operator_pair"));
+                return Ok(declined("scalar_operand_has_no_kernel"));
             }
             Err(error) => return Err(error).context(DataFusionPlanningSnafu),
         };
+        // The operand is put beside evaluated samples, so it has to be one value per grid point on
+        // the same grid: a tree answering something else is not the side of a broadcast.
+        let evaluated = matches!(
+            &tree.root().output,
+            NativeType::Scalar(scalar) if scalar.spec() == grid.spec()
+        );
+        if !evaluated {
+            return Ok(declined("scalar_operand_is_not_a_scalar"));
+        }
+        Ok(Some(tree.root().clone()))
+    }
+
+    /// Publishes a bound composition as one node over `children`.
+    ///
+    /// `kinds` are the kinds the operation pairs, in the order the operands were written: a scalar
+    /// side is a float, which is what keeps `hist * 2` a histogram while `hist + 2` - a pair with no
+    /// sample to emit - declares the empty float layout. `source_tags` names the labels of each
+    /// child, so the output labels of the node follow the operands it actually reads.
+    #[allow(clippy::too_many_arguments)]
+    fn publish_native_composition(
+        expr: &PromExpr,
+        format: FusedOutputFormat,
+        tree: NativeTree,
+        source_tags: &[Vec<String>],
+        children: Vec<LogicalPlan>,
+        time: String,
+        grid: Arc<EvalGrid>,
+        kinds: (FieldKind, FieldKind),
+    ) -> Result<Option<NativePlanned>> {
         let NativeExpr::Binary { matching, .. } = &tree.root().expr else {
             return Ok(declined("bound_root_is_not_the_binary"));
         };
         let Some(root_kind) = binary_output_field_kind(
-            left_kind,
-            right_kind,
+            kinds.0,
+            kinds.1,
             matching.op,
             matching.return_bool,
             matching.fill,
@@ -809,7 +962,7 @@ impl PromPlanner {
         let metadata = match format {
             FusedOutputFormat::PlainRows => None,
             FusedOutputFormat::SeriesFrame => {
-                let Some(tags) = fused_output_tags(tree.root(), &source_tags) else {
+                let Some(tags) = fused_output_tags(tree.root(), source_tags) else {
                     return Ok(declined("composition_has_no_output_labels"));
                 };
                 Some((tree.root().output.clone(), tags))
@@ -817,13 +970,8 @@ impl PromPlanner {
         };
         let output_schema = match format {
             FusedOutputFormat::PlainRows => {
-                let Some(schema) = Self::fused_root_schema(
-                    &expression,
-                    &tree,
-                    &source_tags,
-                    &left_time,
-                    root_kind,
-                )?
+                let Some(schema) =
+                    Self::fused_root_schema(&expression, &tree, source_tags, &time, root_kind)?
                 else {
                     return Ok(declined("composition_has_no_value_columns"));
                 };
@@ -847,12 +995,12 @@ impl PromPlanner {
             Arc::from(expression.as_str()),
             tree,
             FusedSeriesBinding {
-                grid: Arc::clone(&left_grid),
-                time_index: left_time.clone(),
+                grid: Arc::clone(&grid),
+                time_index: time.clone(),
                 tags: Vec::new(),
                 metric_name: None,
             },
-            vec![left_plan, right_plan],
+            children,
             output_schema,
             format,
         ) else {
@@ -861,9 +1009,7 @@ impl PromPlanner {
         let plan = LogicalPlan::Extension(Extension {
             node: Arc::new(node),
         });
-        Ok(Some(native_planned(
-            plan, metadata, root_kind, left_time, left_grid,
-        )))
+        Ok(Some(native_planned(plan, metadata, root_kind, time, grid)))
     }
 
     /// Plans `prom_expr` as one native node, or returns `None` to keep the existing plan.
@@ -958,9 +1104,11 @@ impl PromPlanner {
                 }
                 Err(error) => return Err(error).context(DataFusionPlanningSnafu),
             };
-            // A frame operand is an evaluated sample root: a composition matches series, and a
-            // scalar root - `2`, `time()` - carries one value and no labels, so those keep the
-            // existing plan rather than becoming a frame the matcher cannot pair.
+            // A frame is an evaluated sample root: a frame consumer decodes series, and a scalar
+            // root - `2`, `time()` - carries one value and no labels. A composition that meets a
+            // scalar binds it as the scalar it is instead of asking for a frame here
+            // ([`Self::native_scalar_operand`]); the shape this refuses is a scalar published as a
+            // frame, which no consumer of one could read.
             let evaluated = matches!(
                 &tree.root().output,
                 NativeType::Samples(schema) if schema.eval_grid.is_some()
