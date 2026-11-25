@@ -31,8 +31,8 @@ bound. Missing or unreadable artifacts fall back to sample discovery. Expired
 windows are retired as a unit. An explicit removal of a contributing file
 invalidates that window's indexes.
 
-Physical tag IDs and names are stored in the artifact manifest. The reader maps
-IDs to current label names and supplies null for newly added nullable labels.
+Physical tag IDs and names are stored in the artifact manifest. The reader supplies
+null for newly added nullable labels that are absent from the index.
 
 ## Wire specification
 

@@ -56,20 +56,20 @@ impl ColumnarReader {
         &mut self,
         metadata: &store_api::metadata::RegionMetadata,
     ) -> Result<()> {
-        let mut fields = self.schema.fields()[..3].to_vec();
+        let mut fields = self.schema.fields().to_vec();
         for column in metadata.primary_key_columns().skip(2) {
-            if !self
-                .manifest
-                .tags
-                .iter()
-                .any(|tag| tag.column_id == column.column_id)
+            if self
+                .schema
+                .field_with_name(&column.column_schema.name)
+                .is_ok()
             {
-                require(
-                    column.column_schema.is_nullable()
-                        && column.column_schema.default_constraint().is_none(),
-                    "missing series tag must be nullable without a default",
-                )?;
+                continue;
             }
+            require(
+                column.column_schema.is_nullable()
+                    && column.column_schema.default_constraint().is_none(),
+                "missing series tag must be nullable without a default",
+            )?;
             fields.push(Arc::new(crate::sst::with_field_id(
                 Field::new(&column.column_schema.name, DataType::Utf8, true),
                 column.column_id,
@@ -263,17 +263,6 @@ impl FormatReader for ColumnarReader {
                 .project(&projection)
                 .map_err(|e| invalid(format!("series projection: {e}")))?,
         );
-        // Block metadata is validated against the physical schema. Only the
-        // projection and filter stage sees current label names.
-        let mut renamed = HashMap::new();
-        for field in schema.fields().iter().skip(3) {
-            let id = crate::series_index::format::field_id(field)?;
-            if let Some(tag) = self.manifest.tags.iter().find(|t| t.column_id == id)
-                && tag.name != *field.name()
-            {
-                renamed.insert(tag.name.clone(), field.name().clone());
-            }
-        }
         let cache = self.cache.clone();
         let manifest = self.manifest.clone();
         let store = self.store.clone();
@@ -332,14 +321,6 @@ impl FormatReader for ColumnarReader {
                             column.payload.validate(previous_payload_end, trailer.payload_end, false)?;
                             previous_payload_end = column.payload.end()?;
                         }
-                        let mut logical;
-                        let block = if renamed.is_empty() { block } else {
-                            logical = block.clone();
-                            for column in &mut logical.columns {
-                                if let Some(name) = renamed.get(&column.name) {column.name.clone_from(name);}
-                            }
-                            &logical
-                        };
                         if !matches_range(block.first_id(), block.last_id(), &request) || !matches_statistics(block, &request.filters) { continue; }
                         *metrics.counts.entry("series_blocks_read").or_default() += 1;
                         *metrics.counts.entry("series_rows_examined").or_default() += u64::from(block.rows);
