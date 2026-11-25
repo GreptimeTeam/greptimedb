@@ -333,8 +333,8 @@ pub(crate) fn restore_join_schema(
     )))
 }
 
-/// Whether `plan` contains a `MaterializedBroadcastNode` leaf (the materialized small
-/// side of the broadcast join).
+/// Whether `plan` contains a `MaterializedInput` leaf (the data slot of the broadcast
+/// join).
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;

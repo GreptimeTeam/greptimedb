@@ -17,8 +17,10 @@ mod commutativity;
 mod dist_join_planner;
 mod dyn_filter_bridge;
 mod filter_id;
-mod materialized_broadcast;
-mod materialized_execution;
+mod materialize;
+mod materialize_broadcast_join;
+mod materialize_exec;
+mod materialized_input;
 mod merge_scan;
 mod merge_sort;
 mod planner;
@@ -38,8 +40,10 @@ pub(crate) use dist_join_planner::{
     restore_join_schema, side_base_table_id,
 };
 pub use filter_id::{FilterFingerprint, FilterId, ParseFilterIdError, RemoteDynFilterProducerId};
-pub(crate) use materialized_broadcast::MaterializedBroadcastNode;
-pub(crate) use materialized_execution::MaterializedBroadcastExecution;
+pub(crate) use materialize::MaterializeLogicalPlan;
+pub(crate) use materialize_broadcast_join::MaterializeBroadcastJoin;
+pub(crate) use materialize_exec::{MaterializeExec, OnceAsync};
+pub(crate) use materialized_input::MaterializedInput;
 pub use merge_scan::{MergeScanExec, MergeScanLogicalPlan};
 pub(crate) use merge_sort::{MergeSortExec, MergeSortLogicalPlan};
 pub use planner::{DistExtensionPlanner, MergeSortExtensionPlanner};

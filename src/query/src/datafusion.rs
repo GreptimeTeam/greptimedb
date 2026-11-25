@@ -59,9 +59,8 @@ use tracing::Span;
 use crate::analyze::DistAnalyzeExec;
 pub use crate::datafusion::planner::DfContextProviderAdapter;
 use crate::dist_plan::{
-    DistJoinStats, MaterializedBroadcastExecution, MergeScanLogicalPlan,
-    RemoteDynFilterReceiverInjectorRef, aggregate_region_stats, candidate_joins,
-    expected_region_ids,
+    DistJoinStats, MergeScanLogicalPlan, RemoteDynFilterReceiverInjectorRef,
+    aggregate_region_stats, candidate_joins, expected_region_ids,
 };
 use crate::error::{
     CatalogSnafu, CreateRecordBatchSnafu, MissingTableMutationHandlerSnafu,
@@ -197,8 +196,8 @@ impl DatafusionQueryEngine {
         ctx: &QueryEngineContext,
     ) -> Result<LogicalPlan> {
         use crate::dist_plan::{
-            DistJoinStats, MaterializedBroadcastNode, MergeScanLogicalPlan, restore_join_schema,
-            side_base_table_id,
+            DistJoinStats, MaterializeBroadcastJoin, MaterializeLogicalPlan, MaterializedInput,
+            MergeScanLogicalPlan, restore_join_schema, side_base_table_id,
         };
         use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
         use datafusion_expr::{Join, LogicalPlan as DfLogicalPlan};
@@ -327,24 +326,25 @@ impl DatafusionQueryEngine {
         }
         // From here on `large`/`small` mean the probe/build sides of the broadcast:
         // swap them when the heuristic favors the original left side as the build.
-        let (large_plan, large, small_plan, _small_scan) = if materialize_left {
-            (small_plan, small_scan, large_plan, large)
+        let (large_plan, large, small_scan) = if materialize_left {
+            (small_plan, small_scan, large)
         } else {
-            (large_plan, large, small_plan, small_scan)
+            (large_plan, large, small_scan)
         };
-        // The build side runs when the query executes: a plan-only pass (e.g. plain
-        // `EXPLAIN`) must not evaluate it, and the execution-time decision node owns
-        // the row/byte budget.
-        let node = MaterializedBroadcastNode::new_placeholder(
-            small_plan.schema().clone(),
-            Arc::new(small_plan),
-        );
+        // The build side is evaluated once, on the frontend: `Materialize` is the local
+        // child of the broadcast merge stage, and the remote join reads its batches from
+        // a data slot that starts empty. The physical layer binds the data into the slot.
+        // The child is the build `MergeScan` itself: its inner input is a distributed
+        // table scan that only the merge stage can read.
+        let build_plan = small_scan.into_logical_plan();
+        let broadcast_slot = MaterializedInput::new(build_plan.schema().clone(), Vec::new());
+        let build_materialize = MaterializeLogicalPlan::new(build_plan).into_logical_plan();
         // The materialized side becomes the join's left input so DataFusion hashes it as
         // the build side. When the materialized side is the original right input, the
         // join keys swap with it; when it is the original left input, they keep their
         // order.
         let swapped_join = Join::try_new(
-            Arc::new(node.into_logical_plan()),
+            Arc::new(broadcast_slot.into_logical_plan()),
             Arc::new(large_plan),
             if materialize_right {
                 original_join
@@ -372,10 +372,13 @@ impl DatafusionQueryEngine {
                 restore_join_schema(swapped_join, original_join.schema.clone())
             }
         };
-        let Some(restored_plan) = restored_plan else {
+        let Some(remote_input) = restored_plan else {
             return Ok(analyzed_plan.clone());
         };
-        let mut outer = MergeScanLogicalPlan::new(restored_plan, false);
+        // The regions run `remote_input`; its only table scan is the probe fragment, so the
+        // merge stage is routed to the probe regions. The frontend runs
+        // `Materialize(build)` and binds the batches into the data slot of `remote_input`.
+        let mut outer = MaterializeBroadcastJoin::new(remote_input, build_materialize);
         if let Some(id) = large.remote_dyn_filter_producer_id() {
             outer = outer.with_remote_dyn_filter_producer_id(id);
         }
@@ -757,9 +760,9 @@ impl DatafusionQueryEngine {
 
         common_telemetry::debug!("Create physical plan, input plan: {logical_plan}");
 
-        // The nested broadcast join rewrite reads its statistics from a query-local config
-        // extension. This has to happen before the EXPLAIN branch below: the input of an EXPLAIN
-        // plan is analyzed by the physical planner of DataFusion, i.e. outside this function.
+        // The broadcast join rewrite reads its statistics from a query-local config extension.
+        // A plain `EXPLAIN` returns below, before the rewrite, so the statistics only shape the
+        // execution path.
         if let Some(stats) = self.dist_join_stats(ctx, logical_plan).await {
             ctx.state_mut()
                 .config_mut()
@@ -770,35 +773,9 @@ impl DatafusionQueryEngine {
 
         let state = ctx.state();
 
-        // special handle EXPLAIN plan
-        if let DfLogicalPlan::Explain(explain) = logical_plan {
-            // `Explain` is always plain EXPLAIN; `EXPLAIN ANALYZE` is planned as an
-            // `Analyze` node and keeps the regular execution path.
-            if ctx
-                .query_ctx()
-                .configuration_parameter()
-                .experimental_dist_join()
-            {
-                // The inner plan of an `Explain` node is the initial logical plan; run
-                // the analyzer first so the join and its `MergeScan` boundaries exist
-                // before looking for a materialization candidate.
-                let analyzed = state.analyzer().execute_and_check(
-                    explain.plan.as_ref().clone(),
-                    state.config_options(),
-                    |_, _| {},
-                )?;
-                let inner = self
-                    .maybe_materialize_volatile_broadcast(&analyzed, ctx)
-                    .await?;
-                let explained = DfLogicalPlan::Explain(datafusion_expr::Explain {
-                    plan: Arc::new(inner),
-                    ..(*explain).clone()
-                });
-                return state
-                    .create_physical_plan(&explained)
-                    .await
-                    .map_err(Into::into);
-            }
+        // Plain `EXPLAIN` is planned by DataFusion from the logical plan as it is, so it
+        // shows the distributed plan without the broadcast materialization.
+        if let DfLogicalPlan::Explain(_) = logical_plan {
             return state
                 .create_physical_plan(logical_plan)
                 .await
@@ -811,18 +788,9 @@ impl DatafusionQueryEngine {
             state.config_options(),
             |_, _| {},
         )?;
-        // The plan before inserting the materialization placeholder: the
-        // execution-time decision falls back to it when the build side is too
-        // large to materialize.
-        let fallback_plan = analyzed_plan.clone();
         let analyzed_plan = self
             .maybe_materialize_volatile_broadcast(&analyzed_plan, ctx)
             .await?;
-        let materialized_plan = MaterializedBroadcastExecution::has_placeholder(&analyzed_plan)
-            .then(|| {
-                let placeholder_plan = analyzed_plan.clone();
-                (placeholder_plan, fallback_plan)
-            });
 
         expr_depth::validate_plan(&analyzed_plan)?;
         logger.after_analyze = Some(analyzed_plan.clone());
@@ -851,13 +819,6 @@ impl DatafusionQueryEngine {
 
         logger.phy_plan = Some(physical_plan.clone());
         drop(logger);
-        if let Some((placeholder_plan, fallback_plan)) = materialized_plan {
-            return Ok(Arc::new(MaterializedBroadcastExecution::new(
-                (*state).clone(),
-                placeholder_plan,
-                fallback_plan,
-            )));
-        }
         Ok(physical_plan)
     }
 
@@ -2594,6 +2555,32 @@ mod tests {
         }
     }
 
+    /// The analyzed and materialized logical plan of `plan`, as the engine plans it for
+    /// execution: the distributed analyzer runs first, then the broadcast rewrite.
+    async fn materialized_logical_plan(
+        engine: &DatafusionQueryEngine,
+        ctx: &mut QueryEngineContext,
+        plan: &LogicalPlan,
+    ) -> String {
+        let stats = engine.dist_join_stats(ctx, plan).await.unwrap();
+        ctx.state_mut()
+            .config_mut()
+            .options_mut()
+            .extensions
+            .insert(stats);
+
+        let state = ctx.state();
+        let analyzed = state
+            .analyzer()
+            .execute_and_check(plan.clone(), state.config_options(), |_, _| {})
+            .unwrap();
+        let materialized = engine
+            .maybe_materialize_volatile_broadcast(&analyzed, ctx)
+            .await
+            .unwrap();
+        materialized.display_indent().to_string()
+    }
+
     /// The automatic path of the statistics of the nested broadcast join rewrite: the engine
     /// resolves the candidate tables to their physical routes, fetches the region statistics of
     /// the query once, and the EXPLAIN of the same query then shows the nested rewrite.
@@ -2621,17 +2608,32 @@ mod tests {
             "the statistics of one query must come from one region stats call"
         );
 
-        // Plain EXPLAIN inserts a schema-only placeholder: it shows the materialized
-        // broadcast path without evaluating the small side.
-        let explained = explain_logical_plan(query_engine, &mut ctx, &plan).await;
-        // With a materialized build side the probe `MergeScan` carries the frontend
-        // join, so the join text appears inside the probe boundary; the materialized
-        // node marks the path.
+        // The engine plans the broadcast shape for execution: the remote join reads the
+        // build side from a data slot, which the local `Materialize` stage fills.
+        let materialized = materialized_logical_plan(query_engine, &mut ctx, &plan).await;
         assert!(
-            explained.contains("MaterializedBroadcast"),
-            "plain EXPLAIN must show the materialized broadcast path, got:\n{explained}"
+            materialized.contains("MaterializeBroadcastJoin [remote_input=["),
+            "the broadcast rewrite must wrap the remote join, got:\n{materialized}"
+        );
+        assert!(
+            materialized.contains("MaterializedInput rows=0"),
+            "the remote join must read an empty data slot, got:\n{materialized}"
+        );
+        assert!(
+            materialized.contains("\n  Materialize\n"),
+            "the build side must stay a local child, got:\n{materialized}"
         );
         assert_eq!(2, calls.load(Ordering::SeqCst));
+
+        // Plain EXPLAIN stays on the analyzed distributed plan: it must not evaluate the
+        // build side nor show the materialization.
+        let explained = explain_logical_plan(query_engine, &mut ctx, &plan).await;
+        assert!(
+            !nests_join_in_merge_scan(&explained),
+            "plain EXPLAIN must keep the two MergeScan boundaries, got:\n{explained}"
+        );
+        assert!(!explained.contains("MaterializeBroadcastJoin"));
+        assert_eq!(3, calls.load(Ordering::SeqCst));
     }
 
     /// The gating of the automatic path: without the session opt-in, without the distributed
@@ -2892,10 +2894,10 @@ mod tests {
         assert!(stats.favors_right_build(PROBE_TABLE_ID, BUILD_TABLE_ID));
         assert_eq!(1, calls.load(Ordering::SeqCst));
 
-        let explained = explain_logical_plan(query_engine, &mut ctx, &plan).await;
+        let materialized = materialized_logical_plan(query_engine, &mut ctx, &plan).await;
         assert!(
-            explained.contains("MaterializedBroadcast"),
-            "aliased tables must stay materialization candidates, got:\n{explained}"
+            materialized.contains("MaterializeBroadcastJoin"),
+            "aliased tables must stay materialization candidates, got:\n{materialized}"
         );
         assert_eq!(2, calls.load(Ordering::SeqCst));
     }

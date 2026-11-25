@@ -23,6 +23,7 @@ use arrow_schema::{
     SchemaRef as ArrowSchemaRef, SortOptions,
 };
 use async_stream::stream;
+use bytes::Bytes;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::BoxedError;
 use common_plugins::GREPTIME_EXEC_READ_COST;
@@ -39,8 +40,9 @@ use datafusion::physical_plan::metrics::{
 };
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
-    SendableRecordBatchStream, StatisticsArgs, apply_expression_roots,
+    ChildrenPropertiesMode, DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning,
+    PlanProperties, ReplaceChildrenOptions, SendableRecordBatchStream, StatisticsArgs,
+    apply_expression_roots,
 };
 use datafusion_common::stats::Precision;
 use datafusion_common::tree_node::TreeNodeRecursion;
@@ -60,6 +62,7 @@ use session::context::{
 };
 use store_api::metrics::{REGION_QUERY_CPU_TIME, REGION_QUERY_SCANNED_BYTES};
 use store_api::storage::RegionId;
+use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::table_name::TableName;
 use tokio::time;
 use tokio::time::Instant;
@@ -73,11 +76,12 @@ use crate::dist_plan::dyn_filter_bridge::{
     resolve_scalar_subquery_dyn_filters,
 };
 use crate::dist_plan::{
-    FilterId, RemoteDynFilterProducerId, RemoteDynFilterRegistryLease, Subscriber,
+    FilterId, MaterializeExec, MaterializedInput, OnceAsync, RemoteDynFilterProducerId,
+    RemoteDynFilterRegistryLease, Subscriber,
 };
 use crate::metrics::{MERGE_SCAN_ERRORS_TOTAL, MERGE_SCAN_POLL_ELAPSED, MERGE_SCAN_REGIONS};
 use crate::options::{FlowQueryExtensions, remote_dyn_filter_pushdown_enabled_from_extensions};
-use crate::query_engine::QueryEngineState;
+use crate::query_engine::{DefaultSerializer, QueryEngineState};
 use crate::region_query::{RegionQueryHandlerRef, RegionReadLimiter};
 
 fn query_engine_state_from_task_context(context: &TaskContext) -> Option<Arc<QueryEngineState>> {
@@ -529,6 +533,46 @@ impl MergeScanLogicalPlan {
     }
 }
 
+/// The local build side of a broadcast merge stage.
+///
+/// A physical `MergeScanExec` normally reads every region itself, so it has no children.
+/// The broadcast variant additionally owns the [`MaterializeExec`] that evaluates the build
+/// side on the frontend, and the shared payload of the bound remote join. Both are computed
+/// once and reused by every output partition.
+#[derive(Clone)]
+pub(crate) struct MergeScanBroadcast {
+    /// Evaluates the build side once; the batches become the data slot of the remote join.
+    materialize: Arc<MaterializeExec>,
+    /// The same stage as a plan node, so it can be exposed through `children()`.
+    materialize_plan: Arc<dyn ExecutionPlan>,
+    /// The encoded remote join with the data slot bound, shared by every region request.
+    prepared: Arc<OnceAsync<Bytes>>,
+}
+
+impl MergeScanBroadcast {
+    pub(crate) fn new(materialize: Arc<MaterializeExec>) -> Self {
+        Self::with_prepared(materialize, Arc::new(OnceAsync::new()))
+    }
+
+    fn with_prepared(materialize: Arc<MaterializeExec>, prepared: Arc<OnceAsync<Bytes>>) -> Self {
+        let materialize_plan: Arc<dyn ExecutionPlan> = materialize.clone();
+        Self {
+            materialize,
+            materialize_plan,
+            prepared,
+        }
+    }
+}
+
+impl std::fmt::Debug for MergeScanBroadcast {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MergeScanBroadcast")
+            .field("materialize", &self.materialize)
+            .field("prepared", &self.prepared)
+            .finish()
+    }
+}
+
 #[derive(Clone)]
 pub struct MergeScanExec {
     table: TableName,
@@ -553,6 +597,8 @@ pub struct MergeScanExec {
     target_partition: usize,
     enable_per_region_metrics: bool,
     row_estimate: Option<usize>,
+    /// The local build side when this stage is a materialized broadcast join.
+    broadcast: Option<MergeScanBroadcast>,
 }
 
 impl std::fmt::Debug for MergeScanExec {
@@ -561,6 +607,7 @@ impl std::fmt::Debug for MergeScanExec {
             .field("table", &self.table)
             .field("regions", &self.regions)
             .field("plan", &self.plan)
+            .field("broadcast", &self.broadcast)
             .finish()
     }
 }
@@ -639,7 +686,17 @@ impl MergeScanExec {
             target_partition,
             enable_per_region_metrics,
             row_estimate: None,
+            broadcast: None,
         })
+    }
+
+    /// Declares that this stage ships a materialized build side to its regions.
+    ///
+    /// The stage keeps owning the local [`MaterializeExec`], so it waits for the build side
+    /// and encodes the bound remote join instead of planning anything new.
+    pub(crate) fn with_broadcast(mut self, broadcast: MergeScanBroadcast) -> Self {
+        self.broadcast = Some(broadcast);
+        self
     }
 
     /// Redeclares only a direct raw source when its selected regions may split a key.
@@ -707,6 +764,13 @@ impl MergeScanExec {
         num_regions.max(1).min(target_partition.max(1))
     }
 
+    /// Encodes the remote join once per stage; every region request reuses the bytes.
+    fn encode_plan(plan: &LogicalPlan) -> Result<Bytes> {
+        DFLogicalSubstraitConvertor
+            .encode(plan, DefaultSerializer)
+            .map_err(|error| DataFusionError::External(Box::new(error)))
+    }
+
     pub fn to_stream(
         &self,
         context: Arc<TaskContext>,
@@ -722,6 +786,7 @@ impl MergeScanExec {
         let sub_stage_metrics_moved = self.sub_stage_metrics.clone();
         let partition_metrics_moved = self.partition_metrics.clone();
         let plan = self.plan.clone();
+        let broadcast = self.broadcast.clone();
         let target_partition =
             Self::output_partition_count(self.regions.len(), self.target_partition);
         let remote_dyn_filter_enabled = remote_dyn_filter_enabled(&self.query_ctx)?;
@@ -757,6 +822,25 @@ impl MergeScanExec {
             let _finish_timer = metric.finish_time().timer();
             let mut ready_timer = metric.ready_time().timer();
             let mut first_consume_timer = Some(metric.first_consume_time().timer());
+
+            // A broadcast stage waits for the local build side and encodes the remote join
+            // with the data slot bound. Both are shared by every partition, and this runs
+            // before any region-read permit is taken: a rejected build side must not hold
+            // the query's read slots or send a probe request. Binding replaces the data
+            // slot payload only, so the plan shape stays the one that was analyzed.
+            let (plan, prepared_plan) = match &broadcast {
+                Some(broadcast) => {
+                    let batches = broadcast.materialize.materialize(context.clone()).await?;
+                    let bound_plan = MaterializedInput::bind_batches(plan, batches)?;
+                    let encode_input = bound_plan.clone();
+                    let prepared = broadcast
+                        .prepared
+                        .get_or_init(move || async move { Self::encode_plan(&encode_input) })
+                        .await?;
+                    (bound_plan, Some(prepared))
+                }
+                None => (plan, None),
+            };
 
             // Per-partition timings, scoped to this partition's stream for `EXPLAIN VERBOSE`.
             let partition_start = Instant::now();
@@ -824,7 +908,9 @@ impl MergeScanExec {
                     }),
                     region_id,
                     plan: plan.clone(),
-                    prepared_plan: None,
+                    // In-process routes inject sources into the logical form, remote routes
+                    // ship the bytes encoded once for this stage.
+                    prepared_plan: prepared_plan.clone(),
                 };
                 if explain_verbose {
                     common_telemetry::info!(
@@ -1185,8 +1271,13 @@ impl ExecutionPlan for MergeScanExec {
         &self.properties
     }
 
+    /// A plain merge scan reads the regions itself, so it is a leaf. The broadcast variant
+    /// also owns the local [`MaterializeExec`] it drives before talking to the regions.
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
-        vec![]
+        match &self.broadcast {
+            Some(broadcast) => vec![&broadcast.materialize_plan],
+            None => vec![],
+        }
     }
 
     fn apply_expressions(
@@ -1207,13 +1298,56 @@ impl ExecutionPlan for MergeScanExec {
         )
     }
 
-    // DataFusion will swap children unconditionally.
-    // But since this node is leaf node, it's safe to just return self.
+    fn replace_children(
+        self: Arc<Self>,
+        mut children: Vec<Arc<dyn ExecutionPlan>>,
+        _options: ReplaceChildrenOptions,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        // DataFusion will swap children unconditionally, but a plain merge scan is a leaf,
+        // so there is nothing to rebuild.
+        let Some(broadcast) = self.broadcast.clone() else {
+            return Ok(self);
+        };
+        if children.len() != 1 {
+            return Err(DataFusionError::Internal(format!(
+                "MergeScanExec with a materialized build side expects exactly one child, got {}",
+                children.len()
+            )));
+        }
+        let child = children.swap_remove(0);
+        // Physical optimizers may wrap the materialize stage (for example with a
+        // `RepartitionExec`). The shared evaluation cell and the encoded payload must stay
+        // the ones prepared at planning time, so keep the original stage and only require
+        // that the dependency is still part of the rewritten child tree.
+        fn contains_materialize(plan: &Arc<dyn ExecutionPlan>) -> bool {
+            if plan.downcast_ref::<MaterializeExec>().is_some() {
+                return true;
+            }
+            plan.children()
+                .iter()
+                .any(|child| contains_materialize(child))
+        }
+        if !contains_materialize(&child) {
+            return Err(DataFusionError::Internal(format!(
+                "MergeScanExec with a materialized build side expects a MaterializeExec child, got {}",
+                child.name()
+            )));
+        }
+
+        let mut rebuilt = (*self).clone();
+        rebuilt.broadcast = Some(broadcast);
+        Ok(Arc::new(rebuilt))
+    }
+
+    #[allow(deprecated)]
     fn with_new_children(
         self: Arc<Self>,
-        _children: Vec<Arc<dyn ExecutionPlan>>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        Ok(self.clone())
+        self.replace_children(
+            children,
+            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+        )
     }
 
     fn handle_child_pushdown_result(
@@ -1465,7 +1599,9 @@ mod tests {
     use datafusion::physical_plan::Partitioning;
     use datafusion::physical_plan::filter_pushdown::ChildFilterPushdownResult;
     use datafusion::physical_plan::repartition::RepartitionExec;
+    use datafusion::physical_plan::test::TestMemoryExec;
     use datafusion::physical_plan::{StatisticsArgs, StatisticsContext};
+    use datafusion_common::DFSchema;
     use datafusion_expr::{LogicalPlanBuilder, col, lit};
     use datafusion_physical_expr::PhysicalExpr;
     use datafusion_physical_expr::expressions::{
@@ -1691,6 +1827,185 @@ mod tests {
                 Partitioning::UnknownPartitioning(count) if *count == expected
             ));
         }
+    }
+
+    /// The broadcast variant materializes the build side and encodes the bound remote join
+    /// once, no matter how many output partitions ask for it.
+    #[tokio::test]
+    async fn merge_scan_broadcast_shares_one_materialization_and_one_encoded_plan() {
+        let slot_schema = int64_schema(&["a", "b"]);
+        let slot = MaterializedInput::new(
+            Arc::new(DFSchema::try_from(slot_schema.arrow_schema().as_ref().clone()).unwrap()),
+            Vec::new(),
+        );
+        let remote_plan = slot.into_logical_plan();
+        let build_batch = record_batch(
+            slot_schema.clone(),
+            vec![
+                Arc::new(Int64Vector::from_slice([1, 2])) as _,
+                Arc::new(Int64Vector::from_slice([3, 4])) as _,
+            ],
+        );
+        let build = TestMemoryExec::try_new(
+            &[vec![build_batch.into_df_record_batch()]],
+            slot_schema.arrow_schema().clone(),
+            None,
+        )
+        .unwrap();
+        let materialize = Arc::new(MaterializeExec::new(Arc::new(build)));
+
+        let regions = vec![RegionId::new(1024, 1), RegionId::new(1024, 2)];
+        let handler = Arc::new(TestRegionQueryHandler::new(vec![
+            (
+                RegionId::new(1024, 1),
+                record_batch(
+                    slot_schema.clone(),
+                    vec![
+                        Arc::new(Int64Vector::from_slice([10])) as _,
+                        Arc::new(Int64Vector::from_slice([11])) as _,
+                    ],
+                ),
+            ),
+            (
+                RegionId::new(1024, 2),
+                record_batch(
+                    slot_schema.clone(),
+                    vec![
+                        Arc::new(Int64Vector::from_slice([20])) as _,
+                        Arc::new(Int64Vector::from_slice([21])) as _,
+                    ],
+                ),
+            ),
+        ]));
+        let exec = MergeScanExec::new(
+            &SessionStateBuilder::new().build(),
+            TableName::new("catalog", "schema", "table"),
+            regions,
+            remote_plan,
+            slot_schema.arrow_schema().as_ref(),
+            handler.clone(),
+            QueryContext::arc(),
+            2,
+            None,
+            false,
+        )
+        .unwrap()
+        .with_broadcast(MergeScanBroadcast::new(materialize.clone()));
+        let prepared = exec.broadcast.as_ref().unwrap().prepared.clone();
+
+        // The merge stage owns the local build side, so plan traversal sees it.
+        assert_eq!(1, exec.children().len());
+
+        let context = Arc::new(TaskContext::default());
+        let first: Vec<_> = exec
+            .execute(0, context.clone())
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        let second: Vec<_> = exec
+            .execute(1, context)
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+
+        assert_int64_batch(&first[0], (10, 11));
+        assert_int64_batch(&second[0], (20, 21));
+        assert_eq!(
+            1,
+            materialize.result().init_count(),
+            "two partitions must share one evaluation of the build side"
+        );
+        assert_eq!(
+            1,
+            prepared.init_count(),
+            "two partitions must share one encoding of the bound remote join"
+        );
+
+        let requests = handler.requests.lock().unwrap();
+        assert_eq!(2, requests.len());
+        let payloads = requests
+            .iter()
+            .map(|request| {
+                assert!(
+                    request.plan.display_indent().to_string().contains("rows=2"),
+                    "the shipped logical plan carries the bound data slot: {}",
+                    request.plan.display_indent()
+                );
+                request
+                    .prepared_plan
+                    .clone()
+                    .expect("a broadcast stage ships the encoded join")
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            payloads.windows(2).all(|pair| pair[0] == pair[1]),
+            "the payload is encoded once"
+        );
+    }
+
+    /// Waiting for the build side happens before a region read is issued: an oversized build
+    /// side fails the query without any probe request.
+    #[tokio::test]
+    async fn merge_scan_broadcast_rejects_an_oversized_build_side_without_a_probe() {
+        let slot_schema = int64_schema(&["a"]);
+        let slot = MaterializedInput::new(
+            Arc::new(DFSchema::try_from(slot_schema.arrow_schema().as_ref().clone()).unwrap()),
+            Vec::new(),
+        );
+        let oversized = record_batch(
+            slot_schema.clone(),
+            vec![Arc::new(Int64Vector::from_vec(vec![
+                1i64;
+                crate::dist_plan::materialize_exec::MAX_ROWS
+                    + 1
+            ])) as _],
+        );
+        let build = TestMemoryExec::try_new(
+            &[vec![oversized.into_df_record_batch()]],
+            slot_schema.arrow_schema().clone(),
+            None,
+        )
+        .unwrap();
+        let handler = Arc::new(TestRegionQueryHandler::new(vec![(
+            RegionId::new(1024, 1),
+            record_batch(
+                slot_schema.clone(),
+                vec![Arc::new(Int64Vector::from_slice([10])) as _],
+            ),
+        )]));
+        let exec = MergeScanExec::new(
+            &SessionStateBuilder::new().build(),
+            TableName::new("catalog", "schema", "table"),
+            vec![RegionId::new(1024, 1)],
+            slot.into_logical_plan(),
+            slot_schema.arrow_schema().as_ref(),
+            handler.clone(),
+            QueryContext::arc(),
+            1,
+            None,
+            false,
+        )
+        .unwrap()
+        .with_broadcast(MergeScanBroadcast::new(Arc::new(MaterializeExec::new(
+            Arc::new(build),
+        ))));
+
+        let error = exec
+            .execute(0, Arc::new(TaskContext::default()))
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("exceeds the broadcast budget"),
+            "{error}"
+        );
+        assert!(
+            handler.requests.lock().unwrap().is_empty(),
+            "a rejected build side must not send a probe request"
+        );
     }
 
     #[test]
@@ -2277,6 +2592,7 @@ mod tests {
         select_target_calls: AtomicUsize,
         read_preferences: Mutex<Vec<ReadPreference>>,
         do_get_targets: Mutex<Vec<u64>>,
+        requests: Mutex<Vec<common_query::request::QueryRequest>>,
     }
 
     impl TestRegionQueryHandler {
@@ -2721,6 +3037,7 @@ mod tests {
             request: common_query::request::QueryRequest,
         ) -> crate::error::Result<common_recordbatch::SendableRecordBatchStream> {
             self.do_get_targets.lock().unwrap().push(target.peer().id);
+            self.requests.lock().unwrap().push(request.clone());
             let response = self
                 .responses
                 .get(&request.region_id)

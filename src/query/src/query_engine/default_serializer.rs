@@ -56,7 +56,7 @@ use substrait::substrait_proto_df::proto::{
 };
 use substrait::{DFLogicalSubstraitConvertor, Extensions, SubstraitPlan};
 
-use crate::dist_plan::{MaterializedBroadcastNode, MergeScanLogicalPlan};
+use crate::dist_plan::{MaterializedInput, MergeScanLogicalPlan};
 use crate::query_engine::QueryEngineState;
 
 /// Extended [`substrait::extension_serializer::ExtensionSerializer`] but supports [`MergeScanLogicalPlan`] serialization.
@@ -65,11 +65,11 @@ pub struct DefaultSerializer;
 
 impl SerializerRegistry for DefaultSerializer {
     fn serialize_logical_plan(&self, node: &dyn UserDefinedLogicalNode) -> Result<Vec<u8>> {
-        if node.name() == MaterializedBroadcastNode::NAME {
+        if node.name() == MaterializedInput::NAME {
             let node = node
                 .as_any()
-                .downcast_ref::<MaterializedBroadcastNode>()
-                .expect("Failed to downcast MaterializedBroadcastNode");
+                .downcast_ref::<MaterializedInput>()
+                .expect("Failed to downcast MaterializedInput");
             node.encode_batches()
         } else if node.name() == MergeScanLogicalPlan::name() {
             let merge_scan = node
@@ -216,16 +216,14 @@ impl SubstraitConsumer for MergeScanSubstraitConsumer<'_> {
         let Some(detail) = rel.detail.as_ref() else {
             return self.inner.consume_extension_leaf(rel).await;
         };
-        if detail.type_url == MaterializedBroadcastNode::NAME {
-            let batches = MaterializedBroadcastNode::decode_batches(detail.value.as_ref())?;
+        if detail.type_url == MaterializedInput::NAME {
+            let batches = MaterializedInput::decode_batches(detail.value.as_ref())?;
             let schema = batches
                 .first()
                 .map(|b| b.schema())
                 .unwrap_or_else(|| Arc::new(arrow_schema::Schema::empty()));
             let schema = DFSchema::try_from(schema.as_ref().clone())?;
-            return Ok(
-                MaterializedBroadcastNode::new(Arc::new(schema), batches).into_logical_plan()
-            );
+            return Ok(MaterializedInput::new(Arc::new(schema), batches).into_logical_plan());
         }
         if detail.type_url != MergeScanLogicalPlan::name() {
             return self.inner.consume_extension_leaf(rel).await;

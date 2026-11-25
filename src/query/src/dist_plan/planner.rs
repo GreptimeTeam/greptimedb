@@ -47,10 +47,13 @@ use table::metadata::{TableInfo, TableType};
 use table::table::adapter::DfTableProviderAdapter;
 use table::table_name::TableName;
 
-use crate::dist_plan::MaterializedBroadcastNode;
+use crate::dist_plan::MaterializedInput;
 use crate::dist_plan::PredicateExtractor;
 use crate::dist_plan::dist_join_planner::expected_region_ids;
-use crate::dist_plan::merge_scan::{MergeScanExec, MergeScanLogicalPlan};
+use crate::dist_plan::materialize::MaterializeLogicalPlan;
+use crate::dist_plan::materialize_broadcast_join::MaterializeBroadcastJoin;
+use crate::dist_plan::materialize_exec::MaterializeExec;
+use crate::dist_plan::merge_scan::{MergeScanBroadcast, MergeScanExec, MergeScanLogicalPlan};
 use crate::dist_plan::merge_sort::{MergeSortExec, MergeSortLogicalPlan};
 use crate::dist_plan::region_pruner::ConstraintPruner;
 use crate::error::{CatalogSnafu, PartitionRuleManagerSnafu, TableNotFoundSnafu};
@@ -177,11 +180,11 @@ impl ExtensionPlanner for DistExtensionPlanner {
         planner: &dyn PhysicalPlanner,
         node: &dyn UserDefinedLogicalNode,
         _logical_inputs: &[&LogicalPlan],
-        _physical_inputs: &[Arc<dyn ExecutionPlan>],
+        physical_inputs: &[Arc<dyn ExecutionPlan>],
         session: &dyn Session,
         _planning_ctx: &PhysicalPlanningContext,
     ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
-        if let Some(materialized) = node.as_any().downcast_ref::<MaterializedBroadcastNode>() {
+        if let Some(materialized) = node.as_any().downcast_ref::<MaterializedInput>() {
             use datafusion::physical_plan::memory::{LazyBatchGenerator, LazyMemoryExec};
             use parking_lot::RwLock;
             use std::fmt;
@@ -228,6 +231,80 @@ impl ExtensionPlanner for DistExtensionPlanner {
                 vec![generator],
             )?)));
         }
+        // The local stage of a broadcast merge: the build side is evaluated once by this
+        // node, and the merge stage owns it as its only child.
+        if node.as_any().is::<MaterializeLogicalPlan>() {
+            let build = physical_inputs.first().cloned().ok_or_else(|| {
+                DataFusionError::Internal(
+                    "Expect Materialize to have exactly one physical input".to_string(),
+                )
+            })?;
+            return Ok(Some(Arc::new(MaterializeExec::new(build)) as _));
+        }
+
+        // A broadcast merge stage is a `MergeScanExec` over the unmodified `remote_input`
+        // template: the merge stage itself binds the materialized batches into the data
+        // slot at execution time, encodes the bound join once and ships it to the regions.
+        if let Some(broadcast_join) = node.as_any().downcast_ref::<MaterializeBroadcastJoin>() {
+            let remote_input = broadcast_join.remote_input();
+            let Some(table_name) = Self::extract_full_table_name(remote_input)? else {
+                return Err(DataFusionError::Plan(
+                    "a materialized broadcast join has no region route table".to_string(),
+                ));
+            };
+            // `MaterializedInput` is a leaf, so the probe fragment is the only scan of the
+            // template and it selects the region route.
+            let (regions, series_disjoint) = self.get_regions(&table_name, remote_input).await?;
+
+            let session_state =
+                session
+                    .as_any()
+                    .downcast_ref::<SessionState>()
+                    .ok_or_else(|| {
+                        DataFusionError::Internal(
+                            "MergeScan requires a SessionState for physical planning".to_string(),
+                        )
+                    })?;
+            let query_ctx = session_state
+                .config()
+                .get_extension()
+                .unwrap_or_else(QueryContext::arc);
+
+            // The `Materialize` logical child is planned before this node, so the build side
+            // is evaluated by exactly one `MaterializeExec`. The fallback keeps the contract
+            // if a planner ever hands over no physical input.
+            let materialize = match physical_inputs.first() {
+                Some(input) => input
+                    .downcast_ref::<MaterializeExec>()
+                    .map(|exec| Arc::new(exec.clone()))
+                    .ok_or_else(|| {
+                        DataFusionError::Internal(format!(
+                            "Expect the input of a materialized broadcast join to be a MaterializeExec, found {}",
+                            input.name()
+                        ))
+                    })?,
+                None => Arc::new(MaterializeExec::new(
+                    session.create_physical_plan(broadcast_join.build_input()).await?,
+                )),
+            };
+
+            let merge_scan_plan = MergeScanExec::new(
+                session_state,
+                table_name,
+                regions,
+                remote_input.clone(),
+                remote_input.schema().as_arrow(),
+                self.region_query_handler.clone(),
+                query_ctx,
+                session.config().target_partitions(),
+                broadcast_join.remote_dyn_filter_producer_id(),
+                self.enable_per_region_metrics,
+            )?
+            .with_raw_series_disjoint(series_disjoint)?
+            .with_broadcast(MergeScanBroadcast::new(materialize));
+            return Ok(Some(Arc::new(merge_scan_plan) as _));
+        }
+
         let Some(merge_scan) = node.as_any().downcast_ref::<MergeScanLogicalPlan>() else {
             return Ok(None);
         };
