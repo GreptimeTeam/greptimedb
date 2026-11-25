@@ -1,0 +1,14 @@
+src/mito2/src/worker/handle_manifest.rs
+  h_623774b620da8e 457,1003-1022,1257-1285
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d12d53334f2ebd4a0737f3cd9f942f25670a8aab",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
