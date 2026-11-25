@@ -14,6 +14,9 @@
 
 //! Cooperative byte transfer for SST uploads. Callers own close, abort, and file cleanup.
 
+#[cfg(feature = "enterprise")]
+pub(crate) mod buffered;
+
 use futures::{Stream, StreamExt};
 use object_store::{Buffer, Error as ObjectStoreError, Result as ObjectStoreResult, Writer};
 use snafu::Snafu;
@@ -63,23 +66,33 @@ pub(crate) async fn write(
     write_buffer_size: usize,
     cancellation: Option<&CancellationToken>,
 ) -> Result<u64, UploadError> {
-    let len = bytes.len() as u64;
-    // Keep each slice nonempty even when the configured size is zero.
-    let write_buffer_size = write_buffer_size.max(1);
-    while !bytes.is_empty() {
+    let chunks = std::iter::from_fn(|| {
+        (!bytes.is_empty()).then(|| bytes.split_to(bytes.len().min(write_buffer_size.max(1))))
+    });
+    write_chunks(writer, chunks, cancellation).await
+}
+
+async fn write_chunks(
+    writer: &mut Writer,
+    chunks: impl Iterator<Item = Buffer>,
+    cancellation: Option<&CancellationToken>,
+) -> Result<u64, UploadError> {
+    let mut written = 0;
+    for chunk in chunks {
         if cancellation.is_some_and(CancellationToken::is_cancelled) {
             return Err(UploadError::Cancelled);
         }
-        let chunk = bytes.split_to(bytes.len().min(write_buffer_size));
+        let len = chunk.len() as u64;
         writer
             .write(chunk)
             .await
             .map_err(|source| UploadError::Write { source })?;
+        written += len;
     }
     if cancellation.is_some_and(CancellationToken::is_cancelled) {
         return Err(UploadError::Cancelled);
     }
-    Ok(len)
+    Ok(written)
 }
 
 #[cfg(test)]

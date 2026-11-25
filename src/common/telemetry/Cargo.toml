@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-tokio-console = ["console-subscriber", "tokio/tracing"]
+tokio-console = ["console-subscriber"]
 deadlock_detection = ["parking_lot/deadlock_detection"]
 
 [lints]
@@ -33,7 +33,6 @@ prometheus.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
-tokio.workspace = true
 tracing = "0.1"
 tracing-appender.workspace = true
 tracing-log = "0.2"

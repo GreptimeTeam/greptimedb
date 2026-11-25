@@ -15,8 +15,8 @@
 //! Tests for regions whose WAL options select the object store WAL.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use api::v1::region::{StrictWindow, compact_request};
@@ -59,8 +59,9 @@ use crate::engine::lease_test::promote_to_await_leader_lease;
 use crate::engine::listener::{EventListener, FlushCancellationListener};
 use crate::engine::open_test::new_dummy_fetcher;
 use crate::engine::region_hook::{RegionHook, RegionHookRef};
+use crate::error::Error;
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
-use crate::manifest::storage::{delta_file, gen_path, manifest_dir};
+use crate::manifest::storage::{checkpoint_file, delta_file, gen_path, manifest_dir};
 use crate::region::MitoRegionRef;
 use crate::request::{BackgroundNotify, RegionEditRequest, WorkerRequest};
 use crate::sst::file::FileMeta;
@@ -570,9 +571,10 @@ async fn test_stale_commit_on_deleted_delta_name_conflicts(
     #[case] awaiting_leader_lease: bool,
 ) {
     common_telemetry::init_default_ut_logging();
-    // The creation is version 0 and the flushes below are versions 1 and 2.
-    const VERSION: u64 = 3;
-    let (blocker, layer) = CheckpointTaskBlocker::block_delta_write(VERSION);
+    // The creation is version 0, the flushes below are versions 1 and 2, and the catchup that
+    // makes the region await its Leader lease commits version 3.
+    let blocked_version = if awaiting_leader_lease { 4 } else { 3 };
+    let (blocker, layer) = CheckpointTaskBlocker::block_delta_write(blocked_version);
     let mut env = TestEnv::with_prefix("stale-manifest-commit")
         .await
         .with_mock_layer(layer);
@@ -626,14 +628,14 @@ async fn test_stale_commit_on_deleted_delta_name_conflicts(
     new_holder.handle_request(region_id, open).await.unwrap();
     let delta = gen_path(
         &manifest_dir(&region_dir),
-        &delta_file(VERSION),
+        &delta_file(blocked_version),
         CompressionType::Gzip,
     );
     {
         let held = new_holder.get_region(region_id).unwrap();
         let mut manager = held.manifest_ctx.manifest_manager.write().await;
-        assert_eq!(VERSION - 1, manager.last_version());
-        while manager.last_version() < VERSION || store.exists(&delta).await.unwrap() {
+        assert_eq!(blocked_version - 1, manager.last_version());
+        while manager.last_version() < blocked_version || store.exists(&delta).await.unwrap() {
             manager
                 .update_with_verification(nop_action(), false, true, || false)
                 .await
@@ -666,7 +668,7 @@ async fn test_stale_commit_on_deleted_delta_name_conflicts(
     wait_until(|| is_replaced(&old_leader, &region)).await;
 
     let manager = region.manifest_ctx.manifest_manager.read().await;
-    assert_eq!(VERSION - 1, manager.last_version());
+    assert_eq!(blocked_version - 1, manager.last_version());
     assert!(Arc::ptr_eq(&manifest, &manager.manifest()));
     assert_eq!(checkpoint, manager.checkpointer().last_checkpoint_version());
     assert!(!manager.checkpointer().is_doing_checkpoint());
@@ -769,6 +771,20 @@ async fn test_node_lease_fences_wal_and_renews_without_region_grants() {
     assert_eq!(3, count_rows(&engine, region_id).await);
     log_store.stop().await.unwrap();
     engine.stop().await.unwrap();
+}
+
+/// A region without a WAL provider hands nothing over: the object store WAL, which has no region
+/// for it, is not called, and the given entry id is the bound.
+#[tokio::test]
+async fn test_handoff_of_a_region_without_a_wal_provider_does_nothing() {
+    let log_store = new_log_store().await;
+    let wal = crate::wal::Wal::new(log_store.clone());
+    let bound = wal
+        .handoff(RegionId::new(1, 1), &Provider::Noop, 42)
+        .await
+        .unwrap();
+    assert_eq!(42, bound);
+    log_store.stop().await.unwrap();
 }
 
 async fn new_log_store() -> Arc<ObjectStoreLogStore> {
@@ -1221,6 +1237,285 @@ async fn test_fence_or_lease_during_catchup_reopen(#[case] lease: bool) {
     }
 }
 
+/// A Leader lease that arrives while a catchup waits for its hand-off to become durable does not
+/// promote the region the catchup reopened; the catchup promotes it when it ends.
+#[tokio::test]
+async fn test_leader_lease_during_handoff_does_not_promote() {
+    let mut env = TestEnv::with_prefix("lease-during-handoff").await;
+    let region_id = RegionId::new(1, 1);
+    let (engine, log_store, _, schema, deadline) = create_leased_region(&mut env, region_id).await;
+    // Rows left in the memtable make the catchup reopen the region.
+    put_range(&engine, region_id, &schema, 0, 3).await;
+    engine
+        .set_region_role(region_id, RegionRole::Follower)
+        .unwrap();
+    let old = engine.get_region(region_id).unwrap();
+    let reported_entry_id = old.version().flushed_entry_id;
+    log_store.hold_creates();
+    let catchup = {
+        let engine = engine.clone();
+        let request = RegionRequest::Catchup(RegionCatchupRequest {
+            set_writable: true,
+            entry_id: Some(reported_entry_id),
+            ..Default::default()
+        });
+        tokio::spawn(async move { engine.handle_request(region_id, request).await })
+    };
+
+    // The hand-off of the reopened region waits for the object that carries its record.
+    log_store.wait_for_parked_creates(1).await.unwrap();
+    assert!(!catchup.is_finished());
+    assert!(is_replaced(&engine, &old));
+    let region = engine.get_region(region_id).unwrap();
+    let promoted = engine
+        .set_region_role_with_lease(
+            region_id,
+            RegionRole::Leader,
+            Instant::now(),
+            deadline,
+            None,
+        )
+        .unwrap();
+    assert!(!promoted);
+    assert!(region.is_follower());
+
+    log_store.release_creates();
+    catchup.await.unwrap().unwrap();
+    assert!(region.is_writable());
+    assert_eq!(3, count_rows(&engine, region_id).await);
+}
+
+/// A catchup that makes a region writable first commits an empty edit as the version after the
+/// manifest it read, as a Follower whose Leader deadline has passed.
+#[tokio::test]
+async fn test_catchup_commits_the_next_version_before_it_promotes() {
+    let mut env = TestEnv::with_prefix("catchup-commits-next-version").await;
+    let region_id = RegionId::new(1, 1);
+    let (engine, _log_store, _, _, deadline) = create_leased_region(&mut env, region_id).await;
+    engine
+        .set_region_role(region_id, RegionRole::Follower)
+        .unwrap();
+    engine.freeze_lease_clock(deadline);
+    let region = engine.get_region(region_id).unwrap();
+    let version = next_manifest_version(&region).await;
+    let files = region.version().ssts.levels()[0].files.len();
+    let last_checkpoint_version = || async {
+        let mut manager = region.manifest_ctx.manifest_manager.write().await;
+        manager.wait_for_pending_checkpoint().await;
+        manager.checkpointer().last_checkpoint_version()
+    };
+    let checkpoint = last_checkpoint_version().await;
+
+    let catchup = RegionRequest::Catchup(RegionCatchupRequest {
+        set_writable: true,
+        ..Default::default()
+    });
+    engine.handle_request(region_id, catchup).await.unwrap();
+
+    assert!(region.is_writable());
+    assert_eq!(version, next_manifest_version(&region).await - 1);
+    assert_eq!(files, region.version().ssts.levels()[0].files.len());
+    // Every commit checkpoints under this configuration, except the catchup's.
+    assert_eq!(checkpoint, last_checkpoint_version().await);
+}
+
+/// When another writer committed other content as the version the catchup's empty edit takes,
+/// the commit fails with a retryable error and leaves the region a Follower that is not fenced,
+/// so the next catchup reopens it from the newer manifest and promotes it.
+#[tokio::test]
+async fn test_catchup_commit_conflict_keeps_the_region_a_follower() {
+    let mut env = TestEnv::with_prefix("catchup-commit-conflict").await;
+    let region_id = RegionId::new(1, 1);
+    let (engine, _log_store, table_dir, _, _) = create_leased_region(&mut env, region_id).await;
+    engine
+        .set_region_role(region_id, RegionRole::Follower)
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let version = next_manifest_version(&region).await;
+    let other = RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit {
+        timestamp_ms: Some(1),
+        ..Default::default()
+    }));
+    let store = env.get_object_store().unwrap();
+    let region_dir = region_dir_from_table_dir(&table_dir, region_id, PathType::Bare);
+    publish_delta(&store, &region_dir, version, encode_delta(other).await).await;
+
+    let error = region.manifest_ctx.commit_catchup().await.err().unwrap();
+    assert!(error.retry_hint().is_retryable(), "{error:?}");
+    assert!(region.is_follower());
+    assert!(!region.manifest_ctx.is_reload_pending());
+    assert!(
+        !region
+            .manifest_ctx
+            .manifest_manager
+            .read()
+            .await
+            .is_stopped()
+    );
+
+    let catchup = RegionRequest::Catchup(RegionCatchupRequest {
+        set_writable: true,
+        ..Default::default()
+    });
+    engine.handle_request(region_id, catchup).await.unwrap();
+    assert!(is_replaced(&engine, &region));
+    let region = engine.get_region(region_id).unwrap();
+    assert!(region.is_writable());
+    assert_eq!(version + 2, next_manifest_version(&region).await);
+}
+
+/// A checkpoint that covers the version the catchup's empty edit took means a writer that already
+/// cleaned that version name up, so the commit fails as a conflict and applies nothing.
+#[tokio::test]
+async fn test_catchup_commit_covered_by_a_checkpoint_conflicts() {
+    let mut env = TestEnv::with_prefix("catchup-commit-checkpointed").await;
+    let region_id = RegionId::new(1, 1);
+    let (engine, _log_store, table_dir, _, _) = create_leased_region(&mut env, region_id).await;
+    engine
+        .set_region_role(region_id, RegionRole::Follower)
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let version = next_manifest_version(&region).await;
+    let store = env.get_object_store().unwrap();
+    let region_dir = region_dir_from_table_dir(&table_dir, region_id, PathType::Bare);
+    let checkpoint = gen_path(
+        &manifest_dir(&region_dir),
+        &checkpoint_file(version),
+        CompressionType::Gzip,
+    );
+    store.write(&checkpoint, Vec::<u8>::new()).await.unwrap();
+
+    let error = region.manifest_ctx.commit_catchup().await.err().unwrap();
+    assert!(
+        matches!(error, Error::ManifestVersionConflict { .. }),
+        "{error:?}"
+    );
+    assert_eq!(version, next_manifest_version(&region).await);
+    assert!(region.is_follower());
+}
+
+/// A region that a stop already marked, while the stop still waits to stop its manifest manager,
+/// commits nothing for its catchup.
+#[tokio::test]
+async fn test_catchup_commit_of_a_stopping_region_commits_nothing() {
+    let mut env = TestEnv::with_prefix("catchup-commit-stopping").await;
+    let region_id = RegionId::new(1, 1);
+    let (engine, _log_store, _, _, _) = create_leased_region(&mut env, region_id).await;
+    engine
+        .set_region_role(region_id, RegionRole::Follower)
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let version = next_manifest_version(&region).await;
+    region.manifest_ctx.mark_stopped_for_test();
+
+    let error = region.manifest_ctx.commit_catchup().await.err().unwrap();
+    assert!(matches!(error, Error::RegionStopped { .. }), "{error:?}");
+    assert_eq!(version, next_manifest_version(&region).await);
+}
+
+/// A catchup whose hand-off fails returns a retryable error before it replays or commits, and
+/// leaves the region a Follower; the next catchup makes the region writable.
+#[tokio::test]
+async fn test_catchup_whose_handoff_fails_can_be_retried() {
+    let mut env = TestEnv::with_prefix("catchup-handoff-fails").await;
+    let region_id = RegionId::new(1, 1);
+    let (engine, log_store, _, _, _) = create_leased_region(&mut env, region_id).await;
+    engine
+        .set_region_role(region_id, RegionRole::Follower)
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let version = next_manifest_version(&region).await;
+    let catchup = || {
+        RegionRequest::Catchup(RegionCatchupRequest {
+            set_writable: true,
+            entry_id: Some(region.version().flushed_entry_id),
+            ..Default::default()
+        })
+    };
+
+    log_store.fail_creates();
+    let error = engine
+        .handle_request(region_id, catchup())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            error.as_any().downcast_ref::<Error>(),
+            Some(Error::HandoffWal { .. })
+        ),
+        "{error:?}"
+    );
+    assert!(error.retry_hint().is_retryable(), "{error:?}");
+    assert!(region.is_follower());
+    assert_eq!(version, next_manifest_version(&region).await);
+
+    log_store.allow_creates();
+    engine.handle_request(region_id, catchup()).await.unwrap();
+    assert!(region.is_writable());
+}
+
+/// A region promoted directly while its catchup waits for the hand-off is no longer the Follower
+/// the catchup commits for, so the catchup fails without committing.
+#[tokio::test]
+async fn test_catchup_of_a_region_promoted_meanwhile_commits_nothing() {
+    let mut env = TestEnv::with_prefix("catchup-promoted-meanwhile").await;
+    let region_id = RegionId::new(1, 1);
+    let (engine, log_store, _, _, _) = create_leased_region(&mut env, region_id).await;
+    engine
+        .set_region_role(region_id, RegionRole::Follower)
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let version = next_manifest_version(&region).await;
+    log_store.hold_creates();
+    let catchup = {
+        let engine = engine.clone();
+        let request = RegionRequest::Catchup(RegionCatchupRequest {
+            set_writable: true,
+            entry_id: Some(region.version().flushed_entry_id),
+            ..Default::default()
+        });
+        tokio::spawn(async move { engine.handle_request(region_id, request).await })
+    };
+    log_store.wait_for_parked_creates(1).await.unwrap();
+    engine
+        .set_region_role(region_id, RegionRole::Leader)
+        .unwrap();
+
+    log_store.release_creates();
+    let error = catchup.await.unwrap().unwrap_err();
+    assert!(
+        matches!(
+            error.as_any().downcast_ref::<Error>(),
+            Some(Error::RegionState { .. })
+        ),
+        "{error:?}"
+    );
+    assert_eq!(version, next_manifest_version(&region).await);
+}
+
+/// Without conditional publication the catchup commits nothing.
+#[tokio::test]
+async fn test_catchup_without_conditional_publication_commits_nothing() {
+    let mut env = TestEnv::with_prefix("catchup-unconditional").await;
+    let (engine, _log_store) = new_engine(&mut env).await;
+    let region_id = RegionId::new(1, 1);
+    create_region(&engine, region_id).await;
+    engine
+        .set_region_role(region_id, RegionRole::Follower)
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let version = next_manifest_version(&region).await;
+
+    let catchup = RegionRequest::Catchup(RegionCatchupRequest {
+        set_writable: true,
+        ..Default::default()
+    });
+    engine.handle_request(region_id, catchup).await.unwrap();
+
+    assert!(region.is_writable());
+    assert_eq!(version, next_manifest_version(&region).await);
+}
+
 /// Fails every read of a manifest file.
 struct FailedManifestReader;
 
@@ -1522,6 +1817,8 @@ struct BlockingManifestHook {
     armed: AtomicBool,
     entered: Notify,
     release: Notify,
+    /// The version and actions of the call it held last.
+    held: Mutex<Option<(ManifestVersion, RegionMetaActionList)>>,
 }
 
 #[async_trait]
@@ -1529,14 +1826,150 @@ impl RegionHook for BlockingManifestHook {
     async fn on_manifest_updated(
         &self,
         _region_id: RegionId,
-        _action_list: &RegionMetaActionList,
-        _manifest_version: ManifestVersion,
+        action_list: &RegionMetaActionList,
+        manifest_version: ManifestVersion,
     ) {
         if self.armed.swap(false, Ordering::Relaxed) {
+            *self.held.lock().unwrap() = Some((manifest_version, action_list.clone()));
             self.entered.notify_one();
             self.release.notified().await;
         }
     }
+}
+
+/// The catchup's empty edit fires the manifest hook after the manifest lock is released and
+/// before the region is promoted; a close while the hook runs leaves the region unpromoted.
+#[rstest]
+#[case::promoted(false)]
+#[case::closed(true)]
+#[tokio::test]
+async fn test_catchup_commit_fires_the_hook_after_unlocking(#[case] close: bool) {
+    let mut env = TestEnv::with_prefix("catchup-commit-hook").await;
+    let hook = Arc::new(BlockingManifestHook::default());
+    let plugins = Plugins::new();
+    plugins.insert::<RegionHookRef>(hook.clone());
+    let engine = env
+        .create_engine_with_log_store_and_plugins(
+            MitoConfig::default(),
+            new_log_store().await,
+            plugins,
+        )
+        .await;
+    let region_id = RegionId::new(1, 1);
+    create_leased_region_on(&engine, region_id).await;
+    engine
+        .set_region_role(region_id, RegionRole::Follower)
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let version = next_manifest_version(&region).await;
+    hook.armed.store(true, Ordering::Relaxed);
+    let catchup = {
+        let engine = engine.clone();
+        let request = RegionRequest::Catchup(RegionCatchupRequest {
+            set_writable: true,
+            ..Default::default()
+        });
+        tokio::spawn(async move { engine.handle_request(region_id, request).await })
+    };
+
+    tokio::time::timeout(Duration::from_secs(10), hook.entered.notified())
+        .await
+        .unwrap();
+    let (held_version, actions) = hook.held.lock().unwrap().take().unwrap();
+    assert_eq!(version, held_version);
+    assert_eq!(
+        RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit::default())),
+        actions
+    );
+    // The hook runs without the manifest lock, before the promotion.
+    let manager = tokio::time::timeout(
+        Duration::from_secs(10),
+        region.manifest_ctx.manifest_manager.read(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(version, manager.manifest().manifest_version);
+    drop(manager);
+    assert!(region.is_follower());
+    if close {
+        close_region(&engine, region_id).await;
+    }
+
+    hook.release.notify_one();
+    let caught_up = catchup.await.unwrap();
+    if close {
+        let error = caught_up.unwrap_err();
+        assert_eq!(StatusCode::RegionNotFound, error.status_code());
+        assert!(region.is_follower());
+    } else {
+        caught_up.unwrap();
+        assert!(region.is_writable());
+    }
+}
+
+/// A catchup again fires the hook of its commit once it holds no manifest lock, so a hook that
+/// reads the manifest is not queued behind a writer that waits for the old instance's lock, and
+/// no Leader lease promotes the replacement while the hook runs.
+#[tokio::test]
+async fn test_catchup_again_fires_the_hook_without_manifest_locks() {
+    let mut env = TestEnv::with_prefix("catchup-again-commit-hook").await;
+    let hook = Arc::new(BlockingManifestHook::default());
+    let plugins = Plugins::new();
+    plugins.insert::<RegionHookRef>(hook.clone());
+    let engine = env
+        .create_engine_with_log_store_and_plugins(
+            MitoConfig::default(),
+            new_log_store().await,
+            plugins,
+        )
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let (_, _, deadline) = create_leased_region_on(&engine, region_id).await;
+    promote_to_await_leader_lease(&engine, region_id).await;
+    let old = engine.get_region(region_id).unwrap();
+    hook.armed.store(true, Ordering::Relaxed);
+    let catchup = {
+        let engine = engine.clone();
+        let request = RegionRequest::Catchup(RegionCatchupRequest {
+            set_writable: true,
+            ..Default::default()
+        });
+        tokio::spawn(async move { engine.handle_request(region_id, request).await })
+    };
+
+    let wait = Duration::from_secs(10);
+    tokio::time::timeout(wait, hook.entered.notified())
+        .await
+        .unwrap();
+    // While the hook runs, a writer of the old instance and a reader of the registered one get
+    // their locks.
+    drop(
+        tokio::time::timeout(wait, old.manifest_ctx.manifest_manager.write())
+            .await
+            .unwrap(),
+    );
+    let registered = engine.get_region(region_id).unwrap();
+    drop(
+        tokio::time::timeout(wait, registered.manifest_ctx.manifest_manager.read())
+            .await
+            .unwrap(),
+    );
+    // Nor does a Leader lease promote the registered replacement before its catchup ends.
+    let promoted = engine
+        .set_region_role_with_lease(
+            region_id,
+            RegionRole::Leader,
+            Instant::now(),
+            deadline,
+            None,
+        )
+        .unwrap();
+    assert!(!promoted);
+    assert!(registered.is_follower());
+    hook.release.notify_one();
+    catchup.await.unwrap().unwrap();
+    assert!(!Arc::ptr_eq(&old, &registered));
+    assert!(registered.is_writable());
 }
 
 fn edit_files(files_to_add: Vec<FileMeta>, files_to_remove: Vec<FileMeta>) -> RegionEdit {

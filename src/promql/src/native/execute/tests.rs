@@ -750,6 +750,7 @@ fn source_runtime(pool: &Arc<dyn MemoryPool>) -> InputSlot {
         source_index: 0,
         kind: super::LeafKind::Raw,
         open_source_series: false,
+        open_queued_series: false,
         state: NodeState::new(
             "native.input at root (source_index=0)",
             Arc::new(NodeMetrics::default()),
@@ -1684,6 +1685,9 @@ fn node_metrics(execution: &NativeExecutor) -> Vec<Weak<NodeMetrics>> {
             }
             RuntimeOp::ParameterizedTopK {
                 input, parameter, ..
+            }
+            | RuntimeOp::ParameterizedAggregate {
+                input, parameter, ..
             } => {
                 walk(input, out);
                 if let Some(parameter) = parameter {
@@ -1860,8 +1864,12 @@ fn finishing_a_window_propagates_its_error_and_drops_the_live_tree() {
     drop(execution.next_chunk().unwrap());
     assert!(pool.reserved() > 0);
     // The source-level check normally catches truncation first; leave the evaluator open so the
-    // actual terminal finish pass exercises its own error and context propagation.
-    execution.state.live.as_mut().unwrap().inputs[0].open_source_series = false;
+    // actual terminal finish pass exercises its own error and context propagation. Both halves of
+    // that check are cleared: the chunk was handed over and it was also the last one received, so
+    // the leaf reports `is_last` was sent only to the evaluator that never saw it.
+    let slot = &mut execution.state.live.as_mut().unwrap().inputs[0];
+    slot.open_source_series = false;
+    slot.open_queued_series = false;
     execution.end_of_input().unwrap();
     let error = execution.next_chunk().unwrap_err();
     assert!(
@@ -12464,6 +12472,324 @@ fn a_quantile_over_no_input_answers_nothing() {
     assert_eq!(pool.reserved(), 0);
 }
 
+/// A `Complete` aggregate whose one argument is read per point, over `inner` and `parameter`.
+///
+/// The fold answers one value per field on its input's grid, exactly as its bound counterpart does:
+/// only where its `φ` comes from differs.
+fn parameterized_aggregate(
+    inner: NativeNode,
+    op: BoundAggregate,
+    parameter: NativeNode,
+) -> NativeNode {
+    let fields = inner
+        .output
+        .samples()
+        .expect("a parameterized aggregate reads samples")
+        .fields
+        .clone();
+    let grid = inner
+        .output
+        .grid()
+        .expect("a parameterized aggregate reads an evaluated vector")
+        .clone();
+    let output = NativeType::Samples(Arc::new(SeriesSchema {
+        fields,
+        eval_grid: Some(grid),
+    }));
+    NativeNode {
+        expr: NativeExpr::ParameterizedAggregate {
+            input: Box::new(inner),
+            op,
+            parameter: Box::new(parameter),
+        },
+        output,
+    }
+}
+
+/// A `Complete` `quantile` grouped as `group` whose `φ` is read at every grid point.
+fn per_point_quantile(group: Grouping) -> BoundAggregate {
+    BoundAggregate {
+        // Unused by this fold: the `φ` it reads is its parameter's, one value per point. The
+        // constant is here because it is what a `Quantile` carries, as a parameterized `topk`
+        // carries an unused `k`.
+        kind: AggregateKind::Quantile { quantile: 0.0 },
+        group,
+        stage: AggregateStage::Complete,
+        field_kind: FieldKind::Float,
+    }
+}
+
+/// The value `answer` decided at `point`, from the one group at `index`.
+fn value_at(answer: &[GroupResult], index: usize, point: usize) -> Option<f64> {
+    answer[index]
+        .2
+        .iter()
+        .find(|(at, _)| *at == point)
+        .map(|(_, value)| *value)
+        .unwrap_or_else(|| panic!("group {index} answered no value at point {point}"))
+}
+
+/// A `quantile` reads its argument at every step, and answers there what the same fold bound to
+/// that step's `φ` answers.
+///
+/// The argument is `time() / 120`, which is `0`, `0.5` and `1` on this grid, so each of the three steps
+/// is compared against `quantile(<that step's φ>, m)` computed on its own: the bound fold is the
+/// constant path, and comparing against it is comparing against the value the query means. The
+/// grouping is checked in both shapes, because a fold that reads its `φ` per point groups exactly as
+/// the one that binds it: `by (job)` folds one group per job, and the `φ` is read beside the fold
+/// rather than once per group.
+#[test]
+fn a_quantile_reads_its_parameter_at_every_grid_point() {
+    let grid = grid(0, 60_000, 3);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let members = [
+        (
+            job_instance_metric("requests", "api", "a"),
+            vec![Some(1.0); 3],
+        ),
+        (
+            job_instance_metric("requests", "db", "b"),
+            vec![Some(10.0); 3],
+        ),
+    ];
+    let chunks: Vec<EvaluatedChunk> = members
+        .iter()
+        .map(|(metric, values)| {
+            evaluated_chunk_of(&schema, metric.clone(), 0, values.clone(), true)
+        })
+        .collect();
+    // `time() / 120` over this grid is `0`, `0.5`, `1`: `time()` reports seconds since the epoch and
+    // the grid steps a minute.
+    let per_point = scalar_binary(
+        eval_time(None, Arc::clone(&grid)),
+        scalar(120.0, Arc::clone(&grid)),
+        binary_matching(BinaryOp::Div),
+    );
+    let quantiles = [0.0, 0.5, 1.0];
+    let run = |root: NativeNode| {
+        let tree = NativeTree::try_new(root).expect("the fixture is a legal tree");
+        let pool = bounded_pool(1 << 20);
+        let mut execution = executor(&tree, Arc::clone(&pool));
+        for chunk in &chunks {
+            execution
+                .push_evaluated(InputId::new(0), chunk.clone())
+                .unwrap();
+        }
+        let output = execution.finish().unwrap();
+        assert_eq!(pool.reserved(), 0, "the fold left the pool holding input");
+        groups_of(&output)
+    };
+    for grouping in [
+        Grouping::By(Arc::new([])),
+        Grouping::By(Arc::new(["job".into()])),
+    ] {
+        let answer = run(parameterized_aggregate(
+            evaluated_input(Arc::clone(&grid)),
+            per_point_quantile(grouping.clone()),
+            per_point.clone(),
+        ));
+        let bound = quantiles.map(|quantile| {
+            run(aggregate(
+                evaluated_input(Arc::clone(&grid)),
+                BoundAggregate {
+                    kind: AggregateKind::Quantile { quantile },
+                    group: grouping.clone(),
+                    stage: AggregateStage::Complete,
+                    field_kind: FieldKind::Float,
+                },
+            ))
+        });
+        assert_eq!(answer.len(), bound[0].len(), "{grouping:?}");
+        for (index, group) in answer.iter().enumerate() {
+            // The same group in each separately computed answer, by its tags.
+            assert_eq!(group.0, bound[0][index].0, "{grouping:?}");
+            assert_eq!(group.1, bound[0][index].1, "{grouping:?}");
+            let answered: Vec<Option<f64>> = (0..quantiles.len())
+                .map(|point| value_at(&answer, index, point))
+                .collect();
+            let separately: Vec<Option<f64>> = (0..quantiles.len())
+                .map(|point| value_at(&bound[point], index, point))
+                .collect();
+            assert_eq!(answered, separately, "{grouping:?} at {index}");
+        }
+    }
+    // The one group over both members: half of `{1, 10}` is `5.5`, and the ends are the ends.
+    let ungrouped = run(parameterized_aggregate(
+        evaluated_input(Arc::clone(&grid)),
+        per_point_quantile(Grouping::By(Arc::new([]))),
+        per_point,
+    ));
+    assert_eq!(
+        ungrouped,
+        vec![unlabelled(vec![
+            (0, Some(1.0)),
+            (1, Some(5.5)),
+            (2, Some(10.0)),
+        ])]
+    );
+}
+
+/// A step whose `φ` the statement has no sample for answers NaN there, not no point.
+///
+/// `scalar(foo)` answers one value per grid point -- NaN where `foo` holds no float sample -- so the
+/// series this fold holds covers every step, and a step it covers with NaN is a step with a
+/// `quantile` answer: Prometheus' `quantile` of a NaN `φ` is NaN. A step the parameter had no sample
+/// at at all would be unanswered instead, which is the rule the kernel applies to a parameter series
+/// with a gap; this node is handed one that never has one.
+#[test]
+fn a_quantile_answers_nan_where_its_parameter_is_nan() {
+    let grid = grid(0, 60_000, 3);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    // `foo` holds a sample at the first and last step and none in between, so `scalar(foo)` is the
+    // value it holds there and NaN at the step it holds none.
+    let foo = scalar_of(evaluated_input_with_source_index(Arc::clone(&grid), 1));
+    let tree = NativeTree::try_new(parameterized_aggregate(
+        evaluated_input(Arc::clone(&grid)),
+        per_point_quantile(Grouping::By(Arc::new([]))),
+        foo,
+    ))
+    .unwrap();
+    let pool = bounded_pool(1 << 20);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    let parameter = execution.state().input_ids(1).next().unwrap();
+    execution
+        .push_evaluated(
+            parameter,
+            evaluated_chunk_of(&schema, metric(), 0, vec![Some(0.5), None, Some(1.0)], true),
+        )
+        .unwrap();
+    for (metric, value) in [
+        (job_instance_metric("requests", "api", "a"), 1.0),
+        (job_instance_metric("requests", "db", "b"), 10.0),
+    ] {
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(&schema, metric, 0, vec![Some(value); 3], true),
+            )
+            .unwrap();
+    }
+    let output = execution.finish().unwrap();
+    let values = decided(&output);
+    assert_eq!(values.len(), 3, "every step holds a sample");
+    assert_eq!(values[0].1, Some(5.5));
+    assert!(
+        values[1].1.is_some_and(f64::is_nan),
+        "the NaN step answered {:?} rather than NaN",
+        values[1].1
+    );
+    assert_eq!(values[2].1, Some(10.0));
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// An input that ends with a chunk still queued is refused as truncated, not folded.
+///
+/// The fold reads its parameter before it reads any input, and a parameter that answers only once
+/// its own input ended leaves the fold with nothing to do but wait. A caller that ends the input
+/// while the vector's last chunk still waits in the leaf's queue therefore ends a run in which the
+/// fold has never looked at that chunk: it says `is_last` was not sent, and the fold would fold half
+/// a vector into a quantile if it were read as closed. Finality is what the caller sent, so the
+/// queued chunk is what reports the truncation.
+#[test]
+fn a_quantile_refuses_a_queued_chunk_that_never_closed() {
+    let grid = grid(0, 60_000, 3);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    // The parameter is `scalar(foo)` over a source of its own, which answers only once that source
+    // has ended: neither leaf has been drained when the caller ends the input.
+    let parameter_tree = scalar_of(evaluated_input_with_source_index(Arc::clone(&grid), 1));
+    let tree = NativeTree::try_new(parameterized_aggregate(
+        evaluated_input(Arc::clone(&grid)),
+        per_point_quantile(Grouping::By(Arc::new([]))),
+        parameter_tree,
+    ))
+    .unwrap();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    let parameter = execution.state().input_ids(1).next().unwrap();
+    // `foo` closes properly, so the only truncation is the fold's own input.
+    execution
+        .push_evaluated(
+            parameter,
+            evaluated_chunk_of(&schema, metric(), 0, vec![Some(0.5); 3], true),
+        )
+        .unwrap();
+    // The fold's input never sends the chunk that closes its series.
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                metric(),
+                0,
+                vec![Some(1.0), Some(2.0), Some(3.0)],
+                false,
+            ),
+        )
+        .unwrap();
+
+    let error = execution
+        .finish()
+        .expect_err("an input that ended mid-series was folded");
+    assert!(
+        error
+            .to_string()
+            .contains("ended before the last chunk of a series"),
+        "the fold reported {error} instead of a truncated input"
+    );
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// A `quantile` bills the parameter it holds across the handoff and while it computes.
+///
+/// The parameter here is `time()` over a grid far wider than the fold's input: one row of `m`, so
+/// the input says nothing about the parameter's width at all. Its own series costs eight bytes a
+/// point, and the kernel reads the whole of it into one `(position, φ)` pair per point before it
+/// folds anything, so the fold answers only over a pool that holds the series and that copy.
+///
+/// A pool of the values alone is refused by the source that produces the parameter (`POINTS`), one
+/// that holds the parameter but not the copy the kernel reads is refused after the handoff
+/// (`24 * POINTS`: over the series and under the copy), and one that holds both answers the query
+/// and is left empty (`64 * POINTS`).
+#[test]
+fn a_parameterized_quantile_bills_the_parameter_it_holds() {
+    // Eight bytes a point for the values alone, and the axis, the validity slots and the descriptor
+    // on top of them; the kernel's copy is two pairs of eight bytes a point on top of that.
+    const POINTS: usize = 1 << 16;
+    let grid = grid(0, 1_000, POINTS as u64);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(parameterized_aggregate(
+        evaluated_input(Arc::clone(&grid)),
+        per_point_quantile(Grouping::By(Arc::new([]))),
+        eval_time(None, Arc::clone(&grid)),
+    ))
+    .unwrap();
+    for (budget, fits) in [(POINTS, false), (24 * POINTS, false), (64 * POINTS, true)] {
+        let pool = bounded_pool(budget);
+        let mut execution = executor(&tree, Arc::clone(&pool));
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(&schema, metric(), 0, vec![Some(1.0)], true),
+            )
+            .unwrap();
+        let result = execution.finish();
+        if fits {
+            assert!(
+                result.is_ok(),
+                "a pool that holds the parameter refused it: {:?}",
+                result.err()
+            );
+        } else {
+            let error = result.expect_err("a parameter that does not fit the pool was admitted");
+            assert!(
+                matches!(error.find_root(), DataFusionError::ResourcesExhausted(_)),
+                "the parameter was not reserved before it was held: {error}"
+            );
+        }
+        assert_eq!(pool.reserved(), 0, "the query left the pool holding memory");
+    }
+}
+
 /// A `quantile` bills the buffer its chunks are slices of once, not once per chunk.
 ///
 /// One 2000-sample Arrow allocation is handed over as 2000 one-row chunks, which is what a source
@@ -12477,6 +12803,13 @@ fn a_quantile_over_no_input_answers_nothing() {
 /// each billed once by the first chunk that references one (`unbilled_sample_buffers`) -- the input
 /// costs its rows, its descriptors and one charge for the buffer they slice: under a megabyte, so
 /// the fold answers and leaves the pool empty.
+///
+/// The φ is read at every grid point in the second fold below, as `scalar(<the one series of another
+/// source>)`, which has nothing to hand over until that source has ended. The chunks that arrive
+/// while it waits are retained as they come, so this fold pays the same figure: a fold that waited
+/// without reading its input would leave those chunks in the source queue, which bills every queued
+/// chunk for the whole buffer it points into -- 2000 x 16 392 bytes ≈ 32 MB, refused by this 4 MiB
+/// pool at the 255th slice -- and the pool would answer the queue's figure rather than the input's.
 #[test]
 fn a_quantile_bills_a_shared_buffer_once() {
     const ROWS: usize = 2_000;
@@ -12506,8 +12839,44 @@ fn a_quantile_bills_a_shared_buffer_once() {
          would admit, so this input does not reproduce the double billing"
     );
 
-    let run = |kind: AggregateKind, pool: Arc<dyn MemoryPool>| {
-        let tree = NativeTree::try_new(aggregate(
+    // The φ the statement evaluates: the one closed series of the second source, which `scalar()`
+    // answers with a value a point for once that source ended.
+    let parameter = || {
+        (
+            InputId::new(1),
+            evaluated_chunk_of(&schema, metric(), 0, vec![Some(0.5); ROWS], true),
+        )
+    };
+    // One source hands the chunks over and one pulls after each: a source queue holds the chunk the
+    // caller just pushed, so a pull per push keeps what the pool holds to what the nodes retain
+    // rather than to the whole input stream. An aggregate answers once its input ended, so nothing
+    // has settled here yet.
+    let run = |tree: &NativeTree,
+               parameter: Option<(InputId, EvaluatedChunk)>,
+               pool: Arc<dyn MemoryPool>| {
+        let mut execution = executor(tree, Arc::clone(&pool));
+        if let Some((input, parameter)) = parameter {
+            execution.push_evaluated(input, parameter).unwrap();
+        }
+        for chunk in &chunks {
+            execution
+                .push_evaluated(InputId::new(0), chunk.clone())
+                .unwrap();
+            assert!(
+                execution.next_chunk().unwrap().is_none(),
+                "the fold answered early"
+            );
+        }
+        let output = execution.finish().unwrap();
+        assert_eq!(
+            pool.reserved(),
+            0,
+            "the fold left the pool holding input it was finished with"
+        );
+        output
+    };
+    let bound = |kind: AggregateKind| {
+        NativeTree::try_new(aggregate(
             evaluated_input(Arc::clone(&grid)),
             BoundAggregate {
                 kind,
@@ -12516,36 +12885,28 @@ fn a_quantile_bills_a_shared_buffer_once() {
                 field_kind: FieldKind::Float,
             },
         ))
-        .unwrap();
-        let mut execution = executor(&tree, Arc::clone(&pool));
-        for chunk in &chunks {
-            execution
-                .push_evaluated(InputId::new(0), chunk.clone())
-                .unwrap();
-            // A source queue holds the chunk the caller just pushed, so a pull per push keeps what
-            // the pool holds to what the nodes retain rather than to the whole input stream. An
-            // aggregate answers once, when its input ends, so nothing has settled here yet.
-            assert!(
-                execution.next_chunk().unwrap().is_none(),
-                "{kind:?} answered early"
-            );
-        }
-        let output = execution.finish().unwrap();
-        assert_eq!(
-            pool.reserved(),
-            0,
-            "{kind:?} left the pool holding input it was finished with"
-        );
-        output
+        .unwrap()
     };
-    let minimum = run(AggregateKind::Min, bounded_pool(POOL));
+    let minimum = run(&bound(AggregateKind::Min), None, bounded_pool(POOL));
     let quantile = run(
-        AggregateKind::Quantile { quantile: 0.5 },
+        &bound(AggregateKind::Quantile { quantile: 0.5 }),
+        None,
+        bounded_pool(POOL),
+    );
+    let per_point = run(
+        &NativeTree::try_new(parameterized_aggregate(
+            evaluated_input(Arc::clone(&grid)),
+            per_point_quantile(Grouping::By(Arc::new([]))),
+            scalar_of(evaluated_input_with_source_index(Arc::clone(&grid), 1)),
+        ))
+        .unwrap(),
+        Some(parameter()),
         bounded_pool(POOL),
     );
     // Every point of this input holds exactly one value, so the φ-quantile of a point is that value
-    // and the two aggregates answer the same series.
+    // and all three aggregates answer the same series.
     assert_eq!(groups_of(&quantile), groups_of(&minimum));
+    assert_eq!(groups_of(&per_point), groups_of(&minimum));
 }
 
 /// A `quantile` bills the allocation its chunks' slices point into, once, and not the rows it holds of

@@ -72,4 +72,9 @@ SELECT min(val) RANGE '5s' FROM host ALIGN (INTERVAL '0' day);
 
 SELECT min(val) RANGE (INTERVAL '0' day) FROM host ALIGN '5s';
 
+-- 2.8 derived input without time index
+
+WITH tmp AS (SELECT now() AS ts, 1 AS val)
+SELECT ts, min(val) RANGE '5s' FROM tmp ALIGN '5s' BY (1);
+
 DROP TABLE host;

@@ -89,7 +89,7 @@ impl CreateLogicalTablesProcedure {
             let chunk_size = self
                 .context
                 .table_metadata_manager
-                .create_logical_tables_metadata_chunk_size();
+                .create_logical_tables_metadata_chunk_size()?;
             if num_tables > chunk_size {
                 let chunks = remaining_tasks
                     .into_iter()

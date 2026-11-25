@@ -16,7 +16,9 @@ use std::any::Any;
 
 use crate::error::Error;
 use crate::kv_backend::txn::{Txn, TxnOp, TxnOpResponse, TxnResponse};
-use crate::kv_backend::{KvBackend, KvBackendRef, TxnService};
+use crate::kv_backend::{
+    KvBackend, KvBackendCapabilities, KvBackendRef, TxnCapability, TxnService,
+};
 use crate::rpc::KeyValue;
 use crate::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
@@ -46,13 +48,17 @@ impl TxnService for ChrootKvBackend {
         Ok(self.chroot_txn_response(txn_res))
     }
 
-    fn max_txn_ops(&self) -> usize {
-        self.inner.max_txn_ops()
+    fn txn_capability(&self) -> Option<TxnCapability> {
+        self.inner.txn_capability()
     }
 }
 
 #[async_trait::async_trait]
 impl KvBackend for ChrootKvBackend {
+    fn capabilities(&self) -> KvBackendCapabilities {
+        self.inner.capabilities()
+    }
+
     fn name(&self) -> &str {
         self.inner.name()
     }

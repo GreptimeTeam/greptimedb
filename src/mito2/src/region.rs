@@ -59,12 +59,12 @@ use crate::engine::region_hook::{PendingManifestHook, RegionHookRef};
 use crate::error::{
     EndStagingSnafu, Error, FlushableRegionStateSnafu, InvalidPartitionExprSnafu,
     InvalidRequestSnafu, RegionBusySnafu, RegionLeaseExpiredSnafu, RegionLeaseNotReceivedSnafu,
-    RegionNotFoundSnafu, RegionStateSnafu, RegionTruncatedSnafu, Result, UnexpectedSnafu,
-    UpdateManifestSnafu,
+    RegionNotFoundSnafu, RegionStateSnafu, RegionStoppedSnafu, RegionTruncatedSnafu, Result,
+    UnexpectedSnafu, UpdateManifestSnafu,
 };
 use crate::lease::{Deadline, NodeLease, lease_nanos};
 use crate::manifest::action::{
-    PendingTail, RegionChange, RegionManifest, RegionMetaAction, RegionMetaActionList,
+    PendingTail, RegionChange, RegionEdit, RegionManifest, RegionMetaAction, RegionMetaActionList,
 };
 use crate::manifest::manager::RegionManifestManager;
 use crate::metrics::manifest_size::RegionManifestSizeMetric;
@@ -73,7 +73,7 @@ use crate::request::{OnFailure, OptionOutputTx};
 use crate::series_index::{SeriesIndexVersion, SeriesIndexVersionControl};
 use crate::sst::file::{self, FileMeta};
 use crate::sst::file_purger::FilePurgerRef;
-use crate::sst::location::{index_file_path, sst_file_path};
+use crate::sst::location::index_file_path;
 use crate::time_provider::TimeProviderRef;
 
 /// This is the approximate factor to estimate the size of wal.
@@ -768,7 +768,7 @@ impl MitoRegion {
         };
 
         // The checkpoint task is taken under the lock after the state change, so every commit
-        // that could start a checkpoint has registered it: a follower takes no commit, and a
+        // that could start a checkpoint has registered it: a follower's commit starts none, and a
         // commit of a downgrading leader starts no checkpoint. The wait holds no lock, so the
         // worker and other users of the manifest are not blocked while the checkpoint finishes.
         if wait_for_checkpoint {
@@ -989,6 +989,7 @@ impl MitoRegion {
         let region_options = serde_json::to_string(&version.options)
             .unwrap_or_else(|err| serde_json::json!({ "error": err.to_string() }).to_string());
         let sst_format = match version.options.sst_format.unwrap_or_default() {
+            crate::sst::FormatType::Narthex => "narthex",
             crate::sst::FormatType::PrimaryKey => "primary_key",
             crate::sst::FormatType::Flat => "flat",
         }
@@ -1058,7 +1059,7 @@ impl MitoRegion {
                 let file_path = OnceCell::new();
                 if !filters.matches(|column| match column {
                     sst_entry::FILE_PATH => Some(file_path.get_or_init(|| {
-                        ScalarValue::Utf8(Some(sst_file_path(table_dir, meta.file_id(), path_type)))
+                        ScalarValue::Utf8(Some(meta.file_path(table_dir, path_type)))
                     })),
                     _ => None,
                 }) {
@@ -1081,7 +1082,7 @@ impl MitoRegion {
                 let file_path = if projection.file_path {
                     match file_path.into_inner() {
                         Some(ScalarValue::Utf8(Some(path))) => path,
-                        _ => sst_file_path(table_dir, meta.file_id(), path_type),
+                        _ => meta.file_path(table_dir, path_type),
                     }
                 } else {
                     String::new()
@@ -1927,6 +1928,54 @@ impl ManifestContext {
         Ok(TailPublication::Committed(result?))
     }
 
+    /// Commits the empty edit a catchup makes before the region becomes writable, as the version
+    /// after the manifest the region holds when it commits. A writer that committed other content
+    /// at that version conflicts with it. Two catchups that start from the same manifest version
+    /// commit the same content, so they are not told apart. Only a manifest published
+    /// conditionally detects a conflict, so without conditional publication it commits nothing.
+    ///
+    /// The region commits as a Follower, which needs no valid Leader deadline, so the commit
+    /// skips the deadline check. Like a commit of a region that awaits its Leader lease, it
+    /// starts no checkpoint and applies only if no checkpoint covers its version. A conflict
+    /// leaves the region and its manifest manager as they are: the next catchup reopens the
+    /// region from the newer manifest. A stopped region commits nothing.
+    ///
+    /// Returns the receipt of the manifest hook, which the caller fires once it holds no manifest
+    /// lock, or None if it committed nothing.
+    pub(crate) async fn commit_catchup(&self) -> Result<Option<PendingManifestHook>> {
+        let mut manager = self.manifest_manager.write().await;
+        if !manager.is_conditional_publication() {
+            return Ok(None);
+        }
+        let region_id = manager.manifest().metadata.region_id;
+        let state = self.state.load();
+        ensure!(
+            state == RegionRoleState::Follower,
+            RegionStateSnafu {
+                region_id,
+                state,
+                expect: RegionRoleState::Follower,
+            }
+        );
+        ensure!(!self.is_reload_pending(), RegionBusySnafu { region_id });
+        // A stop marks the region before it waits for this lock to stop the manager.
+        ensure!(!self.is_stopped(), RegionStoppedSnafu { region_id });
+        let action_list =
+            RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit::default()));
+        let action_list_for_hook = self.hook.as_ref().map(|_| action_list.clone());
+        let version = manager
+            .update_with_verification(action_list, false, false, || true)
+            .await?;
+        let pending = PendingManifestHook::new(
+            region_id,
+            action_list_for_hook,
+            version,
+            self.hook.clone(),
+            false,
+        );
+        Ok(Some(pending))
+    }
+
     /// Performs a manifest write under a caller-held write lock and returns a
     /// [`PendingManifestHook`] to [`fire`](PendingManifestHook::fire) after
     /// dropping the lock. It is the checked entry of the shared write
@@ -2298,6 +2347,21 @@ impl ManifestContext {
         self.record_leader_lease(issued_at)
     }
 
+    /// Demotes the region to a follower for a lease the metasrv granted to it as the candidate of
+    /// a migration, unless the region [awaits its Leader lease](Self::awaits_leader_lease) (a
+    /// catchup of the migration promoted it, and the route switch that follows grants that lease).
+    /// Returns the state this call replaced, None if it left the state unchanged.
+    ///
+    /// It holds the lock of [Self::promote_after_catchup], so a promotion is either seen or
+    /// happens after the demotion.
+    pub(crate) fn demote_candidate(&self, region_id: RegionId) -> Option<RegionRoleState> {
+        let _fence = self.promotion_fence.lock().unwrap();
+        if self.awaits_leader_lease() {
+            return None;
+        }
+        self.set_role(RegionRole::Follower, region_id)
+    }
+
     /// Ends a catchup that does not promote the region, so the next Leader lease promotes it.
     pub(crate) fn end_catchup(&self) {
         self.promotion_fence.lock().unwrap().catching_up = false;
@@ -2313,6 +2377,12 @@ impl ManifestContext {
             .extend(Instant::now() + Duration::from_secs(60));
         assert!(self.promote_after_catchup(region_id));
         assert!(self.awaits_leader_lease());
+    }
+
+    /// Marks the region stopped as [MitoRegion::stop] does before it stops the manifest manager.
+    #[cfg(test)]
+    pub(crate) fn mark_stopped_for_test(&self) {
+        self.promotion_fence.lock().unwrap().stopped = true;
     }
 
     /// Promotes the region unless it waits for a reload or was stopped. The caller holds the fence
@@ -3274,8 +3344,62 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_manifest_narthex_file_path_filter() {
+        use common_recordbatch::filter::MetadataFilter;
+        use datafusion_expr::{col, lit};
+        use futures::StreamExt;
+
+        use super::ManifestSstProjection;
+        use crate::sst::file::{FileFormat, FileMeta, NarthexPartMeta, NarthexSamplesMeta};
+
+        let env = SchedulerEnv::new().await;
+        let region = build_test_region(&env).await;
+        let id = FileId::random();
+        let path = format!(
+            "{}manifest.json",
+            crate::sst::location::narthex_file_dir(
+                &region.access_layer.build_region_dir(region.region_id),
+                id
+            )
+        );
+        let mut edit = empty_edit();
+        edit.files_to_add.push(FileMeta {
+            file_id: id,
+            region_id: region.region_id,
+            file_size: 2,
+            format: FileFormat::NarthexSamples(Box::new(NarthexSamplesMeta {
+                manifest_size: 1,
+                parts: smallvec::smallvec![NarthexPartMeta { file_size: 1 }],
+            })),
+            ..Default::default()
+        });
+        region
+            .manifest_ctx
+            .manifest_manager
+            .write()
+            .await
+            .update(
+                RegionMetaActionList::with_action(RegionMetaAction::Edit(edit)),
+                false,
+            )
+            .await
+            .unwrap();
+
+        for filters in [
+            MetadataFilter::new(&[]),
+            MetadataFilter::new(&[col("file_path").eq(lit(path.as_str()))]),
+        ] {
+            let mut stream = region.manifest_sst_stream(filters, ManifestSstProjection::new(None));
+            assert_eq!(stream.next().await.unwrap().file_path, path);
+            assert!(stream.next().await.is_none());
+        }
+    }
+
     fn empty_edit() -> RegionEdit {
         RegionEdit {
+            series_indexes_to_add: Vec::new(),
+            series_indexes_to_remove: Vec::new(),
             files_to_add: Vec::new(),
             files_to_remove: Vec::new(),
             timestamp_ms: None,
@@ -3372,6 +3496,36 @@ mod tests {
         assert!(!promotion.promoted);
         assert!(promotion.ended_wait.is_none());
         assert!(region.manifest_ctx.awaits_leader_lease());
+    }
+
+    /// A candidate lease reads the wait for a Leader lease under the fence lock, so it does not
+    /// demote a region that a catchup promotes meanwhile.
+    #[tokio::test]
+    async fn test_candidate_demotion_sees_catchup_promotion_under_fence() {
+        let env = SchedulerEnv::new().await;
+        let region = Arc::new(build_test_region(&env).await);
+        region.manifest_ctx.node_lease.enable();
+        // A writable leader, so a demotion that misses the fence returns Some and fails below.
+        assert!(region.is_writable());
+        assert!(!region.manifest_ctx.awaits_leader_lease());
+        let demoted = run_blocked_on_fence(
+            &region,
+            |r| r.manifest_ctx.demote_candidate(r.region_id),
+            // What a catchup's promotion does under the lock.
+            |fence| {
+                assert!(region.manifest_ctx.promote_unless_reload_pending(
+                    fence,
+                    region.region_id,
+                    true
+                ))
+            },
+        );
+        assert_eq!(demoted, None);
+        assert!(region.manifest_ctx.awaits_leader_lease());
+        assert_eq!(
+            region.state(),
+            RegionRoleState::Leader(RegionLeaderState::Writable)
+        );
     }
 
     /// The readiness of an upgrade reads the role and the wait for a Leader lease under the fence

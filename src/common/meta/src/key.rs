@@ -907,10 +907,10 @@ impl TableMetadataManager {
         Ok(())
     }
 
-    pub fn create_logical_tables_metadata_chunk_size(&self) -> usize {
+    pub fn create_logical_tables_metadata_chunk_size(&self) -> Result<usize> {
         // The batch size is max_txn_size / 3 because the size of the `tables_data`
         // is 3 times the size of the `tables_data`.
-        self.kv_backend.max_txn_ops() / 3
+        Ok(self.max_txn_ops()? / 3)
     }
 
     /// Creates metadata for multiple logical tables and return an error if different metadata exists.
@@ -1338,7 +1338,11 @@ impl TableMetadataManager {
         &self,
         tables: &[(TableId, TableName)],
     ) -> Result<()> {
-        let max_ops = self.kv_backend.max_txn_ops().max(1);
+        // Without a transaction limit, delete one table's identity keys per request.
+        let max_ops = self
+            .kv_backend
+            .txn_capability()
+            .map_or(Self::TABLE_IDENTITY_KEYS, |txn| txn.max_ops.max(1));
         let tables_per_request = (max_ops / Self::TABLE_IDENTITY_KEYS).max(1);
         // Keep a table's keys together whenever they fit in one backend request. A backend
         // limit smaller than a single table still requires splitting, as with single-table drop.
@@ -1677,8 +1681,12 @@ impl TableMetadataManager {
         Ok(())
     }
 
-    pub fn batch_update_table_info_value_chunk_size(&self) -> usize {
-        self.kv_backend.max_txn_ops()
+    pub fn max_txn_ops(&self) -> Result<usize> {
+        Ok(self
+            .kv_backend
+            .txn_capability()
+            .context(error::UnsupportedSnafu { operation: "txn" })?
+            .max_ops)
     }
 
     pub async fn batch_update_table_info_values(
@@ -3136,7 +3144,8 @@ mod tests {
         use std::sync::Mutex;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        for limit in [1, 3, 127, 128, 129] {
+        for txn_limit in [None, Some(1), Some(3), Some(127), Some(128), Some(129)] {
+            let limit = txn_limit.unwrap_or(TableMetadataManager::TABLE_IDENTITY_KEYS);
             let tables = (0..65)
                 .map(|id| {
                     (
@@ -3152,8 +3161,11 @@ mod tests {
                     .collect::<HashSet<_>>(),
             ));
             let requests = Arc::new(AtomicUsize::new(0));
-            let backend = MockKvBackendBuilder::default()
-                .max_txn_ops(limit)
+            let mut builder = MockKvBackendBuilder::default();
+            if let Some(limit) = txn_limit {
+                builder.max_txn_ops(limit);
+            }
+            let backend = builder
                 .batch_delete_fn({
                     let remaining = remaining.clone();
                     let requests = requests.clone();
@@ -3415,6 +3427,7 @@ mod tests {
         let range_calls = Arc::new(AtomicUsize::new(0));
         let batch_get_calls = Arc::new(AtomicUsize::new(0));
         let mock = MockKvBackend {
+            capabilities: Default::default(),
             range_fn: Some({
                 let all_tombstones = all_tombstones.clone();
                 let range_calls = range_calls.clone();

@@ -475,6 +475,9 @@ pub(super) async fn run_direct_sst(args: DirectArgs) {
             ..Default::default()
         };
         let infos = match format {
+            FormatType::Narthex => {
+                unimplemented!("direct SST fixtures only support Parquet formats")
+            }
             FormatType::Flat => writer.write_all_flat(source, Some(sequence), &opts).await,
             FormatType::PrimaryKey => {
                 writer
