@@ -817,11 +817,11 @@ fn build_evaluated_segment(
             .output
             .samples()
             .is_some_and(|schema| schema.eval_grid.is_some())
-            || is_raw_series_source(&child)
-            // A selector that discovered several metrics is prepared as the union of one source per
-            // metric, which already declares the frames this segment reads: it names each metric's
-            // source, so there is no single metric to bind it to and nothing to wrap it in. See
-            // [`is_sourced_plan`].
+            // A selector that discovered one metric is prepared as that metric's source, and one that
+            // discovered several as the union of one source per metric; either way it already
+            // declares the frames this segment reads, since it names each metric's source. So there
+            // is nothing to bind it to and nothing to wrap it in, and binding a source in a source
+            // is what the physical planner refuses. See [`is_sourced_plan`].
             || is_sourced_plan(&child)
             // The typed empty frame of a selector that matched no table is an input in its own
             // right: it reads no region and carries no metric, so there is nothing to wrap it in.
