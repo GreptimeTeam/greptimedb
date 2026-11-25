@@ -18,9 +18,11 @@ use arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray};
 use arrow::record_batch::RecordBatch as ArrowRecordBatch;
 use catalog::RegisterTableRequest;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_recordbatch::RecordBatch;
+use common_error::ext::BoxedError;
+use common_recordbatch::{RecordBatch, RecordBatches, SendableRecordBatchStream};
 use datafusion::datasource::DefaultTableSource;
 use datafusion::logical_expr::TableSource;
+use datafusion::physical_planner::{DefaultPhysicalPlanner, PhysicalPlanner};
 use datafusion_common::tree_node::TreeNode;
 use datafusion_common::{DFSchema, ScalarValue};
 use datafusion_expr::Expr;
@@ -30,9 +32,11 @@ use datafusion_expr::logical_plan::Aggregate;
 use datafusion_expr::physical_planning_context::PhysicalPlanningContext;
 use datafusion_physical_expr::create_physical_expr;
 use datatypes::prelude::*;
-use datatypes::schema::{ColumnSchema, Schema};
+use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::{Float64Vector, StringVector, TimestampMillisecondVector};
 use session::context::QueryContext;
+use store_api::data_source::DataSource;
+use store_api::storage::ScanRequest;
 use table::TableRef;
 use table::metadata::{FilterPushDownType, TableInfoBuilder, TableMetaBuilder, TableType};
 use table::table::adapter::DfTableProviderAdapter;
@@ -599,15 +603,32 @@ fn engine_over_impl(
     enabled: bool,
     with_dist_planner: bool,
 ) -> crate::query_engine::QueryEngineRef {
+    let metrics = MemTable::new_with_catalog(
+        "metrics",
+        metrics,
+        201,
+        DEFAULT_CATALOG_NAME.to_string(),
+        DEFAULT_SCHEMA_NAME.to_string(),
+    );
+    let nodes = MemTable::new_with_catalog(
+        "nodes",
+        nodes,
+        202,
+        DEFAULT_CATALOG_NAME.to_string(),
+        DEFAULT_SCHEMA_NAME.to_string(),
+    );
+    engine_over_tables(metrics, nodes, enabled, with_dist_planner)
+}
+
+/// Builds an engine over the `metrics`/`nodes` tables given as refs.
+fn engine_over_tables(
+    metrics: TableRef,
+    nodes: TableRef,
+    enabled: bool,
+    with_dist_planner: bool,
+) -> crate::query_engine::QueryEngineRef {
     let catalog = catalog::memory::new_memory_catalog_manager().unwrap();
-    for (name, table_id, batch) in [("metrics", 201, metrics), ("nodes", 202, nodes)] {
-        let table = MemTable::new_with_catalog(
-            name,
-            batch,
-            table_id,
-            DEFAULT_CATALOG_NAME.to_string(),
-            DEFAULT_SCHEMA_NAME.to_string(),
-        );
+    for (name, table_id, table) in [("metrics", 201, metrics), ("nodes", 202, nodes)] {
         catalog
             .register_table_sync(RegisterTableRequest {
                 catalog: DEFAULT_CATALOG_NAME.to_string(),
@@ -2149,4 +2170,288 @@ fn arrow_rows(batches: &[arrow::record_batch::RecordBatch]) -> Vec<Vec<String>> 
     }
     rows.sort();
     rows
+}
+
+// ---------- Region traffic: rows and bytes shipped out of a region ----------
+
+/// Fact keys, each holding one fact group and one dim group per area.
+const REGION_KEYS: usize = 2_000;
+/// Fact rows per key: a group the pushdown can collapse 100:1.
+const REGION_FACT_ROWS_PER_KEY: usize = 100;
+/// Dim areas per key, so the dim side has `REGION_KEYS * REGION_AREAS.len()`
+/// groups.
+const REGION_AREAS: [&str; 4] = ["east", "west", "north", "south"];
+/// Dim rows per (key, area) group.
+const REGION_DIM_ROWS_PER_AREA: usize = 20;
+/// Batches each fixture table serves its rows in.
+const REGION_BATCHES: usize = 8;
+
+/// `REGION_KEYS` keys x `REGION_FACT_ROWS_PER_KEY` rows of Float64 payload, in
+/// `REGION_BATCHES` batches.
+fn pushdown_fact_batches() -> Vec<RecordBatch> {
+    let schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+        ColumnSchema::new("mhost", ConcreteDataType::string_datatype(), true),
+        ColumnSchema::new("mval", ConcreteDataType::float64_datatype(), true),
+    ]));
+    let rows = REGION_KEYS * REGION_FACT_ROWS_PER_KEY;
+    let batch_rows = rows / REGION_BATCHES;
+    (0..REGION_BATCHES)
+        .map(|batch| {
+            let range = batch * batch_rows..(batch + 1) * batch_rows;
+            let timestamps: Vec<i64> = range.clone().map(|row| row as i64).collect();
+            let hosts: Vec<Option<String>> = range
+                .clone()
+                .map(|row| Some(format!("k{:04}", row % REGION_KEYS)))
+                .collect();
+            let values: Vec<Option<f64>> = range
+                .map(|row| Some((row % 97) as f64 * 0.5 + 1.0))
+                .collect();
+            RecordBatch::new(
+                schema.clone(),
+                vec![
+                    Arc::new(TimestampMillisecondVector::from_slice(timestamps)) as _,
+                    Arc::new(StringVector::from(hosts)) as _,
+                    Arc::new(Float64Vector::from(values)) as _,
+                ],
+            )
+            .unwrap()
+        })
+        .collect()
+}
+
+/// The same keys x `REGION_AREAS.len()` areas x `REGION_DIM_ROWS_PER_AREA` rows
+/// of Float64 payload, in `REGION_BATCHES` batches.
+fn pushdown_dim_batches() -> Vec<RecordBatch> {
+    let schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+        ColumnSchema::new("nhost", ConcreteDataType::string_datatype(), true),
+        ColumnSchema::new("zone", ConcreteDataType::string_datatype(), true),
+        ColumnSchema::new("wgt", ConcreteDataType::float64_datatype(), true),
+    ]));
+    let rows = REGION_KEYS * REGION_AREAS.len() * REGION_DIM_ROWS_PER_AREA;
+    let batch_rows = rows / REGION_BATCHES;
+    (0..REGION_BATCHES)
+        .map(|batch| {
+            let range = batch * batch_rows..(batch + 1) * batch_rows;
+            let timestamps: Vec<i64> = range.clone().map(|row| row as i64).collect();
+            let hosts: Vec<Option<String>> = range
+                .clone()
+                .map(|row| {
+                    Some(format!(
+                        "k{:04}",
+                        (row / REGION_DIM_ROWS_PER_AREA) % REGION_KEYS
+                    ))
+                })
+                .collect();
+            let zones: Vec<Option<&str>> = range
+                .clone()
+                .map(|row| {
+                    Some(
+                        REGION_AREAS
+                            [(row / (REGION_KEYS * REGION_DIM_ROWS_PER_AREA)) % REGION_AREAS.len()],
+                    )
+                })
+                .collect();
+            let weights: Vec<Option<f64>> = range
+                .map(|row| Some((row % 41) as f64 * 0.25 + 0.5))
+                .collect();
+            RecordBatch::new(
+                schema.clone(),
+                vec![
+                    Arc::new(TimestampMillisecondVector::from_slice(timestamps)) as _,
+                    Arc::new(StringVector::from(hosts)) as _,
+                    Arc::new(StringVector::from(zones)) as _,
+                    Arc::new(Float64Vector::from(weights)) as _,
+                ],
+            )
+            .unwrap()
+        })
+        .collect()
+}
+
+/// A table that serves its rows in several batches and projects on request, the
+/// way a region read hands a plan the batches it scanned.
+struct BatchedSource {
+    schema: SchemaRef,
+    batches: Vec<RecordBatch>,
+}
+
+impl DataSource for BatchedSource {
+    fn get_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream, BoxedError> {
+        let batches = match request.projection.as_deref() {
+            Some(projection) => self
+                .batches
+                .iter()
+                .map(|batch| batch.try_project(projection))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(BoxedError::new)?,
+            None => self.batches.clone(),
+        };
+        let schema = batches
+            .first()
+            .map_or_else(|| self.schema.clone(), |batch| batch.schema.clone());
+        Ok(RecordBatches::try_new(schema, batches)
+            .expect("the fixture batches share one schema")
+            .as_stream())
+    }
+}
+
+/// A table over `batches`, registered under `name`.
+fn batched_table(name: &str, table_id: u32, batches: Vec<RecordBatch>) -> TableRef {
+    let first = batches.first().expect("the fixture has rows").clone();
+    // Only the metadata comes from the memtable; the rows come from `batches`.
+    let info = MemTable::new_with_catalog(
+        name,
+        first,
+        table_id,
+        DEFAULT_CATALOG_NAME.to_string(),
+        DEFAULT_SCHEMA_NAME.to_string(),
+    )
+    .table_info();
+    let schema = info.meta.schema.clone();
+    Arc::new(Table::new(
+        info,
+        FilterPushDownType::Unsupported,
+        Arc::new(BatchedSource { schema, batches }),
+    ))
+}
+
+/// The rows and arrow bytes one plan's batches carry when a region runs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Shipped {
+    rows: usize,
+    bytes: usize,
+}
+
+impl std::fmt::Display for Shipped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} rows / {} bytes", self.rows, self.bytes)
+    }
+}
+
+/// Runs the plan a region executes for one branch and measures what leaves it.
+async fn shipped_by(engine: &crate::query_engine::QueryEngineRef, plan: &LogicalPlan) -> Shipped {
+    let state = engine.engine_state().session_state();
+    // Planned directly, without the engine's analyzer: re-running it would wrap
+    // the scan in the merge scan it was just taken out of.
+    let physical = DefaultPhysicalPlanner::default()
+        .create_physical_plan(plan, &state)
+        .await
+        .expect("the region plan is physically plannable");
+    let batches = datafusion::physical_plan::collect(physical, state.task_ctx())
+        .await
+        .expect("the region plan runs");
+    Shipped {
+        rows: batches.iter().map(|batch| batch.num_rows()).sum(),
+        bytes: batches
+            .iter()
+            .map(|batch| batch.get_array_memory_size())
+            .sum(),
+    }
+}
+
+/// Every aggregate in `plan`, at any depth.
+fn aggregates_in(plan: &LogicalPlan) -> usize {
+    let mut aggregates = 0;
+    let _ = plan.apply(|node| {
+        if matches!(node, LogicalPlan::Aggregate(_)) {
+            aggregates += 1;
+        }
+        Ok(datafusion_common::tree_node::TreeNodeRecursion::Continue)
+    });
+    aggregates
+}
+
+/// The pushdown's win, pinned on what a region hands back rather than on the
+/// clock: with the switch on, each branch's region plan runs `__<f>_state` and
+/// ships exactly one row per group it holds rows for (2,000 fact groups, 8,000
+/// dim groups), instead of every raw row (200,000 and 160,000). The bytes those
+/// batches carry must drop by at least ten times with it.
+#[tokio::test]
+async fn pushdown_ships_one_state_row_per_group_out_of_each_region() {
+    let metrics = batched_table("metrics", 201, pushdown_fact_batches());
+    let nodes = batched_table("nodes", 202, pushdown_dim_batches());
+    let off = engine_over_tables(metrics.clone(), nodes.clone(), false, true);
+    let on = engine_over_tables(metrics, nodes, true, true);
+
+    let off_plan = optimized_logical_for(&off, METRIC_AVG_SQL).await;
+    let off_remotes = remote_inputs(&off_plan);
+    assert_eq!(off_remotes.len(), 2, "{}", off_plan.display_indent());
+    let on_plan = optimized_logical_for(&on, METRIC_AVG_SQL).await;
+    let on_remotes = remote_inputs(&on_plan);
+    assert_eq!(on_remotes.len(), 2, "{}", on_plan.display_indent());
+
+    // Switch off: the remote input is the table itself, so a region ships every
+    // raw row it scanned.
+    let mut off_shipped = Vec::new();
+    for remote in &off_remotes {
+        assert_eq!(
+            aggregates_in(remote),
+            0,
+            "the switch-off region plan must ship raw rows:\n{}",
+            remote.display_indent()
+        );
+        off_shipped.push(shipped_by(&off, remote).await);
+    }
+    assert_eq!(
+        off_shipped[0].rows,
+        REGION_KEYS * REGION_FACT_ROWS_PER_KEY,
+        "the switch-off fact region must ship its 200,000 raw rows: {}",
+        off_shipped[0]
+    );
+    assert_eq!(
+        off_shipped[1].rows,
+        REGION_KEYS * REGION_AREAS.len() * REGION_DIM_ROWS_PER_AREA,
+        "the switch-off dim region must ship its 160,000 raw rows: {}",
+        off_shipped[1]
+    );
+
+    // Switch on: the remote input computes the states, so a region ships one row
+    // per group it holds rows for.
+    let mut on_shipped = Vec::new();
+    for remote in &on_remotes {
+        let LogicalPlan::Aggregate(states) = remote else {
+            panic!(
+                "the switch-on region plan must aggregate:\n{}",
+                remote.display_indent()
+            );
+        };
+        assert_function_names(states, &["__count_state", "__sum_state"], METRIC_AVG_SQL);
+        on_shipped.push(shipped_by(&on, remote).await);
+    }
+    assert_eq!(
+        on_shipped[0].rows, REGION_KEYS,
+        "the switch-on fact region must ship one state row per group (2,000): {}",
+        on_shipped[0]
+    );
+    assert_eq!(
+        on_shipped[1].rows,
+        REGION_KEYS * REGION_AREAS.len(),
+        "the switch-on dim region must ship one state row per group (8,000): {}",
+        on_shipped[1]
+    );
+
+    // And the bytes that cross the region boundary drop by an order of magnitude.
+    let off_bytes: usize = off_shipped.iter().map(|shipped| shipped.bytes).sum();
+    let on_bytes: usize = on_shipped.iter().map(|shipped| shipped.bytes).sum();
+    assert!(
+        on_bytes * 10 <= off_bytes,
+        "the pushdown must ship at most a tenth of the raw bytes: switch off {off_bytes} bytes \
+         (fact {}, dim {}), switch on {on_bytes} bytes (fact {}, dim {})",
+        off_shipped[0],
+        off_shipped[1],
+        on_shipped[0],
+        on_shipped[1],
+    );
 }
