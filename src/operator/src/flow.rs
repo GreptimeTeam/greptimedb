@@ -61,41 +61,22 @@ impl FlowServiceHandler for FlowServiceOperator {
         self.flush_inner(catalog, flow, ctx).await
     }
 
-    async fn backfill(
+    async fn admin(
         &self,
         catalog: &str,
         flow: &str,
-        start_ms: i64,
-        end_ms: i64,
+        function: &str,
+        args: Vec<String>,
         ctx: QueryContextRef,
     ) -> Result<api::v1::flow::FlowResponse> {
-        use api::v1::flow::{BackfillFlow, TimeRange, flow_request};
+        use api::v1::flow::{AdminFlow, flow_request};
 
         let id = self.resolve_flow_id(catalog, flow).await?;
-        let body = flow_request::Body::Backfill(BackfillFlow {
+        let body = flow_request::Body::Admin(AdminFlow {
             catalog: catalog.to_string(),
             flow: flow.to_string(),
-            range: Some(TimeRange {
-                start_inclusive: start_ms,
-                end_exclusive: end_ms,
-            }),
-        });
-
-        self.handle_single_owner(id, ctx, body).await
-    }
-
-    async fn backfill_status(
-        &self,
-        catalog: &str,
-        flow: &str,
-        ctx: QueryContextRef,
-    ) -> Result<api::v1::flow::FlowResponse> {
-        use api::v1::flow::{BackfillStatus, flow_request};
-
-        let id = self.resolve_flow_id(catalog, flow).await?;
-        let body = flow_request::Body::BackfillStatus(BackfillStatus {
-            catalog: catalog.to_string(),
-            flow: flow.to_string(),
+            function: function.to_string(),
+            args,
         });
 
         self.handle_single_owner(id, ctx, body).await
@@ -142,9 +123,10 @@ impl FlowServiceOperator {
 
     /// Sends `body` to the one flownode that owns the flow `id`.
     ///
-    /// A backfill attempt and its status are process-local to the execution that
-    /// owns the flow. Broadcasting would create or read different attempts on
-    /// different nodes and then merge them under the same extension keys, so a
+    /// A flow-admin call answers from process-local state of the execution that
+    /// owns the flow (a backfill attempt and its status are the current
+    /// functions). Broadcasting would create or read different attempts on
+    /// different nodes and then merge them under the same extension key, so a
     /// multi-owner flow is refused before any RPC is sent.
     async fn handle_single_owner(
         &self,
@@ -158,7 +140,7 @@ impl FlowServiceOperator {
         if nodes.len() != 1 {
             return Err(BoxedError::new(PlainError::new(
                 format!(
-                    "flow {id} is owned by {} flownodes; backfill requires exactly one",
+                    "flow {id} is owned by {} flownodes; a flow admin call requires exactly one",
                     nodes.len()
                 ),
                 StatusCode::InvalidArguments,
@@ -230,7 +212,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
-    use api::v1::flow::{BackfillFlow, BackfillStatus, FlowRequest, FlowResponse, flow_request};
+    use api::v1::flow::{AdminFlow, FlowRequest, FlowResponse, flow_request};
     use async_trait::async_trait;
     use common_meta::key::flow::FlowMetadataManager;
     use common_meta::key::flow::flow_info::FlowInfoValue;
@@ -331,19 +313,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_backfill_routes_the_request_and_keeps_the_extensions() {
+    async fn test_admin_routes_the_request_and_keeps_the_extensions() {
         let handler = RecordingFlownode::default();
-        handler.answer_with("flow_backfill_attempt_id", "attempt-1");
+        handler.answer_with("flow_admin_result", "attempt-1");
         let operator = new_operator(handler.clone()).await;
 
         let response = operator
-            .backfill("greptime", "demo", -1000, 1000, QueryContext::arc())
+            .admin(
+                "greptime",
+                "demo",
+                "flow_backfill",
+                vec!["-1000".to_string(), "1000".to_string()],
+                QueryContext::arc(),
+            )
             .await
             .unwrap();
 
         assert_eq!(
             Some(&b"attempt-1".to_vec()),
-            response.extensions.get("flow_backfill_attempt_id")
+            response.extensions.get("flow_admin_result")
         );
 
         let requests = handler.take_requests();
@@ -357,23 +345,23 @@ mod tests {
             "the query context must be carried to the flownode"
         );
         match requests[0].body.as_ref().unwrap() {
-            flow_request::Body::Backfill(BackfillFlow {
+            flow_request::Body::Admin(AdminFlow {
                 catalog,
                 flow,
-                range,
+                function,
+                args,
             }) => {
                 assert_eq!("greptime", catalog);
                 assert_eq!("demo", flow);
-                let range = range.as_ref().unwrap();
-                assert_eq!(-1000, range.start_inclusive);
-                assert_eq!(1000, range.end_exclusive);
+                assert_eq!("flow_backfill", function);
+                assert_eq!(&vec!["-1000".to_string(), "1000".to_string()], args);
             }
             other => panic!("unexpected request body: {other:?}"),
         }
     }
 
     #[tokio::test]
-    async fn test_backfill_refuses_a_multi_owner_flow_before_sending() {
+    async fn test_admin_refuses_a_multi_owner_flow_before_sending() {
         let handler = RecordingFlownode::default();
         let operator = new_operator_with_routes(
             handler.clone(),
@@ -382,12 +370,18 @@ mod tests {
         .await;
 
         let err = operator
-            .backfill("greptime", "demo", 0, 1000, QueryContext::arc())
+            .admin(
+                "greptime",
+                "demo",
+                "flow_backfill",
+                vec!["0".to_string(), "1000".to_string()],
+                QueryContext::arc(),
+            )
             .await
             .unwrap_err();
         assert!(
             err.to_string().contains("requires exactly one"),
-            "multi-owner backfill must be refused: {err}"
+            "multi-owner admin call must be refused: {err}"
         );
         assert!(
             handler.take_requests().is_empty(),
@@ -396,44 +390,69 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_backfill_status_routes_the_request_and_keeps_the_extensions() {
+    async fn test_admin_status_carries_the_function_and_no_args() {
         let handler = RecordingFlownode::default();
-        handler.answer_with("flow_backfill_status", "null");
+        handler.answer_with("flow_admin_result", "null");
         let operator = new_operator(handler.clone()).await;
 
         let response = operator
-            .backfill_status("greptime", "demo", QueryContext::arc())
+            .admin(
+                "greptime",
+                "demo",
+                "flow_backfill_status",
+                vec![],
+                QueryContext::arc(),
+            )
             .await
             .unwrap();
 
         assert_eq!(
             Some(&b"null".to_vec()),
-            response.extensions.get("flow_backfill_status")
+            response.extensions.get("flow_admin_result")
         );
 
         let requests = handler.take_requests();
         assert_eq!(1, requests.len());
         match requests[0].body.as_ref().unwrap() {
-            flow_request::Body::BackfillStatus(BackfillStatus { catalog, flow }) => {
+            flow_request::Body::Admin(AdminFlow {
+                catalog,
+                flow,
+                function,
+                args,
+            }) => {
                 assert_eq!("greptime", catalog);
                 assert_eq!("demo", flow);
+                assert_eq!("flow_backfill_status", function);
+                assert!(args.is_empty(), "a status call carries no args: {args:?}");
             }
             other => panic!("unexpected request body: {other:?}"),
         }
     }
 
     #[tokio::test]
-    async fn test_backfill_unknown_flow_is_an_execute_error() {
+    async fn test_admin_unknown_flow_is_an_execute_error() {
         let handler = RecordingFlownode::default();
         let operator = new_operator(handler.clone()).await;
 
         for response in [
             operator
-                .backfill("greptime", "missing", 0, 1, QueryContext::arc())
+                .admin(
+                    "greptime",
+                    "missing",
+                    "flow_backfill",
+                    vec!["0".to_string(), "1".to_string()],
+                    QueryContext::arc(),
+                )
                 .await
                 .unwrap_err(),
             operator
-                .backfill_status("greptime", "missing", QueryContext::arc())
+                .admin(
+                    "greptime",
+                    "missing",
+                    "flow_backfill_status",
+                    vec![],
+                    QueryContext::arc(),
+                )
                 .await
                 .unwrap_err(),
         ] {

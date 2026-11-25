@@ -1017,40 +1017,27 @@ impl BatchingEngine {
         self.runtime.read().await.tasks.contains_key(&flow_id)
     }
 
-    /// Admits one backfill attempt of the flow `catalog.flow` over the half-open
-    /// range `[start_ms, end_ms)` on the execution factory, and returns its
-    /// attempt id.
-    pub async fn backfill(
+    /// Runs the flow-admin `function` of the flow `catalog.flow` on the execution
+    /// factory with the function's own `args`, and returns its result.
+    ///
+    /// This is the one entry point of every flow admin function: the factory
+    /// resolves `function` itself, so a new function needs no new delegate here.
+    pub async fn admin(
         &self,
         catalog: &str,
         flow: &str,
-        start_ms: i64,
-        end_ms: i64,
+        function: &str,
+        args: &[String],
     ) -> Result<String, Error> {
         let Some(execution_factory) = self.execution_factory.as_ref() else {
             return UnsupportedSnafu {
-                reason: "backfill is not supported: this flownode installs no batching execution \
-                         factory",
+                reason: "flow admin functions are not supported: this flownode installs no \
+                         batching execution factory",
             }
             .fail();
         };
 
-        execution_factory
-            .backfill(catalog, flow, start_ms, end_ms)
-            .await
-    }
-
-    /// Returns the JSON status of the flow's process-local backfill attempt.
-    pub async fn backfill_status(&self, catalog: &str, flow: &str) -> Result<String, Error> {
-        let Some(execution_factory) = self.execution_factory.as_ref() else {
-            return UnsupportedSnafu {
-                reason: "backfill status is not supported: this flownode installs no batching \
-                         execution factory",
-            }
-            .fail();
-        };
-
-        execution_factory.backfill_status(catalog, flow).await
+        execution_factory.admin(catalog, flow, function, args).await
     }
 
     async fn rollback_flow_runtime_if_current(&self, flow_id: FlowId, task: &BatchingTask) {
@@ -2111,16 +2098,16 @@ GROUP BY l.number, time_window
     }
 
     #[tokio::test]
-    async fn test_backfill_without_execution_factory_is_unsupported() {
+    async fn test_admin_without_execution_factory_is_unsupported() {
         let engine = new_test_engine().await;
 
         for err in [
             engine
-                .backfill("greptime", "demo", 0, 1000)
+                .admin("greptime", "demo", "flow_backfill", &[])
                 .await
                 .unwrap_err(),
             engine
-                .backfill_status("greptime", "demo")
+                .admin("greptime", "demo", "flow_backfill_status", &[])
                 .await
                 .unwrap_err(),
         ] {
@@ -2130,7 +2117,7 @@ GROUP BY l.number, time_window
     }
 
     #[tokio::test]
-    async fn test_backfill_delegates_to_the_execution_factory() {
+    async fn test_admin_delegates_to_the_execution_factory() {
         let factory = Arc::new(TestExecutionFactory {
             entered: None,
             release: None,
@@ -2138,15 +2125,15 @@ GROUP BY l.number, time_window
         });
         let engine = new_test_engine_with_execution(Some(factory)).await;
 
-        // The default trait methods refuse: a factory that does not serve
-        // backfill must not pretend to have recorded an attempt.
+        // The default trait method refuses: a factory that serves no flow admin
+        // function must not pretend to have an answer.
         for err in [
             engine
-                .backfill("greptime", "demo", 0, 1000)
+                .admin("greptime", "demo", "flow_backfill", &[])
                 .await
                 .unwrap_err(),
             engine
-                .backfill_status("greptime", "demo")
+                .admin("greptime", "demo", "flow_backfill_status", &[])
                 .await
                 .unwrap_err(),
         ] {

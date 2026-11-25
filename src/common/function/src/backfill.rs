@@ -13,8 +13,9 @@
 //!
 //! Both are routed operator tools shaped exactly like `ADMIN flush_flow`:
 //! they resolve `[<catalog>.]<flow>` and ask the flow service handler, which
-//! forwards the request to the flownode(s) that own the flow. Nothing is
-//! decided here: the answer comes back through the response extensions.
+//! forwards one flow-admin call to the flownode that owns the flow. Nothing is
+//! decided here beyond parsing the arguments: the function is named in the call
+//! and its answer comes back through the response extension.
 
 use arrow::datatypes::DataType as ArrowDataType;
 use chrono::DateTime;
@@ -34,10 +35,13 @@ use sql::parser::ParserContext;
 
 use crate::handlers::FlowServiceHandlerRef;
 
-/// Extension key of the attempt id a backfill request answers with.
-pub(crate) const FLOW_BACKFILL_ATTEMPT_ID_KEY: &str = "flow_backfill_attempt_id";
-/// Extension key of the status JSON a backfill status request answers with.
-pub(crate) const FLOW_BACKFILL_STATUS_KEY: &str = "flow_backfill_status";
+/// Extension key every flow-admin call answers with, whichever function ran.
+pub(crate) const FLOW_ADMIN_RESULT_KEY: &str = "flow_admin_result";
+
+/// The flow-admin function `ADMIN flow_backfill` runs on the owning flownode.
+const FLOW_BACKFILL: &str = "flow_backfill";
+/// The flow-admin function `ADMIN flow_backfill_status` runs.
+const FLOW_BACKFILL_STATUS: &str = "flow_backfill_status";
 
 /// `ADMIN flow_backfill(<flow>, <startMillis>, <endMillis>)`.
 ///
@@ -75,18 +79,20 @@ pub(crate) async fn flow_backfill(
     let start_ms = parse_millis(&params[1], "startMillis")?;
     let end_ms = parse_millis(&params[2], "endMillis")?;
 
+    // The range travels as its own normalized strings; the flow the call is
+    // about is already carried by the route.
     let res = flow_service_handler
-        .backfill(
+        .admin(
             &catalog_name,
             &flow_name,
-            start_ms,
-            end_ms,
+            FLOW_BACKFILL,
+            vec![start_ms.to_string(), end_ms.to_string()],
             query_ctx.clone(),
         )
         .await?;
 
     Ok(Value::from(
-        response_extension(&res, FLOW_BACKFILL_ATTEMPT_ID_KEY)?.as_str(),
+        response_extension(&res, FLOW_ADMIN_RESULT_KEY)?.as_str(),
     ))
 }
 
@@ -117,11 +123,17 @@ pub(crate) async fn flow_backfill_status(
     let (catalog_name, flow_name) = parse_flow_name(&params[0], query_ctx, "flow_backfill_status")?;
 
     let res = flow_service_handler
-        .backfill_status(&catalog_name, &flow_name, query_ctx.clone())
+        .admin(
+            &catalog_name,
+            &flow_name,
+            FLOW_BACKFILL_STATUS,
+            vec![],
+            query_ctx.clone(),
+        )
         .await?;
 
     Ok(Value::from(
-        response_extension(&res, FLOW_BACKFILL_STATUS_KEY)?.as_str(),
+        response_extension(&res, FLOW_ADMIN_RESULT_KEY)?.as_str(),
     ))
 }
 
@@ -252,16 +264,75 @@ fn flow_backfill_status_signature() -> Signature {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
 
+    use async_trait::async_trait;
     use datatypes::value::OrderedFloat;
     use session::context::QueryContext;
+    use session::context::QueryContextRef;
 
     use super::*;
     use crate::function::FunctionContext;
     use crate::function_factory::ScalarFunctionFactory;
+    use crate::handlers::FlowServiceHandler;
 
     const ZERO_UTC_MILLIS: i64 = 1_735_689_600_000; // 2025-01-01T00:00:00Z
+
+    /// One flow-admin call a UDF routed: catalog, flow, function, arguments.
+    type AdminCall = (String, String, String, Vec<String>);
+
+    /// Records the flow-admin calls a UDF routes and answers with `result`.
+    #[derive(Clone, Default)]
+    struct RecordingFlowService {
+        calls: Arc<Mutex<Vec<AdminCall>>>,
+        extensions: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    }
+
+    impl RecordingFlowService {
+        fn answer_with(&self, key: &str, value: &str) {
+            self.extensions
+                .lock()
+                .unwrap()
+                .insert(key.to_string(), value.as_bytes().to_vec());
+        }
+
+        fn take_calls(&self) -> Vec<AdminCall> {
+            std::mem::take(&mut *self.calls.lock().unwrap())
+        }
+    }
+
+    #[async_trait]
+    impl FlowServiceHandler for RecordingFlowService {
+        async fn flush(
+            &self,
+            _catalog: &str,
+            _flow: &str,
+            _ctx: QueryContextRef,
+        ) -> Result<api::v1::flow::FlowResponse> {
+            unimplemented!("neither backfill entry point flushes a flow")
+        }
+
+        async fn admin(
+            &self,
+            catalog: &str,
+            flow: &str,
+            function: &str,
+            args: Vec<String>,
+            _ctx: QueryContextRef,
+        ) -> Result<api::v1::flow::FlowResponse> {
+            self.calls.lock().unwrap().push((
+                catalog.to_string(),
+                flow.to_string(),
+                function.to_string(),
+                args,
+            ));
+            Ok(api::v1::flow::FlowResponse {
+                extensions: self.extensions.lock().unwrap().clone(),
+                ..Default::default()
+            })
+        }
+    }
 
     #[test]
     fn test_flow_backfill_metadata() {
@@ -465,6 +536,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_flow_backfill_routes_the_function_and_its_normalized_args() {
+        let recorder = RecordingFlowService::default();
+        recorder.answer_with(FLOW_ADMIN_RESULT_KEY, "attempt-1");
+        let handler: FlowServiceHandlerRef = Arc::new(recorder.clone());
+        let ctx = QueryContext::arc();
+
+        // One endpoint is an Int64 and the other an RFC 3339 literal: both reach
+        // the flownode as the same normalized epoch-millisecond string.
+        let value = flow_backfill(
+            &handler,
+            &ctx,
+            &[
+                ValueRef::String("catalog.flow"),
+                ValueRef::Int64(-1000),
+                ValueRef::String("1970-01-01T00:00:01Z"),
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(Value::from("attempt-1"), value);
+        assert_eq!(
+            vec![(
+                "catalog".to_string(),
+                "flow".to_string(),
+                FLOW_BACKFILL.to_string(),
+                vec!["-1000".to_string(), "1000".to_string()],
+            )],
+            recorder.take_calls()
+        );
+
+        // The status entry point names its own function and carries no argument.
+        recorder.answer_with(FLOW_ADMIN_RESULT_KEY, "null");
+        let value = flow_backfill_status(&handler, &ctx, &[ValueRef::String("flow")])
+            .await
+            .unwrap();
+        assert_eq!(Value::from("null"), value);
+        assert_eq!(
+            vec![(
+                "greptime".to_string(),
+                "flow".to_string(),
+                FLOW_BACKFILL_STATUS.to_string(),
+                vec![],
+            )],
+            recorder.take_calls()
+        );
+    }
+
+    #[tokio::test]
     async fn test_missing_extension_is_execute_error() {
         let ctx = FunctionContext::mock();
         let handler = ctx.state.flow_service_handler.as_ref().unwrap();
@@ -485,10 +604,7 @@ mod tests {
             matches!(err, common_query::error::Error::Execute { .. }),
             "{err}"
         );
-        assert!(
-            err.to_string().contains(FLOW_BACKFILL_ATTEMPT_ID_KEY),
-            "{err}"
-        );
+        assert!(err.to_string().contains(FLOW_ADMIN_RESULT_KEY), "{err}");
 
         let err = flow_backfill_status(handler, &ctx.query_ctx, &[ValueRef::String("flow")])
             .await
@@ -497,7 +613,7 @@ mod tests {
             matches!(err, common_query::error::Error::Execute { .. }),
             "{err}"
         );
-        assert!(err.to_string().contains(FLOW_BACKFILL_STATUS_KEY), "{err}");
+        assert!(err.to_string().contains(FLOW_ADMIN_RESULT_KEY), "{err}");
     }
 
     #[tokio::test]

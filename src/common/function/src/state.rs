@@ -255,21 +255,14 @@ impl FunctionState {
                 todo!()
             }
 
-            async fn backfill(
+            /// Answers without extensions, so a caller that needs a result
+            /// reports the missing extension instead of reading a made-up one.
+            async fn admin(
                 &self,
                 _catalog: &str,
                 _flow: &str,
-                _start_ms: i64,
-                _end_ms: i64,
-                _ctx: QueryContextRef,
-            ) -> Result<api::v1::flow::FlowResponse> {
-                Ok(api::v1::flow::FlowResponse::default())
-            }
-
-            async fn backfill_status(
-                &self,
-                _catalog: &str,
-                _flow: &str,
+                _function: &str,
+                _args: Vec<String>,
                 _ctx: QueryContextRef,
             ) -> Result<api::v1::flow::FlowResponse> {
                 Ok(api::v1::flow::FlowResponse::default())

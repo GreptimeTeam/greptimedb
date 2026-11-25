@@ -59,29 +59,24 @@ pub trait BatchingExecutionFactory: Send + Sync + 'static {
         frontend: &Arc<FrontendClient>,
     ) -> Result<Option<Arc<dyn BatchingExecution>>>;
 
-    /// Admits one backfill attempt of the flow `catalog.flow` over the half-open
-    /// range `[start_ms, end_ms)` and returns its attempt id.
+    /// Runs the flow-admin `function` of the flow `catalog.flow` with the
+    /// function's own `args` and returns its result as the string the caller
+    /// answers with.
     ///
-    /// An attempt is process-local state of the execution this factory serves,
-    /// so a factory that does not serve backfill refuses the request instead of
-    /// pretending to have recorded one.
-    async fn backfill(
+    /// The route is generic: the factory resolves `function` itself, so adding a
+    /// flow admin function needs no new method here and no new request body on
+    /// the wire. What a function returns is process-local state of the execution
+    /// this factory serves, so a factory that does not serve one refuses the call
+    /// instead of pretending to have an answer.
+    async fn admin(
         &self,
         _catalog: &str,
         _flow: &str,
-        _start_ms: i64,
-        _end_ms: i64,
+        _function: &str,
+        _args: &[String],
     ) -> Result<String> {
         UnsupportedSnafu {
-            reason: "this batching execution factory does not serve flow backfill",
-        }
-        .fail()
-    }
-
-    /// Returns the JSON status of the flow's process-local backfill attempt.
-    async fn backfill_status(&self, _catalog: &str, _flow: &str) -> Result<String> {
-        UnsupportedSnafu {
-            reason: "this batching execution factory does not serve flow backfill status",
+            reason: "this batching execution factory does not serve flow admin functions",
         }
         .fail()
     }

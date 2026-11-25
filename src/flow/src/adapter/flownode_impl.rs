@@ -18,8 +18,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use api::v1::flow::{
-    BackfillFlow, BackfillStatus, CreateRequest, DirtyWindowRequests, DropRequest, FlowRequest,
-    FlowResponse, FlushFlow, flow_request,
+    AdminFlow, CreateRequest, DirtyWindowRequests, DropRequest, FlowRequest, FlowResponse,
+    FlushFlow, flow_request,
 };
 use api::v1::region::InsertRequests;
 use catalog::CatalogManager;
@@ -47,7 +47,7 @@ use crate::batching_mode::engine::BatchingEngine;
 use crate::engine::{FlowEngine, FlowStatProvider};
 use crate::error::{
     CreateFlowSnafu, ExternalSnafu, FlowNotFoundSnafu, FlowNotRecoveredSnafu,
-    IllegalCheckTaskStateSnafu, InternalSnafu, InvalidQuerySnafu, JoinTaskSnafu, ListFlowsSnafu,
+    IllegalCheckTaskStateSnafu, InternalSnafu, JoinTaskSnafu, ListFlowsSnafu,
     NoAvailableFrontendSnafu, SyncCheckTaskSnafu, UnsupportedSnafu,
 };
 use crate::metrics::{METRIC_FLOW_ROWS, METRIC_FLOW_TASK_COUNT};
@@ -57,12 +57,10 @@ use crate::{Error, FlowId};
 /// Ref to [`FlowDualEngine`]
 pub type FlowDualEngineRef = Arc<FlowDualEngine>;
 
-/// Extension key of the attempt id a backfill request answers with. The same
-/// key is read back by `ADMIN flow_backfill`.
-const FLOW_BACKFILL_ATTEMPT_ID_KEY: &str = "flow_backfill_attempt_id";
-/// Extension key of the status JSON a backfill status request answers with. The
-/// same key is read back by `ADMIN flow_backfill_status`.
-const FLOW_BACKFILL_STATUS_KEY: &str = "flow_backfill_status";
+/// Extension key every flow-admin call answers with. The one key carries the
+/// result of whichever function was called; the same key is read back by the
+/// `ADMIN flow_*` frontend functions.
+const FLOW_ADMIN_RESULT_KEY: &str = "flow_admin_result";
 
 /// Manage both streaming and batching mode engine
 ///
@@ -918,55 +916,24 @@ impl common_meta::node_manager::Flownode for FlowDualEngine {
                     ..Default::default()
                 })
             }
-            Some(flow_request::Body::Backfill(BackfillFlow {
+            Some(flow_request::Body::Admin(AdminFlow {
                 catalog,
                 flow,
-                range,
+                function,
+                args,
             })) => {
-                let Some(range) = range else {
-                    return InvalidQuerySnafu {
-                        reason: format!(
-                            "backfill request of {catalog}.{flow} is missing its time range"
-                        ),
-                    }
-                    .fail()
-                    .map_err(to_meta_err(snafu::location!()));
-                };
-                if range.start_inclusive >= range.end_exclusive {
-                    return InvalidQuerySnafu {
-                        reason: format!(
-                            "backfill range of {catalog}.{flow} must be non-empty, got [{}, {})",
-                            range.start_inclusive, range.end_exclusive
-                        ),
-                    }
-                    .fail()
-                    .map_err(to_meta_err(snafu::location!()));
-                }
-                let attempt_id = self
+                // The one flow-admin route: this arm resolves no function name and
+                // parses no argument, so a new admin function needs no change here.
+                let result = self
                     .batching_engine
-                    .backfill(&catalog, &flow, range.start_inclusive, range.end_exclusive)
+                    .admin(&catalog, &flow, &function, &args)
                     .await
                     .map_err(to_meta_err(snafu::location!()))?;
 
                 Ok(FlowResponse {
                     extensions: HashMap::from([(
-                        FLOW_BACKFILL_ATTEMPT_ID_KEY.to_string(),
-                        attempt_id.into_bytes(),
-                    )]),
-                    ..Default::default()
-                })
-            }
-            Some(flow_request::Body::BackfillStatus(BackfillStatus { catalog, flow })) => {
-                let status = self
-                    .batching_engine
-                    .backfill_status(&catalog, &flow)
-                    .await
-                    .map_err(to_meta_err(snafu::location!()))?;
-
-                Ok(FlowResponse {
-                    extensions: HashMap::from([(
-                        FLOW_BACKFILL_STATUS_KEY.to_string(),
-                        status.into_bytes(),
+                        FLOW_ADMIN_RESULT_KEY.to_string(),
+                        result.into_bytes(),
                     )]),
                     ..Default::default()
                 })

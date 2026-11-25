@@ -154,7 +154,7 @@ pub trait ProcedureServiceHandler: Send + Sync {
     ) -> Result<MetaGcResponse>;
 }
 
-/// This flow service handler is only use for flush and backfill flow for now.
+/// This flow service handler is only use for flush and flow-admin calls for now.
 #[async_trait]
 pub trait FlowServiceHandler: Send + Sync {
     async fn flush(
@@ -164,29 +164,19 @@ pub trait FlowServiceHandler: Send + Sync {
         ctx: QueryContextRef,
     ) -> Result<api::v1::flow::FlowResponse>;
 
-    /// Asks the flownode(s) that own `catalog.flow` for one backfill attempt over
-    /// the half-open range `[start_ms, end_ms)` of source event time.
+    /// Runs the flow-admin function `function` on the flownode that owns
+    /// `catalog.flow`, with the function's own `args` (already normalized to
+    /// strings, in the order the function documents).
     ///
-    /// The answering node returns the attempt id in the
-    /// `flow_backfill_attempt_id` extension of the response.
-    async fn backfill(
+    /// The route carries no per-function request: the flownode resolves
+    /// `function` itself and answers with its result in the
+    /// `flow_admin_result` extension of the response.
+    async fn admin(
         &self,
         catalog: &str,
         flow: &str,
-        start_ms: i64,
-        end_ms: i64,
-        ctx: QueryContextRef,
-    ) -> Result<api::v1::flow::FlowResponse>;
-
-    /// Asks the flownode(s) that own `catalog.flow` for the status of the
-    /// attempt that process currently knows about.
-    ///
-    /// The answering node returns a status JSON in the `flow_backfill_status`
-    /// extension of the response.
-    async fn backfill_status(
-        &self,
-        catalog: &str,
-        flow: &str,
+        function: &str,
+        args: Vec<String>,
         ctx: QueryContextRef,
     ) -> Result<api::v1::flow::FlowResponse>;
 }
