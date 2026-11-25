@@ -23,6 +23,7 @@ use common_base::Plugins;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_event_recorder::{DEFAULT_COMPACTION_TIME_WINDOW, EventRecorderImpl, EventRecorderRef};
 use common_meta::affinity::{AffinityFallback, AffinityRef, NoopAffinity};
+use common_meta::cluster::Role;
 use common_meta::ddl::flow_meta::FlowMetadataAllocator;
 use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
 use common_meta::ddl::{
@@ -38,6 +39,7 @@ use common_meta::key::flow::flow_state::FlowStateManager;
 use common_meta::key::runtime_switch::{RuntimeSwitchManager, RuntimeSwitchManagerRef};
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
+use common_meta::node_expiry_listener::NodeExpiryListener;
 use common_meta::node_manager::NodeManagerRef;
 use common_meta::peer::PeerDiscoveryRef;
 use common_meta::reconciliation::manager::ReconciliationManager;
@@ -679,7 +681,13 @@ impl MetasrvBuilder {
         let mut resource_stat = ResourceStatImpl::default();
         resource_stat.start_collect_cpu_usage();
 
+        let node_expiry_listener = Arc::new(
+            NodeExpiryListener::new(options.node_max_idle_time, in_memory.clone())
+                .with_role_idle_limit(Role::Datanode, Duration::from_secs(60)),
+        );
+
         Ok(Metasrv {
+            node_expiry_listener,
             state,
             started: Arc::new(AtomicBool::new(false)),
             start_time_ms: common_time::util::current_time_millis() as u64,
@@ -1030,6 +1038,43 @@ mod tests {
                 .unwrap(),
             &resolver
         ));
+    }
+
+    #[tokio::test]
+    async fn test_datanode_expiry_without_election() {
+        use common_meta::cluster::{NodeInfo, NodeInfoKey};
+        use common_meta::peer::Peer;
+        use common_meta::rpc::store::PutRequest;
+
+        let metasrv = MetasrvBuilder::new().build().await.unwrap();
+        assert!(metasrv.election().is_none());
+        crate::test_util::put_datanodes(metasrv.meta_peer_client(), vec![Peer::empty(1)]).await;
+        let backend = metasrv.in_memory();
+        let key = Vec::from(&NodeInfoKey {
+            role: Role::Datanode,
+            node_id: 1,
+        });
+        let record = backend.get(&key).await.unwrap().unwrap();
+        let mut node = NodeInfo::try_from(record.value).unwrap();
+        node.last_activity_ts -= 61_000;
+        backend
+            .put(
+                PutRequest::new()
+                    .with_key(key.clone())
+                    .with_value(Vec::try_from(node).unwrap()),
+            )
+            .await
+            .unwrap();
+
+        metasrv.try_start().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while backend.get(&key).await.unwrap().is_some() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        metasrv.shutdown().await.unwrap();
     }
 
     #[tokio::test]
