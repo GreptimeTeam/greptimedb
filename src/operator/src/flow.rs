@@ -77,6 +77,7 @@ impl FlowServiceHandler for FlowServiceOperator {
             flow: flow.to_string(),
             function: function.to_string(),
             args,
+            flow_id: Some(api::v1::FlowId { id }),
         });
 
         self.handle_single_owner(id, ctx, body).await
@@ -350,11 +351,13 @@ mod tests {
                 flow,
                 function,
                 args,
+                flow_id,
             }) => {
                 assert_eq!("greptime", catalog);
                 assert_eq!("demo", flow);
                 assert_eq!("flow_backfill", function);
                 assert_eq!(&vec!["-1000".to_string(), "1000".to_string()], args);
+                assert_eq!(Some(&api::v1::FlowId { id: FLOW_ID }), flow_id.as_ref());
             }
             other => panic!("unexpected request body: {other:?}"),
         }
@@ -419,11 +422,13 @@ mod tests {
                 flow,
                 function,
                 args,
+                flow_id,
             }) => {
                 assert_eq!("greptime", catalog);
                 assert_eq!("demo", flow);
                 assert_eq!("flow_backfill_status", function);
                 assert!(args.is_empty(), "a status call carries no args: {args:?}");
+                assert_eq!(Some(&api::v1::FlowId { id: FLOW_ID }), flow_id.as_ref());
             }
             other => panic!("unexpected request body: {other:?}"),
         }

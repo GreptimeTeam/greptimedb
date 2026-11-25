@@ -70,6 +70,7 @@ pub trait BatchingExecutionFactory: Send + Sync + 'static {
     /// instead of pretending to have an answer.
     async fn admin(
         &self,
+        _flow_id: u32,
         _catalog: &str,
         _flow: &str,
         _function: &str,

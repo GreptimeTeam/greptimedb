@@ -47,7 +47,7 @@ use crate::batching_mode::engine::BatchingEngine;
 use crate::engine::{FlowEngine, FlowStatProvider};
 use crate::error::{
     CreateFlowSnafu, ExternalSnafu, FlowNotFoundSnafu, FlowNotRecoveredSnafu,
-    IllegalCheckTaskStateSnafu, InternalSnafu, JoinTaskSnafu, ListFlowsSnafu,
+    IllegalCheckTaskStateSnafu, InternalSnafu, InvalidQuerySnafu, JoinTaskSnafu, ListFlowsSnafu,
     NoAvailableFrontendSnafu, SyncCheckTaskSnafu, UnsupportedSnafu,
 };
 use crate::metrics::{METRIC_FLOW_ROWS, METRIC_FLOW_TASK_COUNT};
@@ -921,12 +921,20 @@ impl common_meta::node_manager::Flownode for FlowDualEngine {
                 flow,
                 function,
                 args,
+                flow_id,
             })) => {
+                let Some(flow_id) = flow_id else {
+                    return InvalidQuerySnafu {
+                        reason: "flow admin request is missing its resolved flow id",
+                    }
+                    .fail()
+                    .map_err(to_meta_err(snafu::location!()));
+                };
                 // The one flow-admin route: this arm resolves no function name and
                 // parses no argument, so a new admin function needs no change here.
                 let result = self
                     .batching_engine
-                    .admin(&catalog, &flow, &function, &args)
+                    .admin(flow_id.id, &catalog, &flow, &function, &args)
                     .await
                     .map_err(to_meta_err(snafu::location!()))?;
 

@@ -1024,6 +1024,7 @@ impl BatchingEngine {
     /// resolves `function` itself, so a new function needs no new delegate here.
     pub async fn admin(
         &self,
+        flow_id: u32,
         catalog: &str,
         flow: &str,
         function: &str,
@@ -1037,7 +1038,9 @@ impl BatchingEngine {
             .fail();
         };
 
-        execution_factory.admin(catalog, flow, function, args).await
+        execution_factory
+            .admin(flow_id, catalog, flow, function, args)
+            .await
     }
 
     async fn rollback_flow_runtime_if_current(&self, flow_id: FlowId, task: &BatchingTask) {
@@ -2103,11 +2106,11 @@ GROUP BY l.number, time_window
 
         for err in [
             engine
-                .admin("greptime", "demo", "flow_backfill", &[])
+                .admin(1, "greptime", "demo", "flow_backfill", &[])
                 .await
                 .unwrap_err(),
             engine
-                .admin("greptime", "demo", "flow_backfill_status", &[])
+                .admin(1, "greptime", "demo", "flow_backfill_status", &[])
                 .await
                 .unwrap_err(),
         ] {
@@ -2129,11 +2132,11 @@ GROUP BY l.number, time_window
         // function must not pretend to have an answer.
         for err in [
             engine
-                .admin("greptime", "demo", "flow_backfill", &[])
+                .admin(1, "greptime", "demo", "flow_backfill", &[])
                 .await
                 .unwrap_err(),
             engine
-                .admin("greptime", "demo", "flow_backfill_status", &[])
+                .admin(1, "greptime", "demo", "flow_backfill_status", &[])
                 .await
                 .unwrap_err(),
         ] {
