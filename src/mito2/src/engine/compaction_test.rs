@@ -28,19 +28,20 @@ use common_time::Timestamp;
 use datatypes::arrow::array::AsArray;
 use datatypes::arrow::datatypes::TimestampMillisecondType;
 use parquet::basic::{Encoding, Type as PhysicalType};
-use store_api::region_engine::{RegionEngine, RegionRole};
+use store_api::region_engine::{RegionEngine, RegionRole, RegionScanner};
 use store_api::region_request::AlterKind::SetRegionOptions;
 use store_api::region_request::{
     EnterStagingRequest, PathType, RegionAlterRequest, RegionCloseRequest, RegionCompactRequest,
     RegionDeleteRequest, RegionFlushRequest, RegionOpenRequest, RegionRequest,
     RegionTruncateRequest, SetRegionOption, StagingPartitionDirective,
 };
-use store_api::storage::{RegionId, ScanRequest};
+use store_api::storage::{RegionId, ScanRequest, TimeSeriesRowSelector};
 use tokio::sync::{Notify, Semaphore};
 
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::engine::listener::{CompactionListener, EventListener};
+use crate::read::scan_region::Scanner;
 use crate::sst::file::RegionFileId;
 use crate::test_util::batch_util::sort_batches_and_print;
 use crate::test_util::{
@@ -4250,4 +4251,133 @@ async fn test_automatic_units_share_engine_capacity_and_wait_for_batch_exit(
         );
     }
     engine.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_scanner_time_range_fingerprint() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = crate::test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let scanner = async || {
+        engine
+            .handle_query(region_id, ScanRequest::default())
+            .await
+            .unwrap()
+    };
+    let fp = |scanner: &store_api::region_engine::RegionScannerRef, start: i64, end: i64| {
+        scanner.time_range_fingerprint(Timestamp::new_second(start), Timestamp::new_second(end))
+    };
+    let put = |start: usize, end: usize| {
+        put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: column_schemas.clone(),
+                rows: crate::test_util::build_rows(start, end),
+            },
+        )
+    };
+
+    put(0, 10).await;
+    // Unflushed rows make their range unfingerprintable; other ranges are not affected.
+    let s = scanner().await;
+    assert_eq!(None, fp(&s, 0, 10));
+    let empty = fp(&s, 20, 30).unwrap();
+
+    crate::test_util::flush_region(&engine, region_id, None).await;
+    let before_late_write = scanner().await;
+    let flushed = fp(&before_late_write, 0, 10).unwrap();
+    assert_eq!(Some(empty.clone()), fp(&before_late_write, 20, 30));
+
+    // A late write into the flushed range, then flushed.
+    put(5, 6).await;
+    assert_eq!(None, fp(&scanner().await, 0, 10));
+    crate::test_util::flush_region(&engine, region_id, None).await;
+    let s = scanner().await;
+    let rewritten = fp(&s, 0, 10).unwrap();
+    assert_ne!(flushed, rewritten);
+    assert_eq!(Some(empty.clone()), fp(&s, 20, 30));
+    // A scanner keeps describing the files it was built on.
+    assert_eq!(Some(flushed), fp(&before_late_write, 0, 10));
+
+    // Compaction rewrites the rows into new files.
+    compact(&engine, region_id).await;
+    let compacted = fp(&scanner().await, 0, 10);
+    assert!(compacted.is_some());
+    assert_ne!(Some(rewritten), compacted);
+
+    // A sequential scan merges the memtable range [8, 11] with the file range [0, 9] and
+    // reads the live memtable up to the merged bounds, so [0, 5) is not fingerprintable
+    // although the memtable does not overlap it.
+    put(8, 12).await;
+    let s = scanner().await;
+    assert_eq!(None, fp(&s, 0, 5));
+    assert_eq!(Some(empty), fp(&s, 20, 30));
+
+    // A row written while a scan runs can reach the scan through a memtable it already
+    // reads, inside a range whose fingerprint the scan reported without that memtable.
+    // States computed by that scan may include the row, so no later scan may report the
+    // same fingerprint for the range.
+    crate::test_util::flush_region(&engine, region_id, None).await;
+    put(20, 22).await;
+    let mut running = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let reported = {
+        let (start, end) = (Timestamp::new_second(0), Timestamp::new_second(10));
+        match &running {
+            Scanner::Seq(s) => s.time_range_fingerprint(start, end),
+            Scanner::Unordered(s) => s.time_range_fingerprint(start, end),
+            Scanner::Series(s) => s.time_range_fingerprint(start, end),
+        }
+        .unwrap()
+    };
+    put(3, 4).await;
+    running.set_target_partitions(1);
+    let batches = RecordBatches::try_collect(running.scan().await.unwrap())
+        .await
+        .unwrap();
+    assert!(
+        batches
+            .pretty_print()
+            .unwrap()
+            .contains("1970-01-01T00:00:03")
+    );
+    assert_eq!(None, fp(&scanner().await, 0, 10));
+    crate::test_util::flush_region(&engine, region_id, None).await;
+    assert_ne!(Some(reported), fp(&scanner().await, 0, 10));
+
+    // The last row of series "5" moves out of [0, 10) when a newer row is flushed into a
+    // file outside it, while the files overlapping [0, 10) stay the same.
+    let before = fp(&scanner().await, 0, 10);
+    assert!(before.is_some());
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: crate::test_util::build_rows_for_key("5", 30, 31, 0),
+        },
+    )
+    .await;
+    crate::test_util::flush_region(&engine, region_id, None).await;
+    let last_row = engine
+        .handle_query(
+            region_id,
+            ScanRequest {
+                series_row_selector: Some(TimeSeriesRowSelector::LastRow { after_merge: true }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(before, fp(&scanner().await, 0, 10));
+    assert_eq!(None, fp(&last_row, 0, 10));
 }

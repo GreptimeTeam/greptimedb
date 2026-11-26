@@ -31,6 +31,7 @@ pub mod promql_tsid_narrow_join;
 pub mod remove_duplicate;
 pub mod scan_hint;
 pub mod series_frame_output;
+pub mod slice_agg_cache;
 pub(crate) mod sst_manifest_aggregate;
 pub mod string_normalization;
 #[cfg(test)]

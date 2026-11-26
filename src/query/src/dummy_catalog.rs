@@ -28,7 +28,10 @@ use common_recordbatch::OrderOption;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use datafusion::catalog::{CatalogProvider, CatalogProviderList, SchemaProvider, Session};
 use datafusion::datasource::TableProvider;
+use datafusion::physical_expr::PhysicalExpr;
+use datafusion::physical_expr::expressions::Column;
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion_common::DataFusionError;
 use datafusion_expr::{Expr, TableProviderFilterPushDown, TableType};
 use datatypes::arrow::datatypes::SchemaRef;
@@ -46,6 +49,7 @@ use table::table::adapter::{dictionary_encode_string_columns, supports_pk_dictio
 use table::table::scan::RegionScanExec;
 
 use crate::error::{GetRegionMetadataSnafu, Result};
+use crate::optimizer::slice_agg_cache::{slice_agg_cache_enabled, slicing_range};
 use crate::options::{FlowIncrementalMode, FlowQueryExtensions};
 
 /// Resolve to the given region (specified by [RegionId]) unconditionally.
@@ -148,6 +152,32 @@ impl fmt::Debug for DummyTableProvider {
     }
 }
 
+impl DummyTableProvider {
+    /// Adds the time index to a scan that the slice aggregate cache may rewrite but whose
+    /// projection drops it, since the cache groups rows by time slice. Returns the original
+    /// projection, which the caller restores on top of the scan.
+    fn carry_time_index_for_slicing(
+        &self,
+        state: &dyn Session,
+        request: &mut ScanRequest,
+    ) -> Option<Vec<usize>> {
+        if !slice_agg_cache_enabled(state.config_options()) {
+            return None;
+        }
+        let projection = request.projection.as_mut()?;
+        let ts_index = self.metadata.time_index_column_pos();
+        if projection.contains(&ts_index) {
+            return None;
+        }
+        let ts = self.metadata.time_index_column();
+        let unit = ts.column_schema.data_type.as_timestamp()?.unit();
+        slicing_range(&request.filters, &ts.column_schema.name, unit)?;
+        let original = projection.clone();
+        projection.push(ts_index);
+        Some(original)
+    }
+}
+
 #[async_trait]
 impl TableProvider for DummyTableProvider {
     fn schema(&self) -> SchemaRef {
@@ -166,7 +196,7 @@ impl TableProvider for DummyTableProvider {
 
     async fn scan(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         projection: Option<&Vec<usize>>,
         filters: &[Expr],
         limit: Option<usize>,
@@ -175,6 +205,7 @@ impl TableProvider for DummyTableProvider {
         request.projection = projection.cloned();
         request.filters = filters.to_vec();
         request.limit = limit;
+        let sliced_projection = self.carry_time_index_for_slicing(state, &mut request);
         if let Some(query_ctx) = &self.query_ctx {
             let is_sink_scan = is_sink_scan(query_ctx, self.region_id)
                 .map_err(|e| DataFusionError::External(Box::new(e)))?;
@@ -200,7 +231,23 @@ impl TableProvider for DummyTableProvider {
         if let Some(query_ctx) = &self.query_ctx {
             scan_exec.set_explain_verbose(query_ctx.explain_verbose());
         }
-        Ok(Arc::new(scan_exec))
+        let scan_exec: Arc<dyn ExecutionPlan> = Arc::new(scan_exec);
+        let Some(projection) = sliced_projection else {
+            return Ok(scan_exec);
+        };
+        let scan_schema = scan_exec.schema();
+        let exprs = projection
+            .iter()
+            .map(|&index| {
+                let name = &self.metadata.column_metadatas[index].column_schema.name;
+                let position = scan_schema.index_of(name)?;
+                Ok((
+                    Arc::new(Column::new(name, position)) as Arc<dyn PhysicalExpr>,
+                    name.clone(),
+                ))
+            })
+            .collect::<datafusion::error::Result<Vec<_>>>()?;
+        Ok(Arc::new(ProjectionExec::try_new(exprs, scan_exec)?))
     }
 
     fn supports_filters_pushdown(
