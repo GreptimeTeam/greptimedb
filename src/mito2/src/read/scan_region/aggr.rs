@@ -27,6 +27,7 @@ use datafusion_common::ScalarValue;
 use datafusion_expr::{Expr, Operator};
 use datatypes::data_type::DataType;
 use datatypes::value::Value;
+use futures::future::BoxFuture;
 use futures::{FutureExt, StreamExt};
 use mito_codec::row_converter::{PrimaryKeyCodec, build_primary_key_codec};
 use parquet::file::metadata::ParquetMetaData;
@@ -70,12 +71,17 @@ async fn read_file_evidence(input: &ScanInput, classification: &Classification) 
     if input.append_mode {
         return vec![true; classification.exact.len()];
     }
-    let reads = classification.exact.iter().map(|&index| {
-        let file = input.files[index].clone();
-        let reader = input
-            .access_layer
-            .read_sst(file.clone())
-            .cache(input.cache_strategy.clone());
+    // The stream owns its inputs and creates readers only as buffer slots
+    // become available.
+    let files: Vec<_> = classification
+        .exact
+        .iter()
+        .map(|&index| input.files[index].clone())
+        .collect();
+    let access_layer = input.access_layer.clone();
+    let cache = input.cache_strategy.clone();
+    let reads = futures::stream::iter(files).map(move |file| -> BoxFuture<'static, bool> {
+        let reader = access_layer.read_sst(file.clone()).cache(cache.clone());
         async move {
             match reader.read_statistics().await {
                 Ok(metadata) => footer_proves_visible_rows(&metadata, file.num_rows()),
@@ -90,7 +96,7 @@ async fn read_file_evidence(input: &ScanInput, classification: &Classification) 
         }
         .boxed()
     });
-    futures::stream::iter(reads)
+    reads
         .buffered(input.max_concurrent_scan_files.max(1))
         .collect()
         .await
