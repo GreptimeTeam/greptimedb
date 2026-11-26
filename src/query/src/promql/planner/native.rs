@@ -342,16 +342,6 @@ impl PromPlanner {
         if self.ctx.field_column_matcher.is_some() || fields.is_empty() {
             return Ok(declined("field_selector_without_raw_series_equivalent"));
         }
-        // Delta samples are increments: the existing planner sums them for `increase` and
-        // divides by the range for `rate`. A window over the raw samples does the same per series;
-        // decline when one of those calls reads this selector through another expression.
-        if tags
-            .iter()
-            .any(|tag| tag == OTLP_AGGREGATION_TEMPORALITY_LABEL)
-            && under_rate_or_increase
-        {
-            return Ok(declined("delta_temporality_under_rate_or_increase"));
-        }
         // The selector's own table scan, built by the same method the existing path uses:
         // the physical planner turns it into the region scan the node reads, and building a
         // scan here instead would let the two paths disagree about the columns they read.
@@ -500,6 +490,18 @@ impl PromPlanner {
             return Ok(declined("selectors_disagree_on_field_kind"));
         }
         *statement_kind = Some(field_kind);
+        // Delta samples are increments: the existing planner sums float samples for `increase` and
+        // divides by the range for `rate`, and rates a native histogram as a counter whatever its
+        // marker says. A window over the raw samples does the same per series; decline when one of
+        // those calls reads a float selector through another expression.
+        if field_kind == FieldKind::Float
+            && tags
+                .iter()
+                .any(|tag| tag == OTLP_AGGREGATION_TEMPORALITY_LABEL)
+            && under_rate_or_increase
+        {
+            return Ok(declined("delta_temporality_under_rate_or_increase"));
+        }
         let series_schema = Arc::new(SeriesSchema {
             fields: fields
                 .iter()
@@ -1423,8 +1425,9 @@ impl PromPlanner {
             ))
             .context(DataFusionPlanningSnafu);
         }
-        // The per-series delta math is the float windows' own; a histogram window or a range
-        // modifier over a series that may carry the temporality marker keeps the existing plan.
+        // The per-series delta math is the float windows' own, and a native histogram ignores the
+        // marker on both routes. A range modifier over a float series that may carry the marker
+        // keeps the existing plan.
         let marked = |source: usize| {
             prepared.get(source).is_some_and(|(_, _, _, _, tags, ..)| {
                 tags.iter()
@@ -1434,8 +1437,8 @@ impl PromPlanner {
         if compiled.tree.root().any(&|node| {
             matches!(&node.expr, NativeExpr::Window { input, op }
                 if matches!(op.function, RangeFunction::Rate | RangeFunction::Increase)
-                    && (statement_kind == Some(FieldKind::Histogram)
-                        || op.window.modifier.is_some())
+                    && statement_kind != Some(FieldKind::Histogram)
+                    && op.window.modifier.is_some()
                     && matches!(&input.expr, NativeExpr::Input(input) if marked(input.source_index)))
         }) {
             return Ok(declined("delta_temporality_under_rate_or_increase"));

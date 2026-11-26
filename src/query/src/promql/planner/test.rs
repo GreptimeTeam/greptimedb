@@ -5267,6 +5267,35 @@ async fn native_fused_delta_temporality_rates_run_natively() {
     );
 }
 
+/// `rate` and `increase` over native histograms marked as delta temporality run natively.
+///
+/// The existing plan picks the delta math only for float samples and rates a native histogram as a
+/// counter whatever its marker says, so the native window does not need the marker either - not
+/// even through a subquery or under a range modifier.
+#[tokio::test]
+async fn native_fused_delta_temporality_histogram_rates_run_natively() {
+    for query in [
+        "rate(some_metric[5m])",
+        "increase(some_metric[5m])",
+        "histogram_count(rate(some_metric[5m]))",
+        "sum(rate(some_metric[5m]))",
+        "rate((some_metric)[5m:1m])",
+    ] {
+        let plan = build_native_fused_plan_with_provider(
+            query,
+            true,
+            build_test_native_histogram_table_provider_with_marker("some_metric", true).await,
+        )
+        .await;
+        assert!(
+            find_fused_series(&plan).is_some(),
+            "`{query}`: {}",
+            plan.display_indent()
+        );
+        assert_eq!(take_reported_decline(), None, "`{query}`");
+    }
+}
+
 /// A marker on an unrelated selector must not prevent a native binary.
 #[tokio::test]
 async fn native_fused_delta_temporality_is_selector_scoped() {

@@ -46,6 +46,7 @@ use common_frontend::slow_query_event::{
 };
 use common_memory_manager::OnExhaustedPolicy;
 use common_options::plugin_options::StandaloneFlag;
+use common_query::prelude::{GREPTIME_TEMPORALITY_DELTA, OTLP_AGGREGATION_TEMPORALITY_LABEL};
 use datafusion::common::{DFSchema, ToDFSchema};
 use datafusion::logical_expr::{EmptyRelation, LogicalPlan};
 use datafusion::physical_plan::metrics::MetricValue;
@@ -203,6 +204,7 @@ macro_rules! http_tests {
                 test_remote_write_v2_histogram_sum_and_avg_native_route,
                 test_remote_write_v2_histogram_avg_native_partitions,
                 test_remote_write_v2_histogram_sum_incompatible_layouts_warns,
+                test_remote_write_v2_histogram_delta_temporality_native_route,
                 test_remote_write_v2_histogram_native_annotations,
                 test_remote_write_v2_histogram_native_arithmetic,
                 test_remote_write_v2_histogram_native_composition,
@@ -7814,6 +7816,130 @@ pub async fn test_remote_write_v2_histogram_sum_incompatible_layouts_warns(
             .is_some_and(|text| text.contains("incompatible native histogram layouts"))),
         "the removed point did not report its layout: {body}"
     );
+}
+
+/// `rate` and `increase` over a native histogram marked as OTLP delta temporality run natively and
+/// answer what the existing path answers.
+///
+/// The existing path sums the window only for float samples; a native histogram is rated as a
+/// counter whatever its marker says. So the marked series `job="d"` must answer the value the
+/// existing path answers, which is what the unmarked series `job="c"` with the same samples
+/// answers.
+pub async fn test_remote_write_v2_histogram_delta_temporality_native_route(
+    store_type: StorageType,
+) {
+    let observer = Arc::new(NativeFusedObserver::default());
+    let plugins = Plugins::default();
+    let wrapper: PhysicalPlanWrapperRef = observer.clone();
+    plugins.insert(wrapper);
+    let instance = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(
+        "remote_write_v2_histogram_delta_temporality",
+    )
+    .with_default_store_type(store_type)
+    .with_query_options(QueryOptions {
+        experimental_native_promql: true,
+        ..Default::default()
+    })
+    .with_plugin(plugins)
+    .build()
+    .await;
+    let server = build_test_prom_server(instance.fe_instance().clone(), false, None)
+        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
+        .build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+
+    let metric = "nh_delta";
+    for (timestamp, count, sum) in [(1_000, 2, 1.0), (31_000, 6, 3.0), (61_000, 10, 5.0)] {
+        write_native_histogram_sample(
+            &client,
+            &[
+                (prom_store::METRIC_NAME_LABEL, metric),
+                ("job", "d"),
+                (
+                    OTLP_AGGREGATION_TEMPORALITY_LABEL,
+                    GREPTIME_TEMPORALITY_DELTA,
+                ),
+            ],
+            1,
+            vec![],
+            timestamp,
+            count,
+            sum,
+        )
+        .await;
+        write_native_histogram_sample(
+            &client,
+            &[(prom_store::METRIC_NAME_LABEL, metric), ("job", "c")],
+            1,
+            vec![],
+            timestamp,
+            count,
+            sum,
+        )
+        .await;
+    }
+
+    async fn query(client: &TestClient, promql: &str, native: bool) -> Value {
+        let hints = format!("query.experimental_native_promql={native}");
+        let response = client
+            .get(&format!(
+                "/v1/prometheus/api/v1/query?query={}&time=61",
+                encode(promql)
+            ))
+            .header("x-greptime-hints", &hints)
+            .send()
+            .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "`{promql}` failed with {hints}"
+        );
+        let body: Value = response.json().await;
+        body["data"]["result"].clone()
+    }
+    for template in [
+        "rate(nh_delta{job=\"JOB\"}[1m])",
+        "increase(nh_delta{job=\"JOB\"}[2m])",
+        "histogram_count(increase(nh_delta{job=\"JOB\"}[2m]))",
+        "sum(rate(nh_delta{job=\"JOB\"}[2m]))",
+        "rate((nh_delta{job=\"JOB\"})[1m:30s])",
+    ] {
+        let marked = template.replace("JOB", "d");
+        observer.clear();
+        let native = query(&client, &marked, true).await;
+        observer.take_all(&marked);
+        let legacy = query(&client, &marked, false).await;
+        assert_eq!(
+            1,
+            native.as_array().map_or(0, Vec::len),
+            "`{marked}` answers one series: {native}"
+        );
+        let value = |result: &Value| {
+            let sample = &result[0];
+            if sample["histogram"].is_null() {
+                sample["value"][1].clone()
+            } else {
+                sample["histogram"][1].clone()
+            }
+        };
+        // Values only: the existing path keeps `__name__` on a native histogram `rate`, which
+        // Prometheus drops, as this route does.
+        assert_eq!(
+            value(&legacy),
+            value(&native),
+            "`{marked}`: native and existing answers differ: {native} vs {legacy}"
+        );
+        assert!(
+            native[0]["metric"].get("__name__").is_none(),
+            "`{marked}` drops the metric name: {native}"
+        );
+        let cumulative = query(&client, &template.replace("JOB", "c"), true).await;
+        assert_eq!(
+            value(&cumulative),
+            value(&native),
+            "`{marked}` answers what the unmarked series does: {native} vs {cumulative}"
+        );
+    }
 }
 
 pub async fn test_prometheus_remote_write_v2_native_histogram(store_type: StorageType) {
