@@ -89,25 +89,35 @@ async fn read_file_evidence(
     let check_overlap = !input.append_mode
         && !classification.exact.is_empty()
         && classification.exact.len() + classification.remaining.len() > 1;
-    let candidates = classification.exact.iter().map(|&index| {
-        (
-            &input.files[index],
-            !input.append_mode,
-            classification.key_filter || check_overlap,
-        )
-    });
-    let residual = classification
-        .remaining
+    // Own the file handles across the async reads.
+    let mut files: Vec<_> = classification
+        .exact
         .iter()
-        .filter(|_| check_overlap)
-        .map(|&index| (&input.files[index], false, true));
-    let time_pruned = ssts.levels().iter().flat_map(|level| {
-        input
-            .time_pruned_files
-            .iter()
-            .filter_map(move |id| level.files.get(id))
-            .map(|file| (file, false, false))
-    });
+        .map(|&index| {
+            (
+                input.files[index].clone(),
+                !input.append_mode,
+                classification.key_filter || check_overlap,
+            )
+        })
+        .collect();
+    if check_overlap {
+        files.extend(
+            classification
+                .remaining
+                .iter()
+                .map(|&index| (input.files[index].clone(), false, true)),
+        );
+    }
+    for level in ssts.levels() {
+        files.extend(
+            input
+                .time_pruned_files
+                .iter()
+                .filter_map(|id| level.files.get(id))
+                .map(|file| (file.clone(), false, false)),
+        );
+    }
 
     let access_layer = input.access_layer.clone();
     // The on-disk write cache can survive offline replacement of the same
@@ -119,17 +129,17 @@ async fn read_file_evidence(
     };
     let time_index_id = input.region_metadata().time_index_column().column_id;
     // Readers are created only as buffer slots become available.
-    let reads = futures::stream::iter(candidates.chain(residual).chain(time_pruned)).map(
+    let reads = futures::stream::iter(files).map(
         move |(file, check_rows, check_keys)| -> BoxFuture<'static, Result<bool, ()>> {
             let key_range = if check_keys {
                 file.raw_primary_key_range()
             } else {
                 None
             };
-            let reader = access_layer.read_sst(file.clone()).cache(cache.clone());
             let file_id = file.file_id();
             let (start, end) = file.time_range();
             let num_rows = file.num_rows();
+            let reader = access_layer.read_sst(file).cache(cache.clone());
             async move {
                 let sst = reader.read_statistics().await.map_err(|e| {
                     debug!("Metadata count could not read footer of {file_id}: {e:?}");
