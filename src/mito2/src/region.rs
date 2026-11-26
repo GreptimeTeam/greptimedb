@@ -1812,6 +1812,16 @@ impl ManifestContext {
                 && manifest.pending_tails.is_empty(),
             RegionBusySnafu { region_id }
         );
+        // A competing merge may replace inputs without advancing the watermark.
+        for id in &edit.series_indexes_to_remove {
+            ensure!(
+                manifest
+                    .series_indexes
+                    .get(&id.file_id())
+                    .is_some_and(|file| file.file_id() == *id),
+                RegionBusySnafu { region_id }
+            );
+        }
         let mut current = HashMap::<i64, u64>::new();
         for w in manifest
             .series_indexes

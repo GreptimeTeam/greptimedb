@@ -184,6 +184,60 @@ struct SeriesIndexTask {
     enable_range_index: bool,
 }
 
+const MERGE_FAN_IN: usize = 4;
+
+struct IndexMerge {
+    inputs: [FileHandle; MERGE_FAN_IN],
+    window: WindowSequence,
+    expected_watermark: u64,
+}
+
+/// Select the cheapest balanced run across all persisted windows.
+fn pick_index_merge<'a>(files: impl Iterator<Item = &'a FileHandle>) -> Option<IndexMerge> {
+    let mut windows = HashMap::new();
+    for file in files {
+        if let Some(window) = file.meta_ref().series_window() {
+            windows
+                .entry((window.start, window.end))
+                .or_insert_with(Vec::new)
+                .push((file, window.max_sequence));
+        }
+    }
+    let mut best = None;
+    for ((start, end), mut files) in windows {
+        let expected_watermark = files.iter().map(|(_, seq)| *seq).max().unwrap_or_default();
+        files.sort_unstable_by_key(|(f, _)| (f.meta_ref().file_size, f.meta_ref().file_id));
+        for group in files.windows(MERGE_FAN_IN) {
+            let total = group
+                .iter()
+                .map(|(f, _)| u128::from(f.meta_ref().file_size))
+                .sum();
+            let largest = group[MERGE_FAN_IN - 1].0.meta_ref().file_size;
+            if !crate::compaction::bytes_balanced(largest.into(), total) {
+                continue;
+            }
+            let ids: [_; MERGE_FAN_IN] = std::array::from_fn(|i| group[i].0.meta_ref().file_id);
+            let rank = (total, start, ids);
+            if best.as_ref().is_none_or(|(previous, _)| rank < *previous) {
+                let window = WindowSequence {
+                    start,
+                    end,
+                    max_sequence: group.iter().map(|(_, seq)| *seq).max().unwrap_or_default(),
+                };
+                best = Some((
+                    rank,
+                    IndexMerge {
+                        inputs: std::array::from_fn(|i| group[i].0.clone()),
+                        window,
+                        expected_watermark,
+                    },
+                ));
+            }
+        }
+    }
+    best.map(|(_, files)| files)
+}
+
 impl SeriesIndexTask {
     /// Runs periodic maintenance until the worker stops.
     async fn run(mut self) {
@@ -301,6 +355,48 @@ impl SeriesIndexTask {
         region: MitoRegionRef,
         manual: bool,
     ) -> Result<ReconcileStats> {
+        let mut stats = self.build_and_expire_native(&region, manual).await?;
+        let version = region.version();
+        if !version.pending_tails.is_empty() || !self.state.is_running() {
+            return Ok(stats);
+        }
+        if let Some(IndexMerge {
+            inputs,
+            window,
+            expected_watermark,
+        }) = pick_index_merge(version.ssts.series_indexes().values())
+        {
+            let truncated = version.truncated_entry_id;
+            let metadata = version.metadata.clone();
+            drop(version);
+            let output =
+                crate::sst::narthex::write_series(&region.access_layer, metadata, &inputs, window)
+                    .await?;
+            let handle = FileHandle::new(output.clone(), region.file_purger.clone());
+            let edit = crate::manifest::action::RegionEdit {
+                series_indexes_to_add: vec![output],
+                series_indexes_to_remove: inputs.iter().map(FileHandle::file_id).collect(),
+                ..Default::default()
+            };
+            self.publish_native(
+                &region,
+                edit,
+                &[handle],
+                truncated,
+                &HashMap::from([(window.start, expected_watermark)]),
+            )
+            .await?;
+            stats.built_series += 1;
+            stats.removed_series += inputs.len();
+        }
+        Ok(stats)
+    }
+
+    async fn build_and_expire_native(
+        &self,
+        region: &MitoRegionRef,
+        manual: bool,
+    ) -> Result<ReconcileStats> {
         let mut stats = ReconcileStats::default();
         let (ssts, metadata, frontier, truncated_entry_id, options, series_window_seconds) = {
             let current = region.version_control.current();
@@ -381,11 +477,6 @@ impl SeriesIndexTask {
                 edit.series_indexes_to_remove.push(file.file_id());
             }
         }
-        let worker = self
-            .state
-            .worker
-            .as_ref()
-            .ok_or_else(|| WorkerStoppedSnafu { id: self.worker_id }.build())?;
         let mut handles: Vec<FileHandle> = Vec::new();
         // Merge the ordered window starts lazily. One wide SST can span many windows,
         // and a periodic pass only needs the first buildable one.
@@ -449,25 +540,42 @@ impl SeriesIndexTask {
         }
         stats.built_series = handles.len();
         stats.removed_series = edit.series_indexes_to_remove.len();
-        if stats.built_series + stats.removed_series == 0 {
-            return Ok(stats);
+        if stats.built_series + stats.removed_series > 0 {
+            self.publish_native(region, edit, &handles, truncated_entry_id, &watermarks)
+                .await?;
         }
-        if !self.state.is_running() {
-            for handle in &handles {
+        Ok(stats)
+    }
+
+    async fn publish_native(
+        &self,
+        region: &MitoRegionRef,
+        edit: crate::manifest::action::RegionEdit,
+        handles: &[FileHandle],
+        truncated_entry_id: Option<crate::wal::EntryId>,
+        watermarks: &HashMap<i64, u64>,
+    ) -> Result<()> {
+        let Some(worker) = self
+            .state
+            .worker
+            .as_ref()
+            .filter(|_| self.state.is_running())
+        else {
+            for handle in handles {
                 handle.mark_deleted();
             }
             return WorkerStoppedSnafu { id: self.worker_id }.fail();
-        }
+        };
         let (tx, rx) = oneshot::channel();
         let result = region
             .manifest_ctx
-            .publish_series_indexes(&edit, truncated_entry_id, &watermarks)
+            .publish_series_indexes(&edit, truncated_entry_id, watermarks)
             .await;
         if let Err(error) = &result
             && (matches!(error, crate::error::Error::RegionBusy { .. })
                 || !error.may_have_persisted_manifest_update())
         {
-            for handle in &handles {
+            for handle in handles {
                 handle.mark_deleted();
             }
         }
@@ -489,7 +597,7 @@ impl SeriesIndexTask {
             .map_err(|_| WorkerStoppedSnafu { id: self.worker_id }.build())?;
         rx.await
             .map_err(|_| WorkerStoppedSnafu { id: self.worker_id }.build())??;
-        Ok(stats)
+        Ok(())
     }
 
     /// Each worker contributes only its open regions, refreshed at maintenance boundaries.
@@ -816,6 +924,63 @@ mod tests {
             );
         }
         engine.stop().await.unwrap();
+    }
+
+    #[test]
+    fn test_pick_index_merge() {
+        use crate::sst::file::{FileFormat, FileMeta, NarthexSeriesIndexMeta};
+        use store_api::storage::FileId;
+
+        let file = |id, mib, start| {
+            FileHandle::new(
+                FileMeta {
+                    file_id: FileId::from_bytes([id; 16]),
+                    file_size: mib * (1u64 << 20),
+                    format: FileFormat::NarthexSeriesIndex(Box::new(NarthexSeriesIndexMeta {
+                        manifest_size: 0,
+                        parts: Default::default(),
+                        window: WindowSequence {
+                            start,
+                            end: start + 10,
+                            max_sequence: 1,
+                        },
+                    })),
+                    ..Default::default()
+                },
+                crate::test_util::new_noop_file_purger(),
+            )
+        };
+        let mut files = vec![
+            file(0, 100, 0),
+            file(1, 1, 0),
+            file(2, 1, 0),
+            file(3, 1, 0),
+            file(5, 1, 10),
+        ];
+        assert!(pick_index_merge(files.iter()).is_none());
+        files.push(file(4, 1, 0));
+        let picked = |files: &[FileHandle]| {
+            pick_index_merge(files.iter())
+                .unwrap()
+                .inputs
+                .map(|f| f.meta_ref().file_id.as_bytes()[0])
+        };
+        assert_eq!(picked(&files), [1, 2, 3, 4]);
+        files.extend([
+            file(6, 1, 10),
+            file(7, 1, 10),
+            file(8, 1, 10),
+            file(9, 1, 0),
+        ]);
+        files.reverse();
+        assert_eq!(picked(&files), [1, 2, 3, 4]);
+        files.extend([
+            file(10, 0, 20),
+            file(11, 0, 20),
+            file(12, 0, 20),
+            file(13, 0, 20),
+        ]);
+        assert_eq!(picked(&files), [10, 11, 12, 13]);
     }
 
     #[test]
