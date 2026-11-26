@@ -30,12 +30,12 @@ use datatypes::value::Value;
 use futures::future::BoxFuture;
 use futures::{FutureExt, StreamExt, TryStreamExt};
 use mito_codec::row_converter::{PrimaryKeyCodec, build_primary_key_codec};
-use parquet::file::metadata::ParquetMetaData;
+use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
-use store_api::storage::ScanRequest;
+use store_api::storage::{ColumnId, ScanRequest};
 
-use crate::cache::CacheStrategy;
+use crate::cache::CachedSstMeta;
 use crate::read::scan_region::aggr::overlap::{Extent, find_overlaps};
 use crate::read::scan_region::{ScanInput, request_preserves_rows};
 use crate::sst::file::FileHandle;
@@ -83,22 +83,47 @@ pub(crate) async fn prepare(
     {
         return None;
     }
-    let evidence = if input.append_mode && request.filters.is_empty() {
-        vec![true; classification.exact.len()]
-    } else {
-        read_file_evidence(input, &classification, ssts).await?
-    };
-    resolve(input, classification, &evidence, allow_partial)
+    if input.append_mode && request.filters.is_empty() {
+        return resolve(input, classification, allow_partial);
+    }
+    verify_pruned_times(input, ssts).await?;
+    let mut classification = classification;
+    let check_overlap = !input.append_mode
+        && !classification.exact.is_empty()
+        && classification.exact.len() + classification.remaining.len() > 1;
+    let check_keys = classification.key_filter || check_overlap;
+    let mut files: Vec<_> = classification
+        .exact
+        .iter()
+        .map(|&index| (index, check_keys, !input.append_mode))
+        .collect();
+    if check_overlap {
+        // A stale residual bound could hide an overlap with an exact file.
+        files.extend(
+            classification
+                .remaining
+                .iter()
+                .map(|&index| (index, true, false)),
+        );
+    }
+    let reads = futures::stream::iter(files)
+        .map(|(index, keys, rows)| file_evidence(input, input.files[index].clone(), keys, rows));
+    let mut proven: Vec<_> = reads
+        .buffered(input.max_concurrent_scan_files.max(1))
+        .try_collect()
+        .await
+        .ok()?;
+    proven.truncate(classification.exact.len());
+    classification.retain_exact(input, &proven);
+    resolve(input, classification, allow_partial)
 }
 
 /// Applies the footer evidence of the exact candidates.
 fn resolve(
     input: &ScanInput,
-    mut classification: Classification,
-    evidence: &[bool],
+    classification: Classification,
     allow_partial: bool,
 ) -> Option<MetadataAggr> {
-    classification.retain_exact(input, evidence);
     if classification.remaining.is_empty() && input.memtables.is_empty() {
         return Some(MetadataAggr::Exact(classification.exact_rows));
     }
@@ -115,103 +140,66 @@ fn resolve(
     }))
 }
 
-/// Validates the bounds used by classification before proving the visible row
-/// count of each candidate. A stale or unknown bound may also invalidate the
-/// exclusion of a pruned file or the disjointness of a residual file.
-async fn read_file_evidence(
-    input: &ScanInput,
-    classification: &Classification,
-    ssts: &SstVersion,
-) -> Option<Vec<bool>> {
-    let check_overlap = !input.append_mode
-        && !classification.exact.is_empty()
-        && classification.exact.len() + classification.remaining.len() > 1;
-    // Own the file handles across the async reads.
-    let mut files: Vec<_> = classification
-        .exact
-        .iter()
-        .map(|&index| {
-            (
-                input.files[index].clone(),
-                !input.append_mode,
-                classification.key_filter || check_overlap,
-            )
-        })
-        .collect();
-    if check_overlap {
-        files.extend(
-            classification
-                .remaining
-                .iter()
-                .map(|&index| (input.files[index].clone(), false, true)),
-        );
+/// Older offline replacements could retain stale manifest bounds. Never open an
+/// excluded SST for COUNT: a cold or inconsistent footer leaves the scan in place.
+async fn verify_pruned_times(input: &ScanInput, ssts: &SstVersion) -> Option<()> {
+    let time_id = input.region_metadata().time_index_column().column_id;
+    for id in &input.time_pruned_files {
+        let file = ssts.levels().iter().find_map(|level| level.files.get(id))?;
+        let sst = input
+            .cache_strategy
+            .get_sst_meta_data_from_mem_cache(file.file_id(), PageIndexPolicy::Skip)
+            .await?;
+        if !time_bounds_match(file, &sst, time_id) {
+            return None;
+        }
     }
-    for level in ssts.levels() {
-        files.extend(
-            input
-                .time_pruned_files
-                .iter()
-                .filter_map(|id| level.files.get(id))
-                .map(|file| (file.clone(), false, false)),
-        );
-    }
+    Some(())
+}
 
-    let access_layer = input.access_layer.clone();
-    // The on-disk write cache can survive offline replacement of the same
-    // file ID. This proof needs metadata from the current object.
-    let cache = if input.cache_strategy.write_cache().is_some() {
-        CacheStrategy::Disabled
-    } else {
-        input.cache_strategy.clone()
-    };
-    let time_index_id = input.region_metadata().time_index_column().column_id;
-    // Readers are created only as buffer slots become available.
-    let reads = futures::stream::iter(files).map(
-        move |(file, check_rows, check_keys)| -> BoxFuture<'static, Result<bool, ()>> {
-            let key_range = if check_keys {
-                file.raw_primary_key_range()
-            } else {
-                None
-            };
-            let file_id = file.file_id();
-            let (start, end) = file.time_range();
-            let num_rows = file.num_rows();
-            let reader = access_layer.read_sst(file).cache(cache.clone());
-            async move {
-                let sst = reader.read_statistics().await.map_err(|e| {
-                    debug!("Metadata count could not read footer of {file_id}: {e:?}");
-                })?;
-                let metadata = sst.parquet_metadata();
-                let region_metadata = sst.region_metadata();
-                let time_index = region_metadata.time_index_column();
-                let time_matches = time_index.column_id == time_index_id
-                    && extract_time_range(&metadata, time_index).is_some_and(|(min, max)| {
-                        start.unit() == min.unit()
-                            && end.unit() == max.unit()
-                            && (start, end) == (min, max)
-                    });
-                if !time_matches {
-                    debug!("Metadata count could not verify time bounds of {file_id}");
-                    return Err(());
-                }
-                if let Some(range) = key_range
-                    && extract_primary_key_range(&metadata, &region_metadata) != Some(range)
-                {
-                    debug!("Metadata count could not verify key bounds of {file_id}");
-                    return Err(());
-                }
-                Ok(!check_rows || footer_proves_visible_rows(&metadata, num_rows))
-            }
-            .boxed()
-        },
-    );
-    let mut proven: Vec<_> = reads
-        .buffered(input.max_concurrent_scan_files.max(1))
-        .try_collect()
-        .await
-        .ok()?;
-    proven.truncate(classification.exact.len());
-    Some(proven)
+fn time_bounds_match(file: &FileHandle, sst: &CachedSstMeta, time_id: ColumnId) -> bool {
+    let region = sst.region_metadata();
+    let time_index = region.time_index_column();
+    let (start, end) = file.time_range();
+    time_index.column_id == time_id
+        && extract_time_range(&sst.parquet_metadata(), time_index).is_some_and(|(min, max)| {
+            start.unit() == min.unit() && end.unit() == max.unit() && (start, end) == (min, max)
+        })
+}
+
+/// A bounds mismatch invalidates the classification. An unproven row count
+/// can still be left to the residual scan when partial counts are supported.
+fn file_evidence(
+    input: &ScanInput,
+    file: FileHandle,
+    check_keys: bool,
+    check_rows: bool,
+) -> BoxFuture<'static, Result<bool, ()>> {
+    let time_id = input.region_metadata().time_index_column().column_id;
+    let reader = input
+        .access_layer
+        .read_sst(file.clone())
+        .cache(input.cache_strategy.clone());
+    async move {
+        let sst = reader.read_statistics().await.map_err(|e| {
+            debug!(
+                "Metadata count could not read footer of {}: {e:?}",
+                file.file_id()
+            );
+        })?;
+        let metadata = sst.parquet_metadata();
+        if !time_bounds_match(&file, &sst, time_id) {
+            return Err(());
+        }
+        if check_keys
+            && let Some(range) = file.raw_primary_key_range()
+            && extract_primary_key_range(&metadata, &sst.region_metadata()) != Some(range)
+        {
+            return Err(());
+        }
+        Ok(!check_rows || footer_proves_visible_rows(&metadata, file.num_rows()))
+    }
+    .boxed()
 }
 
 /// The footer and manifest must agree. Without the writer's uniqueness claim,
@@ -585,9 +573,10 @@ mod tests {
 
     /// [`prepare`] with the test's footer evidence.
     fn counted(input: &ScanInput, request: &ScanRequest) -> Option<MetadataAggr> {
-        let classification = classify(input, request, true)?;
+        let mut classification = classify(input, request, true)?;
         let no_deletes = evidence(input, &classification);
-        resolve(input, classification, &no_deletes, true)
+        classification.retain_exact(input, &no_deletes);
+        resolve(input, classification, true)
     }
 
     fn exact_count(input: &ScanInput, request: &ScanRequest) -> Option<usize> {
