@@ -55,6 +55,9 @@ impl RemapManifest {
     /// Main entry point. It copies files from old regions to new regions based on
     /// partition expression overlaps.
     pub fn remap_manifests(&mut self) -> Result<RemapResult> {
+        // A region may only be remapped while it holds files it produced itself.
+        self.ensure_regions_own_their_files()?;
+
         // initialize new manifests
         self.initialize_new_manifests()?;
 
@@ -74,6 +77,74 @@ impl RemapManifest {
             new_manifests,
             stats,
         })
+    }
+
+    /// Rejects the merge of a region that holds a file another region produced.
+    ///
+    /// A file records the partition expression of the region that wrote it (`flush` or a region
+    /// compaction), and a reader drops the region partition predicate exactly when the region's
+    /// expression equals the file's (`ScanRegion::should_skip_region_partition`,
+    /// `src/mito2/src/read/scan_region.rs`). A region that holds a file it did not produce reads
+    /// it through the region predicate, which keeps the rows of a shared physical file apart
+    /// only for as long as nobody materializes a copy of it under a new file id: once a holder
+    /// compacts, one row lives in the shared file *and* in the holder's own copy, and a later
+    /// remap that removes the region predicate for the shared file publishes the row twice.
+    ///
+    /// Merging therefore requires every participating region to hold only files it produced.
+    /// The caller makes the region compact, which stamps the materialized file with the
+    /// region's own expression, and retries the merge.
+    ///
+    /// A *split* (one source published into several targets) is not such a merge and is left
+    /// working as it is: every target receives only that source's files, its domain is narrower
+    /// than their stamp, so the region predicate keeps the targets' rows apart and no target
+    /// combines copies of a file.
+    fn ensure_regions_own_their_files(&self) -> Result<()> {
+        if self.is_split() {
+            return Ok(());
+        }
+
+        let mut offenders = Vec::new();
+        for &from_region_id in self.region_mapping.keys() {
+            let from_manifest = self.old_manifests.get(&from_region_id).context(
+                error::MissingOldManifestSnafu {
+                    region_id: from_region_id,
+                },
+            )?;
+            let region_expr = crate::region::parse_partition_expr(
+                from_manifest.metadata.partition_expr.as_deref(),
+            )?;
+            for (file_id, file_meta) in &from_manifest.files {
+                let creator_expr = file_meta.partition_expr.as_deref();
+                if creator_expr != region_expr.as_ref() {
+                    offenders.push(format!(
+                        "region {} holds file {} created by a region partitioned by {}, but this \
+                         region is partitioned by {}",
+                        from_region_id,
+                        file_id,
+                        describe_partition_expr(creator_expr),
+                        describe_partition_expr(region_expr.as_ref()),
+                    ));
+                }
+            }
+        }
+        ensure!(
+            offenders.is_empty(),
+            error::ForeignFilePartitionExprSnafu {
+                offenders: offenders.join("; "),
+            }
+        );
+
+        Ok(())
+    }
+
+    /// Whether this remap splits one region into several: the shape that is exempt from
+    /// [`Self::ensure_regions_own_their_files`], because no target combines file sets.
+    fn is_split(&self) -> bool {
+        self.region_mapping.len() == 1
+            && self
+                .region_mapping
+                .values()
+                .all(|target_region_ids| target_region_ids.len() > 1)
     }
 
     /// Initializes empty manifests for all new regions.
@@ -385,6 +456,14 @@ impl RemapManifest {
     }
 }
 
+/// Renders a partition expression for an error message.
+fn describe_partition_expr(expr: Option<&PartitionExpr>) -> String {
+    match expr {
+        Some(expr) => expr.as_json_str().unwrap_or_else(|_| format!("{expr:?}")),
+        None => "<none>".to_string(),
+    }
+}
+
 /// Result of manifest remapping, including new manifests and statistics.
 #[derive(Debug)]
 pub struct RemapResult {
@@ -501,8 +580,17 @@ mod tests {
             files.insert(file_id, file_meta.into());
         }
 
+        // The files are stamped with `partition_expr`, so the region serving that same
+        // expression produced them: a remap requires exactly that.
+        let mut metadata = (*create_region_metadata(region_id)).clone();
+        metadata.set_partition_expr(
+            partition_expr
+                .as_ref()
+                .map(|expr| expr.as_json_str().unwrap()),
+        );
+
         RegionManifest {
-            metadata: create_region_metadata(region_id),
+            metadata: Arc::new(metadata),
             files,
             removed_files: RemovedFilesRecord::default(),
             flushed_entry_id,
@@ -597,6 +685,97 @@ mod tests {
         for file_meta in result.new_manifests[&new_region_id_2].files.values() {
             assert_eq!(file_meta.region_id, old_region_id);
         }
+    }
+
+    #[test]
+    fn test_rejects_files_another_region_produced() {
+        // Both participants of the merge hold a file the whole-domain source created: merging
+        // them could publish a row of it twice once a holder materializes its own copy, and the
+        // refusal has to name every offending (region, file, creator).
+        let old_region_id_1 = RegionId::new(1, 1);
+        let old_region_id_2 = RegionId::new(1, 2);
+        let new_region_id = RegionId::new(1, 3);
+
+        let creator_expr = range_expr("x", 0, 100);
+        let mut old_manifests = HashMap::new();
+        let mut file_ids = Vec::new();
+        for old_region_id in [old_region_id_1, old_region_id_2] {
+            let own_expr = if old_region_id == old_region_id_1 {
+                range_expr("x", 0, 50)
+            } else {
+                range_expr("x", 50, 100)
+            };
+            let mut old_manifest = create_manifest(old_region_id, 1, Some(own_expr), 100, 200);
+            let file_id = *old_manifest.files.keys().next().unwrap();
+            old_manifest.files.insert(
+                file_id,
+                create_file_meta(old_region_id, file_id, Some(creator_expr.clone())).into(),
+            );
+            file_ids.push(file_id);
+            old_manifests.insert(old_region_id, old_manifest);
+        }
+
+        let mut new_partition_exprs = HashMap::new();
+        new_partition_exprs.insert(new_region_id, range_expr("x", 0, 100));
+
+        let mut region_mapping = HashMap::new();
+        region_mapping.insert(old_region_id_1, vec![new_region_id]);
+        region_mapping.insert(old_region_id_2, vec![new_region_id]);
+
+        let mut remapper = RemapManifest::new(old_manifests, new_partition_exprs, region_mapping);
+
+        let err = remapper.remap_manifests().unwrap_err();
+        assert!(
+            matches!(&err, Error::ForeignFilePartitionExpr { .. }),
+            "unexpected error: {err:?}"
+        );
+        let message = err.to_string();
+        for (region_id, file_id) in [
+            (old_region_id_1, file_ids[0]),
+            (old_region_id_2, file_ids[1]),
+        ] {
+            assert!(message.contains(&region_id.to_string()), "{message}");
+            assert!(message.contains(&file_id.to_string()), "{message}");
+        }
+        assert!(
+            message.contains(&creator_expr.as_json_str().unwrap()),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn test_split_is_exempt_from_the_foreign_file_rule() {
+        // A split hands both halves the file the whole-domain source created. No target
+        // combines file sets, so the split keeps working: the targets' own expressions narrow
+        // what each of them reads.
+        let old_region_id = RegionId::new(1, 1);
+        let new_region_id_1 = RegionId::new(1, 2);
+        let new_region_id_2 = RegionId::new(1, 3);
+
+        let source_expr = range_expr("x", 50, 100);
+        let mut old_manifest = create_manifest(old_region_id, 1, Some(source_expr), 100, 200);
+        let file_id = *old_manifest.files.keys().next().unwrap();
+        old_manifest.files.insert(
+            file_id,
+            // The file a whole-domain [0, 100) region created.
+            create_file_meta(old_region_id, file_id, Some(range_expr("x", 0, 100))).into(),
+        );
+
+        let mut old_manifests = HashMap::new();
+        old_manifests.insert(old_region_id, old_manifest);
+
+        let mut new_partition_exprs = HashMap::new();
+        new_partition_exprs.insert(new_region_id_1, range_expr("x", 0, 50));
+        new_partition_exprs.insert(new_region_id_2, range_expr("x", 50, 100));
+
+        let mut region_mapping = HashMap::new();
+        region_mapping.insert(old_region_id, vec![new_region_id_1, new_region_id_2]);
+
+        let mut remapper = RemapManifest::new(old_manifests, new_partition_exprs, region_mapping);
+
+        let result = remapper.remap_manifests().unwrap();
+        assert_eq!(result.new_manifests[&new_region_id_1].files.len(), 1);
+        assert_eq!(result.new_manifests[&new_region_id_2].files.len(), 1);
     }
 
     #[test]

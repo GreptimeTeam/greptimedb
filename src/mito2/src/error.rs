@@ -434,6 +434,18 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Cannot remap regions that hold files they did not create: {}",
+        offenders
+    ))]
+    ForeignFilePartitionExpr {
+        /// Every offending triple, one per entry: the holding region, the file, and the
+        /// partition expression of the region that created it.
+        offenders: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Files lost during remapping: old={}, new={}", old_count, new_count))]
     FilesLost {
         old_count: usize,
@@ -1802,6 +1814,7 @@ impl ErrorExt for Error {
             }
             FlushRegion { source, .. } | BuildIndexAsync { source, .. } => source.status_code(),
             IndexBuildIncomplete { .. } => StatusCode::IllegalState,
+            ForeignFilePartitionExpr { .. } => StatusCode::IllegalState,
             RegionDropped { .. } => StatusCode::Cancelled,
             RegionClosed { .. } => StatusCode::Cancelled,
             StaleCompactionExecution { .. } => StatusCode::Cancelled,
