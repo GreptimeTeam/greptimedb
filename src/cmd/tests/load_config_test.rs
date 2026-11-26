@@ -901,6 +901,46 @@ fn test_load_heartbeat_env_vars_from_env() {
 }
 
 #[test]
+fn test_load_remote_allowed_hosts_from_env() {
+    let env_prefix = "REMOTE_ALLOWED_HOSTS_UT";
+    let env_key = [env_prefix, "QUERY", "REMOTE_ALLOWED_HOSTS"].join(ENV_VAR_SEP);
+
+    temp_env::with_var(env_key, Some("minio.internal:9000,*.example.com"), || {
+        let expected = vec![
+            "minio.internal:9000".to_string(),
+            "*.example.com".to_string(),
+        ];
+
+        let datanode =
+            GreptimeOptions::<DatanodeOptions>::load_layered_options(None, env_prefix).unwrap();
+        similar_asserts::assert_eq!(datanode.component.query.remote_allowed_hosts, expected);
+
+        let frontend =
+            GreptimeOptions::<FrontendOptions>::load_layered_options(None, env_prefix).unwrap();
+        similar_asserts::assert_eq!(frontend.component.query.remote_allowed_hosts, expected);
+
+        let standalone =
+            GreptimeOptions::<StandaloneOptions>::load_layered_options(None, env_prefix).unwrap();
+        similar_asserts::assert_eq!(
+            standalone
+                .component
+                .frontend_options()
+                .query
+                .remote_allowed_hosts,
+            expected
+        );
+        similar_asserts::assert_eq!(
+            standalone
+                .component
+                .datanode_options()
+                .query
+                .remote_allowed_hosts,
+            expected
+        );
+    });
+}
+
+#[test]
 fn test_load_event_types_from_env() {
     let env_prefix = "EVENT_TYPES_UT";
     let env_key = [env_prefix, "EVENT_RECORDER", "EVENT_TYPES"].join(ENV_VAR_SEP);

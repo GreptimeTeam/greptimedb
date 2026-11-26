@@ -23,6 +23,7 @@ common-runtime.workspace = true
 common-telemetry.workspace = true
 derive_builder = { workspace = true, optional = true }
 hdfs-native = { workspace = true, optional = true }
+http.workspace = true
 humantime-serde.workspace = true
 opendal = { version = "0.59.4", features = [
     "layers-tracing",
@@ -40,6 +41,7 @@ reqwest.workspace = true
 serde.workspace = true
 snafu.workspace = true
 tokio.workspace = true
+url.workspace = true
 uuid = { workspace = true, optional = true }
 
 [dev-dependencies]

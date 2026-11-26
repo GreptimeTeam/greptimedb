@@ -16,6 +16,8 @@ pub mod azblob;
 pub mod fs;
 pub mod gcs;
 pub mod oss;
+#[cfg(test)]
+mod remote_tests;
 pub mod s3;
 
 use std::collections::HashMap;
@@ -24,10 +26,11 @@ use std::sync::Arc;
 
 use common_telemetry::debug;
 use lazy_static::lazy_static;
-use object_store::ObjectStore;
 use object_store::secure_fs::SecureFsRoot;
+use object_store::util::{with_instrument_layers, with_retry_layers};
+use object_store::{ObjectStore, ObjectStoreBuilder};
 use regex::Regex;
-use snafu::{OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use url::{ParseError, Url};
 
 use self::azblob::build_azblob_backend;
@@ -37,6 +40,8 @@ use self::s3::build_s3_backend;
 use crate::error::{self, Result};
 use crate::object_store::oss::build_oss_backend;
 use crate::util::find_dir_and_filename;
+
+pub use object_store::remote_access::RemoteStorageAccess;
 
 pub const FS_SCHEMA: &str = "FS";
 pub const FILE_SCHEMA: &str = "FILE";
@@ -377,12 +382,18 @@ pub async fn build_backend(
     url: &str,
     connection: &HashMap<String, String>,
     local_file_access: &LocalFileAccess,
+    remote_storage_access: &RemoteStorageAccess,
 ) -> Result<ObjectStore> {
-    Ok(
-        build_backend_inner(url, connection, local_file_access, false, false)
-            .await?
-            .object_store,
+    Ok(build_backend_inner(
+        url,
+        connection,
+        local_file_access,
+        remote_storage_access,
+        false,
+        false,
     )
+    .await?
+    .object_store)
 }
 
 /// Builds a backend and returns the target path relative to the backend root.
@@ -390,8 +401,17 @@ pub async fn build_backend_with_path(
     url: &str,
     connection: &HashMap<String, String>,
     local_file_access: &LocalFileAccess,
+    remote_storage_access: &RemoteStorageAccess,
 ) -> Result<BuiltBackend> {
-    build_backend_inner(url, connection, local_file_access, false, false).await
+    build_backend_inner(
+        url,
+        connection,
+        local_file_access,
+        remote_storage_access,
+        false,
+        false,
+    )
+    .await
 }
 
 /// Builds a backend for an operation that may create the target directory.
@@ -399,12 +419,18 @@ pub async fn build_backend_for_write(
     url: &str,
     connection: &HashMap<String, String>,
     local_file_access: &LocalFileAccess,
+    remote_storage_access: &RemoteStorageAccess,
 ) -> Result<ObjectStore> {
-    Ok(
-        build_backend_inner(url, connection, local_file_access, true, false)
-            .await?
-            .object_store,
+    Ok(build_backend_inner(
+        url,
+        connection,
+        local_file_access,
+        remote_storage_access,
+        true,
+        false,
     )
+    .await?
+    .object_store)
 }
 
 /// Builds a writable backend and returns the target path relative to the backend root.
@@ -412,14 +438,24 @@ pub async fn build_backend_for_write_with_path(
     url: &str,
     connection: &HashMap<String, String>,
     local_file_access: &LocalFileAccess,
+    remote_storage_access: &RemoteStorageAccess,
 ) -> Result<BuiltBackend> {
-    build_backend_inner(url, connection, local_file_access, true, true).await
+    build_backend_inner(
+        url,
+        connection,
+        local_file_access,
+        remote_storage_access,
+        true,
+        true,
+    )
+    .await
 }
 
 async fn build_backend_inner(
     url: &str,
     connection: &HashMap<String, String>,
     local_file_access: &LocalFileAccess,
+    remote_storage_access: &RemoteStorageAccess,
     create_local_root: bool,
     require_object_path: bool,
 ) -> Result<BuiltBackend> {
@@ -468,25 +504,25 @@ async fn build_backend_inner(
             let host = host.context(error::EmptyHostPathSnafu {
                 url: url.to_string(),
             })?;
-            build_s3_backend(&host, &root, connection)?
+            build_s3_backend(&host, &root, connection, remote_storage_access)?
         }
         OSS_SCHEMA => {
             let host = host.context(error::EmptyHostPathSnafu {
                 url: url.to_string(),
             })?;
-            build_oss_backend(&host, &root, connection)?
+            build_oss_backend(&host, &root, connection, remote_storage_access)?
         }
         GCS_SCHEMA => {
             let host = host.context(error::EmptyHostPathSnafu {
                 url: url.to_string(),
             })?;
-            build_gcs_backend(&host, &root, connection)?
+            build_gcs_backend(&host, &root, connection, remote_storage_access)?
         }
         AZBLOB_SCHEMA => {
             let host = host.context(error::EmptyHostPathSnafu {
                 url: url.to_string(),
             })?;
-            build_azblob_backend(&host, &root, connection)?
+            build_azblob_backend(&host, &root, connection, remote_storage_access)?
         }
         _ => error::UnsupportedBackendProtocolSnafu {
             protocol: schema,
@@ -499,6 +535,36 @@ async fn build_backend_inner(
         object_path,
         local_root: None,
     })
+}
+
+/// Returns a connection option, treating an empty value as unset like the backends do.
+fn connection_value<'a>(connection: &'a HashMap<String, String>, key: &str) -> Option<&'a str> {
+    connection
+        .get(key)
+        .map(String::as_str)
+        .filter(|value| !value.is_empty())
+}
+
+fn ensure_server_credentials_allowed(
+    remote_storage_access: &RemoteStorageAccess,
+    backend: &str,
+) -> Result<()> {
+    ensure!(
+        remote_storage_access.allow_server_credentials(),
+        error::ServerCredentialsDisallowedSnafu { backend }
+    );
+    Ok(())
+}
+
+fn finish_remote_backend(
+    builder: impl ObjectStoreBuilder,
+    remote_storage_access: &RemoteStorageAccess,
+) -> Result<ObjectStore> {
+    let object_store = ObjectStore::new(builder).context(error::BuildBackendSnafu)?;
+    Ok(with_instrument_layers(
+        with_retry_layers(remote_storage_access.apply(object_store)),
+        true,
+    ))
 }
 
 lazy_static! {
@@ -522,8 +588,8 @@ mod tests {
     use url::Url;
 
     use super::{
-        LocalFileAccess, build_backend, build_backend_for_write, build_backend_for_write_with_path,
-        build_backend_with_path, handle_windows_path,
+        LocalFileAccess, RemoteStorageAccess, build_backend, build_backend_for_write,
+        build_backend_for_write_with_path, build_backend_with_path, handle_windows_path,
     };
     use crate::error::Error;
 
@@ -600,8 +666,13 @@ mod tests {
                 Url::from_directory_path(dir.path()).unwrap()
             );
             for location in [relative, absolute, file_url] {
-                let result =
-                    build_backend_for_write_with_path(&location, &HashMap::new(), &access).await;
+                let result = build_backend_for_write_with_path(
+                    &location,
+                    &HashMap::new(),
+                    &access,
+                    &RemoteStorageAccess::unrestricted(),
+                )
+                .await;
                 assert!(
                     matches!(result, Err(Error::LocalFileAccessDenied { .. })),
                     "{location}"
@@ -646,9 +717,14 @@ mod tests {
         let access = LocalFileAccess::sandboxed(&copy_root).unwrap();
         let connection = HashMap::new();
 
-        let store = build_backend_for_write("nested/data.txt", &connection, &access)
-            .await
-            .unwrap();
+        let store = build_backend_for_write(
+            "nested/data.txt",
+            &connection,
+            &access,
+            &RemoteStorageAccess::unrestricted(),
+        )
+        .await
+        .unwrap();
         store.write("data.txt", "first").await.unwrap();
         store.write("data.txt", "second").await.unwrap();
         assert_eq!(
@@ -657,9 +733,14 @@ mod tests {
         );
 
         let missing = copy_root.join("missing/directory");
-        let error = build_backend("missing/directory/data.txt", &connection, &access)
-            .await
-            .unwrap_err();
+        let error = build_backend(
+            "missing/directory/data.txt",
+            &connection,
+            &access,
+            &RemoteStorageAccess::unrestricted(),
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(&error, Error::LocalFilePathNotFound { .. }));
         assert_eq!(error.status_code(), StatusCode::InvalidArguments);
         assert_eq!(error.retry_hint(), RetryHint::NonRetryable);
@@ -670,56 +751,105 @@ mod tests {
         assert!(!missing.exists());
 
         let absolute = copy_root.join("nested/data.txt");
-        let store = build_backend(absolute.to_str().unwrap(), &connection, &access)
-            .await
-            .unwrap();
+        let store = build_backend(
+            absolute.to_str().unwrap(),
+            &connection,
+            &access,
+            &RemoteStorageAccess::unrestricted(),
+        )
+        .await
+        .unwrap();
         assert_eq!(store.read("data.txt").await.unwrap().to_vec(), b"second");
 
         let file_url = Url::from_file_path(&absolute).unwrap().to_string();
-        let store = build_backend(&file_url, &connection, &access)
-            .await
-            .unwrap();
+        let store = build_backend(
+            &file_url,
+            &connection,
+            &access,
+            &RemoteStorageAccess::unrestricted(),
+        )
+        .await
+        .unwrap();
         assert_eq!(store.read("data.txt").await.unwrap().to_vec(), b"second");
 
         let internal_file = internal_dir.join("secret");
         assert!(matches!(
-            build_backend(internal_file.to_str().unwrap(), &connection, &access).await,
+            build_backend(
+                internal_file.to_str().unwrap(),
+                &connection,
+                &access,
+                &RemoteStorageAccess::unrestricted()
+            )
+            .await,
             Err(Error::LocalFileAccessDenied { .. })
         ));
         assert!(
-            build_backend("../escape/data.txt", &connection, &access)
-                .await
-                .is_err()
+            build_backend(
+                "../escape/data.txt",
+                &connection,
+                &access,
+                &RemoteStorageAccess::unrestricted()
+            )
+            .await
+            .is_err()
         );
 
         let outside = data_home.path().join("outside/new");
         assert!(
-            build_backend(outside.to_str().unwrap(), &connection, &access)
-                .await
-                .is_err()
+            build_backend(
+                outside.to_str().unwrap(),
+                &connection,
+                &access,
+                &RemoteStorageAccess::unrestricted()
+            )
+            .await
+            .is_err()
         );
         assert!(!outside.parent().unwrap().exists());
 
         let prefix_escape = data_home.path().join("copy-not-the-root/new");
         assert!(matches!(
-            build_backend(prefix_escape.to_str().unwrap(), &connection, &access).await,
+            build_backend(
+                prefix_escape.to_str().unwrap(),
+                &connection,
+                &access,
+                &RemoteStorageAccess::unrestricted()
+            )
+            .await,
             Err(Error::LocalFileAccessDenied { .. })
         ));
         assert!(!prefix_escape.parent().unwrap().exists());
 
         let disabled = LocalFileAccess::Disabled;
-        let error = build_backend(internal_file.to_str().unwrap(), &connection, &disabled)
-            .await
-            .unwrap_err();
+        let error = build_backend(
+            internal_file.to_str().unwrap(),
+            &connection,
+            &disabled,
+            &RemoteStorageAccess::unrestricted(),
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(&error, Error::LocalFileAccessDisabled { .. }));
         assert_eq!(error.status_code(), StatusCode::InvalidArguments);
         assert_eq!(error.retry_hint(), RetryHint::NonRetryable);
         assert!(matches!(
-            build_backend(&file_url, &connection, &disabled).await,
+            build_backend(
+                &file_url,
+                &connection,
+                &disabled,
+                &RemoteStorageAccess::unrestricted()
+            )
+            .await,
             Err(Error::LocalFileAccessDisabled { .. })
         ));
         assert!(matches!(
-            build_backend(outside.to_str().unwrap(), &connection, &disabled).await,
+            build_backend(
+                outside.to_str().unwrap(),
+                &connection,
+                &disabled,
+                &RemoteStorageAccess::unrestricted()
+            )
+            .await,
             Err(Error::LocalFileAccessDisabled { .. })
         ));
         assert!(!outside.parent().unwrap().exists());
@@ -736,9 +866,14 @@ mod tests {
         let location = Url::from_file_path(&file).unwrap().to_string();
         assert!(location.contains("%20"));
         let access = LocalFileAccess::sandboxed(&copy_root).unwrap();
-        let backend = build_backend_with_path(&location, &HashMap::new(), &access)
-            .await
-            .unwrap();
+        let backend = build_backend_with_path(
+            &location,
+            &HashMap::new(),
+            &access,
+            &RemoteStorageAccess::unrestricted(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(backend.object_path.as_deref(), Some("data file.txt"));
         assert_eq!(
@@ -760,7 +895,13 @@ mod tests {
         let location = Url::from_directory_path(&target).unwrap().to_string();
         let access = LocalFileAccess::sandboxed(&copy_root).unwrap();
 
-        let result = build_backend_for_write_with_path(&location, &HashMap::new(), &access).await;
+        let result = build_backend_for_write_with_path(
+            &location,
+            &HashMap::new(),
+            &access,
+            &RemoteStorageAccess::unrestricted(),
+        )
+        .await;
 
         assert!(matches!(result, Err(Error::MissingObjectName { .. })));
         assert!(!target.exists());
@@ -769,22 +910,32 @@ mod tests {
             &location,
             &HashMap::new(),
             &LocalFileAccess::Disabled,
+            &RemoteStorageAccess::unrestricted(),
         )
         .await;
         assert!(matches!(result, Err(Error::LocalFileAccessDisabled { .. })));
         assert!(!target.exists());
 
         let relative_target = copy_root.join("relative directory");
-        let result =
-            build_backend_for_write_with_path("relative directory/", &HashMap::new(), &access)
-                .await;
+        let result = build_backend_for_write_with_path(
+            "relative directory/",
+            &HashMap::new(),
+            &access,
+            &RemoteStorageAccess::unrestricted(),
+        )
+        .await;
         assert!(matches!(result, Err(Error::MissingObjectName { .. })));
         assert!(!relative_target.exists());
 
         let allowed_directory = copy_root.join("allowed directory");
-        build_backend_for_write("allowed directory/", &HashMap::new(), &access)
-            .await
-            .unwrap();
+        build_backend_for_write(
+            "allowed directory/",
+            &HashMap::new(),
+            &access,
+            &RemoteStorageAccess::unrestricted(),
+        )
+        .await
+        .unwrap();
         assert!(allowed_directory.is_dir());
     }
 
@@ -802,9 +953,14 @@ mod tests {
         let connection = HashMap::new();
         let file_location = file.to_str().unwrap();
         assert!(file_location.contains('\\'));
-        let backend = build_backend_with_path(file_location, &connection, &access)
-            .await
-            .unwrap();
+        let backend = build_backend_with_path(
+            file_location,
+            &connection,
+            &access,
+            &RemoteStorageAccess::unrestricted(),
+        )
+        .await
+        .unwrap();
         assert_eq!(backend.object_path.as_deref(), Some("data.txt"));
         assert_eq!(
             backend
@@ -819,7 +975,13 @@ mod tests {
         let new_directory = copy_root.join("new directory");
         let directory_location = format!("{}\\", new_directory.display());
         assert!(matches!(
-            build_backend_for_write_with_path(&directory_location, &connection, &access).await,
+            build_backend_for_write_with_path(
+                &directory_location,
+                &connection,
+                &access,
+                &RemoteStorageAccess::unrestricted()
+            )
+            .await,
             Err(Error::MissingObjectName { .. })
         ));
         assert!(!new_directory.exists());
@@ -869,6 +1031,7 @@ mod tests {
                 location,
                 &connection,
                 &LocalFileAccess::Disabled,
+                &RemoteStorageAccess::unrestricted(),
             )
             .await
             .unwrap();
@@ -894,20 +1057,35 @@ mod tests {
         let connection = HashMap::new();
 
         assert!(
-            build_backend("escape/secret", &connection, &access)
-                .await
-                .is_err()
+            build_backend(
+                "escape/secret",
+                &connection,
+                &access,
+                &RemoteStorageAccess::unrestricted()
+            )
+            .await
+            .is_err()
         );
         assert!(
-            build_backend_for_write("escape/new", &connection, &access)
-                .await
-                .is_err()
+            build_backend_for_write(
+                "escape/new",
+                &connection,
+                &access,
+                &RemoteStorageAccess::unrestricted()
+            )
+            .await
+            .is_err()
         );
         assert!(!outside.join("new").exists());
 
-        let store = build_backend("secret-link", &connection, &access)
-            .await
-            .unwrap();
+        let store = build_backend(
+            "secret-link",
+            &connection,
+            &access,
+            &RemoteStorageAccess::unrestricted(),
+        )
+        .await
+        .unwrap();
         assert!(store.read("secret-link").await.is_err());
         assert!(store.write("secret-link", "overwritten").await.is_err());
         assert_eq!(

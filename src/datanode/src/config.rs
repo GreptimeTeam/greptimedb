@@ -180,6 +180,7 @@ impl Configurable for DatanodeOptions {
             "heartbeat_env_vars",
             "meta_client.metasrv_addrs",
             "wal.broker_endpoints",
+            "query.remote_allowed_hosts",
         ])
     }
 
