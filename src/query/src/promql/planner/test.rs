@@ -5559,7 +5559,12 @@ async fn a_pair_of_histogram_metrics_runs_natively() {
         let display = plan.display_indent().to_string();
         assert_eq!(None, take_reported_decline(), "{query}: {display}");
         let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {display}"));
-        let NativeExpr::Binary { matching, .. } = &fused.tree().root().expr else {
+        let NativeExpr::Binary {
+            left,
+            right,
+            matching,
+        } = &fused.tree().root().expr
+        else {
             panic!("expected Binary for {query}: {display}");
         };
         assert_eq!(
@@ -5568,6 +5573,23 @@ async fn a_pair_of_histogram_metrics_runs_natively() {
             "{query}: {display}"
         );
         assert!(!display.contains("Join:"), "{display}");
+        // The composed route also roots a Binary, but over bare `Input`s reading one evaluated
+        // frame per operand; this route selects each operand itself, straight from its raw source.
+        for side in [left, right] {
+            assert!(
+                matches!(&side.expr, NativeExpr::Instant { input, .. }
+                    if matches!(input.expr, NativeExpr::Input(_))),
+                "{query}: {display}"
+            );
+        }
+        assert_eq!(2, fused.inputs().len(), "{query}: {display}");
+        for input in fused.inputs() {
+            assert!(
+                matches!(input, LogicalPlan::Extension(extension)
+                    if extension.node.as_any().is::<RawSeriesSource>()),
+                "{query}: {display}"
+            );
+        }
         let expression = parser::parse(query).unwrap().to_string();
         let fields = plan.schema().fields();
         let field = fields
