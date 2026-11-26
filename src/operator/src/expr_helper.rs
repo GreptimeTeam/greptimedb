@@ -265,9 +265,11 @@ fn build_relational_expr(
             if is_synthetic_time_index {
                 continue;
             }
-            let remote_type = remote_types.get(column.name.as_str()).context(InvalidSqlSnafu {
-                err_msg: format!("column `{}` is not found in the remote table", column.name),
-            })?;
+            let remote_type = remote_types
+                .get(column.name.as_str())
+                .context(InvalidSqlSnafu {
+                    err_msg: format!("column `{}` is not found in the remote table", column.name),
+                })?;
             ensure!(
                 &column.data_type == remote_type,
                 InvalidSqlSnafu {

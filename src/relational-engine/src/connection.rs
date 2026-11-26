@@ -27,9 +27,7 @@ use common_error::status_code::StatusCode;
 use snafu::{ResultExt, ensure};
 use table::requests::redact_connection;
 
-use crate::error::{
-    ConnectRemoteSnafu, InvalidRemoteTableSnafu, MissingRemoteSchemaSnafu, Result,
-};
+use crate::error::{ConnectRemoteSnafu, InvalidRemoteTableSnafu, MissingRemoteSchemaSnafu, Result};
 
 /// Connect + handshake timeout for the scan; a silently dropping host would
 /// otherwise hang the query until the OS timeout.
@@ -174,10 +172,12 @@ pub(crate) fn build_select_sql(
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .or_else(|| opts.db_name().map(str::to_string))
-        .ok_or_else(|| MissingRemoteSchemaSnafu {
-            remote_table: remote_table.to_string(),
-        }
-        .build())?;
+        .ok_or_else(|| {
+            MissingRemoteSchemaSnafu {
+                remote_table: remote_table.to_string(),
+            }
+            .build()
+        })?;
 
     // When the projection references no real remote column (e.g. only the
     // synthetic time index, or an empty `COUNT(*)` projection), still fetch one
@@ -230,5 +230,28 @@ mod tests {
         .unwrap();
         assert_eq!(opts.socket(), Some("/tmp/mysql.sock"));
         assert!(opts.resolved_ips().is_none());
+    }
+
+    #[test]
+    fn test_build_select_sql_empty_projection() {
+        let opts = mysql_async::Opts::from_url("mysql://user:pw@host:3306/mydb").unwrap();
+        let sql = build_select_sql("remote_table", &opts, &[]).unwrap();
+        assert_eq!(sql, "SELECT 1 FROM `mydb`.`remote_table`");
+    }
+
+    #[test]
+    fn test_build_select_sql_quotes_reserved_and_backtick() {
+        let opts = mysql_async::Opts::from_url("mysql://user:pw@host:3306/mydb").unwrap();
+        let cols = vec!["from".to_string(), "a`b".to_string()];
+        let sql = build_select_sql("select", &opts, &cols).unwrap();
+        assert_eq!(sql, "SELECT `from`, `a``b` FROM `mydb`.`select`");
+    }
+
+    #[test]
+    fn test_build_select_sql_schema_qualified() {
+        let opts = mysql_async::Opts::from_url("mysql://user:pw@host:3306/mydb").unwrap();
+        let cols = vec!["col".to_string()];
+        let sql = build_select_sql("schema.table", &opts, &cols).unwrap();
+        assert_eq!(sql, "SELECT `col` FROM `schema`.`table`");
     }
 }

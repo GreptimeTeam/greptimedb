@@ -25,7 +25,7 @@ use store_api::storage::ScanRequest;
 
 use crate::connection;
 use crate::error::{
-    MissingRemoteColumnsSnafu, ProjectionOutOfBoundsSnafu, ProjectSchemaSnafu, Result,
+    MissingRemoteColumnsSnafu, ProjectSchemaSnafu, ProjectionOutOfBoundsSnafu, Result,
 };
 use crate::mysql_stream;
 use crate::region::RelationalRegion;
@@ -65,10 +65,7 @@ impl RelationalRegion {
         // empty list. The frozen remote column list is the only unambiguous way
         // to tell a real remote column from a synthetic one, so fail fast
         // rather than fall back to a name heuristic.
-        ensure!(
-            !options.columns.is_empty(),
-            MissingRemoteColumnsSnafu
-        );
+        ensure!(!options.columns.is_empty(), MissingRemoteColumnsSnafu);
 
         // Eagerly parse the DSN and resolve the host, so a bad connection
         // surfaces here rather than as a first-batch stream error.

@@ -89,7 +89,10 @@ impl RegionEngine for RelationalEngine {
             .await
             .context(RegionNotFoundSnafu { region_id })
             .map_err(BoxedError::new)?;
-        let plan = region.prepare_scan(request).await.map_err(BoxedError::new)?;
+        let plan = region
+            .prepare_scan(request)
+            .await
+            .map_err(BoxedError::new)?;
         Ok(Box::new(RelationalScanner::new(plan, region.metadata())))
     }
 

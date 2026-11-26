@@ -126,7 +126,9 @@ impl RelationalRegion {
         let encoded = self
             .options
             .get(RELATIONAL_META_KEY)
-            .context(MissingRequiredFieldSnafu { name: RELATIONAL_META_KEY })?;
+            .context(MissingRequiredFieldSnafu {
+                name: RELATIONAL_META_KEY,
+            })?;
         serde_json::from_str(encoded).context(DecodeJsonSnafu)
     }
 

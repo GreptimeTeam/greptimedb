@@ -19,8 +19,8 @@
 
 use common_decimal::Decimal128;
 use datatypes::prelude::{ConcreteDataType, DataType, LogicalTypeId, Value};
-use mysql_async::consts::{ColumnFlags, ColumnType};
 use mysql_async::Value as MySqlValue;
+use mysql_async::consts::{ColumnFlags, ColumnType};
 
 use crate::error::{DecodeRowSnafu, Result};
 
@@ -31,8 +31,8 @@ pub(crate) fn decode_value(
     column: &str,
 ) -> Result<Value> {
     use ConcreteDataType::{
-        Binary, Date, Decimal128, Float32, Float64, Int16, Int32, Int64, Int8, Json, String,
-        Timestamp, UInt16, UInt32, UInt64, UInt8,
+        Binary, Date, Decimal128, Float32, Float64, Int8, Int16, Int32, Int64, Json, String,
+        Timestamp, UInt8, UInt16, UInt32, UInt64,
     };
 
     match data_type {
@@ -44,8 +44,12 @@ pub(crate) fn decode_value(
             .map(|v| Value::Int32(v as i32)),
         Int64(_) => as_i64(value, column).map(Value::Int64),
         UInt8(_) => decode_unsigned(value, column, u8::MAX as u64).map(|v| Value::UInt8(v as u8)),
-        UInt16(_) => decode_unsigned(value, column, u16::MAX as u64).map(|v| Value::UInt16(v as u16)),
-        UInt32(_) => decode_unsigned(value, column, u32::MAX as u64).map(|v| Value::UInt32(v as u32)),
+        UInt16(_) => {
+            decode_unsigned(value, column, u16::MAX as u64).map(|v| Value::UInt16(v as u16))
+        }
+        UInt32(_) => {
+            decode_unsigned(value, column, u32::MAX as u64).map(|v| Value::UInt32(v as u32))
+        }
         UInt64(_) => as_u64(value, column).map(Value::UInt64),
         Float32(_) => decode_f32(value, column).map(Value::from),
         Float64(_) => decode_f64(value, column).map(Value::from),
@@ -80,8 +84,9 @@ pub(crate) fn decode_value(
             let bytes = as_bytes(value, column)?;
             let text = std::str::from_utf8(bytes)
                 .map_err(|_| decode_err(column, "invalid UTF-8 in json column"))?;
-            let jsonb = datatypes::types::parse_string_to_jsonb(text)
-                .map_err(|_| decode_err(column, format!("invalid json `{}`", truncate(text, 64))))?;
+            let jsonb = datatypes::types::parse_string_to_jsonb(text).map_err(|_| {
+                decode_err(column, format!("invalid json `{}`", truncate(text, 64)))
+            })?;
             Ok(Value::from(jsonb))
         }
         // Every other frozen type (boolean, time, duration, interval, list,
@@ -161,7 +166,9 @@ pub(crate) fn validate_column(
     } else {
         Err(decode_err(
             name,
-            format!("remote column type {column_type:?} does not match the frozen type {data_type}"),
+            format!(
+                "remote column type {column_type:?} does not match the frozen type {data_type}"
+            ),
         ))
     }
 }
@@ -311,8 +318,8 @@ fn timestamp_string(value: &MySqlValue, column: &str) -> Result<String> {
 /// column's frozen precision and scale, rescaling the parsed value.
 fn decode_decimal(value: &MySqlValue, column: &str, precision: u8, scale: i8) -> Result<Value> {
     let bytes = as_bytes(value, column)?;
-    let s = std::str::from_utf8(bytes)
-        .map_err(|_| decode_err(column, "invalid UTF-8 in decimal"))?;
+    let s =
+        std::str::from_utf8(bytes).map_err(|_| decode_err(column, "invalid UTF-8 in decimal"))?;
     let s = s.trim();
 
     let (coefficient, parsed_scale) = parse_decimal_str(s, column)?;
@@ -338,7 +345,9 @@ fn decode_decimal(value: &MySqlValue, column: &str, precision: u8, scale: i8) ->
         ));
     }
 
-    Ok(Value::Decimal128(Decimal128::new(rescaled, precision, scale)))
+    Ok(Value::Decimal128(Decimal128::new(
+        rescaled, precision, scale,
+    )))
 }
 
 /// Parses a decimal string into its coefficient and scale without relying on
@@ -368,10 +377,91 @@ fn parse_decimal_str(s: &str, column: &str) -> Result<(i128, i32)> {
     if combined.is_empty() {
         combined = "0".to_string();
     }
-    let mut coefficient = if negative { String::from("-") } else { String::new() };
+    let mut coefficient = if negative {
+        String::from("-")
+    } else {
+        String::new()
+    };
     coefficient.push_str(&combined);
     let value: i128 = coefficient
         .parse()
         .map_err(|_| decode_err(column, format!("decimal `{s}` overflows")))?;
     Ok((value, scale))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datatypes::prelude::ConcreteDataType;
+    use mysql_async::Value as MySqlValue;
+
+    #[test]
+    fn test_decode_decimal_high_scale() {
+        // A legal 10^-30 must decode with the frozen (30, 30) type instead of
+        // being rejected because its coefficient has fewer digits than scale.
+        let dt = ConcreteDataType::decimal128_datatype(30, 30);
+        let v = MySqlValue::Bytes(b"0.000000000000000000000000000001".to_vec());
+        assert!(decode_value(&v, &dt, "c").is_ok());
+    }
+
+    #[test]
+    fn test_decode_decimal_scale_down_rejected() {
+        // More fractional digits than the column scale must be rejected rather
+        // than silently truncated.
+        let dt = ConcreteDataType::decimal128_datatype(4, 2);
+        let v = MySqlValue::Bytes(b"1.239".to_vec());
+        assert!(decode_value(&v, &dt, "c").is_err());
+    }
+
+    #[test]
+    fn test_decode_decimal_overflow() {
+        // 100.00 rescales to a coefficient of 10000, which is >= 10^4.
+        let dt = ConcreteDataType::decimal128_datatype(4, 2);
+        let v = MySqlValue::Bytes(b"100.00".to_vec());
+        assert!(decode_value(&v, &dt, "c").is_err());
+    }
+
+    #[test]
+    fn test_decode_decimal_negative() {
+        let dt = ConcreteDataType::decimal128_datatype(5, 2);
+        let v = MySqlValue::Bytes(b"-123.45".to_vec());
+        assert!(decode_value(&v, &dt, "c").is_ok());
+    }
+
+    #[test]
+    fn test_decode_int_rejects_text() {
+        // A remote column that drifted to text must not be parsed as an integer.
+        let dt = ConcreteDataType::int64_datatype();
+        let v = MySqlValue::Bytes(b"123".to_vec());
+        assert!(decode_value(&v, &dt, "c").is_err());
+    }
+
+    #[test]
+    fn test_decode_float_rejects_double() {
+        let dt = ConcreteDataType::float32_datatype();
+        let v = MySqlValue::Double(1.5);
+        assert!(decode_value(&v, &dt, "c").is_err());
+    }
+
+    #[test]
+    fn test_decode_float_accepts_float() {
+        let dt = ConcreteDataType::float32_datatype();
+        let v = MySqlValue::Float(1.5);
+        assert!(decode_value(&v, &dt, "c").is_ok());
+    }
+
+    #[test]
+    fn test_truncate() {
+        assert_eq!(truncate("abc", 10), "abc");
+        assert_eq!(truncate("abcdef", 3), "abc…");
+    }
+
+    #[test]
+    fn test_value_debug_is_bounded() {
+        // mysql_common renders `Bytes` with only the first 8 bytes plus a `..`
+        // suffix, so a large value already yields a short `Debug`; the 64-char
+        // cap in `value_debug` is a defensive backstop.
+        let v = MySqlValue::Bytes(vec![b'x'; 1000]);
+        assert!(value_debug(&v).chars().count() <= 64);
+    }
 }

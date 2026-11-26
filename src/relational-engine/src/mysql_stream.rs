@@ -29,7 +29,7 @@ use mysql_async::prelude::Queryable;
 use snafu::{GenerateImplicitData, Location, ResultExt};
 use tokio::sync::mpsc;
 
-use crate::connection::{box_foreign_error, box_timeout_error, CONNECT_TIMEOUT, QUERY_TIMEOUT};
+use crate::connection::{CONNECT_TIMEOUT, QUERY_TIMEOUT, box_foreign_error, box_timeout_error};
 use crate::convert;
 use crate::error::{DecodeRowSnafu, Error};
 
@@ -140,10 +140,7 @@ async fn stream_task(
         }
     };
 
-    if let Err(e) = conn
-        .exec_drop("SET SESSION time_zone = '+00:00'", ())
-        .await
-    {
+    if let Err(e) = conn.exec_drop("SET SESSION time_zone = '+00:00'", ()).await {
         let _ = tx
             .send(Err(external(Error::FetchRows {
                 remote_table: remote_table.clone(),
@@ -157,34 +154,35 @@ async fn stream_task(
 
     // `QueryResult` borrows `conn`; its inherent `next()` yields
     // `Result<Option<Row>>` (no `StreamExt` / pinning needed).
-    let mut result = match tokio::time::timeout(QUERY_TIMEOUT, conn.exec_iter(sql.as_str(), ())).await
-    {
-        Ok(Ok(result)) => result,
-        Ok(Err(e)) => {
-            let _ = tx
-                .send(Err(external(Error::FetchRows {
-                    remote_table: remote_table.clone(),
-                    source: box_foreign_error(e, &connection),
-                    location: Location::generate(),
-                })))
-                .await;
-            let _ = conn.disconnect().await;
-            return;
-        }
-        Err(_) => {
-            let _ = tx
-                .send(Err(external(Error::FetchRows {
-                    remote_table: remote_table.clone(),
-                    source: box_timeout_error("querying the remote database", QUERY_TIMEOUT),
-                    location: Location::generate(),
-                })))
-                .await;
-            let _ = conn.disconnect().await;
-            return;
-        }
-    };
+    let mut result =
+        match tokio::time::timeout(QUERY_TIMEOUT, conn.exec_iter(sql.as_str(), ())).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(e)) => {
+                let _ = tx
+                    .send(Err(external(Error::FetchRows {
+                        remote_table: remote_table.clone(),
+                        source: box_foreign_error(e, &connection),
+                        location: Location::generate(),
+                    })))
+                    .await;
+                let _ = conn.disconnect().await;
+                return;
+            }
+            Err(_) => {
+                let _ = tx
+                    .send(Err(external(Error::FetchRows {
+                        remote_table: remote_table.clone(),
+                        source: box_timeout_error("querying the remote database", QUERY_TIMEOUT),
+                        location: Location::generate(),
+                    })))
+                    .await;
+                let _ = conn.disconnect().await;
+                return;
+            }
+        };
 
-    let validation = validate_remote_columns(result.columns_ref(), &column_schemas, &scan_to_remote);
+    let validation =
+        validate_remote_columns(result.columns_ref(), &column_schemas, &scan_to_remote);
     if let Err(e) = validation {
         let _ = tx.send(Err(external(e))).await;
         drop(result);
@@ -326,19 +324,20 @@ impl BatchBuilder {
                     vector.push_null();
                 }
                 Some(value) => {
-                    let decoded = convert::decode_value(value, &column_schema.data_type, &column_schema.name)
-                        .map_err(external)?;
+                    let decoded =
+                        convert::decode_value(value, &column_schema.data_type, &column_schema.name)
+                            .map_err(external)?;
                     self.num_bytes += estimated_size(&column_schema.data_type, Some(&decoded));
                     let value_ref = decoded.as_value_ref();
-                    vector
-                        .try_push_value_ref(&value_ref)
-                        .map_err(|e| {
-                            external(DecodeRowSnafu {
+                    vector.try_push_value_ref(&value_ref).map_err(|e| {
+                        external(
+                            DecodeRowSnafu {
                                 column: column_schema.name.clone(),
                                 reason: e.to_string(),
                             }
-                            .build())
-                        })?;
+                            .build(),
+                        )
+                    })?;
                 }
             }
         }
@@ -414,8 +413,8 @@ fn estimated_size(data_type: &ConcreteDataType, value: Option<&Value>) -> usize 
 
 fn fixed_width(data_type: &ConcreteDataType) -> Option<usize> {
     use ConcreteDataType::{
-        Boolean, Date, Decimal128, Float32, Float64, Int16, Int32, Int64, Int8, Timestamp, UInt16,
-        UInt32, UInt64, UInt8,
+        Boolean, Date, Decimal128, Float32, Float64, Int8, Int16, Int32, Int64, Timestamp, UInt8,
+        UInt16, UInt32, UInt64,
     };
     match data_type {
         Boolean(_) | Int8(_) | UInt8(_) => Some(1),
@@ -424,5 +423,23 @@ fn fixed_width(data_type: &ConcreteDataType) -> Option<usize> {
         Int64(_) | UInt64(_) | Float64(_) | Timestamp(_) => Some(8),
         Decimal128(_) => Some(16),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datatypes::prelude::ConcreteDataType;
+
+    #[test]
+    fn test_fixed_width() {
+        assert_eq!(fixed_width(&ConcreteDataType::boolean_datatype()), Some(1));
+        assert_eq!(fixed_width(&ConcreteDataType::int32_datatype()), Some(4));
+        assert_eq!(fixed_width(&ConcreteDataType::int64_datatype()), Some(8));
+        assert_eq!(
+            fixed_width(&ConcreteDataType::decimal128_datatype(10, 2)),
+            Some(16)
+        );
+        assert_eq!(fixed_width(&ConcreteDataType::string_datatype()), None);
     }
 }
