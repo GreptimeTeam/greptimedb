@@ -28,17 +28,21 @@ use datafusion_expr::{Expr, Operator};
 use datatypes::data_type::DataType;
 use datatypes::value::Value;
 use futures::future::BoxFuture;
-use futures::{FutureExt, StreamExt};
+use futures::{FutureExt, StreamExt, TryStreamExt};
 use mito_codec::row_converter::{PrimaryKeyCodec, build_primary_key_codec};
-use parquet::file::metadata::ParquetMetaData;
+use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
-use store_api::storage::ScanRequest;
+use store_api::storage::{ColumnId, ScanRequest};
 
+use crate::cache::CachedSstMeta;
 use crate::read::scan_region::aggr::overlap::{Extent, find_overlaps};
 use crate::read::scan_region::{ScanInput, request_preserves_rows};
 use crate::sst::file::FileHandle;
-use crate::sst::parquet::metadata::{DEDUPED_SST_KEY, has_only_puts};
+use crate::sst::parquet::metadata::{
+    DEDUPED_SST_KEY, extract_primary_key_range, extract_time_range, has_only_puts,
+};
+use crate::sst::version::SstVersion;
 
 /// What the manifest and SST statistics prove about the row count of a
 /// hinted scalar COUNT scan.
@@ -64,6 +68,7 @@ pub(crate) struct StatisticsSplitPlan {
 pub(crate) async fn prepare(
     input: &ScanInput,
     request: &ScanRequest,
+    ssts: &SstVersion,
     allow_partial: bool,
 ) -> Option<MetadataAggr> {
     if !allow_partial && !input.memtables.is_empty() {
@@ -73,18 +78,52 @@ pub(crate) async fn prepare(
     if !allow_partial && !classification.remaining.is_empty() {
         return None;
     }
-    let evidence = read_file_evidence(input, &classification).await;
-    resolve(input, classification, &evidence, allow_partial)
+    if classification.exact.is_empty()
+        && (!classification.remaining.is_empty() || !input.memtables.is_empty())
+    {
+        return None;
+    }
+    if input.append_mode && request.filters.is_empty() {
+        return resolve(input, classification, allow_partial);
+    }
+    verify_pruned_times(input, ssts).await?;
+    let mut classification = classification;
+    let check_overlap = !input.append_mode
+        && !classification.exact.is_empty()
+        && classification.exact.len() + classification.remaining.len() > 1;
+    let check_keys = classification.key_filter || check_overlap;
+    let mut files: Vec<_> = classification
+        .exact
+        .iter()
+        .map(|&index| (index, check_keys, !input.append_mode))
+        .collect();
+    if check_overlap {
+        // A stale residual bound could hide an overlap with an exact file.
+        files.extend(
+            classification
+                .remaining
+                .iter()
+                .map(|&index| (index, true, false)),
+        );
+    }
+    let reads = futures::stream::iter(files)
+        .map(|(index, keys, rows)| file_evidence(input, input.files[index].clone(), keys, rows));
+    let mut proven: Vec<_> = reads
+        .buffered(input.max_concurrent_scan_files.max(1))
+        .try_collect()
+        .await
+        .ok()?;
+    proven.truncate(classification.exact.len());
+    classification.retain_exact(input, &proven);
+    resolve(input, classification, allow_partial)
 }
 
 /// Applies the footer evidence of the exact candidates.
 fn resolve(
     input: &ScanInput,
-    mut classification: Classification,
-    evidence: &[bool],
+    classification: Classification,
     allow_partial: bool,
 ) -> Option<MetadataAggr> {
-    classification.retain_exact(input, evidence);
     if classification.remaining.is_empty() && input.memtables.is_empty() {
         return Some(MetadataAggr::Exact(classification.exact_rows));
     }
@@ -101,40 +140,66 @@ fn resolve(
     }))
 }
 
-/// Returns whether each candidate yields all of its physical rows once.
-async fn read_file_evidence(input: &ScanInput, classification: &Classification) -> Vec<bool> {
-    if input.append_mode {
-        return vec![true; classification.exact.len()];
-    }
-    // The stream owns its inputs and creates readers only as buffer slots
-    // become available.
-    let files: Vec<_> = classification
-        .exact
-        .iter()
-        .map(|&index| input.files[index].clone())
-        .collect();
-    let access_layer = input.access_layer.clone();
-    let cache = input.cache_strategy.clone();
-    let reads = futures::stream::iter(files).map(move |file| -> BoxFuture<'static, bool> {
-        let reader = access_layer.read_sst(file.clone()).cache(cache.clone());
-        async move {
-            match reader.read_statistics().await {
-                Ok(metadata) => footer_proves_visible_rows(&metadata, file.num_rows()),
-                Err(e) => {
-                    debug!(
-                        "Metadata count falls back to scanning file {}: {e:?}",
-                        file.file_id()
-                    );
-                    false
-                }
-            }
+/// Older offline replacements could retain stale manifest bounds. Never open an
+/// excluded SST for COUNT: a cold or inconsistent footer leaves the scan in place.
+async fn verify_pruned_times(input: &ScanInput, ssts: &SstVersion) -> Option<()> {
+    let time_id = input.region_metadata().time_index_column().column_id;
+    for id in &input.time_pruned_files {
+        let file = ssts.levels().iter().find_map(|level| level.files.get(id))?;
+        let sst = input
+            .cache_strategy
+            .get_sst_meta_data_from_mem_cache(file.file_id(), PageIndexPolicy::Skip)
+            .await?;
+        if !time_bounds_match(file, &sst, time_id) {
+            return None;
         }
-        .boxed()
-    });
-    reads
-        .buffered(input.max_concurrent_scan_files.max(1))
-        .collect()
-        .await
+    }
+    Some(())
+}
+
+fn time_bounds_match(file: &FileHandle, sst: &CachedSstMeta, time_id: ColumnId) -> bool {
+    let region = sst.region_metadata();
+    let time_index = region.time_index_column();
+    let (start, end) = file.time_range();
+    time_index.column_id == time_id
+        && extract_time_range(&sst.parquet_metadata(), time_index).is_some_and(|(min, max)| {
+            start.unit() == min.unit() && end.unit() == max.unit() && (start, end) == (min, max)
+        })
+}
+
+/// A bounds mismatch invalidates the classification. An unproven row count
+/// can still be left to the residual scan when partial counts are supported.
+fn file_evidence(
+    input: &ScanInput,
+    file: FileHandle,
+    check_keys: bool,
+    check_rows: bool,
+) -> BoxFuture<'static, Result<bool, ()>> {
+    let time_id = input.region_metadata().time_index_column().column_id;
+    let reader = input
+        .access_layer
+        .read_sst(file.clone())
+        .cache(input.cache_strategy.clone());
+    async move {
+        let sst = reader.read_statistics().await.map_err(|e| {
+            debug!(
+                "Metadata count could not read footer of {}: {e:?}",
+                file.file_id()
+            );
+        })?;
+        let metadata = sst.parquet_metadata();
+        if !time_bounds_match(&file, &sst, time_id) {
+            return Err(());
+        }
+        if check_keys
+            && let Some(range) = file.raw_primary_key_range()
+            && extract_primary_key_range(&metadata, &sst.region_metadata()) != Some(range)
+        {
+            return Err(());
+        }
+        Ok(!check_rows || footer_proves_visible_rows(&metadata, file.num_rows()))
+    }
+    .boxed()
 }
 
 /// The footer and manifest must agree. Without the writer's uniqueness claim,
@@ -165,6 +230,8 @@ struct Classification {
     remaining: Vec<usize>,
     /// Sum of the manifest row counts of `exact`.
     exact_rows: usize,
+    /// Whether the filter proof depends on key bounds.
+    key_filter: bool,
 }
 
 impl Classification {
@@ -238,6 +305,7 @@ fn classify(
         exact: Vec::new(),
         remaining: Vec::new(),
         exact_rows: 0,
+        key_filter: filters.codec.is_some(),
     };
     for (position, (index, candidate)) in intersecting.into_iter().enumerate() {
         let file = &input.files[index];
@@ -505,9 +573,10 @@ mod tests {
 
     /// [`prepare`] with the test's footer evidence.
     fn counted(input: &ScanInput, request: &ScanRequest) -> Option<MetadataAggr> {
-        let classification = classify(input, request, true)?;
+        let mut classification = classify(input, request, true)?;
         let no_deletes = evidence(input, &classification);
-        resolve(input, classification, &no_deletes, true)
+        classification.retain_exact(input, &no_deletes);
+        resolve(input, classification, true)
     }
 
     fn exact_count(input: &ScanInput, request: &ScanRequest) -> Option<usize> {

@@ -128,7 +128,7 @@ common-version.workspace = true
 datanode = { workspace = true, features = ["testing"] }
 file-engine.workspace = true
 metric-engine.workspace = true
-mito2.workspace = true
+mito2 = { workspace = true, features = ["test"] }
 serde.workspace = true
 similar-asserts.workspace = true
 temp-env = "0.3"

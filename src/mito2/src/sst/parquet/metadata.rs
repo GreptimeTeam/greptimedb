@@ -17,11 +17,15 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use api::v1::OpType;
 use bytes::Bytes;
+use common_time::Timestamp;
+use common_time::timestamp::TimeUnit;
+use datatypes::arrow::datatypes::DataType;
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use object_store::ObjectStore;
 use parquet::arrow::async_reader::MetadataFetch;
-use parquet::basic::{ConvertedType, LogicalType, Type};
+use parquet::arrow::parquet_to_arrow_schema;
+use parquet::basic::{ConvertedType, LogicalType, TimeUnit as ParquetTimeUnit, Type};
 use parquet::errors::{ParquetError, Result as ParquetResult};
 use parquet::file::metadata::{
     KeyValue, PageIndexPolicy, ParquetMetaData, ParquetMetaDataReader, RowGroupMetaData,
@@ -29,11 +33,12 @@ use parquet::file::metadata::{
 use parquet::file::statistics::Statistics;
 use parquet::schema::types::SchemaDescriptor;
 use snafu::{IntoError as _, ResultExt};
-use store_api::metadata::RegionMetadata;
+use store_api::metadata::{ColumnMetadata, RegionMetadata};
 use store_api::storage::consts::{OP_TYPE_COLUMN_NAME, PRIMARY_KEY_COLUMN_NAME};
 
 use crate::error::{self, Result};
 use crate::region::options::MergeMode;
+use crate::sst::file::FileTimeRange;
 use crate::sst::parquet::reader::MetadataCacheMetrics;
 
 /// Presence certifies at most one physical row per (primary key, timestamp).
@@ -193,7 +198,8 @@ pub(crate) fn deduped_sst_marker(
     deduped.then(|| KeyValue::new(DEDUPED_SST_KEY.to_owned(), None))
 }
 
-pub(crate) fn extract_primary_key_range(
+/// Returns complete encoded primary-key endpoints, if all row groups provide them.
+pub fn extract_primary_key_range(
     parquet_meta: &ParquetMetaData,
     region_metadata: &RegionMetadata,
 ) -> Option<(Bytes, Bytes)> {
@@ -229,6 +235,60 @@ pub(crate) fn extract_primary_key_range(
     }
 
     min.zip(max)
+}
+
+/// Returns exact time-index bounds with the unit stored in this SST.
+pub fn extract_time_range(
+    parquet_meta: &ParquetMetaData,
+    time_index: &ColumnMetadata,
+) -> Option<FileTimeRange> {
+    let name = &time_index.column_schema.name;
+    let file = parquet_meta.file_metadata();
+    let index = top_level_leaf_index(file.schema_descr(), name, Type::INT64)?;
+    let column = file.schema_descr().column(index);
+    let unit = match (column.logical_type_ref(), column.converted_type()) {
+        (Some(LogicalType::Timestamp(timestamp)), _) => match timestamp.unit {
+            ParquetTimeUnit::MILLIS => TimeUnit::Millisecond,
+            ParquetTimeUnit::MICROS => TimeUnit::Microsecond,
+            ParquetTimeUnit::NANOS => TimeUnit::Nanosecond,
+        },
+        (None, ConvertedType::TIMESTAMP_MILLIS) => TimeUnit::Millisecond,
+        (None, ConvertedType::TIMESTAMP_MICROS) => TimeUnit::Microsecond,
+        (None, ConvertedType::NONE) => {
+            // Parquet has no timestamp annotation for seconds. Arrow stores
+            // the type in its schema metadata and leaves the INT64 unannotated.
+            let schema =
+                parquet_to_arrow_schema(file.schema_descr(), file.key_value_metadata()).ok()?;
+            let DataType::Timestamp(unit, _) = schema.field_with_name(name).ok()?.data_type()
+            else {
+                return None;
+            };
+            TimeUnit::from(unit)
+        }
+        _ => return None,
+    };
+    if time_index.column_schema.data_type.as_timestamp()?.unit() != unit {
+        return None;
+    }
+
+    let mut min = i64::MAX;
+    let mut max = i64::MIN;
+    for group in parquet_meta.row_groups() {
+        let Statistics::Int64(stats) = group.column(index).statistics()? else {
+            return None;
+        };
+        let (low, high) = (*stats.min_opt()?, *stats.max_opt()?);
+        if low > high
+            || !stats.min_is_exact()
+            || !stats.max_is_exact()
+            || stats.null_count_opt() != Some(0)
+        {
+            return None;
+        }
+        min = min.min(low);
+        max = max.max(high);
+    }
+    (min <= max).then(|| (Timestamp::new(min, unit), Timestamp::new(max, unit)))
 }
 
 struct ObjectStoreFetch<'a> {

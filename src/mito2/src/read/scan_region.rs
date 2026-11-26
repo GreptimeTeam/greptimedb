@@ -45,7 +45,7 @@ use datatypes::extension::json::is_json2_extension_type;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::types::json_type::JsonNativeType;
 use datatypes::value::timestamp_to_scalar_value;
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use mito_codec::row_converter::{SortField, build_primary_key_codec_with_fields};
 use partition::expr::PartitionExpr;
 use smallvec::SmallVec;
@@ -735,7 +735,10 @@ impl ScanRegion {
                 && input.predicate_group().predicate_without_region().is_none()
                 && input.source_row_counts_are_exact())
         {
-            match aggr::prepare(&input, &self.request, allow_partial).await {
+            match aggr::prepare(&input, &self.request, &self.version.ssts, allow_partial)
+                .boxed()
+                .await
+            {
                 Some(aggr::MetadataAggr::Exact(rows)) => input.exact_num_rows = Some(rows),
                 Some(aggr::MetadataAggr::Split(plan)) => input.statistics_split = Some(plan),
                 None => {}
