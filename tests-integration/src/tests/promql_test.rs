@@ -2912,6 +2912,62 @@ async fn native_promql_non_millisecond_time_index_answers_like_legacy() {
     }
 }
 
+/// Two physical metric tables may store their time index in different units, and a nameless
+/// selector can discover logical metrics on both. A native input reads its timestamps in one unit,
+/// so such a selector is declined rather than answered with one source's ticks read in the other's.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_discovery_over_mixed_time_units_is_declined() {
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, _observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_discovery_mixed_units")
+            .with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE mixed_phy_ms (ts TIMESTAMP TIME INDEX, v DOUBLE) \
+             ENGINE=metric WITH (\"physical_metric_table\" = \"\"); \
+         CREATE TABLE mixed_phy_us (ts TIMESTAMP(6) TIME INDEX, v DOUBLE) \
+             ENGINE=metric WITH (\"physical_metric_table\" = \"\"); \
+         CREATE TABLE mixed_a (host STRING NULL, ts TIMESTAMP NOT NULL, v DOUBLE NULL, \
+             TIME INDEX (ts), PRIMARY KEY (host)) \
+             ENGINE=metric WITH (on_physical_table = 'mixed_phy_ms'); \
+         CREATE TABLE mixed_b (host STRING NULL, ts TIMESTAMP(6) NOT NULL, v DOUBLE NULL, \
+             TIME INDEX (ts), PRIMARY KEY (host)) \
+             ENGINE=metric WITH (on_physical_table = 'mixed_phy_us'); \
+         INSERT INTO mixed_a (host, ts, v) VALUES ('a', 1000, 2); \
+         INSERT INTO mixed_b (host, ts, v) VALUES ('b', 1000000, 8)",
+        QueryContext::arc(),
+    )
+    .await;
+    let mut ctx = QueryContext::with_db_name(None);
+    ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, "true".to_string());
+    ctx.set_metric_discovery_scope(MetricDiscoveryScope::allowed(["mixed_a", "mixed_b"].map(
+        |table| {
+            (
+                DEFAULT_CATALOG_NAME.to_string(),
+                DEFAULT_SCHEMA_NAME.to_string(),
+                table.to_string(),
+            )
+        },
+    )));
+    let result = instance
+        .do_query(
+            r#"TQL EVAL (2, 2, '1s') count_over_time({host=~"a|b"}[2s])"#,
+            Arc::new(ctx),
+        )
+        .await
+        .remove(0);
+    // The existing plan, which the statement keeps, refuses a nameless selector.
+    if let Ok(output) = result {
+        panic!("answered natively: {:?}", native_rows(output, None).await);
+    }
+}
+
 /// `output` with its stream read here: [`eval_text_rows`] blocks on the stream, which inside this
 /// runtime stops being woken once the test task has spent its cooperative budget.
 async fn collected(output: Output) -> Output {

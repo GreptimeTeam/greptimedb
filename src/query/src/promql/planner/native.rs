@@ -1551,8 +1551,12 @@ impl PromPlanner {
                         )))
                         .context(DataFusionPlanningSnafu);
                     };
+                    // Logical metrics on different physical tables may disagree on the unit, and
+                    // the union is one input read in one unit.
                     let unit = self.scan_time_unit(table_scan)?;
-                    union_unit.get_or_insert(unit);
+                    if *union_unit.get_or_insert(unit) != unit {
+                        return Ok(declined("discovered_metrics_disagree_on_time_unit"));
+                    }
                     let source_filter = scan_time_filter(start, end, inclusive, &source_time, unit);
                     table_scan.filters.push(source_filter);
                     let replacement = extension
