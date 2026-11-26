@@ -2812,6 +2812,61 @@ async fn native_promql_canonical_merge_over_partitioned_table() {
     }
 }
 
+/// `delta_temporality.sql`'s rate and increase cases: a NULL marker is a cumulative series, and a
+/// window holding one increment sums to it.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_delta_temporality_corpus_matches_legacy() {
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_delta_temporality_corpus",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE delta_temporality (ts TIMESTAMP TIME INDEX, greptime_value DOUBLE, \
+         series STRING, otlp_aggregation_temporality STRING, \
+         PRIMARY KEY (series, otlp_aggregation_temporality)); \
+         INSERT INTO delta_temporality VALUES (60000, 10, 'delta', 'delta'), \
+         (120000, 20, 'delta', 'delta'), (180000, 15, 'delta', 'delta'), \
+         (180000, 7, 'single', 'delta'), (60000, 10, 'cumulative', NULL), \
+         (120000, 20, 'cumulative', NULL), (180000, 30, 'cumulative', NULL)",
+        QueryContext::arc(),
+    )
+    .await;
+    for (sql, reported) in [
+        (
+            "TQL EVAL (180, 180, '1m') increase(delta_temporality[3m])",
+            ReportedName::Nothing,
+        ),
+        (
+            "TQL EVAL (120, 180, '1m') rate(delta_temporality[3m])",
+            ReportedName::Nothing,
+        ),
+        (
+            "TQL EVAL (180, 180, '1m') sum by (series) (rate(delta_temporality[3m]))",
+            ReportedName::Nothing,
+        ),
+    ] {
+        observer.clear();
+        let output = native_tql_output(&instance, sql, true).await;
+        let native = eval_text_rows(collected(output).await, reported);
+        assert!(observer.fused().is_some(), "{sql}");
+        let legacy = eval_text(collected(native_tql_output(&instance, sql, false).await).await);
+        assert_eq!(legacy, native, "{sql}");
+    }
+}
+
+/// `output` with its stream read here: [`eval_text_rows`] blocks on the stream, which inside this
+/// runtime stops being woken once the test task has spent its cooperative budget.
+async fn collected(output: Output) -> Output {
+    match output.data {
+        OutputData::Stream(stream) => {
+            Output::new_with_record_batches(collect_batches(stream).await.unwrap())
+        }
+        _ => output,
+    }
+}
+
 /// The plan the last query ran is the native one, so a row assertion above is about this route.
 fn assert_native_rows_plan(observer: &NativePlanObserver) {
     let root = observer.root_plan();
@@ -12817,9 +12872,7 @@ async fn native_promql_answers_a_quantile_over_a_multi_input_tree() {
 }
 
 /// OTLP delta temporality on the public TQL route: a `delta`-marked series answers the raw sample
-/// sum (10 + 10 = 20) while a cumulative series with the same samples answers 0. The fused node
-/// computes one cumulative window for every series, so it must decline a marker-bearing table
-/// instead of reporting 0 for the delta series.
+/// sum (10 + 10 = 20) while a cumulative series with the same samples answers 0, on both routes.
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_delta_temporality_rate_and_increase_match_legacy() {
     common_telemetry::init_default_ut_logging();
@@ -12894,13 +12947,12 @@ async fn native_promql_delta_temporality_rate_and_increase_match_legacy() {
             "`{query}`: same rows on both routes"
         );
         assert!(
-            observer.fused().is_none(),
-            "`{query}`: the native route must decline a table that carries the temporality marker"
+            observer.fused().is_some(),
+            "`{query}`: a raw window picks the delta math per series natively"
         );
     }
 
-    // A subquery recurses through the expression tree for the same delta-temporality guard.
-    // Compare against the existing route and assert that native execution declines both functions.
+    // Inside a subquery the call still reads its raw window, so it runs natively too.
     for query in [
         format!("max_over_time(rate({TABLE}[2m])[2m:1m])"),
         format!("max_over_time(increase({TABLE}[2m])[2m:1m])"),
@@ -12918,8 +12970,8 @@ async fn native_promql_delta_temporality_rate_and_increase_match_legacy() {
             "`{query}`: same rows on both routes"
         );
         assert!(
-            observer.fused().is_none(),
-            "`{query}`: delta temporality inside a subquery must decline native planning"
+            observer.fused().is_some(),
+            "`{query}`: the raw window inside the subquery runs natively"
         );
     }
 
