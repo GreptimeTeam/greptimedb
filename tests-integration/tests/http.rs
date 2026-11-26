@@ -7923,6 +7923,16 @@ pub async fn test_remote_write_v2_histogram_multi_input_aggregate_native_route(
     let histograms = |fields: &[(f64, f64)]| Some(fields.to_vec());
     for (query, expected_histograms, expected_floats) in [
         ("sum(nh_left + nh_right)", histograms(&[(20.0, 10.0)]), None),
+        (
+            "sum(nh_left + nh_right) * 2",
+            histograms(&[(40.0, 20.0)]),
+            None,
+        ),
+        (
+            "nh_left + nh_right",
+            histograms(&[(8.0, 4.0), (12.0, 6.0)]),
+            None,
+        ),
         ("sum(nh_left and nh_right)", histograms(&[(6.0, 3.0)]), None),
         (
             "sum by (job) (nh_left + nh_right)",

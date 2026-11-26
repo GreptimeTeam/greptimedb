@@ -4408,8 +4408,8 @@ async fn answer_rows(output: Output) -> usize {
     batches.iter().map(|batch| batch.num_rows()).sum()
 }
 
-/// Two independently planned histogram frames whose reset hints contradict: the pair is dropped and
-/// the warning reaches the query's collector.
+/// Two native histograms whose reset hints contradict, paired natively: the pair is dropped and the
+/// warning reaches the query's collector.
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_composed_histogram_reset_warning() {
     use api::greptime_proto::io::prometheus::write::v2::histogram::Count;
@@ -4498,16 +4498,13 @@ async fn native_promql_composed_histogram_reset_warning() {
         .as_any()
         .downcast_ref::<promql::extension_plan::FusedSeries>()
         .unwrap_or_else(|| panic!("{display}"));
-    let promql::native::plan::NativeExpr::Binary { left, right, .. } = &binary.tree().root().expr
-    else {
-        panic!("{display}")
-    };
     assert!(
-        matches!(left.expr, promql::native::plan::NativeExpr::Input(_))
-            && matches!(right.expr, promql::native::plan::NativeExpr::Input(_)),
+        matches!(
+            binary.tree().root().expr,
+            promql::native::plan::NativeExpr::Binary { .. }
+        ),
         "{display}"
     );
-    assert_eq!(binary.children().len(), 2, "{display}");
     assert!(!display.contains("Join:"), "{display}");
 
     // Hold a strong reference to the query-scoped collector until the output stream has finished.
