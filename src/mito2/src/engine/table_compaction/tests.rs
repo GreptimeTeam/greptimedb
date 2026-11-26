@@ -660,13 +660,7 @@ async fn test_indexed_output_with_real_index_object_publishes() {
     assert_eq!(3, row_count(&engine, region_id).await);
 }
 
-/// A preserve-row-sequence region trusts output markers only when the typed
-/// snapshot options and the admitted inputs both carry the marker.
-#[tokio::test]
-async fn test_preserve_row_sequence_option_drives_output_admission() {
-    let mut env = TestEnv::new().await;
-    let engine = env.create_engine(config()).await;
-    let region_id = RegionId::new(1, 1);
+async fn seed_trusted_shared_input(engine: &MitoEngine, region_id: RegionId) {
     let create = CreateRequestBuilder::new()
         .insert_option("append_mode", "true")
         .insert_option("preserve_row_sequence", "true")
@@ -676,7 +670,7 @@ async fn test_preserve_row_sequence_option_drives_output_admission() {
         .await
         .unwrap();
     put_rows(
-        &engine,
+        engine,
         region_id,
         Rows {
             schema: rows_schema(&create),
@@ -684,7 +678,7 @@ async fn test_preserve_row_sequence_option_drives_output_admission() {
         },
     )
     .await;
-    flush_region(&engine, region_id, None).await;
+    flush_region(engine, region_id, None).await;
     let region = engine.get_region(region_id).unwrap();
     let original = region.version().ssts.levels()[0]
         .files()
@@ -711,6 +705,15 @@ async fn test_preserve_row_sequence_option_drives_output_admission() {
     region
         .version_control
         .apply_edit(Some(edit), &[], region.file_purger.clone());
+}
+
+#[tokio::test]
+async fn test_preserve_row_sequence_option_drives_output_admission() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(config()).await;
+    let region_id = RegionId::new(1, 1);
+    seed_trusted_shared_input(&engine, region_id).await;
+    let region = engine.get_region(region_id).unwrap();
     let snapshot = engine.table_compaction_snapshot(region_id).unwrap();
     assert_eq!(
         Some(true),
@@ -751,6 +754,65 @@ async fn test_preserve_row_sequence_option_drives_output_admission() {
         manifest.files.get(&output.file_id).map(AsRef::as_ref)
     );
     assert_eq!(3, row_count(&engine, region_id).await);
+}
+
+#[rstest::rstest]
+#[case::fresh(false)]
+#[case::replay(true)]
+#[tokio::test]
+async fn test_publication_after_enabling_sequence_preservation(#[case] replay: bool) {
+    use store_api::region_request::{AlterKind, RegionAlterRequest, SetRegionOption};
+    use store_api::storage::ScanRequest;
+
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(config()).await;
+    let region_id = RegionId::new(1, 1);
+    seed_trusted_shared_input(&engine, region_id).await;
+    let region = engine.get_region(region_id).unwrap();
+    let alter = |enabled| {
+        engine.handle_request(
+            region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::SetRegionOptions {
+                    options: vec![SetRegionOption::PreserveRowSequence(enabled)],
+                },
+            }),
+        )
+    };
+    alter(false).await.unwrap();
+    let snapshot = engine.table_compaction_snapshot(region_id).unwrap();
+    let mut output = copy_sst(&region, &snapshot.inputs[0], 0).await;
+    output.preserve_row_sequence = false;
+    let publish =
+        || engine.publish_table_compaction(region_id, snapshot.clone(), vec![output.clone()]);
+    if replay {
+        assert_eq!(PublicationOutcome::Applied, publish().await.unwrap());
+    }
+    alter(true).await.unwrap();
+    let version = region.manifest_ctx.manifest_version().await;
+    if replay {
+        assert_eq!(PublicationOutcome::Applied, publish().await.unwrap());
+    } else {
+        assert_eq!(PublicationOutcome::StaleInputs, publish().await.unwrap());
+        let stream = engine
+            .scan_to_stream(
+                region_id,
+                ScanRequest {
+                    exact_sequence_range: true,
+                    memtable_min_sequence: Some(0),
+                    memtable_max_sequence: Some(region.version_control.committed_sequence()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let batches = RecordBatches::try_collect(stream).await.unwrap();
+        assert_eq!(
+            3,
+            batches.iter().map(|batch| batch.num_rows()).sum::<usize>()
+        );
+    }
+    assert_eq!(version, region.manifest_ctx.manifest_version().await);
 }
 
 #[tokio::test]
