@@ -28,7 +28,9 @@ use common_error::mock::MockError;
 use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_recordbatch::RecordBatch;
-use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
+use common_recordbatch::adapter::{
+    RecordBatchMetrics, RegionWatermarkEntry, SubstitutedRange, SubstitutedRowRanges,
+};
 use common_time::{TimeToLive, Timestamp};
 use datatypes::data_type::ConcreteDataType as CDT;
 use datatypes::schema::{ColumnSchema, Schema};
@@ -2473,6 +2475,352 @@ fn test_apply_query_result_to_state_advances_incremental_subset() {
         state.checkpoints(),
         &BTreeMap::from([(1_u64, 12_u64), (2_u64, 20_u64), (3_u64, 35_u64)])
     );
+}
+
+/// Builds a delta result that proves `watermarks` and reports `substituted` as the rows
+/// its scan hid, given as `(region id, inclusive [start, end] millisecond ranges)`.
+fn output_with_substituted_ranges(
+    watermarks: impl IntoIterator<Item = (u64, Option<u64>)>,
+    substituted: impl IntoIterator<Item = (u64, Vec<(i64, i64)>)>,
+) -> OutputWithMetrics {
+    let result = OutputWithMetrics::from_output(Output::new_with_affected_rows(0));
+    result.metrics.update(Some(RecordBatchMetrics {
+        region_watermarks: watermarks
+            .into_iter()
+            .map(|(region_id, watermark)| RegionWatermarkEntry {
+                region_id,
+                partition_expr: None,
+                watermark,
+                visible_foreign_file_creators: None,
+            })
+            .collect(),
+        substituted_row_ranges: substituted
+            .into_iter()
+            .map(|(region_id, ranges)| SubstitutedRowRanges {
+                region_id,
+                ranges: ranges
+                    .into_iter()
+                    .map(|(start_millis, end_millis)| SubstitutedRange {
+                        start_millis,
+                        end_millis,
+                    })
+                    .collect(),
+            })
+            .collect(),
+        ..Default::default()
+    }));
+    result.metrics.mark_ready();
+    result
+}
+
+async fn new_substituted_repair_task() -> BatchingTask {
+    new_time_window_test_task_with_query(
+        "SELECT max(number) AS output_value, date_bin(INTERVAL '5 second', ts) AS output_window FROM numbers_with_ts GROUP BY output_window",
+    )
+    .await
+    .task
+}
+
+#[tokio::test]
+async fn test_substituted_repair_windows_include_the_bucket_of_an_inclusive_end() {
+    let task = new_substituted_repair_task().await;
+    let ranges = vec![SubstitutedRowRanges {
+        region_id: 1,
+        ranges: vec![
+            // Rows up to and including the 10s boundary were hidden. The bucket
+            // `[10s, 15s)` contains the last hidden row, so it must be recomputed.
+            SubstitutedRange {
+                start_millis: 4_000,
+                end_millis: 10_000,
+            },
+            // A point range must select the bucket that contains it as well.
+            SubstitutedRange {
+                start_millis: 121_000,
+                end_millis: 121_000,
+            },
+        ],
+    }];
+
+    let windows = task.substituted_repair_windows(&ranges).unwrap();
+
+    assert_eq!(
+        windows,
+        vec![
+            (Timestamp::new_second(0), Timestamp::new_second(15)),
+            (Timestamp::new_second(120), Timestamp::new_second(125)),
+        ]
+    );
+    // The reported end is inclusive, so the bucket that starts exactly at it is affected:
+    // passing `end` through as a half-open end would stop the window at 10s and leave the
+    // hidden row at 10s unrecomputed.
+    assert!(
+        windows.iter().any(|(start, end)| {
+            *start <= Timestamp::new_second(10) && Timestamp::new_second(15) <= *end
+        }),
+        "the bucket containing the inclusive end must be recomputed, got {windows:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_substituted_repair_windows_reject_an_inverted_range() {
+    let task = new_substituted_repair_task().await;
+    let ranges = vec![SubstitutedRowRanges {
+        region_id: 1,
+        ranges: vec![SubstitutedRange {
+            start_millis: 10_000,
+            end_millis: 4_000,
+        }],
+    }];
+
+    let err = task.substituted_repair_windows(&ranges).unwrap_err();
+    assert!(
+        err.to_string().contains("inverted substituted range"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn test_substituted_repair_windows_need_a_time_window_expr() {
+    // A flow without a time-window expression cannot turn the reported ranges into
+    // recompute windows at all, which is the "fail the round" case.
+    let parts = new_test_task_engine_and_plan_with_query(
+        "SELECT number, ts FROM numbers_with_ts",
+        "numbers_with_ts",
+    )
+    .await;
+    let ranges = vec![SubstitutedRowRanges {
+        region_id: 1,
+        ranges: vec![SubstitutedRange {
+            start_millis: 4_000,
+            end_millis: 10_000,
+        }],
+    }];
+
+    let err = parts.task.substituted_repair_windows(&ranges).unwrap_err();
+    assert!(
+        err.to_string().contains("no time-window expression"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn test_delta_reporting_substituted_rows_repairs_instead_of_settling() {
+    let task = new_substituted_repair_task().await;
+    let delta =
+        output_with_substituted_ranges([(1_u64, Some(20_u64))], [(1_u64, vec![(4_000, 10_000)])]);
+
+    // The same terminal metrics settle a delta additively when nothing was substituted:
+    // this is the transition the round must not take once rows were hidden.
+    {
+        let query_ctx = QueryContext::arc();
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let mut unsettled_state = TaskState::new(query_ctx, rx);
+        unsettled_state.advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
+        let decision = BatchingTask::apply_query_result_to_state(
+            &mut unsettled_state,
+            &delta,
+            std::time::Duration::from_millis(1),
+            &QueryCoverage::IncrementalDelta,
+        );
+        assert_eq!(
+            decision,
+            FlowCheckpointDecision::AdvancedIncremental {
+                participating_regions: 1,
+                watermarks: 1,
+            }
+        );
+        assert_eq!(
+            unsettled_state.checkpoints(),
+            &BTreeMap::from([(1_u64, 20_u64)])
+        );
+    }
+
+    task.state
+        .write()
+        .unwrap()
+        .advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
+
+    let decision = {
+        let mut state = task.state.write().unwrap();
+        task.refuse_substituted_delta(
+            &mut state,
+            &delta,
+            std::time::Duration::from_millis(1),
+            &QueryCoverage::IncrementalDelta,
+        )
+        .unwrap()
+    };
+
+    // The delta is refused: it is not settled additively, and the affected windows are
+    // queued as a fenced repair under the delta's own proved high H.
+    assert_eq!(
+        decision,
+        Some(FlowCheckpointDecision::ContinuedFencedRepair {
+            pending_windows: 1,
+            watermarks: 1,
+        })
+    );
+    let high = BTreeMap::from([(1_u64, 20_u64)]);
+    {
+        let state = task.state.read().unwrap();
+        assert_eq!(
+            state.checkpoints(),
+            &BTreeMap::from([(1_u64, 10_u64)]),
+            "the refused delta must not advance the cursor"
+        );
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+        let repair = state.pending_fenced_repair().unwrap();
+        assert_eq!(repair.high(), &high);
+        assert_eq!(repair.pending_windows().len(), 1);
+    }
+
+    // The next round recomputes exactly the affected window, as a fenced full-window read.
+    let (filter, coverage) = {
+        let mut state = task.state.write().unwrap();
+        let col_name = task
+            .config
+            .time_window_expr
+            .as_ref()
+            .unwrap()
+            .column_name
+            .clone();
+        let filter = state
+            .gen_scoped_filter_exprs(
+                &col_name,
+                None,
+                chrono::Duration::seconds(5),
+                20,
+                1,
+                Some(&task),
+            )
+            .unwrap()
+            .unwrap();
+        let repair_high = state
+            .pending_fenced_repair()
+            .expect("a refused delta leaves a fenced repair pending")
+            .high()
+            .clone();
+        (
+            filter,
+            QueryCoverage::FencedRepairChunk { high: repair_high },
+        )
+    };
+    assert_eq!(
+        filter.time_ranges,
+        vec![(Timestamp::new_second(0), Timestamp::new_second(15))],
+        "the whole affected window is recomputed once, not a partial range"
+    );
+    match &coverage {
+        QueryCoverage::FencedRepairChunk {
+            high: coverage_high,
+        } => {
+            assert_eq!(
+                coverage_high, &high,
+                "the recompute runs under the delta's fence"
+            );
+        }
+        _ => panic!("the recompute of a refused delta must be a fenced repair chunk"),
+    }
+    let extensions = task
+        .build_flow_query_extensions(false, coverage.is_incremental_delta())
+        .await
+        .unwrap();
+    // A repair read names the fence and does not request `flow.read_row_sequence`, so it
+    // reads the rows the delta hid: the recompute delivers them to the window exactly once.
+    assert_eq!(
+        extensions,
+        vec![
+            ("flow.return_region_seq", "true".to_string()),
+            (FLOW_REPAIR_MODE, FLOW_REPAIR_MODE_FENCED.to_string()),
+        ]
+    );
+
+    // Only the fenced repair may settle: once it proves H, the cursor advances to exactly H.
+    let chunk = output_with_region_watermarks([(1_u64, Some(20_u64))]);
+    let decision = {
+        let mut state = task.state.write().unwrap();
+        BatchingTask::apply_query_result_to_state(
+            &mut state,
+            &chunk,
+            std::time::Duration::from_millis(1),
+            &coverage,
+        )
+    };
+    assert_eq!(
+        decision,
+        FlowCheckpointDecision::AdvancedFromFullSnapshot {
+            participating_regions: 1,
+            watermarks: 1,
+        }
+    );
+    let state = task.state.read().unwrap();
+    assert!(state.pending_fenced_repair().is_none());
+    assert_eq!(state.checkpoints(), &BTreeMap::from([(1_u64, 20_u64)]));
+    assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
+}
+
+#[tokio::test]
+async fn test_substituted_delta_without_a_provable_fence_fails_the_round() {
+    let task = new_substituted_repair_task().await;
+    task.state
+        .write()
+        .unwrap()
+        .advance_checkpoints(HashMap::from([(1_u64, 10_u64), (2_u64, 10_u64)]));
+    // Region 2 participated but proved no watermark, so no fence covers the affected
+    // windows and the delta must not be settled.
+    let delta = output_with_substituted_ranges(
+        [(1_u64, Some(20_u64)), (2_u64, None)],
+        [(1_u64, vec![(4_000, 10_000)])],
+    );
+
+    let err = {
+        let mut state = task.state.write().unwrap();
+        task.refuse_substituted_delta(
+            &mut state,
+            &delta,
+            std::time::Duration::from_millis(1),
+            &QueryCoverage::IncrementalDelta,
+        )
+        .unwrap_err()
+    };
+
+    assert!(
+        err.to_string().contains("could not prove a high watermark"),
+        "{err}"
+    );
+    let state = task.state.read().unwrap();
+    assert_eq!(
+        state.checkpoints(),
+        &BTreeMap::from([(1_u64, 10_u64), (2_u64, 10_u64)])
+    );
+    assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
+    assert!(state.pending_fenced_repair().is_none());
+}
+
+#[tokio::test]
+async fn test_delta_without_substituted_rows_keeps_settling_additively() {
+    let task = new_substituted_repair_task().await;
+    task.state
+        .write()
+        .unwrap()
+        .advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
+    let delta = output_with_region_watermarks([(1_u64, Some(20_u64))]);
+
+    let decision = {
+        let mut state = task.state.write().unwrap();
+        task.refuse_substituted_delta(
+            &mut state,
+            &delta,
+            std::time::Duration::from_millis(1),
+            &QueryCoverage::IncrementalDelta,
+        )
+        .unwrap()
+    };
+
+    assert_eq!(decision, None);
+    let state = task.state.read().unwrap();
+    assert!(state.pending_fenced_repair().is_none());
+    assert_eq!(state.checkpoints(), &BTreeMap::from([(1_u64, 10_u64)]));
 }
 
 #[test]
