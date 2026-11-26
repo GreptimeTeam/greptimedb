@@ -117,6 +117,7 @@ use sql::util::{
     extract_tables_from_statement_checked,
 };
 use sqlparser::ast::{AnalyzeFormat, ObjectName};
+use table::metadata::TableId;
 use tracing::Span;
 
 use crate::error::{
@@ -268,6 +269,23 @@ impl Instance {
     pub fn clear_rollup_cache(&self) {
         if let Some(cache) = self.rollup_cache.as_ref() {
             cache.clear();
+        }
+    }
+
+    /// Drops the chunks of one table from this frontend's local rollup cache.
+    ///
+    /// This is the local half of a `CacheIdent::TableId` invalidation: only the
+    /// entries keyed on `table_id` are dropped, and the entries of every other table
+    /// are left as they are. The call is fail-open and never leaves the process — it
+    /// does not touch source data, other frontends, or in-flight queries, and a
+    /// frontend that misses the invalidation still stops serving the chunk once its
+    /// ttl runs out.
+    ///
+    /// A frontend without a rollup cache installed has nothing to drop, so the call
+    /// is a no-op there.
+    pub fn clear_rollup_cache_for_table(&self, table_id: TableId) {
+        if let Some(cache) = self.rollup_cache.as_ref() {
+            cache.clear_table(table_id);
         }
     }
 
@@ -1803,7 +1821,10 @@ impl Instance {
     /// - a request with a snapshot, an SST bound, a Flow extension, or a `__schema__`
     ///   override: the original path, since the cache key encodes none of them;
     /// - a bare top-level selector: the original path, see
-    ///   [`Instance::windowed_expr_is_bare_selector`].
+    ///   [`Instance::windowed_expr_is_bare_selector`];
+    /// - a source table that does not resolve to an id: the original path, since a
+    ///   chunk its key cannot name could not be invalidated for it either, see
+    ///   [`Instance::rollup_source_table_id`].
     ///
     /// A statement that records PromQL warnings or infos does not bypass: the
     /// messages of a chunk travel with its rows
@@ -1863,8 +1884,14 @@ impl Instance {
         if Self::windowed_expr_is_bare_selector(&eval_stmt.expr) {
             return Ok(None);
         }
+        // The identity keys the request on the id the source table name resolves to
+        // now, not on the name alone: a table created again under a dropped table's
+        // name is another table, and its chunks must not answer this one's requests.
+        let Some(table_id) = self.rollup_source_table_id(eval_stmt, query_ctx).await else {
+            return Ok(None);
+        };
         let Some(identity) =
-            Self::range_query_identity(query, eval_stmt, alias.clone(), plan, query_ctx)
+            Self::range_query_identity(query, eval_stmt, alias.clone(), plan, query_ctx, table_id)
         else {
             return Ok(None);
         };
@@ -1963,18 +1990,50 @@ impl Instance {
         }
     }
 
+    /// The id of the table the statement's named source resolves to.
+    ///
+    /// The identity keys chunks on it, so it is read from the catalog rather than
+    /// taken from the name: a table dropped and created again under the same name has
+    /// another id, and that is what tells its chunks apart from the old ones and what
+    /// an invalidation of the table names (`CacheIdent::TableId`).
+    ///
+    /// [`None`] when the expression names no admitted table or the name resolves to
+    /// nothing this context can read: a request whose table cannot be identified keeps
+    /// its original plan, since its chunks could not be invalidated either.
+    async fn rollup_source_table_id(
+        &self,
+        eval_stmt: &EvalStmt,
+        query_ctx: &QueryContextRef,
+    ) -> Option<TableId> {
+        let source_table = windowed_source_table(&eval_stmt.expr).ok()?;
+        self.catalog_manager
+            .table_id(
+                query_ctx.current_catalog(),
+                &query_ctx.current_schema(),
+                source_table,
+                Some(query_ctx.as_ref()),
+            )
+            .await
+            .ok()?
+    }
+
     /// The reusable half of this request: every dimension two requests must agree on
     /// before one may answer the other's points.
     ///
     /// [`None`] when the expression has no admitted source table or a dimension
     /// does not fit the identity's integer fields, because a narrowed value would
     /// key the same span under a different grid.
+    ///
+    /// `table_id` is the id [`Instance::rollup_source_table_id`] resolved the
+    /// statement's source table to; the caller resolves it, because the name alone
+    /// does not identify the table.
     fn range_query_identity(
         query: &PromQuery,
         eval_stmt: &EvalStmt,
         alias: Option<String>,
         plan: &LogicalPlan,
         query_ctx: &QueryContextRef,
+        table_id: TableId,
     ) -> Option<QueryIdentity> {
         Some(QueryIdentity {
             tenant: query_ctx.current_user().username().to_string(),
@@ -1982,6 +2041,7 @@ impl Instance {
             schema: query_ctx.current_schema(),
             query: query.query.clone(),
             source_table: windowed_source_table(&eval_stmt.expr).ok()?.to_string(),
+            table_id,
             step_ms: i64::try_from(eval_stmt.interval.as_millis()).ok()?,
             lookback_ms: i64::try_from(eval_stmt.lookback_delta.as_millis()).ok()?,
             route: plan_route(plan),
@@ -2774,6 +2834,9 @@ mod tests {
     use crate::frontend::FrontendOptions;
     use crate::instance::builder::FrontendBuilder;
     use crate::instance::*;
+
+    /// The id the `cpu` metric table of [`metric_instance`] is registered under.
+    const CPU_TABLE_ID: TableId = 1024;
 
     fn parse_test_sql(sql: &str) -> Vec<Statement> {
         parse_stmt(sql, &GreptimeDbDialect {}).unwrap()
@@ -3808,26 +3871,55 @@ mod tests {
         };
         let context = test_query_ctx(1);
         let plan = LogicalPlanBuilder::empty(false).build().unwrap();
-        let first = Instance::range_query_identity(&query, &stmt, None, &plan, &context)
-            .expect("the expression names one admitted table");
+        let first =
+            Instance::range_query_identity(&query, &stmt, None, &plan, &context, CPU_TABLE_ID)
+                .expect("the expression names one admitted table");
         assert_eq!(first.source_table, "cpu");
+        assert_eq!(first.table_id, CPU_TABLE_ID);
 
         query.start = "36300".to_string();
         query.end = "38040".to_string();
         let mut sliding = stmt.clone();
         sliding.start += Duration::from_secs(300);
         sliding.end += Duration::from_secs(300);
-        let second = Instance::range_query_identity(&query, &sliding, None, &plan, &context)
-            .expect("the sliding expression names the same table");
+        let second =
+            Instance::range_query_identity(&query, &sliding, None, &plan, &context, CPU_TABLE_ID)
+                .expect("the sliding expression names the same table");
         assert_eq!(first, second);
         assert_eq!(second.source_table, "cpu");
 
         // The statement expression, not the original query text, is authoritative.
         sliding.expr = promql_parser::parser::parse("sum(rate(memory[5m]))").unwrap();
-        let other = Instance::range_query_identity(&query, &sliding, None, &plan, &context)
-            .expect("the statement names a table");
+        let other =
+            Instance::range_query_identity(&query, &sliding, None, &plan, &context, CPU_TABLE_ID)
+                .expect("the statement names a table");
         assert_eq!(other.source_table, "memory");
         assert_ne!(first, other);
+    }
+
+    #[test]
+    fn range_query_identity_keys_on_the_table_id_not_only_its_name() {
+        let query = metric_range_query("rate(cpu[5m])");
+        let stmt = EvalStmt {
+            expr: promql_parser::parser::parse(&query.query).unwrap(),
+            start: std::time::UNIX_EPOCH + Duration::from_secs(36_000),
+            end: std::time::UNIX_EPOCH + Duration::from_secs(37_740),
+            interval: Duration::from_secs(60),
+            lookback_delta: Duration::from_secs(60),
+        };
+        let context = test_query_ctx(1);
+        let plan = LogicalPlanBuilder::empty(false).build().unwrap();
+        let dropped =
+            Instance::range_query_identity(&query, &stmt, None, &plan, &context, CPU_TABLE_ID)
+                .expect("the expression names one admitted table");
+        // `DROP TABLE` then `CREATE TABLE` under the same name: the request is otherwise
+        // identical, so only the id can tell the two tables' chunks apart.
+        let recreated =
+            Instance::range_query_identity(&query, &stmt, None, &plan, &context, CPU_TABLE_ID + 1)
+                .expect("the expression names one admitted table");
+        assert_eq!(dropped.source_table, recreated.source_table);
+        assert_ne!(dropped.table_id, recreated.table_id);
+        assert_ne!(dropped, recreated);
     }
 
     #[test]
@@ -3844,7 +3936,8 @@ mod tests {
                 lookback_delta: Duration::from_secs(60),
             };
             assert!(
-                Instance::range_query_identity(&query, &stmt, None, &plan, &context).is_none(),
+                Instance::range_query_identity(&query, &stmt, None, &plan, &context, CPU_TABLE_ID)
+                    .is_none(),
                 "{text}"
             );
         }
@@ -3938,6 +4031,43 @@ mod tests {
         assert_eq!(printed(&uncached), printed(&cold));
         assert_eq!(printed(&uncached), printed(&warm));
         assert_eq!(6, cache.hit_count(), "the warm request served every chunk");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invalidating_a_table_drops_only_the_chunks_of_that_table() -> TestResult<()> {
+        let cached = metric_instance(Some(test_rollup_cache())).await?;
+        let cache = cached.rollup_cache().unwrap().clone();
+        let query = metric_range_query("rate(cpu[5m])");
+
+        cached_rows(&cached, &query).await?;
+        assert_eq!(6, cache.entry_count(), "the request filled six chunks");
+
+        // Naming another table leaves every chunk of this one resident.
+        cached.clear_rollup_cache_for_table(CPU_TABLE_ID + 1);
+        assert_eq!(
+            6,
+            cache.entry_count(),
+            "another table's chunks are separate"
+        );
+
+        // The identity carries the id the fixture's `cpu` table is registered under,
+        // so naming it is what drops the chunks of the table the request read.
+        cached.clear_rollup_cache_for_table(CPU_TABLE_ID);
+        assert_eq!(0, cache.entry_count());
+
+        // The chunks are filled again rather than served from the dropped entries.
+        cached_rows(&cached, &query).await?;
+        assert_eq!(6, cache.entry_count());
+        assert_eq!(0, cache.hit_count(), "nothing was served after the drop");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invalidating_a_table_without_a_cache_is_a_no_op() -> TestResult<()> {
+        let plain = metric_instance(None).await?;
+        assert!(plain.rollup_cache().is_none());
+        plain.clear_rollup_cache_for_table(CPU_TABLE_ID);
         Ok(())
     }
 

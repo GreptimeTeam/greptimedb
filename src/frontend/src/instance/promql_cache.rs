@@ -352,6 +352,8 @@ mod tests {
     const HEAD_MS: i64 = 36_000_000;
     /// The ttl every test configures.
     const TTL: Duration = Duration::from_secs(3_600);
+    /// The id the table every test reads resolves to.
+    const CPU_TABLE_ID: u32 = 1024;
 
     fn at(ms: i64) -> SystemTime {
         UNIX_EPOCH + Duration::from_millis(ms.unsigned_abs())
@@ -382,6 +384,7 @@ mod tests {
             // Every test query reads cpu; a test that wants another series set states
             // it in the query text.
             source_table: "cpu".to_string(),
+            table_id: CPU_TABLE_ID,
             step_ms: STEP_MS,
             lookback_ms: 300_000,
             route: QueryRoute::Legacy,
@@ -831,6 +834,57 @@ mod tests {
         );
         assert_eq!(2, executor.windows().len(), "the other series were read");
         assert_eq!(0, cache.hit_count());
+    }
+
+    #[tokio::test]
+    async fn a_table_created_under_a_reused_name_is_never_served_the_old_chunks() {
+        let cache = test_cache();
+        let stmt = range_stmt("cpu", HEAD_MS, 10, STEP_MS);
+        merged(
+            run(&RecordingExecutor::default(), &cache, &stmt, "cpu")
+                .await
+                .unwrap(),
+        );
+        assert_eq!(2, cache.entry_count());
+
+        // `DROP TABLE` followed by `CREATE TABLE` under the same name: every dimension
+        // of the request is unchanged and only the id the name resolves to is new, so
+        // the chunks of the table that was dropped must not answer the new one.
+        let mut recreated = identity("cpu");
+        recreated.table_id = CPU_TABLE_ID + 1;
+        let executor = RecordingExecutor::default();
+        merged(
+            execute_range(
+                &executor,
+                &cache,
+                recreated.clone(),
+                &stmt,
+                SystemTime::now(),
+            )
+            .await
+            .unwrap(),
+        );
+        assert_eq!(2, executor.windows().len(), "the new table was read");
+        assert_eq!(0, cache.hit_count(), "nothing was served across tables");
+        assert_eq!(
+            4,
+            cache.entry_count(),
+            "the chunks of the dropped table are resident but unreachable"
+        );
+
+        // The recreated table's own chunks answer its second request.
+        merged(
+            execute_range(
+                &ForbiddenExecutor,
+                &cache,
+                recreated,
+                &stmt,
+                SystemTime::now(),
+            )
+            .await
+            .unwrap(),
+        );
+        assert_eq!(2, cache.hit_count(), "the new table's chunks were served");
     }
 
     #[tokio::test]

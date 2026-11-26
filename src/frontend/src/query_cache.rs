@@ -97,6 +97,7 @@ use moka::sync::Cache;
 use promql_parser::parser::EvalStmt;
 use query::promql::label_values::signed_millis_since_epoch;
 use query::promql::window::{EvalGrid, WindowError, is_windowable};
+use table::metadata::TableId;
 
 /// The placeholder a [`QueryIdentity`] prints instead of its query text.
 const REDACTED_QUERY: &str = "<redacted>";
@@ -143,6 +144,16 @@ pub struct QueryIdentity {
     pub query: String,
     /// The expression's named source table, without catalog or schema.
     pub source_table: String,
+    /// The id of the table [`QueryIdentity::source_table`] resolved to.
+    ///
+    /// A name alone does not identify the data: a table dropped and created again
+    /// under the same name is a different table with different rows, so a chunk
+    /// keyed on the name would answer one table's points from another's rows. The
+    /// id is also what an invalidation names ([`CacheIdent::TableId`]), so it is
+    /// what [`RollupCache::clear_table`] selects entries by.
+    ///
+    /// [`CacheIdent::TableId`]: common_meta::instruction::CacheIdent::TableId
+    pub table_id: TableId,
     /// The evaluation step, in milliseconds.
     ///
     /// It has to be the step the statement is evaluated with: a chunk keyed on one
@@ -176,6 +187,7 @@ impl fmt::Debug for QueryIdentity {
             .field("schema", &self.schema)
             .field("query", &REDACTED_QUERY)
             .field("source_table", &REDACTED_QUERY)
+            .field("table_id", &self.table_id)
             .field("step_ms", &self.step_ms)
             .field("lookback_ms", &self.lookback_ms)
             .field("route", &self.route)
@@ -821,9 +833,12 @@ impl Entry {
 ///
 /// The cache is read-through: [`RollupCache::lookup`] answers from memory or says
 /// why it cannot, and the caller executes storage and calls [`RollupCache::insert`].
-/// Entries leave for two reasons only — they reach
-/// [`RollupCacheConfig::ttl`], or moka evicts them once the byte budget is spent —
-/// so nothing on the request path has to observe the source at all.
+/// Entries leave for three reasons only — they reach
+/// [`RollupCacheConfig::ttl`], moka evicts them once the byte budget is spent, or a
+/// table invalidation drops the entries of one table ([`RollupCache::clear_table`]) —
+/// so nothing on the request path has to observe the source at all. The last one
+/// narrows what a served entry may be stale about: an entry older than `ttl` is
+/// never served, and one that a received invalidation named is not served either.
 pub struct RollupCache {
     config: RollupCacheConfig,
     entries: Cache<TimeChunkKey, Entry>,
@@ -885,6 +900,32 @@ impl RollupCache {
     /// touch source data or other frontends.
     pub fn clear(&self) {
         self.entries.invalidate_all();
+        self.entries.run_pending_tasks();
+    }
+
+    /// Drops every entry keyed on `table_id`, and nothing else.
+    ///
+    /// This is the local half of an invalidation: the frontend that receives a
+    /// [`CacheIdent::TableId`] clears its own chunks of that table and no others,
+    /// so a write to one table never costs the entries of its neighbours. The
+    /// entries of the other tables are neither aged nor evicted, and an entry that
+    /// is already gone is not an error — invalidation is only ever a hint to stop
+    /// serving, never a fact a request may fail on.
+    ///
+    /// [`CacheIdent::TableId`]: common_meta::instruction::CacheIdent::TableId
+    pub fn clear_table(&self, table_id: TableId) {
+        // The cache has no per-table index, so the entries are walked once. An
+        // invalidation is rare and bounded by the byte budget, while a lookup on the
+        // request path never pays for this.
+        let keys = self
+            .entries
+            .iter()
+            .filter(|(key, _)| key.identity.table_id == table_id)
+            .map(|(key, _)| TimeChunkKey::clone(key.as_ref()))
+            .collect::<Vec<_>>();
+        for key in keys {
+            self.entries.invalidate(&key);
+        }
         self.entries.run_pending_tasks();
     }
 
@@ -995,6 +1036,10 @@ mod tests {
     const LATER_MS: i64 = HEAD_MS + 24 * 3_600_000;
     /// The ttl every test configures.
     const TTL: Duration = Duration::from_secs(3_600);
+    /// The id the table every test names resolves to.
+    const TABLE_ID: TableId = 1024;
+    /// The id a table created under a name another table was dropped from gets.
+    const RECREATED_TABLE_ID: TableId = 2048;
 
     fn at(ms: i64) -> SystemTime {
         let duration = Duration::from_millis(ms.unsigned_abs());
@@ -1029,6 +1074,7 @@ mod tests {
             schema: "public".to_string(),
             query: "rate(http_requests_total[5m])".to_string(),
             source_table: "http_requests_total".to_string(),
+            table_id: TABLE_ID,
             step_ms: STEP_MS,
             lookback_ms: 300_000,
             route: QueryRoute::Legacy,
@@ -1295,6 +1341,75 @@ mod tests {
         assert!(printed.contains("public"));
         assert!(!printed.contains("http_requests_total"));
         assert!(printed.contains(REDACTED_QUERY));
+        assert!(
+            printed.contains(&TABLE_ID.to_string()),
+            "the table id is what invalidation names, so it is printed: {printed}"
+        );
+    }
+
+    #[test]
+    fn a_chunk_is_never_served_to_another_table_of_the_same_name() {
+        let cache = cache();
+        let key = chunk_key_at(0);
+        assert_eq!(
+            cache.insert(&key, payload(), Arc::default()),
+            Insert::Stored
+        );
+
+        // Dropping the table and creating it again under the same name leaves the
+        // request otherwise identical and changes only the id the name resolves to.
+        let recreated = TimeChunkKey::new(
+            QueryIdentity {
+                table_id: RECREATED_TABLE_ID,
+                ..identity()
+            },
+            key.chunk(),
+        );
+        assert_eq!(
+            cache.lookup(&recreated, SystemTime::now()),
+            Lookup::Miss(MissReason::NotFound)
+        );
+        assert_eq!(
+            cache.entry_count(),
+            1,
+            "the chunk of the table that still exists is untouched"
+        );
+    }
+
+    #[test]
+    fn clearing_a_table_removes_only_its_chunks() {
+        let cache = cache();
+        let first = chunk_key_at(0);
+        let second = chunk_key_at(1);
+        let other_table = TimeChunkKey::new(
+            QueryIdentity {
+                table_id: RECREATED_TABLE_ID,
+                ..identity()
+            },
+            first.chunk(),
+        );
+        for key in [&first, &second, &other_table] {
+            assert_eq!(cache.insert(key, payload(), Arc::default()), Insert::Stored);
+        }
+        assert_eq!(cache.entry_count(), 3);
+
+        cache.clear_table(TABLE_ID);
+
+        assert_eq!(cache.entry_count(), 1);
+        for key in [&first, &second] {
+            assert_eq!(
+                cache.lookup(key, SystemTime::now()),
+                Lookup::Miss(MissReason::NotFound)
+            );
+        }
+        assert!(
+            matches!(
+                cache.lookup(&other_table, SystemTime::now()),
+                Lookup::Hit { .. }
+            ),
+            "another table's chunk is served"
+        );
+        assert_eq!(cache.hit_count(), 1);
     }
 
     #[test]
