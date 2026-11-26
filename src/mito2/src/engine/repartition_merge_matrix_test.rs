@@ -1012,6 +1012,7 @@ impl Model {
         let remap = self
             .engine
             .remap_manifests(RemapManifestsRequest {
+                validate_only: false,
                 region_id: probe,
                 input_regions: inputs.to_vec(),
                 region_mapping: inputs
@@ -1801,6 +1802,7 @@ impl Model {
         let response = self
             .engine
             .remap_manifests(RemapManifestsRequest {
+                validate_only: false,
                 region_id: source,
                 input_regions: vec![source],
                 region_mapping: [(source, targets.clone())].into_iter().collect(),
@@ -1908,6 +1910,7 @@ impl Model {
         let response = self
             .engine
             .remap_manifests(RemapManifestsRequest {
+                validate_only: false,
                 region_id: target,
                 input_regions: inputs.to_vec(),
                 region_mapping: inputs

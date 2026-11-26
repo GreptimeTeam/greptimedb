@@ -1088,6 +1088,7 @@ impl StorageModel {
         let response = self
             .engine
             .remap_manifests(RemapManifestsRequest {
+                validate_only: false,
                 region_id: source,
                 input_regions: vec![source],
                 region_mapping: [(source, vec![left, right])].into_iter().collect(),
@@ -1333,6 +1334,7 @@ impl StorageModel {
         let remap = self
             .engine
             .remap_manifests(RemapManifestsRequest {
+                validate_only: false,
                 region_id: probe,
                 input_regions: inputs.to_vec(),
                 region_mapping: inputs
@@ -1412,6 +1414,7 @@ impl StorageModel {
         let response = self
             .engine
             .remap_manifests(RemapManifestsRequest {
+                validate_only: false,
                 region_id: merged,
                 input_regions: inputs.to_vec(),
                 region_mapping: inputs

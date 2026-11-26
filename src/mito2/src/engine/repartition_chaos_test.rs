@@ -824,6 +824,7 @@ impl StorageModel {
         let response = self
             .engine
             .remap_manifests(RemapManifestsRequest {
+                validate_only: false,
                 region_id: source,
                 input_regions: vec![source],
                 region_mapping: [(source, vec![left, right])].into_iter().collect(),
@@ -1046,6 +1047,7 @@ impl StorageModel {
         let response = self
             .engine
             .remap_manifests(RemapManifestsRequest {
+                validate_only: false,
                 region_id: merged,
                 input_regions: inputs.clone(),
                 region_mapping: inputs
@@ -1085,6 +1087,7 @@ impl StorageModel {
         let remap = self
             .engine
             .remap_manifests(RemapManifestsRequest {
+                validate_only: false,
                 region_id: probe,
                 input_regions: inputs.to_vec(),
                 region_mapping: inputs
@@ -3003,6 +3006,7 @@ async fn abort_split_with_compaction(model: &mut StorageModel, choice: usize) ->
         let response = model
             .engine
             .remap_manifests(RemapManifestsRequest {
+                validate_only: false,
                 region_id: merged,
                 input_regions: inputs.clone(),
                 region_mapping: inputs
@@ -3038,6 +3042,7 @@ async fn abort_split_with_compaction(model: &mut StorageModel, choice: usize) ->
                 let response = model
                     .engine
                     .remap_manifests(RemapManifestsRequest {
+                        validate_only: false,
                         region_id: target,
                         input_regions: vec![target],
                         region_mapping: [(target, vec![left, right])].into_iter().collect(),
@@ -3259,6 +3264,7 @@ async fn abort_split(model: &mut StorageModel, abort: SplitAbort) -> OpOutcome {
     let remap = model
         .engine
         .remap_manifests(RemapManifestsRequest {
+            validate_only: false,
             region_id: source,
             input_regions: vec![source],
             region_mapping: [(source, vec![left, right])].into_iter().collect(),
@@ -3366,6 +3372,7 @@ async fn staging_read_fault(model: &mut StorageModel, times: usize) -> OpOutcome
     let remap = model
         .engine
         .remap_manifests(RemapManifestsRequest {
+            validate_only: false,
             region_id: source,
             input_regions: vec![source],
             region_mapping: [(source, vec![left, right])].into_iter().collect(),
