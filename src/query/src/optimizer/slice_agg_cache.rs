@@ -43,7 +43,7 @@ use datafusion::datasource::memory::MemorySourceConfig;
 use datafusion::execution::TaskContext;
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
 use datafusion::physical_expr::expressions::{
-    BinaryExpr, Column, DynamicFilterPhysicalExpr, Literal,
+    BinaryExpr, CastExpr, Column, DynamicFilterPhysicalExpr, Literal,
 };
 use datafusion::physical_expr::{EquivalenceProperties, ScalarFunctionExpr};
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
@@ -61,6 +61,7 @@ use datafusion::physical_plan::{
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion_common::{DataFusionError, Result, ScalarValue, internal_err};
 use datafusion_expr::{Expr, Operator, Volatility};
+use datafusion_functions::datetime::date_bin::DateBinFunc;
 use datafusion_physical_expr::PhysicalExpr;
 use futures::StreamExt;
 use moka::sync::Cache;
@@ -76,6 +77,7 @@ use crate::metrics::{
 use crate::options::{QueryOptions, SliceAggCacheExtension};
 
 const SLICE_SECONDS: i64 = 3600;
+const NANOS_PER_DAY: i64 = 86_400_000_000_000;
 const MAX_SLICES: i64 = 10_000;
 const SLICE_COLUMN: &str = "__slice_start";
 const SLICE_TS_COLUMN: &str = "__slice_ts";
@@ -112,8 +114,8 @@ pub(crate) struct SliceCacheStore {
     /// Plans whose states exceeded `max_collect_bytes`, which are not rewritten until the
     /// idle timeout passes: they would pay for the extra grouping without being cached.
     oversized: Cache<PlanDigest, ()>,
-    /// Plans seen once. A plan is rewritten only when it comes again, so a query that runs
-    /// once does not pay for the extra slice grouping.
+    /// Plans seen once. A plan that needs an extra slice group is rewritten only when it
+    /// comes again, so a query that runs once does not pay for that grouping.
     seen: Cache<PlanDigest, ()>,
     /// A query stops collecting states for the cache once they exceed this size.
     max_collect_bytes: usize,
@@ -433,29 +435,64 @@ fn rewrite(
     let Some((input, input_ts)) = carry_scan_column(agg.input(), scan_ts)? else {
         return skip("unsupported_plan");
     };
-    if store.seen.get(&identity).is_none() {
-        store.seen.insert(identity, ());
-        return skip("first_run");
-    }
-    let mut group_exprs = agg.group_expr().expr().to_vec();
-    let index = group_exprs.len();
-    group_exprs.push((
-        Arc::new(SliceStartExpr {
-            name: ts_name.clone(),
-            index: input_ts,
-            width,
-        }),
-        SLICE_COLUMN.to_string(),
-    ));
-    let partial = Arc::new(AggregateExec::try_new(
-        AggregateMode::Partial,
-        PhysicalGroupBy::new_single(group_exprs),
-        agg.aggr_expr().to_vec(),
-        agg.filter_expr().to_vec(),
-        input.clone(),
-        input.schema(),
-    )?);
-    let slice_column = SliceColumn { index, width };
+    // A group key that falls in one slice per group gives the slice of each group, so the
+    // aggregation stays as planned. An extra key column doubles the cost of grouping
+    // even when it adds no groups.
+    let bucket = if Arc::ptr_eq(&input, agg.input()) {
+        agg.group_expr()
+            .expr()
+            .iter()
+            .enumerate()
+            .find_map(|(index, (expr, _))| {
+                bucket_within_slice(expr, input_ts, ts_unit).map(|scale| (index, scale))
+            })
+    } else {
+        None
+    };
+    let (partial, slice_column) = match bucket {
+        Some((index, scale)) => (
+            node.clone(),
+            SliceColumn {
+                index,
+                added: false,
+                scale,
+                width,
+            },
+        ),
+        None => {
+            if store.seen.get(&identity).is_none() {
+                store.seen.insert(identity, ());
+                return skip("first_run");
+            }
+            let mut group_exprs = agg.group_expr().expr().to_vec();
+            let index = group_exprs.len();
+            group_exprs.push((
+                Arc::new(SliceStartExpr {
+                    name: ts_name.clone(),
+                    index: input_ts,
+                    width,
+                }),
+                SLICE_COLUMN.to_string(),
+            ));
+            let partial = AggregateExec::try_new(
+                AggregateMode::Partial,
+                PhysicalGroupBy::new_single(group_exprs),
+                agg.aggr_expr().to_vec(),
+                agg.filter_expr().to_vec(),
+                input.clone(),
+                input.schema(),
+            )?;
+            (
+                Arc::new(partial) as Arc<dyn ExecutionPlan>,
+                SliceColumn {
+                    index,
+                    added: true,
+                    scale: 1,
+                    width,
+                },
+            )
+        }
+    };
 
     Ok(Some(Arc::new(SliceAggExec {
         input: partial,
@@ -485,6 +522,60 @@ fn skip(reason: &str) -> Result<Option<Arc<dyn ExecutionPlan>>> {
         .with_label_values(&[reason])
         .inc();
     Ok(None)
+}
+
+/// If every group of `expr` lies within one slice, returns how many units of `expr` make
+/// one unit of the time index. That holds for the time index itself and for `date_bin`
+/// from the epoch whose stride divides the slice width and is a whole number of time
+/// units. An interval given as a string makes `date_bin` cast the time index to
+/// nanoseconds; with an origin, `date_bin` is not accepted.
+fn bucket_within_slice(
+    expr: &Arc<dyn PhysicalExpr>,
+    ts_index: usize,
+    ts_unit: TimeUnit,
+) -> Option<i64> {
+    let is_ts = |e: &Arc<dyn PhysicalExpr>| {
+        e.downcast_ref::<Column>()
+            .is_some_and(|c| c.index() == ts_index)
+    };
+    if is_ts(expr) {
+        return Some(1);
+    }
+    let func = expr.downcast_ref::<ScalarFunctionExpr>()?;
+    let args = func.args();
+    if !func.fun().inner().is::<DateBinFunc>() || args.len() != 2 {
+        return None;
+    }
+    let scale = if is_ts(&args[1]) {
+        1
+    } else {
+        let cast = args[1].downcast_ref::<CastExpr>()?;
+        if !is_ts(cast.expr())
+            || !matches!(
+                cast.cast_type(),
+                DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, _)
+            )
+        {
+            return None;
+        }
+        ts_unit.factor() as i64
+    };
+    let stride = match args[0].downcast_ref::<Literal>().map(|l| l.value()) {
+        Some(ScalarValue::IntervalMonthDayNano(Some(v))) if v.months == 0 => (v.days as i64)
+            .checked_mul(NANOS_PER_DAY)
+            .and_then(|d| d.checked_add(v.nanoseconds)),
+        Some(ScalarValue::IntervalDayTime(Some(v))) => (v.days as i64)
+            .checked_mul(NANOS_PER_DAY)
+            .and_then(|d| d.checked_add(v.milliseconds as i64 * 1_000_000)),
+        _ => None,
+    };
+    stride
+        .is_some_and(|stride| {
+            stride > 0
+                && (SLICE_SECONDS * 1_000_000_000) % stride == 0
+                && stride % ts_unit.factor() as i64 == 0
+        })
+        .then_some(scale)
 }
 
 /// The expressions the aggregation and the operators between it and the scan evaluate.
@@ -731,8 +822,9 @@ impl PhysicalExpr for SliceStartExpr {
 
 /// A partial aggregation evaluated per time slice through the cache.
 ///
-/// `input` is the original partial aggregation with an added [SliceStartExpr] group key,
-/// which this operator removes, so its output schema is the original one.
+/// `input` is the original partial aggregation, grouped by a key that gives each group's
+/// slice. If that key is an added [SliceStartExpr], this operator removes it, so its
+/// output schema is the original one.
 pub struct SliceAggExec {
     input: Arc<dyn ExecutionPlan>,
     schema: SchemaRef,
@@ -785,6 +877,10 @@ impl Collected {
 #[derive(Clone, Copy)]
 struct SliceColumn {
     index: usize,
+    /// Whether the column is an added [SliceStartExpr] to remove from the output.
+    added: bool,
+    /// Units of the column in one unit of the time index.
+    scale: i64,
     width: i64,
 }
 
@@ -795,13 +891,16 @@ impl SliceColumn {
             .as_primitive::<Int64Type>()
             .iter()
             .map(|v| match v {
-                Some(v) => Ok(v.div_euclid(self.width) * self.width),
+                Some(v) => Ok(v.div_euclid(self.scale).div_euclid(self.width) * self.width),
                 None => internal_err!("slice column of a row is null"),
             })
             .collect()
     }
 
     fn strip(&self, batch: &RecordBatch, schema: &SchemaRef) -> Result<RecordBatch> {
+        if !self.added {
+            return Ok(batch.clone());
+        }
         let mut columns = batch.columns().to_vec();
         columns.remove(self.index);
         Ok(RecordBatch::try_new(schema.clone(), columns)?)

@@ -67,6 +67,8 @@ async fn query(instance: &Arc<Instance>, sql: &str, cache: bool) -> String {
 enum Plan {
     /// Not rewritten.
     Original,
+    /// Slices taken from a time bucket the query groups by.
+    Bucket,
     /// Slices from an added group key.
     Added,
 }
@@ -82,7 +84,7 @@ fn queries(start: i64, end: i64) -> Vec<(String, Plan)> {
                 "SELECT date_bin(INTERVAL '10 minutes', ts) AS b, host, count(*), sum(v), avg(v), max(v) \
                  FROM {TABLE} WHERE {range} GROUP BY b, host ORDER BY b, host"
             ),
-            Plan::Added,
+            Plan::Bucket,
         ),
         // The time index is not projected, so the scan has to carry it for slicing.
         (
@@ -115,6 +117,22 @@ fn queries(start: i64, end: i64) -> Vec<(String, Plan)> {
         (
             format!(
                 "SELECT date_bin(INTERVAL '30 minutes', ts) AS b, approx_distinct(CAST(v AS BIGINT)) FROM {TABLE} \
+                 WHERE {range} GROUP BY b ORDER BY b"
+            ),
+            Plan::Bucket,
+        ),
+        // A string interval makes `date_bin` cast the time index to nanoseconds.
+        (
+            format!(
+                "SELECT date_bin('20 minutes', ts) AS b, count(*), sum(v) FROM {TABLE} \
+                 WHERE {range} GROUP BY b ORDER BY b"
+            ),
+            Plan::Bucket,
+        ),
+        // Buckets that cross slice boundaries.
+        (
+            format!(
+                "SELECT date_bin(INTERVAL '25 minutes', ts) AS b, count(*), sum(v) FROM {TABLE} \
                  WHERE {range} GROUP BY b ORDER BY b"
             ),
             Plan::Added,
@@ -232,14 +250,15 @@ async fn test_slice_agg_cache_matches_uncached_results() {
     create_table(&instance, &mut rng).await;
 
     // The rewritten shapes must hit the cache when repeated, otherwise the comparisons
-    // below prove nothing. A plan is rewritten from its second run.
+    // below prove nothing. A plan with an added key is rewritten from its second run.
     let (start, end) = (
         BASE_MS + 30 * MINUTE_MS,
         BASE_MS + 7 * HOUR_MS + 5 * MINUTE_MS,
     );
     for (sql, plan) in queries(start, end) {
         let first = explain(&instance, &sql).await;
-        assert!(!first.contains("SliceAggExec"), "`{sql}`: {first}");
+        let rewritten_first = first.contains("SliceAggExec");
+        assert_eq!(plan == Plan::Bucket, rewritten_first, "`{sql}`: {first}");
         query(&instance, &sql, true).await;
         let explain = explain_cached(&instance, &sql).await;
         let hits = slice_hits(&explain);
@@ -250,7 +269,11 @@ async fn test_slice_agg_cache_matches_uncached_results() {
                 hits.is_some_and(|h| h > 0),
                 "expected cache hits for `{sql}`, got {hits:?}"
             );
-            assert!(explain.contains("slice_start("), "`{sql}`");
+            assert_eq!(
+                plan == Plan::Added,
+                explain.contains("slice_start("),
+                "`{sql}`"
+            );
         }
     }
 
