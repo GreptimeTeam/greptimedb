@@ -90,10 +90,16 @@ fn is_current(
     context.metadata == manifest.metadata
         && context.options == current.version.options
         && !edit.files_to_remove.is_empty()
-        && edit
-            .files_to_remove
-            .iter()
-            .all(|file| manifest.files.get(&file.file_id).map(AsRef::as_ref) == Some(file))
+        // "Unchanged" compares the row authorization by its serialized form: two
+        // literals that only compare equal as Rust `Value`s (`TIME 1 second` and
+        // `TIME 1000 milliseconds`) still authorize different rows, so an input
+        // re-authorized after this snapshot was captured is stale, not a repeat.
+        && edit.files_to_remove.iter().all(|file| {
+            manifest
+                .files
+                .get(&file.file_id)
+                .is_some_and(|current| current.same_reference(file))
+        })
 }
 
 fn validate_files(

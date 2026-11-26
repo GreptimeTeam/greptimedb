@@ -311,6 +311,7 @@ fn file_meta_from_sst_info(
         num_row_groups: info.num_row_groups,
         sequence: NonZeroU64::new(sequence),
         partition_expr: None,
+        owned_range: None,
         num_series: info.num_series,
         primary_key_min: None,
         primary_key_max: None,

@@ -455,6 +455,28 @@ impl RegionManifestBuilder {
         for file in edit.files_to_add {
             let file = FileMetaRef::from(file);
             let file = self.file_metadata_interner.intern(file);
+            // Repartition re-authorizes an existing physical SST without changing it,
+            // and index publication only replaces its index view. Both are reconciled
+            // by the same rule the live version uses, so reopening the manifest
+            // publishes exactly what was live: the row authorization comes from the
+            // edit and the index view from whichever description is newer.
+            let file = match self.files.get(&file.file_id) {
+                Some(existing) => {
+                    let reconciled = existing.reconcile_reference(&file);
+                    // Reuse only an unchanged entry, comparing the row
+                    // authorization by its serialized form: `PartitionExpr`
+                    // equality cannot tell `TIME 1 second` from
+                    // `TIME 1000 milliseconds` apart, so the derived equality would
+                    // persist the range the staging proof already replaced.
+                    if reconciled.same_reference(existing) {
+                        existing.clone()
+                    } else {
+                        self.file_metadata_interner
+                            .intern(FileMetaRef::from(reconciled))
+                    }
+                }
+                None => file,
+            };
             if let Some(old_file) = self.files.insert(file.file_id, file.clone())
                 && let Some(old_index) = old_file.index_version()
                 && !old_file.is_index_up_to_date(&file)
@@ -1759,6 +1781,223 @@ mod tests {
         for (id, meta) in &manifest.files {
             assert!(MetadataRef::ptr_eq(meta, &recovered.files[id]));
         }
+    }
+
+    #[test]
+    fn test_range_only_edit_keeps_the_current_index_generation_on_reopen() {
+        use crate::sst::file::PartitionExprRef;
+
+        let mut builder = manifest_builder();
+        let file_id = FileId::random();
+        let current = FileMeta {
+            region_id: RegionId::new(1, 1),
+            file_id,
+            index_version: 7,
+            index_file_size: 1024,
+            available_indexes: [crate::sst::file::IndexType::InvertedIndex]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        builder.apply_edit(
+            1,
+            RegionEdit {
+                files_to_add: vec![current.clone()],
+                ..Default::default()
+            },
+        );
+
+        // A repartition narrows the reference from a snapshot that still saw
+        // generation 3 of the index.
+        let range = partition::expr::col("tag").lt(datatypes::value::Value::UInt32(10));
+        let mut incoming = current.clone();
+        incoming.index_version = 3;
+        incoming.index_file_size = 0;
+        incoming.available_indexes.clear();
+        incoming.owned_range = Some(PartitionExprRef::from(range.clone()));
+        builder.apply_edit(
+            2,
+            RegionEdit {
+                files_to_add: vec![incoming],
+                ..Default::default()
+            },
+        );
+
+        // Reopen publishes what the manifest holds, so the range must coexist with
+        // the index generation the region had already built.
+        let checkpoint = builder.try_build().unwrap();
+        let restored = RegionManifest::decode(&serde_json::to_vec(&checkpoint).unwrap()).unwrap();
+        let reopened = RegionManifestBuilder::with_checkpoint(Some(restored), Default::default())
+            .try_build()
+            .unwrap();
+        let meta = &reopened.files[&file_id];
+        assert_eq!(Some(&range), meta.owned_range.as_deref());
+        assert_eq!(7, meta.index_version);
+        assert_eq!(1024, meta.index_file_size);
+        assert!(
+            meta.available_indexes
+                .contains(&crate::sst::file::IndexType::InvertedIndex)
+        );
+    }
+
+    /// Live version updates and a reopen must publish the same reference.
+    ///
+    /// They used to disagree: live installed an incoming indexless entry wholesale
+    /// while the manifest kept its own view, so a restart changed the index a
+    /// reference advertised. Both now use `FileMeta::reconcile_reference`.
+    #[test]
+    fn test_live_and_reopened_reconcile_the_index_view_the_same_way() {
+        use crate::sst::file::{IndexType, PartitionExprRef};
+        use crate::sst::version::SstVersion;
+
+        let purger = crate::test_util::new_noop_file_purger();
+        let file_id = FileId::random();
+        let range = |bound: u32| {
+            PartitionExprRef::from(
+                partition::expr::col("tag").lt(datatypes::value::Value::UInt32(bound)),
+            )
+        };
+        let indexed = |version: u64| FileMeta {
+            region_id: RegionId::new(1, 1),
+            file_id,
+            level: 0,
+            index_version: version,
+            index_file_size: 1024,
+            available_indexes: [IndexType::InvertedIndex].into_iter().collect(),
+            ..Default::default()
+        };
+        let indexless = |version: u64| FileMeta {
+            region_id: RegionId::new(1, 1),
+            file_id,
+            level: 0,
+            index_version: version,
+            ..Default::default()
+        };
+        let mut stale = indexless(3);
+        stale.owned_range = Some(range(10));
+        let mut watermark = indexless(9);
+        watermark.owned_range = Some(range(20));
+        let mut retreat = indexed(3);
+        retreat.owned_range = Some(range(30));
+        let mut first_build = indexed(0);
+        first_build.owned_range = Some(range(40));
+        first_build.index_file_size = 0;
+        let mut indexed_first_build = indexed(0);
+        indexed_first_build.owned_range = Some(range(50));
+        indexed_first_build.index_file_size = 0;
+        let cases = [
+            // (a) An indexed v7 reference against a stale indexless v3 snapshot.
+            ("indexed v7 vs indexless v3", indexed(7), stale, Some(7)),
+            // (b) A removal watermark against an index it retired.
+            ("removal watermark vs indexed v3", watermark, retreat, None),
+            // (c) Indexless generation 0 against an index built at generation 0.
+            (
+                "indexless v0 vs indexed v0",
+                indexless(0),
+                first_build,
+                Some(0),
+            ),
+            // (d) The reverse tie: an indexless snapshot of generation 0 must not
+            // drop an index that was published in place at generation 0, and must
+            // not queue its file for removal either.
+            (
+                "indexed v0 vs indexless v0",
+                indexed_first_build,
+                indexless(0),
+                Some(0),
+            ),
+        ];
+
+        for (name, existing, incoming, expected_index) in cases {
+            let mut version = SstVersion::new(crate::test_util::memtable_util::metadata_for_test());
+            version.add_files(purger.clone(), [existing.clone()].into_iter());
+            version.add_files(purger.clone(), [incoming.clone()].into_iter());
+            let live = version.levels()[0].files[&file_id].meta_ref().clone();
+
+            let mut builder = manifest_builder();
+            for (version, meta) in [(1, existing), (2, incoming)] {
+                builder.apply_edit(
+                    version,
+                    RegionEdit {
+                        files_to_add: vec![meta],
+                        ..Default::default()
+                    },
+                );
+            }
+            let reopened = builder.try_build().unwrap().files[&file_id].clone();
+
+            assert_eq!(FileMetaRef::from(live.clone()), reopened, "{name}");
+            assert_eq!(
+                expected_index,
+                live.index_version(),
+                "live index view: {name}"
+            );
+            assert_eq!(
+                expected_index,
+                reopened.index_version(),
+                "reopened index view: {name}"
+            );
+        }
+    }
+
+    /// An L0 entry adopted as a shared reference keeps its index view.
+    ///
+    /// The adoption detaches the L0 entry before installing the shared one, so
+    /// reconciling only against the shared slot let an indexless incoming
+    /// description install wholesale: live dropped the index while the manifest,
+    /// which still holds the L0 entry, kept it.
+    #[test]
+    fn test_l0_adoption_keeps_the_index_view_of_the_detached_entry() {
+        use crate::sst::file::{IndexType, LEVEL_SHARED, SHARED_LEVEL_SLOT};
+        use crate::sst::version::SstVersion;
+
+        let purger = crate::test_util::new_noop_file_purger();
+        let file_id = FileId::random();
+        let indexed = FileMeta {
+            region_id: RegionId::new(1, 1),
+            file_id,
+            level: 0,
+            index_version: 7,
+            index_file_size: 1024,
+            available_indexes: [IndexType::InvertedIndex].into_iter().collect(),
+            ..Default::default()
+        };
+        // The adoption is a description taken before the index was built.
+        let mut adopted = indexed.clone();
+        adopted.level = LEVEL_SHARED;
+        adopted.index_version = 3;
+        adopted.index_file_size = 0;
+        adopted.available_indexes.clear();
+
+        let mut version = SstVersion::new(crate::test_util::memtable_util::metadata_for_test());
+        version.add_files(purger.clone(), [indexed.clone()].into_iter());
+        version.add_files(purger.clone(), [adopted.clone()].into_iter());
+        assert!(
+            version.levels()[0].files.is_empty(),
+            "the L0 entry is detached, not left visible"
+        );
+        let live = version.levels()[SHARED_LEVEL_SLOT].files[&file_id]
+            .meta_ref()
+            .clone();
+        assert_eq!(Some(7), live.index_version());
+
+        let mut builder = manifest_builder();
+        for (version, meta) in [(1, indexed), (2, adopted)] {
+            builder.apply_edit(
+                version,
+                RegionEdit {
+                    files_to_add: vec![meta],
+                    ..Default::default()
+                },
+            );
+        }
+        let reopened = builder.try_build().unwrap().files[&file_id].clone();
+        assert_eq!(FileMetaRef::from(live), reopened);
+        assert_eq!(Some(7), reopened.index_version());
+        assert!(
+            reopened.inverted_index_available(),
+            "the index descriptor survives the adoption"
+        );
     }
 
     #[test]

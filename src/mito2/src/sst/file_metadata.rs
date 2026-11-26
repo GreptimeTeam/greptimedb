@@ -45,6 +45,16 @@ enum MetadataRefInner<T: Eq + Hash> {
 struct ScopedMetadata<T: Eq + Hash> {
     table_id: TableId,
     value: Arc<T>,
+    /// Exact identity of the value's row authorization, for the values that
+    /// carry one.
+    ///
+    /// `FileMeta` equality compares `owned_range` with `PartitionExpr` equality,
+    /// which cannot tell `TIME 1 second` from `TIME 1000 milliseconds` apart,
+    /// although the two authorize different rows. Carrying the exact key in the
+    /// interner key keeps those references in separate entries, so interning the
+    /// re-authorized one never hands back the older range. It is `None` for values
+    /// without a range, including every registered `PartitionExpr`.
+    owned_range_key: Option<String>,
 }
 
 impl<T: Eq + Hash> MetadataRef<T> {
@@ -201,6 +211,8 @@ impl FileMetadataInterner {
                 self.inner.expressions[shard].intern_sized(ScopedMetadata {
                     table_id,
                     value: expr.as_arc().clone(),
+                    // A `PartitionExpr` has no row authorization of its own.
+                    owned_range_key: None,
                 }),
             ));
             if let Some(owned) = meta.get_mut() {
@@ -212,6 +224,7 @@ impl FileMetadataInterner {
         *meta = MetadataRef(MetadataRefInner::Interned(
             self.inner.files[shard].intern_sized(ScopedMetadata {
                 table_id: meta.region_id.table_id(),
+                owned_range_key: meta.owned_range_key(),
                 value: meta.as_arc().clone(),
             }),
         ));

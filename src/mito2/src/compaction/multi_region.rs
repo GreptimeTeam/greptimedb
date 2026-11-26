@@ -94,6 +94,9 @@ pub struct MultiRegionCompactionContext {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MultiRegionCompactionStats {
     pub source_files: u64,
+    /// Physical rows read from the source objects, before any reference drops a row.
+    pub source_physical_rows: u64,
+    /// Rows admitted by their owner's reference, i.e. rows this compaction kept.
     pub source_rows: u64,
     /// Row-group page bytes fetched from object storage, excluding footer traffic and retries.
     pub source_store_page_bytes: u64,
@@ -120,7 +123,10 @@ pub struct MultiRegionCompactionOutput {
 #[derive(Default)]
 struct SourceCounters {
     files: AtomicU64,
+    /// Rows admitted by their owner's reference.
     rows: AtomicU64,
+    /// Rows physically present in the scanned objects, admitted or not.
+    physical_rows: AtomicU64,
     store_page_bytes: AtomicU64,
 }
 
@@ -157,6 +163,48 @@ pub async fn compact_regions(
         _ = cancellation.cancelled() => crate::error::CompactionCancelledSnafu.fail(),
         result = execution => result,
     }
+}
+
+/// Rejects a plan whose routing would retire a row that a departing reference can
+/// still read.
+///
+/// The source scan is physical and each row is routed to the one target its
+/// partition selects, so a row can only be lost when the routed target's own
+/// reference rejects it and every departing reference rejects it too. Deciding
+/// that needs row values, so planning rejects the provable case here - a target
+/// with a restricted reference next to a holder that authorizes the whole file -
+/// and `SharedSource::authorize` verifies every remaining dropped row against all
+/// holders, failing the compaction rather than losing it.
+fn validate_row_authorizations(plan: &MultiRegionCompactionPlan) -> Result<()> {
+    for file in &plan.sources {
+        let id = file.file_id();
+        for (target_id, target) in &plan.targets {
+            let Some(input) = target.inputs.get(&id) else {
+                continue;
+            };
+            // A target with an unrestricted reference drops nothing.
+            if input.owned_range.is_none() {
+                continue;
+            }
+            for (holder_id, holder) in &plan.targets {
+                if holder_id == target_id {
+                    continue;
+                }
+                let Some(holder_input) = holder.inputs.get(&id) else {
+                    continue;
+                };
+                ensure!(
+                    holder_input.owned_range.is_some(),
+                    InvalidMultiRegionCompactionSnafu {
+                        reason: format!(
+                            "Source file {id} is unrestricted in region {holder_id} but restricted in region {target_id}; a row routed to {target_id} could be retired while {holder_id} can still read it"
+                        ),
+                    }
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_plan(plan: &MultiRegionCompactionPlan) -> Result<RegionMetadataRef> {
@@ -264,5 +312,6 @@ fn validate_plan(plan: &MultiRegionCompactionPlan) -> Result<RegionMetadataRef> 
             }
         );
     }
+    validate_row_authorizations(plan)?;
     Ok(first.metadata.clone())
 }

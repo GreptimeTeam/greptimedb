@@ -424,15 +424,18 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             mut edit,
             waiters,
             preload_sst_cache,
-            staging_partition_expr: _,
+            staging_partition_expr,
         } = request;
         #[cfg(feature = "enterprise")]
         if matches!(kind, RegionEditKind::Compaction(_)) && region.is_staging() {
             waiters.reply_with(|| RegionBusySnafu { region_id }.fail());
             return RegionEditDispatch::Rejected;
         }
+        // Only a staging apply replays a repartition layout, and only that path
+        // computed the new row authorization from both domains.
+        let remap_publication = staging_partition_expr.is_some();
         if matches!(kind, RegionEditKind::Import)
-            && let Err(error) = prepare_region_edit(&region, &mut edit)
+            && let Err(error) = prepare_region_edit(&region, &mut edit, remap_publication)
         {
             let error = Arc::new(error);
             waiters.reply_with(|| Err(error.clone()).context(EditRegionSnafu { region_id }));
@@ -976,7 +979,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     }
 }
 
-fn prepare_region_edit(region: &MitoRegionRef, edit: &mut RegionEdit) -> Result<()> {
+fn prepare_region_edit(
+    region: &MitoRegionRef,
+    edit: &mut RegionEdit,
+    remap_publication: bool,
+) -> Result<()> {
     let region_id = region.region_id;
     region.version().options.validate_file_formats(
         region_id,
@@ -1017,14 +1024,31 @@ fn prepare_region_edit(region: &MitoRegionRef, edit: &mut RegionEdit) -> Result<
     );
     for file in &edit.files_to_add {
         if let Some(existing) = shared.get(&file.file_id) {
+            let existing_meta = existing.meta_ref();
             let mut imported = file.clone();
-            imported.sequence = existing.meta_ref().sequence;
+            imported.sequence = existing_meta.sequence;
             imported.preserve_row_sequence = false;
+            // A repartition republishes a visible shared SST with the row range it
+            // derived from both domains. That is the only path that may move the
+            // reference's authorization: replaying an import from a caller, or an
+            // ordinary edit, could restore a range the region already gave up
+            // (`Some(range) -> None` widens), and no solver runs here to prove the
+            // new range is narrower.
+            let reauthorized =
+                remap_publication && existing_meta.reauthorizes_owned_range(&imported);
+            // "Unchanged" compares the row authorization exactly: two literals that
+            // only compare equal as Rust `Value`s (`TIME 1 second` and `TIME 1000
+            // milliseconds`) still authorize different rows, so moving between them
+            // is a re-authorization and needs the staging proof.
             snafu::ensure!(
-                &imported == existing.meta_ref(),
+                imported.same_reference(existing_meta) || reauthorized,
                 crate::error::InvalidRequestSnafu {
                     region_id,
-                    reason: "Shared SST import conflicts with a visible reference",
+                    reason: if !existing_meta.same_owned_range(&imported) {
+                        "An ownership-only change is only admitted on the staging path that computed it"
+                    } else {
+                        "Shared SST import conflicts with a visible reference"
+                    },
                 }
             );
         }

@@ -500,8 +500,16 @@ impl<S> RegionWorkerLoop<S> {
 
         let manager = region.manifest_ctx.manifest_manager.read().await;
         let manifest = manager.manifest();
-        let is_current =
-            manifest.files.get(&file_meta.file_id).map(AsRef::as_ref) == Some(&file_meta);
+        // "Still current" compares the row authorization by its serialized form:
+        // the reference may have been re-authorized while this build ran (a
+        // repartition respelling the range, e.g. `TIME 1 second` ->
+        // `TIME 1000 milliseconds`), which admits different rows. The completed
+        // result then describes a reference that no longer exists, and installing
+        // it would put the stale captured range back in place.
+        let is_current = manifest
+            .files
+            .get(&file_meta.file_id)
+            .is_some_and(|current| current.same_reference(&file_meta));
         if is_current {
             region.version_control.apply_edit(
                 Some(RegionEdit {

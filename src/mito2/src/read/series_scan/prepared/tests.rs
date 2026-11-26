@@ -797,6 +797,110 @@ async fn native_scan_falls_back_to_raw_sources_until_columnar_coverage(#[case] v
     engine.stop().await.unwrap();
 }
 
+/// A repartition narrows a reference's `owned_range` without rewriting the SST, so a
+/// local file keeps full columnar coverage while authorizing fewer rows than it holds.
+/// The sidecar exposes the whole file, whereas the Parquet reader filters per file, so
+/// a ranged reference must fall back to the ordinary reader instead of letting the
+/// prepared path return samples the reference does not own.
+#[tokio::test]
+async fn narrowed_owned_range_falls_back_to_the_ordinary_reader() {
+    use common_time::Timestamp;
+
+    use crate::manifest::action::RegionEdit;
+    use crate::sst::file::PartitionExprRef;
+
+    let (_env, engine, region) = fixture().await;
+    let request = ScanRequest {
+        distribution: Some(TimeSeriesDistribution::PerSeries),
+        ..Default::default()
+    };
+    let ctx = QueryScanContext::default();
+    let metrics = ExecutionPlanMetricsSet::new();
+    build(&engine, &region).await;
+
+    let raw_scanner = engine
+        .handle_query(region.region_id, request.clone())
+        .await
+        .unwrap();
+    let binding = labels(raw_scanner.metadata());
+    // Everything the artifacts cover is readable while the reference is file-wide.
+    let prepared = raw_scanner
+        .prepare_series(&ctx, &metrics, &binding)
+        .await
+        .unwrap()
+        .expect("complete columnar coverage prepares");
+    let chunks = prepared
+        .read_series(0..prepared.num_series())
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(
+        vec![(1000, 1.0), (2000, 1.0)],
+        samples(&chunks),
+        "the sidecar covers both rows, which is what makes a ranged read unsafe here"
+    );
+
+    // Narrow every local reference: the rows before 1500ms belong to a sibling
+    // reference now, and the SSTs themselves are untouched.
+    let narrowed = partition::expr::col("ts").gt_eq(datatypes::value::Value::Timestamp(
+        Timestamp::new_millisecond(1500),
+    ));
+    let files = engine
+        .get_region(region.region_id)
+        .unwrap()
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files())
+        .map(|file| {
+            let mut meta = (*file.meta_ref()).clone();
+            meta.owned_range = Some(PartitionExprRef::from(narrowed.clone()));
+            meta
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(3, files.len(), "the fixture flushed three SSTs");
+    engine
+        .edit_region(
+            region.region_id,
+            RegionEdit {
+                files_to_add: files,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let raw_scanner = engine
+        .handle_query(region.region_id, request)
+        .await
+        .unwrap();
+    let binding = labels(raw_scanner.metadata());
+    assert!(
+        raw_scanner
+            .prepare_series(&ctx, &metrics, &binding)
+            .await
+            .unwrap()
+            .is_none(),
+        "a ranged reference must fall back instead of reading the whole sidecar"
+    );
+    // The ordinary reader applies the range per file, so the samples match what the
+    // prepared path could only return by ignoring it.
+    assert_eq!(
+        vec![(2000, 1.0)],
+        all_raw_samples(
+            raw_scanner.as_ref(),
+            &ctx,
+            &metrics,
+            &binding,
+            SeriesOrdering::KeyThenTime
+        )
+        .await
+    );
+    engine.stop().await.unwrap();
+}
+
 #[tokio::test]
 async fn manual_build_covers_unknown_sequences_without_a_compaction_window() {
     use crate::region::options::CompactionOptions;

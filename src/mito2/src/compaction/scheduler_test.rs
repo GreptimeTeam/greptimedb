@@ -1213,7 +1213,10 @@ async fn test_pick_result_refreshes_replaced_selected_file() {
         .await;
 
     assert_eq!(job_scheduler.num_jobs(), 1);
-    assert!(!stale.compacting());
+    // The replacement is the same logical SST, so it shares the reservation with
+    // the handle the picker selected: reserving the refreshed handle reserves both,
+    // and releasing it releases both.
+    assert!(stale.compacting());
     assert!(current.compacting());
     assert_eq!(current.meta_ref().index_version, 1);
 }

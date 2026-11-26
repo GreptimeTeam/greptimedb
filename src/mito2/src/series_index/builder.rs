@@ -57,6 +57,10 @@ async fn reader_input(
         .access_layer
         .read_sst(file)
         .projection(Some(ReadColumns::new([])))
+        // A range index describes the whole physical file: its row-group offsets
+        // and value bounds must cover every stored row, whatever range this
+        // reference is allowed to read.
+        .complete_physical_scan()
         .build_reader_input(&mut ReaderMetrics::default())
         .await?
         .map(|(context, selection)| (Arc::new(context), selection)))
@@ -305,6 +309,9 @@ pub(crate) async fn build_sample_windows(
         let (context, mut selection) = region
             .access_layer
             .read_sst(file.clone())
+            // Daily coverage is a property of the samples object, not of one
+            // reference's authorization, so it must see every physical row.
+            .complete_physical_scan()
             .build_reader_input(&mut ReaderMetrics::default())
             .await?
             .context(UnexpectedSnafu {

@@ -717,11 +717,19 @@ fn output_matches_partition(
     output: &CompactionOutput,
     partition_expr: Option<&PartitionExpr>,
 ) -> bool {
-    partition_expr.is_none()
-        || output
-            .inputs
-            .iter()
-            .all(|input| input.meta_ref().partition_expr.as_deref() == partition_expr)
+    // A ranged reference reads only part of its file, so whole-file summaries
+    // (row count, series count, pk range) do not describe the rows this region
+    // sees and must not be reused as the output's — not even when the region
+    // carries no partition expression.
+    output
+        .inputs
+        .iter()
+        .all(|input| input.meta_ref().owned_range.is_none())
+        && (partition_expr.is_none()
+            || output
+                .inputs
+                .iter()
+                .all(|input| input.meta_ref().partition_expr.as_deref() == partition_expr))
 }
 
 fn reusable_index_inputs(
@@ -937,6 +945,7 @@ impl DefaultSstMerger {
                     num_row_groups: sst_info.num_row_groups,
                     sequence: sequence_metadata.file_sequence,
                     partition_expr: partition_expr.clone().map(Into::into),
+                    owned_range: None,
                     num_series: sst_info.num_series,
                     primary_key_min,
                     primary_key_max,

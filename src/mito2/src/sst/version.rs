@@ -116,41 +116,91 @@ impl SstVersion {
         for file in files_to_add {
             let file = file.into();
             let level = file.level;
-            let new_index_version = file.index_version;
             // A trusted L0 adoption changes classification, not the physical object.
             // Detach the old handle without marking it deleted (old readers may hold it).
             // Admission rejects an existing L1 reference; see `prepare_region_edit`.
-            if level == file::LEVEL_SHARED {
-                levels[0].files.remove(&file.file_id);
-            }
+            // The detached description still takes part in the reconciliation below:
+            // dropping it before reconciling would let an incoming description install
+            // wholesale and lose an index view only the L0 entry knew, so a reopen that
+            // still holds that entry would disagree with the live version.
+            let detached = if level == file::LEVEL_SHARED {
+                levels[0]
+                    .files
+                    .remove(&file.file_id)
+                    .map(|handle| handle.meta_ref().clone())
+            } else {
+                None
+            };
             // Shared references use a sentinel wire level and live in their own slot.
             let Some(slot) = file::level_slot(level) else {
                 panic!("Unsupported SST level {level}");
             };
-            // If the file already exists, then we should only replace the handle when the index is outdated.
-            levels[slot]
-                .files
-                .entry(file.file_id)
-                .and_modify(|f| {
-                    if f.meta_ref() == file.as_ref() || f.meta_ref().is_index_up_to_date(&file) {
-                        // same file meta or current file handle's index is up-to-date, skip adding
-                        if f.index_id().version > new_index_version {
-                            // what does it mean for us to see older index version?
-                            common_telemetry::warn!(
-                                "Adding file with older index version, existing: {:?}, new: {:?}, ignoring new file",
-                                f.meta_ref(),
-                                file
-                            );
-                        }
-                    } else {
-                        // include case like old file have no index or index is outdated
-                        *f = f.with_updated_index(file.clone());
+            // If the same physical SST is already visible, publish one reconciled
+            // description of it. `reconcile_reference` is the same rule a reopen
+            // applies, so a restart cannot change what this version publishes; the
+            // incoming row authorization always wins because it belongs to one
+            // reference, and a fresh handle would drop a running compaction's
+            // reservation, which `with_updated_index` shares instead.
+            match levels[slot].files.entry(file.file_id) {
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    let existing = entry.get().meta_ref().clone();
+                    // Reuse only what is unchanged, and "unchanged" compares the row
+                    // authorization by its serialized form: `PartitionExpr` equality
+                    // cannot tell `TIME 1 second` from `TIME 1000 milliseconds` apart,
+                    // so the derived equality would keep a range the staging proof
+                    // already replaced.
+                    if existing.same_reference(&file) && detached.is_none() {
+                        continue;
                     }
-                })
-                .or_insert_with(|| {
-                    FileHandle::new(file.clone(), file_purger.clone())
-                });
+                    if existing.exists_index()
+                        && !existing.supersedes_index_view(&file)
+                        && existing.index_version > file.index_version
+                    {
+                        // A description older than the current index view: only its
+                        // row authorization is news.
+                        common_telemetry::warn!(
+                            "Adding file with older index version, existing: {:?}, new: {:?}, keeping the current index view",
+                            existing,
+                            file
+                        );
+                    }
+                    let reconciled = Self::reconcile_descriptions(
+                        [detached.as_ref(), Some(&existing)],
+                        (*file).clone(),
+                    );
+                    if !reconciled.same_reference(&existing) {
+                        *entry.get_mut() = entry
+                            .get()
+                            .with_updated_index(FileMetaRef::from(reconciled));
+                    }
+                }
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    let reconciled =
+                        Self::reconcile_descriptions([detached.as_ref()], (*file).clone());
+                    entry.insert(FileHandle::new(
+                        FileMetaRef::from(reconciled),
+                        file_purger.clone(),
+                    ));
+                }
+            }
         }
+    }
+
+    /// Reconciles an incoming description with every description of the same
+    /// physical SST this version already holds.
+    ///
+    /// The row authorization belongs to `incoming`; the index view comes from
+    /// whichever description is newest under [FileMeta::reconcile_reference], so
+    /// a live update and a reopen publish the same thing.
+    fn reconcile_descriptions<'a>(
+        prior: impl IntoIterator<Item = Option<&'a FileMeta>>,
+        incoming: FileMeta,
+    ) -> FileMeta {
+        let mut reconciled = incoming;
+        for prior in prior.into_iter().flatten() {
+            reconciled = prior.reconcile_reference(&reconciled);
+        }
+        reconciled
     }
 
     /// Remove files from the version.
@@ -434,6 +484,53 @@ mod tests {
         assert!(!independent.is_deleted());
         drop(version);
         assert!(old_snapshot.levels()[0].files[&meta.file_id].is_deleted());
+    }
+
+    /// Mirrors the reservation guard in `compaction::scheduler::state`:
+    /// it releases whatever handle it was created from.
+    struct ReservationGuard(FileHandle);
+
+    impl Drop for ReservationGuard {
+        fn drop(&mut self) {
+            self.0.set_compacting(false);
+        }
+    }
+
+    #[test]
+    fn test_range_replacement_releases_the_compaction_reservation() {
+        let purger = new_noop_file_purger();
+        let meta = FileMeta {
+            file_id: FileId::random(),
+            ..Default::default()
+        };
+        let mut version = SstVersion::new(crate::test_util::memtable_util::metadata_for_test());
+        version.add_files(purger.clone(), [meta.clone()].into_iter());
+
+        // A compaction plan reserves the handle it selected.
+        let selected = version.levels()[0].files[&meta.file_id].clone();
+        assert!(selected.try_set_compacting());
+        let guard = ReservationGuard(selected.clone());
+
+        // Repartition replaces the handle with a range-only view of the same SST.
+        let mut ranged = meta.clone();
+        ranged.owned_range = Some(crate::sst::file::PartitionExprRef::from(
+            partition::expr::col("tag").lt(datatypes::value::Value::UInt32(10)),
+        ));
+        version.add_files(purger, [ranged.clone()].into_iter());
+        let live = version.levels()[0].files[&meta.file_id].clone();
+        assert_eq!(live.meta_ref(), &ranged);
+        assert!(
+            live.compacting(),
+            "the replacement must inherit the running reservation"
+        );
+
+        // Cancelling the compaction must release the handle the version publishes.
+        drop(guard);
+        assert!(!live.compacting(), "the reservation must not leak");
+        assert!(
+            live.try_set_compacting(),
+            "a later plan must be able to reserve the file again"
+        );
     }
 
     #[test]

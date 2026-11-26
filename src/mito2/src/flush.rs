@@ -1028,6 +1028,7 @@ impl MemtableSstWriter {
             num_row_groups: sst_info.num_row_groups,
             sequence: NonZeroU64::new(max_sequence),
             partition_expr: partition_expr.map(Into::into),
+            owned_range: None,
             num_series: sst_info.num_series,
             primary_key_min,
             primary_key_max,
