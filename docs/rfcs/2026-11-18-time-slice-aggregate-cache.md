@@ -147,26 +147,35 @@ Benefits:
 - Exact results. The fingerprint changes whenever the persisted rows of a slice change, so there is no staleness window to tune and nothing to clear manually.
 - No new protocol or persisted format. The engine contract is one method with a default implementation, and the cache is in memory.
 - The fingerprint is useful beyond this cache. Any result cache keyed by time range, such as one for PromQL range steps, can use it.
-- A prototype measured four dashboard queries over 384 million request log rows spanning 8 days, in standalone mode, on local disk with a warm OS cache. The table shows median milliseconds. A first run is the first query after the server starts; a slid window starts 5 minutes after the previous one. The uncached runs use `main` at 8e885bfed5, which already prunes these windows by time range.
+- A prototype measured dashboard queries over 384 million request log rows spanning 8 days, in standalone mode, on local disk with a warm OS cache. The table shows median milliseconds. A first run is the first query after the server starts; a slid window starts 5 minutes after the previous one. The uncached runs use `main` at 8e885bfed5, which already prunes these windows by time range.
 
-| Query | Window | Uncached, first run | Cached, first run | Uncached, later runs | Cached, slid window | Cached, same window |
+| Query | Window | Uncached, first run | Cached, first run | Uncached, slid window | Cached, slid window | Cached, same window |
 |---|---|---|---|---|---|---|
-| P99 latency per bucket and service | 24 hours | 187.7 | 209.4 | 166.3 | 18.8 | 7.5 |
-| | 7 days | 1187.2 | 1207.4 | 1227.7 | 22.9 | 14.1 |
-| Error count with a full-text term | 24 hours | 325.9 | 338.0 | 279.1 | 22.9 | 5.6 |
-| | 7 days | 2727.0 | 2680.5 | 2853.4 | 39.5 | 15.3 |
-| Top 10 endpoints | 24 hours | 162.0 | 165.3 | 147.7 | 14.3 | 3.4 |
-| | 7 days | 1174.5 | 1197.1 | 1192.7 | 22.9 | 12.9 |
-| Distinct users (`approx_distinct`) | 24 hours | 105.5 | 113.0 | 92.5 | 11.4 | 3.7 |
-| | 7 days | 722.2 | 748.9 | 817.2 | 23.4 | 15.3 |
+| P99 latency per bucket and service | 24 hours | 181.3 | 187.0 | 145.9 | 17.1 | 7.0 |
+| | 7 days | 1180.6 | 1197.1 | 974.3 | 23.3 | 14.5 |
+| Error count with a full-text term | 24 hours | 319.7 | 329.8 | 257.4 | 21.8 | 5.2 |
+| | 7 days | 2212.7 | 2375.9 | 1910.5 | 25.8 | 12.8 |
+| Top 10 endpoints | 24 hours | 165.9 | 161.2 | 119.1 | 14.0 | 3.3 |
+| | 7 days | 1151.4 | 1121.1 | 1014.6 | 38.8 | 15.8 |
+| Distinct users (`approx_distinct`) | 24 hours | 105.2 | 108.2 | 84.1 | 12.3 | 3.7 |
+| | 7 days | 675.5 | 682.3 | 523.6 | 17.6 | 11.3 |
 
-  Cached and uncached results were identical except for `approx_percentile_cont`, whose result depends on the order in which states are merged: cached values differed from uncached ones by up to 4.3%, as much as two uncached runs differed. A light query, `count(*)` and `avg` per bucket and service over 24 hours of 24 million rows, took 38.5 ms uncached and 9.9 ms cached on a slid window.
+  The cache held between 0.4 MB and 19 MB of states per query. Cached and uncached results were identical except for `approx_percentile_cont`, whose result depends on the order in which states are merged: cached values differed from uncached ones by up to 4.3%, as much as two uncached runs differed.
+
+  The same queries over 24 hours ran on a cluster of two datanodes, with 96 million rows in four regions on MinIO behind 10 ms of added latency. The datanodes restarted with empty local caches before each first run.
+
+| Query | Uncached, first run | Cached, first run | Uncached, slid window | Cached, slid window | Cached, same window |
+|---|---|---|---|---|---|
+| P99 latency per bucket and service | 370.5 | 374.9 | 154.9 | 34.4 | 9.1 |
+| Error count with a full-text term | 525.8 | 543.3 | 256.4 | 38.8 | 7.1 |
+| Top 10 endpoints | 357.0 | 366.8 | 127.8 | 32.7 | 5.3 |
+| Distinct users (`approx_distinct`) | 289.8 | 307.2 | 108.5 | 43.5 | 19.7 |
 
 Drawbacks:
 
-- The first execution of a query does more work. The prototype measured up to 12% more time on a first run. When the rule must add a grouping key, the key multiplies the groups by the number of slices.
+- The first execution of a query does more work: up to 7% more time in the measurements above. When the rule must add a grouping key, the key multiplies the groups by the number of slices, so a plan that needs one is rewritten only from its second run.
 - Slices are not cached while a memtable overlaps them, and a memtable spans everything from its oldest row to its newest. A late write therefore disables the cache from its timestamp to the present until the next flush. A dashboard that only shows the last 15 or 30 minutes, the default window of several of these front ends, gains little.
-- Aggregations whose states grow with their input, such as an exact `count(DISTINCT)`, exceed the per-query bound and are never cached; their first run pays for the extra grouping.
+- Aggregations whose states grow with their input are not cached. On the 8-day data, an exact `count(DISTINCT user_id)` per bucket and a top 10 of `user_id` by count, with 2 million distinct users, both exceeded the 256 MiB per-query bound. The run that exceeds the bound pays for collecting the states: 17% more time for the distinct count over 24 hours, 9% over 7 days, and 26% and 1% for the top 10. The plan is then not rewritten until the idle timeout passes, and later runs take the same time as uncached ones.
 - Only aggregations with a partial stage are rewritten. A query that groups by the whole primary key aggregates each series within one partition, and a `min` or `max` without grouping pushes its own dynamic filter into the scan; neither uses the cache.
 - Correctness depends on the fingerprint observing every change to the rows of a range. A new engine operation that changes rows without replacing files or bumping one of the versions in the fingerprint would make the cache return stale results. The engine contract and its tests must cover this requirement.
 
