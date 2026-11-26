@@ -73,7 +73,21 @@ If the aggregation already groups by a time bucket that lies within one slice, t
 
 When the query runs, `SliceAggregateExec` asks the scan for the fingerprint of each slice. Slices whose cached entry has the same fingerprint are emitted from the cache, and a dynamic filter lets the scan skip their rows. The remaining slices are computed by the original scan in one pass, and an extra grouping key is removed from their states before they are emitted. Once every partition of the scan has finished, their states are merged across partitions and cached per slice, without delaying the query. The final aggregation merges partial states regardless of how the input rows were split, so its output does not change.
 
-The rule runs where the partial aggregation reads the region scan: in-process in standalone mode, and on the datanode in distributed mode. In distributed mode, the aggregation above `SliceAggregateExec` produces the states that the frontend merges. Aggregations that the distributed planner keeps above `MergeScan`, such as those that cannot be split into steps, are not affected. The frontend plan and the region request protocol do not change.
+The rule runs where the partial aggregation reads the region scan: in-process in standalone mode, and on the datanode in distributed mode:
+
+```
+Frontend   AggregateExec (merges the outputs of all regions)    (unchanged)
+             └─ MergeScanExec                                   region request unchanged
+Datanode   AggregateExec (FinalPartitioned)                     (unchanged)
+             └─ RepartitionExec
+                  └─ SliceAggregateExec
+                       └─ Partial AggregateExec
+                            └─ RegionScanExec
+```
+
+In distributed mode, the datanode does all the cache work: it computes fingerprints, emits cached states, prunes the scan, merges the states of the partitions, and stores them. The frontend does not know whether a region's states came from the cache. Aggregations that the distributed planner keeps above `MergeScan`, such as those that cannot be split into steps, are not affected. The frontend plan and the region request protocol do not change.
+
+Each datanode caches the regions it hosts. A recomputed slice replaces its entry as a whole; states are never appended to an entry. After a region moves to another datanode, the new datanode starts without entries for it, and the old datanode evicts them once they are idle.
 
 A row written while a query runs may or may not be seen by a plain scan, with or without the cache. The cache keeps that visibility and does not add another outcome. A slice computed with such a row is cached under a fingerprint that does not match again, because the row stays in a memtable or moves to a new file.
 
@@ -103,10 +117,10 @@ SST files are immutable. Every operation that changes the persisted rows of a ra
 
 ## Cache key and entry
 
-- Key: the region ID, the partial aggregation and the operators below it, the scan request, the session settings, and the slice bounds. The key is kept in full and compared on lookup, so two plans never share an entry by a hash collision. It leaves out only the time-index range predicates that the slice bounds provably imply, so two queries with different windows can share their interior slices. Any other predicate on the time index, such as `date_part('hour', ts) = 3`, stays in the key. Session settings are in the key because functions read some of them, such as the time zone, at execution time.
+- Key: the region ID, the partial aggregation and the operators below it, the scan request, the session settings, and the slice bounds. The plan part is stored as its SHA-256 digest, so a key has a fixed size however large the plan is, and two plans share an entry only by a SHA-256 collision. It leaves out only the time-index range predicates that the slice bounds provably imply, so two queries with different windows can share their interior slices. Any other predicate on the time index, such as `date_part('hour', ts) = 3`, stays in the key. Session settings are in the key because functions read some of them, such as the time zone, at execution time.
 - Exclusions: dynamic filters change while a query runs, so the rule skips scans that hold one, such as a filter pushed down by a TopK or a join, and runs after filter pushdown to see them. Plans with expressions that are not immutable are skipped too, because their values can change between queries.
 - Entry: the fingerprint under which the entry was computed, and the partial state batches.
-- Capacity: one cache per node, bounded in bytes. The states a query collects count against the query memory limit, and a query whose states exceed a per-query bound caches nothing.
+- Capacity: one cache per node, bounded in bytes. Entries unused for an idle timeout are evicted. The states a query collects count against the query memory limit, and a query whose states exceed a per-query bound caches nothing.
 - The cache is experimental and off by default, with a node-level switch that a single query can override.
 
 ## Worked example
@@ -180,7 +194,7 @@ Drawbacks:
 2. **Plan identity.** The prototype identifies the plan by the debug form of its expressions plus the session settings. This relies on the debug form of every expression covering everything that affects its result. A stable serialization of physical expressions would remove that reliance.
 3. **Cost of a full hit.** A 30-day window with hourly slices still takes about 18 ms when every slice hits. Where that time goes has not been measured.
 4. **Sequence fence.** Bounding the memtable reads of rewritten scans by a sequence would make each query read exactly one version, at the cost of behaving differently from uncached scans.
-5. **Distributed mode.** The prototype has been verified in standalone mode only.
+5. **Leaving experimental.** The cache stays off by default until there is evidence from real dashboards: the hit rate by query shape, the reasons queries are not rewritten, the bytes held by the cache, and the first-run overhead on multiple datanodes with object storage. Distributed mode has so far been tested for correctness only, with a table of two regions.
 
 # Future Work
 
