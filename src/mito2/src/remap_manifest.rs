@@ -113,15 +113,10 @@ impl RemapManifest {
                 if file_meta.partition_expr.is_none() {
                     continue;
                 }
-                let creator_expr = file_meta.partition_expr.as_deref();
-                if creator_expr != region_expr.as_ref() {
+                if file_meta.partition_expr.as_deref() != region_expr.as_ref() {
                     offenders.push(format!(
-                        "region {} holds file {} created by a region partitioned by {}, but this \
-                         region is partitioned by {}",
-                        from_region_id,
-                        file_id,
-                        describe_partition_expr(creator_expr),
-                        describe_partition_expr(region_expr.as_ref()),
+                        "region {} holds file {} that another region created",
+                        from_region_id, file_id
                     ));
                 }
             }
@@ -456,13 +451,6 @@ impl RemapManifest {
 }
 
 /// Renders a partition expression for an error message.
-fn describe_partition_expr(expr: Option<&PartitionExpr>) -> String {
-    match expr {
-        Some(expr) => expr.as_json_str().unwrap_or_else(|_| format!("{expr:?}")),
-        None => "<none>".to_string(),
-    }
-}
-
 /// Result of manifest remapping, including new manifests and statistics.
 #[derive(Debug)]
 pub struct RemapResult {
@@ -736,10 +724,6 @@ mod tests {
             assert!(message.contains(&region_id.to_string()), "{message}");
             assert!(message.contains(&file_id.to_string()), "{message}");
         }
-        assert!(
-            message.contains(&creator_expr.as_json_str().unwrap()),
-            "{message}"
-        );
     }
 
     #[test]
