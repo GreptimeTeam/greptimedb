@@ -671,7 +671,8 @@ async fn test_metadata_aggr_replacement_with_stale_bounds_falls_back(
             let df = ctx.sql("SELECT count(*) FROM t").await.unwrap();
             let plan = df.clone().create_physical_plan().await.unwrap();
             let text = displayable(plan.as_ref()).indent(true).to_string();
-            assert!(text.contains("RegionScanExec"), "{text}");
+            let scan_name = if append { "UnorderedScan" } else { "SeqScan" };
+            assert!(text.contains(scan_name), "{text}");
             let batches = df.collect().await.unwrap();
             assert_eq!(
                 ScalarValue::try_from_array(batches[0].column(0), 0).unwrap(),
