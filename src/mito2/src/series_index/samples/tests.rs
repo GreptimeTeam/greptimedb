@@ -2651,3 +2651,131 @@ async fn narthex_prepared_discovery_empty_projection_skips_payload() {
         );
     }
 }
+
+/// Native histogram fields round-trip through an artifact. A block ends before its histogram
+/// chunk would outgrow the chunk limit, and the stored chunk is only readable as the field type
+/// the manifest records.
+#[tokio::test]
+async fn native_histogram_fields_round_trip_and_split_by_chunk_limit() {
+    use datatypes::arrow::compute::concat;
+
+    use super::histogram::tests::{TestHistogram, fixture, histogram_array};
+
+    let mut m = sst_region_metadata_with_encoding(PrimaryKeyEncoding::Sparse);
+    m.column_metadatas
+        .iter_mut()
+        .find(|c| c.column_id == 2)
+        .unwrap()
+        .column_schema
+        .data_type = native_histogram_value_type().clone();
+    let m = Arc::new(m);
+    let small = histogram_array(&fixture());
+    // Bucket counts whose XOR deltas stay wide, so the rows together encode past one chunk.
+    let large = histogram_array(
+        &(0..24)
+            .map(|i| {
+                Some(TestHistogram {
+                    sum: i as f64,
+                    positive_spans: vec![(0, 8000)],
+                    floats: Some((
+                        8000.0,
+                        0.0,
+                        (0..8000).map(|j| ((i * 8000 + j) as f64).sqrt()).collect(),
+                        vec![],
+                    )),
+                    ..Default::default()
+                })
+            })
+            .collect::<Vec<_>>(),
+    );
+    assert!(histogram::encode(&large).unwrap().len() > metadata::CHUNK_LIMIT);
+    let values = concat(&[&small as &dyn Array, &large]).unwrap();
+    let keys = (0..values.len())
+        .map(|i| new_sparse_primary_key(&["a", "b"], &m, 1, if i < small.len() { 1 } else { 2 }))
+        .collect::<Vec<_>>();
+    let times = (0..small.len() as i64)
+        .chain(0..large.len() as i64)
+        .collect::<Vec<_>>();
+    let input = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("field_0", values.data_type().clone(), true),
+            Field::new(
+                "ts",
+                DataType::Timestamp(datatypes::arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("__primary_key", DataType::Binary, false),
+            Field::new(SEQUENCE, DataType::UInt64, false),
+            Field::new(OPERATION, DataType::UInt8, false),
+        ])),
+        vec![
+            values.clone(),
+            Arc::new(datatypes::arrow::array::TimestampMillisecondArray::from(
+                times,
+            )),
+            Arc::new(BinaryArray::from_iter_values(
+                keys.iter().map(Vec::as_slice),
+            )),
+            Arc::new(UInt64Array::from(vec![1; values.len()])),
+            Arc::new(UInt8Array::from(vec![1; values.len()])),
+        ],
+    )
+    .unwrap();
+    let store = store();
+    let format = ColumnarSamplesFormat::default();
+    // Two input batches, so a block also concatenates rows borrowed from different batches.
+    let handle = build(
+        &format,
+        &store,
+        m.clone(),
+        &[input.slice(0, 10), input.slice(10, input.num_rows() - 10)],
+    )
+    .await;
+    let read = |handle: SamplesFileHandle| {
+        let store = store.clone();
+        let format = format.clone();
+        async move {
+            format
+                .reader(store, handle)
+                .await
+                .unwrap()
+                .read(request(&["field_0"]))
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+        }
+    };
+    let batches = read(handle.clone()).await.unwrap();
+    assert!(
+        batches.len() > 2,
+        "the large series spans more than one block"
+    );
+    let decoded = concat(
+        &batches
+            .iter()
+            .map(|b| b.column(0).as_ref())
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    assert_eq!(&values, &decoded);
+
+    let mut stored = manifest(&store, &handle).await;
+    stored.fields[0].data_type = FLOAT64_TYPE.to_string();
+    let json = serde_json::to_vec(&stored).unwrap();
+    store.write(&stored.path(), json.clone()).await.unwrap();
+    let mut entry = handle.entry().clone();
+    for object in &mut entry.artifact.objects {
+        if object.path == stored.path() {
+            object.file_size = json.len() as u64;
+        }
+    }
+    entry.artifact.file_size = entry.artifact.objects.iter().map(|o| o.file_size).sum();
+    let (purger, _receiver) = series_index_channel(store.clone());
+    let error = read(SamplesFileHandle::new(handle.file_id(), entry, purger))
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("does not match its field type"),
+        "{error}"
+    );
+}

@@ -90,6 +90,109 @@ async fn test_narthex_sparse_upsert_after_adding_nullable_tag() -> WhateverResul
     check_sparse_upsert_after_adding_nullable_tag("narthex").await
 }
 
+/// A Narthex region refuses a native histogram sample too large for one samples chunk before it
+/// accepts the write, so flushes never meet a sample they cannot store.
+#[tokio::test]
+async fn test_narthex_rejects_oversized_histogram_sample() -> WhateverResult<()> {
+    use api::greptime_proto::io::prometheus::write::v2::histogram::Count;
+    use api::greptime_proto::io::prometheus::write::v2::{BucketSpan, Histogram};
+    use api::v1::{Row, Value};
+    use common_query::native_histogram::{
+        encode_native_histogram, native_histogram_column_schema, native_histogram_value_type,
+    };
+    use store_api::region_request::RegionPutRequest;
+
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1024, 0);
+    let mut request = sparse_metric_create_request("narthex");
+    let field = request
+        .column_metadatas
+        .iter_mut()
+        .find(|c| c.semantic_type == SemanticType::Field)
+        .unwrap();
+    field.column_schema = ColumnSchema::new(
+        field.column_schema.name.clone(),
+        native_histogram_value_type().clone(),
+        true,
+    );
+    let field = field.column_schema.name.clone();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await?;
+    let metadata = engine.get_region(region_id).unwrap().metadata();
+    let key = new_sparse_primary_key(&["api"], &metadata, 42, 7);
+    let mut histogram_schema = native_histogram_column_schema().unwrap();
+    histogram_schema.column_name = field;
+    let put = |buckets: u32| {
+        let mut deltas = vec![0; buckets as usize];
+        deltas[0] = 1;
+        // Custom buckets: exponential bucket indexes are bounded, custom bounds are not.
+        let histogram = Histogram {
+            schema: -53,
+            custom_values: (1..buckets).map(f64::from).collect(),
+            count: Some(Count::CountInt(u64::from(buckets))),
+            positive_spans: vec![BucketSpan {
+                offset: 0,
+                length: buckets,
+            }],
+            positive_deltas: deltas,
+            timestamp: 1000,
+            ..Default::default()
+        };
+        let schema = vec![
+            api::v1::ColumnSchema {
+                column_name: "__primary_key".into(),
+                datatype: ColumnDataType::Binary as i32,
+                semantic_type: SemanticType::Tag as i32,
+                ..Default::default()
+            },
+            api::v1::ColumnSchema {
+                column_name: "ts".into(),
+                datatype: ColumnDataType::TimestampMillisecond as i32,
+                semantic_type: SemanticType::Timestamp as i32,
+                ..Default::default()
+            },
+            histogram_schema.clone(),
+        ];
+        let values = [
+            ValueData::BinaryValue(key.clone()),
+            ValueData::TimestampMillisecondValue(1000),
+            encode_native_histogram(&histogram).unwrap(),
+        ]
+        .into_iter()
+        .map(|value| Value {
+            value_data: Some(value),
+        })
+        .collect();
+        RegionRequest::Put(RegionPutRequest {
+            rows: Rows {
+                schema,
+                rows: vec![Row { values }],
+            },
+            hint: Some(WriteHint {
+                primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse.into(),
+            }),
+            skip_wal: false,
+            partition_expr_version: None,
+        })
+    };
+    let Err(error) = engine.handle_request(region_id, put(100_000)).await else {
+        panic!("an oversized histogram sample must be refused");
+    };
+    assert!(error.to_string().contains("chunk limit"), "{error}");
+    engine.handle_request(region_id, put(8)).await?;
+    test_util::flush_region(&engine, region_id, None).await;
+    let rows = RecordBatches::try_collect(
+        engine
+            .scan_to_stream(region_id, ScanRequest::default())
+            .await?,
+    )
+    .await?;
+    assert_eq!(1, rows.iter().map(|b| b.num_rows()).sum::<usize>());
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_narthex_series_index_survives_added_label() -> WhateverResult<()> {
     let reads = Arc::new(std::sync::Mutex::new(Vec::new()));

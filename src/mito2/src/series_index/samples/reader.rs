@@ -23,6 +23,7 @@ use datatypes::arrow::array::{
     ArrayRef, BinaryArray, Float64Array, TimestampMicrosecondArray, TimestampMillisecondArray,
     TimestampNanosecondArray, TimestampSecondArray, UInt8Array, UInt32Array, UInt64Array,
 };
+use datatypes::arrow::compute::take;
 use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use futures::stream::BoxStream;
@@ -31,17 +32,17 @@ use snafu::ResultExt;
 use tokio::sync::OnceCell;
 
 use crate::cache::columnar::{self as metadata_cache, MetadataCache};
-use crate::error::{NewRecordBatchSnafu, OpenDalSnafu, Result};
+use crate::error::{ComputeArrowSnafu, NewRecordBatchSnafu, OpenDalSnafu, Result};
 use crate::metrics::ColumnarReadMetrics;
 use crate::series_index::artifact::{ArtifactFormat, SamplesFileHandle};
 use crate::series_index::format::{SamplesBatch, SamplesFormatReader, SamplesReadRequest};
 use crate::series_index::identity::{ExactSeriesKey, IdentityEncoding};
-use crate::series_index::samples::codec;
 use crate::series_index::samples::metadata::{
     self, Areas, Block, BlockOrder, Bounds, Column, Page, PageReference, Trailer,
 };
 use crate::series_index::samples::{
-    MANIFEST_LIMIT, Manifest, MetricSeriesId, TimestampUnit, VERSION, invalid, require, unsupported,
+    MANIFEST_LIMIT, Manifest, MetricSeriesId, TimestampUnit, VERSION, codec, histogram, invalid,
+    require, unsupported,
 };
 use crate::sst::parquet::helper::fetch_byte_ranges;
 
@@ -812,7 +813,7 @@ fn load_column_chunk<'a>(
         1 => matches!(column.payload.encoding, 1 | 2),
         2 => matches!(column.payload.encoding, 3 | 4),
         3 => matches!(column.payload.encoding, 6 | 7),
-        4 => column.payload.encoding == 5,
+        4 => matches!(column.payload.encoding, 5 | histogram::ENCODING),
         _ => false,
     };
     if !allowed {
@@ -1087,7 +1088,54 @@ async fn read_block(
                         .get(field - 5)
                         .ok_or_else(|| invalid("unknown sample field"))?;
                     let id = field.column_id;
-                    if let Some(column) = block.columns.iter().find(|c| c.role == 4 && c.id == id) {
+                    let column = block.columns.iter().find(|c| c.role == 4 && c.id == id);
+                    if field.is_histogram() {
+                        let data_type = schema
+                            .field(
+                                projection
+                                    .iter()
+                                    .position(|&p| p == index)
+                                    .ok_or_else(|| invalid("unprojected sample field"))?,
+                            )
+                            .data_type();
+                        match column {
+                            Some(column) => {
+                                let bytes = load_column_chunk(&scratch.buffers, column, decoder)?;
+                                // Decoded histograms outgrow their chunk by far more than the
+                                // per-row terms reserved above, so their values are charged
+                                // from the chunk's own counts before they are built.
+                                if let Some(reservation) = &reservation {
+                                    reservation
+                                        .try_grow(histogram::decoded_bytes(
+                                            bytes,
+                                            block.rows as usize,
+                                        )?)
+                                        .context(crate::error::ScanMemoryExhaustedSnafu)?;
+                                }
+                                let array: ArrayRef = Arc::new(histogram::decode(
+                                    bytes,
+                                    data_type,
+                                    block.rows as usize,
+                                    column.nulls,
+                                )?);
+                                if selected.len() == array.len() {
+                                    array
+                                } else {
+                                    take(
+                                        &array,
+                                        &UInt32Array::from_iter_values(
+                                            selected.iter().map(|&i| i as u32),
+                                        ),
+                                        None,
+                                    )
+                                    .context(ComputeArrowSnafu)?
+                                }
+                            }
+                            None => {
+                                datatypes::arrow::array::new_null_array(data_type, selected.len())
+                            }
+                        }
+                    } else if let Some(column) = column {
                         let values = codec::decode_float(
                             load_column_chunk(&scratch.buffers, column, decoder)?,
                             block.rows as usize,
