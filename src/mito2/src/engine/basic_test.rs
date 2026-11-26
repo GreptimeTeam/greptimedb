@@ -1106,37 +1106,11 @@ async fn test_cache_null_primary_key_with_format(flat_format: bool) {
     assert_eq!(expected, batches.pretty_print().unwrap());
 }
 
+#[rstest]
+#[case(false)]
+#[case(true)]
 #[tokio::test]
-async fn test_list_ssts() {
-    test_list_ssts_with_format(false, r#"
-ManifestSstEntry { table_dir: "test/", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_version: 0, level: 0, file_path: "test/11_0000000001/<file_id>.parquet", file_size: 2951, max_row_group_uncompressed_size: 0, index_file_path: Some("test/11_0000000001/index/<file_id>.puffin"), index_file_size: Some(250), num_rows: 10, num_row_groups: 1, num_series: Some(1), min_ts: 0::Millisecond, max_ts: 9000::Millisecond, sequence: Some(10), partition_expr: None, origin_region_id: 47244640257(11, 1), node_id: None, visible: true, primary_key_min: Some(b"\x01\x01x\0\0\0\0\0\0\0\x01"), primary_key_max: Some(b"\x01\x01x\0\0\0\0\0\0\0\x01") }
-ManifestSstEntry { table_dir: "test/", region_id: 47244640258(11, 2), table_id: 11, region_number: 2, region_group: 0, region_sequence: 2, file_id: "<file_id>", index_version: 0, level: 0, file_path: "test/11_0000000002/<file_id>.parquet", file_size: 2951, max_row_group_uncompressed_size: 0, index_file_path: Some("test/11_0000000002/index/<file_id>.puffin"), index_file_size: Some(250), num_rows: 10, num_row_groups: 1, num_series: Some(1), min_ts: 0::Millisecond, max_ts: 9000::Millisecond, sequence: Some(10), partition_expr: None, origin_region_id: 47244640258(11, 2), node_id: None, visible: true, primary_key_min: Some(b"\x01\x01x\0\0\0\0\0\0\0\x01"), primary_key_max: Some(b"\x01\x01x\0\0\0\0\0\0\0\x01") }
-ManifestSstEntry { table_dir: "test/", region_id: 94489280554(22, 42), table_id: 22, region_number: 42, region_group: 0, region_sequence: 42, file_id: "<file_id>", index_version: 0, level: 0, file_path: "test/22_0000000042/<file_id>.parquet", file_size: 2951, max_row_group_uncompressed_size: 0, index_file_path: Some("test/22_0000000042/index/<file_id>.puffin"), index_file_size: Some(250), num_rows: 10, num_row_groups: 1, num_series: Some(1), min_ts: 0::Millisecond, max_ts: 9000::Millisecond, sequence: Some(10), partition_expr: None, origin_region_id: 94489280554(22, 42), node_id: None, visible: true, primary_key_min: Some(b"\x01\x01x\0\0\0\0\0\0\0\x01"), primary_key_max: Some(b"\x01\x01x\0\0\0\0\0\0\0\x01") }"# ,
-r#"
-StorageSstEntry { file_path: "test/11_0000000001/<file_id>.parquet", file_size: None, last_modified_ms: None, node_id: None }
-StorageSstEntry { file_path: "test/11_0000000001/index/<file_id>.puffin", file_size: None, last_modified_ms: None, node_id: None }
-StorageSstEntry { file_path: "test/11_0000000002/<file_id>.parquet", file_size: None, last_modified_ms: None, node_id: None }
-StorageSstEntry { file_path: "test/11_0000000002/index/<file_id>.puffin", file_size: None, last_modified_ms: None, node_id: None }
-StorageSstEntry { file_path: "test/22_0000000042/<file_id>.parquet", file_size: None, last_modified_ms: None, node_id: None }
-StorageSstEntry { file_path: "test/22_0000000042/index/<file_id>.puffin", file_size: None, last_modified_ms: None, node_id: None }"#).await;
-    test_list_ssts_with_format(true, r#"
-ManifestSstEntry { table_dir: "test/", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_version: 0, level: 0, file_path: "test/11_0000000001/<file_id>.parquet", file_size: 3365, max_row_group_uncompressed_size: 0, index_file_path: Some("test/11_0000000001/index/<file_id>.puffin"), index_file_size: Some(250), num_rows: 10, num_row_groups: 1, num_series: Some(1), min_ts: 0::Millisecond, max_ts: 9000::Millisecond, sequence: Some(10), partition_expr: None, origin_region_id: 47244640257(11, 1), node_id: None, visible: true, primary_key_min: Some(b"\x01\x01x\0\0\0\0\0\0\0\x01"), primary_key_max: Some(b"\x01\x01x\0\0\0\0\0\0\0\x01") }
-ManifestSstEntry { table_dir: "test/", region_id: 47244640258(11, 2), table_id: 11, region_number: 2, region_group: 0, region_sequence: 2, file_id: "<file_id>", index_version: 0, level: 0, file_path: "test/11_0000000002/<file_id>.parquet", file_size: 3365, max_row_group_uncompressed_size: 0, index_file_path: Some("test/11_0000000002/index/<file_id>.puffin"), index_file_size: Some(250), num_rows: 10, num_row_groups: 1, num_series: Some(1), min_ts: 0::Millisecond, max_ts: 9000::Millisecond, sequence: Some(10), partition_expr: None, origin_region_id: 47244640258(11, 2), node_id: None, visible: true, primary_key_min: Some(b"\x01\x01x\0\0\0\0\0\0\0\x01"), primary_key_max: Some(b"\x01\x01x\0\0\0\0\0\0\0\x01") }
-ManifestSstEntry { table_dir: "test/", region_id: 94489280554(22, 42), table_id: 22, region_number: 42, region_group: 0, region_sequence: 42, file_id: "<file_id>", index_version: 0, level: 0, file_path: "test/22_0000000042/<file_id>.parquet", file_size: 3365, max_row_group_uncompressed_size: 0, index_file_path: Some("test/22_0000000042/index/<file_id>.puffin"), index_file_size: Some(250), num_rows: 10, num_row_groups: 1, num_series: Some(1), min_ts: 0::Millisecond, max_ts: 9000::Millisecond, sequence: Some(10), partition_expr: None, origin_region_id: 94489280554(22, 42), node_id: None, visible: true, primary_key_min: Some(b"\x01\x01x\0\0\0\0\0\0\0\x01"), primary_key_max: Some(b"\x01\x01x\0\0\0\0\0\0\0\x01") }"#,
-r#"
-StorageSstEntry { file_path: "test/11_0000000001/<file_id>.parquet", file_size: None, last_modified_ms: None, node_id: None }
-StorageSstEntry { file_path: "test/11_0000000001/index/<file_id>.puffin", file_size: None, last_modified_ms: None, node_id: None }
-StorageSstEntry { file_path: "test/11_0000000002/<file_id>.parquet", file_size: None, last_modified_ms: None, node_id: None }
-StorageSstEntry { file_path: "test/11_0000000002/index/<file_id>.puffin", file_size: None, last_modified_ms: None, node_id: None }
-StorageSstEntry { file_path: "test/22_0000000042/<file_id>.parquet", file_size: None, last_modified_ms: None, node_id: None }
-StorageSstEntry { file_path: "test/22_0000000042/index/<file_id>.puffin", file_size: None, last_modified_ms: None, node_id: None }"#).await;
-}
-
-async fn test_list_ssts_with_format(
-    flat_format: bool,
-    expected_manifest_ssts: &str,
-    expected_storage_ssts: &str,
-) {
+async fn test_list_ssts(#[case] flat_format: bool) {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
@@ -1183,24 +1157,33 @@ async fn test_list_ssts_with_format(
     }
 
     // list from manifest
-    let debug_format = engine
-        .all_ssts_from_manifest()
-        .await
-        .into_iter()
-        .map(|mut e| {
-            e.file_path = e.file_path.replace(&e.file_id, "<file_id>");
-            e.index_file_path = e
-                .index_file_path
-                .map(|p| p.replace(&e.file_id, "<file_id>"));
-            e.file_id = "<file_id>".to_string();
-            e.index_version = 0;
-            e.max_row_group_uncompressed_size = 0;
-            format!("\n{:?}", e)
-        })
-        .sorted()
-        .collect::<Vec<_>>()
-        .join("");
-    assert_eq!(debug_format, expected_manifest_ssts, "{}", debug_format);
+    let store = env.get_object_store().unwrap();
+    let mut manifest_ssts = Vec::new();
+    for mut entry in engine.all_ssts_from_manifest().await {
+        let actual = store.stat(&entry.file_path).await.unwrap();
+        assert_eq!(
+            entry.file_size,
+            actual.content_length(),
+            "{}",
+            entry.file_path
+        );
+
+        entry.file_path = entry.file_path.replace(&entry.file_id, "<file_id>");
+        entry.index_file_path = entry
+            .index_file_path
+            .map(|p| p.replace(&entry.file_id, "<file_id>"));
+        entry.file_id = "<file_id>".to_string();
+        entry.file_size = 0;
+        entry.index_version = 0;
+        entry.max_row_group_uncompressed_size = 0;
+        manifest_ssts.push(format!("\n{entry:?}"));
+    }
+    manifest_ssts.sort_unstable();
+    let expected_manifest_ssts = r#"
+ManifestSstEntry { table_dir: "test/", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_version: 0, level: 0, file_path: "test/11_0000000001/<file_id>.parquet", file_size: 0, max_row_group_uncompressed_size: 0, index_file_path: Some("test/11_0000000001/index/<file_id>.puffin"), index_file_size: Some(250), num_rows: 10, num_row_groups: 1, num_series: Some(1), min_ts: 0::Millisecond, max_ts: 9000::Millisecond, sequence: Some(10), partition_expr: None, origin_region_id: 47244640257(11, 1), node_id: None, visible: true, primary_key_min: Some(b"\x01\x01x\0\0\0\0\0\0\0\x01"), primary_key_max: Some(b"\x01\x01x\0\0\0\0\0\0\0\x01") }
+ManifestSstEntry { table_dir: "test/", region_id: 47244640258(11, 2), table_id: 11, region_number: 2, region_group: 0, region_sequence: 2, file_id: "<file_id>", index_version: 0, level: 0, file_path: "test/11_0000000002/<file_id>.parquet", file_size: 0, max_row_group_uncompressed_size: 0, index_file_path: Some("test/11_0000000002/index/<file_id>.puffin"), index_file_size: Some(250), num_rows: 10, num_row_groups: 1, num_series: Some(1), min_ts: 0::Millisecond, max_ts: 9000::Millisecond, sequence: Some(10), partition_expr: None, origin_region_id: 47244640258(11, 2), node_id: None, visible: true, primary_key_min: Some(b"\x01\x01x\0\0\0\0\0\0\0\x01"), primary_key_max: Some(b"\x01\x01x\0\0\0\0\0\0\0\x01") }
+ManifestSstEntry { table_dir: "test/", region_id: 94489280554(22, 42), table_id: 22, region_number: 42, region_group: 0, region_sequence: 42, file_id: "<file_id>", index_version: 0, level: 0, file_path: "test/22_0000000042/<file_id>.parquet", file_size: 0, max_row_group_uncompressed_size: 0, index_file_path: Some("test/22_0000000042/index/<file_id>.puffin"), index_file_size: Some(250), num_rows: 10, num_row_groups: 1, num_series: Some(1), min_ts: 0::Millisecond, max_ts: 9000::Millisecond, sequence: Some(10), partition_expr: None, origin_region_id: 94489280554(22, 42), node_id: None, visible: true, primary_key_min: Some(b"\x01\x01x\0\0\0\0\0\0\0\x01"), primary_key_max: Some(b"\x01\x01x\0\0\0\0\0\0\0\x01") }"#;
+    assert_eq!(manifest_ssts.concat(), expected_manifest_ssts);
 
     // list from storage
     let storage_entries = engine
@@ -1220,7 +1203,14 @@ async fn test_list_ssts_with_format(
         .sorted()
         .collect::<Vec<_>>()
         .join("");
-    assert_eq!(debug_format, expected_storage_ssts, "{}", debug_format);
+    let expected_storage_ssts = r#"
+StorageSstEntry { file_path: "test/11_0000000001/<file_id>.parquet", file_size: None, last_modified_ms: None, node_id: None }
+StorageSstEntry { file_path: "test/11_0000000001/index/<file_id>.puffin", file_size: None, last_modified_ms: None, node_id: None }
+StorageSstEntry { file_path: "test/11_0000000002/<file_id>.parquet", file_size: None, last_modified_ms: None, node_id: None }
+StorageSstEntry { file_path: "test/11_0000000002/index/<file_id>.puffin", file_size: None, last_modified_ms: None, node_id: None }
+StorageSstEntry { file_path: "test/22_0000000042/<file_id>.parquet", file_size: None, last_modified_ms: None, node_id: None }
+StorageSstEntry { file_path: "test/22_0000000042/index/<file_id>.puffin", file_size: None, last_modified_ms: None, node_id: None }"#;
+    assert_eq!(debug_format, expected_storage_ssts);
 }
 
 #[tokio::test]
