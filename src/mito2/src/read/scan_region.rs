@@ -526,7 +526,8 @@ impl ScanRegion {
                 region_id,
                 reason: format!(
                     "series sample {sample} requires a per-series ({}) scan of a sparse metric \
-                     region with __table_id/__tsid primary keys and the two-phase series scan",
+                     region with __table_id/__tsid primary keys and the two-phase series scan \
+                     (enable the `experimental_series_scan_v2` option of the mito engine)",
                     TimeSeriesDistribution::PerSeries
                 ),
             }

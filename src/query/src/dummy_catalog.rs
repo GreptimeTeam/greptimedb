@@ -454,6 +454,11 @@ fn build_scan_request(
     region_id: RegionId,
     decision: &FlowScanDecision,
 ) -> ScanRequest {
+    // A `SAMPLE SERIES (<fraction>)` clause of the query reaches the region
+    // through the query context, keyed by the table it samples. Sampling prunes
+    // whole series, so the scan asks for the per-series distribution it is only
+    // sound with.
+    let sample = crate::series_sample::series_sample_of(query_ctx, region_id.table_id());
     // Build the initial scan request from the final decision known at provider creation
     // time. A later scan may still refresh `memtable_max_sequence` if another source scan
     // has bound a snapshot into `query_ctx` after this provider was created.
@@ -466,6 +471,8 @@ fn build_scan_request(
         exact_sequence_range: decision.exact_sequence_range,
         memtable_min_sequence: decision.memtable_min_sequence,
         memtable_max_sequence: decision.memtable_max_sequence,
+        distribution: sample.map(|_| TimeSeriesDistribution::PerSeries),
+        sample,
         ..Default::default()
     }
 }
@@ -697,6 +704,48 @@ mod tests {
 
     fn test_region_id() -> RegionId {
         RegionId::new(1024, 1)
+    }
+
+    /// `FROM metrics SAMPLE SERIES (1/16)` reaches the region scan as
+    /// `ScanRequest.sample`, together with the per-series distribution sampling
+    /// needs; a query that samples another table does not touch this scan.
+    #[test]
+    fn test_scan_request_from_query_context_carries_series_sample() {
+        use store_api::storage::SeriesSample;
+
+        let region_id = test_region_id();
+        let query_ctx = QueryContextBuilder::default()
+            .extensions(HashMap::from([(
+                session::hints::series_sample_extension_key(region_id.table_id()),
+                "1/16".to_string(),
+            )]))
+            .build();
+
+        let request = scan_request_from_query_context(region_id, &query_ctx).unwrap();
+        assert_eq!(request.sample, Some(SeriesSample { num: 1, den: 16 }));
+        assert_eq!(
+            request.distribution,
+            Some(TimeSeriesDistribution::PerSeries)
+        );
+
+        // Every region of the sampled table carries the sample: a series lives in
+        // exactly one region, so the fraction must apply to all of them.
+        let sibling_region_id = RegionId::new(region_id.table_id(), 2);
+        let request = scan_request_from_query_context(sibling_region_id, &query_ctx).unwrap();
+        assert_eq!(request.sample, Some(SeriesSample { num: 1, den: 16 }));
+
+        // A sample recorded for another table of the same query stays local to it.
+        let other_region_id = RegionId::new(region_id.table_id() + 1, 1);
+        let request = scan_request_from_query_context(other_region_id, &query_ctx).unwrap();
+        assert_eq!(request.sample, None);
+        assert_eq!(request.distribution, None);
+
+        // No clause, no hint.
+        let request =
+            scan_request_from_query_context(region_id, &QueryContextBuilder::default().build())
+                .unwrap();
+        assert_eq!(request.sample, None);
+        assert_eq!(request.distribution, None);
     }
 
     #[test]
