@@ -134,7 +134,7 @@ WHERE ts >= now() - INTERVAL '24 hours' AND ts < now()
 GROUP BY b, service;
 ```
 
-At 12:37, the range `[12:37 yesterday, 12:37 today)` splits into 25 one-hour slices: a partial slice `[12:37, 13:00)` yesterday, 23 whole hours, and a partial slice `[12:00, 12:37)` today. The first run computes all 25 slices in one scan and caches every slice without unflushed data. In this example, only the current hour has unflushed data.
+At 12:37, the range `[12:37 yesterday, 12:37 today)` splits into 25 one-hour slices: a partial slice `[12:37, 13:00)` yesterday, 23 whole hours, and a partial slice `[12:00, 12:37)` today. The first run computes all 25 slices in one scan and caches the 23 whole hours that have no unflushed data. The two partial slices are not cached: their bounds change as the window slides, so their entries would never be read again. In this example, only the current hour has unflushed data.
 
 At 12:42, the range is `[12:42 yesterday, 12:42 today)`. The 23 whole hours from 13:00 yesterday to 12:00 today keep their keys and fingerprints, so they come from the cache. The scan skips them and computes only the two edge slices: `[12:42, 13:00)` yesterday and `[12:00, 12:42)` today.
 
