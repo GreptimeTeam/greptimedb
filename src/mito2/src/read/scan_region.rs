@@ -44,7 +44,7 @@ use datatypes::extension::json::is_json2_extension_type;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::types::json_type::JsonNativeType;
 use datatypes::value::timestamp_to_scalar_value;
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use mito_codec::row_converter::{SortField, build_primary_key_codec_with_fields};
 use partition::expr::PartitionExpr;
 use smallvec::SmallVec;
@@ -717,7 +717,9 @@ impl ScanRegion {
         let mut input = input.build();
         input.row_preserving_request = request_preserves_rows(&self.request);
         if self.experimental_metadata_aggr && self.request.metadata_aggr_hint {
-            input.exact_num_rows = aggr::prepare(&input, &self.request, &self.version.ssts).await;
+            input.exact_num_rows = aggr::prepare(&input, &self.request, &self.version.ssts)
+                .boxed()
+                .await;
         }
         Ok(input)
     }

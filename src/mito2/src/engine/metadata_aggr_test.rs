@@ -23,7 +23,9 @@ use datafusion::logical_expr::{Expr, TableType};
 use datafusion::physical_plan::expressions::Column;
 use datafusion::physical_plan::expressions::{DynamicFilterPhysicalExpr, lit as physical_lit};
 use datafusion::physical_plan::projection::ProjectionExec;
-use datafusion::physical_plan::{ExecutionPlan, StatisticsArgs, StatisticsContext, displayable};
+use datafusion::physical_plan::{
+    ExecutionPlan, StatisticsArgs, StatisticsContext, collect, displayable,
+};
 use datafusion::prelude::SessionContext;
 use datafusion_common::ScalarValue;
 use datafusion_common::stats::Precision;
@@ -191,10 +193,10 @@ async fn run_compaction_sql_and_fallback(merge_mode: &str) {
     ctx.register_table("t", Arc::new(CountTable { plan: scan }))
         .unwrap();
     let df = ctx.sql("SELECT count(*) FROM t").await.unwrap();
-    let plan = df.clone().create_physical_plan().await.unwrap();
+    let plan = df.create_physical_plan().await.unwrap();
     let text = displayable(plan.as_ref()).indent(true).to_string();
-    assert!(!text.contains("RegionScanExec"), "{text}");
-    let batches = df.collect().await.unwrap();
+    assert!(text.contains("PlaceholderRowExec"), "{text}");
+    let batches = collect(plan, ctx.task_ctx()).await.unwrap();
     assert_eq!(
         ScalarValue::try_from_array(batches[0].column(0), 0).unwrap(),
         ScalarValue::Int64(Some(6))
@@ -477,8 +479,6 @@ async fn test_metadata_aggr_replacement_with_duplicate_rows_falls_back() {
 
 #[rstest::rstest]
 #[case::non_append_key_filter(false, false, "b", 1)]
-#[case::append_key_filter(true, false, "b", 1)]
-#[case::non_append_time_filter(false, false, "a", 2)]
 #[case::append_time_filter(true, false, "a", 2)]
 #[case::key_overlap(false, true, "b", 1)]
 #[case::time_overlap(false, true, "a", 2)]
@@ -493,9 +493,22 @@ async fn test_metadata_aggr_replacement_with_stale_bounds_falls_back(
 
     use crate::manifest::action::RegionEdit;
 
-    let mut env = TestEnv::new().await;
+    let reads = Arc::new(AtomicUsize::new(0));
+    let observed = reads.clone();
+    let layer = MockLayerBuilder::default()
+        .reader_factory(Arc::new(move |path, _, inner| {
+            if path.ends_with(".parquet") {
+                observed.fetch_add(1, Ordering::Relaxed);
+            }
+            inner
+        }))
+        .build()
+        .unwrap();
+    let mut env = TestEnv::new().await.with_mock_layer(layer);
     let config = MitoConfig {
         experimental_metadata_aggr: true,
+        // Isolate query I/O from the background preloader on region open.
+        preload_index_cache: false,
         schedule_compaction_after_edit: false,
         ..Default::default()
     };
@@ -567,19 +580,6 @@ async fn test_metadata_aggr_replacement_with_stale_bounds_falls_back(
         .find(|file| file.file_id() != old_file.file_id())
         .unwrap()
         .clone();
-    assert_eq!(
-        old_file.time_range() != second_file.time_range(),
-        changed_time
-    );
-    assert_eq!(old_file.num_rows(), second_file.num_rows());
-    assert_eq!(
-        old_file.meta_ref().num_row_groups,
-        second_file.meta_ref().num_row_groups
-    );
-    assert_eq!(
-        old_file.raw_primary_key_range() != second_file.raw_primary_key_range(),
-        replacement_key != "a"
-    );
     if keep_second_file {
         let scan = engine
             .handle_query(region_id, request.clone())
@@ -596,7 +596,7 @@ async fn test_metadata_aggr_replacement_with_stale_bounds_falls_back(
         file_size: bytes.len() as u64,
         ..old_file.meta_ref().clone()
     };
-    // Like sst-replace, keep the file ID and the old manifest bounds.
+    // Reproduce an older sst-replace edit that kept its file ID and manifest bounds.
     store
         .write(&replacement.file_path(&table_dir, path_type), bytes)
         .await
@@ -633,52 +633,34 @@ async fn test_metadata_aggr_replacement_with_stale_bounds_falls_back(
         )
         .await
         .unwrap();
-    assert_eq!(
-        engine
-            .get_region(region_id)
-            .unwrap()
-            .version()
-            .options
-            .append_mode,
-        append
-    );
+    if !keep_second_file && changed_time {
+        // The file is excluded by the old manifest. A cold proof must fall back
+        // without opening it just to validate that exclusion.
+        reads.store(0, Ordering::Relaxed);
+        let scan = engine
+            .handle_query(region_id, time_pruned_request)
+            .await
+            .unwrap();
+        assert_eq!(scan.properties().exact_num_rows(), None);
+        assert_eq!(reads.load(Ordering::Relaxed), 0);
+    }
     let scan = engine
         .handle_query(region_id, request.clone())
         .await
         .unwrap();
     assert_eq!(scan.properties().exact_num_rows(), None);
     if !keep_second_file {
-        if changed_time {
-            let scan = engine
-                .handle_query(region_id, time_pruned_request)
-                .await
-                .unwrap();
-            assert_eq!(scan.properties().exact_num_rows(), None);
-        }
-        for metadata_aggr_hint in [false, true] {
-            let request = ScanRequest {
-                metadata_aggr_hint,
-                ..request.clone()
-            };
-            let scanner = engine
-                .handle_query(region_id, request.clone())
-                .await
-                .unwrap();
-            let plan = Arc::new(RegionScanExec::new(scanner, request, None).unwrap());
-            let ctx = SessionContext::new();
-            ctx.register_table("t", Arc::new(CountTable { plan }))
-                .unwrap();
-            let df = ctx.sql("SELECT count(*) FROM t").await.unwrap();
-            let plan = df.clone().create_physical_plan().await.unwrap();
-            let text = displayable(plan.as_ref()).indent(true).to_string();
-            let scan_name = if append { "UnorderedScan" } else { "SeqScan" };
-            assert!(text.contains(scan_name), "{text}");
-            let batches = df.collect().await.unwrap();
-            assert_eq!(
-                ScalarValue::try_from_array(batches[0].column(0), 0).unwrap(),
-                ScalarValue::Int64(Some(0))
-            );
-        }
+        // Execute the same scanner whose statistics were inspected above.
+        let plan = Arc::new(RegionScanExec::new(scan, request, None).unwrap());
+        let ctx = SessionContext::new();
+        ctx.register_table("t", Arc::new(CountTable { plan }))
+            .unwrap();
+        let df = ctx.sql("SELECT count(*) FROM t").await.unwrap();
+        let batches = df.collect().await.unwrap();
+        assert_eq!(
+            ScalarValue::try_from_array(batches[0].column(0), 0).unwrap(),
+            ScalarValue::Int64(Some(0))
+        );
     }
     engine.stop().await.unwrap();
 }

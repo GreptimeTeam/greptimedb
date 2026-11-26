@@ -198,7 +198,8 @@ pub(crate) fn deduped_sst_marker(
     deduped.then(|| KeyValue::new(DEDUPED_SST_KEY.to_owned(), None))
 }
 
-pub(crate) fn extract_primary_key_range(
+/// Returns complete encoded primary-key endpoints, if all row groups provide them.
+pub fn extract_primary_key_range(
     parquet_meta: &ParquetMetaData,
     region_metadata: &RegionMetadata,
 ) -> Option<(Bytes, Bytes)> {
@@ -237,7 +238,7 @@ pub(crate) fn extract_primary_key_range(
 }
 
 /// Returns exact time-index bounds with the unit stored in this SST.
-pub(crate) fn extract_time_range(
+pub fn extract_time_range(
     parquet_meta: &ParquetMetaData,
     time_index: &ColumnMetadata,
 ) -> Option<FileTimeRange> {

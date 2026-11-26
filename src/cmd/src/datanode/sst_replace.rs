@@ -19,18 +19,25 @@ use colored::Colorize;
 use mito2::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use mito2::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use mito2::region::ManifestStats;
-use mito2::sst::file::RegionFileId;
+use mito2::sst::file::{FileFormat, FileMeta};
 use mito2::sst::file_metadata::FileMetadataInterner;
-use mito2::sst::location::{region_dir_from_table_dir, sst_file_path};
+use mito2::sst::location::region_dir_from_table_dir;
 use mito2::sst::parquet::max_row_group_decoded_size;
-use object_store::ObjectStore;
+use mito2::sst::parquet::metadata::{extract_primary_key_range, extract_time_range};
+use object_store::{Buffer, ObjectStore};
 use parquet::file::FOOTER_SIZE;
 use parquet::file::metadata::{FooterTail, ParquetMetaDataReader};
+use parquet::file::reader::{FileReader, SerializedFileReader};
+use parquet::record::RowAccessor;
+use parquet::record::reader::RowIter;
+use parquet::schema::types::Type;
 use store_api::region_request::PathType;
+use store_api::storage::FileId;
+use store_api::storage::consts::SEQUENCE_COLUMN_NAME;
 
 use crate::datanode::tool_util::{
-    build_object_store, max_row_group_uncompressed_size, parse_config, parse_file_id,
-    parse_path_type, parse_region_id,
+    build_object_store, extract_region_metadata, max_row_group_uncompressed_size, parse_config,
+    parse_file_id, parse_path_type, parse_region_id,
 };
 use crate::error;
 
@@ -65,7 +72,7 @@ pub struct SstReplaceCommand {
     #[clap(long, default_value = "auto")]
     path_type: String,
 
-    /// Actually overwrite the SST object and append a manifest delta.
+    /// Write the replacement under a new file ID and publish the manifest edit.
     #[clap(long, default_value_t = false)]
     confirm: bool,
 
@@ -148,8 +155,16 @@ impl SstReplaceCommand {
             .fail();
         };
 
-        let region_file_id = RegionFileId::new(old_file.region_id, old_file.file_id);
-        let target_path = sst_file_path(&self.table_dir, region_file_id, path_type);
+        if old_file.format != FileFormat::Parquet
+            || old_file.region_id != region_id
+            || old_file.level == mito2::sst::file::LEVEL_SHARED
+        {
+            return error::IllegalConfigSnafu {
+                msg: format!("file {file_id} must be a locally owned, unshared Parquet SST"),
+            }
+            .fail();
+        }
+        let target_path = old_file.file_path(&self.table_dir, path_type);
         let target_stat = object_store.stat(&target_path).await.map_err(|e| {
             error::IllegalConfigSnafu {
                 msg: format!("stat target SST {} failed: {e}", target_path),
@@ -168,12 +183,60 @@ impl SstReplaceCommand {
         let new_num_row_groups = parquet_meta.num_row_groups() as u64;
         validate_replacement(&old_file, new_num_rows, new_num_row_groups)?;
 
-        let mut new_file = old_file.as_ref().clone();
-        new_file.file_size = new_file_size;
-        new_file.num_rows = new_num_rows;
-        new_file.num_row_groups = new_num_row_groups;
-        new_file.max_row_group_uncompressed_size = max_row_group_uncompressed_size(&parquet_meta);
-        new_file.max_row_group_decoded_size = max_row_group_decoded_size(&parquet_meta);
+        let source = extract_region_metadata("replacement SST", &parquet_meta)?;
+        let time_index = source.time_index_column();
+        let manifest = manifest_manager.manifest();
+        if source.region_id != old_file.region_id
+            || time_index.column_id != manifest.metadata.time_index_column().column_id
+        {
+            return error::IllegalConfigSnafu {
+                msg: "replacement region or time index differs from the target".to_string(),
+            }
+            .fail();
+        }
+        let time_range = extract_time_range(&parquet_meta, time_index).ok_or_else(|| {
+            error::IllegalConfigSnafu {
+                msg: "replacement has no exact time-index bounds".to_string(),
+            }
+            .build()
+        })?;
+        let replacement_bytes = Buffer::from(replacement_bytes);
+        if old_file.sequence.is_some() || old_file.preserve_row_sequence {
+            // The edit retains the original sequence fence and per-row trust.
+            let original = object_store.read(&target_path).await.map_err(|e| {
+                error::IllegalConfigSnafu {
+                    msg: format!("read target SST {target_path}: {e}"),
+                }
+                .build()
+            })?;
+            validate_sequences(original, replacement_bytes.clone()).map_err(|e| {
+                error::IllegalConfigSnafu {
+                    msg: format!("validate replacement sequences: {e}"),
+                }
+                .build()
+            })?;
+        }
+        let (primary_key_min, primary_key_max) =
+            extract_primary_key_range(&parquet_meta, &source).unzip();
+        // A new identity isolates data, index and footer caches, including on restart.
+        // A replacement has no index sidecar, series count or proven partition scope.
+        let new_file = FileMeta {
+            file_id: FileId::random(),
+            region_id: old_file.region_id,
+            level: old_file.level,
+            sequence: old_file.sequence,
+            preserve_row_sequence: old_file.preserve_row_sequence,
+            time_range,
+            primary_key_min,
+            primary_key_max,
+            file_size: new_file_size,
+            num_rows: new_num_rows,
+            num_row_groups: new_num_row_groups,
+            max_row_group_uncompressed_size: max_row_group_uncompressed_size(&parquet_meta),
+            max_row_group_decoded_size: max_row_group_decoded_size(&parquet_meta),
+            ..Default::default()
+        };
+        let replacement_path = new_file.file_path(&self.table_dir, path_type);
 
         println!("{} Region: {}", "[ok]".green(), region_id);
         println!("{} Target SST: {}", "[ok]".green(), target_path.cyan());
@@ -192,30 +255,25 @@ impl SstReplaceCommand {
 
         if !self.confirm {
             println!(
-                "{} Dry run only. Re-run with --confirm to overwrite the SST and update the manifest.",
+                "{} Dry run only. Re-run with --confirm to publish the replacement.",
                 "[dry-run]".yellow()
             );
             return Ok(());
         }
 
         object_store
-            .write(&target_path, replacement_bytes)
+            .write(&replacement_path, replacement_bytes)
             .await
             .map_err(|e| {
                 error::IllegalConfigSnafu {
-                    msg: format!("write replacement SST {} failed: {e}", target_path),
+                    msg: format!("write replacement SST {} failed: {e}", replacement_path),
                 }
                 .build()
             })?;
 
         let edit = RegionEdit {
             files_to_add: vec![new_file],
-            files_to_remove: vec![],
-            timestamp_ms: None,
-            compaction_time_window: None,
-            flushed_entry_id: None,
-            flushed_sequence: None,
-            committed_sequence: None,
+            files_to_remove: vec![old_file.as_ref().clone()],
             ..Default::default()
         };
         let version = manifest_manager
@@ -226,13 +284,15 @@ impl SstReplaceCommand {
             .await
             .map_err(|e| {
                 error::IllegalConfigSnafu {
-                    msg: format!("update manifest failed: {e:?}"),
+                    msg: format!(
+                        "update manifest for replacement {replacement_path} failed: {e:?}"
+                    ),
                 }
                 .build()
             })?;
 
         println!(
-            "{} Replacement committed, manifest version {}",
+            "{} Replacement committed at {replacement_path}, manifest version {}",
             "[ok]".green(),
             version
         );
@@ -279,6 +339,39 @@ async fn load_replacement_bytes(
                     }
                     .build()
                 })
+        }
+    }
+}
+
+// Compare only the sequence column. Physical row-group boundaries and encodings
+// may change in a layout rewrite without changing logical sequences.
+fn validate_sequences(original: Buffer, replacement: Buffer) -> parquet::errors::Result<()> {
+    fn sequences(bytes: Buffer) -> parquet::errors::Result<RowIter<'static>> {
+        let reader = SerializedFileReader::new(bytes.to_bytes())?;
+        let schema = reader.metadata().file_metadata().schema();
+        let column = schema
+            .get_fields()
+            .iter()
+            .find(|field| field.name() == SEQUENCE_COLUMN_NAME)
+            .ok_or_else(|| {
+                parquet::errors::ParquetError::General("missing SST sequence column".into())
+            })?;
+        let projection = Type::group_type_builder(schema.name())
+            .with_fields(vec![column.clone()])
+            .build()?;
+        RowIter::from_file_into(Box::new(reader)).project(Some(projection))
+    }
+    let mut old = sequences(original)?;
+    let mut new = sequences(replacement)?;
+    loop {
+        match (old.next().transpose()?, new.next().transpose()?) {
+            (Some(old), Some(new)) if old.get_ulong(0)? == new.get_ulong(0)? => {}
+            (None, None) => return Ok(()),
+            _ => {
+                return Err(parquet::errors::ParquetError::General(
+                    "replacement changes the target's row sequences".into(),
+                ));
+            }
         }
     }
 }
@@ -352,6 +445,145 @@ fn path_type_name(path_type: PathType) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_replace_refreshes_bounds_and_cache_identity() {
+        use datafusion::prelude::{col, lit};
+        use datafusion_common::ScalarValue;
+        use futures::TryStreamExt;
+        use mito2::config::MitoConfig;
+        use mito2::test_util::{self, CreateRequestBuilder, TestEnv};
+        use store_api::region_engine::RegionEngine;
+        use store_api::region_request::{RegionOpenRequest, RegionRequest};
+        use store_api::storage::{RegionId, ScanRequest};
+
+        let mut target = TestEnv::new().await;
+        let mut donor = TestEnv::new().await;
+        let region_id = RegionId::new(1, 1);
+        let create = CreateRequestBuilder::new().table_dir("table").build();
+        let schema = test_util::rows_schema(&create);
+        let region_dir = region_dir_from_table_dir(&create.table_dir, region_id, create.path_type);
+        let config = MitoConfig {
+            experimental_metadata_aggr: true,
+            enable_write_cache: true,
+            ..Default::default()
+        };
+        // Two independent regions have the same schema and sequence. The target
+        // has a cached Delete and the replacement has one Put at a new key/time.
+        let mut paths = Vec::new();
+        for (env, key, second) in [(&mut target, "a", 1), (&mut donor, "b", 2)] {
+            let engine = env.create_engine(config.clone()).await;
+            engine
+                .handle_request(region_id, RegionRequest::Create(create.clone()))
+                .await
+                .unwrap();
+            let rows = api::v1::Rows {
+                schema: schema.clone(),
+                rows: test_util::build_rows_for_key(key, second, second + 1, 0),
+            };
+            if key == "a" {
+                test_util::delete_rows(&engine, region_id, rows).await;
+            } else {
+                test_util::put_rows(&engine, region_id, rows).await;
+            }
+            test_util::flush_region(&engine, region_id, None).await;
+            engine.stop().await.unwrap();
+            let dir = env
+                .data_home()
+                .join("data")
+                .join(region_dir.trim_start_matches('/'));
+            let files: Vec<_> = std::fs::read_dir(dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| path.extension().is_some_and(|ext| ext == "parquet"))
+                .collect();
+            assert_eq!(files.len(), 1);
+            paths.push(files.into_iter().next().unwrap());
+        }
+        let data_home = target.data_home().join("data");
+        let config_file = target.data_home().join("replace.toml");
+        std::fs::write(
+            &config_file,
+            format!(
+                "[storage]\ntype = \"File\"\ndata_home = {}\n[[region_engine]]\n[region_engine.mito]\n",
+                toml::Value::String(data_home.to_string_lossy().into_owned())
+            ),
+        )
+        .unwrap();
+        let command = SstReplaceCommand {
+            config: config_file,
+            region_id: region_id.as_u64().to_string(),
+            table_dir: create.table_dir.clone(),
+            file_id: paths[0].file_stem().unwrap().to_str().unwrap().to_owned(),
+            replacement_file: Some(paths[1].clone()),
+            replacement_object: None,
+            path_type: "bare".into(),
+            confirm: true,
+            verbose: false,
+        };
+        let previous_bytes = std::fs::read(&paths[0]).unwrap();
+        command.run().await.unwrap();
+        assert_eq!(std::fs::read(&paths[0]).unwrap(), previous_bytes);
+        let engine = target.open_engine(config).await;
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Open(RegionOpenRequest {
+                    engine: String::new(),
+                    table_dir: create.table_dir,
+                    path_type: create.path_type,
+                    options: create.options,
+                    skip_wal_replay: false,
+                    checkpoint: None,
+                    requirements: Default::default(),
+                }),
+            )
+            .await
+            .unwrap();
+        let cutoff = lit(ScalarValue::TimestampMillisecond(Some(1500), None));
+        for (filter, expected) in [
+            (col("ts").gt_eq(cutoff), 1),
+            (col("tag_0").eq(lit("a")), 0),
+            (col("tag_0").eq(lit("b")), 1),
+        ] {
+            let request = ScanRequest {
+                filters: vec![filter],
+                ..Default::default()
+            };
+            let scanned = engine
+                .scan_to_stream(region_id, request.clone())
+                .await
+                .unwrap()
+                .try_fold(
+                    0,
+                    |count, batch| async move { Ok(count + batch.num_rows()) },
+                )
+                .await
+                .unwrap();
+            assert_eq!(scanned, expected);
+            let scanner = engine
+                .handle_query(
+                    region_id,
+                    ScanRequest {
+                        metadata_aggr_hint: true,
+                        ..request
+                    },
+                )
+                .await
+                .unwrap();
+            if expected == 1 {
+                assert_eq!(scanner.properties().exact_num_rows(), Some(expected));
+            } else {
+                assert!(
+                    scanner
+                        .properties()
+                        .exact_num_rows()
+                        .is_none_or(|count| count == expected)
+                );
+            }
+        }
+        engine.stop().await.unwrap();
+    }
 
     #[test]
     fn test_validate_replacement_counts() {

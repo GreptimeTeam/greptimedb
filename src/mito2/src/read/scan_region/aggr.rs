@@ -30,12 +30,12 @@ use datatypes::value::Value;
 use futures::future::BoxFuture;
 use futures::{FutureExt, StreamExt, TryStreamExt};
 use mito_codec::row_converter::{PrimaryKeyCodec, build_primary_key_codec};
-use parquet::file::metadata::ParquetMetaData;
+use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
-use store_api::storage::ScanRequest;
+use store_api::storage::{ColumnId, ScanRequest};
 
-use crate::cache::CacheStrategy;
+use crate::cache::CachedSstMeta;
 use crate::read::scan_region::aggr::overlap::{Extent, find_overlaps};
 use crate::read::scan_region::{ScanInput, request_preserves_rows};
 use crate::sst::file::FileHandle;
@@ -52,129 +52,84 @@ pub(crate) async fn prepare(
     request: &ScanRequest,
     ssts: &SstVersion,
 ) -> Option<usize> {
-    if !input.memtables.is_empty() {
-        return None;
+    let classification = classify(input, request)?;
+    if input.append_mode && request.filters.is_empty() {
+        return Some(classification.exact_rows);
     }
-    let classification = classify(input, request, false)?;
-    if !classification.remaining.is_empty() {
-        return None;
-    }
-    let evidence = if input.append_mode && request.filters.is_empty() {
-        vec![true; classification.exact.len()]
-    } else {
-        read_file_evidence(input, &classification, ssts).await?
-    };
-    resolve(input, classification, &evidence)
-}
-
-/// Applies the footer evidence of the exact candidates.
-fn resolve(
-    input: &ScanInput,
-    mut classification: Classification,
-    evidence: &[bool],
-) -> Option<usize> {
-    classification.retain_exact(input, evidence);
-    (classification.remaining.is_empty() && input.memtables.is_empty())
-        .then_some(classification.exact_rows)
-}
-
-/// Validates the bounds used by classification before proving the visible row
-/// count of each candidate. A stale or unknown bound may also invalidate the
-/// exclusion of a pruned file or the disjointness of a residual file.
-async fn read_file_evidence(
-    input: &ScanInput,
-    classification: &Classification,
-    ssts: &SstVersion,
-) -> Option<Vec<bool>> {
-    let check_overlap = !input.append_mode
-        && !classification.exact.is_empty()
-        && classification.exact.len() + classification.remaining.len() > 1;
-    // Own the file handles across the async reads.
-    let mut files: Vec<_> = classification
-        .exact
-        .iter()
-        .map(|&index| {
-            (
-                input.files[index].clone(),
-                !input.append_mode,
-                classification.key_filter || check_overlap,
-            )
-        })
-        .collect();
-    if check_overlap {
-        files.extend(
-            classification
-                .remaining
-                .iter()
-                .map(|&index| (input.files[index].clone(), false, true)),
-        );
-    }
-    for level in ssts.levels() {
-        files.extend(
-            input
-                .time_pruned_files
-                .iter()
-                .filter_map(|id| level.files.get(id))
-                .map(|file| (file.clone(), false, false)),
-        );
-    }
-
-    let access_layer = input.access_layer.clone();
-    // The on-disk write cache can survive offline replacement of the same
-    // file ID. This proof needs metadata from the current object.
-    let cache = if input.cache_strategy.write_cache().is_some() {
-        CacheStrategy::Disabled
-    } else {
-        input.cache_strategy.clone()
-    };
-    let time_index_id = input.region_metadata().time_index_column().column_id;
-    // Readers are created only as buffer slots become available.
-    let reads = futures::stream::iter(files).map(
-        move |(file, check_rows, check_keys)| -> BoxFuture<'static, Result<bool, ()>> {
-            let key_range = if check_keys {
-                file.raw_primary_key_range()
-            } else {
-                None
-            };
-            let file_id = file.file_id();
-            let (start, end) = file.time_range();
-            let num_rows = file.num_rows();
-            let reader = access_layer.read_sst(file).cache(cache.clone());
-            async move {
-                let sst = reader.read_statistics().await.map_err(|e| {
-                    debug!("Metadata count could not read footer of {file_id}: {e:?}");
-                })?;
-                let metadata = sst.parquet_metadata();
-                let region_metadata = sst.region_metadata();
-                let time_index = region_metadata.time_index_column();
-                let time_matches = time_index.column_id == time_index_id
-                    && extract_time_range(&metadata, time_index).is_some_and(|(min, max)| {
-                        start.unit() == min.unit()
-                            && end.unit() == max.unit()
-                            && (start, end) == (min, max)
-                    });
-                if !time_matches {
-                    debug!("Metadata count could not verify time bounds of {file_id}");
-                    return Err(());
-                }
-                if let Some(range) = key_range
-                    && extract_primary_key_range(&metadata, &region_metadata) != Some(range)
-                {
-                    debug!("Metadata count could not verify key bounds of {file_id}");
-                    return Err(());
-                }
-                Ok(!check_rows || footer_proves_visible_rows(&metadata, num_rows))
-            }
-            .boxed()
-        },
-    );
-    let mut proven: Vec<_> = reads
-        .buffered(input.max_concurrent_scan_files.max(1))
-        .try_collect()
+    verify_pruned_times(input, ssts).await?;
+    let check_keys =
+        classification.key_filter || (!input.append_mode && classification.exact.len() > 1);
+    let check_rows = !input.append_mode;
+    futures::stream::iter(classification.exact)
+        .map(|index| file_evidence(input, input.files[index].clone(), check_keys, check_rows))
+        .buffer_unordered(input.max_concurrent_scan_files.max(1))
+        .try_collect::<()>()
         .await
         .ok()?;
-    proven.truncate(classification.exact.len());
-    Some(proven)
+    Some(classification.exact_rows)
+}
+
+/// Older offline replacements could retain stale manifest bounds. Never open an
+/// excluded SST for COUNT: a cold or inconsistent footer leaves the scan in place.
+async fn verify_pruned_times(input: &ScanInput, ssts: &SstVersion) -> Option<()> {
+    let time_id = input.region_metadata().time_index_column().column_id;
+    for id in &input.time_pruned_files {
+        let file = ssts.levels().iter().find_map(|level| level.files.get(id))?;
+        let sst = input
+            .cache_strategy
+            .get_sst_meta_data_from_mem_cache(file.file_id(), PageIndexPolicy::Skip)
+            .await?;
+        if !time_bounds_match(file, &sst, time_id) {
+            return None;
+        }
+    }
+    Some(())
+}
+
+fn time_bounds_match(file: &FileHandle, sst: &CachedSstMeta, time_id: ColumnId) -> bool {
+    let region = sst.region_metadata();
+    let time_index = region.time_index_column();
+    let (start, end) = file.time_range();
+    time_index.column_id == time_id
+        && extract_time_range(&sst.parquet_metadata(), time_index).is_some_and(|(min, max)| {
+            start.unit() == min.unit() && end.unit() == max.unit() && (start, end) == (min, max)
+        })
+}
+
+/// Proves the bounds and visible rows required for this exact candidate.
+fn file_evidence(
+    input: &ScanInput,
+    file: FileHandle,
+    check_keys: bool,
+    check_rows: bool,
+) -> BoxFuture<'static, Result<(), ()>> {
+    let time_id = input.region_metadata().time_index_column().column_id;
+    let reader = input
+        .access_layer
+        .read_sst(file.clone())
+        .cache(input.cache_strategy.clone());
+    async move {
+        let sst = reader.read_statistics().await.map_err(|e| {
+            debug!(
+                "Metadata count could not read footer of {}: {e:?}",
+                file.file_id()
+            );
+        })?;
+        let metadata = sst.parquet_metadata();
+        if !time_bounds_match(&file, &sst, time_id) {
+            return Err(());
+        }
+        if check_keys
+            && let Some(range) = file.raw_primary_key_range()
+            && extract_primary_key_range(&metadata, &sst.region_metadata()) != Some(range)
+        {
+            return Err(());
+        }
+        (!check_rows || footer_proves_visible_rows(&metadata, file.num_rows()))
+            .then_some(())
+            .ok_or(())
+    }
+    .boxed()
 }
 
 /// The footer and manifest must agree. Without the writer's uniqueness claim,
@@ -201,30 +156,10 @@ fn footer_proves_visible_rows(metadata: &ParquetMetaData, manifest_rows: usize) 
 struct Classification {
     /// Indexes into `ScanInput::files` whose rows are all yielded exactly once.
     exact: Vec<usize>,
-    /// Indexes of the other files intersecting the query time range.
-    remaining: Vec<usize>,
     /// Sum of the manifest row counts of `exact`.
     exact_rows: usize,
     /// Whether the filter proof depends on key bounds.
     key_filter: bool,
-}
-
-impl Classification {
-    /// Moves the exact files without proof to `remaining`.
-    fn retain_exact(&mut self, input: &ScanInput, proven: &[bool]) {
-        debug_assert_eq!(self.exact.len(), proven.len());
-        let mut exact = Vec::with_capacity(self.exact.len());
-        for (&index, &proven) in self.exact.iter().zip(proven) {
-            if proven {
-                exact.push(index);
-            } else {
-                self.exact_rows -= input.files[index].num_rows();
-                self.remaining.push(index);
-            }
-        }
-        self.exact = exact;
-        self.remaining.sort_unstable();
-    }
 }
 
 /// A file is an exact candidate if all of the following hold:
@@ -237,12 +172,11 @@ impl Classification {
 ///
 /// Returns `None` for scans whose visible rows can differ from the sources'
 /// rows for reasons other than the files themselves.
-fn classify(
-    input: &ScanInput,
-    request: &ScanRequest,
-    allow_partial: bool,
-) -> Option<Classification> {
-    if !input.allows_exact_row_count() || !request_preserves_rows(request) {
+fn classify(input: &ScanInput, request: &ScanRequest) -> Option<Classification> {
+    if !input.memtables.is_empty()
+        || !input.allows_exact_row_count()
+        || !request_preserves_rows(request)
+    {
         return None;
     }
     let filters = AggrFilters::new(input.region_metadata(), &request.filters)?;
@@ -264,63 +198,36 @@ fn classify(
             && input.file_time_bounds_fit(file)
             && (input.region_partition_expr.is_none() || input.should_skip_region_partition(file))
             && filters.covers(file);
-        if !candidate && !allow_partial {
+        if !candidate {
             return None;
         }
-        intersecting.push((index, candidate));
+        intersecting.push(index);
     }
-    // Append mode never merges rows, so sources cannot hide each other's rows.
-    let overlaps = if !input.append_mode && intersecting.iter().any(|&(_, candidate)| candidate) {
-        overlapping_files(input, &intersecting)
-    } else {
-        Vec::new()
-    };
-
-    let mut classification = Classification {
-        exact: Vec::new(),
-        remaining: Vec::new(),
-        exact_rows: 0,
+    if !input.append_mode && intersecting.len() > 1 {
+        let mapper = input.primary_key_mapper();
+        let extents: Vec<_> = intersecting
+            .iter()
+            .map(|&index| {
+                let file = &input.files[index];
+                Extent {
+                    time: file.time_range(),
+                    key: file.primary_key_range(mapper),
+                }
+            })
+            .collect();
+        if find_overlaps(&extents).contains(&true) {
+            return None;
+        }
+    }
+    let exact_rows = intersecting.iter().try_fold(0usize, |rows, &index| {
+        rows.checked_add(input.files[index].num_rows())
+    })?;
+    i64::try_from(exact_rows).ok()?;
+    Some(Classification {
+        exact: intersecting,
+        exact_rows,
         key_filter: filters.codec.is_some(),
-    };
-    for (position, (index, candidate)) in intersecting.into_iter().enumerate() {
-        let file = &input.files[index];
-        if candidate && !overlaps.get(position).copied().unwrap_or(false) {
-            classification.exact_rows = classification.exact_rows.checked_add(file.num_rows())?;
-            classification.exact.push(index);
-        } else {
-            classification.remaining.push(index);
-        }
-    }
-    i64::try_from(classification.exact_rows).ok()?;
-    Some(classification)
-}
-
-/// Returns, for each file in `files`, whether another file or a memtable may
-/// hold a row with the same primary key and timestamp.
-fn overlapping_files(input: &ScanInput, files: &[(usize, bool)]) -> Vec<bool> {
-    let mapper = input.primary_key_mapper();
-    let mut extents: Vec<_> = files
-        .iter()
-        .map(|&(index, _)| {
-            let file = &input.files[index];
-            Extent {
-                time: file.time_range(),
-                key: file.primary_key_range(mapper),
-            }
-        })
-        .collect();
-    // Memtable key bounds are unknown.
-    for memtable in &input.memtables {
-        let stats = memtable.stats();
-        match stats.time_range {
-            Some(time) => extents.push(Extent { time, key: None }),
-            None if stats.num_rows == 0 => {}
-            None => return vec![true; files.len()],
-        }
-    }
-    let mut overlaps = find_overlaps(&extents);
-    overlaps.truncate(files.len());
-    overlaps
+    })
 }
 
 /// Static scan predicates a metadata count can absorb.
@@ -523,29 +430,14 @@ mod tests {
         )
     }
 
-    /// Footer evidence for the synthetic files in these classification tests.
-    fn evidence(input: &ScanInput, classification: &Classification) -> Vec<bool> {
-        let with_deletes = WITH_DELETES.lock().unwrap();
+    fn exact_count(input: &ScanInput, request: &ScanRequest) -> Option<usize> {
+        let classification = classify(input, request)?;
+        let deletes = WITH_DELETES.lock().unwrap();
         classification
             .exact
             .iter()
-            .map(|&index| {
-                input.append_mode || !with_deletes.contains(&input.files[index].meta_ref().file_id)
-            })
-            .collect()
-    }
-
-    fn exact_count(input: &ScanInput, request: &ScanRequest) -> Option<usize> {
-        let classification = classify(input, request, false)?;
-        let no_deletes = evidence(input, &classification);
-        resolve(input, classification, &no_deletes)
-    }
-
-    fn classified(input: &ScanInput, request: &ScanRequest) -> Classification {
-        let mut classification = classify(input, request, true).unwrap();
-        let no_deletes = evidence(input, &classification);
-        classification.retain_exact(input, &no_deletes);
-        classification
+            .all(|&i| input.append_mode || !deletes.contains(&input.files[i].meta_ref().file_id))
+            .then_some(classification.exact_rows)
     }
 
     async fn input(files: Vec<FileHandle>, filters: &[Expr]) -> ScanInput {
@@ -634,18 +526,6 @@ mod tests {
             };
             assert_eq!(exact_count(&input, &request), expected, "{request:?}");
         }
-
-        let filters = vec![k0("x")];
-        let input = input(vec![x(0, 10, 3), mixed()], &filters).await;
-        let request = ScanRequest {
-            filters,
-            ..Default::default()
-        };
-        let classification = classified(&input, &request);
-        assert_eq!(
-            (classification.exact_rows, classification.remaining.len()),
-            (3, 1)
-        );
     }
 
     #[tokio::test]
@@ -695,52 +575,6 @@ mod tests {
         input.append_mode = true;
         assert_eq!(exact_count(&input, &ScanRequest::default()), None);
     }
-    #[tokio::test]
-    async fn test_metadata_aggr_classifies_files() {
-        for (files, exact_rows, exact, remaining) in [
-            (
-                vec![file(0, 10, 3, true), file(20, 30, 2, false)],
-                3,
-                vec![0],
-                vec![1],
-            ),
-            // Without key bounds, the wide file overlaps both others in time.
-            (
-                vec![
-                    file(0, 100, 3, true),
-                    file(5, 8, 2, false),
-                    file(20, 30, 4, true),
-                ],
-                0,
-                vec![],
-                vec![0, 1, 2],
-            ),
-            (
-                vec![file(0, 10, 3, true), file(20, 30, 0, true)],
-                3,
-                vec![0],
-                vec![1],
-            ),
-            // Disjoint keys keep time-overlapping files independent.
-            (
-                vec![
-                    keyed_file(0, 10, 3, ("a", 0), ("a", 9)),
-                    keyed_file(5, 15, 4, ("b", 0), ("b", 9)),
-                    keyed_file(8, 9, 1, ("a", 5), ("a", 5)),
-                ],
-                4,
-                vec![1],
-                vec![0, 2],
-            ),
-        ] {
-            let input = input(files, &[]).await;
-            let classification = classified(&input, &ScanRequest::default());
-            assert_eq!(classification.exact_rows, exact_rows);
-            assert_eq!(classification.exact, exact);
-            assert_eq!(classification.remaining, remaining);
-        }
-    }
-
     #[test]
     fn test_metadata_aggr_reads_op_type_statistics() {
         use api::v1::OpType;
