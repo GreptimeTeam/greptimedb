@@ -28,9 +28,9 @@ use common_telemetry::tracing;
 use datafusion::common::{DFSchema, plan_err};
 use datafusion::execution::SessionStateBuilder;
 use datafusion::execution::context::SessionState;
-use datafusion::sql::planner::PlannerContext;
+use datafusion::sql::planner::{ContextProvider, PlannerContext};
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
-use datafusion_common::{ScalarValue, ToDFSchema};
+use datafusion_common::{ScalarValue, TableReference, ToDFSchema};
 use datafusion_expr::expr::{Exists, InSubquery};
 use datafusion_expr::{
     Analyze, Explain, ExplainFormat, Expr as DfExpr, LogicalPlan, LogicalPlanBuilder, PlanType,
@@ -50,11 +50,13 @@ use sql::statements::statement::Statement;
 use sql::statements::tql::Tql;
 use sqlparser::ast::{AccessExpr, Value, visit_expressions_mut};
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
+use store_api::storage::SeriesSample;
+use table::metadata::TableId;
 
 use crate::dist_plan::DistPlannerOptions;
 use crate::dist_plan::region_local_node;
 use crate::error::{
-    CteColumnSchemaMismatchSnafu, PlanSqlSnafu, QueryPlanSnafu, Result, SqlSnafu,
+    CatalogSnafu, CteColumnSchemaMismatchSnafu, PlanSqlSnafu, QueryPlanSnafu, Result, SqlSnafu,
     UnimplementedSnafu,
 };
 use crate::log_query::planner::LogQueryPlanner;
@@ -64,6 +66,7 @@ use crate::parser::{DEFAULT_LOOKBACK_STRING, PromQuery, QueryLanguageParser, Que
 use crate::promql::planner::PromPlanner;
 use crate::query_engine::{DefaultPlanDecoder, QueryEngineState};
 use crate::range_select::plan_rewrite::RangePlanRewriter;
+use crate::series_sample;
 use crate::{DfContextProviderAdapter, QueryEngineContext};
 
 #[async_trait]
@@ -459,6 +462,62 @@ impl DfLogicalPlanner {
         }
     }
 
+    /// Decodes and removes the `SAMPLE SERIES (<fraction>)` clauses of `df_stmt`.
+    ///
+    /// Returns the sampled tables with their table id and fraction. Series
+    /// sampling keeps a deterministic fraction of the *series* of a metric
+    /// table instead of a fraction of its rows, so a table that the metric
+    /// engine does not own is rejected here rather than sampled by nothing.
+    ///
+    /// See [`crate::series_sample`] for why the clause is decoded by hand.
+    async fn take_series_samples(
+        &self,
+        df_stmt: &mut DfStatement,
+        query_ctx: &QueryContextRef,
+    ) -> Result<Vec<(TableReference, TableId, SeriesSample)>> {
+        let DfStatement::Statement(statement) = df_stmt else {
+            return Ok(vec![]);
+        };
+        let clauses = series_sample::take_series_samples(statement.as_mut())?;
+        if clauses.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let enable_ident_normalization = self
+            .session_state
+            .config_options()
+            .sql_parser
+            .enable_ident_normalization;
+        let mut table_provider = DfTableSourceProvider::new(
+            self.engine_state.catalog_manager().clone(),
+            self.engine_state.disallow_cross_catalog_query(),
+            query_ctx.clone(),
+            Arc::new(DefaultPlanDecoder::new(
+                self.session_state.clone(),
+                query_ctx,
+            )?),
+            enable_ident_normalization,
+        );
+
+        let mut samples = Vec::with_capacity(clauses.len());
+        for clause in clauses {
+            let table_ref =
+                series_sample::table_reference(&clause.table, enable_ident_normalization)?;
+            let source = table_provider
+                .resolve_table(table_ref.clone())
+                .await
+                .context(CatalogSnafu)?;
+            let table = series_sample::table_of_source(&source)?;
+            let table_info = table.table_info();
+            series_sample::ensure_series_sample_supported(
+                &table_ref.to_string(),
+                &table_info.meta.engine,
+            )?;
+            samples.push((table_ref, table_info.ident.table_id, clause.sample));
+        }
+        Ok(samples)
+    }
+
     /// Derive a [`SessionState`] whose [`ExecutionProps`] includes
     /// `query_execution_start_time` if a scheduled time extension is present
     /// in the query context.
@@ -605,6 +664,28 @@ impl DfLogicalPlanner {
             .fail()?;
         }
 
+        // `FROM <table> SAMPLE SERIES (<fraction>)` is a GreptimeDB extension with
+        // no sqlparser node of its own. Decode it before planning, because
+        // DataFusion's default relation planning drops a `TableSample` on the
+        // floor, and record the fractions on the query context: a metric table
+        // is read through region queries, and the query context is the only
+        // per-query hint that rides along in the region request.
+        let series_samples = self.take_series_samples(&mut df_stmt, &query_ctx).await?;
+        let query_ctx = if series_samples.is_empty() {
+            query_ctx
+        } else {
+            let mut sampled_ctx = query_ctx.as_ref().clone();
+            for (table_ref, table_id, sample) in &series_samples {
+                series_sample::set_series_sample(
+                    &mut sampled_ctx,
+                    &table_ref.to_string(),
+                    *table_id,
+                    *sample,
+                )?;
+            }
+            Arc::new(sampled_ctx)
+        };
+
         let engine_context = self.derive_session_state_with_scheduled_time(query_ctx)?;
         let scheduled_state = engine_context.state().clone();
         let query_ctx = engine_context.query_ctx();
@@ -629,6 +710,15 @@ impl DfLogicalPlanner {
             query_ctx.clone(),
         )
         .await?;
+
+        // A scan planned in this process reads the fraction from its own provider;
+        // the query context above is what the region scans of a remote datanode read.
+        for (table_ref, _, sample) in &series_samples {
+            let source = context_provider
+                .get_table_source(table_ref.clone())
+                .context(PlanSqlSnafu)?;
+            series_sample::apply_series_sample(&source, *sample)?;
+        }
 
         let config_options = scheduled_state.config().options();
         let parser_options = &config_options.sql_parser;

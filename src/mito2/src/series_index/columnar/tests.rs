@@ -136,6 +136,53 @@ fn request(names: &[&str]) -> SeriesReadRequest {
     }
 }
 
+/// A series sample keeps a prefix of the `(table_id, tsid)` order, so whole blocks
+/// above the bound are skipped while a straddling block stays readable.
+#[test]
+fn series_sample_bounds_range_matching() {
+    use super::reader::matches_range;
+
+    let id = |table_id: u32, tsid: u64| MetricSeriesId { table_id, tsid };
+    let bounded = |tsid_max| SeriesReadRequest {
+        tsid_max,
+        ..request(&[TSID_COLUMN])
+    };
+    let tsid_max: u64 = 1 << 62;
+
+    // Without a bound every block, the highest `tsid` included, is read.
+    assert!(matches_range(id(7, 0), id(7, u64::MAX), &bounded(None)));
+    assert!(matches_range(
+        id(7, u64::MAX),
+        id(7, u64::MAX),
+        &bounded(None)
+    ));
+
+    // A block that starts at or above the bound holds no kept series.
+    assert!(!matches_range(
+        id(7, tsid_max),
+        id(7, u64::MAX),
+        &bounded(Some(tsid_max))
+    ));
+    assert!(!matches_range(
+        id(7, u64::MAX),
+        id(7, u64::MAX),
+        &bounded(Some(tsid_max))
+    ));
+
+    // A block straddling the bound keeps its in-range entries, and a block crossing a
+    // table boundary may hold smaller `tsid`s of the later table.
+    assert!(matches_range(
+        id(7, tsid_max - 1),
+        id(7, tsid_max),
+        &bounded(Some(tsid_max))
+    ));
+    assert!(matches_range(
+        id(7, u64::MAX),
+        id(8, 0),
+        &bounded(Some(tsid_max))
+    ));
+}
+
 #[test]
 fn integer_and_dictionary_wire() {
     let values = [0, 1, u64::MAX, 0, 1 << 63, 7, 7];

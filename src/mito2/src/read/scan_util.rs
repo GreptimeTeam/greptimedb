@@ -44,6 +44,7 @@ use crate::metrics::{
 use crate::read::dedup::{DedupMetrics, DedupMetricsReport};
 use crate::read::flat_merge::{MergeMetrics, MergeMetricsReport};
 use crate::read::last_row::FlatLastTimestampSelector;
+use crate::read::pk_sample::{self, PkSampleInterval};
 use crate::read::pruner::PartitionPruner;
 use crate::read::range::{RangeMeta, RowGroupIndex};
 use crate::read::scan_region::StreamContext;
@@ -1196,6 +1197,16 @@ pub(crate) fn scan_flat_mem_ranges(
             part_metrics.inc_build_reader_cost(build_reader_start.elapsed());
 
             while let Some(record_batch) = iter.next().transpose()? {
+                // A memtable has no key statistics, so the sample cannot prune it; it
+                // still applies the exact interval test to every row, so that a key with
+                // both a memtable and an SST version is kept or dropped as a whole.
+                let record_batch = match stream_ctx.input.pk_sample.as_ref() {
+                    Some(sample) => match pk_sample::filter_flat_batch(record_batch, sample)? {
+                        Some(record_batch) => record_batch,
+                        None => continue,
+                    },
+                    None => record_batch,
+                };
                 yield record_batch;
             }
 
@@ -1472,6 +1483,34 @@ pub(crate) fn new_filter_metrics(explain_verbose: bool) -> ReaderFilterMetrics {
     }
 }
 
+/// Drops the row groups whose encoded key statistics miss the sample interval.
+///
+/// This is the row-group half of the primary-key sample: the row groups of a file
+/// record the encoded key range of their rows, so a group entirely outside the
+/// interval never builds a reader. A group without statistics is kept (the sample
+/// over-shoots) because dropping it could lose rows.
+fn prune_file_ranges_by_pk_sample(
+    sample: Option<&PkSampleInterval>,
+    ranges: SmallVec<[FileRange; 2]>,
+) -> SmallVec<[FileRange; 2]> {
+    let Some(sample) = sample else {
+        return ranges;
+    };
+    let mut kept = SmallVec::with_capacity(ranges.len());
+    let mut pruned = 0u64;
+    let mut checked = 0u64;
+    for range in ranges {
+        checked += 1;
+        match range.primary_key_range() {
+            Some((min, max)) if !sample.overlaps(min, max) => pruned += 1,
+            _ => kept.push(range),
+        }
+    }
+    pk_sample::inc("row_groups_checked", checked);
+    pk_sample::inc("row_groups_pruned", pruned);
+    kept
+}
+
 /// Scans file ranges at `index` using flat reader that returns RecordBatch.
 #[tracing::instrument(
     skip_all,
@@ -1495,6 +1534,7 @@ pub(crate) async fn scan_flat_file_ranges(
     let ranges = partition_pruner
         .build_file_ranges(index, &part_metrics, &mut reader_metrics)
         .await?;
+    let ranges = prune_file_ranges_by_pk_sample(stream_ctx.input.pk_sample.as_ref(), ranges);
     part_metrics.inc_num_file_ranges(ranges.len());
     part_metrics.merge_reader_metrics(&reader_metrics, None);
 
@@ -1640,6 +1680,15 @@ pub fn build_flat_file_range_scan_stream(
             while let Some(batch) = next_aligned_file_batch(
                 &range, &mut reader, stream_ctx.input.sequence_range, file_sequence_trusted,
             ).await? {
+                // The exact interval test on the encoded key: a straddling row group
+                // keeps only its rows that fall inside the sample.
+                let batch = match stream_ctx.input.pk_sample.as_ref() {
+                    Some(sample) => match pk_sample::filter_flat_batch(batch, sample)? {
+                        Some(batch) => batch,
+                        None => continue,
+                    },
+                    None => batch,
+                };
                 yield batch;
             }
 

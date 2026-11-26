@@ -29,5 +29,7 @@ pub use datatypes::schema::{
 pub use self::descriptors::*;
 pub use self::file::{FileId, FileRef, FileRefsManifest, GcReport, IndexVersion, ParseIdError};
 pub use self::projection::NestedPath;
-pub use self::requests::{ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector};
+pub use self::requests::{
+    PkSample, ScanRequest, SeriesSample, TimeSeriesDistribution, TimeSeriesRowSelector,
+};
 pub use self::types::{SequenceNumber, SequenceRange};

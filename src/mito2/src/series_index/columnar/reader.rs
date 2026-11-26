@@ -321,7 +321,16 @@ impl FormatReader for ColumnarReader {
                             column.payload.validate(previous_payload_end, trailer.payload_end, false)?;
                             previous_payload_end = column.payload.end()?;
                         }
-                        if !matches_range(block.first_id(), block.last_id(), &request) || !matches_statistics(block, &request.filters) { continue; }
+                        let (first_id, last_id) = (block.first_id(), block.last_id());
+                        if !matches_range(first_id, last_id, &request) {
+                            // Report the blocks the sample alone skipped, so a sampled scan
+                            // shows how much series-index reading it avoided.
+                            if sample_prunes(first_id, last_id, &request) {
+                                *metrics.counts.entry("series_blocks_sample_pruned").or_default() += 1;
+                            }
+                            continue;
+                        }
+                        if !matches_statistics(block, &request.filters) { continue; }
                         *metrics.counts.entry("series_blocks_read").or_default() += 1;
                         *metrics.counts.entry("series_rows_examined").or_default() += u64::from(block.rows);
                         if let Some(mut output) = read_block(&store, &path, block, &request, projected.clone(), &mut metrics).await? {
@@ -344,8 +353,31 @@ impl FormatReader for ColumnarReader {
     }
 }
 
-fn matches_range(first: MetricSeriesId, last: MetricSeriesId, request: &SeriesReadRequest) -> bool {
+/// Returns whether the series sample alone excludes every entry of `[first, last]`.
+///
+/// Entries are ordered by `(table_id, tsid)`: a range inside one table whose first
+/// `tsid` is at or above the bound holds no kept series. A range that crosses a table
+/// boundary keeps entries of the later table whose `tsid`s can be below the bound, so
+/// it stays visible (straddling ranges are read and filtered afterwards).
+pub(super) fn sample_prunes(
+    first: MetricSeriesId,
+    last: MetricSeriesId,
+    request: &SeriesReadRequest,
+) -> bool {
+    request
+        .tsid_max
+        .is_some_and(|tsid_max| first.tsid >= tsid_max && first.table_id == last.table_id)
+}
+
+pub(super) fn matches_range(
+    first: MetricSeriesId,
+    last: MetricSeriesId,
+    request: &SeriesReadRequest,
+) -> bool {
     let (mut first, mut last) = (first, last);
+    if sample_prunes(first, last, request) {
+        return false;
+    }
     if let Some(table) = request.table_id {
         first = first.max(MetricSeriesId {
             table_id: table,

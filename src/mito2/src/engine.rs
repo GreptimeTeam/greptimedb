@@ -65,6 +65,8 @@ mod parallel_test;
 #[cfg(test)]
 pub(crate) mod pending_tail_test;
 #[cfg(test)]
+mod pk_sample_test;
+#[cfg(test)]
 mod projection_test;
 #[cfg(test)]
 mod prune_test;

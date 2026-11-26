@@ -48,8 +48,8 @@ use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{PartitionRange, RegionScannerRef};
 use store_api::storage::{
-    ColumnId, RegionId, ScanRequest, SequenceNumber, SequenceRange, TimeSeriesDistribution,
-    TimeSeriesRowSelector,
+    ColumnId, RegionId, ScanRequest, SequenceNumber, SequenceRange, SeriesSample,
+    TimeSeriesDistribution, TimeSeriesRowSelector,
 };
 use table::predicate::{Predicate, build_time_range_predicate, extract_time_range_from_expr};
 use tokio::sync::{Semaphore, mpsc};
@@ -68,10 +68,12 @@ use crate::memtable::{MemtableRange, RangesOptions};
 use crate::metrics::READ_SST_COUNT;
 use crate::read::compat::{self, FlatCompatBatch};
 use crate::read::flat_projection::FlatProjectionMapper;
+use crate::read::pk_sample::{PkSampleFileStat, PkSampleInterval};
 use crate::read::range::{FileRangeBuilder, MemRangeBuilder, RangeMeta, RowGroupIndex};
 use crate::read::range_cache::{ScanRequestFingerprint, implied_time_range_from_exprs};
 use crate::read::read_columns::ReadColumns;
 use crate::read::seq_scan::SeqScan;
+use crate::read::series_candidate::is_sparse_metric_metadata;
 use crate::read::series_scan::SeriesScan;
 use crate::read::stream::ScanBatchStream;
 use crate::read::unordered_scan::UnorderedScan;
@@ -499,10 +501,170 @@ impl ScanRegion {
             || self.version.options.sst_format == Some(crate::sst::FormatType::Narthex)
     }
 
+    /// Rejects a series sample this scan cannot honor.
+    ///
+    /// Sampling prunes whole series by their `tsid`, so it is only sound on a
+    /// per-series scan of a sparse metric region, where the candidate scan
+    /// enumerates series before any row is read. Rejecting the request keeps a
+    /// caller from silently receiving every series.
+    fn validate_sample(&self) -> Result<()> {
+        let Some(sample) = self.request.sample else {
+            return Ok(());
+        };
+        let region_id = self.version.metadata.region_id;
+        ensure!(
+            sample.den > 0 && sample.num < sample.den,
+            InvalidRequestSnafu {
+                region_id,
+                reason: format!("invalid series sample {sample}: need num < den and den > 0"),
+            }
+        );
+        ensure!(
+            self.request.distribution == Some(TimeSeriesDistribution::PerSeries)
+                && self.experimental_series_scan_v2
+                && is_sparse_metric_metadata(&self.version.metadata),
+            InvalidRequestSnafu {
+                region_id,
+                reason: format!(
+                    "series sample {sample} requires a per-series ({}) scan of a sparse metric \
+                     region with __table_id/__tsid primary keys and the two-phase series scan \
+                     (enable the `experimental_series_scan_v2` option of the mito engine)",
+                    TimeSeriesDistribution::PerSeries
+                ),
+            }
+        );
+        Ok(())
+    }
+
+    /// Rejects a classic-table primary-key sample this scan cannot honor.
+    ///
+    /// The sample maps the requested fraction onto one interval of the encoded
+    /// primary key, which only means something when the region's rows are
+    /// ordered by that key and the request asks for a proper fraction of them.
+    /// A sparse metric region orders its rows by `(__table_id, __tsid)`, where
+    /// `tsid` is a tag hash, so its series are already sampled by [SeriesSample]
+    /// and an interval over the encoded key would mix series across tables.
+    fn validate_pk_sample(&self) -> Result<()> {
+        let Some(sample) = self.request.pk_sample else {
+            return Ok(());
+        };
+        let region_id = self.version.metadata.region_id;
+        ensure!(
+            sample.num > 0 && sample.num < sample.den,
+            InvalidRequestSnafu {
+                region_id,
+                reason: format!(
+                    "invalid primary-key sample {sample}: need 0 < num < den and den > 0"
+                ),
+            }
+        );
+        ensure!(
+            !is_sparse_metric_metadata(&self.version.metadata),
+            InvalidRequestSnafu {
+                region_id,
+                reason: format!(
+                    "primary-key sample {sample} is unsupported for sparse (__table_id, __tsid) \
+                     metric regions, whose key order does not follow the value order of the \
+                     sampled series; use the series sample instead"
+                ),
+            }
+        );
+        ensure!(
+            !self.version.metadata.primary_key.is_empty(),
+            InvalidRequestSnafu {
+                region_id,
+                reason: format!(
+                    "primary-key sample {sample} requires a region with primary key columns"
+                ),
+            }
+        );
+        ensure!(
+            !self.use_series_scan(),
+            InvalidRequestSnafu {
+                region_id,
+                reason: format!(
+                    "primary-key sample {sample} is unsupported for a per-series scan, which \
+                     reads through the series index instead of the primary-key ordered ranges"
+                ),
+            }
+        );
+        Ok(())
+    }
+
+    /// Plans the primary-key sample over the files this scan would read.
+    ///
+    /// Files without key statistics cannot be placed on the key axis: they are
+    /// kept whole (the sample over-shoots) and counted. Files whose stored
+    /// statistics need a schema alignment are rejected, because their stored key
+    /// bytes would not compare with the row-level test.
+    fn plan_pk_sample(&self, files: &[FileHandle]) -> Result<Option<PkSampleInterval>> {
+        let Some(sample) = self.request.pk_sample else {
+            return Ok(None);
+        };
+        let region_id = self.version.metadata.region_id;
+        let mapper = self.version.ssts.primary_key_mapper();
+        let mut stats = Vec::with_capacity(files.len());
+        let mut files_without_stats = 0;
+        for file in files {
+            let Some((min, max)) = file.primary_key_range(&mapper) else {
+                files_without_stats += 1;
+                continue;
+            };
+            ensure!(
+                file.raw_primary_key_range().as_ref() == Some(&(min.clone(), max.clone())),
+                InvalidRequestSnafu {
+                    region_id,
+                    reason: format!(
+                        "primary-key sample {sample} is unsupported for file {} of region {}, \
+                         whose stored key statistics do not match this schema version",
+                        file.file_id(),
+                        region_id
+                    ),
+                }
+            );
+            stats.push(PkSampleFileStat {
+                min,
+                max,
+                num_rows: file.meta_ref().num_rows,
+            });
+        }
+
+        let plan = crate::read::pk_sample::plan_from_stats(
+            stats,
+            sample.num,
+            sample.den,
+            files_without_stats,
+        );
+        crate::read::pk_sample::inc("files_in_range", files.len() as u64);
+        crate::read::pk_sample::inc("files_without_stats", plan.files_without_stats as u64);
+        let Some(interval) = plan.interval.clone() else {
+            warn!(
+                "Primary-key sample {sample} has no key statistics to order in region {}: \
+                 {} files without statistics, {} rows in the step function",
+                region_id, plan.files_without_stats, plan.rows_total
+            );
+            return Ok(None);
+        };
+        debug!(
+            "Primary-key sample {sample} of region {}: keys {:?}..{:?} cover about {}/{} rows \
+             (target {}), files without statistics {}",
+            region_id,
+            interval.lo,
+            interval.hi,
+            plan.rows_covered,
+            plan.rows_total,
+            plan.rows_target,
+            plan.files_without_stats
+        );
+        Ok(Some(interval))
+    }
+
     /// Creates a scan input.
     #[tracing::instrument(skip_all, fields(region_id = %self.region_id()))]
     async fn scan_input(mut self) -> Result<ScanInput> {
         let metadata = &self.version.metadata;
+        self.validate_sample()?;
+        self.validate_pk_sample()?;
         let sst_min_sequence = self.request.sst_min_sequence.and_then(NonZeroU64::new);
         let time_range = self.build_time_range_predicate();
         let predicate = PredicateGroup::new(metadata, &self.request.filters)?;
@@ -548,6 +710,9 @@ impl ScanRegion {
             } else {
                 exact_sequence_range(&self.request, &self.version)?
             };
+        // The primary-key sample turns the requested fraction into one interval of the
+        // encoded key over the files this scan would read, before any range is built.
+        let pk_sample = self.plan_pk_sample(&files)?;
         if sst_min_sequence.is_some() && sequence_range.is_some() {
             return SequenceRangeUnsupportedSnafu {
                 region_id: self.region_id(),
@@ -663,6 +828,8 @@ impl ScanRegion {
             .with_merge_mode(self.version.options.merge_mode())
             .with_series_row_selector(self.request.series_row_selector)
             .with_distribution(self.request.distribution)
+            .with_sample(self.request.sample)
+            .with_pk_sample(pk_sample)
             .with_explain_flat_format(
                 self.version.options.sst_format == Some(crate::sst::FormatType::Flat),
             )
@@ -1042,6 +1209,11 @@ pub struct ScanInput {
     pub(crate) series_row_selector: Option<TimeSeriesRowSelector>,
     /// Hint for the required distribution of the scanner.
     pub(crate) distribution: Option<TimeSeriesDistribution>,
+    /// Hint to keep only a deterministic fraction of the series of this scan.
+    pub(crate) sample: Option<SeriesSample>,
+    /// Resolved interval of encoded primary keys kept by a classic-table sample.
+    /// `None` when the scan is unsampled, or when no file carries key statistics.
+    pub(crate) pk_sample: Option<PkSampleInterval>,
     /// Whether the region's configured SST format is flat.
     explain_flat_format: bool,
     /// Snapshot upper bound bound at scan open and propagated back to the caller.
@@ -1123,6 +1295,8 @@ impl ScanInput {
                 merge_mode: MergeMode::default(),
                 series_row_selector: None,
                 distribution: None,
+                sample: None,
+                pk_sample: None,
                 explain_flat_format: false,
                 snapshot_sequence: None,
                 sequence_range: None,
@@ -1275,7 +1449,9 @@ impl ScanInputBuilder {
             implied_time_range_from_exprs(&time_index_name, ts_col_unit, &time_only_exprs);
 
         // We only cache requests that have tag filters to avoid caching all series.
-        let fingerprint = if eligible && has_tag_filter {
+        // A sampled scan is not cacheable yet: the fingerprint cannot tell two sample
+        // intervals apart, so reusing a range result would return another interval's rows.
+        let fingerprint = if eligible && has_tag_filter && input.pk_sample.is_none() {
             let mut time_filters: Vec<String> =
                 time_only_exprs.iter().map(|e| e.to_string()).collect();
 
@@ -1477,6 +1653,20 @@ impl ScanInputBuilder {
         self
     }
 
+    /// Sets the series sampling hint.
+    #[must_use]
+    pub(crate) fn with_sample(mut self, sample: Option<SeriesSample>) -> Self {
+        self.input.sample = sample;
+        self
+    }
+
+    /// Sets the resolved classic-table primary-key sample interval.
+    #[must_use]
+    pub(crate) fn with_pk_sample(mut self, pk_sample: Option<PkSampleInterval>) -> Self {
+        self.input.pk_sample = pk_sample;
+        self
+    }
+
     /// Sets whether the region's configured SST format is flat for explain output.
     #[must_use]
     pub(crate) fn with_explain_flat_format(mut self, explain_flat_format: bool) -> Self {
@@ -1661,7 +1851,31 @@ impl ScanInput {
         self.manifest_prunes_file(file, predicate.as_ref())
     }
 
+    /// Returns `true` if the file's manifest primary-key range misses the sample
+    /// interval entirely, so the sample prunes the whole file.
+    ///
+    /// A file without statistics cannot be ordered on the key axis: the sample
+    /// keeps it whole (over-sampling) instead of dropping it silently.
+    fn pk_sample_prunes_file(&self, file: &FileHandle) -> bool {
+        let Some(sample) = &self.pk_sample else {
+            return false;
+        };
+        let Some((min, max)) = file.primary_key_range(self.primary_key_mapper()) else {
+            return false;
+        };
+        if sample.overlaps(&min, &max) {
+            return false;
+        }
+        crate::read::pk_sample::inc("files_pruned", 1);
+        true
+    }
+
     fn manifest_prunes_file(&self, file: &FileHandle, predicate: Option<&Predicate>) -> bool {
+        // The sample interval is a range predicate on the encoded key, so it reuses
+        // this manifest-level check and its pruner-wide result cache.
+        if self.pk_sample_prunes_file(file) {
+            return true;
+        }
         if let Some(pred) = predicate
             && !pred.is_empty()
             && let Some(file_level_stats) = self.try_file_level_pruning_stats(file)
@@ -2317,6 +2531,16 @@ impl StreamContext {
         }
         if let Some(distribution) = &self.input.distribution {
             write!(f, ", \"distribution\":\"{}\"", distribution)?;
+        }
+        if let Some(sample) = &self.input.sample {
+            write!(f, ", \"sample\":\"{}\"", sample)?;
+        }
+        if let Some(pk_sample) = &self.input.pk_sample {
+            write!(
+                f,
+                ", \"pk_sample\":\"{:?}..{:?}\"",
+                pk_sample.lo, pk_sample.hi
+            )?;
         }
 
         self.format_scan_details(f)?;
@@ -3529,6 +3753,63 @@ mod tests {
         let hydrated = file(None);
         hydrated.set_primary_key_range((key("c"), key("d")));
         assert!(input.can_manifest_prune_file(&hydrated));
+    }
+
+    #[tokio::test]
+    async fn test_pk_sample_prunes_by_manifest_range_and_keeps_unknown_bounds() {
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
+        let predicate_group = PredicateGroup::new(metadata.as_ref(), &[]).unwrap();
+        use mito_codec::row_converter::PrimaryKeyCodec as _;
+
+        let key = |k0: &str| {
+            let mut bytes = Vec::new();
+            mito_codec::row_converter::DensePrimaryKeyCodec::new(&metadata)
+                .encode_values(
+                    &[
+                        (0, datatypes::value::Value::from(k0)),
+                        (1, datatypes::value::Value::from(1u32)),
+                    ],
+                    &mut bytes,
+                )
+                .unwrap();
+            bytes::Bytes::from(bytes)
+        };
+        let file = |range: Option<(&str, &str)>| {
+            FileHandle::new(
+                FileMeta {
+                    region_id: metadata.region_id,
+                    time_range: (
+                        Timestamp::new_millisecond(0),
+                        Timestamp::new_millisecond(1000),
+                    ),
+                    primary_key_min: range.map(|(min, _)| key(min)),
+                    primary_key_max: range.map(|(_, max)| key(max)),
+                    ..Default::default()
+                },
+                Arc::new(crate::sst::file_purger::NoopFilePurger),
+            )
+        };
+
+        // `b..c` keeps only the keys the sample interval covers.
+        let input = ScanInput::builder(SchedulerEnv::new().await.access_layer.clone(), mapper)
+            .with_predicate(predicate_group)
+            .with_pk_sample(Some(crate::read::pk_sample::PkSampleInterval {
+                lo: key("b"),
+                hi: key("c"),
+            }))
+            .build();
+
+        assert!(!input.can_manifest_prune_file(&file(Some(("b", "b")))));
+        assert!(!input.can_manifest_prune_file(&file(Some(("a", "c")))));
+        assert!(input.can_manifest_prune_file(&file(Some(("a", "a")))));
+        assert!(input.can_manifest_prune_file(&file(Some(("d", "z")))));
+        // A file without key statistics cannot be ordered: the sample keeps it and
+        // counts it as a file without statistics instead of dropping it silently.
+        assert!(!input.can_manifest_prune_file(&file(None)));
+        let plan = crate::read::pk_sample::plan_from_stats(vec![], 1, 2, 1);
+        assert_eq!(1, plan.files_without_stats);
+        assert!(plan.interval.is_none());
     }
 
     #[tokio::test]

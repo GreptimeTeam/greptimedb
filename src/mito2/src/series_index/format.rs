@@ -54,6 +54,10 @@ pub(crate) struct SeriesReadRequest {
     pub(crate) table_id: Option<u32>,
     pub(crate) ids: Option<BTreeSet<MetricSeriesId>>,
     pub(crate) filters: Vec<SimpleFilterEvaluator>,
+    /// Exclusive `tsid` upper bound. Entries are sorted by `(table_id, tsid)`, so
+    /// a block whose first entry is at or above the bound cannot hold a selected
+    /// series unless it also crosses a table boundary.
+    pub(crate) tsid_max: Option<u64>,
 }
 
 pub(crate) trait FormatReader: Send + Sync {
