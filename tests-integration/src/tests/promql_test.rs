@@ -2664,6 +2664,35 @@ fn assert_one_field_native_layout(batches: &common_recordbatch::RecordBatches, q
     );
 }
 
+/// A TQL flow created with the native route requested matches its sink table, which has the
+/// existing planner's columns and no metric-name column.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_tql_flow_matches_the_sink_table() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, _observer) =
+        native_test_instance(GreptimeDbStandaloneBuilder::new("native_promql_tql_flow")).await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE native_flow_src (`value` DOUBLE, ts TIMESTAMP TIME INDEX, \
+             sensor STRING, loc STRING, PRIMARY KEY (sensor, loc)); \
+         CREATE TABLE native_flow_sink (`value` DOUBLE, ts TIMESTAMP TIME INDEX, \
+             sensor STRING, PRIMARY KEY (sensor))",
+        QueryContext::arc(),
+    )
+    .await;
+
+    // Creating the flow plans its query and matches the plan's columns to the sink table.
+    execute_all(
+        &instance,
+        "CREATE FLOW native_flow SINK TO native_flow_sink EVAL INTERVAL '1m' AS \
+         TQL EVAL (now() - '1m'::interval, now(), '1m') \
+         (sum by (sensor) (native_flow_src) / count by (sensor) (native_flow_src)) AS value",
+        native_query_context(true, 4),
+    )
+    .await;
+}
+
 /// A `__field__` selection that matches no metric table answers the empty vector.
 ///
 /// The matcher decides which of a scan's field columns a selection keeps, and no table matched this
@@ -11516,13 +11545,7 @@ const CTE_NATIVE_ORDERED_STATEMENT: &str =
 const CTE_NATIVE_ALIASED_STATEMENT: &str = "WITH tql (site, t, v) AS (TQL EVAL (0, 3, '1s') cte_native + cte_native) \
      SELECT t, v, site FROM tql WHERE v > 5 ORDER BY t";
 
-/// The same statement for the native route, which publishes the name column as a fourth column and
-/// therefore needs a fourth name in the list. The outer projection still reads the same three.
-const CTE_NATIVE_ALIASED_NAME_STATEMENT: &str = "WITH tql (site, t, v, metric) AS (TQL EVAL (0, 3, '1s') cte_native + cte_native) \
-     SELECT t, v, site FROM tql WHERE v > 5 ORDER BY t";
-
-/// A CTE over a plain selection: the answer keeps the metric name, so the native route publishes it
-/// and the existing route does not.
+/// A CTE over a plain selection, whose native answer carries the metric name of every row.
 const CTE_NATIVE_NAME_STATEMENT: &str =
     "WITH tql AS (TQL EVAL (0, 0, '1s') cte_native) SELECT * FROM tql";
 
@@ -11604,29 +11627,6 @@ fn cte_native_published_schema_expected() -> ArrowSchema {
         ],
         cte_native_schema_metadata(),
     )
-}
-
-/// The metadata the declared name column carries.
-fn cte_native_name_metadata() -> std::collections::HashMap<String, String> {
-    std::collections::HashMap::from([("greptime:metric_name".to_string(), "true".to_string())])
-}
-
-/// The schema [`CTE_NATIVE_STATEMENT`] publishes on the native route: the existing planner's
-/// columns, then the per-row name the answer declares.
-///
-/// The name is part of what the statement answers, so a CTE over a native answer publishes it. The
-/// existing planner never publishes it, so the same statement answered by that route has one column
-/// fewer: a CTE's columns follow the answer it was planned from.
-fn cte_native_published_schema_expected_native() -> ArrowSchema {
-    let mut fields = cte_native_published_schema_expected()
-        .fields()
-        .iter()
-        .map(|field| field.as_ref().clone())
-        .collect::<Vec<_>>();
-    fields.push(
-        Field::new("__name__", DataType::Utf8, true).with_metadata(cte_native_name_metadata()),
-    );
-    ArrowSchema::new_with_metadata(fields, cte_native_schema_metadata())
 }
 
 /// The schema [`CTE_NATIVE_ALIASED_STATEMENT`] publishes: the names its CTE declares, in the order it
@@ -11856,23 +11856,8 @@ async fn cte_native_statement_runs_the_fused_plan() {
         "the region reads one raw source per occurrence of the repeated selector:\n{trees}"
     );
     assert_eq!(
-        native_schema,
-        cte_native_published_schema_expected_native(),
-        "the CTE publishes the existing planner's columns, then the name the answer declares"
-    );
-    let legacy_fields = legacy_schema
-        .fields()
-        .iter()
-        .map(|field| field.as_ref())
-        .collect::<Vec<_>>();
-    let native_prefix = native_schema.fields()[..legacy_fields.len()]
-        .iter()
-        .map(|field| field.as_ref())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        native_prefix, legacy_fields,
-        "and every column the existing route publishes keeps its name, type, nullability and \
-         metadata: only the name column is added"
+        native_schema, legacy_schema,
+        "the CTE publishes the existing planner's columns, and no name column"
     );
     let native_types = cte_native_arrow_types(
         native_tql_output(&instance, CTE_NATIVE_ARROW_TYPE_STATEMENT, true).await,
@@ -11909,10 +11894,9 @@ async fn cte_native_statement_runs_the_fused_plan() {
 /// node still answers the statement, and the columns and rows are the ones the existing plan
 /// answers with.
 ///
-/// The declared list is positional and exact, so the native answer needs one more name than the
-/// existing one: it publishes the per-row name column, and the existing route does not. What the
-/// list declares, what the outer projection reads and what the outer filter keeps are all above the
-/// node, and none of them moves it.
+/// The declared list is positional and exact, so the same three names apply on both routes. What
+/// the list declares, what the outer projection reads and what the outer filter keeps are all above
+/// the node, and none of them moves it.
 #[tokio::test(flavor = "multi_thread")]
 async fn cte_native_column_aliases_and_outer_filter_keep_the_fused_plan() {
     common_telemetry::init_default_ut_logging();
@@ -11938,29 +11922,7 @@ async fn cte_native_column_aliases_and_outer_filter_keep_the_fused_plan() {
     assert_eq!(legacy_rows, cte_native_filtered_rows(), "legacy");
 
     observer.clear();
-    // The native answer publishes one more column, so the declared list names four. Three names for
-    // four columns is a hard error, and four names for the existing route's three is one too: the
-    // list is positional and exact.
-    let short = instance
-        .do_query(CTE_NATIVE_ALIASED_STATEMENT, native_query_context(true, 4))
-        .await
-        .remove(0);
-    assert!(
-        short.is_err(),
-        "three names for the native answer's four columns"
-    );
-    let long = instance
-        .do_query(
-            CTE_NATIVE_ALIASED_NAME_STATEMENT,
-            native_query_context(false, 4),
-        )
-        .await
-        .remove(0);
-    assert!(
-        long.is_err(),
-        "four names for the existing answer's three columns"
-    );
-    let native_output = native_tql_output(&instance, CTE_NATIVE_ALIASED_NAME_STATEMENT, true).await;
+    let native_output = native_tql_output(&instance, CTE_NATIVE_ALIASED_STATEMENT, true).await;
     let native_schema = cte_native_published_schema(&native_output);
     let native_rows = cte_native_rows(native_output).await;
     assert_eq!(
@@ -11987,60 +11949,54 @@ async fn cte_native_column_aliases_and_outer_filter_keep_the_fused_plan() {
     assert_eq!(native_rows, legacy_rows);
 }
 
-/// The CTE publishes the name column exactly when the answer declares one.
+/// The CTE publishes no metric-name column on either route.
 ///
-/// A plain selection keeps its series name, and the native answer declares the column for it, so the
-/// CTE publishes it and SQL can read it. The existing answer declares none, so the same statement
-/// answered by that route publishes one column fewer and asking for the name is an error - the CTE's
-/// columns follow the answer it was planned from. A scalar-typed answer declares no such column on
-/// either route, so neither publishes one: the CTE does not invent a column the statement does not
-/// answer.
+/// A plain selection keeps its series name, and the native answer declares a per-row name column
+/// for it, but the existing answer declares none, so the CTE publishes the existing columns only:
+/// a column list or outer query written against one route applies to the other. A scalar-typed
+/// answer declares no name column on either route.
 #[tokio::test(flavor = "multi_thread")]
-async fn cte_native_publishes_the_name_column_only_when_the_answer_declares_one() {
+async fn cte_native_publishes_no_name_column() {
     common_telemetry::init_default_ut_logging();
     let (standalone, observer) =
         native_test_instance(GreptimeDbStandaloneBuilder::new("cte_native_name")).await;
     let instance = standalone.fe_instance().clone();
     execute_all(&instance, CTE_NATIVE_FIXTURE, QueryContext::arc()).await;
 
+    let legacy = native_tql_output(&instance, CTE_NATIVE_NAME_STATEMENT, false).await;
+    let legacy_schema = cte_native_published_schema(&legacy);
+    let legacy_rows = cte_native_rows(legacy).await;
+
     observer.clear();
     let native = native_tql_output(&instance, CTE_NATIVE_NAME_STATEMENT, true).await;
     let native_schema = cte_native_published_schema(&native);
-    let name = native_schema
-        .field_with_name("__name__")
-        .expect("the native answer declares the name column");
-    assert!(
-        datatypes::schema::is_metric_name_field(name),
-        "and marks it as one: {native_schema:?}"
+    let native_rows = cte_native_rows(native).await;
+    assert_eq!(
+        1,
+        cte_native_observed_fused(&observer).len(),
+        "the selection runs one fused node:\n{}",
+        cte_native_observed_plan_trees(&observer)
     );
-    let rows = cte_native_rows(native).await;
-    assert!(!rows.is_empty(), "the statement answers rows");
     assert!(
-        rows.iter()
-            .all(|(_, labels, _)| labels.get("__name__").map(String::as_str) == Some("cte_native")),
-        "every row names the metric it was read from: {rows:?}"
+        native_schema.field_with_name("__name__").is_err(),
+        "the CTE publishes no name column: {native_schema:?}"
     );
-
-    let legacy = native_tql_output(&instance, CTE_NATIVE_NAME_STATEMENT, false).await;
-    let legacy_schema = cte_native_published_schema(&legacy);
-    assert!(
-        legacy_schema.field_with_name("__name__").is_err(),
-        "the existing answer declares no name column: {legacy_schema:?}"
-    );
-    cte_native_rows(legacy).await;
-    let missing = instance
-        .do_query(
-            "WITH tql AS (TQL EVAL (0, 0, '1s') cte_native) SELECT __name__ FROM tql",
-            native_query_context(false, 4),
-        )
-        .await
-        .remove(0);
-    assert!(
-        missing.is_err(),
-        "a CTE answered by the existing route has no name column to read"
-    );
+    assert_eq!(native_schema, legacy_schema);
+    assert!(!native_rows.is_empty(), "the statement answers rows");
+    assert_eq!(native_rows, legacy_rows);
 
     for enabled in [true, false] {
+        let missing = instance
+            .do_query(
+                "WITH tql AS (TQL EVAL (0, 0, '1s') cte_native) SELECT __name__ FROM tql",
+                native_query_context(enabled, 4),
+            )
+            .await
+            .remove(0);
+        assert!(
+            missing.is_err(),
+            "the CTE has no name column to read (native={enabled})"
+        );
         let scalar = native_tql_output(&instance, CTE_NATIVE_SCALAR_STATEMENT, enabled).await;
         let schema = cte_native_published_schema(&scalar);
         assert!(
@@ -12158,24 +12114,9 @@ async fn distributed_cte_native_runs_the_fused_plan_over_raw_sources() {
     }
     let rows = cte_native_rows(output).await;
     assert_eq!(
-        native_schema,
-        cte_native_published_schema_expected_native(),
-        "the CTE publishes the existing planner's columns over the distributed fused plan, then \
-         the name the answer declares"
-    );
-    let legacy_fields = legacy_schema
-        .fields()
-        .iter()
-        .map(|field| field.as_ref())
-        .collect::<Vec<_>>();
-    let native_prefix = native_schema.fields()[..legacy_fields.len()]
-        .iter()
-        .map(|field| field.as_ref())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        native_prefix, legacy_fields,
-        "every column the existing route publishes keeps its name, type, nullability and metadata \
-         on the distributed route too; only the name column is added"
+        native_schema, legacy_schema,
+        "the CTE publishes the existing planner's columns over the distributed fused plan, and no \
+         name column"
     );
     assert_eq!(rows, cte_native_expected_rows(), "native");
     assert_eq!(rows, legacy_rows);

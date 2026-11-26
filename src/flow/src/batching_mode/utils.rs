@@ -41,6 +41,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaRef};
 use query::QueryEngineRef;
 use query::parser::{DEFAULT_LOOKBACK_STRING, PromQuery, QueryLanguageParser, QueryStatement};
+use query::promql::planner::NATIVE_PROMQL_EXTENSION_KEY;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt, ensure};
 use sql::parser::{ParseOptions, ParserContext};
@@ -1065,9 +1066,20 @@ pub async fn sql_to_df_plan(
         },
         _ => QueryStatement::Sql(stmt.clone()),
     };
+    // A TQL flow's output columns are its sink table's columns, so they must not depend on whether
+    // the request asked for the native PromQL route, which names and shapes them differently
+    // (e.g. a per-row `__name__` column). A TQL CTE is unaffected: the SQL planner publishes the
+    // existing planner's columns for it on either route.
+    let plan_ctx = if matches!(query_stmt, QueryStatement::Promql(..)) {
+        let mut ctx = query_ctx.as_ref().clone();
+        ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, "false");
+        Arc::new(ctx)
+    } else {
+        query_ctx.clone()
+    };
     let plan = engine
         .planner()
-        .plan(&query_stmt, query_ctx.clone())
+        .plan(&query_stmt, plan_ctx)
         .await
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
