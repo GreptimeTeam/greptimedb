@@ -766,7 +766,17 @@ mod tests {
     async fn test_metadata_aggr_narrowed_partition_falls_back() {
         use partition::expr::col as partition_col;
 
-        let mut input = input(vec![file(0, 10, 3, true)], &[]).await;
+        let original_scope = partition_col("k0").gt_eq(Value::String("a".into()));
+        let file = FileHandle::new(
+            FileMeta {
+                partition_expr: Some(original_scope.clone().into()),
+                ..file(0, 10, 3, true).meta_ref().clone()
+            },
+            new_noop_file_purger(),
+        );
+        let mut input = input(vec![file], &[]).await;
+        input.region_partition_expr = Some(original_scope);
+        assert_eq!(exact_count(&input, &ScanRequest::default()), Some(3));
         input.region_partition_expr = Some(partition_col("k0").gt_eq(Value::String("x".into())));
         assert_eq!(exact_count(&input, &ScanRequest::default()), None);
     }
