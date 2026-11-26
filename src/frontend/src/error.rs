@@ -337,6 +337,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid rollup cache config: {reason}"))]
+    InvalidRollupCacheConfig {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid tls config"))]
     InvalidTlsConfig {
         #[snafu(source)]
@@ -407,6 +414,7 @@ impl ErrorExt for Error {
             | Error::ColumnNoneDefaultValue { .. }
             | Error::IncompleteGrpcRequest { .. }
             | Error::InvalidTlsConfig { .. }
+            | Error::InvalidRollupCacheConfig { .. }
             | Error::InvalidWriteRetryConfig { .. } => StatusCode::InvalidArguments,
 
             Error::NotSupported { .. } => StatusCode::Unsupported,

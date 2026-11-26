@@ -621,6 +621,7 @@ fn create_heartbeat_task_with_extensions(
         &extensions,
         instance.suspend_state(),
         instance.cache_invalidator().clone(),
+        instance.rollup_cache().cloned(),
     );
 
     let stat = {
