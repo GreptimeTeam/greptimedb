@@ -119,6 +119,30 @@ lazy_static! {
     )
     .unwrap();
 
+    /// Slices looked up by the slice aggregate cache, labeled with the result.
+    pub static ref SLICE_AGG_CACHE_SLICES_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "greptime_query_slice_agg_cache_slices_total",
+        "slices looked up by the slice aggregate cache",
+        &["result"]
+    )
+    .unwrap();
+
+    /// Aggregations over a region scan that the slice aggregate cache did not rewrite,
+    /// labeled with the reason.
+    pub static ref SLICE_AGG_CACHE_SKIPPED_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "greptime_query_slice_agg_cache_skipped_total",
+        "aggregations not rewritten by the slice aggregate cache",
+        &["reason"]
+    )
+    .unwrap();
+
+    /// Bytes held by the slice aggregate caches.
+    pub static ref SLICE_AGG_CACHE_BYTES: IntGauge = register_int_gauge!(
+        "greptime_query_slice_agg_cache_bytes",
+        "bytes held by the slice aggregate caches"
+    )
+    .unwrap();
+
     /// Remote dynamic filter encode results, labeled with result.
     pub static ref REMOTE_DYN_FILTER_ENCODE_TOTAL: IntCounterVec = register_int_counter_vec!(
         "greptime_query_remote_dyn_filter_encode_total",

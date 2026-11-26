@@ -375,6 +375,29 @@ memory_pool_size = "50%"
 #+ experimental_spill_compression = "uncompressed"
 # --- End spill-to-disk ---
 
+# --- Experimental: slice aggregate cache ---
+## Cache partial aggregation states per time slice, so aggregations repeated
+## over sliding time windows, such as dashboards, scan only changed slices.
+## A per-request query.experimental_slice_agg_cache option overrides it.
+#+ experimental_slice_agg_cache = false
+## Memory capacity of the slice aggregate cache.
+## If not set, it's default to 1/16 of OS memory with a max limitation of 512MB.
+## @toml2docs:none-default="Auto"
+#+ experimental_slice_agg_cache_size = "512MB"
+## Most states one aggregation collects for the cache. An aggregation whose states exceed
+## it is not cached until the idle timeout passes.
+## If not set, it's default to 1/4 of experimental_slice_agg_cache_size.
+## @toml2docs:none-default="Auto"
+#+ experimental_slice_agg_cache_max_collect_size = "128MB"
+## Slice width for every cached aggregation.
+## If not set, the width follows the window span: 5 minutes from 1 hour, 15 minutes from
+## 6 hours and 30 minutes from 3 days; windows shorter than 1 hour are not cached.
+## @toml2docs:none-default="Auto"
+#+ experimental_slice_agg_cache_slice_width = "15m"
+## Cache entries not read for this long are dropped.
+#+ experimental_slice_agg_cache_idle_timeout = "1h"
+# --- End slice aggregate cache ---
+
 ## Hosts that object storage in SQL statements may connect to: `COPY`, `COPY DATABASE`,
 ## `EXPORT/IMPORT DATABASE`, and external tables. Frontends check statements; datanodes check
 ## external table scans. Unset or empty means no restriction.

@@ -20,21 +20,15 @@ use std::sync::Arc;
 
 #[cfg(any(test, feature = "test"))]
 use async_stream::try_stream;
-use common_time::Timestamp;
-use common_time::range::TimestampRange;
-use common_time::timestamp::TimeUnit;
 use datafusion::execution::memory_pool::MemoryPool;
-use datafusion_expr::expr::Expr;
-use datafusion_expr::{Between, BinaryExpr, Operator};
 #[cfg(test)]
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::value::scalar_value_to_timestamp;
 #[cfg(any(test, feature = "test"))]
 use futures::TryStreamExt;
 use store_api::region_engine::PartitionRange;
 use store_api::storage::{FileId, RegionId, SequenceRange, TimeSeriesRowSelector};
-use table::predicate::is_string_timestamp_literal;
+pub(crate) use table::predicate::implied_time_range_from_exprs;
 
 use crate::cache::CacheStrategy;
 use crate::cache::range_cache::RangeCacheScope;
@@ -277,182 +271,6 @@ impl RangeScanCacheKey {
             + self.row_groups.capacity() * mem::size_of::<(FileId, i64)>()
             + self.scan.estimated_size()
     }
-}
-
-/// Returns the timestamp range where all time-only predicates are guaranteed true.
-///
-/// Returns `None` for empty input because there is no time-filter implication
-/// that cache-key normalization or prefilter postponement can use. It also
-/// returns `None` if any expression contains an unsupported shape: `OR`, `NOT`,
-/// `IN`, non-literal RHS, unsupported operator, column-name mismatch, an `=`
-/// literal that cannot be represented exactly in the column unit, or overflow
-/// during bound adjustment.
-///
-/// This is intentionally stricter than `extract_time_range_from_expr` in
-/// `table::predicate`: lower bounds round up and upper bounds round down. If a
-/// partition's file-time range is contained by the returned range, every row in
-/// that partition satisfies the original time predicates.
-///
-/// `IsNull`/`IsNotNull` on the time index are not routed into `time_filters`
-/// today. If that changes, handle them here before stripping time filters from
-/// the cache key.
-pub(crate) fn implied_time_range_from_exprs(
-    ts_col_name: &str,
-    ts_col_unit: TimeUnit,
-    exprs: &[&Expr],
-) -> Option<TimestampRange> {
-    if exprs.is_empty() {
-        return None;
-    }
-
-    let mut acc = TimestampRange::min_to_max();
-    for expr in exprs {
-        let r = implied_time_range_from_expr(ts_col_name, ts_col_unit, expr)?;
-        acc = acc.and(&r);
-    }
-    Some(acc)
-}
-
-fn implied_time_range_from_expr(
-    ts_col_name: &str,
-    ts_col_unit: TimeUnit,
-    expr: &Expr,
-) -> Option<TimestampRange> {
-    match expr {
-        Expr::BinaryExpr(BinaryExpr { left, op, right }) => match op {
-            Operator::And => {
-                let l = implied_time_range_from_expr(ts_col_name, ts_col_unit, left)?;
-                let r = implied_time_range_from_expr(ts_col_name, ts_col_unit, right)?;
-                Some(l.and(&r))
-            }
-            Operator::Eq | Operator::Lt | Operator::LtEq | Operator::Gt | Operator::GtEq => {
-                implied_from_cmp(ts_col_name, ts_col_unit, left, *op, right)
-            }
-            // `OR` would require a strict intersection over a union of half-planes
-            // (not the loose-span union provided by `TimestampRange::or`), so we
-            // refuse it. Any other operator is unsupported.
-            _ => None,
-        },
-        Expr::Between(Between {
-            expr,
-            negated,
-            low,
-            high,
-        }) => {
-            if *negated {
-                return None;
-            }
-            implied_from_between(ts_col_name, ts_col_unit, expr, low, high)
-        }
-        // Includes `IsNull`, `IsNotNull`, `Not`, `InList`, function calls, etc.
-        _ => None,
-    }
-}
-
-fn match_ts_column_literal<'a>(
-    ts_col_name: &str,
-    left: &'a Expr,
-    right: &'a Expr,
-) -> Option<(Timestamp, bool)> {
-    let (col, scalar, reverse) = match (left, right) {
-        (Expr::Column(c), Expr::Literal(s, _)) => (c, s, false),
-        (Expr::Literal(s, _), Expr::Column(c)) => (c, s, true),
-        _ => return None,
-    };
-    if col.name != ts_col_name {
-        return None;
-    }
-    // Reject string literals: their conversion needs a timezone we do not have,
-    // and the existing extractor in `table::predicate` rejects them too.
-    if is_string_timestamp_literal(scalar) {
-        return None;
-    }
-    scalar_value_to_timestamp(scalar, None).map(|t| (t, reverse))
-}
-
-fn implied_from_cmp(
-    ts_col_name: &str,
-    ts_col_unit: TimeUnit,
-    left: &Expr,
-    op: Operator,
-    right: &Expr,
-) -> Option<TimestampRange> {
-    let (ts, reverse) = match_ts_column_literal(ts_col_name, left, right)?;
-    // Normalize to "column OP literal".
-    let op = if reverse {
-        match op {
-            Operator::Lt => Operator::Gt,
-            Operator::LtEq => Operator::GtEq,
-            Operator::Gt => Operator::Lt,
-            Operator::GtEq => Operator::LtEq,
-            Operator::Eq => Operator::Eq,
-            _ => return None,
-        }
-    } else {
-        op
-    };
-
-    match op {
-        Operator::GtEq => {
-            // ts >= L. Round the lower bound up in the column unit.
-            let b = ts.convert_to_ceil(ts_col_unit)?;
-            Some(TimestampRange::from_start(b))
-        }
-        Operator::Gt => {
-            // ts > L. floor(L) + 1 is the tight lower bound in the column unit.
-            let v = ts.convert_to(ts_col_unit)?.value().checked_add(1)?;
-            Some(TimestampRange::from_start(Timestamp::new(v, ts_col_unit)))
-        }
-        Operator::LtEq => {
-            // ts <= L. Round the upper bound down in the column unit.
-            let b = ts.convert_to(ts_col_unit)?;
-            Some(TimestampRange::until_end(b, true))
-        }
-        Operator::Lt => {
-            // ts < L. `ts < ceil(L)` is the tight bound: equal to `ts < L` when
-            // L is exactly representable, and `ts <= floor(L)` otherwise.
-            let b = ts.convert_to_ceil(ts_col_unit)?;
-            Some(TimestampRange::until_end(b, false))
-        }
-        Operator::Eq => {
-            // ts = L. Only provable when L is exactly representable.
-            let f = ts.convert_to(ts_col_unit)?;
-            let c = ts.convert_to_ceil(ts_col_unit)?;
-            if f.value() != c.value() {
-                return None;
-            }
-            Some(TimestampRange::single(f))
-        }
-        _ => None,
-    }
-}
-
-fn implied_from_between(
-    ts_col_name: &str,
-    ts_col_unit: TimeUnit,
-    expr: &Expr,
-    low: &Expr,
-    high: &Expr,
-) -> Option<TimestampRange> {
-    let Expr::Column(c) = expr else {
-        return None;
-    };
-    if c.name != ts_col_name {
-        return None;
-    }
-    let (low_s, high_s) = match (low, high) {
-        (Expr::Literal(l, _), Expr::Literal(h, _)) => (l, h),
-        _ => return None,
-    };
-    if is_string_timestamp_literal(low_s) || is_string_timestamp_literal(high_s) {
-        return None;
-    }
-    let low_ts = scalar_value_to_timestamp(low_s, None)?;
-    let high_ts = scalar_value_to_timestamp(high_s, None)?;
-    // BETWEEN low AND high is equivalent to ts >= low AND ts <= high.
-    let lo = low_ts.convert_to_ceil(ts_col_unit)?;
-    let hi = high_ts.convert_to(ts_col_unit)?;
-    Some(TimestampRange::new_inclusive(Some(lo), Some(hi)))
 }
 
 /// Builds a cache key for the given partition range if it is eligible for caching.
@@ -791,7 +609,7 @@ mod tests {
     use common_time::timestamp::TimeUnit;
     use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
     use datafusion_common::ScalarValue;
-    use datafusion_expr::{Expr, col, lit};
+    use datafusion_expr::{Between, Expr, col, lit};
     use smallvec::smallvec;
     use store_api::storage::{FileId, RegionId};
 
