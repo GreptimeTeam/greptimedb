@@ -33,7 +33,7 @@ use datatypes::value::scalar_value_to_timestamp;
 #[cfg(any(test, feature = "test"))]
 use futures::TryStreamExt;
 use store_api::region_engine::PartitionRange;
-use store_api::storage::{FileId, RegionId, SequenceRange, TimeSeriesRowSelector};
+use store_api::storage::{FileId, RegionId, SequenceNumber, SequenceRange, TimeSeriesRowSelector};
 use table::predicate::is_string_timestamp_literal;
 
 use crate::cache::CacheStrategy;
@@ -139,6 +139,24 @@ impl ScanRequestFingerprintBuilder {
     }
 }
 
+/// One candidate creator cursor slice of a file, as the range-cache key records it.
+///
+/// A physical-sequence read decides each row of the file by the cursor of the slice that
+/// selects it, and bounds the whole file by the least advanced cursor and the least upper bound
+/// of the same candidates. Both outcomes depend on the candidate set, which the file itself
+/// does not state: after a piece cursor advances or an `until` changes, the same files under
+/// the same region-level `(C, H]` deliver different rows.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct CreatorCursorSlice {
+    /// Identity of the slice's partition expression (`None` = the whole value domain).
+    pub(crate) partition_expr: Option<String>,
+    /// Last sequence consumed in the slice's domain (exclusive lower bound).
+    pub(crate) cursor: SequenceNumber,
+    /// Last sequence the read's delta covers in that domain
+    /// ([`CursorShard::until`](store_api::storage::CursorShard::until)).
+    pub(crate) until: Option<SequenceNumber>,
+}
+
 /// Inputs affecting a file read's output.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct FileReadFingerprint {
@@ -148,6 +166,14 @@ struct FileReadFingerprint {
     preserve_row_sequence: bool,
     snapshot_sequence: Option<u64>,
     pre_filter_mode: PreFilterMode,
+    /// Whether this read keeps the file's own `__sequence` and splits its rows by creator
+    /// cursor slices (`ScanInput::read_row_sequence`), instead of virtualizing the sequence at
+    /// the file's admission barrier.
+    read_row_sequence: bool,
+    /// The candidate creator cursor slices this read decides the file's rows by, in a stable
+    /// order; `None` when it applies no per-piece rule to the file
+    /// (`ScanInput::creator_cursor_slices`).
+    creator_slices: Option<Arc<Vec<CreatorCursorSlice>>>,
 }
 
 /// Non-copiable struct of the fingerprint.
@@ -236,6 +262,19 @@ impl ScanRequestFingerprint {
             + self.file_reads.as_ref().map_or(0, |files| {
                 mem::size_of::<Vec<FileReadFingerprint>>()
                     + files.capacity() * mem::size_of::<FileReadFingerprint>()
+                    + files
+                        .iter()
+                        .filter_map(|file| file.creator_slices.as_ref())
+                        .map(|slices| {
+                            mem::size_of::<Vec<CreatorCursorSlice>>()
+                                + slices.capacity() * mem::size_of::<CreatorCursorSlice>()
+                                + slices
+                                    .iter()
+                                    .filter_map(|slice| slice.partition_expr.as_ref())
+                                    .map(String::capacity)
+                                    .sum::<usize>()
+                        })
+                        .sum::<usize>()
             })
             + self.inner.read_columns.estimated_size()
             + self.inner.read_column_types.capacity() * mem::size_of::<Option<ConcreteDataType>>()
@@ -524,6 +563,13 @@ fn build_range_cache_key_inner(
         }
         let handle = stream_ctx.input.file_from_index(*index);
         let file = handle.meta_ref();
+        // The per-piece rule of a physical-sequence read decides this file's rows from a set
+        // the file itself does not state (`ScanInput::creator_cursor_slices`), so a result
+        // built under one set must never be replayed under another. A set that cannot be
+        // stated makes the range uncacheable; the read itself reports the same failure.
+        let Ok(creator_slices) = stream_ctx.input.creator_cursor_slices(handle) else {
+            return None;
+        };
         files.push((
             (handle.file_id().file_id(), index.row_group_index),
             FileReadFingerprint {
@@ -536,6 +582,8 @@ fn build_range_cache_key_inner(
                     || stream_ctx.range_pre_filter_mode(part_range),
                     |pruner| pruner.pre_filter_mode(index.index - stream_ctx.input.num_memtables()),
                 ),
+                read_row_sequence: stream_ctx.input.read_row_sequence,
+                creator_slices,
             },
         ));
     }

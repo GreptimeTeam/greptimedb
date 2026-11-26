@@ -70,7 +70,9 @@ use crate::metrics::READ_SST_COUNT;
 use crate::read::compat::{self, FlatCompatBatch};
 use crate::read::flat_projection::FlatProjectionMapper;
 use crate::read::range::{FileRangeBuilder, MemRangeBuilder, RangeMeta, RowGroupIndex};
-use crate::read::range_cache::{ScanRequestFingerprint, implied_time_range_from_exprs};
+use crate::read::range_cache::{
+    CreatorCursorSlice, ScanRequestFingerprint, implied_time_range_from_exprs,
+};
 use crate::read::read_columns::ReadColumns;
 use crate::read::seq_scan::SeqScan;
 use crate::read::series_scan::SeriesScan;
@@ -2376,6 +2378,62 @@ impl ScanInput {
             cursors.push((identity.clone(), shard.seq));
         }
         Ok(Some(Arc::new(cursors)))
+    }
+
+    /// The candidate creator cursor slices of `file` as a **range-cache key** has to record
+    /// them: the same candidates [`Self::creator_slice_cursors`] compiles into row filters,
+    /// each with the `until` bound [`Self::creator_domain_sequence_range`] derives from it.
+    ///
+    /// The set decides two things the file itself does not state: the file-level bound
+    /// `(least advanced cursor, least until]` and the per-row cursor of every piece. A cached
+    /// range result built under one set therefore cannot be replayed under another — a piece
+    /// cursor that advanced would replay rows the new range requires and rows above its
+    /// `until`.
+    ///
+    /// `Ok(None)` means this read applies no per-piece rule to the file (it is not a
+    /// physical-sequence read, or no cursor of the file's creator region is known).
+    pub(crate) fn creator_cursor_slices(
+        &self,
+        file: &FileHandle,
+    ) -> Result<Option<Arc<Vec<CreatorCursorSlice>>>> {
+        if !self.read_row_sequence {
+            return Ok(None);
+        }
+        let meta = file.meta_ref();
+        let Some(shards) = self
+            .creator_cursor_shards
+            .as_ref()
+            .and_then(|shards| shards.get(&meta.region_id.as_u64()))
+        else {
+            return Ok(None);
+        };
+        let mut slices = Vec::with_capacity(shards.len());
+        for shard in shards {
+            // A slice that cannot hold a row of this file is not one of its candidates, so its
+            // cursor and its `until` do not bound it.
+            if !cursor_slice_may_hold_file_rows(shard, meta)? {
+                continue;
+            }
+            slices.push(CreatorCursorSlice {
+                partition_expr: shard.partition_expr.clone(),
+                cursor: shard.seq,
+                until: shard.until,
+            });
+        }
+        if slices.is_empty() {
+            return Ok(None);
+        }
+        // The outcome is decided by the set, not by its order (a row is bounded by the least
+        // advanced candidate that selects it, the file by the least advanced candidate), so
+        // one set must yield one key however the producer ordered it.
+        slices.sort_unstable_by(|a, b| {
+            a.partition_expr
+                .cmp(&b.partition_expr)
+                .then(a.cursor.cmp(&b.cursor))
+                .then(a.until.cmp(&b.until))
+        });
+        slices.dedup();
+        Ok(Some(Arc::new(slices)))
     }
 
     /// Whether `file` was created by another region, i.e. its rows carry a number this

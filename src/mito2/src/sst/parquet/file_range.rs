@@ -1000,6 +1000,13 @@ impl RangeBase {
     /// into narrower ones whose cursors advanced differently, and free of lost rows when
     /// the file's own expression is narrower than the rows it holds.
     ///
+    /// When several candidates select one row — a domain that was not split cleanly, whose
+    /// expressions overlap — the **least advanced** of their cursors decides: the row is kept
+    /// when any of them has not consumed it, which is the conservative direction and the one
+    /// the time-series and bulk memtable filters already take
+    /// (`Batch::filter_by_creator_slices` and `creator_slice_mask`). Letting the first
+    /// matching candidate decide would drop a row a less advanced piece still holds.
+    ///
     /// A row no slice expression selects has no piece to attribute it to, so only the least
     /// advanced candidate ([`PartitionFilterContext::fallback_cursor`]) can bound it. That
     /// bound is exact while every candidate carries the same cursor value — it then *is* the
@@ -1064,8 +1071,27 @@ impl RangeBase {
                 kept.append(true);
                 continue;
             }
-            let keep = match selected.iter().position(|mask| mask.value(row)) {
-                Some(index) => not_consumed[index].value(row),
+            // Disjoint slice expressions match a row at most once, which is the common case:
+            // one bit test answers it. A domain that was not split cleanly can match several,
+            // and their cursors may differ — the least advanced of them is the only bound that
+            // is exact for every candidate, so the first match must not decide the row. The
+            // memtable filters take the same minimum (`Batch::filter_by_creator_slices` and
+            // the bulk `creator_slice_mask`), i.e. they OR the candidates' `not_consumed`
+            // masks, which is the same row decision.
+            let mut selecting = selected
+                .iter()
+                .enumerate()
+                .filter(|(_, mask)| mask.value(row));
+            let keep = match selecting.next() {
+                Some((first, _)) => {
+                    let mut least = first;
+                    for (index, _) in selecting {
+                        if slices[index].cursor < slices[least].cursor {
+                            least = index;
+                        }
+                    }
+                    not_consumed[least].value(row)
+                }
                 None => {
                     unmatched += 1;
                     let (min, max) =

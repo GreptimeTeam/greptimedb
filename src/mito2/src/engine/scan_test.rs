@@ -5455,6 +5455,131 @@ async fn test_range_cache_key_separates_sequence_ranges() {
     );
 }
 
+/// A range result is only reusable for a read whose **per-piece** selection is the same.
+///
+/// A physical-sequence read decides each row of an adopted file by the creator cursor slice
+/// that selects it, and bounds the file by `(least advanced cursor, least until]`. Neither is
+/// stated by the file, so two reads of the same file under the same region-level `(C, H]`
+/// deliver different rows once a piece cursor or an `until` advances; a cache key that only
+/// records `(C, H]` replays the first read's rows to all of them.
+///
+/// The counterexample this pins: `(cursor 0, until 6]` caches the rows 1..6, `(cursor 3,
+/// until 8]` requires the rows 4..8, and `(cursor 0, until 2]` requires the rows 1..2 and
+/// nothing above its `until`. Replaying the first result delivers the rows 1..6 to all three:
+/// rows an advanced piece already consumed, rows the new range requires that are missing, and
+/// rows above the new `until`.
+///
+/// The `LastRow` selector is what puts this read on the sequential scan, the only path that
+/// fills the range result cache: without it an append-only region reads through the unordered
+/// scan, which bypasses the cache entirely.
+#[tokio::test]
+async fn test_range_cache_never_replays_a_range_read_under_other_creator_cursors() {
+    let mut env = TestEnv::with_prefix("test_range_cache_creator_cursor_slices").await;
+    let engine = env
+        .create_engine(MitoConfig {
+            // The flat format is the one the range result cache covers.
+            default_flat_format: true,
+            range_result_cache_size: ReadableSize::mb(64),
+            ..Default::default()
+        })
+        .await;
+    let source = RegionId::new(1, 2);
+    let target = RegionId::new(1, 1);
+
+    // Eight rows numbered 1..8, one per series, all of them in one file of the creator. The
+    // holder adopts that file as a foreign file.
+    let create = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    let schema = test_util::rows_schema(&create);
+    engine
+        .handle_request(source, RegionRequest::Create(create))
+        .await
+        .unwrap();
+    let mut rows = Vec::new();
+    for series in 0..8_usize {
+        rows.extend(test_util::build_rows_for_key(
+            &series.to_string(),
+            series,
+            series + 1,
+            0,
+        ));
+    }
+    test_util::put_rows(&engine, source, Rows { schema, rows }).await;
+    test_util::flush_region(&engine, source, None).await;
+    let source_file = manifest_files(&engine, source)
+        .await
+        .into_values()
+        .next()
+        .expect("flushed file");
+    create_foreign_target(&engine, target).await;
+    adopt_foreign_file(&engine, target, source_file, 20, true, None);
+
+    // The `(cursor, until]` of the one piece the rows of the adopted file belong to. The
+    // region-level `(0, 20]` is the same in every read, so only the slice separates them; the
+    // tag filter is what makes the range eligible for the cache.
+    let request = |cursor: u64, until: u64| {
+        let mut request = creator_cursor_scan(
+            source,
+            vec![partition_str_slice_cursor("0", "9", cursor).with_until(until)],
+            0,
+            20,
+        );
+        request.filters = vec![col("tag_0").gt_eq(lit(ScalarValue::Utf8(Some("0".to_string()))))];
+        request.series_row_selector = Some(TimeSeriesRowSelector::LastRow { after_merge: false });
+        request
+    };
+
+    let first = scan_partition_rows_and_foreign_creators(&engine, target, request(0, 6))
+        .await
+        .0;
+    assert_eq!(
+        vec![0, 1000, 2000, 3000, 4000, 5000],
+        first,
+        "the first read delivers the rows above its cursor and up to its `until`"
+    );
+
+    // Wait for the completed range result: the same read then replays it, which it reports by
+    // saying that the files its rows came from are not readable from that call.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let (rows, creators) =
+                scan_partition_rows_and_foreign_creators(&engine, target, request(0, 6)).await;
+            assert_eq!(first, rows, "a replay delivers the rows it replayed");
+            if creators.is_none() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the range result cache did not replay the range within the timeout");
+
+    // An advanced piece cursor with a higher `until`: the rows 4..8 are what this range
+    // requires, and the rows 1..3 are already consumed.
+    let advanced = scan_partition_rows_and_foreign_creators(&engine, target, request(3, 8))
+        .await
+        .0;
+    assert_eq!(
+        vec![3000, 4000, 5000, 6000, 7000],
+        advanced,
+        "a read under an advanced piece cursor must not replay the rows of the earlier read: \
+         only its own `(cursor, until]` decides"
+    );
+
+    // A narrower `until`: no row above it may be delivered, whatever an earlier read of the
+    // same files cached.
+    let bounded = scan_partition_rows_and_foreign_creators(&engine, target, request(0, 2))
+        .await
+        .0;
+    assert_eq!(
+        vec![0, 1000],
+        bounded,
+        "a range result must never deliver a row above the `until` of the read it serves"
+    );
+}
+
 #[tokio::test]
 async fn test_single_source_ranges_preserve_batches() {
     for (file_count, row_group_size) in [(1, 64), (1, 16), (2, 16)] {
@@ -6735,6 +6860,81 @@ async fn test_read_row_sequence_splits_one_file_by_the_expression_of_each_row() 
         vec![(5000, 6)],
         rows,
         "the partition column is read even though the scan does not project it"
+    );
+}
+
+/// Several candidate slices may select one row, and then the **least advanced** of their
+/// cursors decides it — exactly like the time-series and bulk memtable filters
+/// (`Batch::filter_by_creator_slices`, `creator_slice_mask`), which take the minimum over the
+/// candidates that select a row. Taking the first match instead drops the rows a less advanced
+/// piece still holds.
+///
+/// The counterexample this pins: the retired records `A = [0,8): 1` and `B = [5,9): 0` — the
+/// domain was not split cleanly, so both select a row at `k0 = 7` — and a merged holder file
+/// holding one row at `k0 = 7, sequence = 1`. The row is required because
+/// `1 > min(1, 0) = 0`; taking `A` first, as the reader did, drops it. It matches candidates,
+/// so the fail-closed rule for a row no candidate selects does not apply.
+#[tokio::test]
+async fn test_read_row_sequence_takes_the_least_cursor_when_several_slices_select_a_row() {
+    let mut env = TestEnv::with_prefix("test_read_row_sequence_least_cursor_of_several").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let source = RegionId::new(1, 2);
+    let target = RegionId::new(1, 1);
+
+    // One file of the creator holding one row of the series `k0 = "7"`, numbered 1, under a
+    // coarse statement (`k0 >= "0" AND k0 < "9"`) that covers both retired records: the file
+    // merges the rows of both pieces. The bounds are single characters, so their lexicographic
+    // order (the order of the string tag column) is the numeric order of the tag values.
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    let schema = test_util::rows_schema(&request);
+    engine
+        .handle_request(source, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    test_util::put_rows(
+        &engine,
+        source,
+        Rows {
+            schema,
+            rows: test_util::build_rows_for_key("7", 0, 1, 0),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, source, None).await;
+
+    let mut source_file = manifest_files(&engine, source)
+        .await
+        .into_values()
+        .next()
+        .expect("flushed file");
+    source_file.partition_expr = Some(partition_str_slice("0", "9").into());
+    create_foreign_target(&engine, target).await;
+    adopt_foreign_file(&engine, target, source_file, 2, true, None);
+
+    // `A` is consumed up to 1, `B` only up to 0, and the row at 7 falls into both domains.
+    let rows = scan_flat_row_sequences(
+        &engine,
+        target,
+        creator_cursor_scan(
+            source,
+            vec![
+                partition_str_slice_cursor("0", "8", 1),
+                partition_str_slice_cursor("5", "9", 0),
+            ],
+            0,
+            10,
+        ),
+    )
+    .await;
+
+    assert_eq!(
+        vec![(0, 1)],
+        rows,
+        "the row at sequence 1 is above the least advanced of the slices that select it (0), so \
+         it must be delivered even though the first matching slice is consumed up to 1"
     );
 }
 
