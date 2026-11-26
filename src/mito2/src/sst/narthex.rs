@@ -18,13 +18,11 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::sync::Arc;
 
-use datatypes::arrow::array::{Array, BinaryArray, StringArray, UInt32Array, UInt64Array};
+use datatypes::arrow::array::{Array, BinaryArray};
 use datatypes::arrow::compute::{cast, max, min};
 use datatypes::arrow::datatypes::DataType;
-use datatypes::value::ValueRef;
 use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
-use mito_codec::row_converter::{SparseOffsetsCache, SparsePrimaryKeyCodec};
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadata;
 use store_api::storage::FileId;
@@ -35,9 +33,7 @@ use crate::error::{ComputeArrowSnafu, InvalidRecordBatchSnafu, Result};
 use crate::series_index::artifact::SamplesFileHandle;
 use crate::series_index::columnar::reader::ColumnarReader;
 use crate::series_index::columnar::{ColumnarSeriesFormat, invalid, require};
-use crate::series_index::format::{
-    self, FormatReader, FormatWriter, SamplesFormat, SamplesFormatReader, SeriesReadRequest,
-};
+use crate::series_index::format::{FormatWriter, SamplesFormat, SamplesFormatReader};
 use crate::series_index::identity::ExactSeriesKey;
 use crate::series_index::samples::ColumnarSamplesFormat;
 use crate::series_index::samples::reader::SamplesReader;
@@ -195,53 +191,7 @@ async fn series_keys(
             source.file_id()
         ))
     })?;
-    let schema = reader.schema();
-    let mut tags = schema
-        .fields()
-        .iter()
-        .skip(3)
-        .map(|f| Ok((format::field_id(f)?, f.name().clone())))
-        .collect::<Result<Vec<_>>>()?;
-    tags.sort_unstable_by(|a, b| a.1.cmp(&b.1));
-    let projection = schema
-        .fields()
-        .iter()
-        .take(3)
-        .map(|f| f.name().clone())
-        .chain(tags.iter().map(|(_, name)| name.clone()))
-        .collect();
-    let mut batches = reader.read(SeriesReadRequest {
-        projection,
-        ..Default::default()
-    })?;
-    Ok(Box::pin(async_stream::try_stream! {
-        let codec = SparsePrimaryKeyCodec::schemaless();
-        let mut offsets = SparseOffsetsCache::new();
-        let mut encoded = Vec::new();
-        while let Some(batch) = batches.try_next().await? {
-            let table = batch.column(0).as_any().downcast_ref::<UInt32Array>()
-                .ok_or_else(|| invalid("invalid native series table id"))?;
-            let tsid = batch.column(1).as_any().downcast_ref::<UInt64Array>()
-                .ok_or_else(|| invalid("invalid native series TSID"))?;
-            let counts = batch.column(2).as_any().downcast_ref::<UInt64Array>()
-                .ok_or_else(|| invalid("invalid native series row count"))?;
-            let columns = tags.iter().enumerate().map(|(i, (id, _))| {
-                let values = batch.column(i + 3).as_any().downcast_ref::<StringArray>()
-                    .ok_or_else(|| invalid("invalid native series tag"))?;
-                Ok((*id, values))
-            }).collect::<Result<Vec<_>>>()?;
-            for row in 0..batch.num_rows() {
-                encoded.clear();
-                codec.encode_internal(table.value(row), tsid.value(row), &mut encoded)
-                    .map_err(|err| invalid(err.to_string()))?;
-                let labels = columns.iter().filter(|(_, values)| !values.is_null(row))
-                    .map(|(id, values)| (*id, ValueRef::String(values.value(row))));
-                codec.encode_to_vec(labels, &mut encoded)
-                    .map_err(|err| invalid(err.to_string()))?;
-                yield (ExactSeriesKey::from_sparse_key(&encoded, &mut offsets)?, counts.value(row));
-            }
-        }
-    }))
+    Ok(reader.read_full_keys())
 }
 
 /// Merge sorted sample keys or stored index rows. A separate manifest edit publishes the index.
