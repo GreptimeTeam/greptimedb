@@ -735,7 +735,7 @@ impl ScanRegion {
                 && input.predicate_group().predicate_without_region().is_none()
                 && input.source_row_counts_are_exact())
         {
-            match aggr::prepare(&input, &self.request, allow_partial).await {
+            match aggr::prepare(&input, &self.request, &self.version.ssts, allow_partial).await {
                 Some(aggr::MetadataAggr::Exact(rows)) => input.exact_num_rows = Some(rows),
                 Some(aggr::MetadataAggr::Split(plan)) => input.statistics_split = Some(plan),
                 None => {}

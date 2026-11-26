@@ -855,8 +855,11 @@ pub(crate) fn parquet_row_group_time_range(
         }
     };
 
-    debug_assert!(min >= file_meta.time_range.0.value() && min <= file_meta.time_range.1.value());
-    debug_assert!(max >= file_meta.time_range.0.value() && max <= file_meta.time_range.1.value());
+    // The cached footer may have come from an offline replacement whose
+    // current statistics do not fit the old manifest bounds.
+    if min > max || min < file_meta.time_range.0.value() || max > file_meta.time_range.1.value() {
+        return None;
+    }
     let unit = file_meta.time_range.0.unit();
 
     Some((Timestamp::new(min, unit), Timestamp::new(max, unit)))
