@@ -210,6 +210,7 @@ Drawbacks:
 - A metric engine fingerprint, which the windowed PromQL evaluation in #10569 could use to cache results. Logical tables share one physical region, so a flush or compaction of the physical region invalidates slices of every logical table it covers.
 - Caching slices of the current hour once flushed data covers part of the hour, by splitting the slice at the memtable's minimum timestamp.
 - Incremental refresh, as StarRocks does for tablets: when a slice has only gained new files since its entry was computed, aggregate the new files and merge the result into the cached states instead of recomputing the slice.
+- Admission by estimated state size. When the grouping and aggregated columns have HLL sketches in their SSTs, merging the sketches of the files that overlap the window estimates the number of groups and distinct values, so the rule can skip plans whose states would exceed the per-query bound before running them. High-cardinality top-N and exact distinct counts would then pay nothing on their first run, while low-cardinality distinct counts stay cached. Columns without sketches keep the current behavior.
 
 # References
 
