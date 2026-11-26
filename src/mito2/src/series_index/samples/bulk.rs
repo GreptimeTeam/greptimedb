@@ -291,6 +291,72 @@ mod tests {
     use datatypes::arrow::datatypes::{Field, Schema, TimeUnit};
     use store_api::storage::consts::{OP_TYPE_COLUMN_NAME, SEQUENCE_COLUMN_NAME};
 
+    /// Large histograms of one series are cut into blocks whose chunks stay within the samples
+    /// chunk limit, and the blocks read back as the input.
+    #[test]
+    fn narthex_bulk_splits_histogram_blocks_by_chunk_limit() {
+        use datatypes::arrow::compute::concat_batches;
+
+        use crate::series_index::samples::metadata::CHUNK_LIMIT;
+        use crate::series_index::samples::{TestHistogram, histogram_array};
+
+        let histograms = histogram_array(
+            &(0..24)
+                .map(|i| {
+                    Some(TestHistogram {
+                        sum: i as f64,
+                        positive_spans: vec![(0, 8000)],
+                        floats: Some((
+                            8000.0,
+                            0.0,
+                            (0..8000).map(|j| ((i * 8000 + j) as f64).sqrt()).collect(),
+                            vec![],
+                        )),
+                        ..Default::default()
+                    })
+                })
+                .collect::<Vec<_>>(),
+        );
+        assert!(histogram::encode(&histograms).unwrap().len() > CHUNK_LIMIT);
+        let rows = histograms.len();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("value", histograms.data_type().clone(), true),
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(PRIMARY_KEY_COLUMN_NAME, DataType::Binary, false),
+            Field::new(SEQUENCE_COLUMN_NAME, DataType::UInt64, false),
+            Field::new(OP_TYPE_COLUMN_NAME, DataType::UInt8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(histograms),
+                Arc::new(TimestampMillisecondArray::from_iter_values(0..rows as i64)),
+                Arc::new(BinaryArray::from_iter_values(vec![b"a".as_slice(); rows])),
+                Arc::new(UInt64Array::from(vec![1; rows])),
+                Arc::new(UInt8Array::from(vec![1; rows])),
+            ],
+        )
+        .unwrap();
+        let mut part = NarthexBulkPart::default();
+        part.push(&batch).unwrap();
+        assert!(part.blocks.len() > 1);
+        for block in part.blocks.iter() {
+            let NarthexBulkColumn::Histogram { bytes, .. } = &block.columns[0] else {
+                panic!("the first column is the histogram field");
+            };
+            assert!(bytes.len() <= CHUNK_LIMIT);
+        }
+        let decoded = part
+            .read(schema.clone())
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(batch, concat_batches(&schema, &decoded).unwrap());
+    }
+
     #[test]
     fn narthex_bulk_codec_preserves_keys_nulls_sequences_and_float_bits() {
         let schema = Arc::new(Schema::new(vec![

@@ -432,7 +432,7 @@ fn layout(fields: &Fields) -> Result<Vec<Child>> {
 }
 
 #[cfg(test)]
-pub(super) mod tests {
+pub(crate) mod tests {
     use common_query::native_histogram::{
         COUNT_F64_FIELD, COUNT_I64_FIELD, COUNTER_RESET_HINT, CUSTOM_BUCKETS_SCHEMA,
         CUSTOM_VALUES_FIELD, GAUGE_RESET_HINT, NEGATIVE_BUCKETS_F64_FIELD,

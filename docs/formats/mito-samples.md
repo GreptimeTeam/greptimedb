@@ -216,9 +216,10 @@ Require this to be at most 262,144 bytes. A native histogram field counts as one
 8-byte value per row here; its bucket lists are bounded by its chunk instead. A
 writer also ends a block before a histogram chunk's encoded size bound would exceed
 the 1 MiB chunk limit: 1 byte plus 11 bytes per struct child and per list item for
-each row, and 16 bytes plus 64 bytes per child and the validity bytes for the chunk. A sample that exceeds the limit on its own is rejected when it is
-written to a Narthex region. Count all manifest fields, including
-omitted/all-null fields, and reserve validity bytes even for all-valid fields.
+each row, and 16 bytes plus 64 bytes per child and the validity bytes for the
+chunk. A sample that exceeds the limit on its own is rejected when it is written
+to a Narthex region. Count all manifest fields, including omitted/all-null
+fields, and reserve validity bytes even for all-valid fields.
 This is a bound on decoded column buffers, not total allocator usage or RSS.
 The effective row cap is the largest integer satisfying both limits: 8,192 for
 one field and 31 for 1,024 fields. Encoded buffers and metadata have separate
@@ -551,7 +552,8 @@ value-buffer bits behind nulls are not part of the logical preservation contract
 
 ```text
 child_count <u8>
-child_kinds <u8 x child_count>      # 1 Float64, 2 Int32, 3 Int64, 4 Timestamp(ms); 0x10 | kind for a list
+child_kinds <u8 x child_count>      # 1 Float64, 2 Int32, 3 Int64, 4 Timestamp(ms);
+                                    # 0x10 | kind for a list
 list_items <uvarint>                # items of all valid lists in the chunk
 validity <ceil(row_count/8) bytes>  # only when the descriptor null count is nonzero
 per child, in struct order:
@@ -599,8 +601,9 @@ subject to the same block bound even when chunks are omitted.
 Unknown file versions, depths, reserved fields, roles, or metadata codecs fail
 open/read explicitly. Column role must agree with its encoding: time 1/2,
 sequence 3/4, Float64 5, native histogram 8, operation 6/7. A value chunk's known
-encoding must also be the one its manifest field type is stored with. An unknown column encoding or compression
-can be skipped if its chunk is not needed, but attempting to decode it returns
+encoding must also be the one its manifest field type is stored with. An unknown
+column encoding or compression can be skipped if its chunk is not needed, but
+attempting to decode it returns
 an unsupported-codec error. Known encodings assigned to a different role are
 invalid metadata, even for an unprojected column. Unknown fields or malformed
 references must not be interpreted as omitted all-null columns.

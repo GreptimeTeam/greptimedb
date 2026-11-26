@@ -18247,9 +18247,10 @@ async fn native_promql_matrix_root_matches_legacy() {
     assert_eq!(native, legacy);
 }
 
-/// Native histograms in a Narthex physical table answer what the same samples answer in a Parquet
-/// one: PromQL on both routes and remote read, from the memtable, after flushes, after a
-/// compaction and after a reopen.
+/// Native histograms in a Narthex physical table, and in a Parquet one served by a columnar
+/// series-index sidecar, answer what the same samples answer in a plain Parquet table: PromQL on
+/// both routes and remote read, from the memtable, after flushes, after a compaction and after a
+/// reopen.
 #[tokio::test(flavor = "multi_thread")]
 async fn narthex_native_histograms_match_parquet() {
     use api::helper::ColumnDataTypeWrapper;
@@ -18266,6 +18267,11 @@ async fn narthex_native_histograms_match_parquet() {
     let builder = GreptimeDbStandaloneBuilder::new("narthex_native_histograms")
         .with_mito_config(mito2::config::MitoConfig {
             experimental_series_scan_v2: true,
+            experimental_enable_series_index: true,
+            experimental_series_index_format: mito2::config::SeriesIndexFormat::Columnar,
+            // Only the manual build below publishes a sidecar, so the plain Parquet table never
+            // gets one.
+            experimental_series_index_maintenance_interval: Duration::from_secs(3600),
             ..Default::default()
         })
         .with_query_options(QueryOptions {
@@ -18281,11 +18287,13 @@ async fn narthex_native_histograms_match_parquet() {
         ColumnDataTypeWrapper::try_from(native_histogram_value_type().clone())
             .unwrap()
             .into_parts();
+    // The plain Parquet table at index 1 is the baseline the others are compared against.
     let tables = [
         ("narthex_hist", "narthex_phy"),
         ("parquet_hist", "parquet_phy"),
+        ("sidecar_hist", "sidecar_phy"),
     ];
-    for (format, (_, physical)) in ["narthex", "flat"].into_iter().zip(tables) {
+    for (format, (_, physical)) in ["narthex", "flat", "flat"].into_iter().zip(tables) {
         let expr = CreateTableExpr {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
             schema_name: DEFAULT_SCHEMA_NAME.to_string(),
@@ -18339,10 +18347,39 @@ async fn narthex_native_histograms_match_parquet() {
         run_sql(&instance, &format!("ADMIN FLUSH_TABLE('{physical}')")).await;
         run_sql(&instance, &format!("ADMIN COMPACT_TABLE('{physical}')")).await;
     }
+    run_sql(&instance, "ADMIN BUILD_SERIES_INDEX('sidecar_phy')").await;
     assert_histograms_match(&instance, &tables, "compacted").await;
+    // The sidecar's histogram samples answer a native read: the columnar reader decodes rows.
+    // Reopening rebuilds every region's sidecar, the plain table's included, so only this stage
+    // compares the sidecar against plain Parquet reads.
+    let decoded = columnar_decoded_rows();
+    let output = native_tql_output(
+        &instance,
+        "TQL EVAL (0, 600, '60s') histogram_count(rate(sidecar_hist[5m]))",
+        true,
+    )
+    .await;
+    assert!(!float_answer_rows(output).await.is_empty());
+    assert!(
+        columnar_decoded_rows() > decoded,
+        "the columnar sidecar did not serve the histogram read"
+    );
     context.rebuild().await;
     let instance = context.frontend();
     assert_histograms_match(&instance, &tables, "reopened").await;
+
+    /// Rows the Mito columnar readers have decoded in this process.
+    fn columnar_decoded_rows() -> u64 {
+        common_telemetry::dump_metrics()
+            .unwrap()
+            .lines()
+            .filter(|line| {
+                line.starts_with("greptime_mito_columnar_read_count{")
+                    && line.contains("type=\"decoded_rows\"")
+            })
+            .filter_map(|line| line.rsplit(' ').next()?.parse::<f64>().ok())
+            .sum::<f64>() as u64
+    }
 
     async fn run_sql(instance: &Arc<Instance>, sql: &str) {
         SqlQueryHandler::do_query(instance.as_ref(), sql, QueryContext::arc())
@@ -18445,7 +18482,7 @@ async fn narthex_native_histograms_match_parquet() {
         }
     }
 
-    /// Asserts both metrics answer the same rows: PromQL on each route, and remote read.
+    /// Asserts every metric answers the baseline's rows: PromQL on each route, and remote read.
     async fn assert_histograms_match(
         instance: &Arc<Instance>,
         tables: &[(&str, &str)],
@@ -18453,7 +18490,8 @@ async fn narthex_native_histograms_match_parquet() {
     ) {
         use datatypes::arrow::array::StructArray;
 
-        let (narthex, parquet) = (tables[0].0, tables[1].0);
+        let narthex = tables[0].0;
+        let metrics = tables.iter().map(|(metric, _)| *metric).collect::<Vec<_>>();
         // The aggregates over histograms run on the existing route only: the native planner
         // fails to plan their split state, whatever the storage.
         for (query, routes) in [
@@ -18468,7 +18506,7 @@ async fn narthex_native_histograms_match_parquet() {
         ] {
             for &native in routes {
                 let mut answers = Vec::new();
-                for metric in [narthex, parquet] {
+                for metric in &metrics {
                     let query = query.replace("{m}", metric);
                     let sql = format!("TQL EVAL (0, 600, '60s') {query}");
                     if native {
@@ -18488,11 +18526,13 @@ async fn narthex_native_histograms_match_parquet() {
                     let output = native_tql_output(instance, &sql, native).await;
                     answers.push(float_answer_rows(output).await);
                 }
-                assert!(!answers[0].is_empty(), "{stage}: {query} answered nothing");
-                assert_eq!(
-                    answers[0], answers[1],
-                    "{stage}: {query} (native: {native}) differs between Narthex and Parquet"
-                );
+                assert!(!answers[1].is_empty(), "{stage}: {query} answered nothing");
+                for (metric, answer) in metrics.iter().zip(&answers) {
+                    assert_eq!(
+                        answer, &answers[1],
+                        "{stage}: {query} (native: {native}) differs between {metric} and Parquet"
+                    );
+                }
             }
         }
 
@@ -18500,14 +18540,16 @@ async fn narthex_native_histograms_match_parquet() {
             crate::test_util::build_test_prom_server(instance.clone(), false, None).build();
         let router = server.build(server.make_app()).unwrap();
         let mut answers = Vec::new();
-        for metric in [narthex, parquet] {
+        for metric in &metrics {
             answers.push(remote_read_histograms(&router, metric).await);
         }
-        assert_eq!(answers[0].len(), 2, "{stage}: remote read series");
-        assert_eq!(
-            answers[0], answers[1],
-            "{stage}: remote read differs between Narthex and Parquet"
-        );
+        assert_eq!(answers[1].len(), 2, "{stage}: remote read series");
+        for (metric, answer) in metrics.iter().zip(&answers) {
+            assert_eq!(
+                answer, &answers[1],
+                "{stage}: remote read differs between {metric} and Parquet"
+            );
+        }
 
         // A raw histogram read back is the one written at step 5.
         let output = native_tql_output(

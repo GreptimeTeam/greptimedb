@@ -18,6 +18,8 @@ pub(crate) mod bulk;
 mod codec;
 mod histogram;
 mod metadata;
+#[cfg(test)]
+pub(crate) use histogram::tests::{TestHistogram, histogram_array};
 pub(crate) mod reader;
 #[cfg(test)]
 mod tests;

@@ -193,6 +193,102 @@ async fn test_narthex_rejects_oversized_histogram_sample() -> WhateverResult<()>
     Ok(())
 }
 
+/// The bulk path refuses an oversized native histogram sample before its WAL entry or memtable
+/// write, while a sample that fits takes the same path to the memtable and a flushed file.
+#[tokio::test]
+async fn test_narthex_bulk_rejects_oversized_histogram_sample() -> WhateverResult<()> {
+    use common_query::native_histogram::native_histogram_value_type;
+    use datatypes::arrow::array::Array;
+
+    use crate::series_index::samples::{TestHistogram, histogram_array};
+
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1024, 0);
+    let mut request = sparse_metric_create_request("narthex");
+    let table_dir = request.table_dir.clone();
+    let field = request
+        .column_metadatas
+        .iter_mut()
+        .find(|c| c.semantic_type == SemanticType::Field)
+        .unwrap();
+    field.column_schema = ColumnSchema::new(
+        field.column_schema.name.clone(),
+        native_histogram_value_type().clone(),
+        true,
+    );
+    let field = field.column_schema.name.clone();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await?;
+    let metadata = engine.get_region(region_id).unwrap().metadata();
+    let key = new_sparse_primary_key(&["api"], &metadata, 42, 7);
+    let bulk = |buckets: u32, ts: i64| {
+        let histogram = histogram_array(&[Some(TestHistogram {
+            schema: -53,
+            custom_values: Some((1..buckets).map(f64::from).collect()),
+            positive_spans: vec![(0, buckets as i32)],
+            floats: Some((f64::from(buckets), 0.0, vec![1.0; buckets as usize], vec![])),
+            ..Default::default()
+        })]);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("__primary_key", DataType::Binary, false),
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(&field, histogram.data_type().clone(), true),
+        ]));
+        let payload = DfRecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(datatypes::arrow::array::BinaryArray::from_iter_values([
+                    key.as_slice(),
+                ])) as ArrayRef,
+                Arc::new(TimestampMillisecondArray::from_iter_values([ts])),
+                Arc::new(histogram),
+            ],
+        )
+        .unwrap();
+        let (schema, record_batch) = encode_to_flight_data(payload.clone());
+        RegionRequest::BulkInserts(RegionBulkInsertsRequest {
+            skip_wal: false,
+            region_id,
+            payload,
+            raw_data: ArrowIpc {
+                schema: schema.data_header,
+                data_header: record_batch.data_header,
+                payload: record_batch.data_body,
+            },
+            partition_expr_version: None,
+            aligned_schema_version: None,
+        })
+    };
+    let Err(error) = engine.handle_request(region_id, bulk(100_000, 1000)).await else {
+        panic!("an oversized histogram sample must be refused");
+    };
+    assert!(error.to_string().contains("chunk limit"), "{error}");
+    engine.handle_request(region_id, bulk(8, 2000)).await?;
+    let rows = |engine: crate::engine::MitoEngine| async move {
+        let batches = RecordBatches::try_collect(
+            engine
+                .scan_to_stream(region_id, ScanRequest::default())
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        batches.iter().map(|b| b.num_rows()).sum::<usize>()
+    };
+    // The replayed WAL holds the accepted sample only.
+    reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
+    assert_eq!(1, rows(engine.clone()).await);
+    test_util::flush_region(&engine, region_id, None).await;
+    assert_eq!(1, rows(engine.clone()).await);
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_narthex_series_index_survives_added_label() -> WhateverResult<()> {
     let reads = Arc::new(std::sync::Mutex::new(Vec::new()));
