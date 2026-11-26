@@ -584,6 +584,7 @@ impl Memtable for BulkMemtable {
                     bulk_parts.unordered_part.to_bulk_part(&self.metadata)?
             {
                 let part_stats = unordered_bulk_part.to_memtable_stats(&self.metadata);
+                let captured = part_stats.time_range;
                 let range = MemtableRange::new(
                     Arc::new(MemtableRangeContext::new(
                         self.id,
@@ -598,6 +599,11 @@ impl Memtable for BulkMemtable {
                     )),
                     part_stats,
                 );
+                // The range reads a snapshot of the unordered part.
+                let range = match captured {
+                    Some(time_range) => range.with_captured_time_range(time_range),
+                    None => range,
+                };
                 ranges.insert(range_id, range);
                 range_id += 1;
             }
@@ -611,6 +617,7 @@ impl Memtable for BulkMemtable {
 
                 let part_stats = part_wrapper.part.to_memtable_stats(&self.metadata);
                 let charges = vec![part_wrapper.charge.clone()];
+                let captured = part_stats.time_range;
                 let iter_builder: Box<dyn IterBuilder> = match &part_wrapper.part {
                     PartToMerge::Bulk { part, .. } => Box::new(BulkRangeIterBuilder {
                         part: part.clone(),
@@ -643,6 +650,11 @@ impl Memtable for BulkMemtable {
                     )),
                     part_stats,
                 );
+                // Parts are immutable once added, and the range holds this one.
+                let range = match captured {
+                    Some(time_range) => range.with_captured_time_range(time_range),
+                    None => range,
+                };
                 ranges.insert(range_id, range);
                 range_id += 1;
             }
