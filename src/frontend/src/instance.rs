@@ -105,7 +105,8 @@ use sql::statements::statement::Statement;
 use sql::statements::tql::Tql;
 use sql::util::{
     extract_tables_from_prom_expr_checked, extract_tables_from_prom_expr_partial,
-    extract_tables_from_statement_checked,
+    extract_tables_from_statement_checked, extract_tables_from_statement_partial,
+    extract_tql_exprs_from_statement,
 };
 use sqlparser::ast::{AnalyzeFormat, ObjectName};
 use tracing::Span;
@@ -668,11 +669,13 @@ impl Instance {
         }
     }
 
+    /// Authorizes `stmt` and returns the context to plan it with: the one given, carrying the
+    /// metric discovery scope this authorization resolved when the statement evaluates TQL.
     async fn check_sql_permission(
         &self,
         stmt: &Statement,
         query_ctx: &QueryContextRef,
-    ) -> Result<()> {
+    ) -> Result<QueryContextRef> {
         self.check_unselected_mysql_database(stmt, query_ctx)
             .await?;
         self.plugins
@@ -687,41 +690,63 @@ impl Instance {
 
         // Database COPY needs the full table set before table-target authorization.
         if matches!(stmt, Statement::Copy(Copy::CopyDatabase(_))) {
-            return Ok(());
+            return Ok(query_ctx.clone());
         }
 
-        let targets = match extract_tables_from_statement_checked(stmt) {
-            Some(tables) => PermissionTableTargets::resolved(
-                tables
-                    .map(|name| {
-                        table_idents_to_full_name(&name, query_ctx).map(
-                            |(catalog, schema, table)| {
-                                PermissionTableTarget::new(catalog, schema, table)
-                            },
-                        )
+        let full_names = |names: Vec<ObjectName>, query_ctx: &QueryContextRef| {
+            names
+                .into_iter()
+                .map(|name| {
+                    table_idents_to_full_name(&name, query_ctx).map(|(catalog, schema, table)| {
+                        PermissionTableTarget::new(catalog, schema, table)
                     })
-                    .collect::<std::result::Result<Vec<_>, _>>()
-                    .map_err(BoxedError::new)
-                    .context(ExternalSnafu)?,
-            ),
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)
+        };
+        let mut targets = match extract_tables_from_statement_checked(stmt) {
+            Some(tables) => {
+                PermissionTableTargets::resolved(full_names(tables.collect(), query_ctx)?)
+            }
             None => PermissionTableTargets::Unresolved,
         };
         let req = PermissionReq::SqlStatement(stmt);
+        let mut query_ctx = query_ctx.clone();
+        // TQL discovers metrics the way the Prometheus handler does, bounded by the tables this
+        // statement's own permission request may read.
+        if let Some(exprs) = extract_tql_exprs_from_statement(stmt)
+            && !exprs.is_empty()
+        {
+            self.prepare_metric_discovery_scope_with(&exprs, req.clone(), &mut query_ctx)
+                .await?;
+            if matches!(targets, PermissionTableTargets::Unresolved)
+                && let Some(discovered) =
+                    MetricDiscoveryVisitor::walk(&exprs, query_ctx.current_schema())
+                        .discovery_targets(query_ctx.metric_discovery_scope())
+            {
+                let mut resolved =
+                    full_names(extract_tables_from_statement_partial(stmt), &query_ctx)?;
+                resolved.extend(discovered);
+                targets = PermissionTableTargets::resolved(resolved);
+            }
+        }
         if matches!(
             stmt,
             Statement::Copy(Copy::CopyTable(CopyTable::To(_)) | Copy::CopyQueryTo(_))
         ) {
             // COPY retains its write permission requirement and also reads source data.
             self.check_resolved_table_permissions(
-                query_ctx,
+                &query_ctx,
                 [PermissionReq::Action(COPY_TO), req],
                 targets,
             )
-            .await
+            .await?;
         } else {
-            self.check_resolved_table_permission(query_ctx, req, targets)
-                .await
+            self.check_resolved_table_permission(&query_ctx, req, targets)
+                .await?;
         }
+        Ok(query_ctx)
     }
 
     #[tracing::instrument(skip_all, name = "SqlQueryHandler::do_analyze_stream_query")]
@@ -748,7 +773,7 @@ impl Instance {
         validate_analyze_stream_statement(&mut stmt)?;
         query_ctx.set_explain_format(AnalyzeFormat::JSON.to_string());
 
-        self.check_sql_permission(&stmt, &query_ctx).await?;
+        let query_ctx = self.check_sql_permission(&stmt, &query_ctx).await?;
         check_permission(self.plugins.clone(), &stmt, &query_ctx)?;
         let catalog_name = query_ctx.current_catalog().to_string();
         let schema_name = query_ctx.current_schema();
@@ -896,12 +921,15 @@ impl Instance {
 
                 let mut results = Vec::with_capacity(stmts.len());
                 for stmt in stmts {
-                    if let Err(e) = self.check_sql_permission(&stmt, &query_ctx).await {
-                        results.push(Err(e));
-                        break;
-                    }
+                    let stmt_ctx = match self.check_sql_permission(&stmt, &query_ctx).await {
+                        Ok(stmt_ctx) => stmt_ctx,
+                        Err(e) => {
+                            results.push(Err(e));
+                            break;
+                        }
+                    };
 
-                    match self.query_statement(stmt.clone(), query_ctx.clone()).await {
+                    match self.query_statement(stmt.clone(), stmt_ctx).await {
                         Ok(output) => {
                             let output_result =
                                 query_interceptor.post_execute(output, query_ctx.clone());
@@ -1149,7 +1177,8 @@ impl Instance {
         if let Statement::Tql(tql) = stmt {
             // TQL produces a logical plan; describe it from the plan so the
             // extended-protocol RowDescription matches the executed DataRows.
-            self.check_sql_permission(&Statement::Tql(tql.clone()), &query_ctx)
+            let query_ctx = self
+                .check_sql_permission(&Statement::Tql(tql.clone()), &query_ctx)
                 .await?;
             let plan = self.statement_executor.plan_tql(tql, &query_ctx).await?;
             return self
@@ -1178,7 +1207,7 @@ impl Instance {
         }
 
         if plannable {
-            self.check_sql_permission(&stmt, &query_ctx).await?;
+            let query_ctx = self.check_sql_permission(&stmt, &query_ctx).await?;
 
             let plan = self
                 .query_engine
@@ -1543,6 +1572,33 @@ impl MetricDiscoveryVisitor {
         }
     }
 
+    fn walk(exprs: &[promql_parser::parser::Expr], current_schema: String) -> Self {
+        let mut visitor = Self::new(current_schema);
+        for expr in exprs {
+            let _ = walk_expr(&mut visitor, expr);
+        }
+        visitor
+    }
+
+    /// The tables discovery adds to the statically named ones of a query whose table extraction
+    /// is unresolved, or `None` when something other than discovery left it unresolved.
+    fn discovery_targets(
+        &self,
+        scope: &MetricDiscoveryScope,
+    ) -> Option<Vec<PermissionTableTarget>> {
+        if !self.needs_discovery || !self.all_unresolved_are_discoverable {
+            return None;
+        }
+        match scope {
+            MetricDiscoveryScope::Allowed(allowed) => Some(allowed.iter().cloned().collect()),
+            // The named tables alone, because a selector that cannot be resolved statically is
+            // what left the query unresolved: the complete extraction would answer "no tables",
+            // dropping the named ones that the same query also reads.
+            MetricDiscoveryScope::Unrestricted => Some(Vec::new()),
+            MetricDiscoveryScope::Unavailable => None,
+        }
+    }
+
     /// The planner reads the info table this selector stands for and never discovers with it, so
     /// it must not authorize a schema here. A shape the table extractor leaves unresolved keeps
     /// the whole expression unresolved.
@@ -1631,6 +1687,26 @@ impl Instance {
         expr: &promql_parser::parser::Expr,
         query_ctx: &mut QueryContextRef,
     ) -> server_error::Result<()> {
+        self.prepare_metric_discovery_scope_with(
+            std::slice::from_ref(expr),
+            PermissionReq::Action(PROMQL_QUERY),
+            query_ctx,
+        )
+        .await
+        .or_else(|error| match error {
+            Error::Permission { source, .. } => Err(source).context(AuthSnafu),
+            error => Err(BoxedError::new(error)).context(ExecuteQuerySnafu),
+        })
+    }
+
+    /// [`Self::prepare_metric_discovery_scope`] for the expressions one request evaluates, keeping
+    /// each discovered table that `req` may read.
+    async fn prepare_metric_discovery_scope_with(
+        &self,
+        exprs: &[promql_parser::parser::Expr],
+        req: PermissionReq<'_>,
+        query_ctx: &mut QueryContextRef,
+    ) -> Result<()> {
         // Discovery scope is read by the native PromQL route only, so a query that does not ask
         // for it pays nothing here beyond resolving the switch: the value is read through the
         // query engine's own resolver, which takes what the query states (a request hint, or the
@@ -1645,7 +1721,7 @@ impl Instance {
                 .experimental_native_promql(),
         )
         .map_err(BoxedError::new)
-        .context(ExecuteQuerySnafu)?;
+        .context(ExternalSnafu)?;
         if !native_requested {
             Arc::make_mut(query_ctx).set_metric_discovery_scope(MetricDiscoveryScope::Unrestricted);
             return Ok(());
@@ -1655,8 +1731,7 @@ impl Instance {
             Arc::make_mut(query_ctx).set_metric_discovery_scope(MetricDiscoveryScope::Unrestricted);
             return Ok(());
         }
-        let mut visitor = MetricDiscoveryVisitor::new(query_ctx.current_schema());
-        let _ = walk_expr(&mut visitor, expr);
+        let visitor = MetricDiscoveryVisitor::walk(exprs, query_ctx.current_schema());
         if !visitor.needs_discovery {
             return Ok(());
         }
@@ -1668,8 +1743,7 @@ impl Instance {
                 .tables(query_ctx.current_catalog(), &schema, Some(query_ctx))
                 .try_collect::<Vec<_>>()
                 .await
-                .map_err(BoxedError::new)
-                .context(ExecuteQuerySnafu)?;
+                .context(CatalogSnafu)?;
             tables.sort_by_key(|table| table.table_info().name.clone());
             for table in tables {
                 let info = table.table_info();
@@ -1686,15 +1760,11 @@ impl Instance {
                     &schema,
                     info.name.as_str(),
                 );
-                match checker
-                    .as_ref()
-                    .check_permission_with_table_targets(
-                        query_ctx.current_user(),
-                        PermissionReq::Action(PROMQL_QUERY),
-                        PermissionTableTargets::resolved(vec![target.clone()]),
-                    )
-                    .context(AuthSnafu)
-                {
+                match checker.as_ref().check_permission_with_table_targets(
+                    query_ctx.current_user(),
+                    req.clone(),
+                    PermissionTableTargets::resolved(vec![target.clone()]),
+                ) {
                     Ok(_) => {
                         allowed.insert(target);
                     }
@@ -1707,7 +1777,7 @@ impl Instance {
                     Err(error)
                         if error.status_code()
                             == common_error::status_code::StatusCode::PermissionDenied => {}
-                    Err(error) => return Err(error),
+                    Err(error) => return Err(error).context(PermissionSnafu),
                 }
             }
         }
@@ -1797,28 +1867,17 @@ impl PrometheusHandler for Instance {
         Self::validate_metric_discovery_scope(parsed_expr, query_ctx.metric_discovery_scope())?;
         let mut targets =
             self.prom_queries_permission_targets(std::slice::from_ref(&query), &query_ctx)?;
-        if matches!(targets, PermissionTableTargets::Unresolved) {
-            let mut visitor = MetricDiscoveryVisitor::new(query_ctx.current_schema());
-            let _ = walk_expr(&mut visitor, parsed_expr);
-            if visitor.needs_discovery && visitor.all_unresolved_are_discoverable {
-                match query_ctx.metric_discovery_scope() {
-                    MetricDiscoveryScope::Allowed(allowed) => {
-                        let mut resolved =
-                            self.prom_expr_permission_targets_partial(parsed_expr, &query_ctx)?;
-                        resolved.extend(allowed.iter().cloned());
-                        targets = PermissionTableTargets::resolved(resolved);
-                    }
-                    // The partial answer, because a selector that cannot be resolved statically
-                    // is what brought the query here: the complete one would answer "no tables",
-                    // dropping the named ones that the same query also reads.
-                    MetricDiscoveryScope::Unrestricted => {
-                        targets = PermissionTableTargets::resolved(
-                            self.prom_expr_permission_targets_partial(parsed_expr, &query_ctx)?,
-                        );
-                    }
-                    MetricDiscoveryScope::Unavailable => {}
-                }
-            }
+        if matches!(targets, PermissionTableTargets::Unresolved)
+            && let Some(discovered) = MetricDiscoveryVisitor::walk(
+                std::slice::from_ref(parsed_expr),
+                query_ctx.current_schema(),
+            )
+            .discovery_targets(query_ctx.metric_discovery_scope())
+        {
+            let mut resolved =
+                self.prom_expr_permission_targets_partial(parsed_expr, &query_ctx)?;
+            resolved.extend(discovered);
+            targets = PermissionTableTargets::resolved(resolved);
         }
         self.check_query_target_permission(targets, &query_ctx)
             .await?;
@@ -6487,6 +6546,53 @@ mod tests {
                 .get(NATIVE_PROMQL_OPTION),
             "the route stays on the engine default"
         );
+
+        Ok(())
+    }
+
+    /// TQL discovers metrics as the Prometheus handler does: bounded by the tables the statement's
+    /// own request may read, and that scope reaches planning. A table the statement names is still
+    /// checked by name.
+    #[tokio::test]
+    async fn test_tql_discovery_is_bounded_by_the_statement_grants() -> TestResult<()> {
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(Arc::new(RejectUnresolvedPermissionChecker));
+        let instance = test_instance_with_plugins_and_metric_names(
+            test_logical_table(1024, "denied")?,
+            test_logical_table(1025, "target")?,
+            plugins,
+            None,
+        )
+        .await?;
+        let ctx = test_query_ctx(1);
+        ctx.configuration_parameter()
+            .set_query_option(NATIVE_PROMQL_OPTION, "true")
+            .unwrap();
+
+        for sql in [
+            r#"TQL EVAL (0, 10, '5s') {__name__=~".+"}"#,
+            r#"TQL EXPLAIN (0, 10, '5s') sum({__name__=~".+"})"#,
+            r#"WITH t AS (TQL EVAL (0, 10, '5s') {__name__=~".+"}) SELECT * FROM t"#,
+        ] {
+            let planning_ctx = instance
+                .check_sql_permission(&parse_one_sql(sql), &ctx)
+                .await
+                .unwrap();
+            assert_eq!(
+                vec!["target".to_string()],
+                allowed_tables(planning_ctx.metric_discovery_scope()),
+                "{sql}"
+            );
+        }
+
+        let err = instance
+            .check_sql_permission(
+                &parse_one_sql(r#"TQL EVAL (0, 10, '5s') {__name__=~".+"} + denied"#),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(StatusCode::PermissionDenied, err.status_code());
 
         Ok(())
     }

@@ -229,6 +229,53 @@ fn contains_native_fused(plan: &LogicalPlan) -> bool {
         .any(|input| contains_native_fused(input))
 }
 
+/// Whether `expr` holds a selector that names no metric and is answered by discovering metric
+/// tables. The label selector of `info` names no metric either, but it stands for the info table
+/// rather than a discovery.
+fn discovers_any_metric(expr: &promql_parser::parser::Expr) -> bool {
+    use promql_parser::parser::Expr as PromExpr;
+
+    #[derive(Default)]
+    struct Visitor {
+        discovers: bool,
+        /// Addresses of `info` label selectors, compared only.
+        info_label_selectors: Vec<usize>,
+    }
+
+    impl promql_parser::util::ExprVisitor for Visitor {
+        type Error = std::convert::Infallible;
+
+        fn pre_visit(&mut self, expr: &PromExpr) -> std::result::Result<bool, Self::Error> {
+            match expr {
+                PromExpr::Call(call) if call.func.name == "info" => {
+                    if let Some(PromExpr::VectorSelector(labels)) =
+                        call.args.args.get(1).map(|labels| labels.as_ref())
+                    {
+                        self.info_label_selectors
+                            .push(std::ptr::from_ref(labels) as usize);
+                    }
+                }
+                PromExpr::VectorSelector(selector)
+                    if !self
+                        .info_label_selectors
+                        .contains(&(std::ptr::from_ref(selector) as usize)) =>
+                {
+                    self.discovers |= crate::promql::planner::discovers_metric_name(selector);
+                }
+                PromExpr::MatrixSelector(selector) => {
+                    self.discovers |= crate::promql::planner::discovers_metric_name(&selector.vs);
+                }
+                _ => {}
+            }
+            Ok(!self.discovers)
+        }
+    }
+
+    let mut visitor = Visitor::default();
+    let _ = promql_parser::util::walk_expr(&mut visitor, expr);
+    visitor.discovers
+}
+
 /// Whether `schema` is a series frame's declaration, which describes the columns below it.
 fn publishes_series_frame(schema: &DFSchema) -> bool {
     schema
@@ -933,6 +980,13 @@ impl DfLogicalPlanner {
                 // the statement for that schema and publish it over the native answer. A statement
                 // whose columns that projection cannot fill faithfully keeps the existing plan
                 // instead of changing the schema the CTE exposes.
+                // The existing planner refuses a selector that names no metric, so such a statement
+                // has no other answer whose schema the CTE could publish: the native answer's own
+                // columns are the CTE's. A series frame's declaration is not a table a SQL query
+                // reads, so that one still goes to the existing planner, which refuses it.
+                if discovers_any_metric(&eval.expr) && !publishes_series_frame(plan.schema()) {
+                    return Ok(plan);
+                }
                 let existing = self.plan_pql(eval, query_ctx, false).await?;
                 Ok(publish_legacy_schema(plan, &existing).unwrap_or(existing))
             }
