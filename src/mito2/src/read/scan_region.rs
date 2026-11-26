@@ -2247,7 +2247,13 @@ impl StreamContext {
         if !input.extension_ranges.is_empty() {
             return None;
         }
-        if input.sequence_range.is_some() || input.compaction || !input.filter_deleted {
+        // A series row selector picks rows across the whole scan, so a file outside the
+        // range can change the rows selected inside it.
+        if input.sequence_range.is_some()
+            || input.compaction
+            || !input.filter_deleted
+            || input.series_row_selector.is_some()
+        {
             return None;
         }
         let overlaps = |(min, max): (Timestamp, Timestamp)| min < end && max >= start;
