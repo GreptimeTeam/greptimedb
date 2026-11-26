@@ -326,7 +326,8 @@ impl DistExtensionPlanner {
                     })
             };
 
-            if !logical_metric_table && partition_expressions.is_empty() {
+            if partition_expressions.is_empty() && (!logical_metric_table || all_regions.len() == 1)
+            {
                 break 'pruning all_regions;
             }
             let partitions = match create_partitions_from_region_routes(

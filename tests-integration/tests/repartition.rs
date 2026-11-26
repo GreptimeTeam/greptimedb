@@ -1838,9 +1838,13 @@ pub async fn test_partition_unpartitioned_metric_by_table_id(
             "{plan}"
         );
 
-        let filtered_latest = "SELECT * FROM partition_table_id_metric_high WHERE host = 'z_host' ORDER BY ts DESC LIMIT 100";
+        let filtered_latest = "SELECT val FROM partition_table_id_metric_high WHERE host = 'z_host' ORDER BY ts DESC LIMIT 100";
         let plan = query_output(instance, &format!("EXPLAIN ANALYZE {filtered_latest}")).await;
         assert_eq!(plan.matches("Scan: region=").count(), 1, "{plan}");
+        assert_eq!(
+            query_output(instance, filtered_latest).await,
+            "+------+\n| val  |\n+------+\n| 40.0 |\n+------+"
+        );
 
         // Project the values from the latest-row query to keep the assertion
         // independent of physical columns and timestamp rendering.
