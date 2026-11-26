@@ -81,7 +81,7 @@ pub(crate) fn file_indices(
 }
 
 impl SeriesDiscovery {
-    pub(super) fn fallback_to_samples(
+    pub(crate) fn fallback_to_samples(
         &mut self,
         window: WindowSequence,
         samples: &[Arc<dyn SamplesFormatReader>],
@@ -103,7 +103,7 @@ impl SeriesDiscovery {
     }
 }
 
-pub(super) async fn open_sources(
+pub(crate) async fn open_sources(
     context: &StreamContext,
     ranges: &[PartitionRange],
     pool: &Arc<dyn datafusion::execution::memory_pool::MemoryPool>,

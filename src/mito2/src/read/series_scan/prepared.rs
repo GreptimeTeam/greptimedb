@@ -392,7 +392,7 @@ pub(crate) struct ColumnarPreparedSource {
 /// Only native index readers carry a coverage window. A failed index read can
 /// schedule discovery from the corresponding pinned samples once per scan.
 #[derive(Default)]
-struct SeriesDiscovery {
+pub(crate) struct SeriesDiscovery {
     readers: VecDeque<(Box<dyn FormatReader>, Option<WindowSequence>)>,
     covered_samples: Vec<(FileTimeRange, usize)>,
 }
