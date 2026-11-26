@@ -437,9 +437,13 @@ impl StatementExecutor {
         create_expr: CreateExternalTable,
         ctx: QueryContextRef,
     ) -> Result<TableRef> {
-        let create_expr =
-            &mut expr_helper::create_external_expr(create_expr, &ctx, &self.local_file_access)
-                .await?;
+        let create_expr = &mut expr_helper::create_external_expr(
+            create_expr,
+            &ctx,
+            &self.local_file_access,
+            &self.remote_storage_access,
+        )
+        .await?;
         self.create_table_inner(create_expr, None, ctx, TriggerReason::Manual)
             .await
     }

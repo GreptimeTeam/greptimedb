@@ -574,6 +574,23 @@ memory_pool_size = "50%"
 #+ experimental_spill_compression = "uncompressed"
 # --- End spill-to-disk ---
 
+## Hosts that object storage in SQL statements may connect to: `COPY`, `COPY DATABASE`,
+## `EXPORT/IMPORT DATABASE`, and external tables. Frontends check statements; datanodes check
+## external table scans. Unset or empty means no restriction.
+## Entries: `host`, `host:port`, `*.domain` (subdomains only), `*.domain:port`, or `[::1]:9000`.
+## An entry without a port matches any port.
+## Every request is checked, including credential requests, and redirects aren't followed.
+## GCS service account keys also need `oauth2.googleapis.com`; OSS needs `*.oss-<region>.aliyuncs.com`.
+## Credentials from instance metadata are unavailable while the list is set.
+## Don't list metadata services, such as `169.254.169.254`, or internal services: request paths
+## aren't restricted.
+## @toml2docs:none-default
+#+ remote_allowed_hosts = ["minio.internal:9000"]
+## Whether object storage in SQL statements may use the server's own credentials (environment
+## variables, credential files, or instance metadata) when no credentials are given. When false,
+## statements must provide credentials or use OSS `allow_anonymous`.
+allow_server_credentials = true
+
 ## The data storage options.
 [storage]
 ## The working home directory.

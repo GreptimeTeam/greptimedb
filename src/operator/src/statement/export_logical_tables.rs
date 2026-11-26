@@ -357,7 +357,7 @@ impl StatementExecutor {
             _ = cancellation.cancelled() => return error::LogicalTableExportCancelledSnafu.fail(),
             result = async {
                 unit.validate_table_routes(self.table_metadata_manager.table_route_manager()).await?;
-                let store = build_backend_for_write(&format!("{}/", directory.trim_end_matches('/')), connection, &self.local_file_access)
+                let store = build_backend_for_write(&format!("{}/", directory.trim_end_matches('/')), connection, &self.local_file_access, &self.remote_storage_access)
                     .await.context(error::BuildBackendSnafu)?;
                 let output = self.query_engine.execute(unit.build_plan(time_range)?, query_ctx)
                     .await.context(error::ExecLogicalPlanSnafu)?;

@@ -3192,6 +3192,8 @@ experimental_spill_mode = "default"
 experimental_spill_max_temp_directory_size = "1GiB"
 experimental_spill_compression = "uncompressed"
 experimental_memory_pool_policy = "greedy"
+remote_allowed_hosts = []
+allow_server_credentials = true
 
 [memory]
 enable_heap_profiling = true

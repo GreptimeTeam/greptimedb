@@ -726,6 +726,7 @@ async fn cancellation_drains_storage_and_preserves_committed_files() {
             &format!("{}/", directory.path().display()),
             &HashMap::new(),
             &access,
+            &RemoteStorageAccess::unrestricted(),
         )
         .await
         .unwrap();

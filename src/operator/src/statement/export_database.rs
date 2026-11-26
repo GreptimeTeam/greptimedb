@@ -173,9 +173,14 @@ impl StatementExecutor {
                 LogicalTableExport::try_new_in_directory(table, &tables, &req.location)?,
             ));
         }
-        build_backend_for_write(&req.location, &req.connection, &self.local_file_access)
-            .await
-            .context(error::BuildBackendSnafu)?;
+        build_backend_for_write(
+            &req.location,
+            &req.connection,
+            &self.local_file_access,
+            &self.remote_storage_access,
+        )
+        .await
+        .context(error::BuildBackendSnafu)?;
         Ok(PreparedDatabaseExport { request: req, jobs })
     }
 }
@@ -217,10 +222,14 @@ impl StatementExecutor {
             .get("metric_data_layout")
             .is_some_and(|v| v == "packed")
         {
-            let store =
-                build_backend_for_write(&req.location, &req.connection, &self.local_file_access)
-                    .await
-                    .context(error::BuildBackendSnafu)?;
+            let store = build_backend_for_write(
+                &req.location,
+                &req.connection,
+                &self.local_file_access,
+                &self.remote_storage_access,
+            )
+            .await
+            .context(error::BuildBackendSnafu)?;
             Some(
                 PackedWriter::new(store).context(error::WriteStreamToFileSnafu {
                     path: &req.location,

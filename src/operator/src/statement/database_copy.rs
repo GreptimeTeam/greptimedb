@@ -251,7 +251,9 @@ mod tests {
 
     #[tokio::test]
     async fn output_locations_resolve_to_writer_keys() {
-        use common_datasource::object_store::{LocalFileAccess, build_backend_for_write_with_path};
+        use common_datasource::object_store::{
+            LocalFileAccess, RemoteStorageAccess, build_backend_for_write_with_path,
+        };
 
         let dir = common_test_util::temp_dir::create_temp_dir("database_export_paths");
         let access = LocalFileAccess::sandboxed(dir.path()).unwrap();
@@ -271,10 +273,14 @@ mod tests {
                     continue;
                 }
                 let file = DatabaseExportFile::new(&directory, name, ".parquet").unwrap();
-                let backend =
-                    build_backend_for_write_with_path(&file.location, &connection, &access)
-                        .await
-                        .unwrap();
+                let backend = build_backend_for_write_with_path(
+                    &file.location,
+                    &connection,
+                    &access,
+                    &RemoteStorageAccess::unrestricted(),
+                )
+                .await
+                .unwrap();
                 assert_eq!(backend.object_path.as_deref(), Some(file.path.as_str()));
                 let (table_name, input_location) =
                     database_import_source(&directory, &file.path).unwrap();

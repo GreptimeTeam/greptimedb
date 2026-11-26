@@ -19,7 +19,9 @@ use client::{Output, OutputData, OutputMeta};
 use common_catalog::format_full_table_name;
 use common_datasource::file_format::Format;
 use common_datasource::lister::{Lister, Source};
-use common_datasource::object_store::{LocalFileAccess, build_backend, build_backend_for_write};
+use common_datasource::object_store::{
+    LocalFileAccess, RemoteStorageAccess, build_backend, build_backend_for_write,
+};
 use common_telemetry::{debug, error, info, tracing};
 use futures::future::try_join_all;
 use object_store::Entry;
@@ -147,7 +149,13 @@ impl StatementExecutor {
             .context(error::ParseFileFormatSnafu)?
             .suffix();
 
-        let entries = list_files_to_copy(req, suffix, &self.local_file_access).await?;
+        let entries = list_files_to_copy(
+            req,
+            suffix,
+            &self.local_file_access,
+            &self.remote_storage_access,
+        )
+        .await?;
 
         let continue_on_error = req
             .with
@@ -248,10 +256,16 @@ async fn list_files_to_copy(
     req: &CopyDatabaseRequest,
     suffix: &str,
     local_file_access: &LocalFileAccess,
+    remote_storage_access: &RemoteStorageAccess,
 ) -> error::Result<Vec<Entry>> {
-    let object_store = build_backend(&req.location, &req.connection, local_file_access)
-        .await
-        .context(error::BuildBackendSnafu)?;
+    let object_store = build_backend(
+        &req.location,
+        &req.connection,
+        local_file_access,
+        remote_storage_access,
+    )
+    .await
+    .context(error::BuildBackendSnafu)?;
 
     let pattern = Regex::try_from(format!(".*{}", suffix)).context(error::BuildRegexSnafu)?;
     let lister = Lister::new(
@@ -267,7 +281,7 @@ async fn list_files_to_copy(
 mod tests {
     use std::collections::HashSet;
 
-    use common_datasource::object_store::LocalFileAccess;
+    use common_datasource::object_store::{LocalFileAccess, RemoteStorageAccess};
     use object_store::ObjectStore;
     use object_store::services::Fs;
     use object_store::util::normalize_dir;
@@ -305,16 +319,21 @@ mod tests {
             time_range: None,
         };
         let local_file_access = LocalFileAccess::sandboxed(dir.path()).unwrap();
-        let listed = list_files_to_copy(&request, ".parquet", &local_file_access)
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|e| {
-                database_import_source(&request.location, e.path())
-                    .unwrap()
-                    .0
-            })
-            .collect::<HashSet<_>>();
+        let listed = list_files_to_copy(
+            &request,
+            ".parquet",
+            &local_file_access,
+            &RemoteStorageAccess::unrestricted(),
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|e| {
+            database_import_source(&request.location, e.path())
+                .unwrap()
+                .0
+        })
+        .collect::<HashSet<_>>();
 
         assert_eq!(
             ["a".to_string(), "b".to_string(), "e.f".to_string()]
