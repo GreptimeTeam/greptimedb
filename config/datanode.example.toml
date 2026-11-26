@@ -382,8 +382,8 @@ memory_pool_size = "50%"
 #+ experimental_slice_agg_cache = false
 ## Memory capacity of the slice aggregate cache.
 #+ experimental_slice_agg_cache_size = "256MiB"
-## Most states one query collects for the cache. A query whose states exceed it is not
-## cached until the idle timeout passes.
+## Most states one aggregation collects for the cache. An aggregation whose states exceed
+## it is not cached until the idle timeout passes.
 #+ experimental_slice_agg_cache_max_collect_size = "256MiB"
 ## Cache entries not read for this long are dropped.
 #+ experimental_slice_agg_cache_idle_timeout = "1h"

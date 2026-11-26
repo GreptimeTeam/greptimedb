@@ -101,8 +101,16 @@ struct SliceKey {
     end: i64,
 }
 
+/// SHA-256 of a [TimeRangeFingerprint]. A fingerprint grows with the files overlapping
+/// its slice; a query retains one per slice it misses until the slice is cached.
+type FingerprintDigest = [u8; 32];
+
+fn fingerprint_digest(fingerprint: &TimeRangeFingerprint) -> FingerprintDigest {
+    Sha256::digest(fingerprint.as_bytes()).into()
+}
+
 struct SliceEntry {
-    fingerprint: TimeRangeFingerprint,
+    fingerprint: FingerprintDigest,
     batches: Vec<RecordBatch>,
 }
 
@@ -115,7 +123,7 @@ pub(crate) struct SliceCacheStore {
     /// Plans seen once. A plan is rewritten only when it comes again, so a query that runs
     /// once does not pay for the extra slice grouping.
     seen: Cache<PlanDigest, ()>,
-    /// A query stops collecting states for the cache once they exceed this size.
+    /// An aggregation stops collecting states for the cache once they exceed this size.
     max_collect_bytes: usize,
     /// The size of `entries` last added to [SLICE_AGG_CACHE_BYTES], which sums the
     /// caches of all engines in the process.
@@ -130,7 +138,7 @@ impl SliceCacheStore {
                 .max_capacity(options.experimental_slice_agg_cache_size.as_bytes())
                 .weigher(|_key: &SliceKey, entry: &Arc<SliceEntry>| {
                     let bytes = size_of::<SliceKey>()
-                        + entry.fingerprint.len()
+                        + size_of::<FingerprintDigest>()
                         + entry
                             .batches
                             .iter()
@@ -756,7 +764,7 @@ struct ExecState {
     hits: Mutex<Vec<RecordBatch>>,
     hit_slices: HashSet<i64>,
     /// Slices to cache once every partition has finished, by slice start.
-    pending: HashMap<i64, (SliceKey, TimeRangeFingerprint)>,
+    pending: HashMap<i64, (SliceKey, FingerprintDigest)>,
     /// States handed over by the partitions that finished.
     collected: Mutex<Vec<Collected>>,
     collected_bytes: AtomicUsize,
@@ -945,7 +953,7 @@ impl ExecState {
             self.store.entries.insert(
                 key.clone(),
                 Arc::new(SliceEntry {
-                    fingerprint: fingerprint.clone(),
+                    fingerprint: *fingerprint,
                     batches: by_slice.remove(start).unwrap_or_default(),
                 }),
             );
@@ -992,10 +1000,14 @@ impl SliceAggExec {
                 start: lo,
                 end: hi,
             };
-            if let Some(fingerprint) = scan.time_range_fingerprint(
-                Timestamp::new(lo, self.ts_unit),
-                Timestamp::new(hi, self.ts_unit),
-            ) {
+            if let Some(fingerprint) = scan
+                .time_range_fingerprint(
+                    Timestamp::new(lo, self.ts_unit),
+                    Timestamp::new(hi, self.ts_unit),
+                )
+                .as_ref()
+                .map(fingerprint_digest)
+            {
                 if let Some(entry) = self.store.entries.get(&key) {
                     if entry.fingerprint == fingerprint {
                         hits.extend(entry.batches.iter().cloned());
