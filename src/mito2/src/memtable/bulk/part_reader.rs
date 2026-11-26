@@ -26,7 +26,6 @@ use datatypes::data_type::DataType;
 use mito_codec::row_converter::PrimaryKeyFilter;
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReader;
-use partition::expr::PartitionExpr;
 use snafu::ResultExt;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::storage::{ColumnId, SequenceNumber, SequenceRange};
@@ -38,7 +37,10 @@ use crate::error::{
 use crate::memtable::bulk::context::{BulkIterContext, BulkIterContextRef};
 use crate::memtable::bulk::part::EncodedBulkPart;
 use crate::memtable::bulk::row_group_reader::MemtableRowGroupReaderBuilder;
-use crate::memtable::{MemScanMetrics, MemScanMetricsData};
+use crate::memtable::{
+    CreatorSliceCursor, CreatorSliceCursors, MemScanMetrics, MemScanMetricsData,
+    creator_slice_sequence_range, least_slice_until, sequence_range_upper,
+};
 use crate::metrics::{READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
 use crate::sst::parquet::file_range::TagDecodeState;
 use crate::sst::parquet::flat_format::{
@@ -57,7 +59,7 @@ pub struct EncodedBulkPartIter {
     sequence: Option<SequenceRange>,
     /// Cursor of each piece a row of this part may belong to
     /// ([`crate::memtable::RangesOptions::creator_slices`]).
-    creator_slices: Option<Arc<Vec<(PartitionExpr, SequenceNumber)>>>,
+    creator_slices: Option<CreatorSliceCursors>,
     /// Cached skip_fields for current row group.
     current_skip_fields: bool,
     /// Primary key filter for prefiltering before convert_batch.
@@ -127,10 +129,7 @@ impl EncodedBulkPartIter {
     }
 
     /// Sets the cursor of each piece a row of this part may belong to.
-    pub fn with_creator_slices(
-        mut self,
-        creator_slices: Option<Arc<Vec<(PartitionExpr, SequenceNumber)>>>,
-    ) -> Self {
+    pub fn with_creator_slices(mut self, creator_slices: Option<CreatorSliceCursors>) -> Self {
         self.creator_slices = creator_slices;
         self
     }
@@ -253,7 +252,7 @@ pub struct BulkPartBatchIter {
     sequence: Option<SequenceRange>,
     /// Cursor of each piece a row of this part may belong to
     /// ([`crate::memtable::RangesOptions::creator_slices`]).
-    creator_slices: Option<Arc<Vec<(PartitionExpr, SequenceNumber)>>>,
+    creator_slices: Option<CreatorSliceCursors>,
     /// Primary key filter for prefiltering before convert_batch.
     pk_filter: Option<CachedPrimaryKeyFilter>,
     /// Metrics for this iterator.
@@ -305,10 +304,7 @@ impl BulkPartBatchIter {
     }
 
     /// Sets the cursor of each piece a row of this part may belong to.
-    pub fn with_creator_slices(
-        mut self,
-        creator_slices: Option<Arc<Vec<(PartitionExpr, SequenceNumber)>>>,
-    ) -> Self {
+    pub fn with_creator_slices(mut self, creator_slices: Option<CreatorSliceCursors>) -> Self {
         self.creator_slices = creator_slices;
         self
     }
@@ -421,15 +417,16 @@ impl Drop for BulkPartBatchIter {
 ///
 /// `sequence` bounds every row by the region-level sequence range and
 /// `creator_slices` bounds each row by the cursor of the piece it belongs to
-/// (`RangesOptions::creator_slices`); the two are combined so the per-piece rule only
-/// replaces the lower floor of the region-level range.
+/// (`RangesOptions::creator_slices`); the two are combined so the per-piece rule replaces the
+/// lower floor of the region-level range and narrows its upper end by the bound the piece
+/// states.
 ///
 /// # Panics
 /// Panics if the format is not flat.
 fn apply_combined_filters(
     context: &BulkIterContext,
     sequence: &Option<SequenceRange>,
-    creator_slices: Option<&[(PartitionExpr, SequenceNumber)]>,
+    creator_slices: Option<&[CreatorSliceCursor]>,
     record_batch: RecordBatch,
     skip_fields: bool,
     pk_filter: Option<&mut dyn PrimaryKeyFilter>,
@@ -488,8 +485,12 @@ fn apply_combined_filters(
         combined_filter = Some(and_mask(combined_filter, sequence_filter)?);
     }
 
-    // Filters rows by the cursor of the piece each row belongs to.
-    if let Some(creator_mask) = creator_slice_mask(context, creator_slices, &record_batch)? {
+    // Filters rows by the cursor of the piece each row belongs to. A piece that states an
+    // upper bound narrows the read's fence, which is the upper end `sequence` states.
+    let read_fence = sequence_range_upper(sequence.as_ref());
+    if let Some(creator_mask) =
+        creator_slice_mask(context, creator_slices, read_fence, &record_batch)?
+    {
         combined_filter = Some(and_mask(combined_filter, creator_mask)?);
     }
 
@@ -528,45 +529,55 @@ fn and_mask(current: Option<BooleanArray>, next: BooleanArray) -> error::Result<
 /// A bulk part keeps the tag columns and the physical sequence of every row as real
 /// columns, so the piece a row belongs to is resolved per row: the candidate partition
 /// expressions are evaluated over the whole batch, and a row is kept only when its own
-/// `__sequence` is above the cursor of the candidate that selects it. This is the bulk
-/// memtable counterpart of the per-row slice selection a physical-sequence read of an SST
-/// applies (`FileRangeContext::evaluate_creator_slices`).
+/// `__sequence` is above the cursor of the candidate that selects it and at or below
+/// `min(read_fence, until)` of that candidate — `read_fence` being the upper end the read's
+/// own sequence range states and `until` the last sequence the piece's delta covers. This is
+/// the bulk memtable counterpart of the per-row slice selection a physical-sequence read of an
+/// SST applies (`FileRangeContext::evaluate_creator_slices`).
 ///
 /// A row whose piece cannot be decided is answered by [`unresolved_creator_slices`]: the
 /// least advanced cursor is exact while every candidate carries it, and the read fails
 /// otherwise. That covers a row no candidate selects and an expression that cannot be
-/// resolved, planned or evaluated. When several candidates select one row the least advanced
-/// of them decides.
+/// resolved, planned or evaluated. When several candidates select one row, the least advanced
+/// of their cursors and the least of the bounds they state decide: the row is kept when it is
+/// above one of them and below all of them.
 ///
 /// `None` or an empty set applies no filter, and so does a set whose cursors all carry one
-/// value: that value is the region-level floor the read already states.
+/// value and state no bound: that value is the region-level floor the read already states.
 fn creator_slice_mask(
     context: &BulkIterContext,
-    slices: Option<&[(PartitionExpr, SequenceNumber)]>,
+    slices: Option<&[CreatorSliceCursor]>,
+    read_fence: Option<SequenceNumber>,
     record_batch: &RecordBatch,
 ) -> error::Result<Option<BooleanArray>> {
     let Some(slices) = slices.filter(|slices| !slices.is_empty()) else {
         return Ok(None);
     };
-    let Some(&(_, first)) = slices.first() else {
-        return Ok(None);
-    };
-    // A single cursor value is the floor of the region: which piece a row belongs to cannot
-    // change the outcome, so the batch needs no evaluation.
-    if slices.iter().all(|(_, cursor)| *cursor == first) {
-        return Ok(None);
-    }
+    let sequence_column = record_batch.column(sequence_column_index(record_batch.num_columns()));
 
-    // A row no slice explains is attributed to the least advanced candidate.
+    // A row no slice explains is attributed to the least advanced candidate, bounded by the
+    // least bound the candidates state: the only bound every one of them proves.
     let fallback = slices
         .iter()
-        .map(|(_, cursor)| *cursor)
+        .map(|(_, cursor, _)| *cursor)
         .min()
         .unwrap_or_default();
-    let sequence_column = record_batch.column(sequence_column_index(record_batch.num_columns()));
-    let fallback_mask = SequenceRange::Gt { min: fallback }
+    let fallback_until = least_slice_until(slices.iter().map(|(_, _, until)| until));
+    let fallback_mask = creator_slice_sequence_range(fallback, fallback_until, read_fence)
         .filter(sequence_column)
         .context(ComputeArrowSnafu)?;
+
+    // One cursor value for every piece is the floor of the region: which piece a row belongs
+    // to cannot change the outcome, so the batch needs no evaluation. A stated bound still
+    // narrows every row alike, and the fallback mask above is exactly that rule.
+    if slices.iter().all(|(_, cursor, _)| *cursor == fallback) {
+        // Without a stated bound the read's own range is the whole rule, as it always was.
+        return if fallback_until.is_none() {
+            Ok(None)
+        } else {
+            Ok(Some(fallback_mask))
+        };
+    }
 
     // Per row, the candidate slice whose expression holds.
     let selected = match creator_slice_selection(context, slices, record_batch) {
@@ -582,13 +593,25 @@ fn creator_slice_mask(
             );
         }
     };
-    // Per candidate, the rows whose own sequence is above its cursor.
+    // Per candidate, the rows whose own sequence is above its cursor, and the rows at or below
+    // the bound it states (`None` = unbounded above, so the read's fence is the only end).
     let mut not_consumed = Vec::with_capacity(slices.len());
-    for (_, cursor) in slices {
+    let mut within_bound = Vec::with_capacity(slices.len());
+    for (_, cursor, until) in slices {
         not_consumed.push(
             SequenceRange::Gt { min: *cursor }
                 .filter(sequence_column)
                 .context(ComputeArrowSnafu)?,
+        );
+        let bound = until.map(|until| read_fence.map_or(until, |fence| fence.min(until)));
+        within_bound.push(
+            bound
+                .map(|max| {
+                    SequenceRange::LtEq { max }
+                        .filter(sequence_column)
+                        .context(ComputeArrowSnafu)
+                })
+                .transpose()?,
         );
     }
 
@@ -598,15 +621,21 @@ fn creator_slice_mask(
     for row in 0..num_rows {
         let mut matched = false;
         let mut keep = false;
+        let mut within = true;
         // The slices are disjoint, so at most one expression selects a row. If more than one
         // does (a domain that was not split cleanly), any candidate above its cursor keeps
-        // the row, which is the least advanced cursor among them.
+        // the row — the least advanced cursor among them — while every one of them must
+        // still cover the row with the bound it states.
         for (index, mask) in selected.iter().enumerate() {
             if mask.value(row) {
                 matched = true;
                 keep |= not_consumed[index].value(row);
+                if let Some(bound) = &within_bound[index] {
+                    within &= bound.value(row);
+                }
             }
         }
+        keep &= within;
         if !matched {
             unmatched += 1;
             keep = fallback_mask.value(row);
@@ -646,16 +675,16 @@ fn creator_slice_mask(
 /// cannot resolve.
 fn unresolved_creator_slices(
     context: &BulkIterContext,
-    slices: &[(PartitionExpr, SequenceNumber)],
+    slices: &[CreatorSliceCursor],
     fallback_mask: BooleanArray,
     detail: &str,
 ) -> error::Result<Option<BooleanArray>> {
-    let Some(min) = slices.iter().map(|(_, cursor)| *cursor).min() else {
+    let Some(min) = slices.iter().map(|(_, cursor, _)| *cursor).min() else {
         return Ok(Some(fallback_mask));
     };
     let max = slices
         .iter()
-        .map(|(_, cursor)| *cursor)
+        .map(|(_, cursor, _)| *cursor)
         .max()
         .unwrap_or(min);
     if min == max {
@@ -686,12 +715,12 @@ fn unresolved_creator_slices(
 /// when an expression cannot be planned or evaluated.
 fn creator_slice_selection(
     context: &BulkIterContext,
-    slices: &[(PartitionExpr, SequenceNumber)],
+    slices: &[CreatorSliceCursor],
     record_batch: &RecordBatch,
 ) -> error::Result<Vec<BooleanBuffer>> {
     let metadata = context.read_format().metadata();
     let mut referenced = HashSet::new();
-    for (expr, _) in slices {
+    for (expr, ..) in slices {
         expr.collect_column_names(&mut referenced);
     }
 
@@ -731,7 +760,7 @@ fn creator_slice_selection(
     let probe =
         RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).context(ComputeArrowSnafu)?;
     let mut selected = Vec::with_capacity(slices.len());
-    for (expr, _) in slices {
+    for (expr, ..) in slices {
         let filter = expr
             .try_as_physical_expr(probe.schema_ref())
             .context(SerializePartitionExprSnafu)?;
@@ -1220,10 +1249,12 @@ mod tests {
                 (
                     partition::expr::col("field1").gt_eq(Operand::Value(Value::Int64(0))),
                     left,
+                    None,
                 ),
                 (
                     partition::expr::col("field1").lt(Operand::Value(Value::Int64(0))),
                     right,
+                    None,
                 ),
             ];
             Some(Arc::new(slices))
@@ -1271,6 +1302,146 @@ mod tests {
             vec![3, 4, 6],
             sequences.values().to_vec(),
             "one cursor value for every piece keeps the part-level floor of the whole region"
+        );
+    }
+
+    /// A row numbered above the upper bound of its own slice belongs to a later delta: the
+    /// bulk part resolves the piece of every row from its tag columns and narrows the read's
+    /// fence by the bound that piece states, so the row is not delivered. A slice that states
+    /// no bound keeps the fence alone, exactly as before the bound existed.
+    #[test]
+    fn test_bulk_part_does_not_deliver_rows_above_the_creator_slice_upper_bound() {
+        use datatypes::value::Value;
+        use partition::expr::Operand;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("key1", DataType::Utf8, false),
+            Field::new("field1", DataType::Int64, false),
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(datatypes::arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(
+                "__primary_key",
+                DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Binary)),
+                false,
+            ),
+            Field::new("__sequence", DataType::UInt64, false),
+            Field::new("__op_type", DataType::UInt8, false),
+        ]));
+
+        // Two series, numbered 3, 4 and 6 for the first and 7 for the second.
+        let keys = ["a", "a", "a", "z"];
+        let key1 = Arc::new(StringArray::from_iter_values(keys));
+        let field1 = Arc::new(Int64Array::from(vec![0, 0, 0, 0]));
+        let timestamp = Arc::new(datatypes::arrow::array::TimestampMillisecondArray::from(
+            vec![0, 1000, 2000, 3000],
+        ));
+        let values = Arc::new(BinaryArray::from_iter_values(
+            keys.iter().map(|key| new_primary_key(&[*key])),
+        ));
+        let primary_key = Arc::new(DictionaryArray::new(
+            UInt32Array::from(vec![0, 0, 0, 1]),
+            values,
+        ));
+        let sequence = Arc::new(UInt64Array::from(vec![3, 4, 6, 7]));
+        let op_type = Arc::new(UInt8Array::from(vec![1, 1, 1, 1]));
+        let record_batch = RecordBatch::try_new(
+            schema,
+            vec![key1, field1, timestamp, primary_key, sequence, op_type],
+        )
+        .unwrap();
+
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "key1",
+                    ConcreteDataType::string_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 0,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "field1",
+                    ConcreteDataType::int64_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "timestamp",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 2,
+            })
+            .primary_key(vec![0]);
+
+        let context = Arc::new(
+            BulkIterContext::new(Arc::new(builder.build().unwrap()), None, None, false, 1).unwrap(),
+        );
+        // The read's own fence is 10: it admits every row of the part, so only the per-piece
+        // rule can hold the row at 7 back.
+        let sequence_filter = Some(SequenceRange::GtLtEq { min: 4, max: 10 });
+        let slice_lt =
+            || partition::expr::col("key1").lt(Operand::Value(Value::String("m".into())));
+        let slice_ge =
+            || partition::expr::col("key1").gt_eq(Operand::Value(Value::String("m".into())));
+        let read = |slices: Vec<(
+            partition::expr::PartitionExpr,
+            SequenceNumber,
+            Option<SequenceNumber>,
+        )>| {
+            let iter = BulkPartBatchIter::from_single(
+                record_batch.clone(),
+                context.clone(),
+                sequence_filter,
+                0,
+                None,
+            )
+            .with_creator_slices(Some(Arc::new(slices)));
+            let batches: Vec<_> = iter.map(|rb| rb.unwrap()).collect();
+            let mut sequences = Vec::new();
+            for batch in batches {
+                let column = batch
+                    .column(batch.num_columns() - 2)
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .unwrap();
+                sequences.extend_from_slice(column.values());
+            }
+            sequences
+        };
+
+        // Both slices state the same delta end, 6. The row at 6 belongs to the piece consumed
+        // up to 4 and is owed; the row at 7 belongs to the other piece, whose bound it is
+        // above, so it is left to the delta that covers it.
+        assert_eq!(
+            vec![6],
+            read(vec![(slice_lt(), 4, Some(6)), (slice_ge(), 5, Some(6)),]),
+            "a row above its piece's upper bound is not part of this delta"
+        );
+
+        // Without a stated bound the fence is the whole rule, as it always was: the row at 7
+        // is above the cursor of its piece (5) and at or below the fence, so it is delivered.
+        assert_eq!(
+            vec![6, 7],
+            read(vec![(slice_lt(), 4, None), (slice_ge(), 5, None)]),
+            "without a bound every row above the piece's cursor is still owed"
+        );
+
+        // A bound at or above the fence changes nothing: the fence is the tighter end.
+        assert_eq!(
+            vec![6, 7],
+            read(vec![(slice_lt(), 4, Some(10)), (slice_ge(), 5, Some(10)),]),
+            "the bound narrows the fence, it never widens it"
         );
     }
 }

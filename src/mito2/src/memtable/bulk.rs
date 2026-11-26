@@ -36,7 +36,6 @@ fn env_usize(name: &str, default: usize) -> usize {
 use common_time::Timestamp;
 use datatypes::arrow::datatypes::SchemaRef;
 use mito_codec::key_values::KeyValue;
-use partition::expr::PartitionExpr;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_with::{DisplayFromStr, serde_as};
@@ -59,10 +58,10 @@ use crate::memtable::bulk::part::{
 use crate::memtable::bulk::part_reader::BulkPartBatchIter;
 use crate::memtable::stats::WriteMetrics;
 use crate::memtable::{
-    AllocTracker, BoxedBatchIterator, BoxedRecordBatchIterator, EncodedBulkPart, EncodedRange,
-    IterBuilder, KeyValues, MemScanMetrics, Memtable, MemtableBuilder, MemtableId, MemtableRange,
-    MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats, RangesOptions,
-    group_by_sequence,
+    AllocTracker, BoxedBatchIterator, BoxedRecordBatchIterator, CreatorSliceCursors,
+    EncodedBulkPart, EncodedRange, IterBuilder, KeyValues, MemScanMetrics, Memtable,
+    MemtableBuilder, MemtableId, MemtableRange, MemtableRangeContext, MemtableRanges, MemtableRef,
+    MemtableStats, RangesOptions, group_by_sequence,
 };
 use crate::read::flat_dedup::{FlatDedupIterator, FlatLastNonNull, FlatLastRow};
 use crate::read::flat_merge::FlatMergeIterator;
@@ -909,7 +908,7 @@ pub struct BulkRangeIterBuilder {
     pub context: Arc<BulkIterContext>,
     pub sequence: Option<SequenceRange>,
     /// Cursor of each piece a row may belong to ([`RangesOptions::creator_slices`]).
-    pub creator_slices: Option<Arc<Vec<(PartitionExpr, SequenceNumber)>>>,
+    pub creator_slices: Option<CreatorSliceCursors>,
 }
 
 /// Iterator builder for multi bulk range
@@ -918,7 +917,7 @@ struct MultiBulkRangeIterBuilder {
     context: Arc<BulkIterContext>,
     sequence: Option<SequenceRange>,
     /// Cursor of each piece a row may belong to ([`RangesOptions::creator_slices`]).
-    creator_slices: Option<Arc<Vec<(PartitionExpr, SequenceNumber)>>>,
+    creator_slices: Option<CreatorSliceCursors>,
 }
 
 impl IterBuilder for BulkRangeIterBuilder {
@@ -1010,7 +1009,7 @@ struct EncodedBulkRangeIterBuilder {
     context: Arc<BulkIterContext>,
     sequence: Option<SequenceRange>,
     /// Cursor of each piece a row may belong to ([`RangesOptions::creator_slices`]).
-    creator_slices: Option<Arc<Vec<(PartitionExpr, SequenceNumber)>>>,
+    creator_slices: Option<CreatorSliceCursors>,
 }
 
 impl IterBuilder for EncodedBulkRangeIterBuilder {
