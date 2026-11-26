@@ -3515,3 +3515,230 @@ async fn authoritative_copy_preserves_source_order(#[case] delete: bool) {
     }
     engine.stop().await.unwrap();
 }
+
+use crate::series_index::format::SeriesFormats;
+use store_api::storage::SeriesSample;
+
+/// Series sampling keeps a deterministic fraction of the series, prunes the blocks of
+/// the columnar series index, and never splits a series across the memtable and the
+/// SSTs.
+#[tokio::test]
+#[allow(clippy::print_stdout)] // The block counts are this test's evidence; report them.
+async fn series_sampling_prunes_blocks_and_keeps_whole_series() {
+    use crate::metrics::COLUMNAR_READ_COUNT;
+
+    let (_env, engine, region) = fixture_with(true).await;
+    // Real artifacts pack 8192 series per block, so the format is narrowed to make block
+    // pruning measurable through the engine.
+    *region.series_index_version_control.formats.write().unwrap() = Arc::new(SeriesFormats {
+        index: Some(Arc::new(ColumnarSeriesFormat {
+            block_rows: 8,
+            ..Default::default()
+        })),
+        samples: Some(Arc::new(ColumnarSamplesFormat::default())),
+    });
+
+    // `tsid` is a tag hash, so the fixture spreads a couple of hundred series over the whole
+    // hash space and a quarter sample keeps a contiguous prefix of the sorted order.
+    const SERIES: u64 = 200;
+    let step = u64::MAX / SERIES;
+    let tsid_of = |i: u64| (i + 1) * step;
+    let tag = |i: u64| format!("s{i}");
+    for round in 0..2 {
+        for i in 0..SERIES {
+            let name = tag(i);
+            let tags = [name.as_str(), "x"];
+            write_with_tags(
+                &engine,
+                &region,
+                tsid_of(i),
+                1000 + round * 1000,
+                Some(i as f64 + round as f64),
+                &tags,
+            )
+            .await;
+        }
+        flush_region(&engine, region.region_id, None).await;
+    }
+    // Two flushed SSTs, then the columnar series index and samples over both of them.
+    build(&engine, &region).await;
+
+    let full_request = ScanRequest {
+        distribution: Some(TimeSeriesDistribution::PerSeries),
+        ..Default::default()
+    };
+    let sampled_request = ScanRequest {
+        sample: Some(SeriesSample { num: 1, den: 4 }),
+        ..full_request.clone()
+    };
+    let counter = |kind| COLUMNAR_READ_COUNT.with_label_values(&[kind]).get();
+    let blocks = || counter("series_blocks_read");
+
+    let before_blocks = (blocks(), counter("series_blocks_sample_pruned"));
+    let full = read_series_rows(&engine, region.region_id, full_request.clone()).await;
+    let full_blocks = blocks() - before_blocks.0;
+    let full_pruned = counter("series_blocks_sample_pruned") - before_blocks.1;
+    let before_blocks = (blocks(), counter("series_blocks_sample_pruned"));
+    let before_dropped = counter("prepare_sample_dropped_series");
+    let sampled = read_series_rows(&engine, region.region_id, sampled_request.clone()).await;
+    let sampled_blocks = blocks() - before_blocks.0;
+    let sampled_pruned = counter("series_blocks_sample_pruned") - before_blocks.1;
+    let sampled_dropped = counter("prepare_sample_dropped_series") - before_dropped;
+    let ratio = series_of(&sampled).len() as f64 / series_of(&full).len() as f64;
+    println!(
+        "series sample blocks read: full={full_blocks}, sampled={sampled_blocks}, \
+         blocks pruned by the sample={sampled_pruned}, candidates dropped={sampled_dropped}, \
+         series ratio={ratio:.3}"
+    );
+    // Series-index entries are sorted by `(table_id, tsid)`, so the sample skips blocks.
+    assert!(
+        sampled_blocks < full_blocks,
+        "sampling must read fewer series-index blocks: full={full_blocks}, sampled={sampled_blocks}"
+    );
+    // The sampler's own metrics must account for the work it avoided: an unsampled scan
+    // prunes nothing, a sampled one prunes whole blocks and drops the out-of-bound rows of
+    // the single block that straddles the bound.
+    assert_eq!(0, full_pruned, "an unsampled scan prunes no block");
+    assert!(
+        sampled_pruned > 0,
+        "the sample must prune series-index blocks: pruned={sampled_pruned}"
+    );
+    assert!(
+        sampled_dropped > 0,
+        "the sample must drop the out-of-bound rows of a straddling block: \
+         dropped={sampled_dropped}"
+    );
+
+    assert_sampled_subset(&full, &sampled, 0.15..=0.38);
+
+    // A memtable version of every series must never split a sampled series: a series keeps
+    // its SST rows and its memtable row together, or it disappears entirely.
+    for i in 0..SERIES {
+        let name = tag(i);
+        let tags = [name.as_str(), "x"];
+        write_with_tags(
+            &engine,
+            &region,
+            tsid_of(i),
+            3000,
+            Some(i as f64 + 100.0),
+            &tags,
+        )
+        .await;
+    }
+    let full = read_series_rows(&engine, region.region_id, full_request).await;
+    let sampled = read_series_rows(&engine, region.region_id, sampled_request).await;
+    assert_sampled_subset(&full, &sampled, 0.15..=0.38);
+    let kept_series = series_of(&sampled);
+    for i in 0..SERIES {
+        let times: Vec<_> = sampled
+            .iter()
+            .filter(|(tsid, _, _)| *tsid == tsid_of(i))
+            .map(|(_, time, _)| *time)
+            .collect();
+        if kept_series.contains(&tsid_of(i)) {
+            assert_eq!(
+                vec![1000, 2000, 3000],
+                times,
+                "series {i} keeps its SST rows and its memtable row"
+            );
+        } else {
+            assert!(
+                times.is_empty(),
+                "dropped series {i} must not surface rows: {times:?}"
+            );
+        }
+    }
+    engine.stop().await.unwrap();
+}
+
+/// Reads the raw series of every partition as `(tsid, time, value)` rows.
+async fn read_series_rows(
+    engine: &MitoEngine,
+    region_id: store_api::storage::RegionId,
+    request: ScanRequest,
+) -> Vec<(u64, i64, f64)> {
+    let scanner = engine.handle_query(region_id, request).await.unwrap();
+    let binding = labels(scanner.metadata());
+    let ctx = QueryScanContext::default();
+    let metrics = ExecutionPlanMetricsSet::new();
+    let mut collected = Vec::new();
+    for partition in 0..scanner.properties().num_partitions().max(1) {
+        let stream = scanner
+            .scan_series_partition(&ctx, &metrics, partition, &binding)
+            .unwrap()
+            .unwrap();
+        for (key, time, value) in rows(&stream.try_collect::<Vec<_>>().await.unwrap()) {
+            // `rows` re-encodes each chunk identity as `(u32 table_id, u64 tsid)` big-endian.
+            let tsid = u64::from_be_bytes(key[4..12].try_into().unwrap());
+            collected.push((tsid, time, value));
+        }
+    }
+    collected.sort_unstable_by_key(|row| (row.0, row.1));
+    collected
+}
+
+fn series_of(rows: &[(u64, i64, f64)]) -> std::collections::BTreeSet<u64> {
+    rows.iter().map(|(tsid, _, _)| *tsid).collect()
+}
+
+/// Checks that the sampled read kept a proper fraction of the series and every row of
+/// each kept series.
+fn assert_sampled_subset(
+    full: &[(u64, i64, f64)],
+    sampled: &[(u64, i64, f64)],
+    ratio: std::ops::RangeInclusive<f64>,
+) {
+    let full_series = series_of(full);
+    let kept_series = series_of(sampled);
+    assert!(kept_series.is_subset(&full_series));
+    let observed = kept_series.len() as f64 / full_series.len() as f64;
+    assert!(
+        ratio.contains(&observed),
+        "sampled {}/{} series ({observed})",
+        kept_series.len(),
+        full_series.len()
+    );
+    let kept: Vec<_> = full
+        .iter()
+        .filter(|(tsid, _, _)| kept_series.contains(tsid))
+        .copied()
+        .collect();
+    assert_eq!(kept, sampled, "a kept series must keep every row");
+}
+
+/// A sample on a scan that cannot prune by `tsid` is refused instead of ignored.
+#[tokio::test]
+async fn series_sample_requires_a_tsid_series_scan() {
+    let (_env, engine, region) = fixture_with(true).await;
+    let request = ScanRequest {
+        sample: Some(SeriesSample { num: 1, den: 4 }),
+        ..Default::default()
+    };
+    // Without a per-series distribution the scan has no candidate phase to prune.
+    let error = engine
+        .handle_query(region.region_id, request.clone())
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("series sample 1/4"),
+        "unexpected error: {error}"
+    );
+    // An invalid fraction is refused as well.
+    let error = engine
+        .handle_query(
+            region.region_id,
+            ScanRequest {
+                distribution: Some(TimeSeriesDistribution::PerSeries),
+                sample: Some(SeriesSample { num: 4, den: 4 }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("invalid series sample 4/4"),
+        "unexpected error: {error}"
+    );
+    engine.stop().await.unwrap();
+}

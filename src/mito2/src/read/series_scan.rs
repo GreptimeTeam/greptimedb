@@ -32,7 +32,7 @@ use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
 use common_telemetry::tracing::{self, Instrument};
 use common_telemetry::{debug, warn};
 use datafusion::execution::memory_pool::MemoryPool;
-use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilder};
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, PhysicalExpr};
 use datafusion_common::tree_node::TreeNode;
 use datafusion_expr::{Expr, Volatility};
@@ -60,8 +60,9 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
 use crate::error::{
-    Error, InvalidRecordBatchSnafu, InvalidSenderSnafu, JoinSnafu, PartitionOutOfRangeSnafu,
-    Result, ScanMultiTimesSnafu, ScanSeriesSnafu, TooManyFilesToReadSnafu,
+    Error, InvalidRecordBatchSnafu, InvalidRequestSnafu, InvalidSenderSnafu, JoinSnafu,
+    PartitionOutOfRangeSnafu, Result, ScanMultiTimesSnafu, ScanSeriesSnafu,
+    TooManyFilesToReadSnafu,
 };
 use crate::metrics::SCAN_MAX_CONCURRENT_FILES;
 use crate::read::ScannerMetrics;
@@ -767,6 +768,16 @@ impl SeriesScan {
         metrics_set: &ExecutionPlanMetricsSet,
         explain_verbose: bool,
     ) -> Result<ScanBatchStream> {
+        // The legacy distributor discovers series from the row data, so it has no
+        // `tsid`-ordered candidate stream to prune. Fail closed instead of returning
+        // every series to a caller that asked for a sample.
+        ensure!(
+            self.stream_ctx.input.sample.is_none(),
+            InvalidRequestSnafu {
+                region_id: self.stream_ctx.input.region_metadata().region_id,
+                reason: "series sampling requires the two-phase series scan",
+            }
+        );
         self.maybe_start_legacy_distributor(metrics_set, explain_verbose);
         let mut receiver = self.legacy_receivers.lock().unwrap()[partition]
             .take()
@@ -1510,11 +1521,30 @@ impl SeriesCandidateDistributor {
         let mut candidates = candidate_scanner.build_stream().await?;
         let mut collector =
             SeriesBatchCollector::new(self.partitions.len()).context(InvalidSenderSnafu)?;
+        // The `tsid` of a metric series is a hash of its tags, so pruning it drops
+        // every memtable and SST row of that series and keeps both sides of a
+        // deduplicated series consistent.
+        let sample = self.stream_ctx.input.sample.map(|sample| {
+            (
+                sample.tsid_max(),
+                // Candidate series this sample dropped before they were assigned any read.
+                MetricBuilder::new(&self.metrics_set)
+                    .counter("candidate_series_sample_dropped", self.partitions.len()),
+            )
+        });
         let mut chunked = false;
-        while let Some(batch) = candidates.try_next().await? {
+        while let Some(mut batch) = candidates.try_next().await? {
             if !self.should_fetch_candidates() {
                 part_metrics.on_finish();
                 return Ok(());
+            }
+            if let Some((tsid_max, dropped)) = &sample {
+                let num_candidates = batch.len();
+                batch.retain(|series| series.tsid < *tsid_max);
+                dropped.add(num_candidates - batch.len());
+                if batch.is_empty() {
+                    continue;
+                }
             }
             collector.push(batch);
             if collector.len() >= candidate_series_assignment_threshold() {
@@ -1530,7 +1560,12 @@ impl SeriesCandidateDistributor {
         }
 
         if collector.len() > 0 {
-            self.send_assignments(collector.finish(!chunked), &partition_pruner);
+            // A cached result range holds the rows of one allow-list, and the range cache key
+            // cannot tell two samples apart, so a sampled scan never reads or fills it.
+            self.send_assignments(
+                collector.finish(!chunked && sample.is_none()),
+                &partition_pruner,
+            );
         }
         part_metrics.on_finish();
         Ok(())

@@ -48,8 +48,8 @@ use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{PartitionRange, RegionScannerRef};
 use store_api::storage::{
-    ColumnId, RegionId, ScanRequest, SequenceNumber, SequenceRange, TimeSeriesDistribution,
-    TimeSeriesRowSelector,
+    ColumnId, RegionId, ScanRequest, SequenceNumber, SequenceRange, SeriesSample,
+    TimeSeriesDistribution, TimeSeriesRowSelector,
 };
 use table::predicate::{Predicate, build_time_range_predicate, extract_time_range_from_expr};
 use tokio::sync::{Semaphore, mpsc};
@@ -72,6 +72,7 @@ use crate::read::range::{FileRangeBuilder, MemRangeBuilder, RangeMeta, RowGroupI
 use crate::read::range_cache::{ScanRequestFingerprint, implied_time_range_from_exprs};
 use crate::read::read_columns::ReadColumns;
 use crate::read::seq_scan::SeqScan;
+use crate::read::series_candidate::is_sparse_metric_metadata;
 use crate::read::series_scan::SeriesScan;
 use crate::read::stream::ScanBatchStream;
 use crate::read::unordered_scan::UnorderedScan;
@@ -499,10 +500,45 @@ impl ScanRegion {
             || self.version.options.sst_format == Some(crate::sst::FormatType::Narthex)
     }
 
+    /// Rejects a series sample this scan cannot honor.
+    ///
+    /// Sampling prunes whole series by their `tsid`, so it is only sound on a
+    /// per-series scan of a sparse metric region, where the candidate scan
+    /// enumerates series before any row is read. Rejecting the request keeps a
+    /// caller from silently receiving every series.
+    fn validate_sample(&self) -> Result<()> {
+        let Some(sample) = self.request.sample else {
+            return Ok(());
+        };
+        let region_id = self.version.metadata.region_id;
+        ensure!(
+            sample.den > 0 && sample.num < sample.den,
+            InvalidRequestSnafu {
+                region_id,
+                reason: format!("invalid series sample {sample}: need num < den and den > 0"),
+            }
+        );
+        ensure!(
+            self.request.distribution == Some(TimeSeriesDistribution::PerSeries)
+                && self.experimental_series_scan_v2
+                && is_sparse_metric_metadata(&self.version.metadata),
+            InvalidRequestSnafu {
+                region_id,
+                reason: format!(
+                    "series sample {sample} requires a per-series ({}) scan of a sparse metric \
+                     region with __table_id/__tsid primary keys and the two-phase series scan",
+                    TimeSeriesDistribution::PerSeries
+                ),
+            }
+        );
+        Ok(())
+    }
+
     /// Creates a scan input.
     #[tracing::instrument(skip_all, fields(region_id = %self.region_id()))]
     async fn scan_input(mut self) -> Result<ScanInput> {
         let metadata = &self.version.metadata;
+        self.validate_sample()?;
         let sst_min_sequence = self.request.sst_min_sequence.and_then(NonZeroU64::new);
         let time_range = self.build_time_range_predicate();
         let predicate = PredicateGroup::new(metadata, &self.request.filters)?;
@@ -663,6 +699,7 @@ impl ScanRegion {
             .with_merge_mode(self.version.options.merge_mode())
             .with_series_row_selector(self.request.series_row_selector)
             .with_distribution(self.request.distribution)
+            .with_sample(self.request.sample)
             .with_explain_flat_format(
                 self.version.options.sst_format == Some(crate::sst::FormatType::Flat),
             )
@@ -1042,6 +1079,8 @@ pub struct ScanInput {
     pub(crate) series_row_selector: Option<TimeSeriesRowSelector>,
     /// Hint for the required distribution of the scanner.
     pub(crate) distribution: Option<TimeSeriesDistribution>,
+    /// Hint to keep only a deterministic fraction of the series of this scan.
+    pub(crate) sample: Option<SeriesSample>,
     /// Whether the region's configured SST format is flat.
     explain_flat_format: bool,
     /// Snapshot upper bound bound at scan open and propagated back to the caller.
@@ -1123,6 +1162,7 @@ impl ScanInput {
                 merge_mode: MergeMode::default(),
                 series_row_selector: None,
                 distribution: None,
+                sample: None,
                 explain_flat_format: false,
                 snapshot_sequence: None,
                 sequence_range: None,
@@ -1474,6 +1514,13 @@ impl ScanInputBuilder {
         distribution: Option<TimeSeriesDistribution>,
     ) -> Self {
         self.input.distribution = distribution;
+        self
+    }
+
+    /// Sets the series sampling hint.
+    #[must_use]
+    pub(crate) fn with_sample(mut self, sample: Option<SeriesSample>) -> Self {
+        self.input.sample = sample;
         self
     }
 
@@ -2317,6 +2364,9 @@ impl StreamContext {
         }
         if let Some(distribution) = &self.input.distribution {
             write!(f, ", \"distribution\":\"{}\"", distribution)?;
+        }
+        if let Some(sample) = &self.input.sample {
+            write!(f, ", \"sample\":\"{}\"", sample)?;
         }
 
         self.format_scan_details(f)?;

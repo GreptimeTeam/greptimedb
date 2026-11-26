@@ -554,6 +554,9 @@ impl ColumnarPreparedSource {
         preparation_metrics.bytes.insert("prepare_encoded_keys", 0);
         preparation_metrics.counts.insert("prepare_batch_series", 0);
         let direct_labels = !batch_output && sample_schema.is_some();
+        // Series sampling keeps whole series, so the bound is computed once and applied
+        // both to the index read (block pruning) and to the candidates discovered from it.
+        let tsid_max = input.sample.map(|sample| sample.tsid_max());
         let conjuncts = predicate_conjuncts(input.predicate_group().predicate());
         let mut retained_rows = 0_usize;
         let mut candidates = BTreeMap::<ExactSeriesKey, Candidate>::new();
@@ -571,7 +574,11 @@ impl ColumnarPreparedSource {
                 })
                 .collect::<Result<Vec<_>>>()?;
             tags.sort_unstable_by(|a, b| a.1.cmp(&b.1));
-            let (request, accepted) = series_read_request(&schema, &conjuncts);
+            let (mut request, accepted) = series_read_request(&schema, &conjuncts);
+            // Blocks whose first `tsid` is at or above the bound cannot hold a kept
+            // series, so the reader never loads them. A block straddling the bound is
+            // read, and its out-of-range candidates are dropped below.
+            request.tsid_max = tsid_max;
             let projection = request
                 .projection
                 .iter()
@@ -637,6 +644,7 @@ impl ColumnarPreparedSource {
                     .or_default() += batch.num_rows() as u64;
                 let started = Instant::now();
                 let mut duplicate_rows = 0_u64;
+                let mut sample_dropped_series = 0_u64;
                 let table = batch
                     .column_by_name(DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
                     .ok_or_else(|| invalid("missing table ID column"))?
@@ -671,6 +679,10 @@ impl ColumnarPreparedSource {
                 let mut fresh = Vec::<(ExactSeriesKey, usize)>::new();
                 let mut encoded_key_bytes = 0_u64;
                 for row in 0..batch.num_rows() {
+                    if tsid_max.is_some_and(|tsid_max| tsid.value(row) >= tsid_max) {
+                        sample_dropped_series += 1;
+                        continue;
+                    }
                     identity.clear();
                     codec
                         .encode_internal(table.value(row), tsid.value(row), &mut identity)
@@ -701,6 +713,15 @@ impl ColumnarPreparedSource {
                     let key = ExactSeriesKey::from_sparse_key(&identity, &mut offsets)?;
                     previous = Some(identity.clone());
                     fresh.push((key, row));
+                }
+                if fresh.is_empty() {
+                    // The sample dropped every series of this batch: no candidate, no label
+                    // batch, and no further row materialization.
+                    *preparation_metrics
+                        .counts
+                        .entry("prepare_sample_dropped_series")
+                        .or_default() += sample_dropped_series;
+                    continue;
                 }
                 // Retain only rows that introduce a new identity; the retained batch backs
                 // both explicit labels and the metadata rows of direct-label candidates.
@@ -828,6 +849,10 @@ impl ColumnarPreparedSource {
                     .counts
                     .entry("prepare_duplicate_rows")
                     .or_default() += duplicate_rows;
+                *preparation_metrics
+                    .counts
+                    .entry("prepare_sample_dropped_series")
+                    .or_default() += sample_dropped_series;
                 *preparation_metrics
                     .counts
                     .entry("prepare_batch_series")
