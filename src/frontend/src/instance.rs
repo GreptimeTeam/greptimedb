@@ -6597,6 +6597,71 @@ mod tests {
         Ok(())
     }
 
+    /// A TQL statement discovers only the tables its own SQL request may read, even where a
+    /// PromQL grant would also allow one: the HTTP action must not widen what TQL reads.
+    #[tokio::test]
+    async fn test_tql_discovery_checks_the_statement_request() -> TestResult<()> {
+        struct PromqlOnlyDenied;
+
+        impl PermissionChecker for PromqlOnlyDenied {
+            fn check_permission(
+                &self,
+                _user_info: UserInfoRef,
+                _req: PermissionReq,
+            ) -> auth::error::Result<PermissionResp> {
+                Ok(PermissionResp::Allow)
+            }
+
+            fn check_permission_with_table_targets(
+                &self,
+                _user_info: UserInfoRef,
+                req: PermissionReq,
+                targets: PermissionTableTargets,
+            ) -> auth::error::Result<PermissionResp> {
+                let reject = match targets {
+                    PermissionTableTargets::Unresolved => true,
+                    PermissionTableTargets::Resolved(targets) => {
+                        matches!(req, PermissionReq::SqlStatement(_))
+                            && targets.iter().any(|target| target.table == "denied")
+                    }
+                };
+                Ok(if reject {
+                    PermissionResp::Reject
+                } else {
+                    PermissionResp::Allow
+                })
+            }
+        }
+
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(Arc::new(PromqlOnlyDenied));
+        let instance = test_instance_with_plugins_and_metric_names(
+            test_logical_table(1024, "denied")?,
+            test_logical_table(1025, "target")?,
+            plugins,
+            None,
+        )
+        .await?;
+        let ctx = test_query_ctx(1);
+        ctx.configuration_parameter()
+            .set_query_option(NATIVE_PROMQL_OPTION, "true")
+            .unwrap();
+
+        let planning_ctx = instance
+            .check_sql_permission(
+                &parse_one_sql(r#"TQL EVAL (0, 10, '5s') {__name__=~".+"}"#),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            vec!["target".to_string()],
+            allowed_tables(planning_ctx.metric_discovery_scope())
+        );
+
+        Ok(())
+    }
+
     struct CountingCatalogManager {
         inner: Arc<catalog::memory::MemoryCatalogManager>,
         table_calls: atomic::AtomicUsize,
