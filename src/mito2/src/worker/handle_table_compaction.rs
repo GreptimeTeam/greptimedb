@@ -31,6 +31,7 @@ pub(crate) async fn publish(
     let replay = is_replay(region, context, &edit, &snapshot)?;
     validate_files(region, context, &edit)?;
     if !replay {
+        check_sequence_policy(region, context, &edit)?;
         output::verify_and_notify(region, &context.metadata, &edit.files_to_add).await?;
     }
 
@@ -58,18 +59,7 @@ pub(crate) async fn publish(
             region_id: region.region_id
         }
     );
-    // An exact scan can skip an unmarked input below its lower bound, but
-    // an unmarked replacement can inherit a higher sequence from another input.
-    if !context.options.preserve_row_sequence && region.version().options.preserve_row_sequence {
-        ensure!(
-            edit.files_to_add
-                .iter()
-                .all(|file| file.preserve_row_sequence),
-            StaleCompactionExecutionSnafu {
-                region_id: region.region_id
-            }
-        );
-    }
+    check_sequence_policy(region, context, &edit)?;
     let pending = match region
         .manifest_ctx
         .update_locked(
@@ -92,6 +82,26 @@ pub(crate) async fn publish(
     drop(manager);
     pending.fire().await;
     Ok(RegionEditOutcome::Written)
+}
+
+fn check_sequence_policy(
+    region: &MitoRegionRef,
+    context: &PublicationContext,
+    edit: &RegionEdit,
+) -> Result<()> {
+    // An exact scan can skip an unmarked input below its lower bound, but
+    // an unmarked replacement can inherit a higher sequence from another input.
+    if !context.options.preserve_row_sequence && region.version().options.preserve_row_sequence {
+        ensure!(
+            edit.files_to_add
+                .iter()
+                .all(|file| file.preserve_row_sequence),
+            StaleCompactionExecutionSnafu {
+                region_id: region.region_id
+            }
+        );
+    }
+    Ok(())
 }
 
 fn is_replay(

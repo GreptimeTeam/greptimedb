@@ -845,6 +845,13 @@ async fn test_publication_after_enabling_sequence_preservation(
             before.iter().map(|batch| batch.num_rows()).sum::<usize>()
         );
         assert_eq!(PublicationOutcome::StaleInputs, publish().await.unwrap());
+
+        // A stale job must be told to replan even if its output object is gone.
+        let access = &region.access_layer;
+        let path =
+            location::sst_file_path(access.table_dir(), outputs[0].file_id(), access.path_type());
+        access.object_store().delete(&path).await.unwrap();
+        assert_eq!(PublicationOutcome::StaleInputs, publish().await.unwrap());
         assert_eq!(
             before.pretty_print().unwrap(),
             scan().await.pretty_print().unwrap()
