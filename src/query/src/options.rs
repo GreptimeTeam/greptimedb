@@ -160,8 +160,8 @@ pub struct QueryOptions {
     pub experimental_slice_agg_cache: bool,
     /// Experimental: capacity of the slice aggregate cache. Default: `256MiB`.
     pub experimental_slice_agg_cache_size: ReadableSize,
-    /// Experimental: most states one query collects for the slice aggregate cache. A plan
-    /// whose states exceed it is not cached until the idle timeout passes. Default: `256MiB`.
+    /// Experimental: most states one aggregation collects for the slice aggregate cache. A
+    /// plan whose states exceed it is not cached until the idle timeout passes. Default: `256MiB`.
     pub experimental_slice_agg_cache_max_collect_size: ReadableSize,
     /// Experimental: slice aggregate cache entries not read for this long are dropped.
     /// Default: `1h`.

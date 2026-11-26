@@ -651,13 +651,8 @@ impl TimeRangeFingerprint {
         Self(bytes)
     }
 
-    /// Returns the size of the fingerprint in bytes.
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
     }
 }
 
