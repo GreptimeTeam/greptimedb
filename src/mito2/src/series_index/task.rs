@@ -651,7 +651,7 @@ mod tests {
         let engine = env
             .create_engine(MitoConfig {
                 experimental_enable_series_index: true,
-                native_series_index_min_files: 1,
+                experimental_series_index_min_files: 1,
                 ..Default::default()
             })
             .await;
@@ -729,7 +729,7 @@ mod tests {
             .create_engine_with_time(
                 MitoConfig {
                     experimental_enable_series_index: true,
-                    native_series_index_min_files: 1,
+                    experimental_series_index_min_files: 1,
                     ..Default::default()
                 },
                 None,

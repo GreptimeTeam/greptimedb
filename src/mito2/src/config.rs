@@ -32,6 +32,7 @@ use crate::gc::GcConfig;
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
 
 const MULTIPART_UPLOAD_MINIMUM_SIZE: ReadableSize = ReadableSize::mb(5);
+const DEFAULT_SERIES_INDEX_MIN_FILES: usize = 4;
 const DEFAULT_SERIES_INDEX_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// Default maximum number of SST files to scan concurrently.
 pub(crate) const DEFAULT_MAX_CONCURRENT_SCAN_FILES: usize = 384;
@@ -131,9 +132,8 @@ pub struct MitoConfig {
     #[serde(with = "humantime_serde")]
     pub experimental_series_index_bucket_width: Duration,
     /// Minimum uncovered live sample SSTs per native series index window.
-    /// Set with GREPTIME_SERIES_INDEX_MIN_FILES (default 4).
-    #[serde(skip, default = "native_series_index_min_files")]
-    pub native_series_index_min_files: usize,
+    /// Zero uses the default of 4.
+    pub experimental_series_index_min_files: usize,
     /// Max number of running background flush jobs (default: 1/2 of cpu cores).
     pub max_background_flushes: usize,
     /// Max number of running background compaction jobs (default: 1/4 of cpu cores).
@@ -254,14 +254,6 @@ pub struct MitoConfig {
     pub gc: GcConfig,
 }
 
-fn native_series_index_min_files() -> usize {
-    std::env::var("GREPTIME_SERIES_INDEX_MIN_FILES")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .filter(|&value| value > 0)
-        .unwrap_or(4)
-}
-
 impl Default for MitoConfig {
     fn default() -> Self {
         let mut mito_config = MitoConfig {
@@ -274,7 +266,7 @@ impl Default for MitoConfig {
             compress_manifest: false,
             max_background_index_builds: divide_num_cpus(8),
             experimental_enable_series_index: false,
-            native_series_index_min_files: native_series_index_min_files(),
+            experimental_series_index_min_files: DEFAULT_SERIES_INDEX_MIN_FILES,
             experimental_series_index_format: SeriesIndexFormat::Legacy,
             experimental_series_index_max_size: ReadableSize::gb(5),
             experimental_enable_range_index: false,
@@ -386,6 +378,10 @@ impl MitoConfig {
             let cpu_cores = get_total_cpu_cores();
             warn!("Sanitize max background purges 0 to {}", cpu_cores);
             self.max_background_purges = cpu_cores;
+        }
+
+        if self.experimental_series_index_min_files == 0 {
+            self.experimental_series_index_min_files = DEFAULT_SERIES_INDEX_MIN_FILES;
         }
 
         if self
@@ -543,6 +539,8 @@ mod tests {
 
     #[test]
     fn test_series_index_config() {
+        let defaults: MitoConfig = toml::from_str("").unwrap();
+        assert_eq!(4, defaults.experimental_series_index_min_files);
         assert!(!MitoConfig::default().experimental_enable_series_index);
         assert!(!MitoConfig::default().experimental_enable_range_index);
         assert_eq!(
@@ -555,10 +553,12 @@ mod tests {
              experimental_enable_range_index = false
              experimental_series_index_max_size = '64MiB'
              experimental_series_index_maintenance_interval = '30s'
+             experimental_series_index_min_files = 2
              experimental_series_index_bucket_width = '2days'",
         )
         .unwrap();
         config.sanitize("/data").unwrap();
+        assert_eq!(2, config.experimental_series_index_min_files);
         assert!(config.experimental_enable_series_index);
         assert_eq!(
             config.experimental_series_index_format,
@@ -579,6 +579,9 @@ mod tests {
         );
         let restored: MitoConfig = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
         assert_eq!(config, restored);
+        config.experimental_series_index_min_files = 0;
+        config.sanitize("/data").unwrap();
+        assert_eq!(4, config.experimental_series_index_min_files);
         config.experimental_series_index_max_size = ReadableSize(1023);
         assert!(config.sanitize("/data").is_err());
         config.experimental_series_index_max_size = ReadableSize(1024);

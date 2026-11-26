@@ -107,7 +107,7 @@ async fn test_narthex_series_index_survives_added_label() -> WhateverResult<()> 
     let engine = env
         .create_engine(MitoConfig {
             experimental_enable_series_index: true,
-            native_series_index_min_files: 1,
+            experimental_series_index_min_files: 1,
             schedule_compaction_after_edit: false,
             sst_meta_cache_size: ReadableSize(0),
             ..Default::default()
@@ -212,7 +212,7 @@ async fn test_narthex_build_threshold_counts_uncovered_files_per_window() -> Wha
     let engine = env
         .create_engine(MitoConfig {
             experimental_enable_series_index: true,
-            native_series_index_min_files: 4,
+            experimental_series_index_min_files: 4,
             experimental_series_index_bucket_width: Duration::from_secs(10),
             ..Default::default()
         })
@@ -258,7 +258,7 @@ async fn test_narthex_spanning_sample_keeps_window_width_on_reopen() -> Whatever
     let mut env = TestEnv::new().await;
     let config = MitoConfig {
         experimental_enable_series_index: true,
-        native_series_index_min_files: 1,
+        experimental_series_index_min_files: 1,
         experimental_series_index_bucket_width: Duration::from_secs(10),
         schedule_compaction_after_edit: false,
         ..Default::default()
@@ -327,7 +327,7 @@ async fn test_narthex_build_uses_no_local_sidecar_budget() -> WhateverResult<()>
     let engine = env
         .create_engine(MitoConfig {
             experimental_enable_series_index: true,
-            native_series_index_min_files: 1,
+            experimental_series_index_min_files: 1,
             experimental_series_index_max_size: budget,
             ..Default::default()
         })
@@ -465,7 +465,7 @@ async fn test_narthex_index_counts_rows_across_flushes() -> WhateverResult<()> {
     let engine = env
         .create_engine(MitoConfig {
             experimental_enable_series_index: true,
-            native_series_index_min_files: 1,
+            experimental_series_index_min_files: 1,
             ..Default::default()
         })
         .await;
@@ -531,7 +531,7 @@ async fn test_narthex_incremental_index_after_compaction() -> WhateverResult<()>
     let engine = env
         .create_engine(MitoConfig {
             experimental_enable_series_index: true,
-            native_series_index_min_files: 1,
+            experimental_series_index_min_files: 1,
             sst_meta_cache_size: ReadableSize(0),
             schedule_compaction_after_edit: false,
             ..Default::default()

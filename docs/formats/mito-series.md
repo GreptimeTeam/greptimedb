@@ -23,9 +23,9 @@ Unix seconds and the inclusive sequence watermark `max_sequence`. The region
 records `series_window_seconds` on first publication and retains it in
 checkpoints even after every index expires.
 
-Manual and periodic builds wait until a window has at least four uncovered live
-sample SSTs. Set `GREPTIME_SERIES_INDEX_MIN_FILES` to a positive integer to
-change the minimum. Samples remain queryable while the window is below it.
+Manual and periodic builds wait until a window has at least
+`experimental_series_index_min_files` uncovered live sample SSTs. This Mito
+setting defaults to four. Samples remain queryable while the window is below it.
 
 All index files in a window contribute series keys. Maintenance indexes sample
 SSTs above the previous watermark through a durable sequence boundary. A

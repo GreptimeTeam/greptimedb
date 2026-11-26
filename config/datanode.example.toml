@@ -583,6 +583,9 @@ compress_manifest = false
 ## width on first build. Local series indexes round up to a compaction window multiple.
 #+ experimental_series_index_bucket_width = "5days"
 
+## Minimum uncovered live sample SSTs per native series index window. Zero uses the default of 4.
+#+ experimental_series_index_min_files = 4
+
 ## Max number of running background flush jobs (default: 1/2 of cpu cores).
 ## @toml2docs:none-default="Auto"
 #+ max_background_flushes = 4
