@@ -57,7 +57,7 @@ use crate::error::{GetSchemaMetadataSnafu, Result, TimeoutSnafu};
 use crate::sst::file::{FileHandle, FileMeta, Level};
 
 /// Finds compaction options and TTL together with a single metadata fetch to reduce RTT.
-async fn find_dynamic_options(
+pub(crate) async fn find_dynamic_options(
     region_id: RegionId,
     region_options: &crate::region::options::RegionOptions,
     schema_metadata_manager: &SchemaMetadataManagerRef,

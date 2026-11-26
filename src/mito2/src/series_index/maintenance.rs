@@ -728,7 +728,7 @@ mod tests {
                         file_size: 20,
                         bucket_start: Timestamp::new_second(0),
                         bucket_end: Timestamp::new_second(100),
-                        source_file_ids: vec![range_id],
+                        source_file_ids: Some(vec![range_id]),
                         min_file_sequence: 1,
                         max_file_sequence: 1,
                         compaction_window_secs: 100,

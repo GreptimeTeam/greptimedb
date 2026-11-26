@@ -171,6 +171,13 @@ impl StatementExecutor {
         for f in filters {
             builder = builder.filter(f).context(BuildDfLogicalPlanSnafu)?;
         }
+        if let Some(limit) = req.limit {
+            // DataFusion represents the fetch count as a signed 64-bit literal.
+            let fetch = usize::try_from(limit.min(i64::MAX as u64)).unwrap_or(usize::MAX);
+            builder = builder
+                .limit(0, Some(fetch))
+                .context(BuildDfLogicalPlanSnafu)?;
+        }
         let plan = builder.build().context(BuildDfLogicalPlanSnafu)?;
 
         let output = self

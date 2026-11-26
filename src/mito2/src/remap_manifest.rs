@@ -119,6 +119,7 @@ impl RemapManifest {
                 append_mode: None,
                 pending_tails: Default::default(),
                 series_indexes: Default::default(),
+                series_window_seconds: None,
                 handoff_floors: Default::default(),
             };
 
@@ -208,21 +209,7 @@ impl RemapManifest {
             }
         }
 
-        // Remap creates references, not physical copies: retain index owner,
-        // inventory and exact source identities together with the samples.
-        for (id, index) in &source_manifest.series_indexes {
-            if let Some(existing) = target_manifest.series_indexes.get(id) {
-                ensure!(
-                    existing == index,
-                    error::InconsistentFileSnafu {
-                        file_id: *id,
-                        reason: "narthex series identity mismatch",
-                    }
-                );
-            } else {
-                target_manifest.series_indexes.insert(*id, index.clone());
-            }
-        }
+        // The destination builds its own series coverage after admitting the samples.
         Ok(())
     }
 
@@ -515,6 +502,7 @@ mod tests {
             append_mode: None,
             pending_tails: Default::default(),
             series_indexes: Default::default(),
+            series_window_seconds: None,
             handoff_floors: Default::default(),
         }
     }
