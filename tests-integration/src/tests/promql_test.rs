@@ -2317,6 +2317,148 @@ async fn native_result_rows(output: Output) -> Vec<(i64, String, f64)> {
     native_rows(output, Some("host")).await
 }
 
+/// An append-mode table keeps every row it is given, and the native route answers it like the
+/// existing plan instead of declining it.
+///
+/// The table below writes one series and timestamp twice: `native_append` holds `(a, 1000)` with
+/// both `1` and `5`. An append-mode region dedups nothing, so the merge order decides what that
+/// timestamp reads as - descending sequence, which puts the row written last first - and both routes
+/// answer `5`. A raw series chunk carries one sample per timestamp, so the region collapses the tie
+/// into that row; the existing plan collapses it in its own manipulation node, keeping the same one.
+///
+/// Every statement is compared row by row against the existing plan, and the bare selector's rows
+/// are spelled out: the tie reads as the last write, at the instant it was written.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_append_mode_table_answers_like_legacy() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_append_mode_e2e",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE native_append (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)) WITH (append_mode = 'true')",
+        QueryContext::arc(),
+    )
+    .await;
+    execute_all(
+        &instance,
+        "INSERT INTO native_append (host, ts, val) VALUES ('a', 1000, 1), ('a', 2000, 2), ('b', 1000, 10)",
+        QueryContext::arc(),
+    )
+    .await;
+    // The second write of `(a, 1000)`, which is the row both routes read there.
+    execute_all(
+        &instance,
+        "INSERT INTO native_append (host, ts, val) VALUES ('a', 1000, 5), ('a', 3000, 3)",
+        QueryContext::arc(),
+    )
+    .await;
+
+    observer.clear();
+    let native = instance
+        .do_query(
+            "TQL EVAL (0, 3, '1s') native_append",
+            native_query_context(true, 4),
+        )
+        .await
+        .remove(0)
+        .unwrap();
+    let native_rows = native_result_rows(native).await;
+    assert!(
+        observer.fused().is_some(),
+        "an append-mode table reaches the fused node"
+    );
+    let legacy_rows = native_result_rows(
+        instance
+            .do_query(
+                "TQL EVAL (0, 3, '1s') native_append",
+                native_query_context(false, 4),
+            )
+            .await
+            .remove(0)
+            .unwrap(),
+    )
+    .await;
+    let expected = vec![
+        // The repeated timestamp reads as the row written last.
+        (1000, "a".to_string(), 5.0),
+        (1000, "b".to_string(), 10.0),
+        (2000, "a".to_string(), 2.0),
+        (2000, "b".to_string(), 10.0),
+        (3000, "a".to_string(), 3.0),
+        (3000, "b".to_string(), 10.0),
+    ];
+    assert_eq!(expected, legacy_rows, "the existing plan's append answer");
+    assert_eq!(native_rows, legacy_rows, "the fused answer");
+
+    observer.clear();
+    let native_sum = native_scalar_rows(
+        instance
+            .do_query(
+                "TQL EVAL (0, 3, '1s') sum(native_append)",
+                native_query_context(true, 4),
+            )
+            .await
+            .remove(0)
+            .unwrap(),
+    )
+    .await;
+    assert!(
+        observer.fused().is_some(),
+        "the aggregate runs on the fused node"
+    );
+    let legacy_sum = native_scalar_rows(
+        instance
+            .do_query(
+                "TQL EVAL (0, 3, '1s') sum(native_append)",
+                native_query_context(false, 4),
+            )
+            .await
+            .remove(0)
+            .unwrap(),
+    )
+    .await;
+    // 5 + 10 at 1s, 2 + 10 at 2s, 3 + 10 at 3s: one sample per series and instant, the tie included.
+    assert_eq!(
+        vec![(1000, 15.0), (2000, 12.0), (3000, 13.0)],
+        legacy_sum,
+        "the existing plan's append sum"
+    );
+    assert_eq!(native_sum, legacy_sum, "the fused sum");
+
+    observer.clear();
+    let native_rate = native_result_rows(
+        instance
+            .do_query(
+                "TQL EVAL (0, 3, '1s') rate(native_append[5m])",
+                native_query_context(true, 4),
+            )
+            .await
+            .remove(0)
+            .unwrap(),
+    )
+    .await;
+    assert!(
+        observer.fused().is_some(),
+        "the range function runs on the fused node"
+    );
+    let legacy_rate = native_result_rows(
+        instance
+            .do_query(
+                "TQL EVAL (0, 3, '1s') rate(native_append[5m])",
+                native_query_context(false, 4),
+            )
+            .await
+            .remove(0)
+            .unwrap(),
+    )
+    .await;
+    assert!(!legacy_rate.is_empty(), "the range answers samples");
+    assert_eq!(native_rate, legacy_rate, "the fused rate");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_clamp_aggregates_execute_on_native_segments() {
     common_telemetry::init_default_ut_logging();
@@ -12683,6 +12825,83 @@ async fn native_promql_answers_a_selection_that_depends_on_input_order() {
         "{query}: the route answers it natively"
     );
     assert_eq!(rows, vec![(0, "a".to_string(), 8.0)], "{query}");
+}
+
+/// A `limitk` over more than one input answers natively, keeping `k` series the data holds.
+///
+/// `limitk` keeps the first `k` series of each group *in input order*, and a node over more than one
+/// input reads its inputs in whichever order the gather finishes them. Prometheus defines the
+/// operation as keeping *any* `k` series of a group, so which ones that gather hands over first is a
+/// freedom the statement already grants: the route answers the shape rather than refusing the tree,
+/// and the three facts asserted below are the ones the definition promises - the statement answers,
+/// it answers `k` series, and every series it answers carries a value the data holds. Which two of
+/// the three hosts survive is deliberately not asserted, and the answer is deliberately not compared
+/// against the existing plan's: that choice is the engine's, here as in Prometheus.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_answers_a_limitk_over_more_than_one_input() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_limitk_multi_input",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        r#"CREATE TABLE native_limitk_phy (
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE
+        ) ENGINE=metric WITH ("physical_metric_table" = "true");
+        CREATE TABLE native_limitk_left (
+            host STRING,
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE,
+            PRIMARY KEY (host)
+        ) ENGINE=metric WITH ("on_physical_table" = 'native_limitk_phy');
+        CREATE TABLE native_limitk_right (
+            host STRING,
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE,
+            PRIMARY KEY (host)
+        ) ENGINE=metric WITH ("on_physical_table" = 'native_limitk_phy');
+        INSERT INTO native_limitk_left (host, ts, val) VALUES ('a', 0, 2), ('b', 0, 4), ('c', 0, 6);
+        INSERT INTO native_limitk_right (host, ts, val) VALUES ('a', 0, 8), ('b', 0, 8), ('c', 0, 8);"#,
+        QueryContext::arc(),
+    )
+    .await;
+
+    // The ranking reads the sum of two tables, so the tree holds two inputs and the `limitk` above
+    // them is exactly the shape the order of its input would decide for. It answers natively rather
+    // than falling back: the existing planner has no kernel for the operation at all, so a refusal
+    // here would not be a plan the statement already had but an error.
+    let query = "limitk(2, native_limitk_left + on(host) native_limitk_right)";
+    let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+    observer.clear();
+    // Reading the answer is the "no error" assertion: `native_tql_output` unwraps the statement's
+    // output, so a statement that reported one would fail the test here instead of answering rows.
+    let rows = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
+    assert_eq!(
+        observer.take().name(),
+        "FusedSeriesExec",
+        "{query}: the route answers it natively"
+    );
+    // Three hosts hold a sample and `k` is two, so the answer is `k` series rather than the input.
+    assert_eq!(
+        rows.len(),
+        2,
+        "{query}: `limitk` keeps `k` series, not the whole input: {rows:?}"
+    );
+    // Every series it answers is one the data holds: each value is the two tables' sum at that host,
+    // which the same binary computes without the ranking over it.
+    let unranked =
+        format!("TQL EVAL (0, 0, '1s') native_limitk_left + on(host) native_limitk_right");
+    let all = native_result_rows(native_tql_output(&instance, &unranked, true).await).await;
+    assert_eq!(all.len(), 3, "`{unranked}`: every host holds a sample");
+    for row in &rows {
+        assert!(
+            all.contains(row),
+            "{query}: {row:?} is not a series the data holds: {all:?}"
+        );
+    }
 }
 
 /// A tree the native runtime cannot execute keeps the existing plan, rather than failing the

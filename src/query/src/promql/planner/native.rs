@@ -58,9 +58,9 @@ use promql::extension_plan::{
     RawSeriesSource, input_locality, keys_survive_metadata_drop, matching_operands_drop_key,
 };
 use promql::native::plan::{
-    AggregateKind, BoundAggregate, BoundInput, BoundVectorOp, NativeExpr, NativeNode, NativeTree,
-    NativeType, aggregate_state_binding, binary_output_field_kind, fused_output_tags,
-    native_tree_supported, uniform_field_kind,
+    AggregateKind, BoundAggregate, BoundInput, NativeExpr, NativeNode, NativeTree, NativeType,
+    aggregate_state_binding, binary_output_field_kind, fused_output_tags, native_tree_supported,
+    uniform_field_kind,
 };
 use promql::native::segment::{
     self, NATIVE_ORDERING, canonical_boundary_stages, canonical_local_prefix,
@@ -433,21 +433,19 @@ impl PromPlanner {
         {
             return Ok(declined("engine_without_raw_series_scanner"));
         }
-        // The region's raw-series preflight refuses these, and the physical layer turns that
-        // refusal into an error, so decline this route here instead.
+        // The region's raw-series preflight refuses a time index that is not a millisecond
+        // timestamp, and the physical layer turns that refusal into an error, so decline this route
+        // here instead. An append-mode table is not refused: the region keeps one row per write,
+        // and its raw series stream collapses a repeated timestamp into the sample the existing
+        // plan reads, so this route answers it like any other table.
         let time_index_type = table_meta
             .schema
             .timestamp_column()
             .map(|column| &column.data_type);
         if time_index_type
             != Some(&datatypes::prelude::ConcreteDataType::timestamp_millisecond_datatype())
-            || table_meta
-                .options
-                .extra_options
-                .get(store_api::mito_engine_options::APPEND_MODE_KEY)
-                .is_some_and(|value| value.eq_ignore_ascii_case("true"))
         {
-            return Ok(declined("unsupported_time_index_type_or_append_mode"));
+            return Ok(declined("unsupported_time_index_type"));
         }
         // A partition column that is not a tag splits one series across regions, and a bare scan cannot
         // reconcile the fragments; a raw source can, so such a selector is admitted and its input is bound per
@@ -1746,12 +1744,13 @@ impl PromPlanner {
         {
             return Ok(declined("histogram_aggregate_needs_state_this_route_lacks"));
         }
-        // The split keeps its prefix per-series, which is why it declines an operation whose
-        // answer depends on the order its input arrives in. A node over more than one input reads
-        // its inputs' partitions in the order they became ready, so that refusal holds there too.
-        if multi_input && depends_on_input_order(root) {
-            return Ok(declined("answer_depends_on_input_order"));
-        }
+        // A tree holding a selection of its input's series - `limitk` - is answered here even though
+        // the node above more than one input reads its inputs' partitions in the order they became
+        // ready: Prometheus defines `limitk` as keeping *any* `k` series of a group, so which ones
+        // arrive first is a freedom the statement already grants. No other operation is left to that
+        // order - a shape whose own selection or fold would be is refused where it is bound, by
+        // [`native_tree_supported`] or by its node's `validate`.
+        //
         // The native output schema can name only compiled value fields, the time index and the tag
         // columns a source declares, and `source_tags` declares the metric name of every occurrence of
         // a statement reading more than one input - the label a grouping by `__name__` keeps, so that
@@ -2543,53 +2542,6 @@ pub fn discovers_metric_name(selector: &VectorSelector) -> bool {
                 !["__schema__", "__database__", "__field__", METRIC_NAME]
                     .contains(&matcher.name.as_str())
             }))
-}
-
-/// Whether `node` holds an operation whose answer depends on the order its input arrives in.
-///
-/// `limitk` keeps the first `k` series of each group *in input order* ([`promql::select::limitk`]),
-/// and a node with more than one input reads them through a gather that hands over whichever
-/// partition became ready first, so the schedule would decide which series a query keeps. Only this
-/// operation's selection depends on that order: `topk` breaks ties by label and `limit_ratio`
-/// selects by a label hash.
-fn depends_on_input_order(node: &NativeNode) -> bool {
-    match &node.expr {
-        NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => false,
-        NativeExpr::Instant { input, .. }
-        | NativeExpr::Merge { input }
-        | NativeExpr::Window { input, .. }
-        | NativeExpr::Map { input, .. }
-        | NativeExpr::Timestamp { input }
-        | NativeExpr::Aggregate { input, .. }
-        // `vector()` and `scalar()` answer one series or one value from their input, and since
-        // `scalar()` exists their input can hold an order-dependent selection:
-        // `vector(scalar(limitk(1, a)))` keeps whichever `a` series the gather handed over first.
-        | NativeExpr::VectorOf { input }
-        | NativeExpr::ScalarOf { input } => depends_on_input_order(input),
-        NativeExpr::ParameterizedMap {
-            input, parameters, ..
-        } => depends_on_input_order(input) || parameters.iter().any(depends_on_input_order),
-        NativeExpr::ParameterizedTopK {
-            input, parameter, ..
-        } => depends_on_input_order(input) || depends_on_input_order(parameter),
-        // The fold's own order is its input's, and the argument it reads per point can hold an
-        // order-dependent selection of its own (`quantile(scalar(limitk(1, a)), b)`).
-        NativeExpr::ParameterizedAggregate {
-            input, parameter, ..
-        } => depends_on_input_order(input) || depends_on_input_order(parameter),
-        NativeExpr::ParameterizedHistogram {
-            input, parameters, ..
-        } => depends_on_input_order(input) || parameters.iter().any(depends_on_input_order),
-        NativeExpr::Vector { input, op } => {
-            matches!(op, BoundVectorOp::LimitK { .. }) || depends_on_input_order(input)
-        }
-        NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
-            depends_on_input_order(left) || depends_on_input_order(right)
-        }
-        NativeExpr::Info { base, info, .. } => {
-            depends_on_input_order(base) || depends_on_input_order(info)
-        }
-    }
 }
 
 /// One side of a set operation, as the slice of the pre-order selector list it reads.

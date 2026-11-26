@@ -30,10 +30,10 @@ use common_query::series_frame::label_decode_spec;
 use common_recordbatch::filter;
 use datafusion::physical_plan::PhysicalExpr;
 use datatypes::arrow::array::{
-    Array, BinaryArray, Float64Array, StructArray, TimestampMillisecondArray,
+    Array, BinaryArray, BooleanArray, Float64Array, StructArray, TimestampMillisecondArray,
 };
 use datatypes::arrow::buffer::Buffer;
-use datatypes::arrow::compute::{cast, concat_batches};
+use datatypes::arrow::compute::{self, cast, concat_batches};
 use datatypes::arrow::datatypes::ArrowNativeType;
 use datatypes::arrow::datatypes::DataType;
 use datatypes::arrow::record_batch::RecordBatch;
@@ -256,6 +256,88 @@ struct IncomingRecord {
     ends_package: bool,
 }
 
+/// The last row kept from a series, as the identity a repeated sample would repeat.
+type LastKeptRow = Option<(Buffer, i64)>;
+
+/// Drops the rows that repeat the `(primary key, timestamp)` an earlier row of the same series
+/// already carries, keeping that earlier row.
+///
+/// An append-mode region keeps every row it was given, so one series can hold several rows for one
+/// timestamp. A raw series chunk cannot carry them: its time axis is strictly increasing, so a
+/// second sample at a kept timestamp is not expressible. The rows of one series reach this stream in
+/// the region's merge order, which orders a tie by descending sequence, so the first row of a tie is
+/// the row written last - the row a deduplicating scan keeps and the row the existing PromQL plan
+/// collapses a tie to. Keeping that row is therefore what makes an append-mode answer agree with the
+/// existing plan's, and it is why the rows are collapsed here instead of further up: every layer
+/// above receives chunks, where the rows of a tie no longer exist separately.
+///
+/// `last_kept` carries the last kept row across the records of this stream, because a batch boundary
+/// can split one tie over two of them. Rows arrive sorted by `(primary key, timestamp)`, so a
+/// repeated row only ever follows the row it repeats.
+fn collapse_repeated_samples(
+    record: RecordBatch,
+    last_kept: &mut LastKeptRow,
+) -> Result<RecordBatch, BoxedError> {
+    let num_columns = record.num_columns();
+    let primary_key = record
+        .column(primary_key_column_index(num_columns))
+        .as_any()
+        .downcast_ref::<PrimaryKeyArray>()
+        .ok_or_else(|| invalid("invalid primary-key array"))?;
+    let values = primary_key
+        .values()
+        .as_any()
+        .downcast_ref::<BinaryArray>()
+        .ok_or_else(|| invalid("invalid primary-key dictionary"))?;
+    let timestamps = record
+        .column(time_index_column_index(num_columns))
+        .as_any()
+        .downcast_ref::<TimestampMillisecondArray>()
+        .ok_or_else(|| invalid("non-millisecond timestamp array"))?;
+    if timestamps.null_count() > 0 {
+        // A row without a timestamp takes part in no tie, and the chunk loop below reports it.
+        return Ok(record);
+    }
+    let mut keep = Vec::with_capacity(record.num_rows());
+    let mut dropped = false;
+    for row in 0..record.num_rows() {
+        let index = if primary_key.keys().is_valid(row) {
+            primary_key.keys().value(row).as_usize()
+        } else {
+            return Err(invalid("null primary key"));
+        };
+        if index >= values.len() || !values.is_valid(index) {
+            return Err(invalid("invalid primary-key dictionary value"));
+        }
+        let key = values.value(index);
+        let timestamp = timestamps.value(row);
+        let repeated = last_kept.as_ref().is_some_and(|(kept, kept_timestamp)| {
+            kept.as_slice() == key && *kept_timestamp == timestamp
+        });
+        if !repeated {
+            match &mut *last_kept {
+                // A later row of the same series moves the timestamp it reaches.
+                Some((kept, kept_timestamp)) if kept.as_slice() == key => {
+                    *kept_timestamp = timestamp;
+                }
+                // A new series never repeats the row before it, whatever its timestamp: one copy of
+                // the key per series is all this state pays.
+                slot => {
+                    *slot = Some((Buffer::from(key), timestamp));
+                }
+            }
+        }
+        dropped |= repeated;
+        keep.push(!repeated);
+    }
+    if !dropped {
+        return Ok(record);
+    }
+    compute::filter_record_batch(&record, &BooleanArray::from(keep))
+        .context(ComputeArrowSnafu)
+        .map_err(boxed)
+}
+
 pub(crate) fn make_stream(
     inner: ScanBatchStream,
     schema: Arc<SeriesSchema>,
@@ -264,6 +346,7 @@ pub(crate) fn make_stream(
     metrics: PartitionMetrics,
     predicates: Vec<Arc<dyn PhysicalExpr>>,
     ordering: SeriesOrdering,
+    append_mode: bool,
 ) -> SendableRawSeriesStream {
     let output_schema = schema.clone();
     let label_decode_spec = label_decode_spec(&label_source);
@@ -282,6 +365,9 @@ pub(crate) fn make_stream(
         let mut incoming: VecDeque<IncomingRecord> = VecDeque::new();
         let mut held: Option<IncomingRecord> = None;
         let mut exhausted = false;
+        // The last row kept from an append-mode series, so a tie split across two records collapses
+        // into the one sample a chunk can carry.
+        let mut last_kept: LastKeptRow = None;
         // An upstream error is reported only after the records buffered before it are processed,
         // so the chunks that precede it are still yielded first.
         let mut upstream_error: Option<Error> = None;
@@ -409,6 +495,15 @@ pub(crate) fn make_stream(
                 if record.num_rows() == 0 {
                     break;
                 }
+            }
+            // An append-mode region keeps one row per write, so a series can hold several rows for
+            // one timestamp. Predicates are applied first, so the row kept here is the first row of
+            // the tie the answer is read from, exactly as the existing PromQL plan reads it.
+            if append_mode {
+                record = match collapse_repeated_samples(record, &mut last_kept) {
+                    Ok(record) => record,
+                    Err(error) => { yield Err(error); return; }
+                };
             }
             // An emptied group contributes no chunk, and the chunk loop below yields nothing for it.
             if record.num_rows() > 0 {

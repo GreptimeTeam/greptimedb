@@ -524,11 +524,10 @@ impl SeriesScan {
             });
         }
         let time_is_millis = matches!(metadata.time_index_type(), TimestampType::Millisecond(_));
-        if fields.is_empty()
-            || (input.append_mode && !input.requires_narthex_preparation())
-            || input.series_row_selector.is_some()
-            || !time_is_millis
-        {
+        // An append-mode region is not refused here: it keeps one row per write, and the raw
+        // stream collapses a repeated timestamp into the sample it is read as rather than the
+        // whole region losing the raw path.
+        if fields.is_empty() || input.series_row_selector.is_some() || !time_is_millis {
             debug!(
                 "Raw series scan preflight rejected scan options: region_id={}, selected_fields={}, append_mode={}, row_selector={}, time_is_millis={}",
                 metadata.region_id,
@@ -1152,6 +1151,9 @@ impl RegionScanner for SeriesScan {
             metrics,
             preparation.predicates,
             SeriesOrdering::KeyThenTime,
+            // An append-mode region keeps one row per write, so this stream collapses a
+            // repeated timestamp itself instead of refusing the region.
+            self.stream_ctx.input.append_mode,
         )))
     }
 

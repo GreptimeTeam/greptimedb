@@ -4243,8 +4243,14 @@ async fn native_fused_non_millisecond_time_index_falls_back() {
     );
 }
 
+/// An append-mode table is served by the fused node, not handed back to the existing plan.
+///
+/// The table keeps one row per write, so one primary key can hold two rows for one timestamp. The
+/// region's raw series stream collapses such a tie into the row the existing plan reads - the last
+/// one written - so the fused answer is the existing plan's answer and declining the route would
+/// only cost the table its fused plan.
 #[tokio::test]
-async fn native_fused_append_mode_table_falls_back() {
+async fn native_fused_append_mode_table_still_plans_fused_series() {
     let table_provider = build_test_table_provider_with_options(
         &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
         1,
@@ -4272,8 +4278,8 @@ async fn native_fused_append_mode_table_falls_back() {
     let without_flag =
         build_native_fused_plan_with_provider("rate(some_metric[5m])", false, fallback_provider)
             .await;
-    assert!(!native.display_indent().to_string().contains("FusedSeries"));
-    assert_eq!(
+    assert!(native.display_indent().to_string().contains("FusedSeries"));
+    assert_ne!(
         native.display_indent().to_string(),
         without_flag.display_indent().to_string()
     );
@@ -8768,36 +8774,30 @@ async fn native_fused_quantile_parameter_over_a_second_table() {
     assert!(find_final_split(&plan).is_none(), "`{query}`: {display}");
 }
 
-/// An argument that ranks its series in input order is refused by the native route.
+/// An argument that ranks its series in input order plans natively.
 ///
 /// `scalar()` hands the fold one value per grid point, so the `limitk` inside the argument ranks the
 /// argument's own source, and a tree over more than one input reads its inputs in whichever order the
-/// gather finishes them: which series the ranking keeps would be the schedule's answer rather than the
-/// statement's. The gate that refuses such a tree reads the fold's argument as well as the vector it
-/// folds, and the argument is the only place an order-dependent selection sits here - the same
-/// statement with an order-independent argument plans natively in
-/// [`native_fused_quantile_parameter_over_a_second_table`].
+/// gather finishes them. Prometheus defines `limitk` as keeping *any* `k` series of a group, so which
+/// ones that gather hands over first is a freedom the statement already grants: the ranking's answer
+/// is one Prometheus accepts whichever series it names, and a tree holding one is answered here like
+/// any other. The gate that used to refuse such a tree read the fold's argument as well as the vector
+/// it folds, so the order-independent argument below pins that the walk is gone rather than bypassed.
 ///
-/// The refusal is asserted on the native attempt alone rather than on the plan the statement gets: the
+/// The plan is asserted on the native attempt alone rather than on the plan the statement gets: the
 /// existing planner binds a `quantile` argument only as a literal and answers a per-point one with
-/// `Invalid function argument for quantile`, so a tree this gate refuses has no other route - the
-/// statement is answered natively or not at all.
+/// `Invalid function argument for quantile`, so these trees have no other route - the statement is
+/// answered natively or not at all.
 #[tokio::test]
-async fn native_fused_declines_an_order_dependent_quantile_argument() {
+async fn native_fused_plans_an_order_dependent_quantile_argument() {
     let state = build_query_engine_state();
-    for (query, native) in [
+    for query in [
         // The argument keeps the first series `limitk` is handed, so which one survives two gathered
-        // inputs is the schedule's answer.
-        (
-            "quantile(scalar(limitk(1, some_metric)), other_metric)",
-            false,
-        ),
-        // Neither fold reads its source in arrival order, so the argument is what the refusal turns
-        // on rather than the two-table shape or a per-point argument as such.
-        (
-            "quantile(scalar(max by (tag_0) (some_metric)), other_metric)",
-            true,
-        ),
+        // inputs is the schedule's answer - and a statement Prometheus leaves to the engine.
+        "quantile(scalar(limitk(1, some_metric)), other_metric)",
+        // Neither fold reads its source in arrival order, so this shape was never the refusal's
+        // subject: it is here to show the two are answered alike.
+        "quantile(scalar(max by (tag_0) (some_metric)), other_metric)",
     ] {
         let tables = [
             (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
@@ -8815,10 +8815,9 @@ async fn native_fused_declines_an_order_dependent_quantile_argument() {
             .try_plan_native_fused(&stmt.expr, &state)
             .await
             .unwrap();
-        assert_eq!(
-            native,
+        assert!(
             planned.is_some(),
-            "`{query}`: the gate must read the fold's argument as well as its vector: {}",
+            "`{query}`: a selection the statement leaves to the engine is not refused: {}",
             planned
                 .map(|plan| plan.display_indent().to_string())
                 .unwrap_or_default()
