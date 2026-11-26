@@ -3139,12 +3139,25 @@ async fn authoritative_fixture_with(
 }
 
 /// A time-partitioned region keeps only its own rows, though a file shared after repartition
-/// holds rows of both partitions and series rows carry no time index to filter on.
+/// holds rows of both partitions and series rows carry no time index to filter on. Key columns
+/// a mixed rule references take the series' values, `__table_id` included.
+#[rstest::rstest]
+#[case::time(None)]
+#[case::tag_and_time(Some(partition::expr::col("tag_0").eq(Value::from("a"))))]
+#[case::table_id_and_time(Some(
+    partition::expr::col(DATA_SCHEMA_TABLE_ID_COLUMN_NAME).eq(Value::UInt32(10))
+))]
 #[tokio::test]
-async fn authoritative_time_partition_filters_sample_rows() {
-    let rule = partition::expr::col("ts").lt(datatypes::value::Value::Timestamp(
+async fn authoritative_time_partition_filters_sample_rows(
+    #[case] key_rule: Option<partition::expr::PartitionExpr>,
+) {
+    let time_rule = partition::expr::col("ts").lt(Value::Timestamp(
         common_time::Timestamp::new_millisecond(60_000),
     ));
+    let rule = match key_rule {
+        Some(key_rule) => key_rule.and(time_rule),
+        None => time_rule,
+    };
     let (_env, engine, region) =
         authoritative_fixture_with("last_row", Some(rule.as_json_str().unwrap())).await;
     // 61_000 belongs to the other partition, as rows of a shared file do.

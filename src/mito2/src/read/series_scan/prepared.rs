@@ -1346,9 +1346,19 @@ fn partition_on_tags_only(
 struct SamplePartitionFilter {
     /// The columns the rule references, typed as the region declares them.
     schema: SchemaRef,
-    /// For each schema field, its tag column ID, or `None` for a column the sample rows carry.
-    tags: Vec<Option<u32>>,
+    /// Where each schema field's values come from.
+    inputs: Vec<PartitionInput>,
     expr: Arc<dyn datafusion::physical_plan::PhysicalExpr>,
+}
+
+enum PartitionInput {
+    /// Logical table ID of the series. Repartitioning a metric table may route on it, and the
+    /// series index keeps it outside the tag columns.
+    TableId,
+    /// A tag column, by column ID, valued from the series.
+    Tag(u32),
+    /// A column the sample rows carry.
+    Sample,
 }
 
 impl SamplePartitionFilter {
@@ -1361,7 +1371,7 @@ impl SamplePartitionFilter {
         let mut names = names.into_iter().collect::<Vec<_>>();
         names.sort_unstable();
         let mut fields = Vec::with_capacity(names.len());
-        let mut tags = Vec::with_capacity(names.len());
+        let mut inputs = Vec::with_capacity(names.len());
         for name in names {
             let column = metadata
                 .column_by_name(&name)
@@ -1371,17 +1381,30 @@ impl SamplePartitionFilter {
                 datatypes::data_type::DataType::as_arrow_type(&column.column_schema.data_type),
                 true,
             ));
-            tags.push((column.semantic_type == SemanticType::Tag).then_some(column.column_id));
+            inputs.push(if column.column_id == ReservedColumnId::table_id() {
+                PartitionInput::TableId
+            } else if column.semantic_type == SemanticType::Tag {
+                PartitionInput::Tag(column.column_id)
+            } else {
+                PartitionInput::Sample
+            });
         }
         let schema = Arc::new(Schema::new(fields));
         let expr = rule
             .try_as_physical_expr(&schema)
             .map_err(|error| invalid(error.to_string()))?;
-        Ok(Self { schema, tags, expr })
+        Ok(Self {
+            schema,
+            inputs,
+            expr,
+        })
     }
 
     fn tag_ids(&self) -> impl Iterator<Item = u32> + '_ {
-        self.tags.iter().flatten().copied()
+        self.inputs.iter().filter_map(|input| match input {
+            PartitionInput::Tag(column_id) => Some(*column_id),
+            _ => None,
+        })
     }
 
     /// Keeps the rows of `flat`, all of `candidate`, that the rule assigns to this region.
@@ -1391,16 +1414,19 @@ impl SamplePartitionFilter {
             .schema
             .fields()
             .iter()
-            .zip(&self.tags)
-            .map(|(field, tag)| match tag {
-                Some(column_id) => {
+            .zip(&self.inputs)
+            .map(|(field, input)| match input {
+                PartitionInput::TableId => {
+                    Ok(Arc::new(UInt32Array::from(vec![candidate.id.table_id; rows])) as ArrayRef)
+                }
+                PartitionInput::Tag(column_id) => {
                     let value = candidate
                         .tags
                         .get(column_id)
                         .ok_or_else(|| invalid("missing partition tag"))?;
                     Ok(Arc::new(StringArray::from(vec![value.as_deref(); rows])) as ArrayRef)
                 }
-                None => {
+                PartitionInput::Sample => {
                     let array = flat
                         .column_by_name(field.name())
                         .ok_or_else(|| invalid("missing partition column in samples"))?;
