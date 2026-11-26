@@ -44,9 +44,9 @@ use store_api::region_engine::{
     RegionEngine, RegionManifestInfo, RegionRole, SettableRegionRoleState,
 };
 use store_api::region_request::{
-    EnterStagingRequest, PathType, RegionAlterRequest, RegionBuildIndexRequest,
+    AlterKind, EnterStagingRequest, PathType, RegionAlterRequest, RegionBuildIndexRequest,
     RegionCatchupRequest, RegionCloseRequest, RegionDiscardPendingTailsRequest, RegionDropRequest,
-    RegionFlushRequest, RegionOpenRequest, RegionRequest, RegionTruncateRequest,
+    RegionFlushRequest, RegionOpenRequest, RegionRequest, RegionTruncateRequest, SetRegionOption,
     StagingPartitionDirective,
 };
 use store_api::storage::{RegionId, ScanRequest};
@@ -67,7 +67,8 @@ use crate::engine::pending_tail_test::{
 use crate::engine::region_hook::RegionHookRef;
 use crate::error::Error;
 use crate::manifest::action::{
-    PendingTail, RegionEdit, RegionMetaAction, RegionMetaActionList, UptoKind,
+    HandoffFloor, PendingTail, RegionEdit, RegionMetaAction, RegionMetaActionList, UptoKind,
+    WalRecoveryEdit,
 };
 use crate::manifest::storage::delta_file;
 use crate::region::version::VersionRef;
@@ -2954,4 +2955,594 @@ async fn test_region_statistic_reports_pending_tails() {
 
     let statistic = region.engine.region_statistic(region.region_id).unwrap();
     assert!(!statistic.has_pending_tails);
+}
+
+/// Returns a catchup that makes the region writable and carries `entry_id` as the last entry
+/// its source `source_node_id` reported.
+fn catchup_from_request(entry_id: Option<EntryId>, source_node_id: Option<u64>) -> RegionRequest {
+    RegionRequest::Catchup(RegionCatchupRequest {
+        set_writable: true,
+        entry_id,
+        source_node_id,
+        ..Default::default()
+    })
+}
+
+impl TestRegion {
+    /// Flushes this node's rows and makes the region a Follower, as a migration leaves it on
+    /// the node it moves to.
+    async fn flush_and_demote(&self) {
+        flush_region(&self.engine, self.region_id, None).await;
+        self.engine
+            .set_region_role(self.region_id, RegionRole::Follower)
+            .unwrap();
+    }
+
+    /// Writes rows `[6, 9)` to the WAL of [REMOTE_NODE_ID] after a hand-off there above every
+    /// entry id of the region on this node, as the remote node does when it takes the region
+    /// over, and returns the entry id.
+    async fn write_handed_over_remote_rows(&self) -> EntryId {
+        let store = ObjectStoreLogStore::try_new(
+            self.wal_store.clone(),
+            &wal_config(),
+            REMOTE_NODE_ID,
+            FIXED_DIRECTORY_GENERATION,
+        )
+        .await
+        .unwrap();
+        let provider = Provider::object_store_provider(self.region_id, remote_prefix());
+        store.handoff(&provider, self.entries[1]).await.unwrap();
+        store.stop().await.unwrap();
+        let last = self.write_remote_rows(self.region_id, 6, 9).await;
+        assert!(last > self.entries[1]);
+        last
+    }
+
+    /// Sends [catchup_from_request] for `entry_id` and `source_node_id`, letting the region
+    /// write until the node's deadline once it is writable.
+    async fn catchup_from(
+        &self,
+        entry_id: EntryId,
+        source_node_id: Option<u64>,
+    ) -> Result<RegionResponse, BoxedError> {
+        self.engine
+            .renew_node_lease(Instant::now() + Duration::from_secs(10));
+        let catchup = catchup_from_request(Some(entry_id), source_node_id);
+        self.engine.handle_request(self.region_id, catchup).await
+    }
+
+    /// Reopens the region as a Follower without replaying its WAL.
+    async fn reopen_without_wal_replay(&self) {
+        let close = RegionRequest::Close(RegionCloseRequest::default());
+        self.engine
+            .handle_request(self.region_id, close)
+            .await
+            .unwrap();
+        let open = RegionRequest::Open(RegionOpenRequest {
+            engine: String::new(),
+            table_dir: self.table_dir.clone(),
+            options: wal_options(),
+            skip_wal_replay: true,
+            path_type: PathType::Bare,
+            checkpoint: None,
+            requirements: Default::default(),
+        });
+        self.engine
+            .handle_request(self.region_id, open)
+            .await
+            .unwrap();
+        assert!(self.version().memtables.is_empty());
+    }
+
+    async fn manifest(&self) -> Arc<crate::manifest::action::RegionManifest> {
+        let region = self.engine.get_region(self.region_id).unwrap();
+        region.manifest_ctx.manifest().await
+    }
+}
+
+/// A migration's catchup hands the region over from its source without replaying any WAL: it
+/// records the source's entries after the flushed ones as a tail, this node's handoff floor and
+/// a raised committed sequence, makes the region writable, and the tail is replayed in the
+/// background. Writes accepted before the replay outrank the replayed rows.
+#[tokio::test]
+async fn test_handover_records_source_tail_and_replays_it() {
+    let region = TestRegion::new("handover-records-tail", true, None).await;
+    region.flush_and_demote().await;
+    let flushed = region.version().flushed_entry_id;
+    let last = region.write_handed_over_remote_rows().await;
+    let mito_region = region.engine.get_region(region.region_id).unwrap();
+    // Sequences this node allocated without committing them, as a failed write leaves.
+    let sequence = mito_region.version_control.current().last_sequence + 5;
+    mito_region.version_control.update_last_sequence(sequence);
+    region.listener.hold_from(1);
+
+    region
+        .catchup_from(last, Some(REMOTE_NODE_ID))
+        .await
+        .unwrap();
+
+    assert!(mito_region.is_writable());
+    let tails = vec![remote_tail(flushed, last, UptoKind::Reported)];
+    assert_eq!(tails, region.version().pending_tails);
+    let manifest = region.manifest().await;
+    assert_eq!(tails, manifest.pending_tails);
+    assert!(manifest.handoff_floors[&NODE_ID] >= last);
+    assert_eq!(Some(sequence + (1 << 40)), manifest.committed_sequence);
+    assert_eq!(
+        sequence + (1 << 40),
+        mito_region.version_control.committed_sequence()
+    );
+    // Reads wait for the tail.
+    let error = region
+        .engine
+        .scan_to_stream(region.region_id, ScanRequest::default())
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        matches!(
+            error.as_any().downcast_ref::<Error>(),
+            Some(Error::RegionPendingTails { .. })
+        ),
+        "{error:?}"
+    );
+
+    region.overwrite_remote_row().await;
+    region.listener.hold_from(0);
+    region.wait_until_replayed().await;
+    assert_eq!(last, region.version().flushed_entry_id);
+    assert_eq!(9, count_rows(&region.engine, region.region_id).await);
+    assert!(region.sees_overwrite().await);
+}
+
+/// A handover whose request names no source fails, before the log store hands anything over,
+/// when the source has entries to recover, and leaves the region a Follower.
+#[tokio::test]
+async fn test_handover_from_unknown_source_fails() {
+    let region = TestRegion::new("handover-unknown-source", true, None).await;
+    region.flush_and_demote().await;
+    let last = region.write_handed_over_remote_rows().await;
+    let mito_region = region.engine.get_region(region.region_id).unwrap();
+    let version = next_manifest_version(&mito_region).await;
+    // A hand-off would fail retryably.
+    region.log_store.fail_creates();
+
+    let error = region.catchup_from(last, None).await.unwrap_err();
+
+    assert_eq!(
+        StatusCode::InvalidArguments,
+        error.status_code(),
+        "{error:?}"
+    );
+    assert!(mito_region.is_follower());
+    assert_eq!(version, next_manifest_version(&mito_region).await);
+    assert!(!region.has_pending_tails());
+    region.log_store.allow_creates();
+    region
+        .catchup_from(last, Some(REMOTE_NODE_ID))
+        .await
+        .unwrap();
+    region.wait_until_replayed().await;
+    assert_eq!(9, count_rows(&region.engine, region.region_id).await);
+}
+
+/// A region with rows in its memtable is not handed over: the handoff floor would skip their
+/// entries and a reopen would drop them. The refused catchup ends, so a Leader lease makes the
+/// region writable again. Without conditional manifest publication the catchup reopens the
+/// region and replays the rows, as before.
+#[rstest]
+#[case::handover(true)]
+#[case::reopen(false)]
+#[tokio::test]
+async fn test_catchup_of_region_with_rows_in_memtable(#[case] leased: bool) {
+    let region = TestRegion::new("handover-memtable-rows", leased, None).await;
+    region
+        .engine
+        .set_region_role(region.region_id, RegionRole::Follower)
+        .unwrap();
+    let mito_region = region.engine.get_region(region.region_id).unwrap();
+    let version = next_manifest_version(&mito_region).await;
+
+    let result = region
+        .catchup_from(region.entries[1], Some(REMOTE_NODE_ID))
+        .await;
+
+    if leased {
+        let error = result.unwrap_err();
+        assert_eq!(StatusCode::RegionBusy, error.status_code(), "{error:?}");
+        assert!(error.retry_hint().is_retryable());
+        assert!(!is_replaced(&region.engine, &mito_region));
+        assert!(mito_region.is_follower());
+        assert_eq!(version, next_manifest_version(&mito_region).await);
+        region.promote_with_lease();
+        assert!(mito_region.is_writable());
+    } else {
+        result.unwrap();
+        assert!(is_replaced(&region.engine, &mito_region));
+        assert!(
+            region
+                .engine
+                .get_region(region.region_id)
+                .unwrap()
+                .is_writable()
+        );
+    }
+    assert_eq!(6, count_rows(&region.engine, region.region_id).await);
+}
+
+/// A handover of a region that skips the WAL hands nothing over to the log store and commits an
+/// empty edit: no handoff floor and no tail.
+#[tokio::test]
+async fn test_handover_of_region_that_skips_wal_commits_empty_edit() {
+    let region = TestRegion::new("handover-skip-wal", true, None).await;
+    region.flush_and_demote().await;
+    let skip_wal = RegionRequest::Alter(RegionAlterRequest {
+        kind: AlterKind::SetRegionOptions {
+            options: vec![SetRegionOption::SkipWal(true)],
+        },
+    });
+    region
+        .engine
+        .handle_request(region.region_id, skip_wal)
+        .await
+        .unwrap();
+    let manifest = region.manifest().await;
+    // A hand-off would fail.
+    region.log_store.fail_creates();
+
+    region
+        .catchup_from(region.entries[1] + 1, Some(REMOTE_NODE_ID))
+        .await
+        .unwrap();
+
+    let caught_up = region.manifest().await;
+    assert_eq!(manifest.manifest_version + 1, caught_up.manifest_version);
+    assert!(caught_up.handoff_floors.is_empty());
+    assert!(caught_up.pending_tails.is_empty());
+    let mito_region = region.engine.get_region(region.region_id).unwrap();
+    assert!(mito_region.is_writable());
+}
+
+/// A handover releases this node's entries of the region up to its handoff floor, except those
+/// a tail of this node still needs. The region opened without replaying its WAL, as a migration
+/// opens it, so those entries are still held.
+#[rstest]
+#[case::without_own_tail(false)]
+#[case::with_own_tail(true)]
+#[tokio::test]
+async fn test_handover_releases_wal_up_to_floor(#[case] own_tail_kept: bool) {
+    let region = TestRegion::new("handover-releases", true, None).await;
+    if own_tail_kept {
+        let tail = own_tail(0, region.entries[1], UptoKind::Reported);
+        set_pending_tails(&region.engine, region.region_id, vec![tail]).await;
+    }
+    region.reopen_without_wal_replay().await;
+    let last = region.write_handed_over_remote_rows().await;
+    region.listener.hold_from(1);
+
+    region
+        .catchup_from(last, Some(REMOTE_NODE_ID))
+        .await
+        .unwrap();
+
+    let stored = stored_entry_ids(&region.log_store, region.region_id).await;
+    if own_tail_kept {
+        assert_eq!(region.entries.to_vec(), stored);
+    } else {
+        assert!(stored.is_empty(), "{stored:?}");
+    }
+}
+
+/// A handover moves this node's entry ids above the flushed entry id and above every pending
+/// tail, also when its source reported a smaller id: a tail commit raises the flushed entry id
+/// to the tail's bound, and an open replays this node's WAL only above the flushed entry id.
+#[rstest]
+#[case::flushed_entry_id(false)]
+#[case::pending_tail(true)]
+#[tokio::test]
+async fn test_handover_assigns_entry_ids_above_flushed_and_tails(#[case] tail: bool) {
+    let region = TestRegion::new("handover-above-manifest", true, None).await;
+    // Many objects above every entry of this node.
+    let high = region.entries[1] + (1 << 30);
+    let edit = if tail {
+        pending_tails_edit(vec![remote_tail(0, high, UptoKind::Listed)])
+    } else {
+        // A tail of this node, which a flush passed while it waits for its replay, keeps the
+        // release after the handover below the flushed entry id.
+        RegionEdit {
+            flushed_entry_id: Some(high),
+            ..pending_tails_edit(vec![own_tail(0, region.entries[1], UptoKind::Reported)])
+        }
+    };
+    commit_edit(&region.engine, region.region_id, edit).await;
+    region.reopen_without_wal_replay().await;
+    region.listener.hold_from(1);
+
+    // The source took no writes since it took the region over, so it reports an old id.
+    region
+        .catchup_from(region.entries[1], Some(REMOTE_NODE_ID))
+        .await
+        .unwrap();
+
+    let schema = rows_schema(&CreateRequestBuilder::new().build());
+    put_range(&region.engine, region.region_id, &schema, 6, 9).await;
+    let stored = stored_entry_ids(&region.log_store, region.region_id).await;
+    assert!(*stored.last().unwrap() > high, "{stored:?}");
+}
+
+/// The floor a handover records is the bound its hand-off returned, which also covers the ids
+/// this node assigned the region above the id its source reported, so an open replays none.
+#[tokio::test]
+async fn test_handover_floor_covers_own_entries_above_reported() {
+    let region = TestRegion::new("handover-floor-own-entries", true, None).await;
+    region.reopen_without_wal_replay().await;
+
+    region.catchup_from(0, None).await.unwrap();
+
+    assert_eq!(
+        region.entries[1],
+        region.manifest().await.handoff_floors[&NODE_ID]
+    );
+    assert!(
+        stored_entry_ids(&region.log_store, region.region_id)
+            .await
+            .is_empty()
+    );
+}
+
+/// A catchup, and a catchup again of a region that awaits its Leader lease, replay this node's
+/// WAL only after its handoff floor: entries at or below it were left by an earlier leader on
+/// this node. The region opened without replaying its WAL, as a migration opens it, so those
+/// entries are still held.
+#[rstest]
+#[case::catchup(false)]
+#[case::catchup_again(true)]
+#[tokio::test]
+async fn test_catchup_replays_wal_after_handoff_floor(#[case] again: bool) {
+    let region = TestRegion::new("catchup-after-floor", true, None).await;
+    let floor = RegionEdit {
+        wal_recovery: WalRecoveryEdit {
+            pending_tails: None,
+            handoff_floor: Some(HandoffFloor {
+                node_id: NODE_ID,
+                entry_id: region.entries[1],
+            }),
+        },
+        ..Default::default()
+    };
+    commit_edit(&region.engine, region.region_id, floor).await;
+    region.reopen_without_wal_replay().await;
+    let mito_region = region.engine.get_region(region.region_id).unwrap();
+    if again {
+        mito_region
+            .manifest_ctx
+            .start_leader_lease_wait_for_test(region.region_id);
+    }
+    region
+        .engine
+        .renew_node_lease(Instant::now() + Duration::from_secs(10));
+
+    region.catchup().await;
+
+    assert_eq!(again, is_replaced(&region.engine, &mito_region));
+    assert!(
+        region
+            .engine
+            .get_region(region.region_id)
+            .unwrap()
+            .is_writable()
+    );
+    assert_eq!(0, count_rows(&region.engine, region.region_id).await);
+}
+
+/// A catchup again of a region that awaits its Leader lease and carries its source's last entry
+/// commits an empty edit: it records no handoff floor and no tail.
+#[tokio::test]
+async fn test_catchup_again_with_reported_entry_writes_no_floor() {
+    let region = TestRegion::new("catchup-again-no-floor", true, None).await;
+    // The flushed entry id stays below the reported one, so a floor would be kept.
+    region.reopen_without_wal_replay().await;
+    let mito_region = region.engine.get_region(region.region_id).unwrap();
+    mito_region
+        .manifest_ctx
+        .start_leader_lease_wait_for_test(region.region_id);
+    let manifest = region.manifest().await;
+
+    region
+        .catchup_from(region.entries[1], Some(REMOTE_NODE_ID))
+        .await
+        .unwrap();
+
+    assert!(is_replaced(&region.engine, &mito_region));
+    let caught_up = region.manifest().await;
+    assert_eq!(manifest.manifest_version + 1, caught_up.manifest_version);
+    assert!(caught_up.handoff_floors.is_empty());
+    assert!(caught_up.pending_tails.is_empty());
+    // The replacement replays this node's entries, which no floor covers.
+    assert_eq!(6, count_rows(&region.engine, region.region_id).await);
+}
+
+/// A catchup that replays this node's WAL releases it only up to the tails of this node, which
+/// still need their entries.
+#[tokio::test]
+async fn test_catchup_keeps_wal_of_own_tails() {
+    let region = TestRegion::new("catchup-keeps-own-tail-wal", true, None).await;
+    let tail = own_tail(0, region.entries[1], UptoKind::Reported);
+    set_pending_tails(&region.engine, region.region_id, vec![tail]).await;
+    region.reopen_without_wal_replay().await;
+    region.listener.hold_from(1);
+    region
+        .engine
+        .renew_node_lease(Instant::now() + Duration::from_secs(10));
+
+    region.catchup().await;
+
+    assert_eq!(
+        region.entries.to_vec(),
+        stored_entry_ids(&region.log_store, region.region_id).await
+    );
+    region.listener.hold_from(0);
+    region.wait_until_replayed().await;
+    assert_eq!(6, count_rows(&region.engine, region.region_id).await);
+}
+
+/// A manifest sync is refused while a handover runs: the handover reads the manifest and changes
+/// the version outside the worker, so a sync would overwrite the tail it records.
+#[tokio::test]
+async fn test_sync_is_refused_during_handover() {
+    let region = TestRegion::new("handover-refuses-sync", true, None).await;
+    region.flush_and_demote().await;
+    let flushed = region.version().flushed_entry_id;
+    let last = region.write_handed_over_remote_rows().await;
+    let mito_region = region.engine.get_region(region.region_id).unwrap();
+    let version = mito_region.manifest_ctx.manifest_version().await;
+    region.listener.hold_from(1);
+    region
+        .engine
+        .renew_node_lease(Instant::now() + Duration::from_secs(10));
+    region.log_store.hold_creates();
+    let handover = {
+        let engine = region.engine.clone();
+        let region_id = region.region_id;
+        let request = catchup_from_request(Some(last), Some(REMOTE_NODE_ID));
+        tokio::spawn(async move { engine.handle_request(region_id, request).await })
+    };
+    // The hand-off waits for the object that carries its record.
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        region.log_store.wait_for_parked_creates(1),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let error = region
+        .engine
+        .sync_region(
+            region.region_id,
+            RegionManifestInfo::mito(version, 0, 0).into(),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(StatusCode::RegionBusy, error.status_code(), "{error:?}");
+    region.log_store.release_creates();
+    handover.await.unwrap().unwrap();
+    assert_eq!(
+        vec![remote_tail(flushed, last, UptoKind::Reported)],
+        region.version().pending_tails
+    );
+}
+
+/// A follower's option change is refused while a handover runs: the handover changes the version
+/// outside the worker, so either could overwrite the other. Once the handover ends, the change
+/// is accepted and the recorded tail stays.
+#[tokio::test]
+async fn test_follower_option_change_is_refused_during_handover() {
+    let region = TestRegion::new("handover-refuses-option-change", true, None).await;
+    region.flush_and_demote().await;
+    let flushed = region.version().flushed_entry_id;
+    let last = region.write_handed_over_remote_rows().await;
+    region.listener.hold_from(1);
+    region
+        .engine
+        .renew_node_lease(Instant::now() + Duration::from_secs(10));
+    region.log_store.hold_creates();
+    let handover = {
+        let engine = region.engine.clone();
+        let region_id = region.region_id;
+        let request = catchup_from_request(Some(last), Some(REMOTE_NODE_ID));
+        tokio::spawn(async move { engine.handle_request(region_id, request).await })
+    };
+    // The hand-off waits for the object that carries its record.
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        region.log_store.wait_for_parked_creates(1),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let skip_wal = || {
+        RegionRequest::Alter(RegionAlterRequest {
+            kind: AlterKind::SetRegionOptions {
+                options: vec![SetRegionOption::SkipWal(true)],
+            },
+        })
+    };
+
+    let error = region
+        .engine
+        .handle_request(region.region_id, skip_wal())
+        .await
+        .unwrap_err();
+
+    assert_eq!(StatusCode::RegionBusy, error.status_code(), "{error:?}");
+    region.log_store.release_creates();
+    handover.await.unwrap().unwrap();
+    let tails = vec![remote_tail(flushed, last, UptoKind::Reported)];
+    assert_eq!(tails, region.version().pending_tails);
+    region
+        .engine
+        .set_region_role(region.region_id, RegionRole::Follower)
+        .unwrap();
+    region
+        .engine
+        .handle_request(region.region_id, skip_wal())
+        .await
+        .unwrap();
+    assert!(region.version().options.skip_wal);
+    assert_eq!(tails, region.version().pending_tails);
+}
+
+/// A handover whose commit conflicts with a version another writer published fails retryably
+/// and records nothing; the retry reopens the region from that version and hands it over.
+#[tokio::test]
+async fn test_handover_commit_conflict_can_be_retried() {
+    let region = TestRegion::new("handover-conflict", true, None).await;
+    region.flush_and_demote().await;
+    let flushed = region.version().flushed_entry_id;
+    let last = region.write_handed_over_remote_rows().await;
+    let mito_region = region.engine.get_region(region.region_id).unwrap();
+    let version = next_manifest_version(&mito_region).await;
+    region.log_store.hold_creates();
+    let handover = {
+        let engine = region.engine.clone();
+        let region_id = region.region_id;
+        let request = catchup_from_request(Some(last), Some(REMOTE_NODE_ID));
+        tokio::spawn(async move { engine.handle_request(region_id, request).await })
+    };
+    // The hand-off waits for the object that carries its record.
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        region.log_store.wait_for_parked_creates(1),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let store = region.env.get_object_store().unwrap();
+    publish_delta(
+        &store,
+        &region.region_dir(),
+        version,
+        encode_delta(nop_action()).await,
+    )
+    .await;
+    region.log_store.release_creates();
+
+    let error = handover.await.unwrap().unwrap_err();
+    assert!(error.retry_hint().is_retryable(), "{error:?}");
+    assert!(mito_region.is_follower());
+    assert!(!region.has_pending_tails());
+
+    region
+        .catchup_from(last, Some(REMOTE_NODE_ID))
+        .await
+        .unwrap();
+    assert!(is_replaced(&region.engine, &mito_region));
+    assert_eq!(
+        vec![remote_tail(flushed, last, UptoKind::Reported)],
+        region.manifest().await.pending_tails
+    );
+    region.wait_until_replayed().await;
+    assert_eq!(9, count_rows(&region.engine, region.region_id).await);
 }

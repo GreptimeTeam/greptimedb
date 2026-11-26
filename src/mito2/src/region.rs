@@ -2034,6 +2034,18 @@ impl ManifestContext {
     /// lock, or None if it committed nothing.
     pub(crate) async fn commit_catchup(&self) -> Result<Option<PendingManifestHook>> {
         let mut manager = self.manifest_manager.write().await;
+        self.commit_catchup_locked(&mut manager, RegionEdit::default())
+            .await
+    }
+
+    /// Commits the catchup as [Self::commit_catchup] does, with `edit` and under the caller's
+    /// manifest write lock. If it returns a receipt, the caller applies `edit` to the region's
+    /// version before it drops the lock.
+    pub(crate) async fn commit_catchup_locked(
+        &self,
+        manager: &mut RegionManifestManager,
+        edit: RegionEdit,
+    ) -> Result<Option<PendingManifestHook>> {
         if !manager.is_conditional_publication() {
             return Ok(None);
         }
@@ -2050,8 +2062,7 @@ impl ManifestContext {
         ensure!(!self.is_reload_pending(), RegionBusySnafu { region_id });
         // A stop marks the region before it waits for this lock to stop the manager.
         ensure!(!self.is_stopped(), RegionStoppedSnafu { region_id });
-        let action_list =
-            RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit::default()));
+        let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
         let action_list_for_hook = self.hook.as_ref().map(|_| action_list.clone());
         let version = manager
             .update_with_verification(action_list, false, false, || true)
@@ -2764,6 +2775,14 @@ impl ManifestContext {
                 }
             }
         }
+    }
+
+    /// Returns whether the region publishes its manifest by conditional create.
+    pub(crate) async fn is_conditional_publication(&self) -> bool {
+        self.manifest_manager
+            .read()
+            .await
+            .is_conditional_publication()
     }
 
     /// Returns the normal manifest of the region.

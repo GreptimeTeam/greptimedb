@@ -1241,15 +1241,29 @@ async fn test_fence_or_lease_during_catchup_reopen(#[case] lease: bool) {
 /// promote the region the catchup reopened; the catchup promotes it when it ends.
 #[tokio::test]
 async fn test_leader_lease_during_handoff_does_not_promote() {
-    let mut env = TestEnv::with_prefix("lease-during-handoff").await;
+    let mut env = TestEnv::with_prefix("lease-during-handoff")
+        .await
+        .with_node_id(1);
     let region_id = RegionId::new(1, 1);
-    let (engine, log_store, _, schema, deadline) = create_leased_region(&mut env, region_id).await;
-    // Rows left in the memtable make the catchup reopen the region.
+    let (engine, log_store, table_dir, schema, deadline) =
+        create_leased_region(&mut env, region_id).await;
     put_range(&engine, region_id, &schema, 0, 3).await;
+    flush_region(&engine, region_id, None).await;
     engine
         .set_region_role(region_id, RegionRole::Follower)
         .unwrap();
     let old = engine.get_region(region_id).unwrap();
+    // A version another writer published makes the catchup reopen the region.
+    let store = env.get_object_store().unwrap();
+    let region_dir = region_dir_from_table_dir(&table_dir, region_id, PathType::Bare);
+    let version = next_manifest_version(&old).await;
+    publish_delta(
+        &store,
+        &region_dir,
+        version,
+        encode_delta(nop_action()).await,
+    )
+    .await;
     let reported_entry_id = old.version().flushed_entry_id;
     log_store.hold_creates();
     let catchup = {
@@ -1417,7 +1431,9 @@ async fn test_catchup_commit_of_a_stopping_region_commits_nothing() {
 /// leaves the region a Follower; the next catchup makes the region writable.
 #[tokio::test]
 async fn test_catchup_whose_handoff_fails_can_be_retried() {
-    let mut env = TestEnv::with_prefix("catchup-handoff-fails").await;
+    let mut env = TestEnv::with_prefix("catchup-handoff-fails")
+        .await
+        .with_node_id(1);
     let region_id = RegionId::new(1, 1);
     let (engine, log_store, _, _, _) = create_leased_region(&mut env, region_id).await;
     engine
@@ -1458,7 +1474,9 @@ async fn test_catchup_whose_handoff_fails_can_be_retried() {
 /// the catchup commits for, so the catchup fails without committing.
 #[tokio::test]
 async fn test_catchup_of_a_region_promoted_meanwhile_commits_nothing() {
-    let mut env = TestEnv::with_prefix("catchup-promoted-meanwhile").await;
+    let mut env = TestEnv::with_prefix("catchup-promoted-meanwhile")
+        .await
+        .with_node_id(1);
     let region_id = RegionId::new(1, 1);
     let (engine, log_store, _, _, _) = create_leased_region(&mut env, region_id).await;
     engine
@@ -1557,7 +1575,8 @@ async fn test_leader_lease_after_catchup_without_promotion_promotes(#[case] end:
         .unwrap();
     let mut env = TestEnv::with_prefix("lease-after-catchup")
         .await
-        .with_mock_layer(layer);
+        .with_mock_layer(layer)
+        .with_node_id(1);
     let region_id = RegionId::new(1, 1);
     let (engine, _log_store, _, schema, deadline) = create_leased_region(&mut env, region_id).await;
     put_range(&engine, region_id, &schema, 0, 3).await;
@@ -1569,10 +1588,17 @@ async fn test_leader_lease_after_catchup_without_promotion_promotes(#[case] end:
         .set_region_role(region_id, RegionRole::Follower)
         .unwrap();
     let region = engine.get_region(region_id).unwrap();
+    let version = next_manifest_version(&region).await;
+    let flushed_entry_id = region.version().flushed_entry_id;
     let request = RegionCatchupRequest {
         set_writable: end != CatchupEnd::NotSetWritable,
-        // With `Failed`, a source that reported an entry the replay cannot reach fails the catchup.
-        entry_id: (end == CatchupEnd::Failed).then(|| region.version().flushed_entry_id + 1),
+        entry_id: match end {
+            // The catchup cannot hand over the entry its unknown source reported.
+            CatchupEnd::Failed => Some(flushed_entry_id + 1),
+            // A catchup that does not make the region writable hands nothing over.
+            CatchupEnd::NotSetWritable => Some(flushed_entry_id),
+            CatchupEnd::ReopenFails => None,
+        },
         ..Default::default()
     };
     fail_manifest_reads.store(end == CatchupEnd::ReopenFails, Ordering::Relaxed);
@@ -1586,8 +1612,7 @@ async fn test_leader_lease_after_catchup_without_promotion_promotes(#[case] end:
             assert!(
                 matches!(
                     error.as_any().downcast_ref::<crate::error::Error>(),
-                    Some(crate::error::Error::Unexpected { reason, .. })
-                        if reason.contains("expected to replay to")
+                    Some(crate::error::Error::InvalidRequest { .. })
                 ),
                 "{error:?}"
             );
@@ -1605,6 +1630,7 @@ async fn test_leader_lease_after_catchup_without_promotion_promotes(#[case] end:
     }
     assert!(Arc::ptr_eq(&region, &engine.get_region(region_id).unwrap()));
     assert!(region.is_follower());
+    assert_eq!(version, next_manifest_version(&region).await);
 
     let promoted = engine
         .set_region_role_with_lease(

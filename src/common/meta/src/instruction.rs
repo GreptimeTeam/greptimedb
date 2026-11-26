@@ -381,7 +381,8 @@ pub struct UpgradeRegion {
     /// it's helpful to verify whether the leader region is ready.
     #[serde(with = "humantime_serde")]
     pub replay_timeout: Duration,
-    /// Legacy WAL index location hint, retained for older datanodes.
+    /// Id of the datanode that led the region before the migration. The datanode passes it to
+    /// the catchup as the source of `last_entry_id`.
     #[serde(default)]
     pub location_id: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

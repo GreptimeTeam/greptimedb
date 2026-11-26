@@ -162,10 +162,10 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   without fencing the region; a retry reopens it from the newer manifest.
 - Pending tails (`RegionManifest::pending_tails`) are WAL ranges a region still has
   to recover; the flushed entry id never prunes them. Opening a region replays its
-  WAL after `RegionManifest::wal_replay_start`. The WAL releases at open, after
-  a flush, and on close stay below this node's tails (`cap_wal_release`); truncate,
-  drop, offline cleanup and catchup release without that cap. Handoff floors are
-  dropped once the flushed entry id reaches them, in
+  WAL after `RegionManifest::wal_replay_start`, and so does a catchup. The WAL releases
+  at open, after a flush, on close and in a catchup stay below this node's tails
+  (`cap_wal_release`); truncate, drop and offline cleanup release without that cap. Handoff
+  floors are dropped once the flushed entry id reaches them, in
   `RegionManifestBuilder::try_build`. While a
   region has pending tails, scans and memtable/SST stats fail with
   `RegionPendingTails`, and so do truncate, entering staging, a repartition flush,
@@ -173,6 +173,11 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   without a default or changing options; compaction pauses. These checks run
   before any region state changes. Full-listing GC skips a region that has pending
   tails or whose manifest `has_update()` reports newer, or fails to check.
+- A catchup with `set_writable` and the source's last entry, of a region whose manifest is
+  published conditionally and that does not await its Leader lease, hands the region over
+  without replaying: see `hand_over` and `HANDOVER_SEQUENCE_GAP` in `region/catchup.rs`. It
+  refuses a region with rows in its memtable. During any catchup a manifest sync and a
+  follower's option change are refused, as the catchup changes the version outside the worker.
 - A leader that is writable, altering or editing replays its pending tails in one
   background task (`tail_replay.rs`), started by the worker when a lease, catchup or
   role change makes the region writable, or when it registers a region created or opened
@@ -238,9 +243,10 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   `ManifestContext::update_locked` refuses its commits unless they are staged or the region is
   downgrading (a close that must flush downgrades first); only a replay of tails
   (`TailsEditor::Replay`) skips the check, a discard does not, and ending staging checks it
-  before `commit_staged_locked`. `ManifestContext::commit_catchup` commits an empty edit as a
-  Follower; fire its hook only after every manifest guard is dropped, including the old instance's
-  read guard held by `handle_caught_up_again`. No flush or compaction trigger starts work for a
+  before `commit_staged_locked`. `ManifestContext::commit_catchup` commits an empty edit (a
+  handover's edit through `commit_catchup_locked`) as a Follower; fire its hook only after
+  every manifest guard is dropped, including the old instance's read guard held by
+  `handle_caught_up_again`. No flush or compaction trigger starts work for a
   waiting region except a downgrade's flush. The lease that ends the wait wakes the worker
   (`handle_leader_lease_wait_ended`) to schedule the flushes the wait deferred and, only if the
   region is then a writable leader, start a compaction. The missing indexes, the refused index

@@ -67,8 +67,8 @@ pub(crate) fn should_replay_tails(region: &MitoRegion) -> bool {
 }
 
 /// Releases the WAL of `region` on node `node_id` up to where the region now replays it on
-/// open, keeping the node's remaining tails, after an edit of its pending tails. A failure is
-/// only logged.
+/// open, keeping the node's remaining tails, after an edit of its pending tails or a handover's
+/// commit, which may record only a handoff floor or nothing. A failure is only logged.
 pub(crate) async fn release_wal_after_tails_edit<S: LogStore>(
     region: &MitoRegion,
     wal: &Wal<S>,
