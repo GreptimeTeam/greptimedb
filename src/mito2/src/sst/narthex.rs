@@ -198,6 +198,7 @@ pub(crate) async fn write_samples(
 /// Reconstruct the canonical sparse key from a native series row, in SST order.
 async fn series_keys(
     layer: &AccessLayer,
+    cache: Option<&WriteCacheRef>,
     source: &FileHandle,
     metadata: &RegionMetadata,
 ) -> Result<BoxStream<'static, Result<(ExactSeriesKey, u64)>>> {
@@ -205,7 +206,10 @@ async fn series_keys(
         source.clone(),
         &layer.build_region_dir(source.region_id()),
     )?;
-    let mut reader = ColumnarReader::open(layer.object_store().clone(), handle).await?;
+    let context =
+        crate::cache::columnar::MetadataCache::maintenance(cache, source.file_id().file_id());
+    let mut reader =
+        ColumnarReader::open_cached(layer.object_store().clone(), handle, context).await?;
     reader.adapt_tags(metadata)?;
     Ok(reader.read_full_keys())
 }
@@ -261,13 +265,19 @@ pub(crate) async fn write_series(
         let mut heads = BinaryHeap::new();
         for source in sources {
             let mut stream = match &source.meta_ref().format {
-                FileFormat::NarthexSeriesIndex(_) => series_keys(layer, source, &metadata).await?,
+                FileFormat::NarthexSeriesIndex(_) => {
+                    series_keys(layer, cache, source, &metadata).await?
+                }
                 FileFormat::NarthexSamples(_) => {
                     let handle = SamplesFileHandle::from_narthex(
                         source.clone(),
                         &layer.build_region_dir(source.region_id()),
                     )?;
-                    SamplesReader::open(layer.object_store().clone(), handle)
+                    let context = crate::cache::columnar::MetadataCache::maintenance(
+                        cache,
+                        source.file_id().file_id(),
+                    );
+                    SamplesReader::open_cached(layer.object_store().clone(), handle, context)
                         .await?
                         .read(Default::default())?
                         .map_ok(|block| (block.key, block.batch.num_rows() as u64))

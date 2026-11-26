@@ -43,31 +43,49 @@ pub(crate) struct DecodedValue {
 /// admission uses a synchronous, atomic cache entry after loading.
 #[derive(Clone)]
 pub(crate) struct MetadataCache {
-    manager: CacheManagerRef,
+    memory: Option<CacheManagerRef>,
+    disk: Option<super::write_cache::WriteCacheRef>,
     namespace: FileId,
     download_on_miss: bool,
 }
 impl CacheStrategy {
     pub(crate) fn columnar_metadata(&self, namespace: FileId) -> Option<MetadataCache> {
-        let Self::EnableAll(manager) = self else {
-            return None;
-        };
-        Some(MetadataCache {
-            manager: manager.clone(),
-            namespace,
-            download_on_miss: true,
-        })
+        match self {
+            Self::EnableAll(manager) => Some(MetadataCache {
+                memory: Some(manager.clone()),
+                disk: manager.write_cache().cloned(),
+                namespace,
+                download_on_miss: true,
+            }),
+            Self::Compaction(manager) => {
+                MetadataCache::maintenance(manager.write_cache(), namespace)
+            }
+            Self::Disabled => None,
+        }
     }
 }
 
 impl MetadataCache {
+    pub(crate) fn maintenance(
+        disk: Option<&super::write_cache::WriteCacheRef>,
+        namespace: FileId,
+    ) -> Option<Self> {
+        Some(Self {
+            memory: None,
+            disk: Some(disk?.clone()),
+            namespace,
+            download_on_miss: false,
+        })
+    }
+
     pub(crate) fn preload(manager: &CacheManagerRef, namespace: FileId) -> Option<Self> {
         let cache = manager.sst_decoded_meta_cache.as_ref()?;
         if manager.columnar_load_metrics.is_none() || cache.weighted_size() >= cache.capacity() {
             return None;
         }
         Some(Self {
-            manager: manager.clone(),
+            memory: Some(manager.clone()),
+            disk: manager.write_cache().cloned(),
             namespace,
             download_on_miss: false,
         })
@@ -94,7 +112,7 @@ impl ObjectReader {
         use snafu::ResultExt;
         let download = cache.is_some_and(|c| c.download_on_miss);
         let local = cache
-            .and_then(|c| c.manager.write_cache())
+            .and_then(|c| c.disk.as_ref())
             .zip(file)
             .map(|(cache, file)| {
                 let disk = cache.file_cache();
@@ -189,11 +207,12 @@ impl PartArea {
         exprs: &smallvec::SmallVec<[String; 1]>,
     ) -> Option<(&CacheManagerRef, super::PrefilterKey)> {
         let context = self.cache.as_ref()?;
-        context.manager.prefilter_result_cache.as_ref()?;
+        let manager = context.memory.as_ref()?;
+        manager.prefilter_result_cache.as_ref()?;
         let mut key = super::PrefilterKey::new(context.namespace, 0, None, 0, exprs.clone());
         key.mem_usage += self.path.len();
         key.native_block = Some((self.path.clone(), block_offset));
-        Some((&context.manager, key))
+        Some((manager, key))
     }
 
     pub(crate) async fn cached_ranges(
@@ -203,7 +222,7 @@ impl PartArea {
         let Some((context, pages)) = self
             .cache
             .as_ref()
-            .and_then(|c| Some((c, c.manager.page_cache.as_ref()?)))
+            .and_then(|c| Some((c, c.memory.as_ref()?.page_cache.as_ref()?)))
         else {
             return Ok(None);
         };
@@ -300,12 +319,12 @@ pub(crate) async fn load<T: Send + Sync + 'static>(
     weight: impl FnOnce(&T) -> usize,
     loader: impl Future<Output = Result<T>>,
 ) -> Result<Arc<T>> {
-    let Some(context) = cache else {
+    let Some((context, manager)) = cache.and_then(|c| Some((c, c.memory.as_ref()?))) else {
         return loader.await.map(Arc::new);
     };
     let (Some(decoded), Some(metrics)) = (
-        &context.manager.sst_decoded_meta_cache,
-        &context.manager.columnar_load_metrics,
+        &manager.sst_decoded_meta_cache,
+        &manager.columnar_load_metrics,
     ) else {
         return loader.await.map(Arc::new);
     };
