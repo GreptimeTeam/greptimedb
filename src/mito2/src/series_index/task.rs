@@ -986,7 +986,7 @@ mod tests {
         let metadata = region.metadata();
         let short = new_sparse_primary_key(&["a"], &metadata, 42, 1);
         let long = new_sparse_primary_key(&[&"b".repeat(256)], &metadata, 42, 2);
-        let flush_windows = async |offset| {
+        let flush_windows = async |offset: i64| {
             for (ts, key) in [
                 (1_000 + offset, short.clone()),
                 (11_000 + offset, long.clone()),
