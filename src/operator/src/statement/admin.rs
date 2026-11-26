@@ -515,6 +515,7 @@ mod tests {
         admin_output_schema, args_to_vector, immediate_result, resolve_admin_function,
     };
 
+    #[cfg(feature = "enterprise")]
     #[test]
     fn test_admin_signed_numeric_args_resolve() {
         for sql in [
