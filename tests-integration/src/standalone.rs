@@ -51,7 +51,7 @@ use frontend::frontend::Frontend;
 use frontend::instance::Instance;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
-use frontend::service_config::{BatcherOptions, PendingRowsBatcherOptions};
+use frontend::service_config::{BatcherOptions, PendingRowsBatcherOptions, RollupCacheOptions};
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
 use servers::grpc::GrpcOptions;
 use standalone::options::StandaloneOptions;
@@ -98,6 +98,7 @@ pub struct GreptimeDbStandaloneBuilder {
     mito_config: Option<mito2::config::MitoConfig>,
     query_options: query::options::QueryOptions,
     pipeline_options: pipeline::PipelineOptions,
+    rollup_cache: Option<RollupCacheOptions>,
 }
 
 impl GreptimeDbStandaloneBuilder {
@@ -123,7 +124,19 @@ impl GreptimeDbStandaloneBuilder {
             mito_config: None,
             query_options: query::options::QueryOptions::default(),
             pipeline_options: pipeline::PipelineOptions::default(),
+            rollup_cache: None,
         }
+    }
+
+    /// Installs the frontend rollup cache with these options.
+    ///
+    /// The cache is disabled unless this is called; the options are the whole
+    /// configuration, so a test states the bounds it needs (the chunk it is cut
+    /// into, the tail it leaves out, and the `ttl` it serves for) here.
+    #[must_use]
+    pub fn with_rollup_cache(mut self, options: RollupCacheOptions) -> Self {
+        self.rollup_cache = Some(options);
+        self
     }
 
     /// Overrides query options for this standalone test instance.
@@ -446,6 +459,7 @@ impl GreptimeDbStandaloneBuilder {
                 .auto_create_physical_table_timestamp_unit
                 .unwrap_or(common_time::timestamp::TimeUnit::Millisecond),
             pipeline: self.pipeline_options.clone(),
+            rollup_cache: self.rollup_cache.clone().unwrap_or_default(),
             max_in_flight_write_bytes: self.max_in_flight_write_bytes,
             pending_rows_batcher: PendingRowsBatcherOptions {
                 logical_table: self.logical_batcher.clone(),

@@ -57,13 +57,14 @@ use servers::batcher::{BatchingProtocol, pending_rows_batch_sync_enabled};
 use servers::request_memory_limiter::ServerMemoryLimiter;
 use snafu::{OptionExt, ResultExt};
 
-use crate::error::{self, DataFusionSnafu, ExternalSnafu, Result};
+use crate::error::{self, DataFusionSnafu, ExternalSnafu, InvalidRollupCacheConfigSnafu, Result};
 use crate::events::EventHandlerImpl;
 use crate::frontend::FrontendOptions;
 use crate::instance::Instance;
 use crate::instance::entity_graph::EntityGraphProviderImpl;
 use crate::instance::otlp::TraceAuxCache;
 use crate::instance::region_query::FrontendRegionQueryHandler;
+use crate::query_cache::RollupCache;
 use crate::service_config::BatcherOptions;
 
 /// The frontend [`Instance`] builder.
@@ -78,6 +79,7 @@ pub struct FrontendBuilder {
     procedure_executor: ProcedureExecutorRef,
     process_manager: ProcessManagerRef,
     local_file_access: LocalFileAccess,
+    rollup_cache: Option<Arc<RollupCache>>,
 }
 
 impl FrontendBuilder {
@@ -105,7 +107,17 @@ impl FrontendBuilder {
             procedure_executor,
             process_manager,
             local_file_access: LocalFileAccess::Disabled,
+            rollup_cache: None,
         }
+    }
+
+    /// Installs the frontend-local rollup cache of PromQL range queries.
+    ///
+    /// [`crate::frontend::FrontendOptions::rollup_cache`] builds one when it is enabled;
+    /// this seam is for an embedder that already holds one, which today is a test.
+    pub fn with_rollup_cache(mut self, rollup_cache: Arc<RollupCache>) -> Self {
+        self.rollup_cache = Some(rollup_cache);
+        self
     }
 
     #[cfg(test)]
@@ -432,6 +444,20 @@ impl FrontendBuilder {
             None
         };
 
+        let rollup_cache = match self.rollup_cache {
+            Some(cache) => Some(cache),
+            None if self.options.rollup_cache.enable => {
+                let config = self.options.rollup_cache.config().map_err(|error| {
+                    InvalidRollupCacheConfigSnafu {
+                        reason: error.to_string(),
+                    }
+                    .build()
+                })?;
+                Some(Arc::new(RollupCache::new(config)))
+            }
+            None => None,
+        };
+
         Ok(Instance {
             server_memory_limiter,
             logical_batcher: Default::default(),
@@ -457,6 +483,7 @@ impl FrontendBuilder {
             trace_aux_limiter,
             otlp_resource_info: self.options.otlp.experimental_enable_resource_info,
             suspend: Arc::new(AtomicBool::new(false)),
+            rollup_cache,
         })
     }
 }

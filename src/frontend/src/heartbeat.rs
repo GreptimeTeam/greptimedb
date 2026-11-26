@@ -35,6 +35,7 @@ use common_meta::heartbeat::handler::{
 };
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MailboxRef, OutgoingMessage};
 use common_meta::heartbeat::utils::outgoing_message_to_mailbox_message;
+use common_meta::instruction::{CacheIdent, Instruction};
 use common_stat::ResourceStatRef;
 use common_telemetry::{debug, error, info, warn};
 use meta_client::client::heartbeat::HeartbeatConfig;
@@ -49,6 +50,7 @@ use crate::error;
 use crate::error::Result;
 use crate::frontend::FrontendOptions;
 use crate::metrics::{HEARTBEAT_RECV_COUNT, HEARTBEAT_SENT_COUNT};
+use crate::query_cache::RollupCache;
 
 /// The result type returned by a [`FrontendHeartbeatExtension`].
 pub type FrontendHeartbeatExtensionResult<T> = std::result::Result<T, BoxedError>;
@@ -199,11 +201,17 @@ impl FrontendHeartbeatExtensions {
 /// Builds the frontend heartbeat response handler chain.
 ///
 /// Mailbox parsing always runs first, followed by extension handlers, suspension state handling,
-/// and cache invalidation.
+/// cache invalidation, and the rollup cache's own invalidation.
+///
+/// `rollup_cache` is this frontend's local PromQL chunk cache, when one is installed.
+/// It is cleared from the same `Instruction::InvalidateCaches` delivery the metadata
+/// caches use, because a chunk of a table is as stale as the metadata that changed
+/// under it.
 pub fn heartbeat_response_handler_executor(
     extensions: &FrontendHeartbeatExtensions,
     suspend_state: Arc<AtomicBool>,
     cache_invalidator: CacheInvalidatorRef,
+    rollup_cache: Option<Arc<RollupCache>>,
 ) -> HeartbeatResponseHandlerExecutorRef {
     let mut handlers: Vec<HeartbeatResponseHandlerRef> = vec![Arc::new(ParseMailboxMessageHandler)];
     handlers.extend(extensions.response_handlers().into_iter().map(|handler| {
@@ -211,9 +219,68 @@ pub fn heartbeat_response_handler_executor(
     }));
     handlers.extend([
         Arc::new(SuspendHandler::new(suspend_state)) as HeartbeatResponseHandlerRef,
+        // Before the invalidation handler, which consumes the incoming message.
+        Arc::new(RollupCacheInvalidateHandler::new(rollup_cache)),
         Arc::new(InvalidateCacheHandler::new(cache_invalidator)),
     ]);
     Arc::new(HandlerGroupExecutor::new(handlers))
+}
+
+/// Drops this frontend's rollup-cache chunks of the tables an invalidation names.
+///
+/// The rollup cache is process-local state that the [`CacheInvalidator`] chain does
+/// not own, so a `CacheIdent::TableId` delivered over the heartbeat is what tells this
+/// handler which table's chunks to stop serving. Only the table id is acted on: the
+/// chunks are keyed on it, so a `TableName` or a `SchemaName` ident cannot name a
+/// subset of them.
+///
+/// The handler never fails a heartbeat and never takes the message — it leaves it for
+/// [`InvalidateCacheHandler`] and answers [`HandleControl::Continue`] — so a frontend
+/// whose rollup cache is disabled, or one that sees an ident it cannot use, still
+/// invalidates every metadata cache exactly as before.
+///
+/// [`CacheInvalidator`]: common_meta::cache_invalidator::CacheInvalidator
+struct RollupCacheInvalidateHandler {
+    rollup_cache: Option<Arc<RollupCache>>,
+}
+
+impl RollupCacheInvalidateHandler {
+    fn new(rollup_cache: Option<Arc<RollupCache>>) -> Self {
+        Self { rollup_cache }
+    }
+}
+
+#[async_trait]
+impl common_meta::heartbeat::handler::HeartbeatResponseHandler for RollupCacheInvalidateHandler {
+    fn is_acceptable(&self, ctx: &HeartbeatResponseHandlerContext) -> bool {
+        self.rollup_cache.is_some()
+            && matches!(
+                ctx.incoming_message.as_ref(),
+                Some((_, _, Instruction::InvalidateCaches(_)))
+            )
+    }
+
+    async fn handle(
+        &self,
+        ctx: &mut HeartbeatResponseHandlerContext,
+    ) -> common_meta::error::Result<common_meta::heartbeat::handler::HandleControl> {
+        use common_meta::heartbeat::handler::HandleControl;
+
+        let Some((_, _, Instruction::InvalidateCaches(caches))) = ctx.incoming_message.as_ref()
+        else {
+            unreachable!("RollupCacheInvalidateHandler: should be guarded by 'is_acceptable'")
+        };
+        if let Some(rollup_cache) = &self.rollup_cache {
+            for ident in caches {
+                if let CacheIdent::TableId(table_id) = ident {
+                    rollup_cache.clear_table(*table_id);
+                }
+            }
+        }
+        // The message is left in place: the metadata caches are invalidated by the
+        // handler that follows this one.
+        Ok(HandleControl::Continue)
+    }
 }
 
 struct IsolatedHeartbeatResponseHandler(HeartbeatResponseHandlerRef);

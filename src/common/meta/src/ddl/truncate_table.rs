@@ -34,10 +34,12 @@ use table::metadata::{TableId, TableInfo};
 use table::table_name::TableName;
 use table::table_reference::TableReference;
 
+use crate::cache_invalidator::Context;
 use crate::ddl::DdlContext;
 use crate::ddl::event::table::{TableDdlEvent, TableDdlEventType, TableDdlLocator};
 use crate::ddl::utils::{add_peer_context_if_needed, map_to_procedure_error};
 use crate::error::{ConvertTimeRangesSnafu, Result, TableNotFoundSnafu};
+use crate::instruction::CacheIdent;
 use crate::key::DeserializedValueWithBytes;
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
@@ -218,7 +220,37 @@ impl TruncateTableProcedure {
             .into_iter()
             .collect::<Result<Vec<_>>>()?;
 
+        // The rows every cached answer of this table was computed from are gone. The
+        // invalidation is emitted once the regions are truncated, so a frontend that
+        // served a chunk while the truncation was in flight still reported rows that
+        // were there when it read them, and none keeps serving them afterwards.
+        self.on_broadcast_invalidate().await?;
+
         Ok(Status::done())
+    }
+
+    /// Tells every frontend to drop what it cached for the truncated table.
+    ///
+    /// A truncate is a change of the table's data, not of its metadata, but the same
+    /// `CacheIdent::TableId` an alter or a drop emits names it: it travels over the
+    /// existing heartbeat instruction, so no new protocol is involved, and a frontend
+    /// that misses it still stops serving the chunk once its ttl runs out.
+    async fn on_broadcast_invalidate(&self) -> Result<()> {
+        let table_id = self.data.table_id();
+        let ctx = Context {
+            subject: Some(format!(
+                "Invalidate table cache by truncating table {}, table_id: {}",
+                self.data.table_ref(),
+                table_id,
+            )),
+        };
+
+        self.context
+            .cache_invalidator
+            .invalidate(&ctx, &[CacheIdent::TableId(table_id)])
+            .await?;
+
+        Ok(())
     }
 }
 
@@ -264,4 +296,72 @@ enum TruncateTableState {
     Prepare,
     /// Truncates regions on Datanode
     DatanodeTruncateRegions,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+
+    use super::*;
+    use crate::cache_invalidator::CacheInvalidator;
+    use crate::ddl::test_util::create_table::test_create_table_task;
+    use crate::test_util::{MockDatanodeManager, new_ddl_context};
+
+    /// Records the idents an invalidation names instead of broadcasting them.
+    #[derive(Default)]
+    struct RecordingCacheInvalidator {
+        idents: Mutex<Vec<CacheIdent>>,
+    }
+
+    #[async_trait]
+    impl CacheInvalidator for RecordingCacheInvalidator {
+        async fn invalidate(&self, _ctx: &Context, caches: &[CacheIdent]) -> Result<()> {
+            self.idents.lock().unwrap().extend(caches.iter().cloned());
+            Ok(())
+        }
+
+        fn invalidate_all(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A truncate of table `table_id` whose invalidation is recorded rather than sent.
+    fn recording_procedure(
+        table_id: TableId,
+    ) -> (TruncateTableProcedure, Arc<RecordingCacheInvalidator>) {
+        let task = TruncateTableTask {
+            catalog: "greptime".to_string(),
+            schema: "public".to_string(),
+            table: "metrics".to_string(),
+            table_id,
+            time_ranges: Vec::new(),
+        };
+        let create_table = test_create_table_task("metrics", table_id);
+        let table_info_value =
+            DeserializedValueWithBytes::from_inner(TableInfoValue::new(create_table.table_info));
+        let mut context = new_ddl_context(Arc::new(MockDatanodeManager::new(())));
+        let recorder = Arc::new(RecordingCacheInvalidator::default());
+        context.cache_invalidator = recorder.clone();
+
+        (
+            TruncateTableProcedure::new(task, table_info_value, context),
+            recorder,
+        )
+    }
+
+    #[tokio::test]
+    async fn test_truncate_invalidates_the_truncated_table() {
+        let table_id = 1024;
+        let (procedure, recorder) = recording_procedure(table_id);
+
+        procedure.on_broadcast_invalidate().await.unwrap();
+
+        assert_eq!(
+            vec![CacheIdent::TableId(table_id)],
+            *recorder.idents.lock().unwrap(),
+            "a truncate invalidates the table id and nothing else"
+        );
+    }
 }

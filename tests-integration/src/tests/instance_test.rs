@@ -14,6 +14,7 @@
 
 use std::env;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use client::{DEFAULT_SCHEMA_NAME, OutputData};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, METRICS_EXEMPLARS_TABLE};
@@ -28,6 +29,7 @@ use datatypes::arrow::array::{
 };
 use frontend::error::Error;
 use frontend::instance::Instance;
+use frontend::service_config::RollupCacheOptions;
 use operator::error::Error as OperatorError;
 use query::datafusion::QUERY_PARALLELISM_HINT;
 use query::options::QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN;
@@ -38,11 +40,348 @@ use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{QueryContext, QueryContextRef};
 
 use crate::tests::test_util::{
-    MockInstance, both_instances_cases, both_instances_cases_with_custom_storages,
+    MockInstance, PromRangeQuery, both_instances_cases, both_instances_cases_with_custom_storages,
     check_unordered_output_stream, create_local_file_test_dir, distributed,
-    distributed_with_multiple_object_stores, find_testing_resource, prepare_path, standalone,
-    standalone_instance_case, standalone_with_multiple_object_stores,
+    distributed_with_multiple_object_stores, find_testing_resource, prepare_path,
+    prometheus_http_app, promql_range_points, rollup_cache_options, standalone,
+    standalone_instance_case, standalone_with_multiple_object_stores, standalone_with_rollup_cache,
+    standalone_with_rollup_cache_options,
 };
+
+/// The timestamps a rollup cache test's rows are written at, in milliseconds past
+/// the epoch: one point per minute from 15 to 25 minutes.
+///
+/// They are fixed rather than relative to the wall clock, so the points a query
+/// evaluates and the classification the tail gives them do not move between runs.
+/// The tail is what is configured relative to the wall clock instead (see
+/// [`cache_tail_ending_at_2330`]).
+fn cache_ts_ms() -> Vec<i64> {
+    (15..=25).map(|minute| minute * 60_000).collect()
+}
+
+/// The answer of a cache test's range query: every point reads `default`, except
+/// the points named in `overrides`, which are `(minute, value)`.
+fn cache_answer(default: f64, overrides: &[(i64, f64)]) -> Vec<(i64, f64)> {
+    cache_ts_ms()
+        .into_iter()
+        .map(|ts| {
+            let value = overrides
+                .iter()
+                .find(|(minute, _)| ts == minute * 60_000)
+                .map(|(_, value)| *value)
+                .unwrap_or(default);
+            (ts, value)
+        })
+        .collect()
+}
+
+/// The tail an end-to-end test configures so that the tail lands inside the fixed
+/// data window.
+///
+/// The tail is measured from the wall clock and the test's data is in 1970, so a
+/// recorded duration would leave every point on the cacheable side. Stating it as
+/// "from now back to 23:30 past the epoch" instead puts the cutoff between the
+/// 23rd and the 24th minute: the 24th and 25th minutes are inside the tail and are
+/// therefore executed by every request, and everything before them is cacheable.
+/// Half a minute separates the cutoff from the nearest point on either side, so
+/// the wall clock cannot move it across a point while a test runs.
+fn cache_tail_ending_at_2330() -> Duration {
+    const CUTOFF_MS: u128 = 1_410_000;
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("the test clock is past the epoch")
+        .as_millis();
+    Duration::from_millis(u64::try_from(now_ms - CUTOFF_MS).expect("the test clock is past 1970"))
+}
+
+/// [`rollup_cache_options`] with the tail ending at 23:30 past the epoch, which is
+/// what puts the tail inside the fixed data window (see
+/// [`cache_tail_ending_at_2330`]).
+fn cache_options_with_tail(tail: Duration) -> RollupCacheOptions {
+    RollupCacheOptions {
+        tail,
+        ..rollup_cache_options()
+    }
+}
+
+/// [`rollup_cache_options`] with a `ttl` short enough for a test to outlive it.
+fn cache_options_with_ttl(ttl: Duration) -> RollupCacheOptions {
+    RollupCacheOptions {
+        ttl,
+        ..rollup_cache_options()
+    }
+}
+
+/// Creates the cache test's table and writes its 11 fixed points, all reading 1.0.
+async fn create_cache_table(frontend: &Arc<Instance>, table: &str) {
+    execute_sql(
+        frontend,
+        &format!(
+            "CREATE TABLE {table} (host STRING PRIMARY KEY, ts TIMESTAMP(3) TIME INDEX, val DOUBLE)"
+        ),
+    )
+    .await;
+    let rows = cache_ts_ms()
+        .into_iter()
+        .map(|ts| format!("('a', {ts}, 1.0)"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    execute_sql(
+        frontend,
+        &format!("INSERT INTO {table} (host, ts, val) VALUES {rows}"),
+    )
+    .await;
+}
+
+/// Overwrites the row at `minute`, so stored data moves while a cached payload
+/// still holds what it read.
+async fn write_cache_point(frontend: &Arc<Instance>, table: &str, minute: i64, value: f64) {
+    execute_sql(
+        frontend,
+        &format!(
+            "INSERT INTO {table} (host, ts, val) VALUES ('a', {}, {value})",
+            minute * 60_000
+        ),
+    )
+    .await;
+}
+
+/// Reads the value stored at `minute` back, so a test can state that the source
+/// moved before it states what a request answered.
+async fn stored_cache_point(frontend: &Arc<Instance>, table: &str, minute: i64) -> String {
+    let output = execute_sql(
+        frontend,
+        &format!("SELECT val FROM {table} WHERE ts = {}", minute * 60_000),
+    )
+    .await;
+    output.data.pretty_print().await
+}
+
+/// The range the cache tests query: every point from 15 to 25 minutes, one per
+/// minute, folding one minute of lookback each.
+fn cache_range_query(query: &str) -> PromRangeQuery<'_> {
+    PromRangeQuery::new(query, "900", "1500", "60", "60")
+}
+
+/// The rollup cache serves a repeated range from memory, and re-executes the part
+/// of it that is inside the tail.
+///
+/// The cache is read-through, so nothing has to run between the requests: the
+/// first one misses every chunk, executes it and stores it, and the second one is
+/// served from memory. With five-minute chunks and the tail landing at 23:30, the
+/// 15..19 minute points are one whole cacheable chunk, the 24th and 25th minutes
+/// are inside the tail, and every request executes them.
+///
+/// A row written after the fill is what separates the two: the tail re-reads
+/// storage and reports it immediately, while the cached chunk keeps answering what
+/// it read (the staleness `ttl` bounds) instead of executing again.
+#[tokio::test]
+async fn test_rollup_cache_ttl_hit_and_tail_bypass() {
+    let instance =
+        standalone_with_rollup_cache_options(cache_options_with_tail(cache_tail_ending_at_2330()))
+            .await;
+    let frontend = instance.frontend();
+    create_cache_table(&frontend, "cache_hit").await;
+    let cache = frontend
+        .rollup_cache()
+        .expect("the test instance installs the cache")
+        .clone();
+    let app = prometheus_http_app(&frontend);
+    let query = cache_range_query("sum(cache_hit)");
+
+    // Nothing is resident yet: the request executes every span and fills the one
+    // whole chunk of the range.
+    let cold = promql_range_points(&app, &query).await;
+    assert_eq!(cache_answer(1.0, &[]), cold, "one point per minute");
+    assert_eq!(0, cache.hit_count(), "a cold request serves nothing");
+    assert_eq!(
+        1,
+        cache.entry_count(),
+        "the request filled the one whole chunk before the tail"
+    );
+
+    // The same range again: the whole chunk is served from memory, and the spans
+    // outside it (the 20..23 minute edge and the 24..25 minute tail) are executed.
+    let warm = promql_range_points(&app, &query).await;
+    assert_eq!(cache_answer(1.0, &[]), warm);
+    assert_eq!(1, cache.hit_count(), "the repeat hit the one chunk");
+    assert_eq!(1, cache.entry_count(), "a hit stores nothing new");
+
+    // Two rows move: one inside the cached chunk, one inside the tail.
+    write_cache_point(&frontend, "cache_hit", 16, 2.5).await;
+    write_cache_point(&frontend, "cache_hit", 24, 2.5).await;
+    assert!(
+        stored_cache_point(&frontend, "cache_hit", 16)
+            .await
+            .contains("2.5"),
+        "the write reached storage"
+    );
+
+    let after_write = promql_range_points(&app, &query).await;
+    assert_eq!(
+        cache_answer(1.0, &[(24, 2.5)]),
+        after_write,
+        "the tail re-read storage, the cached chunk answered what it read"
+    );
+    assert_eq!(
+        2,
+        cache.hit_count(),
+        "the second repeat hit the chunk again"
+    );
+    assert_eq!(1, cache.entry_count(), "the tail filled nothing");
+}
+
+/// The internal reset drops every entry, so the next request reads storage again,
+/// and `nocache=1` leaves the cache alone.
+///
+/// Both are stated against a moved row. The reset makes the request after it report
+/// the write, and `nocache=1` reports a second write without advancing the hit
+/// count; the request after that still answers from the entry the reset's request
+/// filled, which is what shows `nocache=1` neither served nor replaced anything.
+#[tokio::test]
+async fn test_rollup_cache_reset_and_nocache() {
+    let instance = standalone_with_rollup_cache().await;
+    let frontend = instance.frontend();
+    create_cache_table(&frontend, "cache_reset").await;
+    let cache = frontend
+        .rollup_cache()
+        .expect("the test instance installs the cache")
+        .clone();
+    let app = prometheus_http_app(&frontend);
+    let query = cache_range_query("sum(cache_reset)");
+
+    // Two whole chunks cover 15..24 minutes, and the 25th minute starts a third one
+    // the request does not fill, so it is read directly.
+    let chunks = 2;
+    let cold = promql_range_points(&app, &query).await;
+    assert_eq!(cache_answer(1.0, &[]), cold, "one point per minute");
+    assert_eq!(0, cache.hit_count(), "a cold request serves nothing");
+    assert_eq!(chunks, cache.entry_count(), "and fills both chunks");
+
+    let warm = promql_range_points(&app, &query).await;
+    assert_eq!(cache_answer(1.0, &[]), warm);
+    assert_eq!(
+        chunks,
+        cache.hit_count(),
+        "the repeat is served from both chunks"
+    );
+    assert_eq!(chunks, cache.entry_count(), "a hit stores nothing new");
+
+    // Move a row of the cached chunk, so a request that reads storage can be told
+    // apart from one that answers from memory.
+    write_cache_point(&frontend, "cache_reset", 16, 2.5).await;
+    assert!(
+        stored_cache_point(&frontend, "cache_reset", 16)
+            .await
+            .contains("2.5"),
+        "the write reached storage"
+    );
+
+    // The reset drops every entry, so the next request misses, reads storage and
+    // fills again; the unchanged hit count is what says it served nothing.
+    frontend.clear_rollup_cache();
+    assert_eq!(0, cache.entry_count(), "the reset drops every entry");
+    let refilled = promql_range_points(&app, &query).await;
+    assert_eq!(
+        cache_answer(1.0, &[(16, 2.5)]),
+        refilled,
+        "the request after the reset reports what storage holds now"
+    );
+    assert_eq!(
+        chunks,
+        cache.hit_count(),
+        "that request served nothing from memory"
+    );
+    assert_eq!(chunks, cache.entry_count(), "and filled the chunks again");
+
+    // A second write, then `nocache=1`: the request must read storage and leave the
+    // entry the reset's request filled untouched.
+    write_cache_point(&frontend, "cache_reset", 16, 3.5).await;
+    assert!(
+        stored_cache_point(&frontend, "cache_reset", 16)
+            .await
+            .contains("3.5"),
+        "the second write reached storage"
+    );
+    let bypassed =
+        promql_range_points(&app, &cache_range_query("sum(cache_reset)").without_cache()).await;
+    assert_eq!(
+        cache_answer(1.0, &[(16, 3.5)]),
+        bypassed,
+        "nocache=1 reads storage instead of the entry"
+    );
+    assert_eq!(chunks, cache.hit_count(), "nocache=1 hit neither chunk");
+    assert_eq!(chunks, cache.entry_count(), "and left both chunks in place");
+
+    // The entry survived `nocache=1` and still holds what the reset's request read.
+    let served = promql_range_points(&app, &query).await;
+    assert_eq!(
+        cache_answer(1.0, &[(16, 2.5)]),
+        served,
+        "the entry outlived the bypassing request"
+    );
+    assert_eq!(
+        2 * chunks,
+        cache.hit_count(),
+        "the request after it hit both chunks"
+    );
+}
+
+/// An entry stops being served when it reaches `ttl`, and the request that finds it
+/// gone reads storage and fills the chunk again.
+///
+/// What the test states is the one thing a ttl guarantees: after sleeping longer
+/// than it, a lookup cannot answer from the entry, so the request reports what
+/// storage holds now. It deliberately does not state a hit before the sleep — that
+/// would be a question about how fast a request is, not about the cache. The age
+/// boundary itself is stated deterministically by the frontend unit test
+/// `query_cache::tests::an_entry_older_than_the_ttl_never_serves`, and
+/// [`test_rollup_cache_ttl_hit_and_tail_bypass`] states the hit.
+#[tokio::test]
+async fn test_rollup_cache_ttl_expiry_refills() {
+    let ttl = Duration::from_secs(1);
+    let instance = standalone_with_rollup_cache_options(cache_options_with_ttl(ttl)).await;
+    let frontend = instance.frontend();
+    create_cache_table(&frontend, "cache_expiry").await;
+    let cache = frontend
+        .rollup_cache()
+        .expect("the test instance installs the cache")
+        .clone();
+    let app = prometheus_http_app(&frontend);
+    let query = cache_range_query("sum(cache_expiry)");
+
+    let chunks = 2;
+    let cold = promql_range_points(&app, &query).await;
+    assert_eq!(cache_answer(1.0, &[]), cold, "one point per minute");
+    assert_eq!(
+        chunks,
+        cache.entry_count(),
+        "the cold request filled both chunks"
+    );
+
+    write_cache_point(&frontend, "cache_expiry", 16, 2.5).await;
+    assert!(
+        stored_cache_point(&frontend, "cache_expiry", 16)
+            .await
+            .contains("2.5"),
+        "the write reached storage"
+    );
+
+    // Past the ttl, so the resident entry may not answer: the request reads storage.
+    tokio::time::sleep(ttl + Duration::from_millis(500)).await;
+    let after_ttl = promql_range_points(&app, &query).await;
+    assert_eq!(
+        cache_answer(1.0, &[(16, 2.5)]),
+        after_ttl,
+        "the request after the ttl read storage instead of the aged entry"
+    );
+    assert_eq!(0, cache.hit_count(), "an aged entry is a miss, not a hit");
+    assert_eq!(
+        chunks,
+        cache.entry_count(),
+        "and the request filled the chunks again"
+    );
+}
 
 #[apply(both_instances_cases)]
 async fn test_sparse_primary_key_schema_validation(instance: Arc<dyn MockInstance>) {

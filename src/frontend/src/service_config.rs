@@ -20,6 +20,7 @@ pub mod otlp;
 pub mod pending_rows_batcher;
 pub mod postgres;
 pub mod prom_store;
+pub mod rollup_cache;
 
 pub use influxdb::{InfluxdbMergeMode, InfluxdbOptions};
 pub use jaeger::JaegerOptions;
@@ -30,3 +31,4 @@ pub use otlp::OtlpOptions;
 pub use pending_rows_batcher::{BatcherOptions, PendingRowsBatcherOptions};
 pub use postgres::PostgresOptions;
 pub use prom_store::PromStoreOptions;
+pub use rollup_cache::RollupCacheOptions;

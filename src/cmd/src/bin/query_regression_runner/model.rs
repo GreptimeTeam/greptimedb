@@ -133,6 +133,27 @@ pub(super) struct PromStore {
     pub(super) max_concurrent_flushes: u64,
     pub(super) worker_channel_capacity: u64,
     pub(super) max_inflight_requests: u64,
+    /// Rollup cache rendered into the frontend configuration of both targets.
+    #[serde(default)]
+    pub(super) rollup_cache: Option<RollupCache>,
+    /// Rollup cache rendered only into the candidate frontend configuration,
+    /// taking precedence over `rollup_cache` there.
+    #[serde(default)]
+    pub(super) candidate_rollup_cache: Option<RollupCache>,
+}
+
+/// The frontend `[rollup_cache]` section as the strings the frontend parses.
+///
+/// It carries the cache's four bounds and nothing else: the cache is
+/// read-through and bounded by `ttl` alone, so there is no refresh schedule and
+/// no separate age limit to render.
+#[derive(Clone, Debug, Deserialize)]
+pub(super) struct RollupCache {
+    pub(super) enable: bool,
+    pub(super) max_bytes: String,
+    pub(super) chunk: String,
+    pub(super) tail: String,
+    pub(super) ttl: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]

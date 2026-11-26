@@ -17,9 +17,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use auth::UserProviderRef;
+use axum::Router;
 use axum::extract::{Request, State};
+use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::IntoResponse;
+use axum::routing::post;
 use common_base::Plugins;
 use common_config::Configurable;
 use common_telemetry::{info, warn};
@@ -157,6 +160,31 @@ where
         }
 
         builder = builder.with_dashboard_handler(self.instance.clone());
+
+        if let Some(cache) = self.instance.rollup_cache().cloned() {
+            let token = opts.rollup_cache.reset_token.clone();
+            let reset = Router::new().route(
+                "/internal/resetRollupResultCache",
+                post(move |headers: HeaderMap| {
+                    let cache = cache.clone();
+                    let token = token.clone();
+                    async move {
+                        let Some(expected) = token.as_deref() else {
+                            return StatusCode::NOT_FOUND;
+                        };
+                        let given = headers
+                            .get("x-greptime-admin-token")
+                            .and_then(|value| value.to_str().ok());
+                        if given != Some(expected) {
+                            return StatusCode::UNAUTHORIZED;
+                        }
+                        cache.clear();
+                        StatusCode::NO_CONTENT
+                    }
+                }),
+            );
+            builder = builder.with_extra_router(reset);
+        }
 
         if let Some(configurator) = self.plugins.get::<RouterConfigurator>() {
             info!("Adding extra router from plugins");
