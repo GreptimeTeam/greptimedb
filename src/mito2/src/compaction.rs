@@ -57,7 +57,7 @@ use crate::error::{GetSchemaMetadataSnafu, Result, TimeoutSnafu};
 use crate::sst::file::{FileHandle, FileMeta, Level};
 
 /// Finds compaction options and TTL together with a single metadata fetch to reduce RTT.
-async fn find_dynamic_options(
+pub(crate) async fn find_dynamic_options(
     region_id: RegionId,
     region_options: &crate::region::options::RegionOptions,
     schema_metadata_manager: &SchemaMetadataManagerRef,
@@ -172,4 +172,9 @@ pub(crate) fn format_panic_reason(payload: &(dyn Any + Send + 'static)) -> Strin
     } else {
         "unknown panic".to_string()
     }
+}
+
+/// A rewrite is balanced when the peers contribute at least the largest input size.
+pub(crate) fn bytes_balanced(largest: u128, total: u128) -> bool {
+    largest <= total - largest
 }

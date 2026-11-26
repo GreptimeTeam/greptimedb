@@ -162,6 +162,7 @@ impl Configurable for StandaloneOptions {
             "heartbeat_env_vars",
             "wal.broker_endpoints",
             "event_recorder.event_types",
+            "query.remote_allowed_hosts",
             "pending_rows_batcher.protocols",
             "pending_rows_batcher.logical_table.protocols",
         ])

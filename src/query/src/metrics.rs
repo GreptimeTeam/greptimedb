@@ -150,6 +150,40 @@ lazy_static! {
         &["result"]
     )
     .unwrap();
+
+    /// Statements the native PromQL route handed to the existing planner, by the cause it recorded.
+    ///
+    /// A declined statement is not an error and not a different answer: the existing planner
+    /// computes the same rows, so a fallback is only visible as a slower query. This counter and
+    /// the log line beside it are what make its rate observable per cause.
+    pub static ref NATIVE_PROMQL_DECLINED_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "greptime_query_native_promql_declined_total",
+        "native PromQL expressions planned by the existing planner, by cause",
+        &["reason"]
+    )
+    .unwrap();
+
+    /// Statements whose metadata drop the native PromQL planner could not prove for its key
+    /// columns, by reason.
+    ///
+    /// A plan-time risk hint, not a record of work done. The canonical pass decides a drop from the
+    /// labels a tree reports; the one fact those labels cannot state is the scan's key columns: a
+    /// primary-key column that holds `NULL` in one series and `''` in another decodes to an absent
+    /// and to an empty label, and a name-dropping kernel drops the empty one with the metadata
+    /// labels, so two such series can leave it as one label set. Nothing is collected for that pair,
+    /// so this counts the statements where it is possible at all.
+    ///
+    /// The statement is counted when *every* input's key columns lack the proof - the fact is taken
+    /// as an `all` over the inputs, like the flag that reports it. Being counted therefore does not
+    /// mean a collision happens: the pair needs two stored series that agree on every other label,
+    /// and it says nothing about whether anything was collected above them.
+    pub static ref DUPLICATE_LABELSET_CHECK_UNPROVED_TOTAL: IntCounterVec =
+        register_int_counter_vec!(
+            "greptime_query_duplicate_labelset_check_unproved_total",
+            "native PromQL statements whose metadata drop its key columns could not prove, by reason",
+            &["reason"]
+        )
+        .unwrap();
 }
 
 /// A stream to call the callback once a RecordBatch stream is done.

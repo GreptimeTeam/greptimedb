@@ -460,7 +460,16 @@ impl SeriesScan {
                 return Ok(None);
             }
         }
-        if self.uses_columnar() && !is_sparse_metric_metadata(metadata) {
+        // The columnar prepared reader serves sparse metric regions only: another region on a store in
+        // that format has no columnar samples, and its SST rows are the sources the ordinary scan reads
+        // anyway. Missing columnar coverage is not a reason to refuse the raw path - see the
+        // `prepared_columnar` gate below - so such a scan keeps it and is served from the ordinary scan.
+        // Refusing here instead would be an error no caller can turn into a fallback: the logical plan
+        // above this leaf is already the fused node by the time the region is asked.
+        let columnar_region = self.uses_columnar() && is_sparse_metric_metadata(metadata);
+        // Narthex samples exist for sparse metric regions only, so a scan that requires them and is not
+        // one of those has nothing to read them from.
+        if !columnar_region && input.requires_narthex_preparation() {
             return Ok(None);
         }
         let selected = input.mapper.output_schema();
@@ -532,7 +541,8 @@ impl SeriesScan {
         }
         // Structural eligibility errors still reject the raw path; ordinary scans cover sources
         // without columnar artifacts, so missing coverage is not an error here.
-        let prepared_columnar = self.uses_prepared_columnar()? && columnar_fields_supported;
+        let prepared_columnar =
+            columnar_region && self.uses_prepared_columnar()? && columnar_fields_supported;
         let schema = Arc::new(SeriesSchema {
             fields: specs.into(),
             eval_grid: None,

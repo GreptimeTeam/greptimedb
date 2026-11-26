@@ -38,21 +38,7 @@ const RANGE_CATALOG: &str = "range-index.json";
 const SERIES_CATALOG: &str = "series-index.json";
 const SERIES_METADATA_KEY: &str = "greptime.series_index";
 
-/// Summary of SSTs sharing a compaction-window-aligned start.
-///
-/// New data changes must have sequences greater than those already indexed. A new
-/// start adds a map entry; new data at an existing start raises its maximum sequence.
-/// The maximum end and sequence may come from different files, so this summary
-/// does not establish uniform sequence coverage throughout the interval.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct WindowSequence {
-    /// Inclusive start in epoch seconds, equal to the key in `window_sequences`.
-    pub(crate) start: i64,
-    /// Exclusive interval end in epoch seconds.
-    pub(crate) end: i64,
-    /// Maximum sequence among the SSTs sharing this aligned start.
-    pub(crate) max_sequence: u64,
-}
+pub(crate) use crate::sst::file::WindowSequence;
 
 /// Self-describing coverage stored in a series-index Parquet footer.
 ///
@@ -73,7 +59,9 @@ pub(crate) struct SeriesIndexEntry {
     pub(crate) bucket_end: Timestamp,
     /// Source SST IDs retained for diagnostics and exact coverage of unknown-sequence files. Compaction can replace these
     /// files without changing indexed data, so known-sequence reuse does not depend on IDs.
-    pub(crate) source_file_ids: Vec<FileId>,
+    /// Native indexes omit this field and use region-manifest coverage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) source_file_ids: Option<Vec<FileId>>,
     pub(crate) min_file_sequence: u64,
     pub(crate) max_file_sequence: u64,
     /// Width used to align the half-open compaction windows, in seconds.
@@ -87,6 +75,10 @@ pub(crate) struct SeriesIndexEntry {
 }
 
 impl SeriesIndexEntry {
+    pub(crate) fn source_file_ids(&self) -> &[FileId] {
+        self.source_file_ids.as_deref().unwrap_or_default()
+    }
+
     /// Entries written before pluggable formats describe the original Parquet layout.
     pub(crate) fn format(&self) -> crate::series_index::artifact::ArtifactFormat {
         self.artifact.as_ref().map_or(
@@ -112,7 +104,9 @@ impl SeriesIndexEntry {
                 }
                 // Manual builds can cover immutable files without sequence metadata.
                 // This is exact membership, never a claim about replacement SSTs.
-                None => self.min_file_sequence == 0 && self.source_file_ids.contains(&file.file_id),
+                None => {
+                    self.min_file_sequence == 0 && self.source_file_ids().contains(&file.file_id)
+                }
             }
     }
 }
@@ -340,7 +334,7 @@ mod tests {
             index_uuid: FileId::random(),
             bucket_start: Timestamp::new_second(1),
             bucket_end: Timestamp::new_second(2),
-            source_file_ids: Vec::new(),
+            source_file_ids: Some(Vec::new()),
             min_file_sequence: 2,
             max_file_sequence: 4,
             compaction_window_secs: 1,
@@ -438,7 +432,7 @@ mod tests {
             index_uuid: FileId::random(),
             bucket_start: Timestamp::new_second(0),
             bucket_end: Timestamp::new_second(100),
-            source_file_ids: vec![FileId::random()],
+            source_file_ids: Some(vec![FileId::random()]),
             min_file_sequence: 1,
             max_file_sequence: 2,
             compaction_window_secs: 10,

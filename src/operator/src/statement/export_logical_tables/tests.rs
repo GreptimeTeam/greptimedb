@@ -321,7 +321,14 @@ async fn packed_destination_reuses_backend_with_local_access_disabled() {
         .build_operator();
     let connection = HashMap::new();
     let access = LocalFileAccess::Disabled;
-    let result = LogicalExportDestination::new(location.as_str(), &connection, &access, None).await;
+    let result = LogicalExportDestination::new(
+        location.as_str(),
+        &connection,
+        &access,
+        &RemoteStorageAccess::unrestricted(),
+        None,
+    )
+    .await;
     assert!(matches!(
         result,
         Err(error::Error::BuildBackend {
@@ -335,6 +342,7 @@ async fn packed_destination_reuses_backend_with_local_access_disabled() {
         location.as_str(),
         &connection,
         &access,
+        &RemoteStorageAccess::unrestricted(),
         Some(packed.clone()),
     )
     .await
@@ -778,6 +786,7 @@ async fn cancellation_drains_storage_and_preserves_committed_files() {
             &format!("{}/", directory.path().display()),
             &HashMap::new(),
             &access,
+            &RemoteStorageAccess::unrestricted(),
         )
         .await
         .unwrap();

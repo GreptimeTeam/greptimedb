@@ -19,6 +19,7 @@ async-compression = { version = "0.4", features = [
     "tokio",
 ] }
 async-trait.workspace = true
+base64.workspace = true
 bytes.workspace = true
 common-base.workspace = true
 common-error.workspace = true
@@ -34,6 +35,7 @@ futures.workspace = true
 lazy_static.workspace = true
 object-store.workspace = true
 object_store_opendal.workspace = true
+opendal-service-azure-common.workspace = true
 orc-rust = { version = "0.9", default-features = false, features = ["async"] }
 parquet.workspace = true
 paste.workspace = true

@@ -860,6 +860,7 @@ pub(crate) fn version_builder_from_manifest(
         .flushed_sequence(manifest.flushed_sequence)
         .truncated_entry_id(manifest.truncated_entry_id)
         .compaction_time_window(manifest.compaction_time_window)
+        .series_window_seconds(manifest.series_window_seconds)
         .options(region_options)
         .pending_tails(manifest.pending_tails.clone())
 }
@@ -1616,6 +1617,7 @@ mod tests {
             append_mode: None,
             pending_tails: Default::default(),
             series_indexes: Default::default(),
+            series_window_seconds: None,
             handoff_floors: Default::default(),
         }
     }

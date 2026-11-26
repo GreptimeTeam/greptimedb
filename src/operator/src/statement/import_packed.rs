@@ -67,10 +67,14 @@ impl StatementExecutor {
             }
             .fail();
         }
-        let backend =
-            build_backend_with_path(&req.location, &req.connection, &self.local_file_access)
-                .await
-                .context(error::BuildBackendSnafu)?;
+        let backend = build_backend_with_path(
+            &req.location,
+            &req.connection,
+            &self.local_file_access,
+            &self.remote_storage_access,
+        )
+        .await
+        .context(error::BuildBackendSnafu)?;
         if !backend
             .is_file(PACK_INDEX_FILE)
             .await

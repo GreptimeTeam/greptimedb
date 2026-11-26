@@ -993,7 +993,7 @@ mod tests {
         let (mut bucket, mut entry) = build_input(&version);
         // A single source is first polled after opening the series writer.
         bucket.files.truncate(1);
-        entry.source_file_ids = vec![bucket.files[0].file_id().file_id()];
+        entry.source_file_ids = Some(vec![bucket.files[0].file_id().file_id()]);
         let states = WriterStates::default();
         let write_fail = fail.clone();
         let write_layer = writer_layer(&states, move |_| {

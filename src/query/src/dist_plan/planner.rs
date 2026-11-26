@@ -34,11 +34,16 @@ use datafusion_common::{DataFusionError, TableReference};
 use datafusion_expr::{LogicalPlan, UserDefinedLogicalNode};
 use datafusion_physical_expr::{LexOrdering, PhysicalSortExpr};
 use datatypes::prelude::ConcreteDataType;
-use partition::expr::PartitionExpr;
-use partition::manager::{PartitionRuleManagerRef, create_partitions_from_region_routes};
+use datatypes::value::Value;
+use partition::expr::{Operand, PartitionExpr, RestrictedOp};
+use partition::function::IcebergHash;
+use partition::manager::{
+    PartitionInfo, PartitionRuleManagerRef, create_partitions_from_region_routes,
+};
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
-use store_api::storage::RegionId;
+use store_api::metric_engine_consts::{DATA_SCHEMA_TABLE_ID_COLUMN_NAME, METRIC_ENGINE_NAME};
+use store_api::storage::{RegionId, TableId};
 use table::TableRef;
 use table::metadata::{TableInfo, TableType};
 use table::table::adapter::DfTableProviderAdapter;
@@ -306,90 +311,89 @@ impl DistExtensionPlanner {
             partition_columns,
             all_regions,
         );
-        // Ordinary region selection. Every fallback keeps all regions, exactly
-        // as before the native raw route existed.
+        let partitioned_by_table_id = physical_table_id != table_info.table_id()
+            && table_info.meta.engine == METRIC_ENGINE_NAME
+            && table.partition_rules().is_some_and(|rules| {
+                rules
+                    .extra_phy_cols_not_in_logical_table
+                    .iter()
+                    .any(|name| name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
+            });
         let regions = 'pruning: {
-            if partition_columns.is_empty() {
-                break 'pruning all_regions;
-            }
-            // Extract predicates from logical plan
-            let partition_expressions = match PredicateExtractor::extract_partition_expressions(
-                logical_plan,
-                &partition_columns,
-            ) {
-                Ok(expressions) => expressions,
-                Err(err) => {
-                    common_telemetry::debug!(
-                        "Failed to extract partition expressions for table {} (id: {}), using all regions: {:?}",
-                        table_name,
-                        table.table_info().table_id(),
-                        err
-                    );
-                    break 'pruning all_regions;
-                }
+            let partition_expressions = if partition_columns.is_empty() {
+                Vec::new()
+            } else {
+                PredicateExtractor::extract_partition_expressions(logical_plan, &partition_columns)
+                    .unwrap_or_else(|err| {
+                        debug!(
+                            "Failed to extract partition predicates for table {table_name}: {err}"
+                        );
+                        Vec::new()
+                    })
             };
 
-            if partition_expressions.is_empty() {
+            if partition_expressions.is_empty()
+                && (!partitioned_by_table_id || all_regions.len() == 1)
+            {
                 break 'pruning all_regions;
             }
-
-            let Some(partition_column_types) = self
-                .partition_column_types_for_pruning(
-                    table_name,
-                    table_info.as_ref(),
-                    physical_table_id,
-                    &partition_expressions,
-                    &all_regions,
-                )
-                .await
-            else {
-                break 'pruning all_regions;
-            };
-
-            // Get partition information for the table if partition rule manager is available
             let partitions = match create_partitions_from_region_routes(
                 table_info.table_id(),
                 &physical_table_route.region_routes,
             ) {
                 Ok(partitions) => partitions,
                 Err(err) => {
-                    common_telemetry::debug!(
-                        "Failed to get partition information for table {}, using all regions: {:?}",
-                        table_name,
-                        err
-                    );
+                    debug!("Failed to load partitions for table {table_name}: {err}");
                     break 'pruning all_regions;
                 }
             };
-            if partitions.is_empty() {
-                break 'pruning all_regions;
+
+            let (mut regions, partitions) = if partitioned_by_table_id {
+                let Some(candidates) =
+                    simplify_metric_partitions(table_info.table_id(), partitions)
+                else {
+                    debug!("Could not simplify partition rules for table {table_name}");
+                    break 'pruning all_regions;
+                };
+                candidates
+            } else {
+                (Vec::new(), partitions)
+            };
+
+            // Rules that simplify to true impose no constraints on the SQL predicates.
+            // Send only the residual rules to the constraint pruner.
+            if !partitions.is_empty()
+                && !partition_expressions.is_empty()
+                && let Some(column_types) = self
+                    .partition_column_types_for_pruning(
+                        table_name,
+                        table_info.as_ref(),
+                        physical_table_id,
+                        &partition_expressions,
+                    )
+                    .await
+            {
+                match ConstraintPruner::prune_regions(
+                    &partition_expressions,
+                    &partitions,
+                    column_types,
+                ) {
+                    Ok(pruned) => regions.extend(pruned),
+                    Err(err) => {
+                        debug!("Failed to prune partitions for table {table_name}: {err}");
+                        regions.extend(partitions.iter().map(|partition| partition.id));
+                    }
+                }
+            } else {
+                regions.extend(partitions.iter().map(|partition| partition.id));
             }
-            // Apply region pruning based on partition rules
-            let pruned_regions = match ConstraintPruner::prune_regions(
-                &partition_expressions,
-                &partitions,
-                partition_column_types,
-            ) {
-                Ok(regions) => regions,
-                Err(err) => {
-                    common_telemetry::debug!(
-                        "Failed to prune regions for table {}, using all regions: {:?}",
-                        table_name,
-                        err
-                    );
-                    break 'pruning all_regions;
-                }
-            };
 
-            common_telemetry::debug!(
-                "Region pruning for table {}: {} partition expressions applied, pruned from {} to {} regions",
-                table_name,
-                partition_expressions.len(),
+            debug!(
+                "Region pruning for table {table_name}: {} -> {} regions",
                 all_regions.len(),
-                pruned_regions.len()
+                regions.len()
             );
-
-            pruned_regions
+            regions
         };
 
         // A selected region is trivially disjoint. For several regions the proof must
@@ -422,14 +426,13 @@ impl DistExtensionPlanner {
     /// compatibility or because its physical table was repartitioned after the logical table was
     /// created. Predicate extraction must remain bounded by the logical schema, while pruning
     /// needs the physical datatypes to evaluate route expressions. Any lookup failure or
-    /// logical/physical datatype mismatch returns `None`, causing the caller to scan all regions.
+    /// logical/physical datatype mismatch returns `None`, preserving the current candidate regions.
     async fn partition_column_types_for_pruning(
         &self,
         table_name: &TableName,
         logical_table_info: &TableInfo,
         physical_table_id: u32,
         partition_expressions: &[PartitionExpr],
-        all_regions: &[RegionId],
     ) -> Option<HashMap<String, ConcreteDataType>> {
         let physical_partition_columns = if physical_table_id == logical_table_info.table_id() {
             partition_column_types(logical_table_info)
@@ -444,15 +447,15 @@ impl DistExtensionPlanner {
                 }
                 Ok(None) => {
                     debug!(
-                        "DistExtensionPlanner: physical table info not found for table {} (id: {}), using all regions: {:?}",
-                        table_name, physical_table_id, all_regions
+                        "DistExtensionPlanner: physical table info not found for table {} (id: {})",
+                        table_name, physical_table_id
                     );
                     return None;
                 }
                 Err(err) => {
                     debug!(
-                        "DistExtensionPlanner: failed to load physical table info for table {} (id: {}): {}, using all regions: {:?}",
-                        table_name, physical_table_id, err, all_regions
+                        "DistExtensionPlanner: failed to load physical table info for table {} (id: {}): {}",
+                        table_name, physical_table_id, err
                     );
                     return None;
                 }
@@ -473,8 +476,8 @@ impl DistExtensionPlanner {
             .any(|name| logical_column_types.get(name) != physical_column_types.get(name))
         {
             debug!(
-                "DistExtensionPlanner: logical and physical partition metadata mismatch for table {} (physical id: {}), using all regions: {:?}",
-                table_name, physical_table_id, all_regions
+                "DistExtensionPlanner: logical and physical partition metadata mismatch for table {} (physical id: {})",
+                table_name, physical_table_id
             );
             return None;
         }
@@ -501,6 +504,102 @@ impl DistExtensionPlanner {
         session_state
             .optimizer()
             .optimize(plan.clone(), session_state, |_, _| {})
+    }
+}
+
+enum SimplifiedPartitionExpr {
+    Constant(bool),
+    Residual(PartitionExpr),
+}
+
+/// Returns unconditional regions and regions with residual partition rules.
+/// Incomplete or inconsistent routing rules leave the original route in use.
+fn simplify_metric_partitions(
+    table_id: TableId,
+    partitions: Vec<PartitionInfo>,
+) -> Option<(Vec<RegionId>, Vec<PartitionInfo>)> {
+    let table_id = Value::UInt32(table_id);
+    let hash = IcebergHash::evaluate_value(&table_id).ok()?;
+    let mut unconditional = Vec::new();
+    let mut residual = Vec::new();
+    for PartitionInfo { id, partition_expr } in partitions {
+        match simplify_metric_partition_expr(partition_expr?, &table_id, &hash)? {
+            SimplifiedPartitionExpr::Constant(false) => {}
+            SimplifiedPartitionExpr::Constant(true) => unconditional.push(id),
+            SimplifiedPartitionExpr::Residual(expr) => residual.push(PartitionInfo {
+                id,
+                partition_expr: Some(expr),
+            }),
+        }
+    }
+    // A complete set of physical rules covers every logical table ID.
+    if unconditional.is_empty() && residual.is_empty() {
+        return None;
+    }
+    Some((unconditional, residual))
+}
+
+fn simplify_metric_partition_expr(
+    expr: PartitionExpr,
+    table_id: &Value,
+    hash: &Value,
+) -> Option<SimplifiedPartitionExpr> {
+    use SimplifiedPartitionExpr::{Constant, Residual};
+
+    // Route deserialization canonicalizes comparisons to dimension op literal.
+    match (expr.op, *expr.lhs, *expr.rhs) {
+        (op @ (RestrictedOp::And | RestrictedOp::Or), Operand::Expr(lhs), Operand::Expr(rhs)) => {
+            let lhs = simplify_metric_partition_expr(lhs, table_id, hash)?;
+            let rhs = simplify_metric_partition_expr(rhs, table_id, hash)?;
+            let absorbing = op == RestrictedOp::Or;
+            match (lhs, rhs) {
+                (Constant(lhs), Constant(rhs)) => {
+                    Some(Constant(if absorbing { lhs || rhs } else { lhs && rhs }))
+                }
+                (Constant(value), residual) | (residual, Constant(value)) => {
+                    Some(if value == absorbing {
+                        Constant(value)
+                    } else {
+                        residual
+                    })
+                }
+                (Residual(lhs), Residual(rhs)) => Some(Residual(PartitionExpr {
+                    lhs: Box::new(Operand::Expr(lhs)),
+                    op,
+                    rhs: Box::new(Operand::Expr(rhs)),
+                })),
+            }
+        }
+        (RestrictedOp::And | RestrictedOp::Or, _, _) => None,
+        (op, dimension @ (Operand::Column(_) | Operand::IcebergHash(_)), Operand::Value(bound)) => {
+            let known = match &dimension {
+                Operand::Column(name) if name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME => table_id,
+                Operand::IcebergHash(function)
+                    if function.column() == DATA_SCHEMA_TABLE_ID_COLUMN_NAME =>
+                {
+                    hash
+                }
+                _ => return Some(Residual(PartitionExpr::new(dimension, op, bound.into()))),
+            };
+
+            // DDL types the bound to the dimension. Partition routing orders NULL
+            // before non-NULL values. A mismatched bound cannot safely be folded.
+            if !matches!(bound, Value::Null) && known.data_type() != bound.data_type() {
+                return None;
+            }
+            let ordering = known.cmp(&bound);
+            let matches = match op {
+                RestrictedOp::Eq => ordering.is_eq(),
+                RestrictedOp::NotEq => !ordering.is_eq(),
+                RestrictedOp::Lt => ordering.is_lt(),
+                RestrictedOp::LtEq => ordering.is_le(),
+                RestrictedOp::Gt => ordering.is_gt(),
+                RestrictedOp::GtEq => ordering.is_ge(),
+                RestrictedOp::And | RestrictedOp::Or => return None,
+            };
+            Some(Constant(matches))
+        }
+        _ => None,
     }
 }
 
@@ -660,11 +759,15 @@ mod tests {
     use datatypes::value::Value;
     use moka::future::CacheBuilder;
     use partition::cache::new_partition_info_cache;
-    use partition::expr::{PartitionExpr, col as partition_col};
+    use partition::expr::{Operand, PartitionExpr, RestrictedOp, col as partition_col};
+    use partition::function::IcebergHash;
     use partition::manager::PartitionRuleManager;
     use session::ReadPreference;
+    use store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME;
     use store_api::storage::RegionId;
+    use table::dist_table::DistTable;
     use table::metadata::{TableInfo, TableInfoBuilder, TableMeta, TableType};
+    use table::table::PartitionRules;
     use table::table::adapter::DfTableProviderAdapter;
     use table::table_name::TableName;
     use table::test_util::EmptyTable;
@@ -723,7 +826,13 @@ mod tests {
         let schema = Arc::new(Schema::new(
             columns
                 .iter()
-                .map(|name| ColumnSchema::new(*name, ConcreteDataType::string_datatype(), true))
+                .map(|name| {
+                    if *name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME {
+                        ColumnSchema::new(*name, ConcreteDataType::uint32_datatype(), false)
+                    } else {
+                        ColumnSchema::new(*name, ConcreteDataType::string_datatype(), true)
+                    }
+                })
                 .collect(),
         ));
         let meta = TableMeta {
@@ -772,10 +881,26 @@ mod tests {
         let physical_info = table_info(
             PHYSICAL_TABLE_ID,
             "physical",
-            &["host", "rack"],
+            &["host", "rack", DATA_SCHEMA_TABLE_ID_COLUMN_NAME],
             physical_partition_keys,
         );
-        let logical_table = EmptyTable::from_table_info(&logical_info);
+        let hidden_columns: Vec<_> = physical_info
+            .meta
+            .partition_column_names()
+            .filter(|name| {
+                logical_info
+                    .meta
+                    .schema
+                    .column_index_by_name(name)
+                    .is_none()
+            })
+            .cloned()
+            .collect();
+        let partition_rules = (!hidden_columns.is_empty()).then_some(PartitionRules {
+            extra_phy_cols_not_in_logical_table: hidden_columns,
+        });
+        let logical_table =
+            DistTable::table_partitioned(Arc::new(logical_info.clone()), partition_rules);
         let physical_table = EmptyTable::from_table_info(&physical_info);
         let catalog_manager = MemoryCatalogManager::with_default_setup();
         for table in [&logical_table, &physical_table] {
@@ -914,6 +1039,127 @@ mod tests {
 
         let (regions, _) = planner.get_regions(&table_name, &plan).await.unwrap();
         assert_all_logical_regions(regions);
+    }
+
+    #[tokio::test]
+    async fn unfiltered_tag_partitioned_scan_keeps_all_regions() {
+        // The captured table still describes tag partitioning, even if a newer
+        // route already contains rules for __table_id.
+        let id = partition_col(DATA_SCHEMA_TABLE_ID_COLUMN_NAME);
+        let bound = Value::UInt32(LOGICAL_TABLE_ID);
+        for tag_keys in [vec![0], vec![0, 1]] {
+            let rules = vec![
+                Some(id.clone().lt(bound.clone())),
+                Some(id.clone().gt_eq(bound.clone())),
+            ];
+            let (planner, plan, table) = planner_and_plan(tag_keys, rules).await;
+            let (regions, _) = planner.get_regions(&table, plan.inputs()[0]).await.unwrap();
+            assert_eq!(
+                regions,
+                vec![
+                    RegionId::new(LOGICAL_TABLE_ID, 1),
+                    RegionId::new(LOGICAL_TABLE_ID, 2)
+                ]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn prunes_raw_and_hashed_table_id_without_sql_predicates() {
+        let id = Value::UInt32(LOGICAL_TABLE_ID);
+        let hash = IcebergHash::evaluate_value(&id).unwrap();
+        for (dimension, bound) in [
+            (partition_col(DATA_SCHEMA_TABLE_ID_COLUMN_NAME), id),
+            (
+                Operand::IcebergHash(IcebergHash::new(DATA_SCHEMA_TABLE_ID_COLUMN_NAME)),
+                hash,
+            ),
+        ] {
+            let rules = vec![
+                Some(dimension.clone().lt(bound.clone())),
+                Some(dimension.gt_eq(bound)),
+            ];
+            let (planner, plan, table) = planner_and_plan(vec![2], rules).await;
+            let (regions, _) = planner.get_regions(&table, plan.inputs()[0]).await.unwrap();
+            assert_eq!(regions, vec![RegionId::new(LOGICAL_TABLE_ID, 2)]);
+        }
+    }
+
+    #[tokio::test]
+    async fn prunes_mixed_table_id_and_host_rules() {
+        let id = partition_col(DATA_SCHEMA_TABLE_ID_COLUMN_NAME);
+        let host = partition_col("host");
+        let boundary = Value::UInt32(LOGICAL_TABLE_ID);
+        let rules = vec![
+            Some(id.clone().lt(boundary.clone())),
+            Some(
+                id.clone()
+                    .gt_eq(boundary.clone())
+                    .and(host.clone().lt(Value::String("m".into()))),
+            ),
+            Some(
+                id.gt_eq(boundary)
+                    .and(host.gt_eq(Value::String("m".into()))),
+            ),
+        ];
+        let (mut planner, plan, table) = planner_and_plan(vec![0, 2], rules).await;
+        let candidates = vec![
+            RegionId::new(LOGICAL_TABLE_ID, 2),
+            RegionId::new(LOGICAL_TABLE_ID, 3),
+        ];
+        let (regions, _) = planner.get_regions(&table, plan.inputs()[0]).await.unwrap();
+        assert_eq!(regions, candidates);
+        let (regions, _) = planner.get_regions(&table, &plan).await.unwrap();
+        assert_eq!(regions, vec![RegionId::new(LOGICAL_TABLE_ID, 2)]);
+
+        planner.catalog_manager = MemoryCatalogManager::with_default_setup();
+        let (regions, _) = planner.get_regions(&table, &plan).await.unwrap();
+        assert_eq!(regions, candidates);
+    }
+
+    #[tokio::test]
+    async fn folds_or_in_table_id_partition_rule() {
+        let id = partition_col(DATA_SCHEMA_TABLE_ID_COLUMN_NAME);
+        let host = partition_col("host");
+        for (boundary, expected) in [(LOGICAL_TABLE_ID, 2), (LOGICAL_TABLE_ID + 1, 1)] {
+            let boundary = Value::UInt32(boundary);
+            let rules = vec![
+                Some(PartitionExpr::new(
+                    Operand::Expr(id.clone().lt(boundary.clone())),
+                    RestrictedOp::Or,
+                    Operand::Expr(host.clone().gt_eq(Value::String("m".into()))),
+                )),
+                Some(
+                    id.clone()
+                        .gt_eq(boundary)
+                        .and(host.clone().lt(Value::String("m".into()))),
+                ),
+            ];
+            let (planner, plan, table) = planner_and_plan(vec![0, 2], rules).await;
+            let (regions, _) = planner.get_regions(&table, &plan).await.unwrap();
+            assert_eq!(regions, vec![RegionId::new(LOGICAL_TABLE_ID, expected)]);
+        }
+    }
+
+    #[tokio::test]
+    async fn incomplete_table_id_rules_keep_the_full_route() {
+        let id = partition_col(DATA_SCHEMA_TABLE_ID_COLUMN_NAME);
+        for rule in [
+            None,
+            Some(id.clone().lt(Value::UInt32(0))),
+            Some(id.clone().gt_eq(Value::Int64(0))),
+        ] {
+            let rules = vec![Some(id.clone().lt(Value::UInt32(LOGICAL_TABLE_ID))), rule];
+            let (planner, plan, table) = planner_and_plan(vec![2], rules).await;
+            let (regions, _) = planner.get_regions(&table, plan.inputs()[0]).await.unwrap();
+            assert_eq!(
+                regions,
+                vec![
+                    RegionId::new(LOGICAL_TABLE_ID, 1),
+                    RegionId::new(LOGICAL_TABLE_ID, 2)
+                ]
+            );
+        }
     }
 
     #[test]

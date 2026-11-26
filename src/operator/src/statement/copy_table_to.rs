@@ -23,7 +23,9 @@ use common_datasource::file_format::Format;
 use common_datasource::file_format::csv::stream_to_csv;
 use common_datasource::file_format::json::stream_to_json;
 use common_datasource::file_format::parquet::stream_to_parquet;
-use common_datasource::object_store::{LocalFileAccess, build_backend_for_write_with_path};
+use common_datasource::object_store::{
+    LocalFileAccess, RemoteStorageAccess, build_backend_for_write_with_path,
+};
 use common_datasource::packed_writer::PackedTableWriter;
 use common_datasource::parquet_writer::ParquetFileWriter;
 use common_query::Output;
@@ -171,6 +173,13 @@ impl StatementExecutor {
         for f in filters {
             builder = builder.filter(f).context(BuildDfLogicalPlanSnafu)?;
         }
+        if let Some(limit) = req.limit {
+            // DataFusion represents the fetch count as a signed 64-bit literal.
+            let fetch = usize::try_from(limit.min(i64::MAX as u64)).unwrap_or(usize::MAX);
+            builder = builder
+                .limit(0, Some(fetch))
+                .context(BuildDfLogicalPlanSnafu)?;
+        }
         let plan = builder.build().context(BuildDfLogicalPlanSnafu)?;
 
         let output = self
@@ -188,6 +197,7 @@ impl StatementExecutor {
         debug!("Copy table: {table_id} to location: {location}");
         Self::copy_to_file_managed(
             &self.local_file_access,
+            &self.remote_storage_access,
             &format,
             output,
             location,
@@ -207,6 +217,7 @@ impl StatementExecutor {
     ) -> Result<usize> {
         Self::copy_to_file_managed(
             &self.local_file_access,
+            &self.remote_storage_access,
             format,
             output,
             location,
@@ -217,8 +228,10 @@ impl StatementExecutor {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn copy_to_file_managed(
         local_file_access: &LocalFileAccess,
+        remote_storage_access: &RemoteStorageAccess,
         format: &Format,
         output: Output,
         location: &str,
@@ -249,9 +262,14 @@ impl StatementExecutor {
             .await;
         }
 
-        let backend = build_backend_for_write_with_path(location, connection, local_file_access)
-            .await
-            .context(error::BuildBackendSnafu)?;
+        let backend = build_backend_for_write_with_path(
+            location,
+            connection,
+            local_file_access,
+            remote_storage_access,
+        )
+        .await
+        .context(error::BuildBackendSnafu)?;
         let filename = backend
             .object_path
             .with_context(|| error::UnexpectedSnafu {
@@ -524,6 +542,7 @@ mod tests {
         let token = CancellationToken::new();
         let result = StatementExecutor::copy_to_file_managed(
             &access,
+            &RemoteStorageAccess::unrestricted(),
             &format,
             output(false),
             location.as_str(),
@@ -546,6 +565,7 @@ mod tests {
             let token = CancellationToken::new();
             let result = StatementExecutor::copy_to_file_managed(
                 &access,
+                &RemoteStorageAccess::unrestricted(),
                 &format,
                 output(invalid_schema),
                 location.as_str(),

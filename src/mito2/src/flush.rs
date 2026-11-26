@@ -99,6 +99,13 @@ pub trait WriteBufferManager: Send + Sync + std::fmt::Debug {
     /// We have freed `mem` bytes.
     fn free_mem(&self, mem: usize);
 
+    /// Frees `mem` bytes that a memtable gives back while it is still alive. Unlike
+    /// [Self::free_mem], it wakes the workers only when writes may be stalled on the
+    /// global limit, so frequent small releases do not wake every worker.
+    fn release_mem(&self, mem: usize) {
+        self.free_mem(mem);
+    }
+
     /// Returns the total memory used by memtables.
     fn memory_usage(&self) -> usize;
 
@@ -201,6 +208,15 @@ impl WriteBufferManager for WriteBufferManagerImpl {
             // Notifies the worker after the memory usage is decreased. When we drop the memtable
             // outside of the worker, the worker may still stall requests because the memory usage
             // is not updated. So we need to notify the worker to handle stalled requests again.
+            let _ = notifier.send(());
+        }
+    }
+
+    fn release_mem(&self, mem: usize) {
+        let previous = self.memory_used.fetch_sub(mem, Ordering::Relaxed);
+        if previous >= self.global_write_buffer_size
+            && let Some(notifier) = &self.notifier
+        {
             let _ = notifier.send(());
         }
     }
@@ -772,14 +788,16 @@ impl MemtableSstWriter {
             flush_metrics.compact_memtable += compact_cost;
 
             let mem_stats = mem.stats();
+            // Size batches and row groups by the decoded rows, not the held bytes: an encoded
+            // memtable holds far fewer bytes than the batches it decodes to.
             let batch_size = crate::batch_size::estimate_batch_size([(
                 mem_stats.num_rows() as u64,
-                mem_stats.bytes_allocated() as u64,
+                mem_stats.decoded_bytes() as u64,
             )]);
             let mut mem_write_opts = write_opts.clone();
             mem_write_opts.row_group_size = row_group_size_for(
                 mem_stats.num_rows() as u64,
-                mem_stats.bytes_allocated() as u64,
+                mem_stats.decoded_bytes() as u64,
                 write_opts.row_group_size,
             );
             // Sets `for_flush` flag and propagates the reader batch size.
@@ -1213,9 +1231,10 @@ fn build_flush_source(
         );
         return Ok((FlatSource::new_iter(schema, iter), max_sequence));
     }
+    // Encoded ranges are decoded before merging, so their decoded size sizes the batches.
     let batch_size = crate::batch_size::estimate_batch_size(ranges.iter().map(|range| {
         let stats = range.stats();
-        (stats.num_rows() as u64, stats.bytes_allocated() as u64)
+        (stats.num_rows() as u64, stats.decoded_bytes() as u64)
     }));
     let schemas = ranges
         .iter()
@@ -1952,6 +1971,25 @@ mod tests {
     }
 
     #[test]
+    fn test_release_mem_wakes_workers_only_when_writes_may_stall() {
+        let (sender, mut receiver) = watch::channel(());
+        let manager = WriteBufferManagerImpl::new(100).with_notifier(sender);
+        manager.reserve_mem(60);
+        manager.release_mem(10);
+        assert!(!receiver.has_changed().unwrap());
+
+        manager.reserve_mem(50);
+        assert!(manager.should_stall());
+        manager.release_mem(10);
+        assert!(receiver.has_changed().unwrap());
+        receiver.mark_unchanged();
+
+        // Freeing a dropped memtable always wakes the workers.
+        manager.free_mem(10);
+        assert!(receiver.has_changed().unwrap());
+    }
+
+    #[test]
     fn test_get_mutable_limit() {
         assert_eq!(4, WriteBufferManagerImpl::get_mutable_limit(8));
         assert_eq!(5, WriteBufferManagerImpl::get_mutable_limit(10));
@@ -2603,6 +2641,7 @@ mod tests {
                 self.batch.is_none().then(|| EncodedRange {
                     data: Bytes::new(),
                     sst_info: SstInfo::default(),
+                    _charges: Vec::new(),
                 })
             }
         }
@@ -2676,6 +2715,95 @@ mod tests {
         assert_eq!(1, sources.encoded.len());
         assert_eq!(1, sources.sources.len());
         assert_eq!(&schema, sources.sources[0].0.schema());
+        Ok(())
+    }
+
+    #[test]
+    fn test_overlapping_ranges_merge_in_batches_sized_by_decoded_bytes() -> Result<()> {
+        struct BatchIterBuilder(RecordBatch);
+
+        impl IterBuilder for BatchIterBuilder {
+            fn build(
+                &self,
+                _metrics: Option<crate::memtable::MemScanMetrics>,
+            ) -> Result<crate::memtable::BoxedBatchIterator> {
+                unimplemented!()
+            }
+
+            fn is_record_batch(&self) -> bool {
+                true
+            }
+
+            fn build_record_batch(
+                &self,
+                _time_range: Option<(common_time::Timestamp, common_time::Timestamp)>,
+                _metrics: Option<crate::memtable::MemScanMetrics>,
+            ) -> Result<BoxedRecordBatchIterator> {
+                Ok(Box::new(std::iter::once(Ok(self.0.clone()))))
+            }
+
+            fn record_batch_schema_hint(&self) -> Option<SchemaRef> {
+                Some(self.0.schema())
+            }
+        }
+
+        const ROWS: usize = 100;
+        let metadata = metadata_for_test();
+        let schema = to_flat_sst_arrow_schema(
+            &metadata,
+            &FlatSchemaOptions::from_encoding(metadata.primary_key_encoding),
+        );
+        let mut ranges = std::collections::BTreeMap::new();
+        for id in 0..2 {
+            let pk_codec = build_primary_key_codec(&metadata);
+            let mut converter =
+                BulkPartConverter::new(&metadata, schema.clone(), ROWS, pk_codec, true);
+            // Interleaved timestamps, so the merge builds every output batch.
+            converter.append_key_values(&build_key_values_with_ts_seq_values(
+                &metadata,
+                "key".to_string(),
+                1,
+                (0..ROWS as i64).map(|i| i * 2 + id as i64),
+                std::iter::repeat_n(Some(1.0), ROWS),
+                1,
+            ))?;
+            let batch = converter.convert()?.batch;
+            // Encoded ranges hold far fewer bytes than their rows decode to; rows of 2 MiB
+            // make batches of 32 rows.
+            let stats = MemtableStats {
+                estimated_bytes: 1024,
+                decoded_bytes: Some(ROWS * 2 * 1024 * 1024),
+                num_rows: ROWS,
+                min_sequence: 1,
+                max_sequence: 2,
+                ..Default::default()
+            };
+            let context = MemtableRangeContext::new(
+                id as u32,
+                Box::new(BatchIterBuilder(batch)),
+                Default::default(),
+            );
+            ranges.insert(id, MemtableRange::new(Arc::new(context), stats));
+        }
+
+        let mut sources = memtable_flat_sources(
+            schema,
+            MemtableRanges { ranges },
+            &metadata,
+            &RegionOptions {
+                append_mode: true,
+                ..Default::default()
+            },
+            metadata.primary_key.len(),
+        )?;
+        assert_eq!(1, sources.sources.len());
+        let (source, _) = sources.sources.pop().unwrap();
+        let batch_rows: Vec<_> = source
+            .take_iter()
+            .map(|batch| batch.map(|batch| batch.num_rows()))
+            .collect::<Result<_>>()?;
+        assert_eq!(2 * ROWS, batch_rows.iter().sum::<usize>());
+        assert!(batch_rows.iter().all(|rows| *rows <= 32), "{batch_rows:?}");
         Ok(())
     }
 
