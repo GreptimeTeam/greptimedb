@@ -101,6 +101,15 @@ pub enum Error {
         error: object_store::Error,
     },
 
+    #[snafu(display("Source metadata file disappeared while copying {path}"))]
+    MetadataCopyFileNotFound {
+        path: String,
+        #[snafu(source)]
+        error: object_store::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display(
         "Manifest delta {} disappeared after it was listed, path: {}",
         version,
@@ -552,6 +561,14 @@ pub enum Error {
 
     #[snafu(display("Failed to check the WAL history, region_id: {}", region_id))]
     CheckWalHistory {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to hand the WAL of region {} over to this node", region_id))]
+    HandoffWal {
         region_id: RegionId,
         #[snafu(implicit)]
         location: Location,
@@ -1681,6 +1698,7 @@ impl ErrorExt for Error {
             SstWriteMemoryExceeded { .. } => StatusCode::RuntimeResourcesExhausted,
             DataTypeMismatch { source, .. } => source.status_code(),
             OpenDal { .. }
+            | MetadataCopyFileNotFound { .. }
             | ManifestDeltaNotFound { .. }
             | ManifestVersionConflict { .. }
             | ManifestCheckpointVanished { .. }
@@ -1691,7 +1709,8 @@ impl ErrorExt for Error {
             | DeleteWal { source, .. }
             | WaitWalDurable { source, .. }
             | ResolveWalProvider { source, .. }
-            | CheckWalHistory { source, .. } => source.status_code(),
+            | CheckWalHistory { source, .. }
+            | HandoffWal { source, .. } => source.status_code(),
             CompressObject { .. }
             | DecompressObject { .. }
             | SerdeJson { .. }
@@ -1920,6 +1939,7 @@ impl ErrorExt for Error {
             | EndStagingPending { .. }
             | ManualCompactionAlreadyRunning { .. }
             | FlushableRegionState { .. }
+            | MetadataCopyFileNotFound { .. }
             | ManifestDeltaNotFound { .. }
             | ManifestVersionConflict { .. }
             | ManifestCheckpointVanished { .. } => RetryHint::Retryable,
@@ -1936,6 +1956,7 @@ impl ErrorExt for Error {
             | WaitWalDurable { source, .. }
             | ResolveWalProvider { source, .. }
             | CheckWalHistory { source, .. }
+            | HandoffWal { source, .. }
             | FetchManifests { source, .. }
             | External { source, .. } => source.retry_hint(),
 

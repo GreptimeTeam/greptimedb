@@ -255,7 +255,7 @@ impl object_store::layers::mock::Write for BlockingManifestWriter {
 
 /// Injects faults into the next manifest delta write of a mock object store.
 #[derive(Clone, Default)]
-pub(crate) struct DeltaFaults {
+pub struct DeltaFaults {
     /// Whether the next delta write lands but reports an error, like a lost response.
     lose_response: Arc<AtomicBool>,
     /// Whether the next delta write fails without landing.
@@ -267,11 +267,13 @@ impl DeltaFaults {
         self.lose_response.store(true, Ordering::Relaxed);
     }
 
-    pub(crate) fn fail_next_write(&self) {
+    /// Fails the next manifest delta write before it lands.
+    pub fn fail_next_write(&self) {
         self.fail_write.store(true, Ordering::Relaxed);
     }
 
-    pub(crate) fn layer(&self) -> MockLayer {
+    /// Builds the object-store layer controlled by these faults.
+    pub fn layer(&self) -> MockLayer {
         let faults = self.clone();
         MockLayerBuilder::default()
             .writer_factory(Arc::new(move |path, _args, inner| {
@@ -521,6 +523,11 @@ impl TestEnv {
     /// Sets the node identity used by engines created in this environment.
     pub fn with_node_id(mut self, node_id: u64) -> Self {
         self.file_ref_manager = Arc::new(FileReferenceManager::new(Some(node_id)));
+        self
+    }
+
+    pub(crate) fn with_file_ref_manager(mut self, manager: FileReferenceManagerRef) -> Self {
+        self.file_ref_manager = manager;
         self
     }
 
@@ -1517,6 +1524,47 @@ pub fn delete_rows_schema(request: &RegionCreateRequest) -> Vec<api::v1::ColumnS
         .filter(|col| col.semantic_type != SemanticType::Field)
         .map(column_metadata_to_column_schema)
         .collect::<Vec<_>>()
+}
+
+/// Builds an encoded sparse metric put, including an explicitly nullable field.
+pub fn sparse_metric_put(key: Vec<u8>, ts: i64, value: Option<f64>) -> RegionRequest {
+    use api::v1::ColumnDataType;
+    let schema = [
+        ("__primary_key", ColumnDataType::Binary, SemanticType::Tag),
+        (
+            "ts",
+            ColumnDataType::TimestampMillisecond,
+            SemanticType::Timestamp,
+        ),
+        ("field_0", ColumnDataType::Float64, SemanticType::Field),
+    ]
+    .into_iter()
+    .map(|(name, datatype, semantic_type)| api::v1::ColumnSchema {
+        column_name: name.into(),
+        datatype: datatype as i32,
+        semantic_type: semantic_type as i32,
+        ..Default::default()
+    })
+    .collect();
+    let values = [
+        Some(ValueData::BinaryValue(key)),
+        Some(ValueData::TimestampMillisecondValue(ts)),
+        value.map(ValueData::F64Value),
+    ]
+    .into_iter()
+    .map(|value_data| api::v1::Value { value_data })
+    .collect();
+    RegionRequest::Put(RegionPutRequest {
+        rows: Rows {
+            schema,
+            rows: vec![Row { values }],
+        },
+        hint: Some(api::v1::WriteHint {
+            primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse as i32,
+        }),
+        partition_expr_version: None,
+        skip_wal: false,
+    })
 }
 
 /// Put rows into the engine.

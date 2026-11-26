@@ -22,8 +22,8 @@ use crate::error::Result;
 use crate::kv_backend::txn::{Txn, TxnResponse};
 use crate::kv_backend::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
-    BatchPutResponse, DeleteRangeRequest, DeleteRangeResponse, KvBackend, KvBackendRef, PutRequest,
-    PutResponse, RangeRequest, RangeResponse, TxnService,
+    BatchPutResponse, DeleteRangeRequest, DeleteRangeResponse, KvBackend, KvBackendCapabilities,
+    KvBackendRef, PutRequest, PutResponse, RangeRequest, RangeResponse, TxnCapability, TxnService,
 };
 
 pub type MockFn<Req, Resp> = Arc<dyn Fn(Req) -> Result<Resp> + Send + Sync>;
@@ -35,6 +35,8 @@ pub type AsyncMockFn<Req, Resp> =
 /// A mock kv backend for testing.
 #[derive(Builder)]
 pub struct MockKvBackend {
+    #[builder(default)]
+    pub capabilities: KvBackendCapabilities,
     #[builder(setter(strip_option), default)]
     pub range_fn: Option<MockFn<RangeRequest, RangeResponse>>,
     /// Takes precedence over the synchronous range callback when set.
@@ -68,13 +70,19 @@ impl TxnService for MockKvBackend {
         }
     }
 
-    fn max_txn_ops(&self) -> usize {
-        self.max_txn_ops.unwrap()
+    fn txn_capability(&self) -> Option<TxnCapability> {
+        self.max_txn_ops
+            .or_else(|| self.txn.as_ref().map(|_| usize::MAX))
+            .map(|max_ops| TxnCapability { max_ops })
     }
 }
 
 #[async_trait::async_trait]
 impl KvBackend for MockKvBackend {
+    fn capabilities(&self) -> KvBackendCapabilities {
+        self.capabilities
+    }
+
     fn name(&self) -> &str {
         "mock_kv_backend"
     }
@@ -151,13 +159,17 @@ impl TxnService for TxnObservingKvBackend {
         self.inner.txn(txn).await
     }
 
-    fn max_txn_ops(&self) -> usize {
-        self.inner.max_txn_ops()
+    fn txn_capability(&self) -> Option<TxnCapability> {
+        self.inner.txn_capability()
     }
 }
 
 #[async_trait::async_trait]
 impl KvBackend for TxnObservingKvBackend {
+    fn capabilities(&self) -> KvBackendCapabilities {
+        self.inner.capabilities()
+    }
+
     fn name(&self) -> &str {
         self.inner.name()
     }

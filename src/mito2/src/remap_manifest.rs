@@ -22,6 +22,7 @@ use store_api::storage::RegionId;
 use crate::error;
 pub use crate::error::{Error, Result};
 use crate::manifest::action::{RegionManifest, RemovedFilesRecord};
+use crate::sst::file::FileFormat;
 
 /// Remaps file references from old region manifests to new region manifests.
 pub struct RemapManifest {
@@ -160,7 +161,34 @@ impl RemapManifest {
         source_manifest: &RegionManifest,
         target_manifest: &mut RegionManifest,
     ) -> Result<()> {
+        ensure!(
+            (source_manifest.sst_format == crate::sst::FormatType::Narthex)
+                == (target_manifest.sst_format == crate::sst::FormatType::Narthex),
+            error::InvalidRequestSnafu {
+                region_id: target_manifest.metadata.region_id,
+                reason: "Cannot remap between Parquet and Narthex regions",
+            }
+        );
         for (file_id, file_meta) in &source_manifest.files {
+            if let Some(existing) = target_manifest.files.get(file_id)
+                && source_manifest.sst_format == crate::sst::FormatType::Narthex
+            {
+                // Admission sequences may differ by logical region; physical
+                // ownership and object inventory must still agree in all builds.
+                let same_inventory = match (&existing.format, &file_meta.format) {
+                    (FileFormat::NarthexSamples(left), FileFormat::NarthexSamples(right)) => {
+                        left.manifest_size == right.manifest_size && left.parts == right.parts
+                    }
+                    _ => false,
+                };
+                ensure!(
+                    existing.region_id == file_meta.region_id && same_inventory,
+                    error::InconsistentFileSnafu {
+                        file_id: *file_id,
+                        reason: "narthex samples identity mismatch",
+                    }
+                );
+            }
             let file_meta_clone = file_meta.clone();
 
             // Insert or merge into target manifest
@@ -180,6 +208,21 @@ impl RemapManifest {
             }
         }
 
+        // Remap creates references, not physical copies: retain index owner,
+        // inventory and exact source identities together with the samples.
+        for (id, index) in &source_manifest.series_indexes {
+            if let Some(existing) = target_manifest.series_indexes.get(id) {
+                ensure!(
+                    existing == index,
+                    error::InconsistentFileSnafu {
+                        file_id: *id,
+                        reason: "narthex series identity mismatch",
+                    }
+                );
+            } else {
+                target_manifest.series_indexes.insert(*id, index.clone());
+            }
+        }
         Ok(())
     }
 
@@ -474,6 +517,34 @@ mod tests {
             series_indexes: Default::default(),
             handoff_floors: Default::default(),
         }
+    }
+
+    #[rstest::rstest]
+    #[case(FormatType::Narthex, FormatType::Flat)]
+    #[case(FormatType::PrimaryKey, FormatType::Narthex)]
+    #[case(FormatType::Flat, FormatType::PrimaryKey)]
+    #[test]
+    fn test_remap_storage_format(
+        #[case] source_format: FormatType,
+        #[case] target_format: FormatType,
+    ) {
+        let mut source = create_manifest(RegionId::new(1, 0), 0, None, 0, 0);
+        let mut target = create_manifest(RegionId::new(1, 1), 0, None, 0, 0);
+        source.sst_format = source_format;
+        target.sst_format = target_format;
+        let result = RemapManifest::copy_files_to_region(&source, &mut target);
+        if source_format == FormatType::Narthex || target_format == FormatType::Narthex {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Cannot remap between")
+            );
+        } else {
+            result.unwrap();
+        }
+        assert!(target.files.is_empty());
+        assert_eq!(target.sst_format, target_format);
     }
 
     /// Helper to create partition expression: col >= start AND col < end

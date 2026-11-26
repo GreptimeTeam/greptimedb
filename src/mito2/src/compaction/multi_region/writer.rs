@@ -14,14 +14,13 @@ use std::sync::Arc;
 
 use common_base::readable_size::ReadableSize;
 use partition::expr::PartitionExpr;
-use snafu::{ResultExt, ensure};
-use store_api::codec::PrimaryKeyEncoding;
+use snafu::ensure;
 use tokio_util::sync::CancellationToken;
 
 use crate::access_layer::{Metrics, OperationType, SstWriteRequest, WriteType};
 use crate::compaction::multi_region::memory::{self, MemoryLimits};
 use crate::compaction::multi_region::{MultiRegionCompactionContext, MultiRegionTarget};
-use crate::error::{ComputeArrowSnafu, Result};
+use crate::error::Result;
 use crate::read::FlatSource;
 use crate::sst::FormatType;
 use crate::sst::file::FileMeta;
@@ -30,7 +29,7 @@ use crate::sst::index::registry::IndexBuildPlan;
 use crate::sst::parquet::metadata::extract_primary_key_range;
 use crate::sst::parquet::parallel_writer::EncodeRuntime;
 use crate::sst::parquet::writer::SstWriteContext;
-use crate::sst::parquet::{SstInfo, WriteOptions};
+use crate::sst::parquet::{SstInfo, WriteOptions, row_group_size_for};
 
 pub(crate) struct TargetWriter<'a> {
     target: &'a MultiRegionTarget,
@@ -38,6 +37,8 @@ pub(crate) struct TargetWriter<'a> {
     limits: &'a MemoryLimits,
     index_plan: Arc<IndexBuildPlan>,
     max_file_size: usize,
+    /// Rows and decoded bytes of the shared sources.
+    input_size: (u64, u64),
     sequence: Option<NonZeroU64>,
     preserve_row_sequence: bool,
 }
@@ -48,6 +49,7 @@ impl<'a> TargetWriter<'a> {
         context: &'a MultiRegionCompactionContext,
         limits: &'a MemoryLimits,
         max_file_size: usize,
+        input_size: (u64, u64),
         index_plan: Arc<IndexBuildPlan>,
     ) -> Self {
         let sequence = crate::sst::file::known_max_input_sequence(target.inputs.values());
@@ -62,6 +64,7 @@ impl<'a> TargetWriter<'a> {
             limits,
             index_plan,
             max_file_size,
+            input_size,
             sequence,
             preserve_row_sequence,
         }
@@ -104,7 +107,7 @@ impl<'a> TargetWriter<'a> {
     fn request(&self, source: FlatSource) -> Result<SstWriteRequest> {
         let config = &self.context.config;
         // The shared source plan already applies the admitted index thresholds.
-        let source = output_projection(self.target, source, self.context.cancellation.clone())?;
+        let source = cancellable_source(source, self.context.cancellation.clone());
         let index_build_inputs = Some(IndexBuildInputs {
             output_rows: None,
             plan: self.index_plan.clone(),
@@ -137,17 +140,20 @@ impl<'a> TargetWriter<'a> {
         })
     }
 
-    fn options(&self) -> WriteOptions {
+    pub(super) fn options(&self) -> WriteOptions {
         WriteOptions {
-            write_buffer_size: ReadableSize(self.limits.batch as u64),
+            write_buffer_size: ReadableSize(self.limits.writer.upload_limits.chunk_bytes as u64),
             max_file_size: Some(self.max_file_size),
             // Capped so each admitted encoder stays within the task budget; see
             // [memory::MAX_ROW_GROUP_SIZE].
-            row_group_size: self
-                .target
-                .options
-                .row_group_size()
-                .min(memory::MAX_ROW_GROUP_SIZE),
+            row_group_size: row_group_size_for(
+                self.input_size.0,
+                self.input_size.1,
+                self.target
+                    .options
+                    .row_group_size()
+                    .min(memory::MAX_ROW_GROUP_SIZE),
+            ),
             float_field_encoding: self.target.options.float_field_encoding,
             // Every resident encoder and its finish workspace are admitted together.
             encode_parallelism: 1,
@@ -190,6 +196,7 @@ impl<'a> TargetWriter<'a> {
             level: 0,
             file_size: info.file_size,
             max_row_group_uncompressed_size: info.max_row_group_uncompressed_size,
+            max_row_group_decoded_size: info.max_row_group_decoded_size,
             available_indexes: info.index_metadata.build_available_indexes(),
             indexes: info.index_metadata.build_indexes()?,
             index_file_size: info.index_metadata.file_size,
@@ -207,38 +214,13 @@ impl<'a> TargetWriter<'a> {
     }
 }
 
-fn output_projection(
-    target: &MultiRegionTarget,
-    mut source: FlatSource,
-    cancellation: CancellationToken,
-) -> Result<FlatSource> {
-    let projection: Vec<_> = source
-        .schema()
-        .fields()
-        .iter()
-        .enumerate()
-        .filter(|(_, field)| {
-            target.metadata.primary_key_encoding != PrimaryKeyEncoding::Sparse
-                || !target.metadata.primary_key.iter().any(|id| {
-                    target
-                        .metadata
-                        .column_by_id(*id)
-                        .is_some_and(|column| column.column_schema.name == *field.name())
-                })
-        })
-        .map(|(index, _)| index)
-        .collect();
-    let schema = Arc::new(
-        source
-            .schema()
-            .project(&projection)
-            .context(ComputeArrowSnafu)?,
-    );
+fn cancellable_source(mut source: FlatSource, cancellation: CancellationToken) -> FlatSource {
+    let schema = source.schema().clone();
     let stream = async_stream::try_stream! {
         while let Some(batch) = source.next_batch().await? {
             if cancellation.is_cancelled() { Err(crate::error::CompactionCancelledSnafu.build())?; }
-            yield batch.project(&projection).context(ComputeArrowSnafu)?;
+            yield batch;
         }
     };
-    Ok(FlatSource::new_stream(schema, Box::pin(stream)))
+    FlatSource::new_stream(schema, Box::pin(stream))
 }

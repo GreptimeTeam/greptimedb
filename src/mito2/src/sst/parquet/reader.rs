@@ -49,7 +49,6 @@ use partition::expr::PartitionExpr;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::region_request::PathType;
-use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 use store_api::storage::{ColumnId, FileId};
 use table::predicate::Predicate;
 
@@ -82,7 +81,7 @@ use crate::sst::parquet::file_range::{
 use crate::sst::parquet::flat_format::{FlatReadFormat, primary_key_column_index};
 use crate::sst::parquet::format::{INTERNAL_COLUMN_NUM, need_override_sequence};
 use crate::sst::parquet::json_align::{AlignMode, JsonSchemaAligner, ProjectedRecordBatchStream};
-use crate::sst::parquet::metadata::MetadataLoader;
+use crate::sst::parquet::metadata::{MetadataLoader, primary_key_leaf_index};
 use crate::sst::parquet::prefilter::{
     PrefilterContextBuilder, build_reader_filter_plan, execute_prefilter,
 };
@@ -1578,8 +1577,8 @@ pub(crate) struct ReaderFilterMetrics {
     pub(crate) pruner_cache_miss: usize,
     /// Duration spent waiting for pruner to build file ranges.
     pub(crate) pruner_prune_cost: Duration,
-    /// Number of files filtered by manifest time-range pruning.
-    pub(crate) files_time_range_pruned: usize,
+    /// Number of files pruned by their manifest time range or primary key range.
+    pub(crate) files_manifest_pruned: usize,
 }
 
 impl ReaderFilterMetrics {
@@ -1609,7 +1608,7 @@ impl ReaderFilterMetrics {
         self.pruner_cache_hit += other.pruner_cache_hit;
         self.pruner_cache_miss += other.pruner_cache_miss;
         self.pruner_prune_cost += other.pruner_prune_cost;
-        self.files_time_range_pruned += other.files_time_range_pruned;
+        self.files_manifest_pruned += other.files_manifest_pruned;
 
         // Merge optional applier metrics
         if let Some(other_metrics) = &other.inverted_index_apply_metrics {
@@ -1937,11 +1936,8 @@ impl RowGroupReaderBuilder {
         build_ctx: RowGroupBuildContext<'_>,
     ) -> Result<ProjectedRecordBatchStream> {
         let parquet_schema = self.parquet_meta.file_metadata().schema_descr();
-        let primary_key_index = parquet_schema
-            .columns()
-            .iter()
-            .position(|column| column.name() == PRIMARY_KEY_COLUMN_NAME)
-            .context(UnexpectedSnafu {
+        let primary_key_index =
+            primary_key_leaf_index(parquet_schema).context(UnexpectedSnafu {
                 reason: "SST does not contain __primary_key",
             })?;
         let projection = ProjectionMask::leaves(parquet_schema, [primary_key_index]);
@@ -2581,20 +2577,6 @@ impl ParquetReader {
 
     pub fn parquet_metadata(&self) -> Arc<ParquetMetaData> {
         self.context.reader_builder().parquet_meta.clone()
-    }
-
-    #[cfg(feature = "enterprise")]
-    pub(crate) fn fetched_store_page_bytes(&self) -> Result<u64> {
-        self.fetch_metrics
-            .data
-            .lock()
-            .map(|metrics| metrics.page_size_to_fetch_store)
-            .map_err(|_| {
-                crate::error::UnexpectedSnafu {
-                    reason: "Source fetch metrics lock poisoned",
-                }
-                .build()
-            })
     }
 }
 

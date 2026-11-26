@@ -229,6 +229,22 @@ pub(crate) fn split(
             op: BoundVectorOp::TopK { .. },
             ..
         } => Err(declined("a whole-vector operation above a split aggregate")),
+        // A per-point `φ` does not make the fold splittable: `check_cut` declines every `quantile`,
+        // whose state is its group's samples however its argument is read. A `ParameterizedAggregate`
+        // is only ever that fold, so there is nothing here to admit.
+        NativeExpr::ParameterizedAggregate { .. } => Err(declined("a `quantile` aggregate")),
+        // A canonical merge answers one series per canonical label set from every piece of that set,
+        // and the pieces of one set are not in one partition: a label rewrite created them after the
+        // scan split the rows. A split keeps that merge in the prefix, where it sees one partition's
+        // pieces - so two colliding series that landed in different partitions are each collected
+        // apart, the state router folds their partial states, and the statement answers a value
+        // where Prometheus reports `vector cannot contain metrics with the same labelset`.
+        //
+        // The merge therefore has to stay above every partition, and the tree keeps the plan the
+        // lowering gives a collected subtree: the merge is the boundary (`canonical_boundary_stages`
+        // builds its producer and the canonical router collects one label set from every partition),
+        // and the fold above it reads the whole series that boundary assembled. Refusing the split
+        // here is what sends the statement there instead of answering it per partition.
         NativeExpr::Merge { .. } => Err(declined("an aggregate split across a canonical merge")),
         // A window whose input is already evaluated - a subquery - applies to the merged values the
         // suffix reads, provided it evaluates on a grid. The declared grid and the input's grid are
@@ -436,6 +452,12 @@ pub(crate) fn admit_prefix(root: &NativeNode) -> DfResult<()> {
                         ));
                     }
                 };
+            }
+            // A canonical merge is a `merge_same_labelset` over the pieces one scan returned, so it
+            // reads across series even inside one partition: a prefix holding one cannot promise
+            // one series per label set, which is why the split refuses it above as well.
+            NativeExpr::Merge { .. } => {
+                return Err(declined("a per-series prefix that collects a label set"));
             }
             _ => break,
         }

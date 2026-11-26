@@ -23,6 +23,7 @@ mod range_manipulate;
 mod raw_series_source;
 mod scalar_calculate;
 mod series_divide;
+mod series_execution;
 mod series_repartition;
 #[cfg(test)]
 mod test_util;
@@ -44,8 +45,8 @@ pub use empty_metric::{EmptyMetric, EmptyMetricExec, EmptyMetricStream, build_sp
 pub use fused_series::is_canonical_producer_exec;
 pub use fused_series::{
     FieldKind, FusedOutputFormat, FusedSeries, FusedSeriesBinding, FusedSeriesExec,
-    FusedSeriesStream, InputLocality, input_locality, matching_operands_drop_key,
-    tree_source_fields,
+    FusedSeriesStream, InputLocality, input_locality, keys_survive_metadata_drop,
+    matching_operands_drop_key, tree_source_fields,
 };
 pub use histogram_fold::{
     HistogramFold, HistogramFoldExec, HistogramFoldOperation, HistogramFoldStream,
@@ -57,6 +58,10 @@ pub use range_manipulate::{RangeManipulate, RangeManipulateExec, RangeManipulate
 pub use raw_series_source::{RawSeriesSource, RawSeriesSourceExec};
 pub use scalar_calculate::ScalarCalculate;
 pub use series_divide::{SeriesDivide, SeriesDivideExec, SeriesDivideStream};
+pub use series_execution::{
+    HandedSeriesChunk, SendableSeriesStream, SeriesCharge, SeriesChunk, SeriesExecutionPlan,
+    checked_series_stream, series_execution_plan,
+};
 pub use series_repartition::{IdentityCompletion, SeriesRepartitionExec, SeriesRouting};
 pub use union_distinct_on::{UnionDistinctOn, UnionDistinctOnExec, UnionDistinctOnStream};
 

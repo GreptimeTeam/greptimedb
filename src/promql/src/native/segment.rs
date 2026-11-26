@@ -43,8 +43,7 @@ use crate::extension_plan::{
 };
 use crate::native::plan::native_tree_supported;
 use crate::native::plan::{
-    BoundAggregate, BoundInput, BoundVectorOp, Grouping, METRIC_NAME, NativeExpr, NativeNode,
-    NativeTree, NativeType, reads_across_series,
+    BoundInput, METRIC_NAME, NativeExpr, NativeNode, NativeTree, NativeType, reads_across_series,
 };
 use crate::vector_match::Cardinality;
 
@@ -104,7 +103,8 @@ pub fn pointwise_operand(node: &NativeNode) -> bool {
         }
         // An aggregate folds a group, a vector operation reads the whole vector, and a bare input or
         // scalar is not a per-series evaluation. A parameterized topk or histogram reads the whole
-        // vector, and `scalar()` answers from it.
+        // vector, `scalar()` answers from it, and a per-point `φ` is read beside the fold over the
+        // whole group.
         NativeExpr::Input(_)
         | NativeExpr::Scalar(_)
         | NativeExpr::EvalTime { .. }
@@ -112,6 +112,7 @@ pub fn pointwise_operand(node: &NativeNode) -> bool {
         | NativeExpr::ScalarOf { .. }
         | NativeExpr::ParameterizedTopK { .. }
         | NativeExpr::ParameterizedHistogram { .. }
+        | NativeExpr::ParameterizedAggregate { .. }
         | NativeExpr::Aggregate { .. }
         | NativeExpr::Vector { .. }
         | NativeExpr::Set { .. }
@@ -143,61 +144,6 @@ pub fn independent_scan_pair(root: &NativeNode) -> bool {
 
 fn scan_operand(node: &NativeNode) -> bool {
     pointwise_operand(node) || independent_scan_pair(node)
-}
-
-/// Whether a grouping in `node` keeps a label the existing planner's column list cannot name.
-///
-/// An aggregate's `by(...)` keeps the labels it lists that its input carries, and `__name__` is one
-/// of them: the aggregate folds its groups by the metric name as by any other label. It is not a
-/// column of any scan, though - it is the name the raw frame carries - so the existing planner's
-/// `by(__name__)` finds no such column and reports no label at all. A schema taken from that list
-/// would drop the metric name the native aggregate kept, and two groups differing only in their
-/// metric would come out as two rows under one label set, which is a series identity lost rather
-/// than an answer given.
-///
-/// `without(...)` needs no such check: both routes drop `__name__` there. Nor does a tree with one
-/// source: a discovered selector's source declares `__name__` per metric, and a named one folds one
-/// metric whose name cannot merge two groups. What the check is for is the tree reading more than one
-/// source, where only a discovered source can report a name at all.
-pub fn groups_by_metric_name(node: &NativeNode) -> bool {
-    let grouping_names_metric = |op: &BoundAggregate| matches!(&op.group, Grouping::By(names) if names.iter().any(|name| name.as_ref() == METRIC_NAME));
-    match &node.expr {
-        NativeExpr::Input(_)
-        | NativeExpr::Scalar(_)
-        | NativeExpr::EvalTime { .. }
-        | NativeExpr::VectorOf { .. } => false,
-        // `scalar()` answers one value with no labels at all, so a grouping by the metric name
-        // below it cannot leave two groups under one label set: the walk stops there.
-        NativeExpr::ScalarOf { .. } => false,
-        NativeExpr::Instant { input, .. }
-        | NativeExpr::Merge { input }
-        | NativeExpr::Window { input, .. }
-        | NativeExpr::Map { input, .. }
-        | NativeExpr::Timestamp { input } => groups_by_metric_name(input),
-        NativeExpr::Aggregate { input, op } => {
-            grouping_names_metric(op) || groups_by_metric_name(input)
-        }
-        NativeExpr::ParameterizedMap {
-            input, parameters, ..
-        } => groups_by_metric_name(input) || parameters.iter().any(groups_by_metric_name),
-        NativeExpr::ParameterizedTopK {
-            input, parameter, ..
-        } => groups_by_metric_name(input) || groups_by_metric_name(parameter),
-        NativeExpr::ParameterizedHistogram {
-            input, parameters, ..
-        } => groups_by_metric_name(input) || parameters.iter().any(groups_by_metric_name),
-        NativeExpr::Vector { input, op } => {
-            matches!(op, BoundVectorOp::CountValues { group: Grouping::By(names), .. }
-                if names.iter().any(|name| name.as_ref() == METRIC_NAME))
-                || groups_by_metric_name(input)
-        }
-        NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
-            groups_by_metric_name(left) || groups_by_metric_name(right)
-        }
-        NativeExpr::Info { base, info, .. } => {
-            groups_by_metric_name(base) || groups_by_metric_name(info)
-        }
-    }
 }
 
 /// Whether a segment can hand `node`'s values to another segment.
@@ -268,21 +214,6 @@ fn cut_as_segment(node: &NativeNode, canonical_segmentation: bool) -> bool {
     !sources.is_empty()
 }
 
-/// Whether any canonical merge in `node` answers with histogram samples, given the kind its input
-/// carries.
-///
-/// A merge collects the pieces of one label set and hands on the samples it was given, so its answer
-/// kind is its child's. A histogram answer standing on a merge would travel through the canonical
-/// boundary carrying histogram frames, a pairing no execution exercises yet: the planner keeps such
-/// a statement on the existing plan until that pairing is covered, and it has to look at every
-/// merge, not only a root one.
-pub fn merge_answers_histogram(node: &NativeNode, input_kind: FieldKind) -> bool {
-    node.any(&|node| {
-        matches!(node.expr, NativeExpr::Merge { .. })
-            && node.output_field_kind(Some(input_kind)) == Some(FieldKind::Histogram)
-    })
-}
-
 /// Whether the merge producer's entire prefix can run on each scan partition independently.
 pub fn canonical_local_prefix(node: &NativeNode) -> bool {
     match &node.expr {
@@ -314,10 +245,18 @@ pub fn contains_global_consumer(node: &NativeNode) -> bool {
 
 /// Whole-vector consumers remain global, but can be cut out as evaluated segments so a pointwise
 /// parent does not inherit their single-partition placement.
+///
+/// A per-point `φ` does not make the fold it reads any less of a whole-vector consumer: a
+/// `quantile` answers from every series of its group whichever node its argument comes from, so the
+/// parameterized variant is admitted here exactly as the bound one is. Leaving it out would read a
+/// fold that requires one partition as a node that does not, and the cut below it would be chosen
+/// as though its parent could run per partition.
 fn is_global_consumer(node: &NativeNode) -> bool {
     matches!(
         node.expr,
-        NativeExpr::Aggregate { .. } | NativeExpr::Vector { .. }
+        NativeExpr::Aggregate { .. }
+            | NativeExpr::ParameterizedAggregate { .. }
+            | NativeExpr::Vector { .. }
     ) && matches!(input_locality(node), InputLocality::SinglePartition)
 }
 
@@ -481,11 +420,12 @@ pub fn with_row_name_column(node: &NativeNode, mut tags: Vec<String>) -> Vec<Str
     if !matches!(&node.output, NativeType::Samples(_)) {
         return tags;
     }
-    // A layout can already report the name: a set operation takes it from its sides, and a
-    // discovered source sorts its tags for the union. Neither leaves that column last - `or` keeps
-    // the left operand's order and only appends the right side's unseen tags, and sorting puts the
-    // name wherever its bytes fall - so the existing one is removed and appended instead: every rows
-    // layout then answers one order, the time index, the value fields, the labels, and the name
+    // A layout can already report the name: a set operation takes it from its sides, a discovered
+    // source sorts its tags for the union, and a statement reading more than one metric-bound input
+    // declares the name each of those inputs reports. None of them leaves that column last - `or`
+    // keeps the left operand's order and only appends the right side's unseen tags, and sorting puts
+    // the name wherever its bytes fall - so the existing one is removed and appended instead: every
+    // rows layout then answers one order, the time index, the value fields, the labels, and the name
     // last.
     if let Some(index) = tags.iter().position(|tag| tag == METRIC_NAME) {
         tags.remove(index);
@@ -730,6 +670,19 @@ fn is_raw_series_source(plan: &LogicalPlan) -> bool {
     }
 }
 
+/// Whether `plan` already answers raw series frames of its own.
+///
+/// A selector naming no metric is prepared as one [`RawSeriesSource`] per discovered metric, or as
+/// the `Union` of them when it discovered several, and each source names the metric it reads. So
+/// such a plan is a frame producer in its own right: a segment hands it to the node it builds
+/// instead of binding it again. Binding it again nests a source in a source, and the physical
+/// planner reads a source's child as the region scan that source binds - a union is no such child
+/// either - so the nested input is refused after the statement has already been committed to this
+/// route.
+fn is_sourced_plan(plan: &LogicalPlan) -> bool {
+    matches!(plan, LogicalPlan::Union(_)) || is_raw_series_source(plan)
+}
+
 fn find_input_node(node: &NativeNode, source_index: usize) -> Option<&BoundInput> {
     node.inputs()
         .into_iter()
@@ -798,7 +751,12 @@ fn build_evaluated_segment(
             .output
             .samples()
             .is_some_and(|schema| schema.eval_grid.is_some())
-            || is_raw_series_source(&child)
+            // A selector that discovered one metric is prepared as that metric's source, and one that
+            // discovered several as the union of one source per metric; either way it already
+            // declares the frames this segment reads, since it names each metric's source. So there
+            // is nothing to bind it to and nothing to wrap it in, and binding a source in a source
+            // is what the physical planner refuses. See [`is_sourced_plan`].
+            || is_sourced_plan(&child)
             // The typed empty frame of a selector that matched no table is an input in its own
             // right: it reads no region and carries no metric, so there is nothing to wrap it in.
             // A segment over it is still an explicit-label frame with no series.
@@ -918,11 +876,16 @@ fn build_inner_segment(
         let source_fields = tree_source_fields(&tree).ok()?;
         let mut children = Vec::with_capacity(sources.len());
         for (local_index, &source_index) in sources.iter().enumerate() {
-            let (Some((Some(metric), _, source_tags)), Some(fields), Some(scan)) = (
-                per_source.get(source_index),
-                source_fields.get(local_index),
-                scans.get(local_index),
-            ) else {
+            let scan = scans.get(local_index)?;
+            // A scan that is already a source - one metric of a discovery, or the union of several -
+            // is the frame producer this segment reads, so it stays as it is; see [`is_sourced_plan`].
+            if is_sourced_plan(scan) {
+                children.push(scan.clone());
+                continue;
+            }
+            let (Some((Some(metric), _, source_tags)), Some(fields)) =
+                (per_source.get(source_index), source_fields.get(local_index))
+            else {
                 return None;
             };
             children.push(LogicalPlan::Extension(Extension {
@@ -1015,13 +978,11 @@ pub fn segment_tree(
     // The window this tree may be rooted at is not one of those consumers, but it is no boundary
     // either: `cut_as_segment` never cuts one, and what keeps its input's partitions is the
     // per-series prefix below it, which the cuts below are admitted for.
-    // A grouping by `__name__` keeps that label while the fused node's declared columns cannot
-    // name it. With multiple sources, groups differing only by metric name would therefore be
-    // reported under one label set. A single-source tree cannot merge distinct metric-name groups
-    // this way, so this restriction is specific to multi-source segmentation.
-    if children.len() > 1 && groups_by_metric_name(tree.root()) {
-        return None;
-    }
+    //
+    // A grouping by `__name__` needs no refusal of its own here: `source_tags` is the authority on
+    // which labels an input declares, and the planner declares the metric name of every occurrence of
+    // a statement reading more than one input - so a segment's output tags name the label the grouping
+    // keeps, and two groups differing only by metric are published under their own label sets.
     let mut current_tree = tree.clone();
     let mut current_children = children.to_vec();
     let mut current_tags = source_tags.to_vec();
@@ -1247,4 +1208,127 @@ pub fn segment_tree(
     Some(LogicalPlan::Extension(Extension {
         node: Arc::new(plan),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use datatypes::series::SeriesOrdering;
+    use datatypes::series::samples::{FieldSpec, SeriesSchema};
+    use datatypes::series::time::{EvalGrid, GridSpec};
+
+    use super::*;
+    use crate::map::MathOp;
+    use crate::native::plan::{
+        AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap,
+        Grouping, InstantValue, MapOp,
+    };
+
+    fn grid() -> Arc<EvalGrid> {
+        Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 1, 4).unwrap()).unwrap())
+    }
+
+    /// The evaluated layout of the only field these trees carry.
+    fn evaluated(grid: &Arc<EvalGrid>) -> NativeType {
+        NativeType::Samples(Arc::new(SeriesSchema {
+            fields: vec![FieldSpec {
+                name: Arc::from("value"),
+            }]
+            .into(),
+            eval_grid: Some(Arc::clone(grid)),
+        }))
+    }
+
+    /// `abs(…)` over `inner`, as a pointwise rewrite above a cut would be.
+    fn map_over(inner: NativeNode) -> NativeNode {
+        let output = inner
+            .output
+            .grid()
+            .expect("a map reads an evaluated vector")
+            .clone();
+        NativeNode {
+            expr: NativeExpr::Map {
+                input: Box::new(inner),
+                op: BoundMap {
+                    ops: vec![MapOp::Math(MathOp::Abs)].into(),
+                },
+            },
+            output: evaluated(&output),
+        }
+    }
+
+    /// `inner` selected at every grid point.
+    fn selection(inner: NativeNode, output: NativeType) -> NativeNode {
+        let grid = output
+            .grid()
+            .expect("a selection answers on a grid")
+            .clone();
+        NativeNode {
+            expr: NativeExpr::Instant {
+                input: Box::new(inner),
+                op: BoundInstant {
+                    lookback_ms: 300_000,
+                    offset_ms: 0,
+                    at_ms: None,
+                    value: InstantValue::Sample,
+                    output_grid: grid,
+                },
+            },
+            output,
+        }
+    }
+
+    /// A fold that reads its argument at every step is a whole-vector consumer.
+    ///
+    /// A `quantile` answers from its group's whole sample set wherever its `φ` comes from, so a
+    /// fold that reads that `φ` per point needs every series of the vector in one place exactly as
+    /// the fold that binds the number does. [`segment_tree`] asks [`contains_global_consumer`]
+    /// where a tree may be cut and whether a cut it cannot build has to be declined, and a parent
+    /// that answers one series at a time -- the `abs` below, as a canonical label rewrite would be
+    /// -- must not hide the gather under it: read as a per-partition node, the cut beneath would be
+    /// chosen for a parent that cannot run there.
+    #[test]
+    fn a_fold_that_reads_its_parameter_is_a_global_consumer() {
+        let grid = grid();
+        let output = evaluated(&grid);
+        let source = NativeNode {
+            expr: NativeExpr::Input(BoundInput {
+                output: output.clone(),
+                source_index: 0,
+                ordering: SeriesOrdering::Contiguous,
+            }),
+            output: output.clone(),
+        };
+        let fold = NativeNode {
+            expr: NativeExpr::ParameterizedAggregate {
+                input: Box::new(selection(source.clone(), output.clone())),
+                op: BoundAggregate {
+                    kind: AggregateKind::Quantile { quantile: 0.0 },
+                    group: Grouping::By(Arc::from([])),
+                    stage: AggregateStage::Complete,
+                    field_kind: FieldKind::Float,
+                },
+                parameter: Box::new(NativeNode {
+                    expr: NativeExpr::EvalTime { date: None },
+                    output: NativeType::Scalar(Arc::clone(&grid)),
+                }),
+            },
+            output: output.clone(),
+        };
+        assert!(
+            contains_global_consumer(&fold),
+            "a fold that reads its `φ` per point reads the whole vector"
+        );
+        assert!(
+            contains_global_consumer(&map_over(fold)),
+            "a pointwise parent must not hide the fold's gather"
+        );
+        // The predicate is about that fold and not about every subtree: a pointwise rewrite of a
+        // selection answers each series on its own, so it stays cuttable where it stands.
+        assert!(
+            !contains_global_consumer(&map_over(selection(source, output))),
+            "a selection is not a whole-vector consumer"
+        );
+    }
 }

@@ -30,6 +30,10 @@ pub struct RegionCatchupTask<S> {
     region: Arc<MitoRegion>,
     replay_checkpoint_entry_id: Option<u64>,
     expected_last_entry_id: Option<u64>,
+    /// The largest entry id the region acknowledged on this node.
+    acknowledged_entry_id: u64,
+    /// Whether the catchup makes the region writable on this node.
+    set_writable: bool,
     allow_stale_entries: bool,
     wal: Wal<S>,
 }
@@ -41,9 +45,17 @@ impl<S: LogStore> RegionCatchupTask<S> {
             region,
             replay_checkpoint_entry_id: None,
             expected_last_entry_id: None,
+            acknowledged_entry_id: 0,
+            set_writable: false,
             allow_stale_entries,
             wal,
         }
+    }
+
+    /// Sets whether the catchup makes the region writable on this node.
+    pub(crate) fn with_set_writable(mut self, set_writable: bool) -> Self {
+        self.set_writable = set_writable;
+        self
     }
 
     /// Sets the expected last entry id.
@@ -52,6 +64,13 @@ impl<S: LogStore> RegionCatchupTask<S> {
         expected_last_entry_id: Option<u64>,
     ) -> Self {
         self.expected_last_entry_id = expected_last_entry_id;
+        self
+    }
+
+    /// Sets the largest entry id the region acknowledged on this node, which the replay of a
+    /// remote WAL waits to be durable and must reach.
+    pub(crate) fn with_acknowledged_entry_id(mut self, acknowledged_entry_id: u64) -> Self {
+        self.acknowledged_entry_id = acknowledged_entry_id;
         self
     }
 
@@ -89,13 +108,34 @@ impl<S: LogStore> RegionCatchupTask<S> {
             "Trying to replay memtable for region: {region_id}, provider: {:?}, replay from entry id: {replay_from_entry_id}, flushed entry id: {flushed_entry_id}",
             self.region.provider
         );
-        check_wal_history(
-            &self.wal,
-            &self.region.provider,
-            &self.region.version_control.current().version,
-        )
-        .await?;
+        let version = self.region.version_control.current().version;
+        // A catchup that makes the region writable and carries the entry id its source
+        // reported hands the region over to this node's log store: from now on the region takes
+        // ids above every id the source, the manifest or a pending tail used, so a later rise of
+        // its flushed entry id passes none of its new entries, and this node's log store holds
+        // its history from here on. A catchup that still has to replay entries above where its
+        // replay starts hands nothing over, so if it cannot reach them it leaves nothing behind.
+        if self.set_writable
+            && let Some(reported_entry_id) = self.expected_last_entry_id
+            && reported_entry_id <= replay_from_entry_id
+            && !version.options.skip_wal
+        {
+            let entry_id = version
+                .pending_tails
+                .iter()
+                .map(|tail| tail.upto)
+                .fold(reported_entry_id.max(version.flushed_entry_id), u64::max);
+            self.wal
+                .handoff(region_id, &self.region.provider, entry_id)
+                .await?;
+        }
+        check_wal_history(&self.wal, &self.region.provider, &version).await?;
         let timer = Instant::now();
+        // The replay reads only what the log store has made durable.
+        self.wal
+            .durability_barrier(region_id, &self.region.provider)
+            .wait(self.acknowledged_entry_id)
+            .await?;
         let wal_entry_reader = self
             .entry_receiver
             .take()
@@ -114,23 +154,31 @@ impl<S: LogStore> RegionCatchupTask<S> {
         )
         .await?;
         info!(
-            "Elapsed: {:?}, region: {region_id}, provider: {:?} catchup finished. replay from entry id: {replay_from_entry_id}, flushed entry id: {flushed_entry_id}, last entry id: {last_entry_id}, expected: {:?}.",
+            "Elapsed: {:?}, region: {region_id}, provider: {:?} catchup finished. replay from entry id: {replay_from_entry_id}, flushed entry id: {flushed_entry_id}, last entry id: {last_entry_id}, expected: {:?}, acknowledged: {}.",
             timer.elapsed(),
             self.region.provider,
-            self.expected_last_entry_id
+            self.expected_last_entry_id,
+            self.acknowledged_entry_id
         );
-        if let Some(expected_last_entry_id) = self.expected_last_entry_id {
-            ensure!(
-                // The replayed last entry id may be greater than the `expected_last_entry_id`.
-                last_entry_id >= expected_last_entry_id,
-                error::UnexpectedSnafu {
-                    reason: format!(
-                        "Failed to catchup region {}, it was expected to replay to {}, but actually replayed to {}",
-                        region_id, expected_last_entry_id, last_entry_id,
-                    ),
-                }
-            )
-        }
+        // The replay also reaches the entries the region acknowledged on this node.
+        let expected_last_entry_id = self
+            .expected_last_entry_id
+            .unwrap_or_default()
+            .max(self.acknowledged_entry_id);
+        ensure!(
+            // The replayed last entry id may be greater than the `expected_last_entry_id`.
+            last_entry_id >= expected_last_entry_id,
+            error::UnexpectedSnafu {
+                reason: format!(
+                    "Failed to catchup region {}, it was expected to replay to {} (expected: {:?}, acknowledged: {}), but actually replayed to {}",
+                    region_id,
+                    expected_last_entry_id,
+                    self.expected_last_entry_id,
+                    self.acknowledged_entry_id,
+                    last_entry_id,
+                ),
+            }
+        );
         Ok(())
     }
 

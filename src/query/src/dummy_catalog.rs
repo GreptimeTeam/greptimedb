@@ -23,6 +23,7 @@ use api::v1::SemanticType;
 use async_trait::async_trait;
 use catalog::error::Result as CatalogResult;
 use catalog::{CatalogManager, CatalogManagerRef};
+use common_catalog::consts::FILE_ENGINE;
 use common_recordbatch::OrderOption;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use datafusion::catalog::{CatalogProvider, CatalogProviderList, SchemaProvider, Session};
@@ -206,6 +207,11 @@ impl TableProvider for DummyTableProvider {
         &self,
         filters: &[&Expr],
     ) -> datafusion::error::Result<Vec<TableProviderFilterPushDown>> {
+        // File readers may use predicates for pruning without filtering individual rows.
+        if self.is_file_engine() {
+            return Ok(vec![TableProviderFilterPushDown::Inexact; filters.len()]);
+        }
+
         let supported = filters
             .iter()
             .map(|e| {
@@ -258,6 +264,11 @@ impl DummyTableProvider {
 
     pub fn region_metadata(&self) -> RegionMetadataRef {
         self.metadata.clone()
+    }
+
+    /// Returns whether this provider scans File Engine regions.
+    pub(crate) fn is_file_engine(&self) -> bool {
+        self.engine.name() == FILE_ENGINE
     }
 
     /// Sets the ordering hint of the query to the provider.

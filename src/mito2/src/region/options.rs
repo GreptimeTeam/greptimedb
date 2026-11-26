@@ -209,9 +209,56 @@ impl RegionOptions {
         Ok(())
     }
 
-    /// Rejects tag compression when the SST layout packs tags into `__primary_key`.
+    /// Validates external files before admitting them into this region.
+    /// Parquet layouts may differ, but the storage family is fixed at creation.
+    pub(crate) fn validate_file_formats<'a>(
+        &self,
+        region_id: RegionId,
+        files: impl IntoIterator<Item = &'a crate::sst::file::FileMeta>,
+        series_indexes: impl IntoIterator<Item = &'a crate::sst::file::FileMeta>,
+    ) -> Result<()> {
+        use crate::sst::file::FileFormat;
+
+        let narthex = self.sst_format == Some(FormatType::Narthex);
+        for file in files {
+            ensure!(
+                matches!(
+                    (&file.format, narthex),
+                    (FileFormat::Parquet, false) | (FileFormat::NarthexSamples(_), true)
+                ),
+                crate::error::InvalidRequestSnafu {
+                    region_id,
+                    reason: "Imported file format does not match the region storage format",
+                }
+            );
+        }
+        for index in series_indexes {
+            ensure!(
+                narthex && matches!(index.format, FileFormat::NarthexSeriesIndex(_)),
+                crate::error::InvalidRequestSnafu {
+                    region_id,
+                    reason: "Series indexes require Narthex region storage",
+                }
+            );
+        }
+        Ok(())
+    }
+
+    /// Validates narthex schema support and format-specific column compression.
     /// The caller must resolve the SST format before validation.
-    pub(crate) fn validate_column_compression(&self, metadata: &RegionMetadata) -> Result<()> {
+    pub(crate) fn validate_schema(&self, metadata: &RegionMetadata) -> Result<()> {
+        if self.sst_format == Some(FormatType::Narthex) {
+            // Authoritative Narthex storage currently targets Prometheus metrics with one
+            // value field. Supporting multiple fields also requires schema compatibility
+            // for older artifacts during reads, compaction and import, including filling
+            // added fields with their declared defaults. Keep this restriction here so
+            // the shared samples codec can still handle multi-field sidecars.
+            crate::series_index::columnar::require(
+                metadata.field_columns().count() == 1,
+                "Narthex storage requires exactly one value field",
+            )?;
+            crate::series_index::samples::validate_narthex_metadata(metadata)?;
+        }
         if self.sst_format == Some(FormatType::Flat)
             && metadata.primary_key_encoding == PrimaryKeyEncoding::Dense
         {
@@ -346,8 +393,9 @@ impl RegionOptions {
 
         // Bulk memtable produces flat-encoded ranges and flushes them through
         // `put_sst()`, so the SST format must be flat to match.
-        if matches!(memtable, Some(MemtableOptions::Bulk(_)))
-            || primary_key_encoding == Some(PrimaryKeyEncoding::Sparse)
+        if (matches!(memtable, Some(MemtableOptions::Bulk(_)))
+            || primary_key_encoding == Some(PrimaryKeyEncoding::Sparse))
+            && sst_format != Some(FormatType::Narthex)
         {
             if let Some(format) = sst_format
                 && format != FormatType::Flat

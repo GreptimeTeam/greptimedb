@@ -14,9 +14,12 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use crate::batch_size::estimate_batch_size;
 use crate::compaction::CompactionOutput;
 use crate::compaction::picker::PickerOutput;
-use crate::sst::file::FileHandle;
+use crate::compaction::reader::MERGED_BATCH_CHANNEL_SIZE;
+use crate::read::seq_scan::compaction_input_channel_size;
+use crate::sst::file::{FileHandle, FileMeta};
 
 /// A complete input dependency group, merged and published atomically.
 ///
@@ -120,15 +123,144 @@ impl CompactionUnit {
             .fold(0u64, |total, file| total.saturating_add(file.size()))
     }
 
-    /// Estimates merge memory once per input, even when several outputs read it.
-    pub(crate) fn estimated_memory_bytes(&self) -> u64 {
-        if self.outputs.is_empty() {
-            return 0;
+    /// Estimates the memory budget of merging this unit. Outputs are merged one after another,
+    /// so the unit needs the budget of its largest output.
+    /// `retains_dedup_batch` is set when the merge deduplicates in `LastNonNull` mode, which keeps
+    /// the previous output batch until the next one shows whether its last row is updated.
+    pub(crate) fn estimated_memory_bytes(
+        &self,
+        read_parallelism: usize,
+        retains_dedup_batch: bool,
+    ) -> u64 {
+        self.outputs
+            .iter()
+            .map(|output| {
+                output_memory_bytes(&output.inputs, read_parallelism, retains_dedup_batch)
+            })
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+/// Returns the bytes of the largest row group of a file once decoded. Dictionary encoding hides
+/// decoded values from the uncompressed size; files written before the decoded size was recorded
+/// report 0 for it.
+fn max_row_group_bytes(meta: &FileMeta) -> u64 {
+    meta.max_row_group_uncompressed_size
+        .max(meta.max_row_group_decoded_size)
+}
+
+/// Row group size of a file, approximated from its file metadata.
+struct RowGroupShape {
+    /// Decoded bytes of the largest row group.
+    bytes: u64,
+    /// Average rows of a row group; the metadata keeps no per-row-group row counts.
+    rows: u64,
+    num_row_groups: u64,
+}
+
+impl RowGroupShape {
+    fn of(meta: &FileMeta) -> Option<Self> {
+        let bytes = max_row_group_bytes(meta);
+        if bytes == 0 || meta.num_rows == 0 || meta.num_row_groups == 0 {
+            return None;
         }
-        self.inputs.iter().fold(0u64, |total, file| {
-            total.saturating_add(file.meta_ref().max_row_group_uncompressed_size)
+        Some(Self {
+            bytes,
+            rows: (meta.num_rows / meta.num_row_groups).max(1),
+            num_row_groups: meta.num_row_groups,
         })
     }
+
+    fn row_width(&self) -> u64 {
+        self.bytes.div_ceil(self.rows)
+    }
+}
+
+/// Estimates the peak memory of merging `inputs` into one output, following the read path:
+///
+/// - Every input reader holds its current row group.
+/// - With a read parallelism above 1, every input is read in its own task and also holds
+///   batches ahead of the merge: a full channel, one batch being sent and one in the merge. A
+///   batch never spans row groups, and the batches of an input never exceed the whole file.
+/// - Inputs read serially hold the batch the merge is consuming.
+/// - The merge retains consumed input batches until it emits an output batch.
+/// - `LastNonNull` dedup keeps the previous output batch.
+/// - Merged batches pass a channel to the writer, with one more batch on each side of it.
+///
+/// The writer's row group buffer, index builders and the batch dedup concatenates when a key
+/// spans two batches are not covered.
+fn output_memory_bytes(
+    inputs: &[FileHandle],
+    read_parallelism: usize,
+    retains_dedup_batch: bool,
+) -> u64 {
+    let shapes: Vec<_> = inputs
+        .iter()
+        .filter_map(|file| RowGroupShape::of(file.meta_ref()))
+        .collect();
+    let row_group_bytes = inputs.iter().fold(0u64, |total, file| {
+        total.saturating_add(max_row_group_bytes(file.meta_ref()))
+    });
+    if shapes.is_empty() {
+        return row_group_bytes;
+    }
+    // Compaction reads every input of an output with one batch size, picked from the widest row.
+    // The reader also sees inputs without statistics in `FileMeta`; those are not sized here, so
+    // with mixed inputs the batch size is approximate.
+    let batch_rows =
+        estimate_batch_size(shapes.iter().map(|shape| (shape.rows, shape.bytes))) as u64;
+    let merges = inputs.len() > 1;
+    // Matches the condition under which `SeqScan` spawns a task per input.
+    let batches_per_input = if read_parallelism > 1 && merges {
+        compaction_input_channel_size() as u64 + 2
+    } else {
+        1
+    };
+    let input_batch_bytes = shapes.iter().fold(0u64, |total, shape| {
+        let batch_bytes = batch_rows.min(shape.rows).saturating_mul(shape.row_width());
+        let file_bytes = shape.bytes.saturating_mul(shape.num_row_groups);
+        total.saturating_add(
+            batches_per_input
+                .saturating_mul(batch_bytes)
+                .min(file_bytes),
+        )
+    });
+    // The merge holds one output batch when it merges, `LastNonNull` dedup holds one more, and the
+    // channel to the writer holds the rest. A merged batch has `batch_rows` rows; a single input passes its batches through, and
+    // those never span row groups.
+    let output_batches =
+        MERGED_BATCH_CHANNEL_SIZE as u64 + 2 + u64::from(merges) + u64::from(retains_dedup_batch);
+    let rows_per_batch = if merges {
+        batch_rows
+    } else {
+        batch_rows.min(shapes[0].rows)
+    };
+    let downstream_bytes =
+        widest_rows_bytes(&shapes, output_batches.saturating_mul(rows_per_batch));
+
+    row_group_bytes
+        .saturating_add(input_batch_bytes)
+        .saturating_add(downstream_bytes)
+}
+
+/// Bounds the bytes of `rows` distinct rows drawn from the inputs: the widest rows first, and no
+/// input gives more rows than it has. Batches past the readers hold distinct rows, so one wide
+/// row does not make every row of those batches wide.
+fn widest_rows_bytes(shapes: &[RowGroupShape], rows: u64) -> u64 {
+    let mut by_width: Vec<_> = shapes.iter().collect();
+    by_width.sort_unstable_by_key(|shape| std::cmp::Reverse(shape.row_width()));
+    let mut remaining = rows;
+    let mut bytes = 0u64;
+    for shape in by_width {
+        let taken = remaining.min(shape.rows.saturating_mul(shape.num_row_groups));
+        bytes = bytes.saturating_add(taken.saturating_mul(shape.row_width()));
+        remaining -= taken;
+        if remaining == 0 {
+            break;
+        }
+    }
+    bytes
 }
 
 /// Finds a dependency group's representative while shortening the parent chain.
@@ -146,6 +278,33 @@ mod tests {
 
     use super::*;
     use crate::compaction::test_util::{new_file_handle, new_file_handle_with_size_and_sequence};
+    use crate::test_util::new_noop_file_purger;
+
+    #[test]
+    fn test_estimated_memory_counts_decoded_row_groups() {
+        let file = |uncompressed, decoded| {
+            FileHandle::new(
+                crate::sst::file::FileMeta {
+                    file_id: FileId::random(),
+                    max_row_group_uncompressed_size: uncompressed,
+                    max_row_group_decoded_size: decoded,
+                    ..Default::default()
+                },
+                crate::test_util::new_noop_file_purger(),
+            )
+        };
+        // A dictionary-encoded file decodes to more than its uncompressed size; a file written
+        // before the decoded size was recorded reports 0 for it.
+        let units = CompactionUnit::from_picker(PickerOutput {
+            outputs: vec![output(vec![file(1 << 20, 128 << 20), file(4 << 20, 0)])],
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(
+            (128 << 20) + (4 << 20),
+            units[0].estimated_memory_bytes(1, false)
+        );
+    }
 
     /// Builds an L1 output that preserves deletion markers for grouping tests.
     fn output(inputs: Vec<FileHandle>) -> CompactionOutput {
@@ -238,6 +397,89 @@ mod tests {
     }
 
     #[test]
+    fn test_memory_follows_the_merge_of_each_output() {
+        const MIB: u64 = 1024 * 1024;
+        let file = |row_group_bytes: u64, rows_per_row_group: u64, num_row_groups: u64| {
+            FileHandle::new(
+                FileMeta {
+                    file_id: FileId::random(),
+                    max_row_group_uncompressed_size: row_group_bytes,
+                    num_rows: rows_per_row_group * num_row_groups,
+                    num_row_groups,
+                    ..Default::default()
+                },
+                new_noop_file_purger(),
+            )
+        };
+        let unit = |outputs: Vec<CompactionOutput>| {
+            let mut units = CompactionUnit::from_picker(PickerOutput {
+                outputs,
+                ..Default::default()
+            })
+            .unwrap();
+            assert_eq!(1, units.len());
+            units.pop().unwrap()
+        };
+        // Rows of 512 bytes are read in 8192-row batches of 4 MiB. Each input holds a 50 MiB row
+        // group and the batch the merge consumes; the merge retains one 4 MiB output batch and 4
+        // more sit between the merge and the writer.
+        let wide_groups = || file(50 * MIB, 100 * 1024, 10);
+        let (a, b, c) = (wide_groups(), wide_groups(), wide_groups());
+        let serial = 2 * 50 * MIB + 2 * 4 * MIB + 4 * MIB + 16 * MIB;
+        assert_eq!(
+            serial,
+            unit(vec![output(vec![a.clone(), b.clone()])]).estimated_memory_bytes(1, false)
+        );
+        // `LastNonNull` dedup holds back one more output batch.
+        assert_eq!(
+            serial + 4 * MIB,
+            unit(vec![output(vec![a.clone(), b.clone()])]).estimated_memory_bytes(1, true)
+        );
+        // Read in parallel, each input also holds the batches read ahead of the merge.
+        let parallel = 2 * 50 * MIB + 2 * 16 * MIB + 4 * MIB + 16 * MIB;
+        assert_eq!(
+            parallel,
+            unit(vec![output(vec![a.clone(), b.clone()])]).estimated_memory_bytes(4, false)
+        );
+        // Outputs sharing an input run one after another, so the unit needs one output's budget.
+        assert_eq!(
+            parallel,
+            unit(vec![output(vec![a.clone(), b]), output(vec![a, c])])
+                .estimated_memory_bytes(4, false)
+        );
+
+        // Rows of 1 MiB make 64-row batches, but an input batch stops at its 4-row row group.
+        // The merge output still holds 64 rows.
+        let narrow_groups = || file(4 * MIB, 4, 1000);
+        let (d, e) = (narrow_groups(), narrow_groups());
+        assert_eq!(
+            2 * 4 * MIB + 2 * 16 * MIB + 64 * MIB + 4 * 64 * MIB,
+            unit(vec![output(vec![d.clone(), e])]).estimated_memory_bytes(4, false)
+        );
+        // A single input is read without read-ahead or merge, so its batches stay row groups.
+        assert_eq!(
+            4 * MIB + 4 * MIB + 4 * 4 * MIB,
+            unit(vec![output(vec![d])]).estimated_memory_bytes(4, false)
+        );
+
+        // One 1 MiB row merged with 1 KiB rows: of the 320 rows past the readers, only one is
+        // wide.
+        let (wide_row, narrow_rows) = (file(MIB, 1, 1), file(MIB, 1024, 512));
+        assert_eq!(
+            2 * MIB + MIB + 64 * 1024 + MIB + 319 * 1024,
+            unit(vec![output(vec![wide_row, narrow_rows])]).estimated_memory_bytes(1, false)
+        );
+
+        // Two one-row files of 8 KiB: a batch holds both rows at most, and the batches past
+        // the readers never hold more than the two rows.
+        let (f, g) = (file(8 * 1024, 1, 1), file(8 * 1024, 1, 1));
+        assert_eq!(
+            2 * 8 * 1024 + 2 * 8 * 1024 + 2 * 8 * 1024,
+            unit(vec![output(vec![f, g])]).estimated_memory_bytes(4, false)
+        );
+    }
+
+    #[test]
     fn test_compaction_unit_expiration_inputs() {
         let file = new_file_handle(FileId::random(), 0, 100, 0);
         assert!(
@@ -256,7 +498,7 @@ mod tests {
         assert_eq!(1, units.len());
         assert_eq!(1, units[0].inputs.len());
         assert!(units[0].outputs.is_empty());
-        assert_eq!(0, units[0].estimated_memory_bytes());
+        assert_eq!(0, units[0].estimated_memory_bytes(1, false));
         assert!(
             CompactionUnit::from_picker(PickerOutput::default())
                 .unwrap()

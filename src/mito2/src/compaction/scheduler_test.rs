@@ -22,6 +22,7 @@ use common_meta::key::schema_name::SchemaNameValue;
 use common_recordbatch::filter::MetadataFilter;
 use common_time::{DatabaseTimeToLive, Timestamp};
 use datafusion_expr::{col, lit};
+use futures::FutureExt;
 use store_api::mito_engine_options::{
     COMPACTION_TYPE, TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM, TWCS_TRIGGER_FILE_NUM,
 };
@@ -1262,12 +1263,16 @@ async fn test_pick_result_local_submission_failure_releases_and_notifies_once() 
 }
 
 #[rstest::rstest]
-#[case::truncate(DdlRequest::Truncate(RegionTruncateRequest::All))]
+#[case::truncate(DdlRequest::Truncate(RegionTruncateRequest::All), false)]
+#[case::pause_then_truncate(DdlRequest::Truncate(RegionTruncateRequest::All), true)]
 #[case::enter_staging(DdlRequest::EnterStaging(EnterStagingRequest {
     partition_directive: StagingPartitionDirective::RejectAllWrites,
-}))]
+}), false)]
 #[tokio::test]
-async fn test_cancelled_queued_unit_releases_fenced_ddl(#[case] ddl_request: DdlRequest) {
+async fn test_cancelled_queued_unit_releases_fenced_ddl(
+    #[case] ddl_request: DdlRequest,
+    #[case] pause_first: bool,
+) {
     let executor = Arc::new(VecScheduler::default());
     let env = SchedulerEnv::new().await.scheduler(executor.clone());
     let (tx, mut rx) = mpsc::channel(4);
@@ -1310,6 +1315,18 @@ async fn test_cancelled_queued_unit_releases_fenced_ddl(#[case] ddl_request: Ddl
     assert!(!selected.is_empty());
     assert!(selected.iter().all(FileHandle::compacting));
 
+    let pause_waiters = pause_first.then(|| {
+        let first = pending_pause(&mut scheduler, region_id);
+        let second = pending_pause(&mut scheduler, region_id);
+        let (active, _) =
+            CompactionState::current(&scheduler.region_status[&region_id].shared_state);
+        assert_eq!(
+            active.unwrap().snapshot(None).state.as_ref(),
+            compaction_task::STATE_CANCELLING
+        );
+        [first, second]
+    });
+
     let expected_ddl = std::mem::discriminant(&ddl_request);
     let (ddl_tx, mut ddl_rx) = oneshot::channel();
     assert!(
@@ -1343,6 +1360,14 @@ async fn test_cancelled_queued_unit_releases_fenced_ddl(#[case] ddl_request: Ddl
     let CompactionTransition::DdlReady(mut ddls) = transition else {
         panic!("cancelled queued work must hand off its fenced DDL");
     };
+    if let Some([first, second]) = pause_waiters {
+        let first = first.wait().now_or_never().unwrap().unwrap();
+        let second = second.wait().now_or_never().unwrap().unwrap();
+        drop(first);
+        assert!(scheduler.region_status[&region_id].is_paused());
+        drop(second);
+        assert!(!scheduler.region_status[&region_id].is_paused());
+    }
     assert_eq!(1, ddls.len());
     let ddl = ddls.pop().unwrap();
     assert_eq!(region_id, ddl.region_id);
@@ -2411,6 +2436,172 @@ async fn test_add_ddl_request_to_pending() {
     });
 
     assert!(scheduler.has_pending_ddls(region_id));
+}
+
+fn pending_pause(
+    scheduler: &mut CompactionScheduler,
+    region_id: RegionId,
+) -> PauseCompactionResponse {
+    let (sender, mut receiver) = oneshot::channel();
+    scheduler.pause_compaction(region_id, sender);
+    let response = receiver.try_recv().unwrap().unwrap();
+    assert!(response.idle.is_some());
+    response
+}
+
+#[tokio::test]
+async fn test_dropping_pause_waiters_releases_only_their_guards() {
+    let env = SchedulerEnv::new().await;
+    let (tx, _rx) = mpsc::channel(4);
+    let mut scheduler = env.mock_compaction_scheduler(tx);
+    let version = compactable_version();
+    let id = version.region_id();
+    scheduler.register_region(&version, &env.access_layer, &Default::default());
+    scheduler
+        .region_status
+        .get_mut(&id)
+        .unwrap()
+        .start_picking(7);
+
+    let (sender, receiver) = oneshot::channel();
+    drop(receiver);
+    scheduler.pause_compaction(id, sender);
+    assert!(!scheduler.region_status[&id].is_paused());
+    assert_matches!(
+        scheduler.region_status[&id].active.phase,
+        CompactionPhase::Picking {
+            cancelled: false,
+            ..
+        }
+    );
+
+    let mut first = Box::pin(pending_pause(&mut scheduler, id).wait());
+    assert!(futures::poll!(&mut first).is_pending());
+    let (sender, second) = oneshot::channel();
+    scheduler.pause_compaction(id, sender);
+    drop(first);
+    assert!(scheduler.region_status[&id].is_paused());
+    // The second guard is still in the reply channel.
+    drop(second);
+    assert!(!scheduler.region_status[&id].is_paused());
+    assert_matches!(
+        scheduler.region_status[&id].active.phase,
+        CompactionPhase::Picking {
+            cancelled: true,
+            ..
+        }
+    );
+}
+
+#[tokio::test]
+async fn test_failed_compaction_notifies_all_pause_waiters() {
+    let env = SchedulerEnv::new().await;
+    let (tx, _rx) = mpsc::channel(4);
+    let mut scheduler = env.mock_compaction_scheduler(tx);
+    let version = compactable_version();
+    let id = version.region_id();
+    scheduler.register_region(&version, &env.access_layer, &Default::default());
+    scheduler
+        .region_status
+        .get_mut(&id)
+        .unwrap()
+        .start_picking(7);
+
+    let first = pending_pause(&mut scheduler, id);
+    let second = pending_pause(&mut scheduler, id);
+    let error = Arc::new(InvalidSchedulerStateSnafu.build());
+    scheduler.on_compaction_failed(id, error.clone());
+
+    for response in [first, second] {
+        assert_matches!(
+            response.wait().now_or_never().unwrap(),
+            Err(Error::CompactRegion { region_id, source, .. })
+                if region_id == id && Arc::ptr_eq(&error, &source)
+        );
+    }
+    assert!(!scheduler.is_compacting(id));
+    assert!(!scheduler.region_status[&id].is_paused());
+}
+
+#[rstest::rstest]
+#[case::picking(false)]
+#[case::uncancellable_remote(true)]
+#[tokio::test]
+async fn test_pause_compaction_drains_active_cycle_and_blocks_new_triggers(#[case] remote: bool) {
+    let env = SchedulerEnv::new().await;
+    let (tx, _rx) = mpsc::channel(4);
+    let mut scheduler = env.mock_compaction_scheduler(tx);
+    let version = compactable_version();
+    let id = version.region_id();
+    let manifest = env
+        .mock_manifest_context(version.current().version.metadata.clone())
+        .await;
+    let (schemas, _) = mock_schema_metadata_manager();
+    scheduler.register_region(&version, &env.access_layer, &Default::default());
+
+    let schedule = |scheduler: &mut CompactionScheduler| {
+        scheduler
+            .schedule_automatic_compaction(
+                Options::Regular(Default::default()),
+                &version,
+                &env.access_layer,
+                &manifest,
+                schemas.clone(),
+            )
+            .unwrap()
+    };
+    assert!(schedule(&mut scheduler));
+    if remote {
+        scheduler
+            .region_status
+            .get_mut(&id)
+            .unwrap()
+            .start_remote_task();
+    }
+    let (manual, mut pending) = oneshot::channel();
+    scheduler
+        .schedule_manual_compaction(
+            Options::Regular(Default::default()),
+            &version,
+            &env.access_layer,
+            manual.into(),
+            &manifest,
+            schemas.clone(),
+            1,
+            None,
+        )
+        .unwrap();
+    let first = pending_pause(&mut scheduler, id);
+    assert!(!schedule(&mut scheduler));
+    assert_matches!(
+        pending.try_recv().unwrap(),
+        Err(Error::CompactionCancelled { .. })
+    );
+    if remote {
+        scheduler
+            .on_compaction_finished(id, &manifest, schemas.clone(), true)
+            .await;
+    } else {
+        assert_matches!(
+            scheduler.region_status[&id].active.phase,
+            CompactionPhase::Picking {
+                cancelled: true,
+                ..
+            }
+        );
+        scheduler.on_compaction_cancelled(id).await;
+    }
+    let first = first.wait().now_or_never().unwrap().unwrap();
+    let (tx, second) = oneshot::channel();
+    scheduler.pause_compaction(id, tx);
+    let second = second.await.unwrap().unwrap();
+    assert!(second.idle.is_none());
+    let second = second.wait().await.unwrap();
+    drop(first);
+    assert!(!schedule(&mut scheduler));
+    assert!(!scheduler.schedule_automatic_followup(id, &manifest, schemas.clone()));
+    drop(second);
+    assert!(schedule(&mut scheduler));
 }
 
 #[tokio::test]

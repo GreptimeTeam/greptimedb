@@ -49,7 +49,6 @@ use crate::request::{
     RegionChangeResult, RegionEditKind, RegionEditRequest, RegionEditResult, RegionSyncRequest,
     SenderDdlRequest, TruncateResult, WorkerRequest, WorkerRequestWithTime,
 };
-use crate::sst::file::FileFormat;
 use crate::sst::index::IndexBuildType;
 use crate::sst::{file, location};
 use crate::wal::EntryId;
@@ -251,6 +250,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 return;
             }
         };
+        // A region that awaits its Leader lease keeps its memtable for that lease or for a
+        // catchup again.
+        if region.manifest_ctx.awaits_leader_lease() {
+            warn!("Region {region_id} awaits its Leader lease, refusing to sync its manifest");
+            let _ = sender.send(Err(RegionBusySnafu { region_id }.build()));
+            return;
+        }
 
         let original_manifest_version = region.manifest_ctx.manifest_version().await;
         let manifest = match region
@@ -972,6 +978,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
 fn prepare_region_edit(region: &MitoRegionRef, edit: &mut RegionEdit) -> Result<()> {
     let region_id = region.region_id;
+    region.version().options.validate_file_formats(
+        region_id,
+        &edit.files_to_add,
+        &edit.series_indexes_to_add,
+    )?;
     edit.validate_shared_reclassification(region_id)?;
     let current = region.version_control.current();
     let shared = &current.version.ssts.levels()[file::SHARED_LEVEL_SLOT].files;
@@ -1032,7 +1043,7 @@ fn prepare_region_edit(region: &MitoRegionRef, edit: &mut RegionEdit) -> Result<
             .iter()
             .all(|file| existing_sequence(file).is_some());
     let sequence =
-        if same_import {
+        if same_import || (edit.files_to_add.is_empty() && edit.files_to_remove.is_empty()) {
             None
         } else {
             let sequence = current.last_sequence.checked_add(1).context(
@@ -1061,13 +1072,24 @@ async fn edit_region(
     preload_sst_cache: bool,
 ) -> Result<()> {
     let region_id = region.region_id;
+    let narthex_format =
+        region.version().options.sst_format == Some(crate::sst::FormatType::Narthex);
+    if narthex_format {
+        for file in edit.files_to_add.iter().chain(&edit.series_indexes_to_add) {
+            snafu::ensure!(
+                file.region_id.table_id() == region_id.table_id() && file.valid_inventory(),
+                crate::error::InvalidRequestSnafu {
+                    region_id,
+                    reason: "Invalid Narthex artifact for destination region"
+                }
+            );
+        }
+    }
     if let Some(write_cache) = cache_manager.write_cache()
         && preload_sst_cache
+        && !narthex_format
     {
         for file_meta in &edit.files_to_add {
-            if !matches!(file_meta.format, FileFormat::Parquet) {
-                continue;
-            }
             let write_cache = write_cache.clone();
             let layer = region.access_layer.clone();
             let listener = listener.clone();

@@ -185,9 +185,12 @@ impl SetRegionRoleStateResponse {
 pub struct GrantedRegion {
     pub region_id: RegionId,
     pub region_role: RegionRole,
-    /// An opaque non-zero id the metadata plane attaches to some leases, `None` for a lease
-    /// without one. It reaches the engine through [`RegionEngine::set_region_role_with_lease`];
-    /// engines may keep it with the lease and must not interpret it.
+    /// A non-zero id the metadata plane attaches to the Follower leases of a region migration's
+    /// target before the route names that target, `None` for a lease without one. It reaches the
+    /// engine through [`RegionEngine::set_region_role_with_lease`]. An engine may keep it with the
+    /// lease, and may use its presence to keep such a lease from demoting a region that the
+    /// migration's catchup made writable and that still awaits a Leader or StagingLeader lease.
+    /// Engines must not interpret its value.
     pub candidate_lease_id: Option<u64>,
     pub extensions: HashMap<String, Vec<u8>>,
 }
@@ -1550,13 +1553,16 @@ pub trait RegionEngine: Send + Sync {
 
     /// Sets [RegionRole] for a region from a lease the metasrv grants until `deadline`, in reply
     /// to a heartbeat sent at `sent_at`. Returns false if the engine ignores a Leader lease because
-    /// the region was downgraded or (re)opened after `sent_at`.
+    /// the region was downgraded or (re)opened after `sent_at`, a catchup runs on it, or it waits
+    /// for a reload.
     ///
     /// The region must not acknowledge a write whose WAL append completes at or after the
     /// deadline of its latest Leader or StagingLeader lease. Leases of other roles do not extend
     /// that deadline.
     ///
-    /// `candidate_lease_id` is the lease's [GrantedRegion::candidate_lease_id].
+    /// `candidate_lease_id` is the lease's [GrantedRegion::candidate_lease_id]. A Follower lease
+    /// that carries one may leave a region that a catchup made writable alone until its Leader or
+    /// StagingLeader lease, see [`is_confirmed_leader`](Self::is_confirmed_leader).
     fn set_region_role_with_lease(
         &self,
         region_id: RegionId,
@@ -1592,6 +1598,21 @@ pub trait RegionEngine: Send + Sync {
     ///
     /// Returns the `None` if the region is not found.
     fn role(&self, region_id: RegionId) -> Option<RegionRole>;
+
+    /// Returns whether the region is a leader that needs no catchup: `None` if the region is not
+    /// found, `Some(false)` if it is a follower or, on a node that requires leases to confirm its
+    /// leaders, a catchup made it a leader and no Leader or StagingLeader lease sent after that
+    /// catchup, nor a direct promotion to Leader, has applied since, and `Some(true)` otherwise.
+    /// The default answers from [`role`](Self::role) alone, which suits an engine that does not tie
+    /// its commits to leases.
+    ///
+    /// An upgrade reports a region that answers `Some(true)` ready without a catchup, sends one
+    /// that answers `Some(false)` a catchup with `set_writable`, and reports one that answers
+    /// `None` missing.
+    fn is_confirmed_leader(&self, region_id: RegionId) -> Option<bool> {
+        self.role(region_id)
+            .map(|role| role != RegionRole::Follower)
+    }
 
     fn as_any(&self) -> &dyn Any;
 }

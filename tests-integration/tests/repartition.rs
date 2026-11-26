@@ -508,6 +508,7 @@ async fn assert_append_count(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "Exemplar writes require pre-encoded keys: https://github.com/GreptimeTeam/greptimedb/issues/10598"]
 async fn test_exemplar_sparse_repartition_compaction() {
     let (cluster, _home_guard) = repartition_cluster("exemplar_sparse_repartition").await;
     let instance = cluster.fe_instance();

@@ -318,7 +318,7 @@ with_metric_engine = true
 ## Available options:
 ## - strict: deny invalid UTF-8 strings (default).
 ## - lossy: allow invalid UTF-8 strings, replace invalid characters with REPLACEMENT_CHARACTER(U+FFFD).
-## - unchecked: do not valid strings.
+## - unchecked: same as `lossy`. Kept for compatibility.
 prom_validation_mode = "strict"
 
 
@@ -570,6 +570,9 @@ max_running_procedures = 128
 ## query.experimental_native_promql option overrides it, in that order.
 ## Default: false
 #+ experimental_native_promql = false
+## Experimental opt-in for shape-based AVG/SUM join aggregation; default false.
+experimental_enable_factorized_join_agg = false
+
 ## Parallelism of the query engine.
 ## Default to 0, which means the number of CPU cores.
 parallelism = 0
