@@ -452,7 +452,8 @@ fn rewrite(
             .iter()
             .enumerate()
             .find_map(|(index, (expr, _))| {
-                bucket_within_slice(expr, input_ts, ts_unit).map(|scale| (index, scale))
+                bucket_within_slice(expr, input_ts, ts_unit, (start, end))
+                    .map(|scale| (index, scale))
             })
     } else {
         None
@@ -541,6 +542,7 @@ fn bucket_within_slice(
     expr: &Arc<dyn PhysicalExpr>,
     ts_index: usize,
     ts_unit: TimeUnit,
+    (start, end): (i64, i64),
 ) -> Option<i64> {
     let is_ts = |e: &Arc<dyn PhysicalExpr>| {
         e.downcast_ref::<Column>()
@@ -577,11 +579,21 @@ fn bucket_within_slice(
             .and_then(|d| d.checked_add(v.milliseconds as i64 * 1_000_000)),
         _ => None,
     };
+    // `date_bin` bins in nanoseconds and returns null for a timestamp whose nanoseconds or
+    // bin overflow i64, so every row in `[start, end)` must convert and round down.
+    let factor = ts_unit.factor() as i64;
+    let in_range = start
+        .checked_mul(factor)
+        .zip(stride)
+        .and_then(|(start, stride)| start.checked_sub(stride))
+        .is_some()
+        && (end - 1).checked_mul(factor).is_some();
     stride
         .is_some_and(|stride| {
-            stride > 0
+            in_range
+                && stride > 0
                 && (SLICE_SECONDS * 1_000_000_000) % stride == 0
-                && stride % ts_unit.factor() as i64 == 0
+                && stride % factor == 0
         })
         .then_some(scale)
 }

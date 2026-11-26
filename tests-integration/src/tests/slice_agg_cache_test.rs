@@ -344,6 +344,33 @@ async fn test_slice_agg_cache_matches_uncached_results() {
         assert_eq!(expected, query(&instance, &earliest, true).await);
     }
 
+    // `date_bin` returns null for millisecond timestamps past 2262, whose nanoseconds
+    // overflow i64.
+    execute_sql(
+        &instance,
+        "CREATE TABLE slice_far (ts TIMESTAMP(3) TIME INDEX, v DOUBLE)",
+    )
+    .await;
+    let year_2300 = 10_413_792_000_000i64;
+    execute_sql(
+        &instance,
+        &format!(
+            "INSERT INTO slice_far VALUES ({year_2300}, 1), ({}, 2)",
+            year_2300 + HOUR_MS
+        ),
+    )
+    .await;
+    execute_sql(&instance, "ADMIN FLUSH_TABLE('slice_far')").await;
+    let far = format!(
+        "SELECT date_bin(INTERVAL '5 minutes', ts) AS b, count(*) FROM slice_far \
+         WHERE ts >= {year_2300}::TIMESTAMP(3) AND ts < {}::TIMESTAMP(3) GROUP BY b",
+        year_2300 + 2 * HOUR_MS
+    );
+    let expected = query(&instance, &far, false).await;
+    for _ in 0..2 {
+        assert_eq!(expected, query(&instance, &far, true).await);
+    }
+
     // Metric engine tables are never rewritten.
     execute_sql(
         &instance,
