@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use api::v1::meta::MailboxMessage;
+use common_error::ext::ErrorExt;
 use common_meta::instruction::{Instruction, InstructionReply};
 use common_meta::peer::Peer;
 use common_meta::rpc::router::RegionRoute;
@@ -173,7 +174,11 @@ pub(crate) async fn validate_merge_sources(ctx: &Context) -> Result<()> {
     {
         match result {
             Ok(()) => {}
-            Err(error::Error::RetryLater { .. }) => return Err(result.err().unwrap()),
+            // A retryable failure - a mailbox timeout, a channel that closed, a region that is
+            // not a leader yet - says nothing about which region owns what. It reaches the
+            // procedure as retryable, so it is retried instead of turning into a terminal
+            // "compact the region" refusal.
+            Err(err) if err.retry_hint().is_retryable() => return Err(err),
             Err(err) => offenders.push(format!("region {region_id}: {err}")),
         }
     }
@@ -264,7 +269,16 @@ async fn send_validate_only(
         }
         .build()
     })?;
-    let msg = receiver.await?;
+    // Waiting for the reply can time out or find its channel closed. Neither says anything
+    // about which region owns what, so both stay retryable instead of becoming a refusal.
+    let msg = receiver.await.map_err(|e| {
+        error::RetryLaterSnafu {
+            reason: format!(
+                "Source region {region_id} on datanode {peer:?} did not answer the validation: {e}"
+            ),
+        }
+        .build()
+    })?;
     let reply = HeartbeatMailbox::json_reply(&msg)?;
     let InstructionReply::RemapManifest(reply) = reply else {
         return error::UnexpectedInstructionReplySnafu {
@@ -310,7 +324,7 @@ mod tests {
 
     use api::v1::meta::MailboxMessage;
     use api::v1::meta::mailbox_message::Payload;
-    use common_error::ext::RetryHint;
+    use common_error::ext::{ErrorExt, RetryHint};
     use common_error::status_code::StatusCode;
     use common_meta::instruction::{
         Instruction, InstructionError, InstructionReply, RemapManifestReply,
@@ -476,6 +490,53 @@ mod tests {
 
         let published = ctx.get_table_route_value().await.unwrap();
         assert_eq!(published.into_inner().region_routes().unwrap(), &old_routes);
+    }
+
+    #[tokio::test]
+    async fn test_validate_merge_sources_keeps_a_timeout_retryable() {
+        // The datanodes never answer: delivery times out. A timeout says nothing about region
+        // ownership, so the procedure has to retry - advising the operator to compact a region
+        // would be wrong advice and a terminal failure.
+        let mut env = TestingEnv::new();
+        let (sources, targets, prepare_result) = merge_sources();
+        let (left_tx, mut left_rx) = tokio::sync::mpsc::channel(2);
+        env.mailbox_ctx
+            .insert_heartbeat_response_receiver(Channel::Datanode(1), left_tx)
+            .await;
+        let (right_tx, mut right_rx) = tokio::sync::mpsc::channel(2);
+        env.mailbox_ctx
+            .insert_heartbeat_response_receiver(Channel::Datanode(2), right_tx)
+            .await;
+
+        let mut persistent = new_persistent_context(TABLE_ID, sources, targets);
+        persistent.group_prepare_result = Some(prepare_result);
+        let ctx = env.create_context(persistent);
+        let mailbox = ctx.mailbox.clone();
+
+        let datanodes = async {
+            for rx in [&mut left_rx, &mut right_rx] {
+                let msg = rx.recv().await.unwrap().unwrap().mailbox_message.unwrap();
+                mailbox
+                    .on_recv(
+                        msg.id,
+                        Err(crate::error::MailboxTimeoutSnafu { id: msg.id }.build()),
+                    )
+                    .await
+                    .unwrap();
+            }
+        };
+
+        let (result, ()) = tokio::join!(validate_merge_sources(&ctx), datanodes);
+        let err = result.unwrap_err();
+        assert!(
+            err.retry_hint().is_retryable(),
+            "a mailbox timeout must stay retryable: {err}"
+        );
+        let message = err.to_string();
+        assert!(
+            !message.contains("Compact the offending regions"),
+            "a timeout is not an ownership refusal: {message}"
+        );
     }
 
     #[tokio::test]
