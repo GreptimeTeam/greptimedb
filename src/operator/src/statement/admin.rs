@@ -499,6 +499,7 @@ fn try_get_data_type_for_sql_value(value: &SqlValue) -> Result<ArrowDataType> {
 mod tests {
     use std::sync::Arc;
 
+    #[cfg(feature = "enterprise")]
     use common_function::state::FunctionState;
     use datafusion_expr::TypeSignature;
     use datatypes::arrow::datatypes::DataType as ArrowDataType;
@@ -511,9 +512,9 @@ mod tests {
     use sql::statements::statement::Statement;
 
     use crate::error::Error;
-    use crate::statement::admin::{
-        admin_output_schema, args_to_vector, immediate_result, resolve_admin_function,
-    };
+    #[cfg(feature = "enterprise")]
+    use crate::statement::admin::resolve_admin_function;
+    use crate::statement::admin::{admin_output_schema, args_to_vector, immediate_result};
 
     #[cfg(feature = "enterprise")]
     #[test]
