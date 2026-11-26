@@ -122,6 +122,7 @@ impl SeriesIndexTaskState {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_series_index_tasks(
     worker_id: u32,
+    write_cache: Option<crate::cache::write_cache::WriteCacheRef>,
     schema_manager: SchemaMetadataManagerRef,
     store: ObjectStore,
     regions: RegionMapRef,
@@ -145,6 +146,7 @@ pub(crate) fn spawn_series_index_tasks(
     ));
     common_runtime::spawn_compact(async move {
         SeriesIndexTask {
+            write_cache,
             schema_manager,
             worker_id,
             store,
@@ -169,6 +171,7 @@ pub(crate) fn spawn_series_index_tasks(
 
 /// Periodic series-index maintenance for one region worker.
 struct SeriesIndexTask {
+    write_cache: Option<crate::cache::write_cache::WriteCacheRef>,
     schema_manager: SchemaMetadataManagerRef,
     store: ObjectStore,
     regions: RegionMapRef,
@@ -398,7 +401,7 @@ impl SeriesIndexTask {
             let metadata = version.metadata.clone();
             drop(version);
             let output =
-                crate::sst::narthex::write_series(&region.access_layer, metadata, &inputs, window)
+                crate::sst::narthex::write_series(&region.access_layer, self.write_cache.as_ref(), metadata, &inputs, window)
                     .await
                     .inspect_err(|_| {
                         self.failed_merge.insert(region.region_id, rank);
@@ -548,6 +551,7 @@ impl SeriesIndexTask {
             };
             let output = match crate::sst::narthex::write_series(
                 &region.access_layer,
+                self.write_cache.as_ref(),
                 metadata.clone(),
                 &sources,
                 window,
@@ -744,6 +748,7 @@ mod tests {
         let (state, receiver) = SeriesIndexTaskState::new(0, 1);
         (
             SeriesIndexTask {
+            write_cache: None,
                 schema_manager: crate::test_util::mock_schema_metadata_manager().0,
                 store,
                 regions,
@@ -1456,6 +1461,7 @@ mod tests {
         regions.insert_region(region.clone());
         let (state, receiver) = SeriesIndexTaskState::new(0, 2);
         let mut task = SeriesIndexTask {
+            write_cache: None,
             schema_manager: crate::test_util::mock_schema_metadata_manager().0,
             store: store.clone(),
             regions,
@@ -1543,6 +1549,7 @@ mod tests {
         let usage = Arc::new(AtomicU64::new(0));
         let (state, command_receiver) = SeriesIndexTaskState::new(0, 1);
         let mut task = SeriesIndexTask {
+            write_cache: None,
             schema_manager: crate::test_util::mock_schema_metadata_manager().0,
             store: store.clone(),
             regions,
@@ -1683,6 +1690,7 @@ mod tests {
         let make_task = || {
             let (state, command_receiver) = SeriesIndexTaskState::new(0, 1);
             SeriesIndexTask {
+            write_cache: None,
                 schema_manager: crate::test_util::mock_schema_metadata_manager().0,
                 store: store.clone(),
                 regions: Arc::new(RegionMap::default()),

@@ -27,7 +27,9 @@ use snafu::ResultExt;
 use store_api::metadata::RegionMetadata;
 use store_api::storage::FileId;
 
-use crate::access_layer::SstInfoArray;
+use crate::access_layer::{OperationType, SstInfoArray};
+use crate::cache::file_cache::IndexKey;
+use crate::cache::write_cache::WriteCacheRef;
 use crate::access_layer::{AccessLayer, SstWriteRequest};
 use crate::error::{ComputeArrowSnafu, InvalidRecordBatchSnafu, Result};
 use crate::series_index::artifact::SamplesFileHandle;
@@ -60,10 +62,12 @@ pub(crate) async fn write_samples(
             .await?;
     }
     let prefix = location::narthex_file_dir(&layer.build_region_dir(region_id), id);
+    let cache = request.cache_manager.write_cache();
+    let store = cache.map_or_else(|| layer.object_store().clone(), |cache| cache.file_cache().local_store());
     let mut writer = ColumnarSamplesFormat::default()
         .writer(
             request.metadata.clone(),
-            layer.object_store().clone(),
+            store,
             &prefix,
             id,
             id,
@@ -121,7 +125,7 @@ pub(crate) async fn write_samples(
         }
         Ok(())
     };
-    let write_result: Result<()> = if let Some(signal) = cancellation {
+    let write_result: Result<()> = if let Some(signal) = &cancellation {
         tokio::select! {
             biased;
             _ = signal.cancelled() => crate::error::CompactionCancelledSnafu.fail(),
@@ -146,7 +150,7 @@ pub(crate) async fn write_samples(
         .build()
     })?;
     let unit = request.metadata.time_index_type().unit();
-    Ok(smallvec::smallvec![SstInfo {
+    let info = SstInfo {
         file_id: id,
         time_range: (
             common_time::Timestamp::new(lower, unit),
@@ -169,7 +173,12 @@ pub(crate) async fn write_samples(
                 })
                 .collect()
         })),
-    }])
+    };
+    if let Some(cache) = cache {
+        let file = FileMeta { region_id, file_id: id, format: info.format.clone(), ..Default::default() };
+        cache.upload_native(IndexKey::native_objects(&file, &layer.build_region_dir(region_id)), layer.object_store(), request.op_type, cancellation.as_ref()).await?;
+    }
+    Ok(smallvec::smallvec![info])
 }
 
 /// Reconstruct the canonical sparse key from a native series row, in SST order.
@@ -190,6 +199,7 @@ async fn series_keys(
 /// Merge sorted sample keys or stored index rows. A separate manifest edit publishes the index.
 pub(crate) async fn write_series(
     layer: &AccessLayer,
+    cache: Option<&WriteCacheRef>,
     metadata: store_api::metadata::RegionMetadataRef,
     sources: &[FileHandle],
     window: crate::sst::file::WindowSequence,
@@ -220,7 +230,7 @@ pub(crate) async fn write_series(
     )?;
     let mut writer = ColumnarSeriesFormat::default().narthex_writer(
         metadata.clone(),
-        layer.object_store().clone(),
+        cache.map_or_else(|| layer.object_store().clone(), |cache| cache.file_cache().local_store()),
         &entry,
         prefix,
     )?;
@@ -276,6 +286,9 @@ pub(crate) async fn write_series(
                 file_size: part.file_size,
             })
             .collect();
+    }
+    if let Some(cache) = cache {
+        cache.upload_native(IndexKey::native_objects(&file, &layer.build_region_dir(metadata.region_id)), layer.object_store(), OperationType::Compact, None).await?;
     }
     Ok(file)
 }

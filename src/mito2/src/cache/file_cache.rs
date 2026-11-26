@@ -64,6 +64,7 @@ const DOWNLOAD_TASK_CHANNEL_SIZE: usize = 64;
 
 /// A task to download a file in the background.
 struct DownloadTask {
+    _pin: Option<crate::sst::file::FileHandle>,
     index_key: IndexKey,
     remote_path: String,
     remote_store: ObjectStore,
@@ -85,8 +86,8 @@ impl FileCacheInner {
     /// Returns the appropriate memory index for the given file type.
     fn memory_index(&self, file_type: FileType) -> &Cache<IndexKey, IndexValue> {
         match file_type {
-            FileType::Parquet => &self.parquet_index,
-            FileType::Puffin { .. } => &self.puffin_index,
+            FileType::Parquet | FileType::Samples(_) => &self.parquet_index,
+            FileType::Puffin(_) | FileType::Series(_) => &self.puffin_index,
         }
     }
 
@@ -144,8 +145,8 @@ impl FileCacheInner {
 
             // Track sizes separately for each file type
             match key.file_type {
-                FileType::Parquet => parquet_size += size,
-                FileType::Puffin { .. } => puffin_size += size,
+                FileType::Parquet | FileType::Samples(_) => parquet_size += size,
+                FileType::Puffin(_) | FileType::Series(_) => puffin_size += size,
             }
         }
         // The metrics is a signed int gauge so we can updates it finally.
@@ -193,6 +194,8 @@ impl FileCacheInner {
         let timer = WRITE_CACHE_DOWNLOAD_ELAPSED
             .with_label_values(&[match file_type {
                 FileType::Parquet => "download_parquet",
+                FileType::Series(_) => "download_series",
+                FileType::Samples(_) => "download_samples",
                 FileType::Puffin { .. } => "download_puffin",
             }])
             .start_timer();
@@ -725,12 +728,20 @@ impl FileCache {
         remote_store: ObjectStore,
         file_size: u64,
     ) {
+        self.queue_download(index_key, remote_path, remote_store, file_size, None);
+    }
+
+    pub(crate) fn queue_download(
+        &self, index_key: IndexKey, remote_path: String, remote_store: ObjectStore,
+        file_size: u64, pin: Option<crate::sst::file::FileHandle>,
+    ) {
         // Do nothing if background worker is disabled (channel is None)
         let Some(tx) = &self.download_task_tx else {
             return;
         };
 
         let task = DownloadTask {
+            _pin: pin,
             index_key,
             remote_path,
             remote_store,
@@ -756,6 +767,21 @@ pub struct IndexKey {
 }
 
 impl IndexKey {
+    /// The native inventory ends with its manifest; all preceding objects are in part-ID order.
+    pub(crate) fn native_objects(file: &crate::sst::file::FileMeta, region_dir: &str) -> Vec<(Self, crate::series_index::artifact::ArtifactObject)> {
+        let Some(objects) = file.narthex_objects(region_dir) else { return Vec::new() };
+        let manifest_index = objects.len() - 1;
+        objects.into_iter().enumerate().map(|(i, object)| {
+            let part = (i != manifest_index).then_some(i as u32);
+            let kind = match &file.format {
+                crate::sst::file::FileFormat::NarthexSamples(_) => FileType::Samples(part),
+                crate::sst::file::FileFormat::NarthexSeriesIndex(_) => FileType::Series(part),
+                _ => unreachable!(),
+            };
+            (Self::new(file.region_id, file.file_id, kind), object)
+        }).collect()
+    }
+
     /// Creates a new index key.
     pub fn new(region_id: RegionId, file_id: FileId, file_type: FileType) -> IndexKey {
         IndexKey {
@@ -785,11 +811,18 @@ pub enum FileType {
     Parquet,
     /// Puffin file.
     Puffin(u64),
+    /// Immutable part, or the manifest when the part ID is absent.
+    Series(Option<u32>),
+    Samples(Option<u32>),
 }
 
 impl fmt::Display for FileType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            FileType::Samples(None) => f.write_str("samples"),
+            FileType::Series(None) => f.write_str("series"),
+            FileType::Samples(Some(part)) => write!(f, "{part}.samples"),
+            FileType::Series(Some(part)) => write!(f, "{part}.series"),
             FileType::Parquet => write!(f, "parquet"),
             FileType::Puffin(version) => write!(f, "{}.puffin", version),
         }
@@ -800,6 +833,10 @@ impl FileType {
     /// Parses the file type from string.
     pub(crate) fn parse(s: &str) -> Option<FileType> {
         match s {
+            "series" => Some(Self::Series(None)),
+            "samples" => Some(Self::Samples(None)),
+            _ if s.ends_with(".series") => Some(Self::Series(Some(s.strip_suffix(".series")?.parse().ok()?))),
+            _ if s.ends_with(".samples") => Some(Self::Samples(Some(s.strip_suffix(".samples")?.parse().ok()?))),
             "parquet" => Some(FileType::Parquet),
             "puffin" => Some(FileType::Puffin(0)),
             _ => {
@@ -817,8 +854,8 @@ impl FileType {
     /// Returns the metric label for this file type.
     fn metric_label(&self) -> &'static str {
         match self {
-            FileType::Parquet => FILE_TYPE,
-            FileType::Puffin(_) => INDEX_TYPE,
+            FileType::Parquet | FileType::Samples(_) => FILE_TYPE,
+            FileType::Puffin(_) | FileType::Series(_) => INDEX_TYPE,
         }
     }
 }

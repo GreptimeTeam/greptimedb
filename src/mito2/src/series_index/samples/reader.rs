@@ -26,11 +26,11 @@ use datatypes::arrow::array::{
 use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use futures::stream::BoxStream;
-use object_store::{ObjectStore, Reader};
+use object_store::ObjectStore;
 use snafu::ResultExt;
 use tokio::sync::OnceCell;
 
-use crate::cache::columnar::{self as metadata_cache, MetadataCache, PartArea};
+use crate::cache::columnar::{self as metadata_cache, MetadataCache, PartArea, ObjectReader};
 use crate::error::{NewRecordBatchSnafu, OpenDalSnafu, Result};
 use crate::metrics::ColumnarReadMetrics;
 use crate::series_index::artifact::{ArtifactFormat, SamplesFileHandle};
@@ -43,7 +43,6 @@ use crate::series_index::samples::metadata::{
 use crate::series_index::samples::{
     MANIFEST_LIMIT, Manifest, MetricSeriesId, TimestampUnit, VERSION, invalid, require, unsupported,
 };
-use crate::sst::parquet::helper::fetch_byte_ranges;
 
 pub(crate) struct SamplesReader {
     store: ObjectStore,
@@ -51,7 +50,7 @@ pub(crate) struct SamplesReader {
     schema: SchemaRef,
     cache: Option<MetadataCache>,
     handle: SamplesFileHandle,
-    parts: Arc<Vec<OnceCell<Reader>>>,
+    parts: Arc<Vec<OnceCell<ObjectReader>>>,
 }
 impl SamplesReader {
     pub(crate) async fn open_cached(
@@ -74,7 +73,7 @@ impl SamplesReader {
                         .sum::<usize>()
             },
             async {
-                let reader = Self::open(store.clone(), handle.clone()).await?;
+                let reader = Self::open_descriptor(store.clone(), handle.clone(), cache.as_ref()).await?;
                 Ok((reader.manifest, reader.schema))
             },
         )
@@ -94,6 +93,10 @@ impl SamplesReader {
     }
 
     pub async fn open(store: ObjectStore, handle: SamplesFileHandle) -> Result<Self> {
+        Self::open_descriptor(store, handle, None).await
+    }
+
+    async fn open_descriptor(store: ObjectStore, handle: SamplesFileHandle, cache: Option<&MetadataCache>) -> Result<Self> {
         let entry = handle.entry();
         let artifact = &entry.artifact;
         require(
@@ -122,7 +125,8 @@ impl SamplesReader {
             length > 0 && length <= MANIFEST_LIMIT as u64,
             "samples manifest exceeds limit",
         )?;
-        let bytes = read_range(&store, &path, 0, length).await?;
+        let object = ObjectReader::open(cache, handle.native_file(), crate::cache::file_cache::FileType::Samples(None), &store, &path, length).await?;
+        let bytes = object.read(0..length).await.context(OpenDalSnafu)?;
         // A manifest that the current format cannot read predates exact identity or is
         // corrupt; either way it must never be reused.
         let mut manifest: Manifest = serde_json::from_slice(&bytes).map_err(|error| {
@@ -299,7 +303,7 @@ impl SamplesFormatReader for SamplesReader {
                 let path = manifest.part_path(part.part_id);
                 // One lazy reader per accessed part, shared across this query's streams.
                 let reader = parts[part.part_id as usize].get_or_try_init(|| async {
-                    store.reader_with(&path).concurrent(8).gap(0).await.context(OpenDalSnafu)
+                    ObjectReader::open(cache.as_ref(), handle.native_file(), crate::cache::file_cache::FileType::Samples(Some(part.part_id)), &store, &path, part.file_size).await
                 }).await?;
                 let size = part.file_size;
                 let metadata_started = Instant::now();
@@ -760,24 +764,10 @@ fn matches(
     }
     first <= last && ids.is_none_or(|ids| ids.range(first..=last).next().is_some())
 }
-async fn read_range(store: &ObjectStore, path: &str, start: u64, end: u64) -> Result<bytes::Bytes> {
-    require(start <= end, "reversed sample byte range")?;
-    let mut buffers = fetch_byte_ranges(path, store.clone(), std::slice::from_ref(&(start..end)))
-        .await
-        .context(OpenDalSnafu)?;
-    let bytes = buffers
-        .pop()
-        .ok_or_else(|| invalid("missing sample range response"))?;
-    require(
-        buffers.is_empty() && bytes.len() as u64 == end - start,
-        "sample range length mismatch",
-    )?;
-    Ok(bytes)
-}
 /// Reuses validated immutable metadata; traversal remains local to each stream.
 async fn load_metadata_page(
     cache: Option<&MetadataCache>,
-    reader: &Reader,
+    reader: &ObjectReader,
     object: (&str, u64),
     reference: &PageReference,
     depth: u32,
@@ -1127,13 +1117,12 @@ async fn read_block(
     Ok(Some((batch, reservation)))
 }
 
-async fn read_part_range(reader: &Reader, start: u64, end: u64) -> Result<bytes::Bytes> {
+async fn read_part_range(reader: &ObjectReader, start: u64, end: u64) -> Result<bytes::Bytes> {
     require(start <= end, "reversed sample byte range")?;
     let bytes = reader
         .read(start..end)
         .await
-        .context(OpenDalSnafu)?
-        .to_bytes();
+        .context(OpenDalSnafu)?;
     require(
         bytes.len() as u64 == end - start,
         "sample range length mismatch",
@@ -1203,7 +1192,7 @@ async fn fetch_ranges(
     let mut result = Vec::with_capacity(ranges.len());
     let mut index = 0;
     for (range, buffer) in merged.iter().zip(fetched) {
-        let bytes = buffer.to_bytes();
+        let bytes = buffer;
         require(
             bytes.len() as u64 == range.end - range.start,
             "sample range length mismatch",

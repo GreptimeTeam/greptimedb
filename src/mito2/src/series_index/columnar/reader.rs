@@ -29,7 +29,7 @@ use mito_codec::row_converter::{SparseOffsetsCache, SparsePrimaryKeyCodec};
 use object_store::ObjectStore;
 use snafu::ResultExt;
 
-use crate::cache::columnar::{self as metadata_cache, MetadataCache, PartArea};
+use crate::cache::columnar::{self as metadata_cache, MetadataCache, PartArea, ObjectReader};
 use crate::error::{NewRecordBatchSnafu, OpenDalSnafu, RecordBatchSnafu, Result};
 use crate::metrics::ColumnarReadMetrics;
 use crate::series_index::artifact::ArtifactFormat;
@@ -43,7 +43,6 @@ use crate::series_index::identity::{ExactSeriesKey, IdentityEncoding};
 use crate::series_index::{
     MetricSeriesId, ROW_COUNT_COLUMN, SeriesIndexFileHandle, TABLE_ID_COLUMN, TSID_COLUMN,
 };
-use crate::sst::parquet::helper::fetch_byte_ranges;
 
 pub(crate) struct ColumnarReader {
     store: ObjectStore,
@@ -101,7 +100,7 @@ impl ColumnarReader {
                         .sum::<usize>()
             },
             async {
-                let reader = Self::open(store.clone(), handle.clone()).await?;
+                let reader = Self::open_descriptor(store.clone(), handle.clone(), cache.as_ref()).await?;
                 Ok((reader.manifest, reader.schema))
             },
         )
@@ -116,6 +115,10 @@ impl ColumnarReader {
     }
 
     pub(crate) async fn open(store: ObjectStore, handle: SeriesIndexFileHandle) -> Result<Self> {
+        Self::open_descriptor(store, handle, None).await
+    }
+
+    async fn open_descriptor(store: ObjectStore, handle: SeriesIndexFileHandle, cache: Option<&MetadataCache>) -> Result<Self> {
         let entry = handle.entry();
         let artifact = entry
             .artifact
@@ -144,7 +147,8 @@ impl ColumnarReader {
             length <= MANIFEST_LIMIT as u64,
             "series manifest exceeds size limit",
         )?;
-        let bytes = read_range(&store, &path, 0, length).await?;
+        let object = ObjectReader::open(cache, handle.native_file(), crate::cache::file_cache::FileType::Series(None), &store, &path, length).await?;
+        let bytes = object.read(0..length).await.context(OpenDalSnafu)?;
         // A manifest that the current format cannot read predates exact identity or is
         // corrupt; either way it must never be reused.
         let mut manifest: Manifest = serde_json::from_slice(&bytes).map_err(|error| {
@@ -364,8 +368,9 @@ impl ColumnarReader {
                 let timer = metrics.timer("columnar_series_metadata_wall");
                 let path: Arc<str> = manifest.part_path(part.part_id).into();
                 let size = part.file_size;
+                let reader = ObjectReader::open(cache.as_ref(), _handle.native_file(), crate::cache::file_cache::FileType::Series(Some(part.part_id)), &store, &path, size).await?;
                 let trailer = metadata_cache::load(cache.as_ref(), format!("{path}/{size}/framing"), |_| std::mem::size_of::<Trailer>(), async {
-                let framing = fetch_byte_ranges(&path, store.clone(), &[0..metadata::HEADER_SIZE, size-metadata::TRAILER_SIZE..size]).await.context(OpenDalSnafu)?;
+                let framing = reader.fetch(vec![0..metadata::HEADER_SIZE, size-metadata::TRAILER_SIZE..size]).await.context(OpenDalSnafu)?;
                 require(
                     framing.len() == 2
                         && framing[0].len() as u64 == metadata::HEADER_SIZE
@@ -377,9 +382,8 @@ impl ColumnarReader {
                     Ok(trailer)
                 }).await?;
                 require(trailer.root.first == part.first && trailer.root.last == part.last, "series part/root bounds mismatch")?;
-                let reader = store.reader_with(&path).concurrent(8).gap(0).await.context(OpenDalSnafu)?;
-                let area = PartArea::new(reader, cache.clone(), path.clone(), metadata::HEADER_SIZE..trailer.payload_end, None);
-                let root = load_metadata_page(cache.as_ref(), &store, (&path, size), &trailer.root, trailer.depth, trailer.payload_end, &names).await?;
+                let area = PartArea::new(reader.clone(), cache.clone(), path.clone(), metadata::HEADER_SIZE..trailer.payload_end, None);
+                let root = load_metadata_page(cache.as_ref(), &reader, (&path, size), &trailer.root, trailer.depth, trailer.payload_end, &names).await?;
                 drop(timer);
                 let (mut active, children) = match root.as_ref() {
                     Page::Leaf(_) => (Some(root.clone()), Vec::new()),
@@ -393,7 +397,7 @@ impl ColumnarReader {
                         let Some(child) = child_iter.next() else { break; };
                         if !matches_range(child.first, child.last, &request) { continue; }
                         let timer = metrics.timer("columnar_series_metadata_wall");
-                        let page = load_metadata_page(cache.as_ref(), &store, (&path, size), &child, 1, trailer.payload_end, &names).await?;
+                        let page = load_metadata_page(cache.as_ref(), &reader, (&path, size), &child, 1, trailer.payload_end, &names).await?;
                         drop(timer);
                         page
                     };
@@ -455,24 +459,10 @@ fn matches_statistics(block: &Block, filters: &[SimpleFilterEvaluator]) -> bool 
     true
 }
 
-async fn read_range(store: &ObjectStore, path: &str, start: u64, end: u64) -> Result<bytes::Bytes> {
-    let mut buffers = fetch_byte_ranges(path, store.clone(), std::slice::from_ref(&(start..end)))
-        .await
-        .context(OpenDalSnafu)?;
-    let bytes = buffers
-        .pop()
-        .ok_or_else(|| invalid("missing series range response"))?;
-    require(
-        bytes.len() as u64 == end - start,
-        "series range length mismatch",
-    )?;
-    Ok(bytes)
-}
-
 /// Reuses validated immutable metadata; traversal remains local to each stream.
 async fn load_metadata_page(
     cache: Option<&MetadataCache>,
-    store: &ObjectStore,
+    reader: &ObjectReader,
     object: (&str, u64),
     reference: &PageReference,
     depth: u32,
@@ -491,13 +481,7 @@ async fn load_metadata_page(
                     reference.payload.encoding
                 )));
             }
-            let bytes = read_range(
-                store,
-                path,
-                reference.payload.offset,
-                reference.payload.end()?,
-            )
-            .await?;
+            let bytes = reader.read(reference.payload.offset..reference.payload.end()?).await.context(OpenDalSnafu)?;
             // TODO: benchmark inline versus offloaded codecs for latency, throughput,
             // and async-worker responsiveness before adding scheduling overhead.
             let decoded = reference.payload.unpack(&bytes)?;
@@ -588,7 +572,7 @@ async fn load_column_chunk(
     let bytes = if let Some((mut bytes, _)) = area.cached_ranges(std::slice::from_ref(&range)).await? {
         bytes.pop().unwrap()
     } else {
-        area.reader.read(range).await.context(OpenDalSnafu)?.to_bytes()
+        area.reader.read(range).await.context(OpenDalSnafu)?
     };
     drop(timer);
     *metrics.counts.entry("series_column_reads").or_default() += 1;

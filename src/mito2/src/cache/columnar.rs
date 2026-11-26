@@ -57,10 +57,53 @@ impl CacheStrategy {
     }
 }
 
+/// Reads each immutable object locally when resident. The remote reader retains
+/// its coalescing options and serves the same ranges on eviction.
+#[derive(Clone)]
+pub(crate) struct ObjectReader {
+    remote: object_store::Reader,
+    local: Option<(super::file_cache::FileCacheRef, super::file_cache::IndexKey)>,
+}
+
+impl ObjectReader {
+    pub(crate) async fn open(
+        cache: Option<&MetadataCache>, file: Option<&crate::sst::file::FileHandle>,
+        kind: super::file_cache::FileType, store: &object_store::ObjectStore, path: &str, size: u64,
+    ) -> Result<Self> {
+        use snafu::ResultExt;
+        let local = cache.and_then(|c| c.manager.write_cache()).zip(file).map(|(cache, file)| {
+            let disk = cache.file_cache();
+            let key = super::file_cache::IndexKey::new(file.region_id(), file.file_id().file_id(), kind);
+            if !disk.contains_key(&key) {
+                disk.queue_download(key, path.to_owned(), store.clone(), size, Some(file.clone()));
+            }
+            (disk, key)
+        });
+        let remote = store.reader_with(path).concurrent(8).gap(0).await.context(crate::error::OpenDalSnafu)?;
+        Ok(Self { remote, local })
+    }
+
+    pub(crate) async fn fetch(&self, ranges: Vec<std::ops::Range<u64>>) -> object_store::Result<Vec<bytes::Bytes>> {
+        if let Some((cache, key)) = &self.local
+            && let Some(bytes) = cache.read_ranges(*key, &ranges).await {
+            return Ok(bytes);
+        }
+        self.remote.fetch(ranges).await.map(|buffers| buffers.into_iter().map(|b| b.to_bytes()).collect())
+    }
+
+    pub(crate) async fn read(&self, range: std::ops::Range<u64>) -> object_store::Result<bytes::Bytes> {
+        if let Some((cache, key)) = &self.local
+            && let Some(mut bytes) = cache.read_ranges(*key, std::slice::from_ref(&range)).await {
+            return Ok(bytes.pop().unwrap());
+        }
+        self.remote.read(range).await.map(|b| b.to_bytes())
+    }
+}
+
 /// Byte ranges are relative to one validated payload or key area of an immutable part.
 #[derive(Clone)]
 pub(crate) struct PartArea {
-    pub(crate) reader: object_store::Reader,
+    pub(crate) reader: ObjectReader,
     cache: Option<MetadataCache>,
     path: Arc<str>,
     bounds: std::ops::Range<u64>,
@@ -68,7 +111,7 @@ pub(crate) struct PartArea {
 }
 
 impl PartArea {
-    pub(crate) fn new(reader: object_store::Reader, cache: Option<MetadataCache>, path: Arc<str>, bounds: std::ops::Range<u64>, pool: Option<Arc<dyn datafusion::execution::memory_pool::MemoryPool>>) -> Self {
+    pub(crate) fn new(reader: ObjectReader, cache: Option<MetadataCache>, path: Arc<str>, bounds: std::ops::Range<u64>, pool: Option<Arc<dyn datafusion::execution::memory_pool::MemoryPool>>) -> Self {
         Self { reader, cache, path, bounds, pool }
     }
 
@@ -117,11 +160,11 @@ impl common_base::range_read::RangeReader for PartArea {
     }
     async fn read(&self, range: std::ops::Range<u64>) -> std::io::Result<bytes::Bytes> {
         self.reader.read(self.bounds.start+range.start..self.bounds.start+range.end).await
-            .map(|b| b.to_bytes()).map_err(std::io::Error::other)
+            .map_err(std::io::Error::other)
     }
     async fn read_vec(&self, ranges: &[std::ops::Range<u64>]) -> std::io::Result<Vec<bytes::Bytes>> {
         let ranges = ranges.iter().map(|r| self.bounds.start+r.start..self.bounds.start+r.end).collect::<Vec<_>>();
-        self.reader.fetch(ranges).await.map(|buffers| buffers.into_iter().map(|b| b.to_bytes()).collect()).map_err(std::io::Error::other)
+        self.reader.fetch(ranges).await.map_err(std::io::Error::other)
     }
 }
 

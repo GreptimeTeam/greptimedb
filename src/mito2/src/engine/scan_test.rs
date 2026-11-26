@@ -622,6 +622,7 @@ async fn test_narthex_merge_existing_series_indexes() -> WhateverResult<()> {
         seed.series_indexes_to_add.push(
             crate::sst::narthex::write_series(
                 &region.access_layer,
+                None,
                 region.metadata(),
                 std::slice::from_ref(source),
                 window,

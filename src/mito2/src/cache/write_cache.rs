@@ -480,6 +480,35 @@ impl WriteCache {
         Ok(true)
     }
 
+    /// Uploads staged parts in inventory order, then publishes the manifest.
+    pub(crate) async fn upload_native(
+        self: &Arc<Self>, inventory: Vec<(IndexKey, crate::series_index::artifact::ArtifactObject)>,
+        remote: &ObjectStore, op_type: OperationType, cancellation: Option<&CancellationToken>,
+    ) -> Result<()> {
+        let mut guard = NativeUpload {
+            cache: self.file_cache.clone(), remote: remote.clone(), inventory,
+        };
+        let result = async {
+            for (key, object) in &guard.inventory {
+                let path = self.file_cache.cache_file_path(*key);
+                self.file_cache.local_store().rename(&object.path, &path).await.context(error::OpenDalSnafu)?;
+                self.upload_with_cancellation(*key, &object.path, remote, UploadOptions {
+                    op_type, write_buffer_size: DEFAULT_WRITE_BUFFER_SIZE,
+                }, cancellation).await?;
+            }
+            Ok(())
+        }.await;
+        if result.is_err() {
+            guard.clean().await;
+        } else {
+            if let Some(dir) = guard.inventory.first().and_then(|(_, o)| crate::sst::location::parent_dir(&o.path)) {
+                let _ = self.file_cache.local_store().delete(dir).await;
+            }
+            guard.inventory.clear();
+        }
+        result
+    }
+
     /// Uploads a Parquet file or a Puffin file to the remote object store.
     pub(crate) async fn upload(
         &self,
@@ -600,6 +629,37 @@ impl WriteCache {
     /// If the receiver has been dropped, the error is ignored.
     pub(crate) fn load_region_cache(&self, task: RegionLoadCacheTask) {
         let _ = self.task_sender.send(task);
+    }
+}
+
+/// The writer owns a fresh physical file ID until the complete upload returns.
+struct NativeUpload {
+    cache: FileCacheRef,
+    remote: ObjectStore,
+    inventory: Vec<(IndexKey, crate::series_index::artifact::ArtifactObject)>,
+}
+
+impl NativeUpload {
+    async fn clean(&mut self) {
+        for (key, object) in &self.inventory {
+            self.cache.remove(*key).await;
+            let local = self.cache.local_store();
+            for (store, path) in [(&local, self.cache.cache_file_path(*key)), (&local, object.path.clone()), (&self.remote, object.path.clone())] {
+                if let Err(error) = store.delete(&path).await {
+                    common_telemetry::warn!(error; "Failed to remove unpublished native object {}", path);
+                }
+            }
+        }
+        self.inventory.clear();
+    }
+}
+
+impl Drop for NativeUpload {
+    fn drop(&mut self) {
+        if !self.inventory.is_empty() {
+            let mut owned = Self { cache: self.cache.clone(), remote: self.remote.clone(), inventory: std::mem::take(&mut self.inventory) };
+            common_runtime::spawn_compact(async move { owned.clean().await });
+        }
     }
 }
 
