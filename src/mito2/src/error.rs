@@ -439,8 +439,7 @@ pub enum Error {
         offenders
     ))]
     ForeignFilePartitionExpr {
-        /// Every offending triple, one per entry: the holding region, the file, and the
-        /// partition expression of the region that created it.
+        /// One entry per offending file: the holding region and the file it must settle.
         offenders: String,
         #[snafu(implicit)]
         location: Location,

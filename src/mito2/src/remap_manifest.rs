@@ -108,8 +108,9 @@ impl RemapManifest {
                 from_manifest.metadata.partition_expr.as_deref(),
             )?;
             for (file_id, file_meta) in &from_manifest.files {
-                // Legacy files carry no creator, so their provenance cannot be established;
-                // the read path does not narrow them either. Treat them as the region's own.
+                // Legacy files carry no creator, so their provenance cannot be established.
+                // Treat them as the region's own; rejecting them would break the first
+                // repartition of an upgraded table.
                 if file_meta.partition_expr.is_none() {
                     continue;
                 }
@@ -450,7 +451,6 @@ impl RemapManifest {
     }
 }
 
-/// Renders a partition expression for an error message.
 /// Result of manifest remapping, including new manifests and statistics.
 #[derive(Debug)]
 pub struct RemapResult {
@@ -678,7 +678,7 @@ mod tests {
     fn test_rejects_files_another_region_produced() {
         // Both participants of the merge hold a file the whole-domain source created: merging
         // them could publish a row of it twice once a holder materializes its own copy, and the
-        // refusal has to name every offending (region, file, creator).
+        // refusal has to name every offending region and file.
         let old_region_id_1 = RegionId::new(1, 1);
         let old_region_id_2 = RegionId::new(1, 2);
         let new_region_id = RegionId::new(1, 3);
