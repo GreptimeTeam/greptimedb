@@ -75,7 +75,7 @@ use crate::request::OptionOutputTx;
 use crate::schedule::scheduler::SchedulerRef;
 use crate::series_index::{IndexFilePurger, load_version_control};
 use crate::sst::FormatType;
-use crate::sst::file::{FileHandle, RegionFileId, RegionIndexId};
+use crate::sst::file::FileHandle;
 use crate::sst::file_purger::{FilePurgerRef, create_file_purger};
 use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::index::IndexBuildType;
@@ -1201,11 +1201,24 @@ impl RegionLoadCacheTask {
                             files_to_download.push((
                                 puffin_key,
                                 file_meta.index_file_size,
-                                file_meta.time_range.1, // max timestamp
+                                file_meta.time_range.1,
+                                location::index_file_path(table_dir, file_meta.index_id(), path_type),
+                                None,
                             ));
                         } else {
                             files_already_cached += 1;
                         }
+                    }
+                }
+            }
+            for handle in version.ssts.series_indexes().values() {
+                let meta = handle.meta_ref();
+                let dir = self.region.access_layer.build_region_dir(meta.region_id);
+                for (key, object) in IndexKey::native_objects(meta, &dir) {
+                    if file_cache.contains_key(&key) {
+                        files_already_cached += 1;
+                    } else {
+                        files_to_download.push((key, object.file_size, meta.time_range.1, object.path, Some(handle.clone())));
                     }
                 }
             }
@@ -1228,7 +1241,7 @@ impl RegionLoadCacheTask {
         let mut files_downloaded = 0;
         let mut files_skipped = 0;
 
-        for (puffin_key, file_size, max_timestamp) in files_to_download {
+        for (index_key, file_size, max_timestamp, path, _pin) in files_to_download {
             let current_size = file_cache.puffin_cache_size();
             let capacity = file_cache.puffin_cache_capacity();
             let region_state = self.region.state();
@@ -1244,33 +1257,21 @@ impl RegionLoadCacheTask {
             if current_size + file_size > capacity {
                 info!(
                     "Stopping index cache preload due to capacity limit, region: {}, file_id: {}, current_size: {}, file_size: {}, capacity: {}, file_timestamp: {:?}",
-                    region_id, puffin_key.file_id, current_size, file_size, capacity, max_timestamp
+                    region_id, index_key.file_id, current_size, file_size, capacity, max_timestamp
                 );
                 files_skipped = (total_files - files_downloaded) as usize;
                 CACHE_FILL_PENDING_FILES.sub(total_files - files_downloaded);
                 break;
             }
 
-            let index_version = if let FileType::Puffin(version) = puffin_key.file_type {
-                version
-            } else {
-                unreachable!("`files_to_download` should only contains Puffin files");
-            };
-            let index_id = RegionIndexId::new(
-                RegionFileId::new(puffin_key.region_id, puffin_key.file_id),
-                index_version,
-            );
-
-            let index_remote_path = location::index_file_path(table_dir, index_id, path_type);
-
             match file_cache
-                .download(puffin_key, &index_remote_path, object_store, file_size)
+                .download(index_key, &path, object_store, file_size)
                 .await
             {
                 Ok(_) => {
                     debug!(
                         "Downloaded index file to write cache, region: {}, file_id: {}",
-                        region_id, puffin_key.file_id
+                        region_id, index_key.file_id
                     );
                     files_downloaded += 1;
                     CACHE_FILL_DOWNLOADED_FILES.inc_by(1);
@@ -1279,7 +1280,7 @@ impl RegionLoadCacheTask {
                 Err(e) => {
                     warn!(
                         e; "Failed to download index file to write cache, region: {}, file_id: {}",
-                        region_id, puffin_key.file_id
+                        region_id, index_key.file_id
                     );
                     CACHE_FILL_PENDING_FILES.dec();
                 }
@@ -1338,7 +1339,6 @@ async fn preload_parquet_meta_cache_for_files(
 ) -> usize {
     if !cache_manager.sst_meta_cache_enabled()
         || sst_meta_cache_capacity == 0
-        || cache_manager.sst_meta_cache_is_full()
     {
         return 0;
     }
@@ -1351,11 +1351,39 @@ async fn preload_parquet_meta_cache_for_files(
     let mut loaded = 0usize;
     for file_handle in files {
         // Stop when the protected authoritative tier is full.
-        if cache_manager.sst_meta_cache_is_full() {
-            break;
+        if matches!(file_handle.meta_ref().format, crate::sst::file::FileFormat::Parquet) && cache_manager.sst_meta_cache_is_full() {
+            continue;
         }
 
         let file_id = file_handle.file_id();
+        if !matches!(file_handle.meta_ref().format, crate::sst::file::FileFormat::Parquet) {
+            use crate::cache::columnar::MetadataCache;
+            let Some(context) = MetadataCache::preload(&cache_manager, file_id.file_id()) else { continue };
+            let dir = region_dir_from_table_dir(&table_dir, file_id.region_id(), path_type);
+            let series = file_handle.meta_ref().series_window().is_some();
+            // A local fallback also keeps a concurrent disk eviction from issuing remote I/O.
+            let source = if allow_direct_load {
+                object_store.clone()
+            } else if let Some(write) = cache_manager.write_cache() {
+                let disk = write.file_cache();
+                let kind = if series { FileType::Series(None) } else { FileType::Samples(None) };
+                if !disk.contains_key(&IndexKey::new(file_id.region_id(), file_id.file_id(), kind)) { continue; }
+                disk.local_store()
+            } else { continue };
+            let result = if series {
+                match crate::series_index::SeriesIndexFileHandle::from_narthex(file_handle, &dir) {
+                    Ok(handle) => crate::series_index::columnar::reader::ColumnarReader::open_cached(source, handle, Some(context)).await.map(drop),
+                    Err(error) => Err(error),
+                }
+            } else {
+                match crate::series_index::artifact::SamplesFileHandle::from_narthex(file_handle, &dir) {
+                    Ok(handle) => crate::series_index::samples::reader::SamplesReader::open_cached(source, handle, Some(context)).await.map(drop),
+                    Err(error) => Err(error),
+                }
+            };
+            loaded += usize::from(result.is_ok());
+            continue;
+        }
         let mut cache_metrics = MetadataCacheMetrics::default();
         if let Some(metadata) = cache_manager
             .get_compact_sst_meta_data(file_id, PageIndexPolicy::Optional)
@@ -1506,6 +1534,7 @@ fn maybe_preload_parquet_meta_cache(
         let mut files = Vec::new();
         {
             let version = region.version_control.current().version;
+            files.extend(version.ssts.series_indexes().values().cloned());
             for level in version.ssts.levels() {
                 for file_handle in level.files.values() {
                     files.push(file_handle.clone());

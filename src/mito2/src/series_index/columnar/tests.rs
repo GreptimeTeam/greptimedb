@@ -955,8 +955,9 @@ async fn selective_io_and_pinned_stream_retirement() {
         }))
         .build()
         .unwrap();
+    let store = store.layer(layer);
     let reader = format
-        .reader(store.layer(layer), handle.clone())
+        .reader(store.clone(), handle.clone())
         .await
         .unwrap();
     let all = reader
@@ -1008,6 +1009,17 @@ async fn selective_io_and_pinned_stream_retirement() {
         "é"
     );
     assert_eq!(all[0].column(4).null_count(), 0);
+    let strategy = crate::cache::CacheStrategy::EnableAll(Arc::new(crate::cache::CacheManager::builder()
+        .page_cache_size(1024 * 1024).sst_meta_cache_size(1024 * 1024)
+        .enable_columnar_meta_cache(true).build()));
+    for warm in [false, true] {
+        reads.lock().unwrap().clear();
+        let cached = reader::ColumnarReader::open_cached(store.clone(), handle.clone(),
+            strategy.columnar_metadata(handle.file_id().file_id())).await.unwrap();
+        let batches = cached.read(request(&["tag_0"])).unwrap().try_collect::<Vec<_>>().await.unwrap();
+        assert_eq!(batches.len(), all.len());
+        assert_eq!(reads.lock().unwrap().is_empty(), warm);
+    }
     reads.lock().unwrap().clear();
     let mut req = request(&["tag_0"]);
     req.table_id = Some(9);

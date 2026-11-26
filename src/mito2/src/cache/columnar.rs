@@ -44,6 +44,7 @@ pub(crate) struct DecodedValue {
 pub(crate) struct MetadataCache {
     manager: CacheManagerRef,
     namespace: FileId,
+    download_on_miss: bool,
 }
 impl CacheStrategy {
     pub(crate) fn columnar_metadata(&self, namespace: FileId) -> Option<MetadataCache> {
@@ -53,7 +54,18 @@ impl CacheStrategy {
         Some(MetadataCache {
             manager: manager.clone(),
             namespace,
+            download_on_miss: true,
         })
+    }
+}
+
+impl MetadataCache {
+    pub(crate) fn preload(manager: &CacheManagerRef, namespace: FileId) -> Option<Self> {
+        let cache = manager.sst_decoded_meta_cache.as_ref()?;
+        if manager.columnar_load_metrics.is_none() || cache.weighted_size() >= cache.capacity() {
+            return None;
+        }
+        Some(Self { manager: manager.clone(), namespace, download_on_miss: false })
     }
 }
 
@@ -71,10 +83,11 @@ impl ObjectReader {
         kind: super::file_cache::FileType, store: &object_store::ObjectStore, path: &str, size: u64,
     ) -> Result<Self> {
         use snafu::ResultExt;
+        let download = cache.is_some_and(|c| c.download_on_miss);
         let local = cache.and_then(|c| c.manager.write_cache()).zip(file).map(|(cache, file)| {
             let disk = cache.file_cache();
             let key = super::file_cache::IndexKey::new(file.region_id(), file.file_id().file_id(), kind);
-            if !disk.contains_key(&key) {
+            if download && !disk.contains_key(&key) {
                 disk.queue_download(key, path.to_owned(), store.clone(), size, Some(file.clone()));
             }
             (disk, key)

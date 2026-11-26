@@ -186,6 +186,12 @@ impl LocalFilePurger {
                 }
             }
             if !matches!(file_meta.format, file::FileFormat::Parquet) {
+                if let Some(write_cache) = cache_manager.as_ref().and_then(|c| c.write_cache()) {
+                    let dir = sst_layer.build_region_dir(file_meta.region_id);
+                    for (key, _) in crate::cache::file_cache::IndexKey::native_objects(&file_meta, &dir) {
+                        write_cache.remove(key).await;
+                    }
+                }
                 if let Err(error) = sst_layer.delete_narthex_artifact(file_meta.region_id, file_meta.file_id).await {
                     error!(error; "Failed to delete Narthex artifact {}", file_meta.file_id());
                 }
