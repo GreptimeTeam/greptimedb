@@ -191,7 +191,10 @@ impl SamplesFileHandle {
     }
 
     pub(crate) fn native_file(&self) -> Option<&crate::sst::file::FileHandle> {
-        match &self.0.lifetime { SamplesLifetime::Narthex(file) => Some(file), _ => None }
+        match &self.0.lifetime {
+            SamplesLifetime::Narthex(file) => Some(file),
+            _ => None,
+        }
     }
 
     pub(crate) fn manifest_path(&self) -> String {

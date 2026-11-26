@@ -480,29 +480,60 @@ impl WriteCache {
         Ok(true)
     }
 
+    /// Staging is distinct from authoritative paths even if both stores share an FS root.
+    pub(crate) fn native_stage(path: &str) -> String {
+        format!("cache/staging/narthex/{path}")
+    }
+
     /// Uploads staged parts in inventory order, then publishes the manifest.
     pub(crate) async fn upload_native(
-        self: &Arc<Self>, inventory: Vec<(IndexKey, crate::series_index::artifact::ArtifactObject)>,
-        remote: &ObjectStore, op_type: OperationType, cancellation: Option<&CancellationToken>,
+        &self,
+        inventory: Vec<(IndexKey, crate::series_index::artifact::ArtifactObject)>,
+        remote: &ObjectStore,
+        op_type: OperationType,
+        cancellation: Option<&CancellationToken>,
     ) -> Result<()> {
         let mut guard = NativeUpload {
-            cache: self.file_cache.clone(), remote: remote.clone(), inventory,
+            cache: self.file_cache.clone(),
+            remote: remote.clone(),
+            inventory,
         };
         let result = async {
             for (key, object) in &guard.inventory {
                 let path = self.file_cache.cache_file_path(*key);
-                self.file_cache.local_store().rename(&object.path, &path).await.context(error::OpenDalSnafu)?;
-                self.upload_with_cancellation(*key, &object.path, remote, UploadOptions {
-                    op_type, write_buffer_size: DEFAULT_WRITE_BUFFER_SIZE,
-                }, cancellation).await?;
+                self.file_cache
+                    .local_store()
+                    .rename(&Self::native_stage(&object.path), &path)
+                    .await
+                    .context(error::OpenDalSnafu)?;
+                self.upload_with_cancellation(
+                    *key,
+                    &object.path,
+                    remote,
+                    UploadOptions {
+                        op_type,
+                        write_buffer_size: DEFAULT_WRITE_BUFFER_SIZE,
+                    },
+                    cancellation,
+                )
+                .await?;
             }
             Ok(())
-        }.await;
+        }
+        .await;
         if result.is_err() {
             guard.clean().await;
         } else {
-            if let Some(dir) = guard.inventory.first().and_then(|(_, o)| crate::sst::location::parent_dir(&o.path)) {
-                let _ = self.file_cache.local_store().delete(dir).await;
+            if let Some(dir) = guard
+                .inventory
+                .first()
+                .and_then(|(_, o)| crate::sst::location::parent_dir(&o.path))
+            {
+                let _ = self
+                    .file_cache
+                    .local_store()
+                    .delete(&Self::native_stage(dir))
+                    .await;
             }
             guard.inventory.clear();
         }
@@ -644,7 +675,10 @@ impl NativeUpload {
         for (key, object) in &self.inventory {
             self.cache.remove(*key).await;
             let local = self.cache.local_store();
-            for (store, path) in [(&local, self.cache.cache_file_path(*key)), (&local, object.path.clone()), (&self.remote, object.path.clone())] {
+            for (store, path) in [
+                (&local, WriteCache::native_stage(&object.path)),
+                (&self.remote, object.path.clone()),
+            ] {
                 if let Err(error) = store.delete(&path).await {
                     common_telemetry::warn!(error; "Failed to remove unpublished native object {}", path);
                 }
@@ -657,7 +691,11 @@ impl NativeUpload {
 impl Drop for NativeUpload {
     fn drop(&mut self) {
         if !self.inventory.is_empty() {
-            let mut owned = Self { cache: self.cache.clone(), remote: self.remote.clone(), inventory: std::mem::take(&mut self.inventory) };
+            let mut owned = Self {
+                cache: self.cache.clone(),
+                remote: self.remote.clone(),
+                inventory: std::mem::take(&mut self.inventory),
+            };
             common_runtime::spawn_compact(async move { owned.clean().await });
         }
     }
@@ -974,6 +1012,91 @@ mod tests {
         );
         assert_eq!(1, observations.abort_calls);
         assert_eq!(usize::from(fail_close), observations.close_calls);
+    }
+
+    #[rstest::rstest]
+    #[case::failed_manifest(false)]
+    #[case::cancelled_manifest(true)]
+    #[tokio::test]
+    async fn narthex_upload_cleans_staged_and_uploaded_parts(#[case] cancel: bool) {
+        use crate::series_index::artifact::ArtifactObject;
+        use object_store::layers::mock::MockLayerBuilder;
+        let env = TestEnv::new().await;
+        let root = create_temp_dir("native-upload");
+        let cache = env
+            .create_write_cache_from_path(root.path().to_str().unwrap(), ReadableSize::mb(8))
+            .await;
+        let local = cache.file_cache().local_store();
+        let signal = CancellationToken::new();
+        let on_manifest = signal.clone();
+        let layer = MockLayerBuilder::default()
+            .writer_factory(Arc::new(move |path, _, inner| {
+                if path.ends_with("manifest.json") {
+                    if cancel {
+                        on_manifest.cancel();
+                    }
+                    return Box::new(FailingUploadWriter {
+                        inner,
+                        fail_close: true,
+                        fail_abort: false,
+                        successful_writes: 0,
+                    });
+                }
+                inner
+            }))
+            .build()
+            .unwrap();
+        let remote = ObjectStore::new(Memory::default()).unwrap().layer(layer);
+        let owner = RegionId::new(1, 1);
+        let id = FileId::random();
+        let mut inventory = Vec::new();
+        for (part, name) in [
+            (Some(0), "part-0.series"),
+            (Some(1), "part-1.series"),
+            (None, "manifest.json"),
+        ] {
+            let path = format!("artifact/{name}");
+            local
+                .write(&WriteCache::native_stage(&path), vec![42; 16])
+                .await
+                .unwrap();
+            inventory.push((
+                IndexKey::new(owner, id, FileType::Series(part)),
+                ArtifactObject {
+                    path,
+                    file_size: 16,
+                },
+            ));
+        }
+        let error = cache
+            .upload_native(
+                inventory.clone(),
+                &remote,
+                OperationType::Compact,
+                Some(&signal),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            matches!(error, error::Error::SstWriteCancelled { .. }),
+            cancel
+        );
+        for (key, object) in inventory {
+            assert!(!remote.exists(&object.path).await.unwrap());
+            assert!(
+                !local
+                    .exists(&WriteCache::native_stage(&object.path))
+                    .await
+                    .unwrap()
+            );
+            assert!(
+                !local
+                    .exists(&cache.file_cache.cache_file_path(key))
+                    .await
+                    .unwrap()
+            );
+            assert!(!cache.file_cache.contains_key(&key));
+        }
     }
 
     #[tokio::test]

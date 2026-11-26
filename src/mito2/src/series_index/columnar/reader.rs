@@ -29,7 +29,7 @@ use mito_codec::row_converter::{SparseOffsetsCache, SparsePrimaryKeyCodec};
 use object_store::ObjectStore;
 use snafu::ResultExt;
 
-use crate::cache::columnar::{self as metadata_cache, MetadataCache, PartArea, ObjectReader};
+use crate::cache::columnar::{self as metadata_cache, MetadataCache, ObjectReader, PartArea};
 use crate::error::{NewRecordBatchSnafu, OpenDalSnafu, RecordBatchSnafu, Result};
 use crate::metrics::ColumnarReadMetrics;
 use crate::series_index::artifact::ArtifactFormat;
@@ -100,7 +100,8 @@ impl ColumnarReader {
                         .sum::<usize>()
             },
             async {
-                let reader = Self::open_descriptor(store.clone(), handle.clone(), cache.as_ref()).await?;
+                let reader =
+                    Self::open_descriptor(store.clone(), handle.clone(), cache.as_ref()).await?;
                 Ok((reader.manifest, reader.schema))
             },
         )
@@ -118,7 +119,11 @@ impl ColumnarReader {
         Self::open_descriptor(store, handle, None).await
     }
 
-    async fn open_descriptor(store: ObjectStore, handle: SeriesIndexFileHandle, cache: Option<&MetadataCache>) -> Result<Self> {
+    async fn open_descriptor(
+        store: ObjectStore,
+        handle: SeriesIndexFileHandle,
+        cache: Option<&MetadataCache>,
+    ) -> Result<Self> {
         let entry = handle.entry();
         let artifact = entry
             .artifact
@@ -147,7 +152,15 @@ impl ColumnarReader {
             length <= MANIFEST_LIMIT as u64,
             "series manifest exceeds size limit",
         )?;
-        let object = ObjectReader::open(cache, handle.native_file(), crate::cache::file_cache::FileType::Series(None), &store, &path, length).await?;
+        let object = ObjectReader::open(
+            cache,
+            handle.native_file(),
+            crate::cache::file_cache::FileType::Series(None),
+            &store,
+            &path,
+            length,
+        )
+        .await?;
         let bytes = object.read(0..length).await.context(OpenDalSnafu)?;
         // A manifest that the current format cannot read predates exact identity or is
         // corrupt; either way it must never be reused.
@@ -481,7 +494,10 @@ async fn load_metadata_page(
                     reference.payload.encoding
                 )));
             }
-            let bytes = reader.read(reference.payload.offset..reference.payload.end()?).await.context(OpenDalSnafu)?;
+            let bytes = reader
+                .read(reference.payload.offset..reference.payload.end()?)
+                .await
+                .context(OpenDalSnafu)?;
             // TODO: benchmark inline versus offloaded codecs for latency, throughput,
             // and async-worker responsiveness before adding scheduling overhead.
             let decoded = reference.payload.unpack(&bytes)?;
@@ -548,7 +564,6 @@ impl Decoded {
     }
 }
 
-/// TODO: share decoded chunks through the existing Mito cache, not a new cache framework.
 async fn load_column_chunk(
     area: &PartArea,
     column: &Column,
@@ -569,14 +584,21 @@ async fn load_column_chunk(
     }
     let timer = metrics.timer("columnar_series_fetch_wall");
     let range = column.payload.offset..column.payload.end()?;
-    let bytes = if let Some((mut bytes, _)) = area.cached_ranges(std::slice::from_ref(&range)).await? {
-        bytes.pop().unwrap()
-    } else {
-        area.reader.read(range).await.context(OpenDalSnafu)?
-    };
+    let (bytes, reads, fetched) =
+        if let Some((mut bytes, stats)) = area.cached_ranges(std::slice::from_ref(&range)).await? {
+            (
+                bytes.pop().unwrap(),
+                stats.cache_miss as u64,
+                stats.independently_loaded_bytes,
+            )
+        } else {
+            let bytes = area.reader.read(range).await.context(OpenDalSnafu)?;
+            let fetched = bytes.len() as u64;
+            (bytes, 1, fetched)
+        };
     drop(timer);
-    *metrics.counts.entry("series_column_reads").or_default() += 1;
-    *metrics.bytes.entry("series_payload_fetched").or_default() += bytes.len() as u64;
+    *metrics.counts.entry("series_column_reads").or_default() += reads;
+    *metrics.bytes.entry("series_payload_fetched").or_default() += fetched;
     let started = Instant::now();
     let rows = block.rows as usize;
     let first = block.first;
@@ -673,34 +695,42 @@ async fn read_block(
         decoded.insert(TSID_COLUMN.to_owned(), Arc::new(column));
     }
     // A complete block mask can be reused without hashing an arbitrary ID selection.
-    let prefilter = if request.ids.is_none() && !request.filters.is_empty()
-        && request.filters.len() == request.filter_exprs.len() {
-        block.columns.first().and_then(|column| area.prefilter(column.payload.offset, &request.filter_exprs))
+    let prefilter = if request.ids.is_none()
+        && !request.filters.is_empty()
+        && request.filters.len() == request.filter_exprs.len()
+    {
+        block
+            .columns
+            .first()
+            .and_then(|column| area.prefilter(column.payload.offset, &request.filter_exprs))
     } else {
         None
     };
-    if let Some(mask) = prefilter.as_ref().and_then(|(cache, key)| cache.get_prefilter_result(key)) {
+    if let Some(mask) = prefilter
+        .as_ref()
+        .and_then(|(cache, key)| cache.get_prefilter_result(key))
+    {
         selected.retain(|&row| mask.value(row));
     } else {
-    for filter in &request.filters {
-        if selected.is_empty() {
-            break;
+        for filter in &request.filters {
+            if selected.is_empty() {
+                break;
+            }
+            let name = filter.column_name();
+            if !decoded.contains_key(name) {
+                *metrics.counts.entry("series_filter_columns").or_default() += 1;
+                decoded.insert(
+                    name.to_owned(),
+                    Arc::new(get_column(area, block, name, metrics).await?),
+                );
+            }
+            let started = Instant::now();
+            decoded
+                .get(name)
+                .ok_or_else(|| invalid("missing decoded filter column"))?
+                .filter(filter, &mut selected)?;
+            metrics.add_elapsed("columnar_series_filter", started.elapsed());
         }
-        let name = filter.column_name();
-        if !decoded.contains_key(name) {
-            *metrics.counts.entry("series_filter_columns").or_default() += 1;
-            decoded.insert(
-                name.to_owned(),
-                Arc::new(get_column(area, block, name, metrics).await?),
-            );
-        }
-        let started = Instant::now();
-        decoded
-            .get(name)
-            .ok_or_else(|| invalid("missing decoded filter column"))?
-            .filter(filter, &mut selected)?;
-        metrics.add_elapsed("columnar_series_filter", started.elapsed());
-    }
         if let Some((cache, key)) = prefilter {
             let mut mask = datatypes::arrow::array::BooleanBufferBuilder::new(block.rows as usize);
             mask.append_n(block.rows as usize, false);

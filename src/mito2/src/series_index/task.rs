@@ -400,12 +400,17 @@ impl SeriesIndexTask {
             let truncated = version.truncated_entry_id;
             let metadata = version.metadata.clone();
             drop(version);
-            let output =
-                crate::sst::narthex::write_series(&region.access_layer, self.write_cache.as_ref(), metadata, &inputs, window)
-                    .await
-                    .inspect_err(|_| {
-                        self.failed_merge.insert(region.region_id, rank);
-                    })?;
+            let output = crate::sst::narthex::write_series(
+                &region.access_layer,
+                self.write_cache.as_ref(),
+                metadata,
+                &inputs,
+                window,
+            )
+            .await
+            .inspect_err(|_| {
+                self.failed_merge.insert(region.region_id, rank);
+            })?;
             let handle = FileHandle::new(output.clone(), region.file_purger.clone());
             let edit = crate::manifest::action::RegionEdit {
                 series_indexes_to_add: vec![output],
@@ -748,7 +753,7 @@ mod tests {
         let (state, receiver) = SeriesIndexTaskState::new(0, 1);
         (
             SeriesIndexTask {
-            write_cache: None,
+                write_cache: None,
                 schema_manager: crate::test_util::mock_schema_metadata_manager().0,
                 store,
                 regions,
@@ -1690,7 +1695,7 @@ mod tests {
         let make_task = || {
             let (state, command_receiver) = SeriesIndexTaskState::new(0, 1);
             SeriesIndexTask {
-            write_cache: None,
+                write_cache: None,
                 schema_manager: crate::test_util::mock_schema_metadata_manager().0,
                 store: store.clone(),
                 regions: Arc::new(RegionMap::default()),

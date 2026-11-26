@@ -238,10 +238,6 @@ impl WorkerGroup {
         let cache_manager = Arc::new(
             CacheManager::builder()
                 .sst_meta_cache_size(config.sst_meta_cache_size.as_bytes())
-                .enable_columnar_meta_cache(
-                    config.experimental_series_index_format
-                        == crate::config::SeriesIndexFormat::Columnar,
-                )
                 .vector_cache_size(config.vector_cache_size.as_bytes())
                 .page_cache_size(config.page_cache_size.as_bytes())
                 .selector_result_cache_size(config.selector_result_cache_size.as_bytes())
@@ -555,10 +551,6 @@ impl WorkerGroup {
         let cache_manager = Arc::new(
             CacheManager::builder()
                 .sst_meta_cache_size(config.sst_meta_cache_size.as_bytes())
-                .enable_columnar_meta_cache(
-                    config.experimental_series_index_format
-                        == crate::config::SeriesIndexFormat::Columnar,
-                )
                 .vector_cache_size(config.vector_cache_size.as_bytes())
                 .page_cache_size(config.page_cache_size.as_bytes())
                 .selector_result_cache_size(config.selector_result_cache_size.as_bytes())

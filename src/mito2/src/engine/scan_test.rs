@@ -462,12 +462,20 @@ async fn check_sparse_upsert_after_adding_nullable_tag(format: &str) -> Whatever
 #[tokio::test]
 async fn test_narthex_index_counts_rows_across_flushes() -> WhateverResult<()> {
     let mut env = TestEnv::new().await;
+    let cache_root = env.data_home().join("write-cache");
     let engine = env
-        .create_engine(MitoConfig {
-            experimental_enable_series_index: true,
-            experimental_series_index_min_files: 1,
-            ..Default::default()
-        })
+        .create_engine(
+            MitoConfig {
+                experimental_enable_series_index: true,
+                experimental_series_index_min_files: 1,
+                ..Default::default()
+            }
+            .enable_write_cache(
+                cache_root.to_string_lossy().into_owned(),
+                common_base::readable_size::ReadableSize::mb(64),
+                None,
+            ),
+        )
         .await;
     let id = RegionId::new(1024, 0);
     engine
@@ -491,6 +499,35 @@ async fn test_narthex_index_counts_rows_across_flushes() -> WhateverResult<()> {
         .await?;
     let version = region.version();
     let file = version.ssts.series_indexes().values().next().unwrap();
+    let disk = engine.cache_manager().write_cache().unwrap().file_cache();
+    for handle in version
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .chain(std::iter::once(file))
+    {
+        for (key, object) in crate::cache::file_cache::IndexKey::native_objects(
+            handle.meta_ref(),
+            &region.access_layer.build_region_dir(id),
+        ) {
+            let ranges = [0..object.file_size];
+            let cached = disk
+                .read_ranges(key, &ranges)
+                .await
+                .expect("native write-through");
+            assert_eq!(
+                cached[0],
+                region
+                    .access_layer
+                    .object_store()
+                    .read(&object.path)
+                    .await
+                    .unwrap()
+                    .to_bytes()
+            );
+        }
+    }
     let handle = crate::series_index::SeriesIndexFileHandle::from_narthex(
         file.clone(),
         &region.access_layer.build_region_dir(id),

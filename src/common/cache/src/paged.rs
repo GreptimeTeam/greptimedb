@@ -164,7 +164,8 @@ impl<K: Hash + Eq + Clone + Send + Sync + 'static> PagedCache<K> {
         ranges: &[Range<u64>],
         reader: &R,
     ) -> Result<(Vec<Bytes>, PageFetchStats), Arc<io::Error>> {
-        self.fetch_inner(file, file_size, ranges, reader, false).await
+        self.fetch_inner(file, file_size, ranges, reader, false)
+            .await
     }
 
     /// Loads missing pages independently. A paused reader never owns another
@@ -176,7 +177,8 @@ impl<K: Hash + Eq + Clone + Send + Sync + 'static> PagedCache<K> {
         ranges: &[Range<u64>],
         reader: &R,
     ) -> Result<(Vec<Bytes>, PageFetchStats), Arc<io::Error>> {
-        self.fetch_inner(file, file_size, ranges, reader, true).await
+        self.fetch_inner(file, file_size, ranges, reader, true)
+            .await
     }
 
     async fn fetch_inner<R: RangeReader + ?Sized>(
@@ -233,7 +235,9 @@ impl<K: Hash + Eq + Clone + Send + Sync + 'static> PagedCache<K> {
             misses: stats.cache_miss,
         });
         if independent && !missing.is_empty() {
-            let spans = missing.iter().map(|id| layout.page_range(*id).ok_or_else(invalid_request))
+            let spans = missing
+                .iter()
+                .map(|id| layout.page_range(*id).ok_or_else(invalid_request))
                 .collect::<Result<Vec<_>, _>>()?;
             let buffers = reader.read_vec(&spans).await?;
             if buffers.len() != spans.len() {

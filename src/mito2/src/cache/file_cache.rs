@@ -732,8 +732,12 @@ impl FileCache {
     }
 
     pub(crate) fn queue_download(
-        &self, index_key: IndexKey, remote_path: String, remote_store: ObjectStore,
-        file_size: u64, pin: Option<crate::sst::file::FileHandle>,
+        &self,
+        index_key: IndexKey,
+        remote_path: String,
+        remote_store: ObjectStore,
+        file_size: u64,
+        pin: Option<crate::sst::file::FileHandle>,
     ) {
         // Do nothing if background worker is disabled (channel is None)
         let Some(tx) = &self.download_task_tx else {
@@ -768,18 +772,27 @@ pub struct IndexKey {
 
 impl IndexKey {
     /// The native inventory ends with its manifest; all preceding objects are in part-ID order.
-    pub(crate) fn native_objects(file: &crate::sst::file::FileMeta, region_dir: &str) -> Vec<(Self, crate::series_index::artifact::ArtifactObject)> {
-        let Some(objects) = file.narthex_objects(region_dir) else { return Vec::new() };
+    pub(crate) fn native_objects(
+        file: &crate::sst::file::FileMeta,
+        region_dir: &str,
+    ) -> Vec<(Self, crate::series_index::artifact::ArtifactObject)> {
+        let Some(objects) = file.narthex_objects(region_dir) else {
+            return Vec::new();
+        };
         let manifest_index = objects.len() - 1;
-        objects.into_iter().enumerate().map(|(i, object)| {
-            let part = (i != manifest_index).then_some(i as u32);
-            let kind = match &file.format {
-                crate::sst::file::FileFormat::NarthexSamples(_) => FileType::Samples(part),
-                crate::sst::file::FileFormat::NarthexSeriesIndex(_) => FileType::Series(part),
-                _ => unreachable!(),
-            };
-            (Self::new(file.region_id, file.file_id, kind), object)
-        }).collect()
+        objects
+            .into_iter()
+            .enumerate()
+            .map(|(i, object)| {
+                let part = (i != manifest_index).then_some(i as u32);
+                let kind = match &file.format {
+                    crate::sst::file::FileFormat::NarthexSamples(_) => FileType::Samples(part),
+                    crate::sst::file::FileFormat::NarthexSeriesIndex(_) => FileType::Series(part),
+                    _ => unreachable!(),
+                };
+                (Self::new(file.region_id, file.file_id, kind), object)
+            })
+            .collect()
     }
 
     /// Creates a new index key.
@@ -816,6 +829,15 @@ pub enum FileType {
     Samples(Option<u32>),
 }
 
+impl From<crate::sst::location::SstObjectType> for FileType {
+    fn from(kind: crate::sst::location::SstObjectType) -> Self {
+        match kind {
+            crate::sst::location::SstObjectType::Parquet => Self::Parquet,
+            crate::sst::location::SstObjectType::Puffin(version) => Self::Puffin(version),
+        }
+    }
+}
+
 impl fmt::Display for FileType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -835,19 +857,13 @@ impl FileType {
         match s {
             "series" => Some(Self::Series(None)),
             "samples" => Some(Self::Samples(None)),
-            _ if s.ends_with(".series") => Some(Self::Series(Some(s.strip_suffix(".series")?.parse().ok()?))),
-            _ if s.ends_with(".samples") => Some(Self::Samples(Some(s.strip_suffix(".samples")?.parse().ok()?))),
-            "parquet" => Some(FileType::Parquet),
-            "puffin" => Some(FileType::Puffin(0)),
-            _ => {
-                // if post-fix with .puffin, try to parse the version
-                if let Some(version_str) = s.strip_suffix(".puffin") {
-                    let version = version_str.parse::<u64>().ok()?;
-                    Some(FileType::Puffin(version))
-                } else {
-                    None
-                }
+            _ if s.ends_with(".series") => {
+                Some(Self::Series(Some(s.strip_suffix(".series")?.parse().ok()?)))
             }
+            _ if s.ends_with(".samples") => Some(Self::Samples(Some(
+                s.strip_suffix(".samples")?.parse().ok()?,
+            ))),
+            other => crate::sst::location::SstObjectType::parse(other).map(Self::from),
         }
     }
 

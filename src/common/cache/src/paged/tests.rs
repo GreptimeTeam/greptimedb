@@ -135,6 +135,34 @@ async fn start_read<F: Future>(mut future: Pin<&mut F>, reader: &Reader, count: 
 }
 
 #[tokio::test]
+async fn independent_page_miss_completes_while_another_stream_is_paused() {
+    let (cache, _) = cache();
+    let first = Reader::gated();
+    let ranges = [2..6, 4..5];
+    let mut paused = Box::pin(cache.fetch_independently(1, 10, &ranges, &first));
+    start_read(paused.as_mut(), &first, 2).await;
+    first.release();
+    // Deliver the wake but keep the owner unpolled, as a backpressured query would.
+    let second = Reader::default();
+    let (loaded, stats) = tokio::time::timeout(
+        Duration::from_secs(5),
+        cache.fetch_independently(1, 10, &ranges, &second),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(stats.independently_loaded_bytes, 8);
+    drop(paused);
+    let (warm, stats) = cache
+        .fetch_independently(1, 10, &ranges, &second)
+        .await
+        .unwrap();
+    assert_eq!(loaded, warm);
+    assert_eq!(stats.cache_hit, 2);
+    assert_eq!(second.count(), 2);
+}
+
+#[tokio::test]
 async fn test_partial_hits_overlaps_and_eof_preserve_order() {
     let (cache, observation) = cache();
     let reader = Reader::default();

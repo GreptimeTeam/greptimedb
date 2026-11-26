@@ -1235,10 +1235,16 @@ async fn edit_region(
             .stop()
             .await;
     }
-    if result.is_ok() && narthex_format && preload_sst_cache
-        && let Some(write_cache) = cache_manager.write_cache() {
+    if result.is_ok()
+        && narthex_format
+        && preload_sst_cache
+        && let Some(write_cache) = cache_manager.write_cache()
+    {
         for file in edit.files_to_add.iter().chain(&edit.series_indexes_to_add) {
-            let inventory = IndexKey::native_objects(file, &region.access_layer.build_region_dir(file.region_id));
+            let inventory = IndexKey::native_objects(
+                file,
+                &region.access_layer.build_region_dir(file.region_id),
+            );
             let cache = write_cache.clone();
             let store = region.access_layer.object_store().clone();
             let listener = listener.clone();
@@ -1246,8 +1252,11 @@ async fn edit_region(
             common_runtime::spawn_global(async move {
                 WRITE_CACHE_INFLIGHT_DOWNLOAD.inc();
                 let mut downloaded = false;
-                for (key, object) in inventory {
-                    match cache.download_if_absent(key, &object.path, &store, object.file_size).await {
+                for (key, object) in &inventory {
+                    match cache
+                        .download_if_absent(*key, &object.path, &store, object.file_size)
+                        .await
+                    {
                         Ok(new) => downloaded |= new,
                         Err(error) => {
                             WRITE_CACHE_INFLIGHT_DOWNLOAD.dec();
@@ -1257,7 +1266,13 @@ async fn edit_region(
                     }
                 }
                 WRITE_CACHE_INFLIGHT_DOWNLOAD.dec();
-                if downloaded { listener.on_file_cache_filled(id); }
+                if downloaded
+                    && inventory
+                        .iter()
+                        .all(|(key, _)| cache.file_cache().contains_key(key))
+                {
+                    listener.on_file_cache_filled(id);
+                }
             });
         }
     }

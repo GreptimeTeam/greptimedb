@@ -52,14 +52,18 @@ fn parse_page_size(value: Option<&str>) -> u64 {
 
 /// Largest block whose bytes and entry overhead fit the cache's u32 weight.
 pub(crate) const MAX_PAGE_SIZE: u64 = u32::MAX as u64
-    - (mem::size_of::<(PageFile, u64)>() + mem::size_of::<Bytes>() + mem::size_of::<u64>())
-        as u64;
+    - (mem::size_of::<(PageFile, u64)>() + mem::size_of::<Bytes>() + mem::size_of::<u64>()) as u64;
 
 /// Caches immutable Parquet file bytes in fixed-size blocks shared across row groups.
 #[derive(Clone, Hash, PartialEq, Eq)]
 enum PageFile {
     Parquet(RegionFileId),
-    Native { namespace: store_api::storage::FileId, path: Arc<str>, start: u64, end: u64 },
+    Native {
+        namespace: store_api::storage::FileId,
+        path: Arc<str>,
+        start: u64,
+        end: u64,
+    },
 }
 
 pub(crate) struct ParquetPageCache {
@@ -90,7 +94,13 @@ impl ParquetPageCache {
                     (mem::size_of::<(PageFile, u64)>()
                         + mem::size_of::<Bytes>()
                         + mem::size_of::<u64>()
-                        + bytes.len() + match &key.0 { PageFile::Native { path, .. } => path.len(), _ => 0 }).try_into().unwrap_or(u32::MAX)
+                        + bytes.len()
+                        + match &key.0 {
+                            PageFile::Native { path, .. } => path.len(),
+                            _ => 0,
+                        })
+                    .try_into()
+                    .unwrap_or(u32::MAX)
                 },
                 metrics::cache_page_observer("page", "page", |hits, misses| {
                     (usize::from(hits > 0), usize::from(misses > 0))
@@ -106,7 +116,9 @@ impl ParquetPageCache {
         file: RegionFileId,
         ranges: &[Range<u64>],
     ) -> Option<u64> {
-        self.cache.known_file_size(&PageFile::Parquet(file), ranges).await
+        self.cache
+            .known_file_size(&PageFile::Parquet(file), ranges)
+            .await
     }
 
     /// Fetches ranges in input order, sharing missing blocks and returning [`PageFetchStats`].
@@ -128,7 +140,10 @@ impl ParquetPageCache {
                 ),
             )));
         }
-        let result = self.cache.fetch(PageFile::Parquet(file), file_size, ranges, reader).await?;
+        let result = self
+            .cache
+            .fetch(PageFile::Parquet(file), file_size, ranges, reader)
+            .await?;
         metrics::cache_page_fetch_metrics("page", &result.1);
         Ok(result)
     }
@@ -138,12 +153,24 @@ impl ParquetPageCache {
     }
 
     pub(crate) async fn fetch_native<R: RangeReader>(
-        &self, namespace: store_api::storage::FileId, path: Arc<str>, area: Range<u64>,
-        ranges: &[Range<u64>], reader: &R,
+        &self,
+        namespace: store_api::storage::FileId,
+        path: Arc<str>,
+        area: Range<u64>,
+        ranges: &[Range<u64>],
+        reader: &R,
     ) -> Result<(Vec<Bytes>, PageFetchStats), Arc<io::Error>> {
         let size = area.end - area.start;
-        let key = PageFile::Native { namespace, path, start: area.start, end: area.end };
-        let result = self.cache.fetch_independently(key, size, ranges, reader).await?;
+        let key = PageFile::Native {
+            namespace,
+            path,
+            start: area.start,
+            end: area.end,
+        };
+        let result = self
+            .cache
+            .fetch_independently(key, size, ranges, reader)
+            .await?;
         metrics::cache_page_fetch_metrics("page", &result.1);
         Ok(result)
     }

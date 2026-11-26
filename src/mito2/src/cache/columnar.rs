@@ -17,9 +17,10 @@
 use std::any::{Any, TypeId};
 use std::sync::Arc;
 
+use snafu::IntoError;
 use store_api::storage::FileId;
 
-use crate::cache::{CacheStrategy, CacheManagerRef, SstDecodedMetaKey, MetaValue};
+use crate::cache::{CacheManagerRef, CacheStrategy, MetaValue, SstDecodedMetaKey};
 use crate::error::Result;
 use crate::metrics::{CACHE_HIT, CACHE_MISS};
 
@@ -65,7 +66,11 @@ impl MetadataCache {
         if manager.columnar_load_metrics.is_none() || cache.weighted_size() >= cache.capacity() {
             return None;
         }
-        Some(Self { manager: manager.clone(), namespace, download_on_miss: false })
+        Some(Self {
+            manager: manager.clone(),
+            namespace,
+            download_on_miss: false,
+        })
     }
 }
 
@@ -79,34 +84,68 @@ pub(crate) struct ObjectReader {
 
 impl ObjectReader {
     pub(crate) async fn open(
-        cache: Option<&MetadataCache>, file: Option<&crate::sst::file::FileHandle>,
-        kind: super::file_cache::FileType, store: &object_store::ObjectStore, path: &str, size: u64,
+        cache: Option<&MetadataCache>,
+        file: Option<&crate::sst::file::FileHandle>,
+        kind: super::file_cache::FileType,
+        store: &object_store::ObjectStore,
+        path: &str,
+        size: u64,
     ) -> Result<Self> {
         use snafu::ResultExt;
         let download = cache.is_some_and(|c| c.download_on_miss);
-        let local = cache.and_then(|c| c.manager.write_cache()).zip(file).map(|(cache, file)| {
-            let disk = cache.file_cache();
-            let key = super::file_cache::IndexKey::new(file.region_id(), file.file_id().file_id(), kind);
-            if download && !disk.contains_key(&key) {
-                disk.queue_download(key, path.to_owned(), store.clone(), size, Some(file.clone()));
-            }
-            (disk, key)
-        });
-        let remote = store.reader_with(path).concurrent(8).gap(0).await.context(crate::error::OpenDalSnafu)?;
+        let local = cache
+            .and_then(|c| c.manager.write_cache())
+            .zip(file)
+            .map(|(cache, file)| {
+                let disk = cache.file_cache();
+                let key = super::file_cache::IndexKey::new(
+                    file.region_id(),
+                    file.file_id().file_id(),
+                    kind,
+                );
+                if download && !disk.contains_key(&key) {
+                    disk.queue_download(
+                        key,
+                        path.to_owned(),
+                        store.clone(),
+                        size,
+                        Some(file.clone()),
+                    );
+                }
+                (disk, key)
+            });
+        let remote = store
+            .reader_with(path)
+            .concurrent(8)
+            .chunk(256 * 1024)
+            .gap(0)
+            .await
+            .context(crate::error::OpenDalSnafu)?;
         Ok(Self { remote, local })
     }
 
-    pub(crate) async fn fetch(&self, ranges: Vec<std::ops::Range<u64>>) -> object_store::Result<Vec<bytes::Bytes>> {
+    pub(crate) async fn fetch(
+        &self,
+        ranges: Vec<std::ops::Range<u64>>,
+    ) -> object_store::Result<Vec<bytes::Bytes>> {
         if let Some((cache, key)) = &self.local
-            && let Some(bytes) = cache.read_ranges(*key, &ranges).await {
+            && let Some(bytes) = cache.read_ranges(*key, &ranges).await
+        {
             return Ok(bytes);
         }
-        self.remote.fetch(ranges).await.map(|buffers| buffers.into_iter().map(|b| b.to_bytes()).collect())
+        self.remote
+            .fetch(ranges)
+            .await
+            .map(|buffers| buffers.into_iter().map(|b| b.to_bytes()).collect())
     }
 
-    pub(crate) async fn read(&self, range: std::ops::Range<u64>) -> object_store::Result<bytes::Bytes> {
+    pub(crate) async fn read(
+        &self,
+        range: std::ops::Range<u64>,
+    ) -> object_store::Result<bytes::Bytes> {
         if let Some((cache, key)) = &self.local
-            && let Some(mut bytes) = cache.read_ranges(*key, std::slice::from_ref(&range)).await {
+            && let Some(mut bytes) = cache.read_ranges(*key, std::slice::from_ref(&range)).await
+        {
             return Ok(bytes.pop().unwrap());
         }
         self.remote.read(range).await.map(|b| b.to_bytes())
@@ -124,12 +163,26 @@ pub(crate) struct PartArea {
 }
 
 impl PartArea {
-    pub(crate) fn new(reader: ObjectReader, cache: Option<MetadataCache>, path: Arc<str>, bounds: std::ops::Range<u64>, pool: Option<Arc<dyn datafusion::execution::memory_pool::MemoryPool>>) -> Self {
-        Self { reader, cache, path, bounds, pool }
+    pub(crate) fn new(
+        reader: ObjectReader,
+        cache: Option<MetadataCache>,
+        path: Arc<str>,
+        bounds: std::ops::Range<u64>,
+        pool: Option<Arc<dyn datafusion::execution::memory_pool::MemoryPool>>,
+    ) -> Self {
+        Self {
+            reader,
+            cache,
+            path,
+            bounds,
+            pool,
+        }
     }
 
     pub(crate) fn prefilter(
-        &self, block_offset: u64, exprs: &smallvec::SmallVec<[String; 1]>,
+        &self,
+        block_offset: u64,
+        exprs: &smallvec::SmallVec<[String; 1]>,
     ) -> Option<(&CacheManagerRef, super::PrefilterKey)> {
         let context = self.cache.as_ref()?;
         context.manager.prefilter_result_cache.as_ref()?;
@@ -140,44 +193,97 @@ impl PartArea {
     }
 
     pub(crate) async fn cached_ranges(
-        &self, ranges: &[std::ops::Range<u64>],
+        &self,
+        ranges: &[std::ops::Range<u64>],
     ) -> Result<Option<(Vec<bytes::Bytes>, common_cache::paged::PageFetchStats)>> {
-        let Some((context, pages)) = self.cache.as_ref().and_then(|c| Some((c, c.manager.page_cache.as_ref()?))) else {
+        let Some((context, pages)) = self
+            .cache
+            .as_ref()
+            .and_then(|c| Some((c, c.manager.page_cache.as_ref()?)))
+        else {
             return Ok(None);
         };
-        let relative = ranges.iter().map(|r| r.start-self.bounds.start..r.end-self.bounds.start).collect::<Vec<_>>();
-        let mut reservation = self.pool.as_ref().map(|pool| datafusion::execution::memory_pool::MemoryConsumer::new("NarthexPages").register(pool));
+        let relative = ranges
+            .iter()
+            .map(|r| r.start - self.bounds.start..r.end - self.bounds.start)
+            .collect::<Vec<_>>();
+        let mut reservation = self.pool.as_ref().map(|pool| {
+            datafusion::execution::memory_pool::MemoryConsumer::new("NarthexPages").register(pool)
+        });
         if let Some(memory) = &mut reservation {
             let size = pages.page_size();
-            let bytes = relative.iter().filter(|r| !r.is_empty()).map(|r| {
-                let aligned = ((r.end.div_ceil(size) * size).min(self.bounds.end-self.bounds.start)) - r.start / size * size;
-                2 * aligned + r.end-r.start
-            }).sum::<u64>();
-            if memory.try_grow(bytes as usize).is_err() { return Ok(None); }
+            let bytes = relative
+                .iter()
+                .filter(|r| !r.is_empty())
+                .map(|r| {
+                    let aligned = ((r.end.div_ceil(size) * size)
+                        .min(self.bounds.end - self.bounds.start))
+                        - r.start / size * size;
+                    2 * aligned + r.end - r.start
+                })
+                .sum::<u64>();
+            if memory.try_grow(bytes as usize).is_err() {
+                return Ok(None);
+            }
         }
-        pages.fetch_native(context.namespace, self.path.clone(), self.bounds.clone(), &relative, self).await
+        pages
+            .fetch_native(
+                context.namespace,
+                self.path.clone(),
+                self.bounds.clone(),
+                &relative,
+                self,
+            )
+            .await
             .map(|(bytes, stats)| {
                 // Pooled readers retain only the bytes charged to their block after this reservation drops.
                 let bytes = if reservation.is_some() {
-                    bytes.iter().map(|slice| bytes::Bytes::copy_from_slice(slice)).collect()
-                } else { bytes };
+                    bytes
+                        .iter()
+                        .map(|slice| bytes::Bytes::copy_from_slice(slice))
+                        .collect()
+                } else {
+                    bytes
+                };
                 Some((bytes, stats))
-            }).map_err(|e| crate::series_index::columnar::invalid(e.to_string()))
+            })
+            .map_err(|error| {
+                // Independent I/O errors have one owner. Preserve storage error kinds for
+                // discovery fallback and retry classification.
+                let error = Arc::try_unwrap(error).unwrap_or_else(std::io::Error::other);
+                match error.downcast::<object_store::Error>() {
+                    Ok(source) => crate::error::OpenDalSnafu.into_error(source),
+                    Err(error) => crate::series_index::columnar::invalid(error.to_string()),
+                }
+            })
     }
 }
 
 #[async_trait::async_trait]
 impl common_base::range_read::RangeReader for PartArea {
     async fn metadata(&self) -> std::io::Result<common_base::range_read::Metadata> {
-        Ok(common_base::range_read::Metadata { content_length: self.bounds.end-self.bounds.start })
+        Ok(common_base::range_read::Metadata {
+            content_length: self.bounds.end - self.bounds.start,
+        })
     }
     async fn read(&self, range: std::ops::Range<u64>) -> std::io::Result<bytes::Bytes> {
-        self.reader.read(self.bounds.start+range.start..self.bounds.start+range.end).await
+        self.reader
+            .read(self.bounds.start + range.start..self.bounds.start + range.end)
+            .await
             .map_err(std::io::Error::other)
     }
-    async fn read_vec(&self, ranges: &[std::ops::Range<u64>]) -> std::io::Result<Vec<bytes::Bytes>> {
-        let ranges = ranges.iter().map(|r| self.bounds.start+r.start..self.bounds.start+r.end).collect::<Vec<_>>();
-        self.reader.fetch(ranges).await.map_err(std::io::Error::other)
+    async fn read_vec(
+        &self,
+        ranges: &[std::ops::Range<u64>],
+    ) -> std::io::Result<Vec<bytes::Bytes>> {
+        let ranges = ranges
+            .iter()
+            .map(|r| self.bounds.start + r.start..self.bounds.start + r.end)
+            .collect::<Vec<_>>();
+        self.reader
+            .fetch(ranges)
+            .await
+            .map_err(std::io::Error::other)
     }
 }
 
@@ -193,7 +299,10 @@ pub(crate) async fn load<T: Send + Sync + 'static>(
     let Some(context) = cache else {
         return loader.await.map(Arc::new);
     };
-    let (Some(decoded), Some(metrics)) = (&context.manager.sst_decoded_meta_cache, &context.manager.columnar_load_metrics) else {
+    let (Some(decoded), Some(metrics)) = (
+        &context.manager.sst_decoded_meta_cache,
+        &context.manager.columnar_load_metrics,
+    ) else {
         return loader.await.map(Arc::new);
     };
     let key = DecodedKey {
@@ -204,7 +313,10 @@ pub(crate) async fn load<T: Send + Sync + 'static>(
     let identity_size = key.identity.capacity();
     let key = SstDecodedMetaKey::Native(key);
     if let Some(MetaValue::Native(value)) = decoded.get(&key).await {
-        let value = value.value.downcast::<T>().expect("type is part of the key");
+        let value = value
+            .value
+            .downcast::<T>()
+            .expect("type is part of the key");
         CACHE_HIT.with_label_values(&[COLUMNAR_META]).inc();
         return Ok(value);
     }
@@ -221,12 +333,20 @@ pub(crate) async fn load<T: Send + Sync + 'static>(
     if let Ok(weight) = u32::try_from(retained)
         && u64::from(weight) <= decoded.capacity()
     {
-        let admitted = decoded.get_or_insert(key, MetaValue::Native(DecodedValue {
-            value: value.clone(),
-            weight,
-        })).await;
+        let admitted = decoded
+            .get_or_insert(
+                key,
+                MetaValue::Native(DecodedValue {
+                    value: value.clone(),
+                    weight,
+                }),
+            )
+            .await;
         if let MetaValue::Native(entry) = admitted {
-            return Ok(entry.value.downcast::<T>().expect("type is part of the key"));
+            return Ok(entry
+                .value
+                .downcast::<T>()
+                .expect("type is part of the key"));
         }
     }
     Ok(value)
@@ -243,10 +363,7 @@ mod tests {
     #[case::stripe_collision(true)]
     #[tokio::test]
     async fn backpressured_load_does_not_block_other_readers(#[case] different_key: bool) {
-        let manager = CacheManager::builder()
-            .sst_meta_cache_size(8192)
-            .enable_columnar_meta_cache(true)
-            .build();
+        let manager = CacheManager::builder().sst_meta_cache_size(8192).build();
         let strategy = CacheStrategy::EnableAll(Arc::new(manager));
         let cache = strategy.columnar_metadata(FileId::random()).unwrap();
         let identity = "generation/part/page";
@@ -322,10 +439,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_misses_share_the_admitted_value() {
         let strategy = CacheStrategy::EnableAll(Arc::new(
-            CacheManager::builder()
-                .sst_meta_cache_size(8192)
-                .enable_columnar_meta_cache(true)
-                .build(),
+            CacheManager::builder().sst_meta_cache_size(8192).build(),
         ));
         let cache = strategy.columnar_metadata(FileId::random()).unwrap();
         let barrier = Arc::new(tokio::sync::Barrier::new(64));

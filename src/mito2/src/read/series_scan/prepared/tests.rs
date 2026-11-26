@@ -1608,7 +1608,6 @@ async fn metadata_cache_reuses_structures_and_isolates_storage() {
     let strategy = CacheStrategy::EnableAll(Arc::new(
         CacheManager::builder()
             .sst_meta_cache_size(8 * 1024 * 1024)
-            .enable_columnar_meta_cache(true)
             .build(),
     ));
     let namespace = FileId::random();

@@ -27,10 +27,10 @@ use snafu::ResultExt;
 use store_api::metadata::RegionMetadata;
 use store_api::storage::FileId;
 
+use crate::access_layer::{AccessLayer, SstWriteRequest};
 use crate::access_layer::{OperationType, SstInfoArray};
 use crate::cache::file_cache::IndexKey;
 use crate::cache::write_cache::WriteCacheRef;
-use crate::access_layer::{AccessLayer, SstWriteRequest};
 use crate::error::{ComputeArrowSnafu, InvalidRecordBatchSnafu, Result};
 use crate::series_index::artifact::SamplesFileHandle;
 use crate::series_index::columnar::reader::ColumnarReader;
@@ -63,15 +63,17 @@ pub(crate) async fn write_samples(
     }
     let prefix = location::narthex_file_dir(&layer.build_region_dir(region_id), id);
     let cache = request.cache_manager.write_cache();
-    let store = cache.map_or_else(|| layer.object_store().clone(), |cache| cache.file_cache().local_store());
+    let prefix = if cache.is_some() {
+        crate::cache::write_cache::WriteCache::native_stage(&prefix)
+    } else {
+        prefix
+    };
+    let store = cache.map_or_else(
+        || layer.object_store().clone(),
+        |cache| cache.file_cache().local_store(),
+    );
     let mut writer = ColumnarSamplesFormat::default()
-        .writer(
-            request.metadata.clone(),
-            store,
-            &prefix,
-            id,
-            id,
-        )
+        .writer(request.metadata.clone(), store, &prefix, id, id)
         .await?;
     let mut rows = 0;
     let mut series = 0;
@@ -154,7 +156,7 @@ pub(crate) async fn write_samples(
         file_id: id,
         time_range: (
             common_time::Timestamp::new(lower, unit),
-            common_time::Timestamp::new(upper, unit)
+            common_time::Timestamp::new(upper, unit),
         ),
         file_size: artifact.file_size,
         num_rows: rows,
@@ -169,14 +171,26 @@ pub(crate) async fn write_samples(
             parts: parts
                 .iter()
                 .map(|part| NarthexPartMeta {
-                    file_size: part.file_size
+                    file_size: part.file_size,
                 })
-                .collect()
+                .collect(),
         })),
     };
     if let Some(cache) = cache {
-        let file = FileMeta { region_id, file_id: id, format: info.format.clone(), ..Default::default() };
-        cache.upload_native(IndexKey::native_objects(&file, &layer.build_region_dir(region_id)), layer.object_store(), request.op_type, cancellation.as_ref()).await?;
+        let file = FileMeta {
+            region_id,
+            file_id: id,
+            format: info.format.clone(),
+            ..Default::default()
+        };
+        cache
+            .upload_native(
+                IndexKey::native_objects(&file, &layer.build_region_dir(region_id)),
+                layer.object_store(),
+                request.op_type,
+                cancellation.as_ref(),
+            )
+            .await?;
     }
     Ok(smallvec::smallvec![info])
 }
@@ -228,9 +242,17 @@ pub(crate) async fn write_series(
         &file,
         &layer.build_region_dir(metadata.region_id),
     )?;
+    let prefix = if cache.is_some() {
+        crate::cache::write_cache::WriteCache::native_stage(&prefix)
+    } else {
+        prefix
+    };
     let mut writer = ColumnarSeriesFormat::default().narthex_writer(
         metadata.clone(),
-        cache.map_or_else(|| layer.object_store().clone(), |cache| cache.file_cache().local_store()),
+        cache.map_or_else(
+            || layer.object_store().clone(),
+            |cache| cache.file_cache().local_store(),
+        ),
         &entry,
         prefix,
     )?;
@@ -288,7 +310,14 @@ pub(crate) async fn write_series(
             .collect();
     }
     if let Some(cache) = cache {
-        cache.upload_native(IndexKey::native_objects(&file, &layer.build_region_dir(metadata.region_id)), layer.object_store(), OperationType::Compact, None).await?;
+        cache
+            .upload_native(
+                IndexKey::native_objects(&file, &layer.build_region_dir(metadata.region_id)),
+                layer.object_store(),
+                OperationType::Compact,
+                None,
+            )
+            .await?;
     }
     Ok(file)
 }

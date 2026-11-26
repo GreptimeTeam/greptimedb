@@ -30,7 +30,7 @@ use object_store::ObjectStore;
 use snafu::ResultExt;
 use tokio::sync::OnceCell;
 
-use crate::cache::columnar::{self as metadata_cache, MetadataCache, PartArea, ObjectReader};
+use crate::cache::columnar::{self as metadata_cache, MetadataCache, ObjectReader, PartArea};
 use crate::error::{NewRecordBatchSnafu, OpenDalSnafu, Result};
 use crate::metrics::ColumnarReadMetrics;
 use crate::series_index::artifact::{ArtifactFormat, SamplesFileHandle};
@@ -73,7 +73,8 @@ impl SamplesReader {
                         .sum::<usize>()
             },
             async {
-                let reader = Self::open_descriptor(store.clone(), handle.clone(), cache.as_ref()).await?;
+                let reader =
+                    Self::open_descriptor(store.clone(), handle.clone(), cache.as_ref()).await?;
                 Ok((reader.manifest, reader.schema))
             },
         )
@@ -96,7 +97,11 @@ impl SamplesReader {
         Self::open_descriptor(store, handle, None).await
     }
 
-    async fn open_descriptor(store: ObjectStore, handle: SamplesFileHandle, cache: Option<&MetadataCache>) -> Result<Self> {
+    async fn open_descriptor(
+        store: ObjectStore,
+        handle: SamplesFileHandle,
+        cache: Option<&MetadataCache>,
+    ) -> Result<Self> {
         let entry = handle.entry();
         let artifact = &entry.artifact;
         require(
@@ -125,7 +130,15 @@ impl SamplesReader {
             length > 0 && length <= MANIFEST_LIMIT as u64,
             "samples manifest exceeds limit",
         )?;
-        let object = ObjectReader::open(cache, handle.native_file(), crate::cache::file_cache::FileType::Samples(None), &store, &path, length).await?;
+        let object = ObjectReader::open(
+            cache,
+            handle.native_file(),
+            crate::cache::file_cache::FileType::Samples(None),
+            &store,
+            &path,
+            length,
+        )
+        .await?;
         let bytes = object.read(0..length).await.context(OpenDalSnafu)?;
         // A manifest that the current format cannot read predates exact identity or is
         // corrupt; either way it must never be reused.
@@ -1119,10 +1132,7 @@ async fn read_block(
 
 async fn read_part_range(reader: &ObjectReader, start: u64, end: u64) -> Result<bytes::Bytes> {
     require(start <= end, "reversed sample byte range")?;
-    let bytes = reader
-        .read(start..end)
-        .await
-        .context(OpenDalSnafu)?;
+    let bytes = reader.read(start..end).await.context(OpenDalSnafu)?;
     require(
         bytes.len() as u64 == end - start,
         "sample range length mismatch",
@@ -1183,7 +1193,11 @@ async fn fetch_ranges(
     let merged = merge_read_ranges(ranges);
     *metrics.counts.entry("payload_reads").or_default() += merged.len() as u64;
     let started = Instant::now();
-    let fetched = reader.reader.fetch(merged.clone()).await.context(OpenDalSnafu)?;
+    let fetched = reader
+        .reader
+        .fetch(merged.clone())
+        .await
+        .context(OpenDalSnafu)?;
     metrics.add_elapsed("columnar_payload_fetch_wall", started.elapsed());
     require(
         fetched.len() == merged.len(),
@@ -1191,8 +1205,7 @@ async fn fetch_ranges(
     )?;
     let mut result = Vec::with_capacity(ranges.len());
     let mut index = 0;
-    for (range, buffer) in merged.iter().zip(fetched) {
-        let bytes = buffer;
+    for (range, bytes) in merged.iter().zip(fetched) {
         require(
             bytes.len() as u64 == range.end - range.start,
             "sample range length mismatch",

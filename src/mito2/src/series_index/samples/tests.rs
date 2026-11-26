@@ -2488,7 +2488,6 @@ async fn aligned_payload_cache_reuses_gap_bytes_across_readers() {
     );
     let strategy = CacheStrategy::EnableAll(Arc::new(
         CacheManager::builder()
-            .enable_columnar_meta_cache(true)
             .page_cache_size(1024 * 1024)
             .sst_meta_cache_size(1024 * 1024)
             .build(),

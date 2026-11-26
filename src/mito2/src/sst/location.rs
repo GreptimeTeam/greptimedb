@@ -19,7 +19,6 @@ use store_api::path_utils::region_name;
 use store_api::region_request::PathType;
 use store_api::storage::{FileId, RegionId};
 
-use crate::cache::file_cache::FileType;
 use crate::error::UnexpectedSnafu;
 use crate::sst::file::{RegionFileId, RegionIndexId};
 
@@ -143,7 +142,32 @@ pub fn parse_index_file_info(filepath: &str) -> crate::error::Result<(FileId, u6
     }
 }
 
-pub fn parse_file_id_type_from_path(filepath: &str) -> crate::error::Result<(FileId, FileType)> {
+/// Flat objects recognized by SST garbage collection. Narthex uses a directory inventory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SstObjectType {
+    Parquet,
+    Puffin(u64),
+}
+
+impl SstObjectType {
+    pub(crate) fn parse(suffix: &str) -> Option<Self> {
+        match suffix {
+            "parquet" => Some(Self::Parquet),
+            "puffin" => Some(Self::Puffin(0)),
+            other => Some(Self::Puffin(other.strip_suffix(".puffin")?.parse().ok()?)),
+        }
+    }
+}
+
+pub fn parse_file_id_type_from_path(
+    filepath: &str,
+) -> crate::error::Result<(FileId, crate::cache::file_cache::FileType)> {
+    parse_sst_object_path(filepath).map(|(id, kind)| (id, kind.into()))
+}
+
+pub(crate) fn parse_sst_object_path(
+    filepath: &str,
+) -> crate::error::Result<(FileId, SstObjectType)> {
     let filename = filepath.rsplit('/').next().context(UnexpectedSnafu {
         reason: format!("invalid file path: {}", filepath),
     })?;
@@ -162,9 +186,10 @@ pub fn parse_file_id_type_from_path(filepath: &str) -> crate::error::Result<(Fil
         }
         .build()
     })?;
-    let file_type = FileType::parse(parts[1..].join(".").as_str()).context(UnexpectedSnafu {
-        reason: format!("invalid file type in file name: {}", filename),
-    })?;
+    let file_type =
+        SstObjectType::parse(parts[1..].join(".").as_str()).context(UnexpectedSnafu {
+            reason: format!("invalid file type in file name: {}", filename),
+        })?;
     Ok((file_id, file_type))
 }
 
@@ -278,42 +303,40 @@ mod tests {
 
     #[test]
     fn test_parse_file_id_type_from_path() {
-        use crate::cache::file_cache::FileType;
-
         // Test parquet file
         let file_id = FileId::random();
         let path = format!("table_dir/1_0000000002/data/{}.parquet", file_id);
         let result = parse_file_id_type_from_path(&path).unwrap();
         assert_eq!(result.0.to_string(), file_id.to_string());
-        assert_eq!(result.1, FileType::Parquet);
+        assert_eq!(result.1, crate::cache::file_cache::FileType::Parquet);
 
         // Test puffin file (legacy format, version 0)
         let file_id = FileId::random();
         let path = format!("table_dir/1_0000000002/index/{}.puffin", file_id);
         let result = parse_file_id_type_from_path(&path).unwrap();
         assert_eq!(result.0.to_string(), file_id.to_string());
-        assert_eq!(result.1, FileType::Puffin(0));
+        assert_eq!(result.1, crate::cache::file_cache::FileType::Puffin(0));
 
         // Test versioned puffin file
         let file_id = FileId::random();
         let path = format!("table_dir/1_0000000002/index/{}.1.puffin", file_id);
         let result = parse_file_id_type_from_path(&path).unwrap();
         assert_eq!(result.0.to_string(), file_id.to_string());
-        assert_eq!(result.1, FileType::Puffin(1));
+        assert_eq!(result.1, crate::cache::file_cache::FileType::Puffin(1));
 
         // Test with different path types
         let file_id = FileId::random();
         let path = format!("table_dir/1_0000000002/metadata/{}.parquet", file_id);
         let result = parse_file_id_type_from_path(&path).unwrap();
         assert_eq!(result.0.to_string(), file_id.to_string());
-        assert_eq!(result.1, FileType::Parquet);
+        assert_eq!(result.1, crate::cache::file_cache::FileType::Parquet);
 
         // Test with bare path type
         let file_id = FileId::random();
         let path = format!("table_dir/1_0000000002/{}.parquet", file_id);
         let result = parse_file_id_type_from_path(&path).unwrap();
         assert_eq!(result.0.to_string(), file_id.to_string());
-        assert_eq!(result.1, FileType::Parquet);
+        assert_eq!(result.1, crate::cache::file_cache::FileType::Parquet);
 
         // Test error cases
         // Invalid file extension

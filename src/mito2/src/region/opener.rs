@@ -770,7 +770,7 @@ impl RegionOpener {
         let region = Arc::new(region);
 
         maybe_load_cache(&region, config, &self.cache_manager);
-        maybe_preload_parquet_meta_cache(&region, config, &self.cache_manager);
+        maybe_preload_sst_meta_cache(&region, config, &self.cache_manager);
 
         Ok(Some(region))
     }
@@ -1202,7 +1202,11 @@ impl RegionLoadCacheTask {
                                 puffin_key,
                                 file_meta.index_file_size,
                                 file_meta.time_range.1,
-                                location::index_file_path(table_dir, file_meta.index_id(), path_type),
+                                location::index_file_path(
+                                    table_dir,
+                                    file_meta.index_id(),
+                                    path_type,
+                                ),
                                 None,
                             ));
                         } else {
@@ -1218,7 +1222,13 @@ impl RegionLoadCacheTask {
                     if file_cache.contains_key(&key) {
                         files_already_cached += 1;
                     } else {
-                        files_to_download.push((key, object.file_size, meta.time_range.1, object.path, Some(handle.clone())));
+                        files_to_download.push((
+                            key,
+                            object.file_size,
+                            meta.time_range.1,
+                            object.path,
+                            Some(handle.clone()),
+                        ));
                     }
                 }
             }
@@ -1316,7 +1326,57 @@ fn maybe_load_cache(
     write_cache.load_region_cache(task);
 }
 
-/// Preloads Parquet metadata into the in-memory SST meta cache on region open.
+/// Uses only a resident manifest or a local region backend during startup.
+async fn preload_native_descriptor(
+    manager: &CacheManagerRef,
+    file: FileHandle,
+    region_dir: &str,
+    local_store: Option<&object_store::ObjectStore>,
+) -> Result<bool> {
+    let id = file.file_id();
+    let Some(context) = crate::cache::columnar::MetadataCache::preload(manager, id.file_id())
+    else {
+        return Ok(false);
+    };
+    let series = file.meta_ref().series_window().is_some();
+    let source = if let Some(store) = local_store {
+        store.clone()
+    } else if let Some(write) = manager.write_cache() {
+        let disk = write.file_cache();
+        let kind = if series {
+            FileType::Series(None)
+        } else {
+            FileType::Samples(None)
+        };
+        if !disk.contains_key(&IndexKey::new(id.region_id(), id.file_id(), kind)) {
+            return Ok(false);
+        }
+        disk.local_store()
+    } else {
+        return Ok(false);
+    };
+    if series {
+        let handle = crate::series_index::SeriesIndexFileHandle::from_narthex(file, region_dir)?;
+        crate::series_index::columnar::reader::ColumnarReader::open_cached(
+            source,
+            handle,
+            Some(context),
+        )
+        .await?;
+    } else {
+        let handle =
+            crate::series_index::artifact::SamplesFileHandle::from_narthex(file, region_dir)?;
+        crate::series_index::samples::reader::SamplesReader::open_cached(
+            source,
+            handle,
+            Some(context),
+        )
+        .await?;
+    }
+    Ok(true)
+}
+
+/// Preloads SST metadata into the in-memory SST meta cache on region open.
 ///
 /// This improves the latency of the first query after server start by avoiding large Parquet
 /// metadata reads on demand.
@@ -1327,7 +1387,7 @@ fn maybe_load_cache(
 ///   directly from the local store.
 /// - It will not fetch metadata from remote object stores (S3/GCS/OSS/...).
 #[allow(clippy::too_many_arguments)]
-async fn preload_parquet_meta_cache_for_files(
+async fn preload_sst_meta_cache_for_files(
     region_id: RegionId,
     cache_manager: CacheManagerRef,
     sst_meta_cache_capacity: u64,
@@ -1337,9 +1397,7 @@ async fn preload_parquet_meta_cache_for_files(
     region_metadata: RegionMetadataRef,
     mut files: Vec<FileHandle>,
 ) -> usize {
-    if !cache_manager.sst_meta_cache_enabled()
-        || sst_meta_cache_capacity == 0
-    {
+    if !cache_manager.sst_meta_cache_enabled() || sst_meta_cache_capacity == 0 {
         return 0;
     }
 
@@ -1350,38 +1408,26 @@ async fn preload_parquet_meta_cache_for_files(
 
     let mut loaded = 0usize;
     for file_handle in files {
-        // Stop when the protected authoritative tier is full.
-        if matches!(file_handle.meta_ref().format, crate::sst::file::FileFormat::Parquet) && cache_manager.sst_meta_cache_is_full() {
+        let file_id = file_handle.file_id();
+        if !matches!(
+            file_handle.meta_ref().format,
+            crate::sst::file::FileFormat::Parquet
+        ) {
+            let dir = region_dir_from_table_dir(&table_dir, file_id.region_id(), path_type);
+            if preload_native_descriptor(
+                &cache_manager,
+                file_handle,
+                &dir,
+                allow_direct_load.then_some(&object_store),
+            )
+            .await
+            .unwrap_or(false)
+            {
+                loaded += 1;
+            }
             continue;
         }
-
-        let file_id = file_handle.file_id();
-        if !matches!(file_handle.meta_ref().format, crate::sst::file::FileFormat::Parquet) {
-            use crate::cache::columnar::MetadataCache;
-            let Some(context) = MetadataCache::preload(&cache_manager, file_id.file_id()) else { continue };
-            let dir = region_dir_from_table_dir(&table_dir, file_id.region_id(), path_type);
-            let series = file_handle.meta_ref().series_window().is_some();
-            // A local fallback also keeps a concurrent disk eviction from issuing remote I/O.
-            let source = if allow_direct_load {
-                object_store.clone()
-            } else if let Some(write) = cache_manager.write_cache() {
-                let disk = write.file_cache();
-                let kind = if series { FileType::Series(None) } else { FileType::Samples(None) };
-                if !disk.contains_key(&IndexKey::new(file_id.region_id(), file_id.file_id(), kind)) { continue; }
-                disk.local_store()
-            } else { continue };
-            let result = if series {
-                match crate::series_index::SeriesIndexFileHandle::from_narthex(file_handle, &dir) {
-                    Ok(handle) => crate::series_index::columnar::reader::ColumnarReader::open_cached(source, handle, Some(context)).await.map(drop),
-                    Err(error) => Err(error),
-                }
-            } else {
-                match crate::series_index::artifact::SamplesFileHandle::from_narthex(file_handle, &dir) {
-                    Ok(handle) => crate::series_index::samples::reader::SamplesReader::open_cached(source, handle, Some(context)).await.map(drop),
-                    Err(error) => Err(error),
-                }
-            };
-            loaded += usize::from(result.is_ok());
+        if cache_manager.sst_meta_cache_is_full() {
             continue;
         }
         let mut cache_metrics = MetadataCacheMetrics::default();
@@ -1496,7 +1542,7 @@ async fn preload_parquet_meta_cache_for_files(
     loaded
 }
 
-fn maybe_preload_parquet_meta_cache(
+fn maybe_preload_sst_meta_cache(
     region: &MitoRegionRef,
     config: &MitoConfig,
     cache_manager: &Option<CacheManagerRef>,
@@ -1542,7 +1588,7 @@ fn maybe_preload_parquet_meta_cache(
             }
         }
         let preloading_start = Instant::now();
-        let loaded = preload_parquet_meta_cache_for_files(
+        let loaded = preload_sst_meta_cache_for_files(
             region_id,
             cache_manager,
             sst_meta_cache_capacity,
@@ -1557,7 +1603,7 @@ fn maybe_preload_parquet_meta_cache(
 
         if loaded > 0 {
             info!(
-                "Preloaded parquet metadata for region {}, loaded_files: {}, elapsed_ms: {}",
+                "Preloaded SST metadata for region {}, loaded_files: {}, elapsed_ms: {}",
                 region_id,
                 loaded,
                 preloading_cost.as_millis()
@@ -1615,7 +1661,7 @@ mod tests {
     use store_api::storage::{FileId, RegionId};
 
     use super::{
-        initial_pruned_entry_id, maybe_upgrade_json2_layout, preload_parquet_meta_cache_for_files,
+        initial_pruned_entry_id, maybe_upgrade_json2_layout, preload_sst_meta_cache_for_files,
         provider_from_wal_options, sanitize_region_options,
         supports_open_region_object_storage_requirement,
     };
@@ -1946,7 +1992,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_preload_parquet_meta_cache_uses_file_cache() {
+    async fn test_preload_sst_meta_cache_uses_file_cache() {
         let env = TestEnv::new().await;
 
         let local_store = ObjectStore::new(Memory::default()).unwrap();
@@ -2024,7 +2070,7 @@ mod tests {
                 .is_none()
         );
 
-        let loaded = preload_parquet_meta_cache_for_files(
+        let loaded = preload_sst_meta_cache_for_files(
             region_id,
             cache_manager.clone(),
             1024 * 1024,
@@ -2051,7 +2097,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_preload_parquet_meta_cache_skips_files_not_in_file_cache() {
+    async fn test_preload_sst_meta_cache_skips_files_not_in_file_cache() {
         let cache_manager = Arc::new(
             CacheManager::builder()
                 .sst_meta_cache_size(1024 * 1024)
@@ -2101,7 +2147,7 @@ mod tests {
                 .is_none()
         );
 
-        let loaded = preload_parquet_meta_cache_for_files(
+        let loaded = preload_sst_meta_cache_for_files(
             region_id,
             cache_manager.clone(),
             1024 * 1024,
@@ -2123,7 +2169,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_preload_parquet_meta_cache_loads_from_local_fs() {
+    async fn test_preload_sst_meta_cache_loads_from_local_fs() {
         let cache_manager = Arc::new(
             CacheManager::builder()
                 .sst_meta_cache_size(1024 * 1024)
@@ -2176,7 +2222,7 @@ mod tests {
                 .is_none()
         );
 
-        let loaded = preload_parquet_meta_cache_for_files(
+        let loaded = preload_sst_meta_cache_for_files(
             region_id,
             cache_manager.clone(),
             1024 * 1024,

@@ -1325,7 +1325,8 @@ impl CacheManager {
         ] {
             // The key describes the loading request, while compact metadata may
             // already contain stronger page-index guarantees.
-            if let Some(MetaValue::Parquet(value)) = cache.get(&SstDecodedMetaKey::new(file_id, policy)).await
+            if let Some(MetaValue::Parquet(value)) =
+                cache.get(&SstDecodedMetaKey::new(file_id, policy)).await
                 && value.metadata.satisfies_page_index_policy(requested)
             {
                 return Some(value.metadata.clone());
@@ -1595,8 +1596,6 @@ pub fn selector_result_cache_hit() {
 #[derive(Default)]
 pub struct CacheManagerBuilder {
     sst_meta_cache_size: u64,
-    /// Allows native readers to use the decoded metadata reservation.
-    enable_columnar_meta_cache: bool,
     disable_sst_meta_cache_on_write: bool,
     vector_cache_size: u64,
     page_cache_size: u64,
@@ -1615,12 +1614,6 @@ impl CacheManagerBuilder {
     /// Sets meta cache size.
     pub fn sst_meta_cache_size(mut self, bytes: u64) -> Self {
         self.sst_meta_cache_size = bytes;
-        self
-    }
-
-    /// Enables native readers to use the decoded metadata reservation.
-    pub fn enable_columnar_meta_cache(mut self, enable: bool) -> Self {
-        self.enable_columnar_meta_cache = enable;
         self
     }
 
@@ -1741,7 +1734,7 @@ impl CacheManagerBuilder {
             .with_size_metric(CACHE_BYTES.bind(&[SST_META_DECODED_TYPE]))
             .with_metrics(crate::metrics::cache_loading_metrics(SST_META_DECODED_TYPE))
         });
-        let columnar_load_metrics = (self.enable_columnar_meta_cache && decoded_meta_capacity > 0)
+        let columnar_load_metrics = (decoded_meta_capacity > 0)
             .then(|| crate::metrics::cache_loading_metrics(COLUMNAR_META));
         let vector_cache = (self.vector_cache_size != 0).then(|| {
             Cache::builder()
@@ -2003,7 +1996,10 @@ impl SstMetaLoadResult {
 /// Separates loads that require different page-index guarantees.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum SstDecodedMetaKey {
-    Parquet { file: SstMetaKey, policy: mem::Discriminant<PageIndexPolicy> },
+    Parquet {
+        file: SstMetaKey,
+        policy: mem::Discriminant<PageIndexPolicy>,
+    },
     Native(DecodedKey),
 }
 
@@ -2531,20 +2527,7 @@ mod tests {
 
     #[test]
     fn test_sst_meta_cache_splits_capacity() {
-        // Default (columnar format off): main's split, the native-reader tier is not created.
         let cache = CacheManager::builder().sst_meta_cache_size(101).build();
-        assert_eq!(
-            50,
-            cache.sst_decoded_meta_cache.as_ref().unwrap().capacity()
-        );
-        assert!(cache.columnar_load_metrics.is_none());
-
-        // Both formats share the decoded reservation.
-        let cache = CacheManager::builder()
-            .sst_meta_cache_size(101)
-            .enable_columnar_meta_cache(true)
-            .build();
-
         assert_eq!(
             Some(51),
             cache

@@ -841,6 +841,11 @@ pub(crate) async fn new_fs_cache_store(root: &str) -> Result<ObjectStore> {
     let atomic_write_dir = Path::new(root).join(ATOMIC_WRITE_DIR);
     clean_dir(&atomic_write_dir.to_string_lossy()).await?;
 
+    // A process can exit after the native codec closes a part but before its upload.
+    let native_stage =
+        Path::new(root).join(crate::cache::write_cache::WriteCache::native_stage(""));
+    clean_dir(&native_stage.to_string_lossy()).await?;
+
     // Compatible code. Remove this after a major release.
     let old_atomic_temp_dir = join_dir(root, OLD_ATOMIC_WRITE_DIR);
     clean_dir(&old_atomic_temp_dir).await?;
