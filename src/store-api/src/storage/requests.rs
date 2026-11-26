@@ -79,6 +79,32 @@ impl Display for SeriesSample {
     }
 }
 
+/// A hint to keep only a deterministic fraction of the rows of a scan that stores
+/// its rows in encoded-primary-key order (a classic, non-metric table).
+///
+/// The engine picks one contiguous interval `[lo, hi]` of the encoded primary key
+/// covering about `num/den` of the rows of the files the scan would read, and
+/// applies it as an ordinary range predicate on the encoded key. Both bounds are
+/// actual keys taken from file statistics, so the upper bound is inclusive. Encoded primary
+/// keys are ordered by the storage order of a classic table, so the bound prunes
+/// whole files by their manifest statistics and whole row groups by their encoded
+/// key statistics instead of only filtering rows after they are read. Unlike a
+/// hash of the key, a range keeps that storage-order locality.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PkSample {
+    /// Numerator of the kept fraction.
+    pub num: u32,
+    /// Denominator of the kept fraction. Callers reject `den == 0` and
+    /// `num >= den`, and `num == 0`, before sampling.
+    pub den: u32,
+}
+
+impl Display for PkSample {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.num, self.den)
+    }
+}
+
 #[derive(Default, Clone, Debug, PartialEq)]
 pub struct ScanRequest {
     /// Optional projection information for the scan. `None` reads all root
@@ -125,6 +151,9 @@ pub struct ScanRequest {
     pub distribution: Option<TimeSeriesDistribution>,
     /// Optional hint to keep only a deterministic fraction of the series.
     pub sample: Option<SeriesSample>,
+    /// Optional hint to keep only the rows of one contiguous interval of the
+    /// encoded primary key, chosen to cover about `num/den` of the rows.
+    pub pk_sample: Option<PkSample>,
     /// Optional hint from query-driven JSON type concretization.
     pub json_type_hint: HashMap<String, JsonNativeType>,
     /// Whether Mito should keep string primary-key columns dictionary encoded in its output.
@@ -229,6 +258,9 @@ impl Display for ScanRequest {
         }
         if let Some(sample) = &self.sample {
             write!(f, "{}sample: {}", delimiter.as_str(), sample)?;
+        }
+        if let Some(pk_sample) = &self.pk_sample {
+            write!(f, "{}pk_sample: {}", delimiter.as_str(), pk_sample)?;
         }
         if !self.json_type_hint.is_empty() {
             write!(
@@ -337,5 +369,12 @@ mod tests {
         // A full or degenerate fraction saturates instead of overflowing.
         assert_eq!(u64::MAX, SeriesSample { num: 4, den: 4 }.tsid_max());
         assert_eq!(u64::MAX, SeriesSample { num: 1, den: 0 }.tsid_max());
+
+        let request = ScanRequest {
+            pk_sample: Some(PkSample { num: 1, den: 4 }),
+            ..Default::default()
+        };
+        assert_eq!(request.to_string(), "ScanRequest { pk_sample: 1/4 }");
+        assert_eq!("1/4", PkSample { num: 1, den: 4 }.to_string());
     }
 }

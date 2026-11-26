@@ -324,6 +324,15 @@ lazy_static! {
         "greptime_mito_scan_requests_rejected_total",
         "total number of scan requests that ultimately failed due to memory limit"
     ).unwrap();
+    /// Work done and avoided by classic-table primary-key interval sampling, by kind.
+    ///
+    /// Kinds: `files_in_range`, `files_without_stats`, `files_pruned`,
+    /// `row_groups_checked`, `row_groups_pruned`, `rows_filtered`.
+    pub static ref PK_SAMPLE_STATS: IntCounterVec = register_int_counter_vec!(
+        "greptime_mito_pk_sample_stats",
+        "primary-key interval sampling stats by kind",
+        &[TYPE_LABEL]
+    ).unwrap();
     /// Gauge for active file range builders in the pruner.
     pub static ref PRUNER_ACTIVE_BUILDERS: IntGauge = register_int_gauge!(
         "greptime_mito_pruner_active_builders",
