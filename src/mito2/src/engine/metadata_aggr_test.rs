@@ -476,13 +476,18 @@ async fn test_metadata_aggr_replacement_with_duplicate_rows_falls_back() {
 }
 
 #[rstest::rstest]
-#[case::non_append_key_filter(false, false)]
-#[case::append_key_filter(true, false)]
-#[case::overlapping_files(false, true)]
+#[case::non_append_key_filter(false, false, "b", 1)]
+#[case::append_key_filter(true, false, "b", 1)]
+#[case::non_append_time_filter(false, false, "a", 2)]
+#[case::append_time_filter(true, false, "a", 2)]
+#[case::key_overlap(false, true, "b", 1)]
+#[case::time_overlap(false, true, "a", 2)]
 #[tokio::test]
-async fn test_metadata_aggr_replacement_with_changed_key_falls_back(
+async fn test_metadata_aggr_replacement_with_stale_bounds_falls_back(
     #[case] append: bool,
     #[case] keep_second_file: bool,
+    #[case] replacement_key: &str,
+    #[case] replacement_second: usize,
 ) {
     use store_api::region_request::RegionOpenRequest;
 
@@ -509,11 +514,11 @@ async fn test_metadata_aggr_replacement_with_changed_key_falls_back(
     let region = engine.get_region(region_id).unwrap();
     let store = region.access_layer.object_store().clone();
 
-    let put = |key| api::v1::Rows {
+    let put = |key, second| api::v1::Rows {
         schema: schema.clone(),
-        rows: test_util::build_rows_for_key(key, 0, 1, 0),
+        rows: test_util::build_rows_for_key(key, second, second + 1, 0),
     };
-    test_util::put_rows(&engine, region_id, put("a")).await;
+    test_util::put_rows(&engine, region_id, put("a", 1)).await;
     test_util::flush_region(&engine, region_id, None).await;
     let old_file = region.version().ssts.levels()[0]
         .files
@@ -521,20 +526,40 @@ async fn test_metadata_aggr_replacement_with_changed_key_falls_back(
         .next()
         .unwrap()
         .clone();
-    let mut request = ScanRequest {
+    let ts = || lit(ScalarValue::TimestampMillisecond(Some(1500), None));
+    let changed_time = replacement_second != 1;
+    let filters = if keep_second_file {
+        vec![]
+    } else if changed_time {
+        vec![col("ts").lt_eq(ts())]
+    } else {
+        vec![col("tag_0").eq(lit("a"))]
+    };
+    let request = ScanRequest {
+        filters,
         metadata_aggr_hint: true,
         ..Default::default()
     };
+    let time_pruned_request = ScanRequest {
+        filters: vec![col("ts").gt_eq(ts())],
+        ..request.clone()
+    };
     if !keep_second_file {
-        request.filters = vec![col("tag_0").eq(lit("a"))];
         let scan = engine
             .handle_query(region_id, request.clone())
             .await
             .unwrap();
         assert_eq!(scan.properties().exact_num_rows(), Some(1));
+        if changed_time {
+            let scan = engine
+                .handle_query(region_id, time_pruned_request.clone())
+                .await
+                .unwrap();
+            assert_eq!(scan.properties().exact_num_rows(), Some(0));
+        }
     }
 
-    test_util::put_rows(&engine, region_id, put("b")).await;
+    test_util::put_rows(&engine, region_id, put(replacement_key, replacement_second)).await;
     test_util::flush_region(&engine, region_id, None).await;
     let second_file = region.version().ssts.levels()[0]
         .files
@@ -542,15 +567,18 @@ async fn test_metadata_aggr_replacement_with_changed_key_falls_back(
         .find(|file| file.file_id() != old_file.file_id())
         .unwrap()
         .clone();
-    assert_eq!(old_file.time_range(), second_file.time_range());
+    assert_eq!(
+        old_file.time_range() != second_file.time_range(),
+        changed_time
+    );
     assert_eq!(old_file.num_rows(), second_file.num_rows());
     assert_eq!(
         old_file.meta_ref().num_row_groups,
         second_file.meta_ref().num_row_groups
     );
-    assert_ne!(
-        old_file.raw_primary_key_range(),
-        second_file.raw_primary_key_range()
+    assert_eq!(
+        old_file.raw_primary_key_range() != second_file.raw_primary_key_range(),
+        replacement_key != "a"
     );
     if keep_second_file {
         let scan = engine
@@ -568,7 +596,7 @@ async fn test_metadata_aggr_replacement_with_changed_key_falls_back(
         file_size: bytes.len() as u64,
         ..old_file.meta_ref().clone()
     };
-    // Like sst-replace, keep the file ID and the old manifest key bounds.
+    // Like sst-replace, keep the file ID and the old manifest bounds.
     store
         .write(&replacement.file_path(&table_dir, path_type), bytes)
         .await
@@ -619,20 +647,37 @@ async fn test_metadata_aggr_replacement_with_changed_key_falls_back(
         .await
         .unwrap();
     assert_eq!(scan.properties().exact_num_rows(), None);
-    for hint in [false, true] {
-        request.metadata_aggr_hint = hint;
-        let rows = common_recordbatch::RecordBatches::try_collect(
-            engine
-                .scan_to_stream(region_id, request.clone())
+    if !keep_second_file {
+        if changed_time {
+            let scan = engine
+                .handle_query(region_id, time_pruned_request)
                 .await
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            rows.iter().map(|batch| batch.num_rows()).sum::<usize>(),
-            usize::from(keep_second_file)
-        );
+                .unwrap();
+            assert_eq!(scan.properties().exact_num_rows(), None);
+        }
+        for metadata_aggr_hint in [false, true] {
+            let request = ScanRequest {
+                metadata_aggr_hint,
+                ..request.clone()
+            };
+            let scanner = engine
+                .handle_query(region_id, request.clone())
+                .await
+                .unwrap();
+            let plan = Arc::new(RegionScanExec::new(scanner, request, None).unwrap());
+            let ctx = SessionContext::new();
+            ctx.register_table("t", Arc::new(CountTable { plan }))
+                .unwrap();
+            let df = ctx.sql("SELECT count(*) FROM t").await.unwrap();
+            let plan = df.clone().create_physical_plan().await.unwrap();
+            let text = displayable(plan.as_ref()).indent(true).to_string();
+            assert!(text.contains("RegionScanExec"), "{text}");
+            let batches = df.collect().await.unwrap();
+            assert_eq!(
+                ScalarValue::try_from_array(batches[0].column(0), 0).unwrap(),
+                ScalarValue::Int64(Some(0))
+            );
+        }
     }
     engine.stop().await.unwrap();
 }

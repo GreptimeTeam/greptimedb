@@ -717,7 +717,7 @@ impl ScanRegion {
         let mut input = input.build();
         input.row_preserving_request = request_preserves_rows(&self.request);
         if self.experimental_metadata_aggr && self.request.metadata_aggr_hint {
-            input.exact_num_rows = aggr::prepare(&input, &self.request).await;
+            input.exact_num_rows = aggr::prepare(&input, &self.request, &self.version.ssts).await;
         }
         Ok(input)
     }

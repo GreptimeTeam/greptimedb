@@ -35,15 +35,23 @@ use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
 use store_api::storage::ScanRequest;
 
+use crate::cache::CacheStrategy;
 use crate::read::scan_region::aggr::overlap::{Extent, find_overlaps};
 use crate::read::scan_region::{ScanInput, request_preserves_rows};
 use crate::sst::file::FileHandle;
-use crate::sst::parquet::metadata::{DEDUPED_SST_KEY, extract_primary_key_range, has_only_puts};
+use crate::sst::parquet::metadata::{
+    DEDUPED_SST_KEY, extract_primary_key_range, extract_time_range, has_only_puts,
+};
+use crate::sst::version::SstVersion;
 
 /// Returns the exact number of rows the scan yields, or `None` if it cannot
 /// be proven. Non-append candidates use cached Parquet footers to prove
 /// file-local uniqueness and the absence of deletes.
-pub(crate) async fn prepare(input: &ScanInput, request: &ScanRequest) -> Option<usize> {
+pub(crate) async fn prepare(
+    input: &ScanInput,
+    request: &ScanRequest,
+    ssts: &SstVersion,
+) -> Option<usize> {
     if !input.memtables.is_empty() {
         return None;
     }
@@ -51,7 +59,11 @@ pub(crate) async fn prepare(input: &ScanInput, request: &ScanRequest) -> Option<
     if !classification.remaining.is_empty() {
         return None;
     }
-    let evidence = read_file_evidence(input, &classification).await?;
+    let evidence = if input.append_mode && request.filters.is_empty() {
+        vec![true; classification.exact.len()]
+    } else {
+        read_file_evidence(input, &classification, ssts).await?
+    };
     resolve(input, classification, &evidence)
 }
 
@@ -66,79 +78,82 @@ fn resolve(
         .then_some(classification.exact_rows)
 }
 
-/// Returns whether each candidate yields all of its physical rows once.
-/// A stale key range invalidates the classification, including overlap proofs
-/// that exclude a residual file based on its keys.
+/// Validates the bounds used by classification before proving the visible row
+/// count of each candidate. A stale or unknown bound may also invalidate the
+/// exclusion of a pruned file or the disjointness of a residual file.
 async fn read_file_evidence(
     input: &ScanInput,
     classification: &Classification,
+    ssts: &SstVersion,
 ) -> Option<Vec<bool>> {
-    if classification.exact.is_empty() || (input.append_mode && !classification.key_filter) {
-        return Some(vec![true; classification.exact.len()]);
-    }
-    let append_mode = input.append_mode;
-    let check_overlap_keys =
-        !append_mode && classification.exact.len() + classification.remaining.len() > 1;
-    let check_keys = classification.key_filter || check_overlap_keys;
-
-    // The stream owns its inputs and creates readers only as buffer slots
-    // become available.
-    let mut files: Vec<_> = classification
-        .exact
+    let check_overlap = !input.append_mode
+        && !classification.exact.is_empty()
+        && classification.exact.len() + classification.remaining.len() > 1;
+    let candidates = classification.exact.iter().map(|&index| {
+        (
+            &input.files[index],
+            !input.append_mode,
+            classification.key_filter || check_overlap,
+        )
+    });
+    let residual = classification
+        .remaining
         .iter()
-        .map(|&index| (input.files[index].clone(), !append_mode))
-        .collect();
-    if check_overlap_keys && !classification.remaining.is_empty() {
-        files.extend(
-            classification
-                .remaining_with_overlapping_times(input)
-                .map(|file| (file.clone(), false)),
-        );
-    }
+        .filter(|_| check_overlap)
+        .map(|&index| (&input.files[index], false, true));
+    let time_pruned = ssts.levels().iter().flat_map(|level| {
+        input
+            .time_pruned_files
+            .iter()
+            .filter_map(move |id| level.files.get(id))
+            .map(|file| (file, false, false))
+    });
 
     let access_layer = input.access_layer.clone();
-    let cache = input.cache_strategy.clone();
-    let region_metadata = input.region_metadata().clone();
-    let reads = futures::stream::iter(files).map(
-        move |(file, check_rows)| -> BoxFuture<'static, Result<bool, ()>> {
+    // The on-disk write cache can survive offline replacement of the same
+    // file ID. This proof needs metadata from the current object.
+    let cache = if input.cache_strategy.write_cache().is_some() {
+        CacheStrategy::Disabled
+    } else {
+        input.cache_strategy.clone()
+    };
+    let time_index_id = input.region_metadata().time_index_column().column_id;
+    // Readers are created only as buffer slots become available.
+    let reads = futures::stream::iter(candidates.chain(residual).chain(time_pruned)).map(
+        move |(file, check_rows, check_keys)| -> BoxFuture<'static, Result<bool, ()>> {
             let key_range = if check_keys {
                 file.raw_primary_key_range()
             } else {
                 None
             };
-            if !check_rows && key_range.is_none() {
-                return std::future::ready(Ok(true)).boxed();
-            }
             let reader = access_layer.read_sst(file.clone()).cache(cache.clone());
-            let region_metadata = region_metadata.clone();
+            let file_id = file.file_id();
+            let (start, end) = file.time_range();
+            let num_rows = file.num_rows();
             async move {
-                match reader.read_statistics().await {
-                    Ok(metadata) => {
-                        // Offline replacement can keep the old manifest's bounds
-                        // even when the footer describes different primary keys.
-                        if let Some(range) = key_range
-                            && extract_primary_key_range(&metadata, &region_metadata) != Some(range)
-                        {
-                            debug!(
-                                "Metadata count could not verify key bounds of {}",
-                                file.file_id()
-                            );
-                            return Err(());
-                        }
-                        Ok(!check_rows || footer_proves_visible_rows(&metadata, file.num_rows()))
-                    }
-                    Err(e) => {
-                        debug!(
-                            "Metadata count falls back to scanning file {}: {e:?}",
-                            file.file_id()
-                        );
-                        if key_range.is_some() {
-                            Err(())
-                        } else {
-                            Ok(false)
-                        }
-                    }
+                let sst = reader.read_statistics().await.map_err(|e| {
+                    debug!("Metadata count could not read footer of {file_id}: {e:?}");
+                })?;
+                let metadata = sst.parquet_metadata();
+                let region_metadata = sst.region_metadata();
+                let time_index = region_metadata.time_index_column();
+                let time_matches = time_index.column_id == time_index_id
+                    && extract_time_range(&metadata, time_index).is_some_and(|(min, max)| {
+                        start.unit() == min.unit()
+                            && end.unit() == max.unit()
+                            && (start, end) == (min, max)
+                    });
+                if !time_matches {
+                    debug!("Metadata count could not verify time bounds of {file_id}");
+                    return Err(());
                 }
+                if let Some(range) = key_range
+                    && extract_primary_key_range(&metadata, &region_metadata) != Some(range)
+                {
+                    debug!("Metadata count could not verify key bounds of {file_id}");
+                    return Err(());
+                }
+                Ok(!check_rows || footer_proves_visible_rows(&metadata, num_rows))
             }
             .boxed()
         },
@@ -185,31 +200,6 @@ struct Classification {
 }
 
 impl Classification {
-    /// Residual files whose key bounds may affect the disjointness proof.
-    fn remaining_with_overlapping_times<'a>(
-        &'a self,
-        input: &'a ScanInput,
-    ) -> impl Iterator<Item = &'a FileHandle> {
-        let mut times: Vec<_> = self
-            .exact
-            .iter()
-            .map(|&i| input.files[i].time_range())
-            .collect();
-        times.sort_unstable_by_key(|&(start, _)| start);
-        // Prefix maxima keep the search correct when time ranges are nested.
-        for i in 1..times.len() {
-            times[i].1 = times[i].1.max(times[i - 1].1);
-        }
-        self.remaining
-            .iter()
-            .map(|&i| &input.files[i])
-            .filter(move |file| {
-                let (start, end) = file.time_range();
-                let n = times.partition_point(|&(candidate_start, _)| candidate_start <= end);
-                n > 0 && times[n - 1].1 >= start
-            })
-    }
-
     /// Moves the exact files without proof to `remaining`.
     fn retain_exact(&mut self, input: &ScanInput, proven: &[bool]) {
         debug_assert_eq!(self.exact.len(), proven.len());
