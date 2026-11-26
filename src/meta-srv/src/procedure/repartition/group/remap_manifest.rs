@@ -121,6 +121,7 @@ impl RemapManifest {
             input_regions: source_regions.iter().map(|r| r.region_id()).collect(),
             region_mapping: region_mapping.clone(),
             new_partition_exprs,
+            validate_only: false,
         })
     }
 

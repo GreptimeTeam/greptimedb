@@ -1344,9 +1344,12 @@ impl SyncRegionFromResponse {
 }
 
 /// Request to remap manifests from old regions to new regions.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RemapManifestsRequest {
     /// The [`RegionId`] of a staging region used to obtain table directory and storage configuration for the remap operation.
+    ///
+    /// For a [`Self::validate_only`] request this is the region the check reads, which is an
+    /// ordinary (not staging) region.
     pub region_id: RegionId,
     /// Regions to remap manifests from.
     pub input_regions: Vec<RegionId>,
@@ -1354,6 +1357,13 @@ pub struct RemapManifestsRequest {
     pub region_mapping: HashMap<RegionId, Vec<RegionId>>,
     /// New partition expressions for the new regions.
     pub new_partition_exprs: HashMap<RegionId, String>,
+    /// Only verify that the request would be accepted, without remapping anything.
+    ///
+    /// A validate-only request reads the persisted manifest of [`Self::region_id`] and reports
+    /// whether the region holds a file it did not create itself; it does not require staging, does
+    /// not write and returns no manifest paths. `false` (the [`Default`]) keeps the ordinary
+    /// remapping behaviour, so an older caller is unaffected.
+    pub validate_only: bool,
 }
 
 /// Response to remap manifests from old regions to new regions.

@@ -456,6 +456,7 @@ async fn test_staging_write_partition_expr_version_with_format(flat_format: bool
 
     let result = engine
         .remap_manifests(RemapManifestsRequest {
+            validate_only: false,
             region_id,
             input_regions: vec![region_id],
             region_mapping: [(region_id, vec![region_id])].into_iter().collect(),
@@ -2695,6 +2696,7 @@ async fn test_apply_staging_manifest_revalidates_after_close_during_read() {
         let partition_expr = float_range_expr("field_0", 0., 100.).as_json_str().unwrap();
         let manifests = engine
             .remap_manifests(RemapManifestsRequest {
+                validate_only: false,
                 region_id,
                 input_regions: vec![region_id],
                 region_mapping: [(region_id, vec![region_id])].into_iter().collect(),

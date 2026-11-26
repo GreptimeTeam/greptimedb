@@ -44,6 +44,10 @@ pub struct Collect {
     pub succeeded_procedures: Vec<ProcedureMeta>,
     /// Sub-procedures that have failed.
     pub failed_procedures: Vec<ProcedureMeta>,
+    /// The errors the failed sub-procedures reported, so that a caller of the parent procedure
+    /// learns why a group failed - for instance which region holds a file it did not create.
+    #[serde(default)]
+    pub failed_procedure_errors: Vec<String>,
     /// Sub-procedures whose state could not be determined.
     pub unknown_procedures: Vec<ProcedureMeta>,
 }
@@ -54,6 +58,7 @@ impl Collect {
             inflight_procedures,
             succeeded_procedures: Vec::new(),
             failed_procedures: Vec::new(),
+            failed_procedure_errors: Vec::new(),
             unknown_procedures: Vec::new(),
         }
     }
@@ -90,6 +95,8 @@ impl State for Collect {
                 Err(e) => {
                     error!(e; "failed to wait for repartition subprocedure, procedure_id: {}, group_id: {}", procedure_id, group_id);
                     self.failed_procedures.push(*procedure_meta);
+                    self.failed_procedure_errors
+                        .push(format!("group {group_id}: {e}"));
                 }
             }
         }
@@ -111,8 +118,11 @@ impl State for Collect {
                 .extend(self.unknown_procedures.iter());
             return crate::error::UnexpectedSnafu {
                 violated: format!(
-                    "Repartition groups failed or became unknown, table_id: {}, failed: {}, unknown: {}",
-                    table_id, failed, unknown
+                    "Repartition groups failed or became unknown, table_id: {}, failed: {}, unknown: {}{}",
+                    table_id,
+                    failed,
+                    unknown,
+                    describe_failed_groups(&self.failed_procedure_errors)
                 ),
             }
             .fail();
@@ -128,6 +138,24 @@ impl State for Collect {
     fn as_any(&self) -> &dyn Any {
         self
     }
+}
+
+/// Appends the errors of the failed groups, bounded so an error message stays readable.
+fn describe_failed_groups(errors: &[String]) -> String {
+    const MAX_REPORTED: usize = 4;
+    if errors.is_empty() {
+        return String::new();
+    }
+    let mut details = errors
+        .iter()
+        .take(MAX_REPORTED)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("; ");
+    if errors.len() > MAX_REPORTED {
+        details.push_str(&format!("; and {} more", errors.len() - MAX_REPORTED));
+    }
+    format!(": {details}")
 }
 
 #[cfg(test)]
@@ -204,6 +232,7 @@ mod tests {
             inflight_procedures: vec![],
             succeeded_procedures: vec![],
             failed_procedures: vec![],
+            failed_procedure_errors: vec![],
             unknown_procedures: vec![ProcedureMeta {
                 plan_index: 0,
                 group_id: uuid::Uuid::new_v4(),
@@ -256,6 +285,7 @@ mod tests {
             }],
             succeeded_procedures: vec![],
             failed_procedures: vec![],
+            failed_procedure_errors: vec![],
             unknown_procedures: vec![],
         };
 
@@ -264,5 +294,11 @@ mod tests {
         assert_eq!(state.failed_procedures.len(), 1);
         assert_eq!(state.unknown_procedures.len(), 0);
         assert!(!err.is_retryable());
+        // The reason the group failed is reported, not only the count.
+        assert_eq!(state.failed_procedure_errors.len(), 1);
+        assert!(
+            err.to_string().contains(&state.failed_procedure_errors[0]),
+            "{err}"
+        );
     }
 }
