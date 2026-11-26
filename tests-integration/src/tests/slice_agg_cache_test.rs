@@ -251,8 +251,10 @@ async fn test_slice_agg_cache_matches_uncached_results() {
 
     // The rewritten shapes must hit the cache when repeated, otherwise the comparisons
     // below prove nothing. A plan with an added key is rewritten from its second run.
+    // Neither bound falls on a slice boundary of the widths these plans get (15 minutes
+    // to 1 hour), so each window has two partial slices.
     let (start, end) = (
-        BASE_MS + 30 * MINUTE_MS,
+        BASE_MS + 37 * MINUTE_MS,
         BASE_MS + 7 * HOUR_MS + 5 * MINUTE_MS,
     );
     for (sql, plan) in queries(start, end) {

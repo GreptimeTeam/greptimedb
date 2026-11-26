@@ -166,6 +166,11 @@ pub struct QueryOptions {
     /// plan whose states exceed it is not cached until the idle timeout passes. Default: 1/4
     /// of [Self::experimental_slice_agg_cache_size], so one plan cannot fill the cache.
     pub experimental_slice_agg_cache_max_collect_size: Option<ReadableSize>,
+    /// Experimental: slice width for every cached aggregation. If not set, the width follows
+    /// the window span: 5 minutes from 1 hour, 15 minutes from 6 hours and 30 minutes from 3
+    /// days; windows shorter than 1 hour are not cached.
+    #[serde(with = "humantime_serde")]
+    pub experimental_slice_agg_cache_slice_width: Option<Duration>,
     /// Experimental: slice aggregate cache entries not read for this long are dropped.
     /// Default: `1h`.
     #[serde(with = "humantime_serde")]
@@ -193,6 +198,7 @@ impl Default for QueryOptions {
                     std::cmp::min(memory / 16, ReadableSize::mb(512))
                 }),
             experimental_slice_agg_cache_max_collect_size: None,
+            experimental_slice_agg_cache_slice_width: None,
             experimental_slice_agg_cache_idle_timeout: Duration::from_secs(3600),
         }
     }

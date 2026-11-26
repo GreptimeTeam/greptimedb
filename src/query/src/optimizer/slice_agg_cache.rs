@@ -76,7 +76,26 @@ use crate::metrics::{
 };
 use crate::options::{QueryOptions, SliceAggCacheExtension};
 
-const SLICE_SECONDS: i64 = 3600;
+const MINUTE_NANOS: i64 = 60_000_000_000;
+const HOUR_NANOS: i64 = 60 * MINUTE_NANOS;
+/// Slice widths by the shortest window span they apply to. On sliding dashboard windows
+/// with an unflushed head, these widths were the fastest of 1m to 6h for windows of 1h,
+/// 6h, 24h and 7d. Shorter windows gained nothing, as most of their rows are unflushed.
+const WIDTH_TIERS: [(i64, i64); 3] = [
+    (72 * HOUR_NANOS, 30 * MINUTE_NANOS),
+    (6 * HOUR_NANOS, 15 * MINUTE_NANOS),
+    (HOUR_NANOS, 5 * MINUTE_NANOS),
+];
+/// Wider slices to try when the tier width is not a multiple of a bucket's stride.
+const WIDER: [i64; 7] = [
+    15 * MINUTE_NANOS,
+    30 * MINUTE_NANOS,
+    HOUR_NANOS,
+    2 * HOUR_NANOS,
+    6 * HOUR_NANOS,
+    12 * HOUR_NANOS,
+    24 * HOUR_NANOS,
+];
 const NANOS_PER_DAY: i64 = 86_400_000_000_000;
 const MAX_SLICES: i64 = 10_000;
 const SLICE_COLUMN: &str = "__slice_start";
@@ -127,6 +146,8 @@ pub(crate) struct SliceCacheStore {
     seen: Cache<PlanDigest, ()>,
     /// An aggregation stops collecting states for the cache once they exceed this size.
     max_collect_bytes: usize,
+    /// Slice width in nanoseconds for every plan, instead of one chosen by window span.
+    fixed_width: Option<i64>,
     /// The size of `entries` last added to [SLICE_AGG_CACHE_BYTES], which sums the
     /// caches of all engines in the process.
     reported_bytes: AtomicU64,
@@ -162,6 +183,15 @@ impl SliceCacheStore {
                 .experimental_slice_agg_cache_max_collect_size
                 .unwrap_or(options.experimental_slice_agg_cache_size / 4)
                 .as_bytes() as usize,
+            fixed_width: options.experimental_slice_agg_cache_slice_width.and_then(|width| {
+                let nanos = i64::try_from(width.as_nanos())
+                    .ok()
+                    .filter(|nanos| *nanos > 0);
+                if nanos.is_none() {
+                    warn!("Ignoring slice aggregate cache slice width {width:?}, choosing it by window span");
+                }
+                nanos
+            }),
             reported_bytes: AtomicU64::new(0),
         }
     }
@@ -403,18 +433,51 @@ fn rewrite(
     let Some((start, end, implied)) = slicing_range(&request.filters, &ts_name, ts_unit) else {
         return skip("no_time_range");
     };
-    let Some(width) = Timestamp::new_second(SLICE_SECONDS)
-        .convert_to(ts_unit)
-        .map(|t| t.value())
-    else {
-        return Ok(None);
+    let Ok(scan_ts) = scan.schema().index_of(&ts_name) else {
+        return skip("unsupported_plan");
     };
-    // Rounding the earliest timestamps down to the slice width can underflow.
-    if end
+    let Some((input, input_ts)) = carry_scan_column(agg.input(), scan_ts)? else {
+        return skip("unsupported_plan");
+    };
+    // A group key that falls in one slice per group gives the slice of each group, so the
+    // aggregation stays as planned. An extra key column doubles the cost of grouping
+    // even when it adds no groups.
+    let bucket = if Arc::ptr_eq(&input, agg.input()) {
+        agg.group_expr()
+            .expr()
+            .iter()
+            .enumerate()
+            .find_map(|(index, (expr, _))| {
+                bucket_within_slice(expr, input_ts, ts_unit, (start, end))
+                    .map(|(scale, stride)| (index, scale, stride))
+            })
+    } else {
+        None
+    };
+    let factor = ts_unit.factor() as i64;
+    let Some(span) = end
         .checked_sub(start)
-        .is_none_or(|span| span / width > MAX_SLICES)
-        || start.div_euclid(width).checked_mul(width).is_none()
-    {
+        .and_then(|span| span.checked_mul(factor))
+    else {
+        return skip("too_many_slices");
+    };
+    let Some((width, fits_bucket)) =
+        slice_width(span, bucket.map(|(_, _, stride)| stride), store.fixed_width)
+    else {
+        return skip(if span < HOUR_NANOS {
+            "short_window"
+        } else {
+            "too_many_slices"
+        });
+    };
+    let bucket = bucket.filter(|_| fits_bucket);
+    // Only a fixed width can be finer than the time index unit.
+    if width % factor != 0 {
+        return skip("slice_width");
+    }
+    let width = width / factor;
+    // Rounding the earliest timestamps down to the slice width can underflow.
+    if (end - start) / width > MAX_SLICES || start.div_euclid(width).checked_mul(width).is_none() {
         return skip("too_many_slices");
     }
     let mut slices = Vec::new();
@@ -441,29 +504,8 @@ fn rewrite(
     if store.oversized.contains_key(&identity) {
         return skip("oversized");
     }
-    let Ok(scan_ts) = scan.schema().index_of(&ts_name) else {
-        return skip("unsupported_plan");
-    };
-    let Some((input, input_ts)) = carry_scan_column(agg.input(), scan_ts)? else {
-        return skip("unsupported_plan");
-    };
-    // A group key that falls in one slice per group gives the slice of each group, so the
-    // aggregation stays as planned. An extra key column doubles the cost of grouping
-    // even when it adds no groups.
-    let bucket = if Arc::ptr_eq(&input, agg.input()) {
-        agg.group_expr()
-            .expr()
-            .iter()
-            .enumerate()
-            .find_map(|(index, (expr, _))| {
-                bucket_within_slice(expr, input_ts, ts_unit, (start, end))
-                    .map(|scale| (index, scale))
-            })
-    } else {
-        None
-    };
     let (partial, slice_column) = match bucket {
-        Some((index, scale)) => (
+        Some((index, scale, _)) => (
             node.clone(),
             SliceColumn {
                 index,
@@ -537,23 +579,25 @@ fn skip(reason: &str) -> Result<Option<Arc<dyn ExecutionPlan>>> {
     Ok(None)
 }
 
-/// If every group of `expr` lies within one slice, returns how many units of `expr` make
-/// one unit of the time index. That holds for the time index itself and for `date_bin`
-/// from the epoch whose stride divides the slice width and is a whole number of time
-/// units. An interval given as a string makes `date_bin` cast the time index to
-/// nanoseconds; with an origin, `date_bin` is not accepted.
+/// If `expr` buckets the time index, returns how many units of `expr` make one unit of
+/// the time index and the bucket stride in nanoseconds; every group then lies within one
+/// slice whose width is a multiple of the stride. That holds for the time index itself and
+/// for `date_bin` from the epoch whose stride is a whole number of time units. An interval
+/// given as a string makes `date_bin` cast the time index to nanoseconds; with an origin,
+/// `date_bin` is not accepted.
 fn bucket_within_slice(
     expr: &Arc<dyn PhysicalExpr>,
     ts_index: usize,
     ts_unit: TimeUnit,
     (start, end): (i64, i64),
-) -> Option<i64> {
+) -> Option<(i64, i64)> {
     let is_ts = |e: &Arc<dyn PhysicalExpr>| {
         e.downcast_ref::<Column>()
             .is_some_and(|c| c.index() == ts_index)
     };
+    let factor = ts_unit.factor() as i64;
     if is_ts(expr) {
-        return Some(1);
+        return Some((1, factor));
     }
     let func = expr.downcast_ref::<ScalarFunctionExpr>()?;
     let args = func.args();
@@ -585,21 +629,42 @@ fn bucket_within_slice(
     };
     // `date_bin` bins in nanoseconds and returns null for a timestamp whose nanoseconds or
     // bin overflow i64, so every row in `[start, end)` must convert and round down.
-    let factor = ts_unit.factor() as i64;
     let in_range = start
         .checked_mul(factor)
         .zip(stride)
         .and_then(|(start, stride)| start.checked_sub(stride))
         .is_some()
         && (end - 1).checked_mul(factor).is_some();
-    stride
-        .is_some_and(|stride| {
-            in_range
-                && stride > 0
-                && (SLICE_SECONDS * 1_000_000_000) % stride == 0
-                && stride % factor == 0
-        })
-        .then_some(scale)
+    let stride = stride.filter(|stride| in_range && *stride > 0 && stride % factor == 0)?;
+    Some((scale, stride))
+}
+
+/// Chooses the slice width in nanoseconds for a window of `span` nanoseconds, and whether
+/// it is a multiple of `stride`, the stride of a bucket the aggregation groups by. Returns
+/// `None` for windows too short to gain from caching or too long for any width.
+fn slice_width(span: i64, stride: Option<i64>, fixed: Option<i64>) -> Option<(i64, bool)> {
+    let fits = |width: i64| stride.is_some_and(|stride| width % stride == 0);
+    if let Some(width) = fixed {
+        return Some((width, fits(width)));
+    }
+    let tier = WIDTH_TIERS
+        .iter()
+        .find(|(min_span, _)| span >= *min_span)
+        .map(|(_, width)| *width)?;
+    // Windows too long for `MAX_SLICES` tier slices take the first wider width that fits.
+    let width = std::iter::once(tier)
+        .chain(WIDER.into_iter().filter(|wider| *wider > tier))
+        .find(|width| span / width <= MAX_SLICES)?;
+    if fits(width) {
+        return Some((width, true));
+    }
+    // A wider slice still keeps the bucket path while the window holds a few of them.
+    Some(
+        WIDER
+            .iter()
+            .find(|wider| **wider > width && **wider <= span / 4 && fits(**wider))
+            .map_or((width, false), |wider| (*wider, true)),
+    )
 }
 
 /// The expressions the aggregation and the operators between it and the scan evaluate.
@@ -1348,6 +1413,40 @@ mod tests {
     fn batch() -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, false)]));
         RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![1; 1024]))]).unwrap()
+    }
+
+    #[test]
+    fn test_slice_width() {
+        const M: i64 = MINUTE_NANOS;
+        const H: i64 = HOUR_NANOS;
+        for (span, stride, fixed, expected) in [
+            // Too short to gain, unless the width is fixed.
+            (30 * M, None, None, None),
+            (30 * M, Some(M), Some(5 * M), Some((5 * M, true))),
+            // Tiers by span, keeping the bucket path for strides that divide them.
+            (H, Some(15_000_000_000), None, Some((5 * M, true))),
+            (6 * H, Some(20_000_000_000), None, Some((15 * M, true))),
+            (24 * H, None, None, Some((15 * M, false))),
+            (7 * 24 * H, Some(10 * M), None, Some((30 * M, true))),
+            // A window too long for 10,000 slices of its tier gets wider slices.
+            (365 * 24 * H, None, None, Some((H, false))),
+            (365 * 24 * H, Some(24 * H), None, Some((24 * H, true))),
+            // A stride that does not divide the tier widens the slice while the window holds
+            // at least four of them.
+            (24 * H, Some(10 * M), None, Some((30 * M, true))),
+            (24 * H, Some(20 * M), None, Some((H, true))),
+            (2 * H, Some(20 * M), None, Some((5 * M, false))),
+            (24 * H, Some(25 * M), None, Some((15 * M, false))),
+            // A fixed width is used as given.
+            (24 * H, Some(10 * M), Some(H), Some((H, true))),
+            (24 * H, Some(25 * M), Some(H), Some((H, false))),
+        ] {
+            assert_eq!(
+                expected,
+                slice_width(span, stride, fixed),
+                "span={span} stride={stride:?} fixed={fixed:?}"
+            );
+        }
     }
 
     /// A memory pool that refuses the states stops caching for the execution without
