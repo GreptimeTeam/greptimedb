@@ -311,8 +311,14 @@ impl DistExtensionPlanner {
             partition_columns,
             all_regions,
         );
-        let logical_metric_table = physical_table_id != table_info.table_id()
-            && table_info.meta.engine == METRIC_ENGINE_NAME;
+        let partitioned_by_table_id = physical_table_id != table_info.table_id()
+            && table_info.meta.engine == METRIC_ENGINE_NAME
+            && table.partition_rules().is_some_and(|rules| {
+                rules
+                    .extra_phy_cols_not_in_logical_table
+                    .iter()
+                    .any(|name| name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
+            });
         let regions = 'pruning: {
             let partition_expressions = if partition_columns.is_empty() {
                 Vec::new()
@@ -326,7 +332,8 @@ impl DistExtensionPlanner {
                     })
             };
 
-            if partition_expressions.is_empty() && (!logical_metric_table || all_regions.len() == 1)
+            if partition_expressions.is_empty()
+                && (!partitioned_by_table_id || all_regions.len() == 1)
             {
                 break 'pruning all_regions;
             }
@@ -341,7 +348,7 @@ impl DistExtensionPlanner {
                 }
             };
 
-            let (mut regions, partitions) = if logical_metric_table {
+            let (mut regions, partitions) = if partitioned_by_table_id {
                 let Some(candidates) =
                     simplify_metric_partitions(table_info.table_id(), partitions)
                 else {
@@ -758,7 +765,9 @@ mod tests {
     use session::ReadPreference;
     use store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME;
     use store_api::storage::RegionId;
+    use table::dist_table::DistTable;
     use table::metadata::{TableInfo, TableInfoBuilder, TableMeta, TableType};
+    use table::table::PartitionRules;
     use table::table::adapter::DfTableProviderAdapter;
     use table::table_name::TableName;
     use table::test_util::EmptyTable;
@@ -875,7 +884,23 @@ mod tests {
             &["host", "rack", DATA_SCHEMA_TABLE_ID_COLUMN_NAME],
             physical_partition_keys,
         );
-        let logical_table = EmptyTable::from_table_info(&logical_info);
+        let hidden_columns: Vec<_> = physical_info
+            .meta
+            .partition_column_names()
+            .filter(|name| {
+                logical_info
+                    .meta
+                    .schema
+                    .column_index_by_name(name)
+                    .is_none()
+            })
+            .cloned()
+            .collect();
+        let partition_rules = (!hidden_columns.is_empty()).then_some(PartitionRules {
+            extra_phy_cols_not_in_logical_table: hidden_columns,
+        });
+        let logical_table =
+            DistTable::table_partitioned(Arc::new(logical_info.clone()), partition_rules);
         let physical_table = EmptyTable::from_table_info(&physical_info);
         let catalog_manager = MemoryCatalogManager::with_default_setup();
         for table in [&logical_table, &physical_table] {
@@ -1014,6 +1039,29 @@ mod tests {
 
         let (regions, _) = planner.get_regions(&table_name, &plan).await.unwrap();
         assert_all_logical_regions(regions);
+    }
+
+    #[tokio::test]
+    async fn unfiltered_tag_partitioned_scan_keeps_all_regions() {
+        // The captured table still describes tag partitioning, even if a newer
+        // route already contains rules for __table_id.
+        let id = partition_col(DATA_SCHEMA_TABLE_ID_COLUMN_NAME);
+        let bound = Value::UInt32(LOGICAL_TABLE_ID);
+        for tag_keys in [vec![0], vec![0, 1]] {
+            let rules = vec![
+                Some(id.clone().lt(bound.clone())),
+                Some(id.clone().gt_eq(bound.clone())),
+            ];
+            let (planner, plan, table) = planner_and_plan(tag_keys, rules).await;
+            let (regions, _) = planner.get_regions(&table, plan.inputs()[0]).await.unwrap();
+            assert_eq!(
+                regions,
+                vec![
+                    RegionId::new(LOGICAL_TABLE_ID, 1),
+                    RegionId::new(LOGICAL_TABLE_ID, 2)
+                ]
+            );
+        }
     }
 
     #[tokio::test]
