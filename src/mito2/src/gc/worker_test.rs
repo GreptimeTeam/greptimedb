@@ -29,7 +29,7 @@ use object_store::layers::mock::{
 };
 use object_store::{Entry, ObjectStore, services};
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::{RegionEngine as _, RegionRole};
+use store_api::region_engine::{RegionEngine as _, RegionManifestInfo, RegionRole};
 use store_api::region_request::{RegionCompactRequest, RegionRequest};
 use store_api::storage::{FileId, FileRef, FileRefsManifest, IndexVersion, RegionId};
 
@@ -526,6 +526,14 @@ async fn test_gc_worker_basic_truncate() {
         "Manifest after truncate: {:?}",
         manifest
     );
+    // Truncate committed the files it removed, so the reported count is not zero yet.
+    let RegionManifestInfo::Mito {
+        file_removed_cnt, ..
+    } = region.region_statistic().manifest
+    else {
+        unreachable!("mito region reports a mito manifest");
+    };
+    assert!(file_removed_cnt > 0, "manifest: {manifest:?}");
     let version = manifest.manifest_version;
 
     let regions = BTreeMap::from([(region_id, Some(region.clone()))]);
@@ -544,6 +552,16 @@ async fn test_gc_worker_basic_truncate() {
 
     let manifest = region.manifest_ctx.manifest().await;
     assert!(manifest.removed_files.removed_files.is_empty() && manifest.files.is_empty());
+
+    // GC cleared the records without any new write, flush or manifest commit for this region, so
+    // the reported count must follow the manifest.
+    let RegionManifestInfo::Mito {
+        file_removed_cnt, ..
+    } = region.region_statistic().manifest
+    else {
+        unreachable!("mito region reports a mito manifest");
+    };
+    assert_eq!(0, file_removed_cnt, "manifest: {manifest:?}");
 }
 
 /// Truncate with file refs should not delete files

@@ -861,6 +861,9 @@ impl RegionManifestManager {
     pub fn clear_deleted_files(&mut self, deleted_files: Vec<RemovedFile>) {
         let mut manifest = (*self.manifest()).clone();
         manifest.removed_files.clear_deleted_files(deleted_files);
+        manifest
+            .removed_files
+            .update_file_removed_cnt_to_stats(&self.stats);
         self.set_manifest(Arc::new(manifest));
     }
 
