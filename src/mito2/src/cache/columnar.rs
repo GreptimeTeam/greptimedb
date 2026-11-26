@@ -19,11 +19,11 @@ use std::sync::Arc;
 
 use store_api::storage::FileId;
 
-use crate::cache::{CacheStrategy, ColumnarMetaCache};
+use crate::cache::{CacheStrategy, SstDecodedMetaCache, SstDecodedMetaKey, MetaValue};
 use crate::error::Result;
-use crate::metrics::{CACHE_BYTES, CACHE_HIT, CACHE_MISS};
+use crate::metrics::{CACHE_HIT, CACHE_MISS};
 
-const COLUMNAR_META: &str = "columnar_metadata";
+pub(super) const COLUMNAR_META: &str = "columnar_metadata";
 
 /// Identity of one immutable native-reader structure.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -36,23 +36,14 @@ pub(crate) struct DecodedKey {
 #[derive(Clone)]
 pub(crate) struct DecodedValue {
     value: Arc<dyn Any + Send + Sync>,
-    weight: u32,
+    pub(super) weight: u32,
 }
-impl DecodedValue {
-    pub(crate) fn label(&self) -> &'static str {
-        COLUMNAR_META
-    }
-}
-/// Weigher for the native-reader metadata tier; the value carries its own admitted weight.
-pub(crate) fn columnar_meta_weight(_key: &DecodedKey, value: &DecodedValue) -> u32 {
-    value.weight
-}
-
 /// Contains no artifact handle or live object-store reader. Loads run independently;
 /// admission uses a synchronous, atomic cache entry after loading.
 #[derive(Clone)]
 pub(crate) struct MetadataCache {
-    cache: ColumnarMetaCache,
+    cache: Arc<SstDecodedMetaCache>,
+    metrics: Arc<common_cache::metrics::CacheMetrics>,
     namespace: FileId,
 }
 impl CacheStrategy {
@@ -61,7 +52,8 @@ impl CacheStrategy {
             return None;
         };
         Some(MetadataCache {
-            cache: manager.columnar_meta_cache.clone()?,
+            cache: manager.sst_decoded_meta_cache.clone()?,
+            metrics: manager.columnar_load_metrics.clone()?,
             namespace,
         })
     }
@@ -84,44 +76,32 @@ pub(crate) async fn load<T: Send + Sync + 'static>(
         identity,
         representation: TypeId::of::<T>(),
     };
-    let get = || {
-        context
-            .cache
-            .get(&key)
-            .and_then(|value| value.value.downcast::<T>().ok())
-    };
-    if let Some(value) = get() {
+    let identity_size = key.identity.capacity();
+    let key = SstDecodedMetaKey::Native(key);
+    if let Some(MetaValue::Native(value)) = context.cache.get(&key).await {
+        let value = value.value.downcast::<T>().expect("type is part of the key");
         CACHE_HIT.with_label_values(&[COLUMNAR_META]).inc();
         return Ok(value);
     }
     CACHE_MISS.with_label_values(&[COLUMNAR_META]).inc();
-    static METRICS: std::sync::LazyLock<Arc<common_cache::metrics::CacheMetrics>> =
-        std::sync::LazyLock::new(|| crate::metrics::cache_loading_metrics(COLUMNAR_META));
-    let value = Arc::new(METRICS.loads.observe(loader).await?);
+    let value = Arc::new(context.metrics.loads.observe(loader).await?);
     // A caller may flush buffered output while its loader is Pending, then stop
     // polling it under downstream backpressure. Never hold a shared lock across
     // that await: another stream may need the lock to finish the current series.
-    let identity_size = key.identity.capacity();
     let retained = weight(&value).saturating_add(identity_size).saturating_add(
-        std::mem::size_of::<DecodedKey>()
-            + std::mem::size_of::<DecodedValue>()
+        std::mem::size_of::<SstDecodedMetaKey>()
+            + std::mem::size_of::<MetaValue>()
             + 2 * std::mem::size_of::<usize>(),
     );
     if let Ok(weight) = u32::try_from(retained)
-        && u64::from(weight) <= context.cache.policy().max_capacity().unwrap_or(0)
+        && u64::from(weight) <= context.cache.capacity()
     {
-        let entry = context.cache.entry(key).or_insert_with(|| DecodedValue {
+        let admitted = context.cache.get_or_insert(key, MetaValue::Native(DecodedValue {
             value: value.clone(),
             weight,
-        });
-        if entry.is_fresh() {
-            CACHE_BYTES
-                .with_label_values(&[COLUMNAR_META])
-                .add(i64::from(weight));
-        }
-        let admitted = entry.into_value().value;
-        if let Ok(admitted) = admitted.downcast::<T>() {
-            return Ok(admitted);
+        })).await;
+        if let MetaValue::Native(entry) = admitted {
+            return Ok(entry.value.downcast::<T>().expect("type is part of the key"));
         }
     }
     Ok(value)

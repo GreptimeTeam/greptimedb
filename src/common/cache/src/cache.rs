@@ -163,6 +163,11 @@ where
         result
     }
 
+    /// Atomically admits an already-loaded value or returns the resident one.
+    pub async fn get_or_insert(&self, key: K, value: V) -> V {
+        self.inner.entry(key).or_insert(value).await.into_value()
+    }
+
     /// Submits a completed value to the cache's admission and eviction policy.
     pub async fn insert(&self, key: K, value: V) {
         self.inner.insert(key, value).await;

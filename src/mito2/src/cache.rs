@@ -58,7 +58,7 @@ use store_api::storage::{ColumnId, ConcreteDataType, FileId, RegionId, TimeSerie
 pub use write_cache::{WriteCacheUploadStoreWrapper, WriteCacheUploadStoreWrapperRef};
 
 use crate::cache::cache_size::parquet_meta_size;
-use crate::cache::columnar::{DecodedKey, DecodedValue, columnar_meta_weight};
+use crate::cache::columnar::{COLUMNAR_META, DecodedKey, DecodedValue};
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::index::inverted_index::{InvertedIndexCache, InvertedIndexCacheRef};
 use crate::cache::parquet_page::ParquetPageCache;
@@ -774,11 +774,12 @@ impl CacheStrategy {
                     resolution,
                 })?;
                 let value = SstMetaLoadResult::new(metadata, cache_miss, resolution);
-                Ok::<_, SstMetaLoadError>(value)
+                Ok::<_, SstMetaLoadError>(MetaValue::Parquet(value))
             })
             .await;
         match result {
-            Ok(value) => (
+            Ok(MetaValue::Native(_)) => unreachable!(),
+            Ok(MetaValue::Parquet(value)) => (
                 Ok((value.metadata.clone(), value.cache_miss)),
                 value.resolution,
             ),
@@ -1115,11 +1116,9 @@ pub struct CacheManager {
     /// Skips output metadata prewarming for caches used only by the current compaction.
     disable_sst_meta_cache_on_write: bool,
     /// Cache for decoded SST metadata, used only as an acceleration tier.
-    sst_decoded_meta_cache: Option<SstDecodedMetaCache>,
-    /// Immutable native-reader (columnar series/samples) metadata tier. It cannot share
-    /// `sst_decoded_meta_cache` because that tier stores `SstMetaLoadResult` under a
-    /// page-index-aware key.
-    columnar_meta_cache: Option<ColumnarMetaCache>,
+    sst_decoded_meta_cache: Option<Arc<SstDecodedMetaCache>>,
+    /// Native readers load independently before sharing a completed entry.
+    columnar_load_metrics: Option<Arc<common_cache::metrics::CacheMetrics>>,
     /// Cache for vectors.
     vector_cache: Option<VectorCache>,
     /// Cache for SST byte ranges.
@@ -1291,7 +1290,7 @@ impl CacheManager {
         if let Some(cache) = &self.sst_decoded_meta_cache {
             let key = SstDecodedMetaKey::new(file_id, metadata.page_index_policy);
             let value = SstMetaLoadResult::new(metadata, false, SstMetaResolution::default());
-            cache.insert(key, value).await;
+            cache.insert(key, MetaValue::Parquet(value)).await;
         }
     }
 
@@ -1324,7 +1323,7 @@ impl CacheManager {
         ] {
             // The key describes the loading request, while compact metadata may
             // already contain stronger page-index guarantees.
-            if let Some(value) = cache.get(&SstDecodedMetaKey::new(file_id, policy)).await
+            if let Some(MetaValue::Parquet(value)) = cache.get(&SstDecodedMetaKey::new(file_id, policy)).await
                 && value.metadata.satisfies_page_index_policy(requested)
             {
                 return Some(value.metadata.clone());
@@ -1594,9 +1593,7 @@ pub fn selector_result_cache_hit() {
 #[derive(Default)]
 pub struct CacheManagerBuilder {
     sst_meta_cache_size: u64,
-    /// Reserves a quarter of `sst_meta_cache_size` for the native-reader metadata tier.
-    /// Only enabled when the columnar series-index format is configured; otherwise the
-    /// decoded tier keeps main's full half of the budget.
+    /// Allows native readers to use the decoded metadata reservation.
     enable_columnar_meta_cache: bool,
     disable_sst_meta_cache_on_write: bool,
     vector_cache_size: u64,
@@ -1619,7 +1616,7 @@ impl CacheManagerBuilder {
         self
     }
 
-    /// Enables the native-reader metadata tier, funded by a quarter of `sst_meta_cache_size`.
+    /// Enables native readers to use the decoded metadata reservation.
     pub fn enable_columnar_meta_cache(mut self, enable: bool) -> Self {
         self.enable_columnar_meta_cache = enable;
         self
@@ -1710,16 +1707,7 @@ impl CacheManagerBuilder {
         // decoded acceleration entries from evicting metadata that would require storage I/O to
         // recover. Both reservations together equal the configured limit.
         let compact_meta_capacity = self.sst_meta_cache_size.div_ceil(2);
-        // TODO(narthex-merge): native-reader metadata is a second acceleration tier that main's
-        // typed decoded cache cannot hold; it takes a quarter of the same budget so the total
-        // still matches the configured size. Re-unify the tiers once the loader accounting is
-        // shared, and move this to a dedicated config knob instead of splitting the reservation.
-        let columnar_meta_capacity = if self.enable_columnar_meta_cache {
-            self.sst_meta_cache_size / 4
-        } else {
-            0
-        };
-        let decoded_meta_capacity = self.sst_meta_cache_size / 2 - columnar_meta_capacity;
+        let decoded_meta_capacity = self.sst_meta_cache_size / 2;
         let sst_meta_cache = (compact_meta_capacity != 0).then(|| {
             Cache::builder()
                 .max_capacity(compact_meta_capacity)
@@ -1738,7 +1726,10 @@ impl CacheManagerBuilder {
             common_cache::Cache::new(
                 "sst_decoded_metadata",
                 decoded_meta_capacity,
-                decoded_meta_cache_weight,
+                |key, value| match value {
+                    MetaValue::Parquet(v) => decoded_meta_cache_weight(key, v),
+                    MetaValue::Native(v) => v.weight,
+                },
                 |_k, _v, cause| {
                     CACHE_EVICTION
                         .with_label_values(&[SST_META_DECODED_TYPE, cause.as_str()])
@@ -1748,19 +1739,8 @@ impl CacheManagerBuilder {
             .with_size_metric(CACHE_BYTES.bind(&[SST_META_DECODED_TYPE]))
             .with_metrics(crate::metrics::cache_loading_metrics(SST_META_DECODED_TYPE))
         });
-        let columnar_meta_cache = (columnar_meta_capacity != 0).then(|| {
-            Cache::builder()
-                .max_capacity(columnar_meta_capacity)
-                .weigher(columnar_meta_weight)
-                .eviction_listener(|k, v, cause| {
-                    let size = columnar_meta_weight(&k, &v);
-                    CACHE_BYTES.with_label_values(&[v.label()]).sub(size.into());
-                    CACHE_EVICTION
-                        .with_label_values(&[v.label(), removal_cause_str(cause)])
-                        .inc();
-                })
-                .build()
-        });
+        let columnar_load_metrics = (self.enable_columnar_meta_cache && decoded_meta_capacity > 0)
+            .then(|| crate::metrics::cache_loading_metrics(COLUMNAR_META));
         let vector_cache = (self.vector_cache_size != 0).then(|| {
             Cache::builder()
                 .max_capacity(self.vector_cache_size)
@@ -1817,8 +1797,8 @@ impl CacheManagerBuilder {
             sst_meta_cache,
             _sst_meta_size_registration: sst_meta_size_registration,
             disable_sst_meta_cache_on_write: self.disable_sst_meta_cache_on_write,
-            sst_decoded_meta_cache,
-            columnar_meta_cache,
+            sst_decoded_meta_cache: sst_decoded_meta_cache.map(Arc::new),
+            columnar_load_metrics,
             vector_cache,
             page_cache,
             write_cache: self.write_cache,
@@ -2020,14 +2000,14 @@ impl SstMetaLoadResult {
 
 /// Separates loads that require different page-index guarantees.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct SstDecodedMetaKey {
-    file: SstMetaKey,
-    policy: mem::Discriminant<PageIndexPolicy>,
+enum SstDecodedMetaKey {
+    Parquet { file: SstMetaKey, policy: mem::Discriminant<PageIndexPolicy> },
+    Native(DecodedKey),
 }
 
 impl SstDecodedMetaKey {
     fn new(file: RegionFileId, policy: PageIndexPolicy) -> Self {
-        Self {
+        Self::Parquet {
             file: SstMetaKey(file.region_id(), file.file_id()),
             policy: mem::discriminant(&policy),
         }
@@ -2037,9 +2017,14 @@ impl SstDecodedMetaKey {
 /// Maps (region id, file id) to compact SST metadata.
 type SstMetaCache = Cache<SstMetaKey, Arc<CompactSstMeta>>;
 /// Maps (region id, file id) to decoded SST metadata retained as an acceleration tier.
-type SstDecodedMetaCache = common_cache::Cache<SstDecodedMetaKey, Arc<SstMetaLoadResult>>;
-/// Maps native-reader metadata identity to validated immutable structures.
-pub(crate) type ColumnarMetaCache = Cache<DecodedKey, DecodedValue>;
+type SstDecodedMetaCache = common_cache::Cache<SstDecodedMetaKey, MetaValue>;
+
+#[derive(Clone)]
+enum MetaValue {
+    Parquet(Arc<SstMetaLoadResult>),
+    Native(DecodedValue),
+}
+
 /// Maps [Value] to a vector that holds this value repeatedly.
 ///
 /// e.g. `"hello" => ["hello", "hello", "hello"]`
@@ -2550,9 +2535,9 @@ mod tests {
             50,
             cache.sst_decoded_meta_cache.as_ref().unwrap().capacity()
         );
-        assert!(cache.columnar_meta_cache.is_none());
+        assert!(cache.columnar_load_metrics.is_none());
 
-        // Columnar format on: a quarter of the budget funds the native-reader tier.
+        // Both formats share the decoded reservation.
         let cache = CacheManager::builder()
             .sst_meta_cache_size(101)
             .enable_columnar_meta_cache(true)
@@ -2567,20 +2552,11 @@ mod tests {
                 .policy()
                 .max_capacity()
         );
-        // The acceleration half is split between the decoded and native-reader tiers.
         assert_eq!(
-            25,
+            50,
             cache.sst_decoded_meta_cache.as_ref().unwrap().capacity()
         );
-        assert_eq!(
-            Some(25),
-            cache
-                .columnar_meta_cache
-                .as_ref()
-                .unwrap()
-                .policy()
-                .max_capacity()
-        );
+        assert!(cache.columnar_load_metrics.is_some());
     }
 
     #[tokio::test]
