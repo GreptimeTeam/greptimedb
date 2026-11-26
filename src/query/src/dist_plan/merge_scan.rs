@@ -84,6 +84,17 @@ fn query_engine_state_from_task_context(context: &TaskContext) -> Option<Arc<Que
     context.session_config().get_extension()
 }
 
+/// A region whose `DoGet` has returned, waiting to be drained.
+struct OpenedRegion<'a> {
+    region_id: RegionId,
+    region_span: Span,
+    region_start: Instant,
+    stream: common_recordbatch::SendableRecordBatchStream,
+    advertised_schema: arrow_schema::SchemaRef,
+    do_get_cost: Duration,
+    _region_read_permit: Option<tokio::sync::SemaphorePermit<'a>>,
+}
+
 /// Returns a deterministic upper bound on rows emitted by the remote plan for
 /// one region.
 ///
@@ -697,6 +708,9 @@ impl MergeScanExec {
         let plan = self.plan.clone();
         let target_partition =
             Self::output_partition_count(self.regions.len(), self.target_partition);
+        // Caps the regions one partition keeps open, so a query keeps at most
+        // `target_partitions²` remote queries in flight however many regions it reads.
+        let max_regions_in_flight = self.target_partition.max(1);
         let remote_dyn_filter_enabled = remote_dyn_filter_enabled(&self.query_ctx)?;
         let captured_remote_dyn_filters = if remote_dyn_filter_enabled {
             self.captured_remote_dyn_filters()
@@ -719,6 +733,13 @@ impl MergeScanExec {
         let region_read_limiter = context
             .session_config()
             .get_extension::<RegionReadLimiter>();
+        // A region whose whole result fits in one batch costs at most that batch to open
+        // early, so its `DoGet` need not wait for the region before it to drain. A query-wide
+        // limiter keeps regions serial: a permit held by a region opened ahead could block a
+        // partition its consumer is waiting on.
+        let open_regions_ahead = region_read_limiter.is_none()
+            && remote_plan_row_bound(&self.plan)
+                .is_some_and(|rows| rows <= context.session_config().batch_size());
 
         let stream = Box::pin(stream!({
             let remote_dyn_filter_registry_lease = remote_dyn_filter_registry_lease;
@@ -736,113 +757,149 @@ impl MergeScanExec {
             let mut partition_ready_time: Option<Duration> = None;
             let mut partition_first_consume_time: Option<Duration> = None;
 
-            for region_id in regions
+            let partition_regions: Vec<_> = regions
                 .iter()
                 .skip(partition)
                 .step_by(target_partition)
                 .copied()
-            {
-                let region_span = tracing_context.attach(tracing::info_span!(
-                    parent: &Span::current(),
-                    "merge_scan_region",
-                    region_id = %region_id,
-                    partition = partition
-                ));
-                let region_start = Instant::now();
-                register_remote_dyn_filters_for_region(
-                    remote_dyn_filter_registry_lease.as_ref(),
-                    &captured_remote_dyn_filters,
-                );
-                let select_target_start = Instant::now();
-                let target = region_query_handler
-                    .select_target(read_preference, region_id)
-                    .instrument(region_span.clone())
-                    .await
-                    .map_err(|e| {
-                        MERGE_SCAN_ERRORS_TOTAL.inc();
-                        DataFusionError::External(Box::new(e))
-                    })?;
-                let select_target_cost = select_target_start.elapsed();
-                let mut subscriber_rollback =
-                    remote_dyn_filter_registry_lease.as_ref().map(|lease| {
+                .collect();
+            let regions_in_flight = if open_regions_ahead {
+                partition_regions.len().clamp(1, max_regions_in_flight)
+            } else {
+                1
+            };
+            let region_query_handler_ref = &region_query_handler;
+            let tracing_context_ref = &tracing_context;
+            let lease_ref = remote_dyn_filter_registry_lease.as_ref();
+            let captured_ref = &captured_remote_dyn_filters;
+            let query_ctx_ref = &query_ctx;
+            let dbname_ref = &dbname;
+            let plan_ref = &plan;
+            let remote_schema_ref = &remote_schema;
+            let region_read_limiter_ref = region_read_limiter.as_ref();
+            // `buffered` hands the regions out in order, so the partition's output keeps the
+            // region order. With more than one region in flight, the `DoGet`s of later regions
+            // are sent together with the first one and run remotely while it is drained.
+            let mut opened_regions = futures_util::stream::iter(partition_regions)
+                .map(|region_id| async move {
+                    let region_span = tracing_context_ref.attach(tracing::info_span!(
+                        parent: &Span::current(),
+                        "merge_scan_region",
+                        region_id = %region_id,
+                        partition = partition
+                    ));
+                    let region_start = Instant::now();
+                    register_remote_dyn_filters_for_region(lease_ref, captured_ref);
+                    let select_target_start = Instant::now();
+                    let target = region_query_handler_ref
+                        .select_target(read_preference, region_id)
+                        .instrument(region_span.clone())
+                        .await
+                        .map_err(|e| {
+                            MERGE_SCAN_ERRORS_TOTAL.inc();
+                            DataFusionError::External(Box::new(e))
+                        })?;
+                    let select_target_cost = select_target_start.elapsed();
+                    let mut subscriber_rollback = lease_ref.map(|lease| {
                         SubscriberRollbackGuard::new(
                             lease.registry(),
                             register_dyn_filter_subscribers_for_region(
                                 lease.registry(),
                                 region_id,
                                 target.clone(),
-                                &captured_remote_dyn_filters,
+                                captured_ref,
                             ),
                         )
                     });
-                let mut region_query_ctx = query_context_with_refreshed_initial_dyn_filter_regs(
-                    &query_ctx,
-                    region_id,
-                    &captured_remote_dyn_filters,
-                );
-                if live_analyze_metrics {
-                    let remote_query_id = region_query_ctx.remote_query_id().map(str::to_string);
-                    if let Some(remote_query_id) = remote_query_id {
-                        region_query_ctx.set_extension(
-                            SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY,
-                            remote_query_id,
+                    let mut region_query_ctx = query_context_with_refreshed_initial_dyn_filter_regs(
+                        query_ctx_ref,
+                        region_id,
+                        captured_ref,
+                    );
+                    if live_analyze_metrics {
+                        let remote_query_id =
+                            region_query_ctx.remote_query_id().map(str::to_string);
+                        if let Some(remote_query_id) = remote_query_id {
+                            region_query_ctx.set_extension(
+                                SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY,
+                                remote_query_id,
+                            );
+                        }
+                    }
+                    let request = QueryRequest {
+                        header: Some(RegionRequestHeader {
+                            tracing_context: tracing_context_ref.to_w3c(),
+                            dbname: dbname_ref.clone(),
+                            query_context: Some((&region_query_ctx).into()),
+                        }),
+                        region_id,
+                        plan: plan_ref.clone(),
+                    };
+                    if explain_verbose {
+                        common_telemetry::info!(
+                            "Merge scan one region, partition: {}, region_id: {}",
+                            partition,
+                            region_id
                         );
                     }
-                }
-                let request = QueryRequest {
-                    header: Some(RegionRequestHeader {
-                        tracing_context: tracing_context.to_w3c(),
-                        dbname: dbname.clone(),
-                        query_context: Some((&region_query_ctx).into()),
-                    }),
+
+                    // Hold the permit until this region's body is drained or dropped: the bound
+                    // counts reads in flight, whichever scan or partition started them.
+                    let region_read_permit = match region_read_limiter_ref {
+                        Some(limiter) => Some(limiter.acquire().await),
+                        None => None,
+                    };
+                    let do_get_start = Instant::now();
+                    let do_get_result = region_query_handler_ref
+                        .do_get(&target, request)
+                        .instrument(region_span.clone())
+                        .await;
+                    if do_get_result.is_err() {
+                        drop(subscriber_rollback.take());
+                    }
+                    let stream = do_get_result.map_err(|e| {
+                        MERGE_SCAN_ERRORS_TOTAL.inc();
+                        DataFusionError::External(Box::new(BoxedError::new(e)))
+                    })?;
+
+                    if let Some(subscriber_rollback) = subscriber_rollback.as_mut() {
+                        subscriber_rollback.disarm();
+                    }
+                    // Regions opened ahead are already running remotely, so they need the
+                    // fanout before the regions in front of them are drained.
+                    if let Some(lease) = lease_ref {
+                        lease.ensure_fanout_task(region_query_handler_ref.clone());
+                    }
+                    let advertised_schema = stream.schema().arrow_schema().clone();
+                    validate_remote_schema(
+                        remote_schema_ref.as_ref(),
+                        advertised_schema.as_ref(),
+                        "advertised remote stream",
+                    )
+                    .inspect_err(|_| record_merge_scan_schema_error())?;
+                    let do_get_cost = select_target_cost + do_get_start.elapsed();
+                    Ok::<_, DataFusionError>(OpenedRegion {
+                        region_id,
+                        region_span,
+                        region_start,
+                        stream,
+                        advertised_schema,
+                        do_get_cost,
+                        _region_read_permit: region_read_permit,
+                    })
+                })
+                .buffered(regions_in_flight);
+
+            while let Some(opened_region) = opened_regions.next().await {
+                let OpenedRegion {
                     region_id,
-                    plan: plan.clone(),
-                };
-                if explain_verbose {
-                    common_telemetry::info!(
-                        "Merge scan one region, partition: {}, region_id: {}",
-                        partition,
-                        region_id
-                    );
-                }
-
-                // Hold the permit until this region's body is drained or dropped: the bound
-                // counts reads in flight, whichever scan or partition started them.
-                let _region_read_permit = match region_read_limiter.as_ref() {
-                    Some(limiter) => Some(limiter.acquire().await),
-                    None => None,
-                };
-                let do_get_start = Instant::now();
-                let do_get_result = region_query_handler
-                    .do_get(&target, request)
-                    .instrument(region_span.clone())
-                    .await;
-                if do_get_result.is_err() {
-                    drop(subscriber_rollback.take());
-                }
-                let mut stream = do_get_result.map_err(|e| {
-                    MERGE_SCAN_ERRORS_TOTAL.inc();
-                    DataFusionError::External(Box::new(BoxedError::new(e)))
-                })?;
-
-                if let Some(subscriber_rollback) = subscriber_rollback.as_mut() {
-                    subscriber_rollback.disarm();
-                }
-                let mut advertised_schema = stream.schema().arrow_schema().clone();
-                validate_remote_schema(
-                    remote_schema.as_ref(),
-                    advertised_schema.as_ref(),
-                    "advertised remote stream",
-                )
-                .inspect_err(|_| record_merge_scan_schema_error())?;
-                let do_get_cost = select_target_cost + do_get_start.elapsed();
-
-                if let Some(remote_dyn_filter_registry_lease) =
-                    remote_dyn_filter_registry_lease.as_ref()
-                {
-                    remote_dyn_filter_registry_lease
-                        .ensure_fanout_task(region_query_handler.clone());
-                }
+                    region_span,
+                    region_start,
+                    mut stream,
+                    mut advertised_schema,
+                    do_get_cost,
+                    _region_read_permit,
+                } = opened_region?;
 
                 ready_timer.stop();
                 if partition_ready_time.is_none() {
@@ -2648,6 +2705,167 @@ mod tests {
             _unregister: api::v1::region::RemoteDynFilterUnregister,
         ) -> crate::error::Result<()> {
             unimplemented!("test only")
+        }
+    }
+
+    /// Wraps [TestRegionQueryHandler] and records how many regions were open at once: a
+    /// region counts from its `DoGet` until its stream is dropped.
+    #[derive(Default)]
+    struct OverlapProbeHandler {
+        inner: TestRegionQueryHandler,
+        open: Arc<AtomicUsize>,
+        max_open: Arc<AtomicUsize>,
+    }
+
+    struct OpenRegionGuard(Arc<AtomicUsize>);
+
+    impl Drop for OpenRegionGuard {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    struct ProbedStream {
+        inner: common_recordbatch::SendableRecordBatchStream,
+        _open: OpenRegionGuard,
+    }
+
+    impl Stream for ProbedStream {
+        type Item = common_recordbatch::error::Result<RecordBatch>;
+
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            self.inner.as_mut().poll_next(cx)
+        }
+    }
+
+    impl RecordBatchStream for ProbedStream {
+        fn schema(&self) -> Arc<Schema> {
+            self.inner.schema()
+        }
+
+        fn output_ordering(&self) -> Option<&[common_recordbatch::OrderOption]> {
+            None
+        }
+
+        fn metrics(&self) -> Option<RecordBatchMetrics> {
+            None
+        }
+    }
+
+    #[async_trait]
+    impl RegionQueryHandler for OverlapProbeHandler {
+        async fn select_target(
+            &self,
+            read_preference: ReadPreference,
+            region_id: RegionId,
+        ) -> crate::error::Result<crate::region_query::RegionQueryTarget> {
+            self.inner.select_target(read_preference, region_id).await
+        }
+
+        async fn do_get(
+            &self,
+            target: &crate::region_query::RegionQueryTarget,
+            request: common_query::request::QueryRequest,
+        ) -> crate::error::Result<common_recordbatch::SendableRecordBatchStream> {
+            let open = self.open.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_open.fetch_max(open, Ordering::SeqCst);
+            let guard = OpenRegionGuard(self.open.clone());
+            // The first region answers last, so only in-order delivery keeps the output order.
+            if request.region_id.region_number() == 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let inner = self.inner.do_get(target, request).await?;
+            Ok(Box::pin(ProbedStream {
+                inner,
+                _open: guard,
+            }))
+        }
+
+        async fn handle_remote_dyn_filter_update(
+            &self,
+            _target: &crate::region_query::RegionQueryTarget,
+            _query_id: String,
+            _update: api::v1::region::RemoteDynFilterUpdate,
+        ) -> crate::error::Result<()> {
+            unimplemented!("test only")
+        }
+
+        async fn handle_remote_dyn_filter_unregister(
+            &self,
+            _target: &crate::region_query::RegionQueryTarget,
+            _query_id: String,
+            _unregister: api::v1::region::RemoteDynFilterUnregister,
+        ) -> crate::error::Result<()> {
+            unimplemented!("test only")
+        }
+    }
+
+    #[tokio::test]
+    async fn merge_scan_opens_regions_ahead_only_for_bounded_results() {
+        // Six regions over two partitions: partition 0 reads regions 0, 2 and 4, and keeps at
+        // most `target_partitions` (2) of them open.
+        // (remote plan fetch, query-wide read limiter, regions open at once)
+        for (fetch, limiter, expected_max_open) in
+            [(Some(10), false, 2), (None, false, 1), (Some(10), true, 1)]
+        {
+            let regions: Vec<_> = (0..6).map(|number| RegionId::new(1024, number)).collect();
+            let responses = regions.iter().map(|region_id| {
+                let value = region_id.region_number() as i64;
+                let batch = record_batch(
+                    int64_schema(&["a", "b"]),
+                    vec![
+                        Arc::new(Int64Vector::from_slice([value])) as _,
+                        Arc::new(Int64Vector::from_slice([value])) as _,
+                    ],
+                );
+                (*region_id, batch)
+            });
+            let handler = Arc::new(OverlapProbeHandler {
+                inner: TestRegionQueryHandler::new(responses),
+                ..Default::default()
+            });
+            let plan = LogicalPlanBuilder::empty(true);
+            let plan = match fetch {
+                Some(fetch) => plan.limit(0, Some(fetch)).unwrap(),
+                None => plan,
+            }
+            .build()
+            .unwrap();
+            let exec = MergeScanExec::new(
+                &SessionStateBuilder::new().build(),
+                TableName::new("catalog", "schema", "table"),
+                regions,
+                plan,
+                &expected_int64_schema(),
+                handler.clone(),
+                QueryContext::arc(),
+                2,
+                None,
+                false,
+            )
+            .unwrap();
+
+            let mut session_config = datafusion::prelude::SessionConfig::new();
+            if limiter {
+                session_config = session_config.with_extension(Arc::new(RegionReadLimiter::new(4)));
+            }
+            let context = TaskContext::default().with_session_config(session_config);
+            let batches: Vec<DfRecordBatch> = exec
+                .execute(0, Arc::new(context))
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap();
+            // The partition reads its regions in their order either way.
+            for (batch, value) in batches.iter().zip([0, 2, 4]) {
+                assert_int64_batch(batch, (value, value));
+            }
+            assert_eq!(3, batches.len());
+            assert_eq!(
+                expected_max_open,
+                handler.max_open.load(Ordering::SeqCst),
+                "fetch {fetch:?}, limiter {limiter}"
+            );
         }
     }
 
