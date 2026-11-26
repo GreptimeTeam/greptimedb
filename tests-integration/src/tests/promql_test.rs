@@ -21,6 +21,7 @@ use api::v1::{
 };
 use common_base::Plugins;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_error::ext::ErrorExt;
 use common_query::prelude::{GREPTIME_TEMPORALITY_DELTA, OTLP_AGGREGATION_TEMPORALITY_LABEL};
 use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
 use common_query::{Output, OutputData};
@@ -13446,10 +13447,26 @@ async fn native_promql_answers_an_aliased_statement_in_the_existing_layout() {
          ('a', 'x', 0, 1), ('a', 'y', 0, 2), ('b', 'x', 0, 3), \
          ('a', 'x', 5000, 4), ('a', 'y', 5000, 5), ('b', 'x', 5000, 6); \
          CREATE TABLE sensor_readings (`value` DOUBLE, ts TIMESTAMP(3) TIME INDEX, sensor STRING, loc STRING, PRIMARY KEY (sensor, loc)); \
-         INSERT INTO sensor_readings VALUES (20, 0, 'test', 'A'), (30, 0, 'test', 'B'), (10, 0, 'other', 'A');",
+         INSERT INTO sensor_readings VALUES (20, 0, 'test', 'A'), (30, 0, 'test', 'B'), (10, 0, 'other', 'A'); \
+         CREATE TABLE alias_two (k STRING PRIMARY KEY, ts TIMESTAMP(3) TIME INDEX, a DOUBLE, b DOUBLE); \
+         INSERT INTO alias_two VALUES ('a', 0, 1, 2);",
         QueryContext::arc(),
     )
     .await;
+
+    // An alias names one value column, so a statement with two fails on both routes alike.
+    let sql = "TQL EVAL (0, 10, '5s') alias_two AS v";
+    let mut errors = Vec::new();
+    for enabled in [true, false] {
+        let output = instance
+            .do_query(sql, native_query_context(enabled, 4))
+            .await
+            .remove(0);
+        errors.push(output.map(|_| ()).unwrap_err().output_msg());
+    }
+    let [native, legacy] = <[String; 2]>::try_from(errors).unwrap();
+    assert_eq!(native, legacy);
+    assert!(native.contains("alias on multi-value result"), "{native}");
 
     for query in [
         r#"{__name__="alias_metric"} AS test_series"#,
@@ -13458,6 +13475,12 @@ async fn native_promql_answers_an_aliased_statement_in_the_existing_layout() {
         "sum by (l, k) (alias_metric) AS s",
         "2 * sum by (l, k) (alias_metric) AS s",
         "alias_metric * 2 AS doubled",
+        // The existing order is not a property of the root alone: `topk by(...)` keeps its input's
+        // order, `count_values` appends its label after the sorted `without` set, and a wrapper
+        // keeps the order of the aggregate it wraps.
+        "topk by (l) (1, alias_metric) AS t",
+        r#"count_values without (l) ("a", alias_metric) AS c"#,
+        "abs(sum by (l, k) (alias_metric)) AS s",
         // The two statements `flow_tql_avg` sinks into a table.
         "avg by(sensor) (sensor_readings) AS value",
         "(sum by(sensor) (sensor_readings) / count by(sensor) (sensor_readings)) AS value",
