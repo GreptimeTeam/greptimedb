@@ -274,6 +274,11 @@ async fn test_slice_agg_cache_matches_uncached_results() {
                 explain.contains("slice_start("),
                 "`{sql}`"
             );
+            // The window cuts the first and last slices short; they are never cached.
+            assert!(
+                explain.contains("slice_uncacheable: 2"),
+                "`{sql}`: {explain}"
+            );
         }
     }
 
