@@ -677,23 +677,20 @@ impl FloatHistogram {
         previous_ts: i64,
         current_ts: i64,
     ) -> bool {
-        if current_start == 0 || current_start >= current_ts || current_start < previous_ts {
+        if previous_start == current_start
+            || current_start == 0
+            || current_start >= current_ts
+            || current_start < previous_ts
+        {
             return false;
         }
         if current_start > previous_ts {
             return true;
         }
 
-        // The previous sample's own start timestamp witnesses a restart between it and the one
-        // before, which the current sample inherits. Requiring it to be at or before `previous_ts`
-        // keeps a start later than its own sample — which no sender can have observed — from being
-        // read as one.
-        //
-        // What this does NOT implement is the rule that two adjacent samples sharing the same
-        // non-zero start timestamp never restarted between them: here only the previous sample's
-        // start is compared with its own time, so equal starts are not excluded. The existing
-        // planner's `detect_start_timestamp_reset` has the same gap, so the two routes agree, which
-        // is what this route owes it; closing the gap is a change to both.
+        // The current start points at the previous sample: a reset for a delta series, but not for
+        // a cumulative one whose start is unknown, which is what an unset or invalid previous start
+        // (later than its own sample) says.
         previous_start <= previous_ts && previous_start != 0 && previous_start != previous_ts
     }
 
