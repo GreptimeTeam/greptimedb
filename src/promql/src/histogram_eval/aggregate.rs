@@ -19,7 +19,7 @@
 
 use datafusion::error::Result;
 
-use crate::histogram_eval::float_histogram::FloatHistogram;
+use crate::histogram_eval::float_histogram::{BucketLayout, EmptyBuckets, FloatHistogram};
 
 /// A native histogram aggregation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,11 +28,11 @@ pub(crate) enum HistogramAggregate {
     Avg,
 }
 
-/// The Kahan sum or the mean of `histograms` in order, without compaction; `None` when there is
-/// none or they mix exponential and custom buckets. Prometheus `sum_over_time` and
-/// `avg_over_time` run the same steps as the aggregations. Histograms are consumed one at a
-/// time, so the first error ends the fold. The result is derived, so it carries no start
-/// timestamp.
+/// The Kahan sum or the mean of `histograms` in order. A compact fold remembers represented
+/// zeros through `last_rebin` (zero for a uniform schema). `None` preserves the full layout.
+/// Returns `None` for an empty window or a mix of exponential and custom buckets. Prometheus
+/// `sum_over_time` and `avg_over_time` run the same steps as the aggregations. The first error
+/// ends the fold. The derived result carries no start timestamp.
 ///
 /// The flag reports whether any add had to reconcile two different custom-bucket sets, which is
 /// what Prometheus annotates with an info. It is carried out of the fold rather than recomputed:
@@ -40,91 +40,112 @@ pub(crate) enum HistogramAggregate {
 pub(crate) fn sum_or_avg(
     op: HistogramAggregate,
     histograms: impl IntoIterator<Item = Result<FloatHistogram>>,
+    last_rebin: Option<usize>,
 ) -> Result<(Option<FloatHistogram>, bool)> {
-    let mut value: Option<FloatHistogram> = None;
+    let mut histograms = histograms.into_iter();
+    let Some(first) = histograms.next() else {
+        return Ok((None, false));
+    };
+    let mut value = first?;
+    if last_rebin == Some(0) {
+        value.compact();
+    }
     let mut compensation: Option<FloatHistogram> = None;
-    let mut mean: Option<FloatHistogram> = None;
-    let mut count = 0.0;
+    let mut empty = EmptyBuckets::default();
+    let mut incremental_mean = false;
+    let mut count = 1.0;
     let mut custom_reconciled = false;
-    for h in histograms {
-        let h = h?;
-        count += 1.0;
-        let Some(current) = value.as_mut() else {
-            value = Some(h);
-            continue;
-        };
-        // Go drops the result with a warning for this addition error only; others propagate.
-        if current.uses_custom_buckets() != h.uses_custom_buckets() {
+    for (index, h) in histograms.enumerate() {
+        let mut h = h?;
+        // A mixed window still reports any custom bounds reconciled before the mismatch.
+        if value.uses_custom_buckets() != h.uses_custom_buckets() {
             return Ok((None, custom_reconciled));
+        }
+        let index = index + 1;
+        let layout = if last_rebin.is_some_and(|last| index > last) {
+            h.compact();
+            BucketLayout::Compact
+        } else {
+            BucketLayout::Preserve
+        };
+        count += 1.0;
+        if incremental_mean {
+            h.div(count);
+        }
+        let track_empty = last_rebin.is_some() && layout == BucketLayout::Preserve;
+        let rebin_value = h.schema < value.schema;
+        if track_empty && let Some(c) = compensation.as_mut() {
+            empty.prepare_for_add(&mut value, c, &mut h)?;
         }
         match op {
             HistogramAggregate::Sum => {
-                let (c, outcome) = current.kahan_add(&h, compensation.take())?;
+                let (c, outcome) = value.kahan_add_with_layout(&h, compensation.take(), layout)?;
                 custom_reconciled |= outcome.custom_bounds_reconciled;
                 compensation = Some(c);
             }
             HistogramAggregate::Avg => {
-                if mean.is_none() {
-                    let mut sum = current.clone();
-                    let (c, outcome) = sum.kahan_add(&h, compensation.clone())?;
+                if !incremental_mean {
+                    let mut sum = value.clone();
+                    let (c, outcome) =
+                        sum.kahan_add_with_layout(&h, compensation.clone(), layout)?;
                     custom_reconciled |= outcome.custom_bounds_reconciled;
-                    if !sum.has_overflow() {
-                        *current = sum;
+                    if sum.has_overflow() {
+                        value.div(count - 1.0);
+                        if let Some(c) = compensation.as_mut() {
+                            c.div(count - 1.0);
+                        }
+                        h.div(count);
+                        incremental_mean = true;
+                    } else {
+                        value = sum;
                         compensation = Some(c);
-                        continue;
                     }
-                    let mut started = current.clone();
-                    started.div(count - 1.0);
+                }
+                if incremental_mean {
+                    let q = (count - 1.0) / count;
                     if let Some(c) = compensation.as_mut() {
-                        c.div(count - 1.0);
+                        c.mul(q);
                     }
-                    mean = Some(started);
+                    value.mul(q);
+                    let (mut c, outcome) = value.kahan_add(&h, compensation.take())?;
+                    // Scaling the mean can also empty buckets outside the incoming sample.
+                    if layout == BucketLayout::Compact {
+                        value.compact_with_compensation(&mut c);
+                    }
+                    custom_reconciled |= outcome.custom_bounds_reconciled;
+                    compensation = Some(c);
                 }
-                // Go switches to an incremental mean once the plain sum overflows.
-                let q = (count - 1.0) / count;
-                if let Some(c) = compensation.as_mut() {
-                    c.mul(q);
-                }
-                let mut to_add = h;
-                to_add.div(count);
-                let mean = mean.as_mut().expect("set above");
-                mean.mul(q);
-                let (c, outcome) = mean.kahan_add(&to_add, compensation.take())?;
-                custom_reconciled |= outcome.custom_bounds_reconciled;
-                compensation = Some(c);
+            }
+        }
+        if track_empty && let Some(c) = compensation.as_mut() {
+            if last_rebin == Some(index) {
+                value.compact_with_compensation(c);
+                empty = EmptyBuckets::default();
+            } else {
+                // Copying the first input, reducing the accumulator, and scaling a mean can
+                // leave zeros anywhere. An ordinary add changes only its input's buckets.
+                empty.take_from(
+                    &mut value,
+                    c,
+                    &h,
+                    index == 1 || rebin_value || incremental_mean,
+                );
             }
         }
     }
-    let Some(mut value) = value else {
-        return Ok((None, custom_reconciled));
-    };
-    match op {
-        HistogramAggregate::Sum => {
-            if let Some(c) = compensation {
-                value.add(&c)?;
-            }
+    if op == HistogramAggregate::Avg && !incremental_mean {
+        value.div(count);
+        if let Some(c) = compensation.as_mut() {
+            c.div(count);
         }
-        HistogramAggregate::Avg => match mean {
-            Some(mut mean) => {
-                if let Some(c) = compensation {
-                    mean.add(&c)?;
-                }
-                value = mean;
-            }
-            None => {
-                value.div(count);
-                if let Some(mut c) = compensation {
-                    c.div(count);
-                    value.add(&c)?;
-                }
-            }
-        },
+    }
+    if let Some(c) = compensation {
+        value.add(&c)?;
     }
     // The result was derived from its inputs, so it carries no start timestamp of its own, like
     // every other operation that builds one. Clearing it here covers the fold that added nothing:
     // the first histogram of a window becomes the result as it arrived, and the adds above are
     // what drop the field otherwise, which would make the payload depend on the sample count.
-    // The bucket layout is left as the fold built it -- compaction belongs to the caller.
     value.start_timestamp = None;
     Ok((Some(value), custom_reconciled))
 }

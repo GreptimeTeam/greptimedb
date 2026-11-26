@@ -46,7 +46,7 @@ use crate::functions::{
     SumOverTime, extract_array, extract_range_dict,
 };
 use crate::histogram_eval::float_histogram::FloatHistogram;
-use crate::histogram_eval::legacy_bridge;
+use crate::histogram_eval::{self, HistogramAggregate, legacy_bridge};
 use crate::range_array::{RangeArray, unpack};
 
 fn extract_histogram_array(value: &ColumnarValue, func_name: &str) -> DfResult<ArrayRef> {
@@ -1202,26 +1202,40 @@ fn spans_and_counts(buckets: &[(i32, f64)]) -> (Vec<Span>, Vec<f64>) {
     (spans, counts)
 }
 
-fn weighted_histogram_mean(
-    left: NativeHistogram,
-    left_count: u64,
-    right: NativeHistogram,
-    right_count: u64,
-    total_count: u64,
-) -> Option<NativeHistogram> {
-    let total_count = total_count as f64;
-    legacy_bridge::add(
-        &legacy_bridge::scale(&left, left_count as f64 / total_count),
-        &legacy_bridge::scale(&right, right_count as f64 / total_count),
-    )
+/// The last addition that reduces either operand's exponential resolution, or zero if none.
+/// The fold stops at the first switch between exponential and custom buckets. Unsupported
+/// schemas keep their explicit buckets for validation.
+fn range_last_rebin(samples: &[NativeHistogram]) -> Option<usize> {
+    let mut schema = samples.first()?.schema;
+    if schema == CUSTOM_BUCKETS_SCHEMA {
+        return Some(0);
+    }
+    exponential_overflow_bucket_index(schema)?;
+    let mut last = 0;
+    for (index, sample) in samples.iter().enumerate().skip(1) {
+        if sample.schema == schema {
+            continue;
+        }
+        if sample.schema == CUSTOM_BUCKETS_SCHEMA {
+            break;
+        }
+        exponential_overflow_bucket_index(sample.schema)?;
+        schema = schema.min(sample.schema);
+        last = index;
+    }
+    Some(last)
 }
 
 fn range_fold_histograms(
-    samples: Vec<NativeHistogram>,
-    kind: NativeHistogramAggregateKind,
+    mut samples: Vec<NativeHistogram>,
+    kind: HistogramAggregate,
     name: &'static str,
     collector: &Option<PromqlAnnotationCollector>,
 ) -> Option<NativeHistogram> {
+    // A single legacy sample retains its start timestamp and explicit zero buckets.
+    if samples.len() <= 1 {
+        return samples.pop();
+    }
     if samples
         .iter()
         .any(|histogram| histogram.reset_hint == COUNTER_RESET_HINT)
@@ -1232,37 +1246,30 @@ fn range_fold_histograms(
         record_counter_reset_contradiction_warning(collector, name);
     }
 
-    let mut value = None;
-    let mut count = 0u64;
-    for histogram in samples {
-        value = match value {
-            Some(value) => {
-                record_custom_reconciliation(collector, name, &value, &histogram);
-                let next_count = count.checked_add(1)?;
-                let combined = match kind {
-                    NativeHistogramAggregateKind::Sum => legacy_bridge::add(&value, &histogram),
-                    NativeHistogramAggregateKind::Avg => {
-                        weighted_histogram_mean(value, count, histogram, 1, next_count)
-                    }
-                };
-                match combined {
-                    Some(value) => Some(value),
-                    None => {
-                        record_warning(
-                            collector,
-                            format!(
-                                "{name}: dropped native histogram range with incompatible schemas"
-                            ),
-                        );
-                        return None;
-                    }
-                }
-            }
-            None => Some(histogram),
-        };
-        count = count.checked_add(1)?;
+    let last_rebin = range_last_rebin(&samples);
+    let mut remaining = samples.iter();
+    let histograms = remaining.by_ref().map(legacy_bridge::float_histogram);
+    let (histogram, reconciled) = histogram_eval::sum_or_avg(kind, histograms, last_rebin)
+        .unwrap_or_else(|_| {
+            // Legacy checked both operands' bounds before decoding even the first pair.
+            let attempted = (samples.len() - remaining.len()).max(2);
+            let reconciled = samples[..attempted]
+                .windows(2)
+                .any(|pair| pair[0].needs_custom_reconciliation(&pair[1]));
+            (None, reconciled)
+        });
+    if reconciled {
+        record_reconciled_custom_buckets(collector, name);
     }
-    value
+    let Some(mut histogram) = histogram else {
+        record_warning(
+            collector,
+            format!("{name}: dropped native histogram range with incompatible schemas"),
+        );
+        return None;
+    };
+    histogram.compact();
+    Some(legacy_bridge::legacy_histogram(&histogram))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1354,18 +1361,12 @@ fn native_histogram_range_histogram(
             continue;
         };
         let histogram = match kind {
-            NativeHistogramRangeHistogramKind::Sum => range_fold_histograms(
-                samples,
-                NativeHistogramAggregateKind::Sum,
-                func_name,
-                &collector,
-            ),
-            NativeHistogramRangeHistogramKind::Avg => range_fold_histograms(
-                samples,
-                NativeHistogramAggregateKind::Avg,
-                func_name,
-                &collector,
-            ),
+            NativeHistogramRangeHistogramKind::Sum => {
+                range_fold_histograms(samples, HistogramAggregate::Sum, func_name, &collector)
+            }
+            NativeHistogramRangeHistogramKind::Avg => {
+                range_fold_histograms(samples, HistogramAggregate::Avg, func_name, &collector)
+            }
             NativeHistogramRangeHistogramKind::Last => samples.last().cloned(),
         };
         result.push(histogram);
@@ -3978,6 +3979,320 @@ mod tests {
     }
 
     #[test]
+    fn range_folds_preserve_singletons_and_compact_combined_buckets() {
+        let mut sample = one_explicit_zero_bucket();
+        sample.reset_hint = GAUGE_RESET_HINT;
+        sample.start_timestamp = Some(100);
+        // Both buckets cancel. Only the first has a correction when compaction runs.
+        let window: Vec<_> = (1..)
+            .zip([(1e16, 1.0), (1.0, 0.0), (-1e16, -1.0), (0.0, 0.0)])
+            .map(|(offset, (count, adjacent))| NativeHistogram {
+                count: count + adjacent,
+                sum: count,
+                positive_spans: vec![
+                    Span {
+                        offset: 0,
+                        length: 2,
+                    },
+                    Span { offset, length: 1 },
+                ],
+                positive_buckets: vec![count, adjacent, 0.0],
+                ..sample.clone()
+            })
+            .collect();
+        for (udf, expected_bucket) in [
+            (NativeHistogramSumOverTime::scalar_udf(), 1.0),
+            (NativeHistogramAvgOverTime::scalar_udf(), 0.25),
+        ] {
+            let single = run_histogram_range_udf(udf.clone(), vec![sample.clone()]);
+            assert_eq!(single, sample);
+
+            let combined = run_histogram_range_udf(udf, window.clone());
+            assert_eq!(combined.positive_buckets, vec![expected_bucket]);
+            assert_eq!(combined.start_timestamp, None);
+        }
+    }
+
+    #[test]
+    fn range_folds_keep_the_correction_at_every_downscale_position() {
+        for schemas in [
+            [8, 7, 7, 7, 7],
+            [8, 8, 7, 7, 7],
+            [8, 8, 8, 8, 7],
+            [8, 7, 8, 7, 8],
+        ] {
+            let samples: Vec<_> = schemas
+                .into_iter()
+                .zip([1e16, 1.0, -1e16, 0.0, 0.0])
+                .zip(1..)
+                .map(|((schema, count), gap)| NativeHistogram {
+                    schema,
+                    reset_hint: GAUGE_RESET_HINT,
+                    positive_spans: vec![
+                        Span {
+                            offset: 0,
+                            length: 1,
+                        },
+                        Span {
+                            offset: gap,
+                            length: 1,
+                        },
+                    ],
+                    ..sample_histogram(count, count, vec![count, 0.0])
+                })
+                .collect();
+
+            for (op, expected) in [
+                (HistogramAggregate::Sum, 1.0),
+                (HistogramAggregate::Avg, 0.2),
+            ] {
+                let (value, _) = histogram_eval::sum_or_avg(
+                    op,
+                    samples.iter().map(legacy_bridge::float_histogram),
+                    range_last_rebin(&samples),
+                )
+                .unwrap();
+                // Before the caller compacts the result, only the bucket with the correction survives.
+                assert_eq!(
+                    value.unwrap().positive,
+                    [(0, expected)],
+                    "{op:?} {schemas:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_range_average_copies_linearly_across_schema_changes() {
+        use crate::histogram_eval::float_histogram::copies::take_cloned_buckets;
+
+        let check = |window: Vec<NativeHistogram>, expected| {
+            let len = window.len();
+            let input = histogram_range_input(window.into_iter().map(Some).collect());
+            take_cloned_buckets();
+            let avg = mixed_histogram_result(NativeHistogramAvgOverTime::scalar_udf(), input);
+            let copied = take_cloned_buckets();
+            assert_eq!(avg.map(|h| h.positive_buckets), expected);
+            // A downscale can copy the whole prefix once. Repeating that copy would be quadratic.
+            assert!(
+                copied <= 8 * len,
+                "{copied} buckets copied for {len} samples"
+            );
+        };
+        let mut custom = NativeHistogram {
+            schema: CUSTOM_BUCKETS_SCHEMA,
+            custom_values: (1..32).map(f64::from).collect(),
+            ..sample_histogram(1.0, 1.0, vec![0.0; 32])
+        };
+        custom.positive_buckets[0] = 1.0;
+        let length = 256;
+        for first_coarse in [1, length / 2, length - 1, length] {
+            let mut samples: Vec<_> = (0..length)
+                .map(|i| NativeHistogram {
+                    schema: if i < first_coarse { 8 } else { 7 },
+                    positive_spans: vec![
+                        Span {
+                            offset: 0,
+                            length: 1,
+                        },
+                        Span {
+                            offset: i + 1,
+                            length: 1,
+                        },
+                    ],
+                    ..sample_histogram(1.0, 1.0, vec![1.0, 0.0])
+                })
+                .collect();
+            check(samples.clone(), Some(vec![1.0]));
+            samples.push(custom.clone());
+            check(samples, None);
+        }
+        check(
+            vec![
+                custom.clone(),
+                custom,
+                sample_histogram(1.0, 1.0, vec![1.0]),
+            ],
+            None,
+        );
+    }
+
+    #[test]
+    fn range_sum_preserves_empty_buckets_when_reducing_the_accumulator() {
+        for (prefix, expected) in [
+            (vec![0.0, 0.0, 0.0, 1e16], 10_000_000_000_000_002.0),
+            (vec![1e16], 10_000_000_000_000_004.0),
+        ] {
+            let mut first = sample_histogram(1e16, 1e16, prefix);
+            first.schema = 2;
+            first.positive_spans[0].offset = 1 - first.positive_spans[0].length;
+            let one = NativeHistogram {
+                schema: 2,
+                ..sample_histogram(1.0, 1.0, vec![1.0])
+            };
+            let count = 1.0_f64.next_down();
+            let last = sample_histogram(count, count, vec![count]);
+            let mut window = vec![first, one.clone(), one, last];
+            // Index 0 has a correction of 2. An earlier empty index in its new bucket changes
+            // when that correction is added. Mirror both sides to exercise both layouts.
+            for h in &mut window {
+                h.negative_spans.clone_from(&h.positive_spans);
+                h.negative_buckets.clone_from(&h.positive_buckets);
+                h.count *= 2.0;
+                h.sum = 0.0;
+            }
+            let sum = run_histogram_range_udf(NativeHistogramSumOverTime::scalar_udf(), window);
+            assert_eq!(sum.positive_buckets, [expected]);
+            assert_eq!(sum.negative_buckets, [expected]);
+        }
+    }
+
+    #[test]
+    fn widening_the_zero_bucket_discards_previous_empty_positions() {
+        let mut fine = sample_histogram(1e16 + 2.0, 5.5e16, vec![1e16, 1.0, 1.0]);
+        fine.schema = 2;
+        fine.positive_spans[0].offset = 9;
+        let count = 1.0_f64.next_down();
+        let mut last = sample_histogram(count, 6.0 * count, vec![count]);
+        last.positive_spans[0].offset = 3;
+        // The second case widens indirectly: the incoming (1, 2] bucket straddles 1.5.
+        let mut crossing = sample_histogram(1.0, 1.75, vec![1.0]);
+        crossing.positive_spans[0].offset = 1;
+        let direct = NativeHistogram {
+            zero_threshold: 0.5,
+            ..sample_histogram(0.0, 0.0, vec![])
+        };
+        for (threshold, wider) in [(0.0, direct), (1.5, crossing)] {
+            let mut empty = sample_histogram(0.0, 0.0, vec![0.0]);
+            empty.zero_threshold = threshold;
+            empty.positive_spans[0].offset = 3;
+            let window = vec![empty.clone(), empty, wider, fine.clone(), last.clone()];
+            let sum = run_histogram_range_udf(NativeHistogramSumOverTime::scalar_udf(), window);
+            // All three fine indices map to index 3, which the widening removed from the layout.
+            assert_eq!(sum.positive_buckets, [10_000_000_000_000_004.0]);
+        }
+    }
+
+    #[test]
+    fn range_sum_preserves_an_empty_bucket_in_a_mixed_schema_window() {
+        let total = 10_000_000_000_000_002.0;
+        let mut fine = sample_histogram(total, 5.5e15, vec![1e16, 1.0, 1.0]);
+        fine.schema = 2;
+        // These three buckets all map to the explicit zero at index 0 of the first sample.
+        fine.positive_spans[0].offset = -3;
+        let empty = sample_histogram(0.0, 0.0, vec![0.0]);
+        let count = 1.0_f64.next_down();
+        let last = sample_histogram(count, 0.75 * count, vec![count]);
+        // Consecutive fine samples still need reduction when the accumulator is coarse.
+        let empty_fine = NativeHistogram {
+            schema: 2,
+            ..empty.clone()
+        };
+        let last_fine = NativeHistogram {
+            schema: 2,
+            ..last.clone()
+        };
+        for window in [
+            vec![empty.clone(), fine.clone(), last],
+            vec![empty, empty_fine, fine, last_fine],
+        ] {
+            let sum = run_histogram_range_udf(NativeHistogramSumOverTime::scalar_udf(), window);
+            assert_eq!(sum.count, total);
+            assert_eq!(sum.positive_buckets, vec![total]);
+        }
+    }
+
+    #[test]
+    fn range_avg_preserves_a_cancelled_bucket_in_a_mixed_schema_window() {
+        let gain = sample_histogram(1.0, 0.75, vec![1.0]);
+        let loss = legacy_bridge::scale(&gain, -1.0);
+        let mut fine = sample_histogram(
+            10_000_000_000_000_009_i64 as f64,
+            5.5e15,
+            vec![1e16 + 4.0, 2.0, 1.0, 2.0],
+        );
+        fine.schema = 2;
+        // All four fine buckets merge into the bucket that the two coarse samples cancelled.
+        fine.positive_spans[0].offset = -3;
+        let avg = run_histogram_range_udf(
+            NativeHistogramAvgOverTime::scalar_udf(),
+            vec![gain, loss, fine],
+        );
+        assert_eq!(avg.positive_buckets, vec![3_333_333_333_333_336.5]);
+    }
+
+    #[test]
+    fn range_fold_reports_layout_errors_and_custom_reconciliation() {
+        let mut first = sample_histogram(2.0, 3.0, vec![1.0, 1.0]);
+        first.schema = CUSTOM_BUCKETS_SCHEMA;
+        first.custom_values = vec![1.0, 2.0];
+        let mut second = first.clone();
+        second.custom_values = vec![2.0];
+        let mut invalid = first.clone();
+        invalid.positive_spans = vec![
+            Span {
+                offset: 0,
+                length: 1,
+            },
+            Span {
+                offset: -1,
+                length: 1,
+            },
+        ];
+        let mut unsupported = sample_histogram(0.0, 0.0, vec![]);
+        unsupported.schema = -5;
+        let exponential = sample_histogram(1.0, 1.0, vec![1.0]);
+
+        let name = NativeHistogramSumOverTime::name();
+        for (samples, expected_bounds, reconciled) in [
+            (vec![first.clone(), second.clone()], Some(vec![2.0]), true),
+            (
+                vec![first.clone(), second.clone(), exponential.clone()],
+                None,
+                true,
+            ),
+            (
+                vec![exponential, first.clone(), second.clone()],
+                None,
+                false,
+            ),
+            (
+                vec![first.clone(), second.clone(), invalid.clone()],
+                None,
+                true,
+            ),
+            (vec![invalid.clone(), second.clone()], None, true),
+            (vec![first, invalid, second], None, false),
+            (
+                vec![unsupported, sample_histogram(0.0, 0.0, vec![0.0])],
+                None,
+                false,
+            ),
+        ] {
+            let collector = PromqlAnnotationCollector::default();
+            let result = range_fold_histograms(
+                samples,
+                HistogramAggregate::Sum,
+                name,
+                &Some(collector.clone()),
+            );
+            assert_eq!(result.map(|h| h.custom_values), expected_bounds);
+            assert_eq!(
+                collected_infos(&collector).contains(&format!(
+                    "{name}: reconciled native histograms with different custom buckets"
+                )),
+                reconciled,
+            );
+            assert_eq!(
+                collected_warnings(&collector).contains(&format!(
+                    "{name}: dropped native histogram range with incompatible schemas"
+                )),
+                expected_bounds.is_none(),
+            );
+        }
+    }
+
+    #[test]
     fn histogram_averages_avoid_sum_overflow() {
         let large = sample_histogram(1.0e308, 1.0e308, vec![1.0e308]);
 
@@ -3997,6 +4312,63 @@ mod tests {
         assert_eq!(aggregate_average.count, 1.0e308);
         assert_eq!(aggregate_average.sum, 1.0e308);
         assert_eq!(aggregate_average.positive_buckets, vec![1.0e308]);
+    }
+
+    #[test]
+    fn range_average_matches_prometheus_at_the_largest_finite_sum() {
+        let mut sample = sample_histogram(1.0, f64::MAX, vec![1.0]);
+        sample.schema = CUSTOM_BUCKETS_SCHEMA;
+        sample.custom_values = vec![0.0];
+        sample.positive_spans[0].offset = 1;
+        // Prometheus v3.15.0 overflows when it adds the final correction at 110 samples.
+        for (length, expected) in [(109, f64::MAX), (110, f64::INFINITY)] {
+            let avg = run_histogram_range_udf(
+                NativeHistogramAvgOverTime::scalar_udf(),
+                vec![sample.clone(); length],
+            );
+            assert_eq!(avg.sum, expected);
+        }
+    }
+
+    #[test]
+    fn range_average_switches_to_a_running_mean_for_an_infinite_custom_bound() {
+        for (bound, expected) in [(0.0, 1.0 / 3.0), (f64::NEG_INFINITY, -0.16666666666666669)] {
+            let samples = [1e16, 1.0, -1e16].map(|sum| NativeHistogram {
+                schema: CUSTOM_BUCKETS_SCHEMA,
+                custom_values: vec![bound],
+                positive_spans: vec![Span {
+                    offset: i32::from(sum > bound),
+                    length: 1,
+                }],
+                ..sample_histogram(1.0, sum, vec![1.0])
+            });
+            let avg =
+                run_histogram_range_udf(NativeHistogramAvgOverTime::scalar_udf(), samples.into());
+            assert_eq!(avg.sum, expected);
+        }
+    }
+
+    #[test]
+    fn range_sum_matches_prometheus_when_the_zero_bucket_widens_twice() {
+        let mut sample = sample_histogram(10_000_000_000_000_005_i64 as f64, -6.0, vec![1.0]);
+        sample.zero_count = 1e16;
+        sample.negative_spans = vec![Span {
+            offset: 1,
+            length: 1,
+        }];
+        sample.negative_buckets = vec![4.0];
+        let mut empty = sample_histogram(0.0, 0.0, vec![]);
+        empty.zero_threshold = 1.5;
+
+        let sum = run_histogram_range_udf(
+            NativeHistogramSumOverTime::scalar_udf(),
+            vec![sample, empty],
+        );
+        assert_eq!(sum.zero_threshold, 2.0);
+        assert!(sum.positive_buckets.is_empty() && sum.negative_buckets.is_empty());
+        // Prometheus v3.15.0 carries the first pass's correction into the second pass.
+        assert_eq!(sum.count, 10_000_000_000_000_004.0);
+        assert_eq!(sum.zero_count, 10_000_000_000_000_006.0);
     }
 
     #[test]
@@ -4438,7 +4810,7 @@ mod tests {
         assert!(
             range_fold_histograms(
                 vec![reset.clone(), unknown.clone(), not_reset.clone()],
-                NativeHistogramAggregateKind::Sum,
+                HistogramAggregate::Sum,
                 NativeHistogramSumOverTime::name(),
                 &Some(range_collector.clone()),
             )
@@ -4564,14 +4936,8 @@ mod tests {
         }
 
         for (kind, name) in [
-            (
-                NativeHistogramAggregateKind::Sum,
-                NativeHistogramSumOverTime::name(),
-            ),
-            (
-                NativeHistogramAggregateKind::Avg,
-                NativeHistogramAvgOverTime::name(),
-            ),
+            (HistogramAggregate::Sum, NativeHistogramSumOverTime::name()),
+            (HistogramAggregate::Avg, NativeHistogramAvgOverTime::name()),
         ] {
             let collector = PromqlAnnotationCollector::default();
             assert!(

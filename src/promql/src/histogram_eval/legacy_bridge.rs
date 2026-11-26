@@ -172,7 +172,7 @@ fn bucket_total(histogram: &NativeHistogram) -> f64 {
 ///
 /// A view borrows the offsets and lengths it needs from two temporary slices, so the copy happens
 /// here and the `FloatHistogram` owns the counts that result.
-fn float_histogram(histogram: &NativeHistogram) -> Result<FloatHistogram> {
+pub(crate) fn float_histogram(histogram: &NativeHistogram) -> Result<FloatHistogram> {
     if steps_backwards(&histogram.positive_spans) || steps_backwards(&histogram.negative_spans) {
         return Err(datafusion::error::DataFusionError::Execution(
             "native histogram has an invalid layout".into(),
@@ -193,7 +193,7 @@ fn steps_backwards(spans: &[Span]) -> bool {
 }
 
 /// The legacy representation of `histogram`, with the span layout it carries.
-fn legacy_histogram(histogram: &FloatHistogram) -> NativeHistogram {
+pub(crate) fn legacy_histogram(histogram: &FloatHistogram) -> NativeHistogram {
     let [positive, negative] = histogram.spans();
     NativeHistogram {
         schema: histogram.schema,

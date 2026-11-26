@@ -174,7 +174,7 @@ pub(super) fn evaluate(
             // flag is the reconciliation its own adds already observed. Re-walking the pairs to
             // learn either would double the histogram work of every window.
             let (result, custom_reconciled) =
-                sum_or_avg(op, histograms.iter().map(|(_, h)| Ok(h.clone())))?;
+                sum_or_avg(op, histograms.iter().map(|(_, h)| Ok(h.clone())), None)?;
             if result.is_none() {
                 record_warning(
                     collector,

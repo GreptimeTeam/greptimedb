@@ -5837,65 +5837,61 @@ pub async fn test_remote_write_v2_histogram_native_range_function(store_type: St
         .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
         .build();
     let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
-    // `__unit__` leaves with the metric name `sum_over_time` drops, and a scan that carries it can
-    // hold two series that agree on everything else: that is the collision the boundary below is
-    // carried by. A nullable key column is not one - see the note on
-    // `test_remote_write_v2_histogram_native_nullable_tag_boundary`.
-    write_native_histogram(
-        &client,
-        &[
-            (prom_store::METRIC_NAME_LABEL, "native_histogram_range"),
-            ("job", "api"),
-            ("__unit__", "s"),
-        ],
-        1000,
-        5,
-        10.0,
-    )
-    .await;
-    write_native_histogram(
-        &client,
-        &[
-            (prom_store::METRIC_NAME_LABEL, "native_histogram_range"),
-            ("job", "api"),
-            ("__unit__", "s"),
-        ],
-        3000,
-        8,
-        20.0,
-    )
-    .await;
-    observer.clear();
-    let response = client.get("/v1/prometheus/api/v1/query?query=sum_over_time(native_histogram_range%5B1m%5D)&time=3")
-        .header("x-greptime-hints", "query.experimental_native_promql=true").send().await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let body: Value = response.json().await;
-    assert_eq!(body["data"]["resultType"], "vector");
-    assert_eq!(body["data"]["result"][0]["histogram"][0], 3.0);
-    assert_eq!(
-        body["data"]["result"][0]["histogram"][1]["count"], "13",
-        "`sum_over_time` adds the counts as {PROMETHEUS_REFERENCE} does"
-    );
-    assert_eq!(
-        body["data"]["result"][0]["histogram"][1]["sum"], "30",
-        "`sum_over_time` adds the sums as {PROMETHEUS_REFERENCE} does"
-    );
-    // `sum_over_time` over a native histogram drops the metadata labels, and this binding carries
-    // `__unit__`, so the canonical pass collects that drop: the answer stands on a canonical merge
-    // carrying histogram frames. Lowering such a boundary is two nodes, not one - a producer that
-    // runs the statement's own tree per partition and exports a frame, and the consumer above the
-    // router that converts the merged frames into the statement's rows. Both are the fused route;
-    // the answer asserted above is what proves the histograms survived the crossing.
-    let fused = observer.take_all("histogram sum_over_time");
-    assert_eq!(
-        2,
-        fused.len(),
-        "the canonical boundary is a producer and a consumer: {fused:?}"
-    );
-    assert!(
-        fused.iter().all(|node| node.name() == "FusedSeriesExec"),
-        "the boundary executed a node that is not the fused producer: {fused:?}"
-    );
+    let metric = "native_histogram_range";
+    let labels = &[
+        (prom_store::METRIC_NAME_LABEL, metric),
+        ("job", "api"),
+        ("__unit__", "s"),
+    ];
+    for (timestamp, count, sum) in [(1000, 5, 1e16), (2000, 2, 1.0), (3000, 8, -1e16)] {
+        write_native_histogram_sample(
+            &client,
+            labels,
+            common_query::native_histogram::CUSTOM_BUCKETS_SCHEMA,
+            vec![0.0],
+            timestamp,
+            count,
+            sum,
+        )
+        .await;
+    }
+
+    // Dropping `__unit__` with the metric name requires a fused producer and consumer.
+    for (native, expected_fused_nodes) in [(true, 2), (false, 0)] {
+        for (function, expected) in [
+            ("sum_over_time", (15.0, 1.0)),
+            ("avg_over_time", (5.0, 1.0 / 3.0)),
+        ] {
+            observer.clear();
+            let query = format!("{function}({metric}[1m])");
+            let response = client
+                .get(&format!(
+                    "/v1/prometheus/api/v1/query?query={}&time=3",
+                    encode(&query)
+                ))
+                .header(
+                    "x-greptime-hints",
+                    format!("query.experimental_native_promql={native}"),
+                )
+                .send()
+                .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body: Value = response.json().await;
+            assert_eq!(body["data"]["resultType"], "vector");
+            let result = &body["data"]["result"][0];
+            assert_eq!(result["histogram"][0], 3.0);
+            assert_eq!(
+                histogram_fields(result),
+                expected,
+                "{query}, native={native}"
+            );
+            assert_eq!(
+                observer.0.lock().unwrap().len(),
+                expected_fused_nodes,
+                "{query}, native={native}"
+            );
+        }
+    }
 }
 
 /// A native histogram answer crosses a canonical merge on a real metric table.
