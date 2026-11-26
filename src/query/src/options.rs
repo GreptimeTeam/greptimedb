@@ -14,10 +14,12 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use common_base::memory_limit::MemoryLimit;
 use common_base::readable_size::ReadableSize;
+use common_stat::get_total_memory_readable;
 use datafusion::config::{ConfigEntry, ConfigExtension, ExtensionOptions};
 use serde::{Deserialize, Serialize};
 use session::context::QueryContextRef;
@@ -153,6 +155,21 @@ pub struct QueryOptions {
     /// a `true` default routes every query natively and a `false` one still lets one query or one
     /// session ask for it. Default: `false`.
     pub experimental_native_promql: bool,
+    /// Experimental: caches partial aggregation states per time slice, for aggregations
+    /// repeated over sliding time windows such as dashboards. A per-request
+    /// `query.experimental_slice_agg_cache` option overrides it. Default: `false`.
+    pub experimental_slice_agg_cache: bool,
+    /// Experimental: capacity of the slice aggregate cache. Default: 1/16 of the system
+    /// memory, at most `512MiB`; `256MiB` if the system memory is unknown.
+    pub experimental_slice_agg_cache_size: ReadableSize,
+    /// Experimental: most states one aggregation collects for the slice aggregate cache. A
+    /// plan whose states exceed it is not cached until the idle timeout passes. Default: 1/4
+    /// of [Self::experimental_slice_agg_cache_size], so one plan cannot fill the cache.
+    pub experimental_slice_agg_cache_max_collect_size: Option<ReadableSize>,
+    /// Experimental: slice aggregate cache entries not read for this long are dropped.
+    /// Default: `1h`.
+    #[serde(with = "humantime_serde")]
+    pub experimental_slice_agg_cache_idle_timeout: Duration,
     /// Hosts that object stores built from SQL statements (`COPY`, `COPY DATABASE`,
     /// `EXPORT/IMPORT DATABASE` and external tables) may connect to. Empty means no restriction.
     pub remote_allowed_hosts: Vec<String>,
@@ -176,6 +193,13 @@ impl Default for QueryOptions {
             experimental_spill_compression: QuerySpillCompression::Uncompressed,
             experimental_memory_pool_policy: QueryMemoryPoolPolicy::Greedy,
             experimental_native_promql: false,
+            experimental_slice_agg_cache: false,
+            experimental_slice_agg_cache_size: get_total_memory_readable()
+                .map_or(ReadableSize::mb(256), |memory| {
+                    std::cmp::min(memory / 16, ReadableSize::mb(512))
+                }),
+            experimental_slice_agg_cache_max_collect_size: None,
+            experimental_slice_agg_cache_idle_timeout: Duration::from_secs(3600),
             remote_allowed_hosts: Vec::new(),
             allow_server_credentials: true,
         }
@@ -547,6 +571,46 @@ impl ExtensionOptions for NativePromqlExtension {
             key: "requested".to_string(),
             value: Some(self.requested.to_string()),
             description: "Whether the query requests the native fused-series PromQL route",
+        }]
+    }
+}
+
+/// Whether a query caches partial aggregation states per time slice: the per-request
+/// `query.experimental_slice_agg_cache` option, or the
+/// [`QueryOptions::experimental_slice_agg_cache`] default.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SliceAggCacheExtension {
+    pub(crate) enabled: bool,
+}
+
+impl ConfigExtension for SliceAggCacheExtension {
+    const PREFIX: &'static str = "slice_agg_cache";
+}
+
+impl ExtensionOptions for SliceAggCacheExtension {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn cloned(&self) -> Box<dyn ExtensionOptions> {
+        Box::new(*self)
+    }
+
+    fn set(&mut self, key: &str, value: &str) -> datafusion::error::Result<()> {
+        Err(datafusion_common::DataFusionError::NotImplemented(format!(
+            "SliceAggCacheExtension does not support set key: {key} with value: {value}"
+        )))
+    }
+
+    fn entries(&self) -> Vec<ConfigEntry> {
+        vec![ConfigEntry {
+            key: "enabled".to_string(),
+            value: Some(self.enabled.to_string()),
+            description: "Whether partial aggregation states are cached per time slice",
         }]
     }
 }

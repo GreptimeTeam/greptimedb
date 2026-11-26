@@ -27,6 +27,7 @@ use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_recordbatch::{QueryMemoryTracker, SendableRecordBatchStream};
 use common_telemetry::tracing::Instrument;
 use common_telemetry::{debug, error, tracing, warn};
+use common_time::Timestamp;
 use common_time::range::TimestampRange;
 use datafusion::optimizer::simplify_expressions::ExprSimplifier;
 use datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr;
@@ -46,7 +47,7 @@ use partition::expr::PartitionExpr;
 use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
-use store_api::region_engine::{PartitionRange, RegionScannerRef};
+use store_api::region_engine::{PartitionRange, RegionScannerRef, TimeRangeFingerprint};
 use store_api::storage::{
     ColumnId, RegionId, ScanRequest, SequenceNumber, SequenceRange, TimeSeriesDistribution,
     TimeSeriesRowSelector,
@@ -2230,6 +2231,87 @@ pub struct StreamContext {
 }
 
 impl StreamContext {
+    /// See [RegionScanner::time_range_fingerprint].
+    ///
+    /// Memtables are read live, bounded by the time range of the scan range that holds
+    /// them, which can be wider than the memtable: a sequential scan merges overlapping
+    /// memtable and file ranges. So every range with a memtable source makes its whole
+    /// time range unfingerprintable.
+    pub(crate) fn time_range_fingerprint(
+        &self,
+        start: Timestamp,
+        end: Timestamp,
+    ) -> Option<TimeRangeFingerprint> {
+        let input = &self.input;
+        #[cfg(feature = "enterprise")]
+        if !input.extension_ranges.is_empty() {
+            return None;
+        }
+        // A series row selector picks rows across the whole scan, so a file outside the
+        // range can change the rows selected inside it.
+        if input.sequence_range.is_some()
+            || input.compaction
+            || !input.filter_deleted
+            || input.series_row_selector.is_some()
+        {
+            return None;
+        }
+        let overlaps = |(min, max): (Timestamp, Timestamp)| min < end && max >= start;
+        let reads_memtable = |range: &RangeMeta| {
+            range
+                .row_group_indices
+                .iter()
+                .any(|index| self.is_mem_range_index(*index))
+        };
+        if self
+            .ranges
+            .iter()
+            .any(|range| reads_memtable(range) && overlaps(range.time_range))
+        {
+            return None;
+        }
+
+        let metadata = input.region_metadata();
+        let mut files: Vec<_> = input
+            .files
+            .iter()
+            .filter(|file| overlaps(file.time_range()))
+            .map(|file| {
+                let meta = file.meta_ref();
+                (
+                    file.file_id().file_id().as_bytes().to_vec(),
+                    file.region_id().as_u64(),
+                    meta.index_version,
+                    meta.sequence.map_or(0, |s| s.get()),
+                    meta.preserve_row_sequence,
+                )
+            })
+            .collect();
+        files.sort_unstable();
+
+        let mut bytes = Vec::with_capacity(32 + files.len() * 41);
+        bytes.extend_from_slice(&metadata.region_id.as_u64().to_le_bytes());
+        bytes.extend_from_slice(&metadata.schema_version.to_le_bytes());
+        bytes.extend_from_slice(&metadata.partition_expr_version.to_le_bytes());
+        // The version decides most comparisons; the expression itself makes equality exact.
+        let partition_expr = metadata.partition_expr.as_deref().unwrap_or_default();
+        bytes.extend_from_slice(&(partition_expr.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(partition_expr.as_bytes());
+        bytes.push(input.append_mode as u8);
+        bytes.push(match input.merge_mode {
+            MergeMode::LastRow => 0,
+            MergeMode::LastNonNull => 1,
+        });
+        for (file_id, source_region, index_version, sequence, preserve_row_sequence) in files {
+            bytes.extend_from_slice(&file_id);
+            bytes.extend_from_slice(&source_region.to_le_bytes());
+            bytes.extend_from_slice(&index_version.to_le_bytes());
+            bytes.extend_from_slice(&sequence.to_le_bytes());
+            bytes.push(preserve_row_sequence as u8);
+        }
+        Some(TimeRangeFingerprint::new(bytes))
+    }
+
     /// Creates a new [StreamContext] for [SeqScan].
     pub(crate) fn seq_scan_ctx(input: ScanInput) -> Self {
         let query_start = input.query_start.unwrap_or_else(Instant::now);

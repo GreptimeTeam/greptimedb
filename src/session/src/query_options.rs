@@ -34,6 +34,9 @@ pub fn canonical_query_option_name(key: &str) -> Option<String> {
         // rejects it as an unknown `query.` option, which silently disables the route.
         // TODO(narthex-merge): drop the public alias once the native route is GA.
         "query.experimental_native_promql" => Some("query.experimental_native_promql".to_string()),
+        "query.experimental_slice_agg_cache" => {
+            Some("query.experimental_slice_agg_cache".to_string())
+        }
         _ if key.starts_with("datafusion.optimizer.") => Some(key),
         _ => None,
     }

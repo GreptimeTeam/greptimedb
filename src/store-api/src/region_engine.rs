@@ -641,6 +641,21 @@ pub trait PreparedSeriesSource: Send + Sync {
     ) -> Result<SendableRawSeriesStream, BoxedError>;
 }
 
+/// Opaque identity of the rows a scan reads in a time range. See
+/// [RegionScanner::time_range_fingerprint].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TimeRangeFingerprint(Vec<u8>);
+
+impl TimeRangeFingerprint {
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
 /// A scanner that provides a way to scan the region concurrently.
 ///
 /// The scanner splits the region into partitions so that each partition can be scanned concurrently.
@@ -752,6 +767,21 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
 
     /// Check if there is any predicate exclude region partition exprs that may be executed in this scanner.
     fn has_predicate_without_region(&self) -> bool;
+
+    /// Returns the identity of the rows this scanner reads in `[start, end)` of the time
+    /// index, or `None` if it cannot vouch for them.
+    ///
+    /// Two scanners built from the same request return equal fingerprints for a range
+    /// only if they read the same rows in it. The fingerprint describes the data the
+    /// scanner was built on, not the region's current state, so states computed by this
+    /// scan always match the fingerprint it reports.
+    fn time_range_fingerprint(
+        &self,
+        _start: common_time::Timestamp,
+        _end: common_time::Timestamp,
+    ) -> Option<TimeRangeFingerprint> {
+        None
+    }
 
     /// Add the given dynamic filter expressions to the predicate of the scanner.
     /// Returns a vector of booleans indicating which filter expressions were applied.

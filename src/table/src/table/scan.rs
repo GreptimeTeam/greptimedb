@@ -60,7 +60,9 @@ use datatypes::compute::SortOptions;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use futures::{Stream, StreamExt};
-use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
+use store_api::metric_engine_consts::{
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
+};
 use store_api::region_engine::{
     BoundTag, PartitionRange, PrepareRequest, QueryScanContext, RawLabelSource, RegionScannerRef,
 };
@@ -90,6 +92,8 @@ pub struct RegionScanExec {
     /// Dynamic filters accepted by the scanner and applied to decoded output batches.
     /// The wrappers themselves remain live and are updated by their producers.
     pushed_dyn_filters: Arc<Mutex<Vec<Arc<dyn PhysicalExpr>>>>,
+    /// The request the scanner was built from.
+    request: Arc<ScanRequest>,
 }
 
 impl std::fmt::Debug for RegionScanExec {
@@ -328,6 +332,7 @@ impl RegionScanExec {
             explain_verbose: false,
             query_memory_tracker,
             pushed_dyn_filters: Arc::new(Mutex::new(Vec::new())),
+            request: Arc::new(request),
         })
     }
 
@@ -354,6 +359,42 @@ impl RegionScanExec {
 
     pub fn is_partition_set(&self) -> bool {
         self.is_partition_set
+    }
+
+    pub fn request(&self) -> &ScanRequest {
+        &self.request
+    }
+
+    pub fn scanner_metadata(&self) -> store_api::metadata::RegionMetadataRef {
+        self.scanner.lock().unwrap().metadata()
+    }
+
+    /// Returns true if the scan reads a metric engine region, either a logical region or
+    /// the physical region shared by logical regions.
+    pub fn reads_metric_region(&self) -> bool {
+        let scanner = self.scanner.lock().unwrap();
+        scanner.properties().is_logical_region()
+            || scanner
+                .metadata()
+                .column_by_name(DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
+                .is_some()
+    }
+
+    /// Returns true if dynamic filters were pushed into this scan.
+    pub fn has_pushed_dyn_filters(&self) -> bool {
+        !self.pushed_dyn_filters.lock().unwrap().is_empty()
+    }
+
+    /// See [store_api::region_engine::RegionScanner::time_range_fingerprint].
+    pub fn time_range_fingerprint(
+        &self,
+        start: common_time::Timestamp,
+        end: common_time::Timestamp,
+    ) -> Option<store_api::region_engine::TimeRangeFingerprint> {
+        self.scanner
+            .lock()
+            .unwrap()
+            .time_range_fingerprint(start, end)
     }
 
     pub fn scanner_type(&self) -> String {
@@ -402,6 +443,7 @@ impl RegionScanExec {
             explain_verbose: self.explain_verbose,
             query_memory_tracker: self.query_memory_tracker.clone(),
             pushed_dyn_filters: self.pushed_dyn_filters.clone(),
+            request: self.request.clone(),
         })
     }
 

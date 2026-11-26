@@ -5025,6 +5025,8 @@ experimental_spill_max_temp_directory_size = "1GiB"
 experimental_spill_compression = "uncompressed"
 experimental_memory_pool_policy = "greedy"
 experimental_native_promql = false
+experimental_slice_agg_cache = false
+experimental_slice_agg_cache_idle_timeout = "1h"
 remote_allowed_hosts = []
 allow_server_credentials = true
 
@@ -5072,6 +5074,7 @@ fn drop_lines_with_inconsistent_results(input: String) -> String {
         "page_cache_size =",
         "selector_result_cache_size =",
         "range_result_cache_size =",
+        "experimental_slice_agg_cache_size =",
         "prefilter_result_cache_size =",
         "metadata_cache_size =",
         "content_cache_size =",
