@@ -54,7 +54,7 @@ pub(crate) struct SeriesReadRequest {
     pub(crate) table_id: Option<u32>,
     pub(crate) ids: Option<BTreeSet<MetricSeriesId>>,
     pub(crate) filters: Vec<SimpleFilterEvaluator>,
-    pub(crate) filter_exprs: Arc<[datafusion_expr::Expr]>,
+    pub(crate) filter_exprs: smallvec::SmallVec<[String; 1]>,
 }
 
 pub(crate) trait FormatReader: Send + Sync {

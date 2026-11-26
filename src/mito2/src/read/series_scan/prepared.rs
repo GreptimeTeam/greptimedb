@@ -320,7 +320,6 @@ fn series_read_request(schema: &Schema, conjuncts: &[&Expr]) -> (SeriesReadReque
         ..Default::default()
     };
     let mut accepted = Vec::with_capacity(conjuncts.len());
-    let mut filter_exprs = Vec::new();
     for expr in conjuncts {
         let Some(filter) = SimpleFilterEvaluator::try_new_with_column_type(expr, &|name| {
             schema
@@ -346,11 +345,11 @@ fn series_read_request(schema: &Schema, conjuncts: &[&Expr]) -> (SeriesReadReque
             // Keep all equality filters, including contradictory ones, for exact evaluation.
             request.table_id = Some(table_id);
         }
-        filter_exprs.push((**expr).clone());
+        request.filter_exprs.push(format!("{expr:?}"));
         request.filters.push(filter);
         accepted.push(true);
     }
-    request.filter_exprs = filter_exprs.into();
+    request.filter_exprs.sort_unstable();
     (request, accepted)
 }
 

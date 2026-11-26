@@ -614,7 +614,6 @@ impl From<&RowSelector> for PrefilterRowSelector {
 struct NativePrefilterBlock {
     path: Arc<str>,
     offset: u64,
-    predicates: Arc<[datafusion_expr::Expr]>,
 }
 
 /// Key for a cached prefilter result.

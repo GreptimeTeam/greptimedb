@@ -266,17 +266,16 @@ impl PartArea {
     pub(crate) fn prefilter(
         &self,
         block_offset: u64,
-        exprs: &Arc<[datafusion_expr::Expr]>,
+        exprs: &smallvec::SmallVec<[String; 1]>,
     ) -> Option<(&CacheManagerRef, PrefilterKey)> {
         let context = self.cache.as_ref()?;
         let manager = context.memory.as_ref()?;
         manager.prefilter_result_cache.as_ref()?;
-        let mut key = PrefilterKey::new(context.namespace, 0, None, 0, Default::default());
-        key.mem_usage += self.path.len() + std::mem::size_of_val(exprs.as_ref());
+        let mut key = PrefilterKey::new(context.namespace, 0, None, 0, exprs.clone());
+        key.mem_usage += self.path.len();
         key.native_block = Some(NativePrefilterBlock {
             path: self.path.clone(),
             offset: block_offset,
-            predicates: exprs.clone(),
         });
         Some((manager, key))
     }
