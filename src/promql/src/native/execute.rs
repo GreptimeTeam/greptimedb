@@ -18,8 +18,7 @@
 //! tree builds independent executions. A caller registers the tree's per-node metric handles into
 //! its own metrics set once, before the execution starts.
 
-use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 
 use common_query::promql_annotations::PromqlAnnotationCollector;
@@ -38,8 +37,8 @@ use datatypes::series::{SeriesLabels, SeriesOrdering};
 
 use crate::aggregate;
 use crate::grid_series::{
-    GridSample, GridSeriesBuilder, LabelSet, fields_bytes, label_set, merge_same_labelset, owned,
-    series_bytes, table_bytes,
+    GridSample, GridSeriesBuilder, fields_bytes, merge_same_labelset, owned, series_bytes,
+    table_bytes,
 };
 use crate::histogram_eval::float_histogram::FloatHistogram;
 use crate::histogram_eval::{
@@ -64,9 +63,6 @@ use crate::native::plan::{
     BoundInstant, BoundScalar, BoundSetOp, BoundVectorOp, Grouping, InstantValue, MapOp,
     NativeExpr, NativeNode, NativeTree, NativeType, ParameterizedOp, unifies_its_own_contributions,
 };
-#[cfg(test)]
-pub(crate) use crate::native::runs::absorb_rebuilds;
-use crate::native::runs::{Run, absorb};
 use crate::native::state::{StateChunk, state_bytes};
 use crate::range_eval::RangeEvaluator;
 use crate::select::{self, SortOrder};
@@ -552,6 +548,15 @@ impl MergeInput {
 pub(super) struct NodeBuffer {
     metrics: Arc<NodeMetrics>,
     reservation: MemoryReservation,
+    /// What this node keeps for the grid timestamps it materialized, folded into every
+    /// re-estimate of its own figure; see [`NodeBuffer::reserve_grid`].
+    ///
+    /// `None` means this node has not reserved a grid yet and `Some(bytes)` that it has: what the
+    /// record says is that the reservation was made, which is not the same statement as the figure
+    /// it ended at. A grid always has at least one point today -- `GridSpec` refuses a length of
+    /// zero -- so the two happen to coincide, but a reservation of no bytes would still be a
+    /// reservation made, and reading the figure would make it one made per call.
+    grid: Option<usize>,
 }
 
 impl NodeBuffer {
@@ -568,7 +573,44 @@ impl NodeBuffer {
         Self {
             metrics,
             reservation: consumer.register(pool),
+            grid: None,
         }
+    }
+
+    /// Reserves the timestamps of `grid` before this node reads them, once for the execution.
+    ///
+    /// An [`EvalGrid`] allocates its timestamps on first access and keeps them for as long as the
+    /// plan holds the grid, which outlives the chunk a node read them for. The node that triggers
+    /// that allocation therefore reserves the array and keeps the reservation: giving it back with
+    /// the workspace would leave the execution holding bytes no reservation covers, which is what a
+    /// grid of a million deferred points -- the reason the array is deferred at all -- would go
+    /// unnoticed through. Only the node that materializes it reserves it: a grid that is already
+    /// materialized, whether the plan built it eagerly or a node below or beside this one needed it
+    /// first, was charged to whoever materialized it, so this node grows by nothing.
+    ///
+    /// The array is reserved once per node, not once per call: a node is handed its input one chunk
+    /// at a time and reaches the grid on every chunk it is handed, and a collecting window reaches
+    /// it again when it flushes what it collected -- which is the call that reads the timestamps,
+    /// because until then nothing on this node looks at them. Reserving again on each of those
+    /// calls charges the pool one array per chunk for the one array the execution holds, so a series
+    /// arriving in `n` pieces would need `n + 1` arrays' worth of budget and exhaust a pool sized
+    /// for the query over a chunk count that says nothing about what the node keeps. What short
+    /// circuits the later calls is therefore the reservation this node made (`grid`), not the array
+    /// having been materialized: it cannot stand in for it, being false exactly while a collecting
+    /// node is charging for it.
+    pub(super) fn reserve_grid(&mut self, grid: &EvalGrid) -> Result<()> {
+        if self.grid.is_some() || grid.is_materialized() {
+            return Ok(());
+        }
+        let len = usize::try_from(grid.spec().len).map_err(|_| {
+            DataFusionError::Execution("grid length does not fit memory size".to_string())
+        })?;
+        let bytes = len.checked_mul(std::mem::size_of::<i64>()).ok_or_else(|| {
+            DataFusionError::Execution("grid timestamp size overflow".to_string())
+        })?;
+        self.grow(bytes)?;
+        self.grid = Some(bytes);
+        Ok(())
     }
 
     /// Reserves `bytes` beside what this node already holds.
@@ -579,9 +621,12 @@ impl NodeBuffer {
     }
 
     /// Reserves exactly `bytes`, which is what this node holds from now on: a node that consumes its
-    /// input chunk by chunk is set from the state that is left, not grown per chunk.
+    /// input chunk by chunk is set from the state that is left, not grown per chunk. What a grid's
+    /// array takes is not part of that figure: the node keeps it for as long as it lives, so it
+    /// stays reserved on top of what the caller measured.
     pub(super) fn resize(&mut self, bytes: usize) -> Result<()> {
-        self.reservation.try_resize(bytes)?;
+        self.reservation
+            .try_resize(bytes.saturating_add(self.grid.unwrap_or(0)))?;
         self.record();
         Ok(())
     }
@@ -624,51 +669,7 @@ impl Drop for NodeBuffer {
     }
 }
 
-/// The positions one node has handed out, per output label set and field.
-///
-/// A node that rewrites labels -- a `Map` dropping the metric name, a `Window` dropping the name and the
-/// empty-valued labels -- can turn two input series into one label set, and the node above would read the
-/// two chunks as one series. Recording which positions of each field were already handed out lets a second
-/// series onto a set be refused before it is evaluated.
-///
-/// Occupancy is per field and per position, and a chunk holding no value occupies nothing. A set is never
-/// retired: `is_last` closes a source series, not a label set. The table is one node's own.
-#[derive(Default)]
-struct Emitted {
-    sets: HashMap<LabelSet, History>,
-    /// How many run vectors, runs and label payload bytes every entry holds, folded in as the entries
-    /// change rather than by walking them, so [`Emitted::bytes`] is read in constant time.
-    counts: Counts,
-}
-
-/// What the entries of an [`Emitted`] table hold, as running totals.
-#[derive(Default)]
-struct Counts {
-    /// The run vectors, one per field of one entry.
-    vectors: usize,
-    /// The occupied runs in every vector.
-    runs: usize,
-    /// The payload of every label set: the bytes of its names and values with one row per label.
-    payload: usize,
-}
-
-/// What one node has handed out under one output label set.
-#[derive(Default)]
-struct History {
-    /// The occupied runs of each field, in position order and disjoint.
-    fields: Vec<Vec<Run>>,
-}
-
-/// The bytes a label set holds: each label's name and value with the pair that refers to them.
-fn label_bytes(labels: &LabelSet) -> usize {
-    labels
-        .iter()
-        .map(|(name, value)| std::mem::size_of::<(Arc<str>, Arc<str>)>() + name.len() + value.len())
-        .sum()
-}
-
-/// The bytes a metric name holds: its name and each tag's name and value, one row per label, which is
-/// the convention [`label_bytes`] keeps.
+/// The bytes a metric name holds: its name and each tag's name and value, one row per label.
 fn metric_bytes(metric: &SeriesLabels) -> usize {
     metric.name().map_or(0, |name| name.len())
         + std::mem::size_of_val(metric.tags())
@@ -677,137 +678,6 @@ fn metric_bytes(metric: &SeriesLabels) -> usize {
             .iter()
             .map(|tag| tag.name.len() + tag.value.len())
             .sum::<usize>()
-}
-
-impl Emitted {
-    /// Records what `chunk` occupies, rejecting it against what this node already handed out.
-    ///
-    /// Two values of one field at one position is the only thing refused: a second series that fills
-    /// only the positions the first one left empty merges into it.
-    fn occupy(&mut self, chunk: &EvaluatedChunk) -> Result<()> {
-        let labels = label_set(&chunk.series.metric);
-        let occupied: Vec<Vec<Run>> = chunk
-            .series
-            .fields
-            .iter()
-            .enumerate()
-            .map(|(index, field)| occupied_runs(index, field, &chunk.series.time))
-            .collect::<Result<_>>()?;
-        let empty = occupied.iter().all(Vec::is_empty);
-        if let Some(history) = self.sets.get(&labels) {
-            for (index, runs) in occupied.iter().enumerate() {
-                let stored = history.fields.get(index).map_or(&[][..], Vec::as_slice);
-                for run in runs {
-                    // The stored runs are sorted and disjoint, so only the one holding `run.start`
-                    // or the one just before it can share a position.
-                    let at = stored.partition_point(|stored| stored.end <= run.start);
-                    let previous = stored.get(at).filter(|stored| stored.overlaps(*run));
-                    if let Some(previous) = previous {
-                        return Err(occupied_position(&labels, index, run, previous));
-                    }
-                }
-            }
-        }
-        if empty {
-            // A chunk holding no value records nothing and closes nothing: a series that answered
-            // empty leaves every earlier series on this label set exactly where it was.
-            return Ok(());
-        }
-        let fields = chunk.series.fields.len();
-        let history = match self.sets.entry(labels) {
-            Entry::Occupied(entry) => entry.into_mut(),
-            Entry::Vacant(entry) => {
-                self.counts.payload += label_bytes(entry.key());
-                entry.insert(History::default())
-            }
-        };
-        if history.fields.len() < fields {
-            self.counts.vectors += fields - history.fields.len();
-            history.fields.resize_with(fields, Vec::new);
-        }
-        for (index, runs) in occupied.into_iter().enumerate() {
-            let stored = &mut history.fields[index];
-            let before = stored.len();
-            absorb(stored, &runs);
-            self.counts.runs = self.counts.runs - before + stored.len();
-        }
-        Ok(())
-    }
-
-    /// An estimate of the bytes this table holds, which the node reserves for.
-    ///
-    /// Read from running totals, so it is constant time; the map's buckets and a vector's slack are
-    /// left out.
-    fn bytes(&self) -> usize {
-        let slots =
-            self.sets.len() * (std::mem::size_of::<LabelSet>() + std::mem::size_of::<History>());
-        slots
-            + self.counts.vectors * std::mem::size_of::<Vec<Run>>()
-            + self.counts.runs * std::mem::size_of::<Run>()
-            + self.counts.payload
-    }
-}
-
-/// The runs of positions holding a value in field `index`, as the axis `time` places its rows.
-///
-/// A missing sample holds no value and a hole between rows is not a position, so a run ends where a hole
-/// begins. Every field must hold one sample per row the axis places.
-fn occupied_runs(index: usize, field: &Samples, time: &TimeAxis) -> Result<Vec<Run>> {
-    let mut runs: Vec<Run> = Vec::new();
-    let mut open: Option<usize> = None;
-    let mut previous: Option<usize> = None;
-    let mut cursor = field.cursor();
-    for (position, row) in time.positions() {
-        // The axis names the absolute position of every row, so the hole between two rows is
-        // visible as a jump in `position` while no row of this chunk sits in it.
-        if let Some(previous) = previous
-            && position != previous + 1
-            && let Some(start) = open.take()
-        {
-            runs.push(Run {
-                start,
-                end: previous + 1,
-            });
-        }
-        let sample = cursor
-            .at(row)
-            .ok_or_else(|| misaligned_field(index, time, field))?;
-        let present = !matches!(sample, SampleRef::Missing);
-        match (present, open) {
-            (true, None) => open = Some(position),
-            (false, Some(start)) => {
-                runs.push(Run {
-                    start,
-                    end: position,
-                });
-                open = None;
-            }
-            _ => {}
-        }
-        previous = Some(position);
-    }
-    if let Some(start) = open {
-        // A run still open at the last row ends just past it, not where the field's row count says:
-        // the rows need not be adjacent to the positions above them.
-        runs.push(Run {
-            start,
-            end: previous.map_or(start, |last| last + 1),
-        });
-    }
-    Ok(runs)
-}
-
-/// The rejection of a series whose axis and fields disagree on how many rows there are.
-///
-/// [`Series`] keeps its fields public, so a struct-literal chunk can carry fewer samples than the
-/// axis places rows.
-fn misaligned_field(index: usize, time: &TimeAxis, field: &Samples) -> DataFusionError {
-    DataFusionError::Execution(format!(
-        "a series was handed to the node whose axis and fields are misaligned: the axis places {} \
-         rows, but field {index} holds {} samples, so the axis names a row the field does not have",
-        time.len(),
-        field.len(),
-    ))
 }
 
 /// What a map node applies.
@@ -2206,9 +2076,11 @@ impl BroadcastRuntime {
 
     /// Whether the operation rewrites the label set of what it hands out.
     ///
-    /// Arithmetic and a `bool` comparison drop the metric name, so two input series can become one label
-    /// set under this node; a filtering comparison keeps the label set it read. The answer is read off
-    /// [`Self::op`], so an operation and its label policy cannot disagree.
+    /// Arithmetic and a `bool` comparison drop the metric name, so two input series can become one
+    /// label set under this node; a filtering comparison keeps the label set it read. The answer is
+    /// read off [`Self::op`], so an operation and its label policy cannot disagree. Collection is not
+    /// this node's work: a collision the rewritten set creates is what a canonical
+    /// [`NativeExpr::Merge`] above it refuses.
     fn drops_labels(&self) -> bool {
         match self.op {
             BroadcastOp::Arithmetic(_) | BroadcastOp::Compare(Comparison::Bool(_)) => true,
@@ -2792,6 +2664,13 @@ enum RuntimeOp {
         vector: VectorRuntime,
         state: NodeState,
     },
+    ParameterizedAggregate {
+        input: Box<RuntimeNode>,
+        // Taken and dropped once the fold holds the series it answers with.
+        parameter: Option<Box<RuntimeNode>>,
+        aggregate: AggregateRuntime,
+        state: NodeState,
+    },
     ParameterizedHistogram {
         input: Box<RuntimeNode>,
         // Each parameter is taken and dropped after its scalar values are installed.
@@ -2806,11 +2685,10 @@ enum RuntimeOp {
 
 /// State shared by the stateful operators.
 ///
-/// The queue and emitted history must precede the buffer so they drop before its reservation.
+/// The queue must precede the buffer so it drops before its reservation.
 struct NodeState {
     queued: VecDeque<(NativeChunk, usize)>,
     queued_tables: usize,
-    emitted: Option<Emitted>,
     buffer: NodeBuffer,
 }
 
@@ -2863,8 +2741,24 @@ impl LeafKind {
 struct InputSlot {
     source_index: usize,
     kind: LeafKind,
+    /// Whether the series whose chunk this leaf most recently handed over is still open.
     open_source_series: bool,
+    /// Whether the series whose chunk the caller most recently queued here is still open.
+    ///
+    /// Finality is a property of what the caller sent and not of what the tree has pulled: a node
+    /// that decides nothing before its whole input is there, such as an aggregate waiting for its
+    /// parameter, can end a run with a chunk still queued, and that chunk is what says whether the
+    /// input was closed. Following the handovers alone would read the queued chunk as never having
+    /// arrived, and the truncated input it holds as a closed one.
+    open_queued_series: bool,
     state: NodeState,
+}
+
+impl InputSlot {
+    /// Whether an input the caller ended here left a series open, handed over or still queued.
+    fn ends_open(&self) -> bool {
+        self.open_source_series || self.open_queued_series
+    }
 }
 
 /// State for one execution of a bound tree. The live tree and input slots are dropped together
@@ -2904,7 +2798,6 @@ impl NodeState {
         Self {
             queued: VecDeque::new(),
             queued_tables: 0,
-            emitted: None,
             buffer: NodeBuffer::new(name, metrics, pool),
         }
     }
@@ -2931,6 +2824,7 @@ impl RuntimeNode {
         binary_before: &mut usize,
         location: String,
         duplicate_evidence: Option<Arc<DuplicateEvidence>>,
+        sources: &SourceFacts,
     ) -> Result<Self> {
         stacker::maybe_grow(NATIVE_STACK_RED_ZONE, NATIVE_STACK_GROWTH, || {
             Self::build_within_stack(
@@ -2940,6 +2834,7 @@ impl RuntimeNode {
                 binary_before,
                 location,
                 duplicate_evidence,
+                sources,
             )
         })
     }
@@ -2951,6 +2846,7 @@ impl RuntimeNode {
         binary_before: &mut usize,
         location: String,
         duplicate_evidence: Option<Arc<DuplicateEvidence>>,
+        sources: &SourceFacts,
     ) -> Result<Self> {
         let metrics = Arc::new(NodeMetrics::default());
         let op = match &node.expr {
@@ -2966,6 +2862,7 @@ impl RuntimeNode {
                     source_index: bound.source_index,
                     kind: LeafKind::of(&node.output)?,
                     open_source_series: false,
+                    open_queued_series: false,
                     state: NodeState::new(
                         format!(
                             "native.input at {location} (source_index={})",
@@ -2997,6 +2894,7 @@ impl RuntimeNode {
                     binary_before,
                     format!("{location}.input"),
                     duplicate_evidence.clone(),
+                    sources,
                 )?;
                 RuntimeOp::ScalarOf {
                     input: Box::new(child),
@@ -3043,6 +2941,7 @@ impl RuntimeNode {
                     binary_before,
                     format!("{location}.input"),
                     duplicate_evidence.clone(),
+                    sources,
                 )?;
                 RuntimeOp::VectorOf {
                     input: Box::new(child),
@@ -3064,6 +2963,7 @@ impl RuntimeNode {
                     binary_before,
                     format!("{location}.input"),
                     duplicate_evidence.clone(),
+                    sources,
                 )?;
                 let input_schema = input.output.samples().cloned().ok_or_else(|| {
                     DataFusionError::Execution(
@@ -3074,15 +2974,11 @@ impl RuntimeNode {
                     input: Box::new(child),
                     instant: InstantRuntime::try_new(&input_schema, op)?,
                     state: {
-                        let mut state = NodeState::new(
+                        NodeState::new(
                             format!("native.instant at {location}"),
                             Arc::clone(&metrics),
                             pool,
-                        );
-                        if op.value == InstantValue::Timestamp {
-                            state.emitted = Some(Emitted::default());
-                        }
-                        state
+                        )
                     },
                 }
             }
@@ -3094,6 +2990,7 @@ impl RuntimeNode {
                     binary_before,
                     format!("{location}.input"),
                     duplicate_evidence.clone(),
+                    sources,
                 )?;
                 let schema = node.output.samples().cloned().ok_or_else(|| {
                     DataFusionError::Execution("merge does not produce samples".to_string())
@@ -3117,18 +3014,23 @@ impl RuntimeNode {
                     binary_before,
                     format!("{location}.input"),
                     duplicate_evidence.clone(),
+                    sources,
                 )?;
                 let input_schema = input.output.samples().cloned().ok_or_else(|| {
                     DataFusionError::Execution("window consumes non-sample input".to_string())
                 })?;
-                let merge = matches!(unifies_its_own_contributions(input), Some(false))
+                // The child reports fragments only when it cannot prove the labels it drops tell its
+                // series apart, which is the same question the canonical pass asked before it
+                // decided this window needs no merge above it.
+                let unification =
+                    unifies_its_own_contributions(input, &sources.tags, &sources.metrics);
+                let merge = matches!(unification, Some(false))
                     .then(|| MergeInput::new(Arc::clone(&input_schema)));
-                let mut state = NodeState::new(
+                let state = NodeState::new(
                     format!("native.window at {location}"),
                     Arc::clone(&metrics),
                     pool,
                 );
-                state.emitted = Some(Emitted::default());
                 RuntimeOp::Window {
                     input: Box::new(child),
                     // The collector arrives through `set_annotations` before the first pull;
@@ -3151,16 +3053,16 @@ impl RuntimeNode {
                     binary_before,
                     format!("{location}.input"),
                     duplicate_evidence.clone(),
+                    sources,
                 )?;
                 let schema = node.output.samples().cloned().ok_or_else(|| {
                     DataFusionError::Execution("map does not produce samples".to_string())
                 })?;
-                let mut state = NodeState::new(
+                let state = NodeState::new(
                     format!("native.map at {location}"),
                     Arc::clone(&metrics),
                     pool,
                 );
-                state.emitted = Some(Emitted::default());
                 RuntimeOp::Map {
                     input: Box::new(child),
                     map: MapRuntime {
@@ -3182,6 +3084,7 @@ impl RuntimeNode {
                     binary_before,
                     format!("{location}.input"),
                     duplicate_evidence.clone(),
+                    sources,
                 )?;
                 // A function of two scalars answers a scalar, which has one unlabelled field on
                 // the grid it is evaluated on; every other function here answers its input's own
@@ -3220,15 +3123,15 @@ impl RuntimeNode {
                             binary_before,
                             format!("{location}.parameter{index}"),
                             duplicate_evidence.clone(),
+                            sources,
                         )
                     })
                     .collect::<Result<Vec<_>>>()?;
-                let mut state = NodeState::new(
+                let state = NodeState::new(
                     format!("native.map at {location}"),
                     Arc::clone(&metrics),
                     pool,
                 );
-                state.emitted = Some(Emitted::default());
                 RuntimeOp::ParameterizedMap {
                     input: Box::new(child),
                     parameters: nodes,
@@ -3252,16 +3155,16 @@ impl RuntimeNode {
                     binary_before,
                     format!("{location}.input"),
                     duplicate_evidence.clone(),
+                    sources,
                 )?;
                 let schema = node.output.samples().cloned().ok_or_else(|| {
                     DataFusionError::Execution("timestamp does not produce samples".to_string())
                 })?;
-                let mut state = NodeState::new(
+                let state = NodeState::new(
                     format!("native.timestamp at {location}"),
                     Arc::clone(&metrics),
                     pool,
                 );
-                state.emitted = Some(Emitted::default());
                 RuntimeOp::Timestamp {
                     input: Box::new(child),
                     schema,
@@ -3300,6 +3203,7 @@ impl RuntimeNode {
                     binary_before,
                     format!("{location}.left"),
                     duplicate_evidence.clone(),
+                    sources,
                 )?;
                 let right_node = Self::build(
                     right,
@@ -3308,6 +3212,7 @@ impl RuntimeNode {
                     binary_before,
                     format!("{location}.right"),
                     duplicate_evidence.clone(),
+                    sources,
                 )?;
                 match (binary, broadcast) {
                     (Some(binary), None) => RuntimeOp::Binary {
@@ -3321,18 +3226,11 @@ impl RuntimeNode {
                         ),
                     },
                     (None, Some(broadcast)) => {
-                        let vector = if broadcast.vector_left { left } else { right };
-                        let mut state = NodeState::new(
+                        let state = NodeState::new(
                             format!("native.binary at {location}"),
                             Arc::clone(&metrics),
                             pool,
                         );
-                        // Only an operation that rewrites the label set is where two input series
-                        // can become one, and only one that makes an identity its vector side has
-                        // not already checked needs a table of its own.
-                        if broadcast.drops_labels() && !elides_emitted_table(&broadcast, vector) {
-                            state.emitted = Some(Emitted::default());
-                        }
                         RuntimeOp::Broadcast {
                             left: Box::new(left_node),
                             right: Box::new(right_node),
@@ -3370,6 +3268,7 @@ impl RuntimeNode {
                     binary_before,
                     format!("{location}.left"),
                     duplicate_evidence.clone(),
+                    sources,
                 )?;
                 let right_node = Self::build(
                     right,
@@ -3378,6 +3277,7 @@ impl RuntimeNode {
                     binary_before,
                     format!("{location}.right"),
                     duplicate_evidence.clone(),
+                    sources,
                 )?;
                 RuntimeOp::Binary {
                     left: Box::new(left_node),
@@ -3417,6 +3317,7 @@ impl RuntimeNode {
                     binary_before,
                     format!("{location}.base"),
                     duplicate_evidence.clone(),
+                    sources,
                 )?;
                 let info_node = Self::build(
                     info,
@@ -3425,6 +3326,7 @@ impl RuntimeNode {
                     binary_before,
                     format!("{location}.info"),
                     duplicate_evidence.clone(),
+                    sources,
                 )?;
                 RuntimeOp::Binary {
                     left: Box::new(base_node),
@@ -3459,9 +3361,59 @@ impl RuntimeNode {
                     binary_before,
                     format!("{location}.input"),
                     duplicate_evidence.clone(),
+                    sources,
                 )?;
                 RuntimeOp::Aggregate {
                     input: Box::new(child),
+                    aggregate,
+                    state,
+                }
+            }
+            NativeExpr::ParameterizedAggregate {
+                input,
+                op,
+                parameter,
+            } => {
+                let schema = node
+                    .output
+                    .samples()
+                    .or_else(|| input.output.samples())
+                    .cloned()
+                    .ok_or_else(|| {
+                        DataFusionError::Execution(
+                            "a parameterized aggregate does not produce samples".into(),
+                        )
+                    })?;
+                let mut state = NodeState::new(
+                    format!("native.aggregate at {location}"),
+                    Arc::clone(&metrics),
+                    pool,
+                );
+                let aggregate =
+                    AggregateRuntime::new_parameterized(op.clone(), schema, &mut state.buffer)?;
+                let child = Self::build(
+                    input,
+                    pool,
+                    inputs,
+                    binary_before,
+                    format!("{location}.input"),
+                    duplicate_evidence.clone(),
+                    sources,
+                )?;
+                // The input is built before the parameter, the order the selector walk binds the
+                // two sources in.
+                let parameter = Self::build(
+                    parameter,
+                    pool,
+                    inputs,
+                    binary_before,
+                    format!("{location}.parameter"),
+                    duplicate_evidence.clone(),
+                    sources,
+                )?;
+                RuntimeOp::ParameterizedAggregate {
+                    input: Box::new(child),
+                    parameter: Some(Box::new(parameter)),
                     aggregate,
                     state,
                 }
@@ -3488,6 +3440,7 @@ impl RuntimeNode {
                     binary_before,
                     format!("{location}.input"),
                     duplicate_evidence.clone(),
+                    sources,
                 )?;
                 let parameter = Self::build(
                     parameter,
@@ -3496,6 +3449,7 @@ impl RuntimeNode {
                     binary_before,
                     format!("{location}.parameter"),
                     duplicate_evidence.clone(),
+                    sources,
                 )?;
                 let state = NodeState::new(
                     format!("native.vector at {location}"),
@@ -3550,6 +3504,7 @@ impl RuntimeNode {
                     binary_before,
                     format!("{location}.input"),
                     duplicate_evidence.clone(),
+                    sources,
                 )?;
                 let mut built = Vec::with_capacity(parameters.len());
                 for (index, parameter) in parameters.iter().enumerate() {
@@ -3560,6 +3515,7 @@ impl RuntimeNode {
                         binary_before,
                         format!("{location}.parameter{index}"),
                         duplicate_evidence.clone(),
+                        sources,
                     )?;
                     built.push(Some(runtime));
                 }
@@ -3603,9 +3559,15 @@ impl RuntimeNode {
                     binary_before,
                     format!("{location}.input"),
                     duplicate_evidence.clone(),
+                    sources,
                 )?;
                 let limitk = matches!(op, BoundVectorOp::LimitK { .. });
-                if limitk && matches!(unifies_its_own_contributions(input), Some(false)) {
+                if limitk
+                    && matches!(
+                        unifies_its_own_contributions(input, &sources.tags, &sources.metrics),
+                        Some(false)
+                    )
+                {
                     vector.merge_input = true;
                 }
                 RuntimeOp::Vector {
@@ -3644,6 +3606,9 @@ impl RuntimeNode {
                 right.register_metrics(&format!("{name}.right"), set, partition);
             }
             RuntimeOp::ParameterizedTopK {
+                input, parameter, ..
+            }
+            | RuntimeOp::ParameterizedAggregate {
                 input, parameter, ..
             } => {
                 input.register_metrics(&format!("{name}.input"), set, partition);
@@ -3720,6 +3685,12 @@ impl RuntimeNode {
                 |n, p| n.saturating_add(p.as_ref().map_or(0, RuntimeNode::reserved_bytes)),
             ),
             RuntimeOp::ParameterizedTopK {
+                input,
+                parameter,
+                state,
+                ..
+            }
+            | RuntimeOp::ParameterizedAggregate {
                 input,
                 parameter,
                 state,
@@ -3802,6 +3773,20 @@ impl RuntimeNode {
                 // collector as well as its child.
                 aggregate.set_annotations(collector.clone());
                 input.set_annotations(collector);
+            }
+            RuntimeOp::ParameterizedAggregate {
+                input,
+                parameter,
+                aggregate,
+                ..
+            } => {
+                // The fold reports skipped samples exactly as the bound one does, so it needs the
+                // collector too; a parameter is a scalar expression and reads none of them.
+                aggregate.set_annotations(collector.clone());
+                input.set_annotations(collector.clone());
+                if let Some(parameter) = parameter {
+                    parameter.set_annotations(collector);
+                }
             }
             RuntimeOp::Timestamp { input, .. } => input.set_annotations(collector),
             RuntimeOp::Vector { input, vector, .. } => {
@@ -3962,6 +3947,12 @@ impl RuntimeNode {
                 state,
             } => {
                 if !std::mem::replace(produced, true) {
+                    // `time()` and the date functions read every point of the grid, so this node is
+                    // what materializes a deferred grid's timestamps.
+                    state
+                        .buffer
+                        .reserve_grid(grid)
+                        .map_err(|error| state.context(error))?;
                     let schema = scalar_schema(Arc::clone(grid));
                     state
                         .produce(grid, || match date {
@@ -4318,6 +4309,72 @@ impl RuntimeNode {
                 // are counted rather than read as its positions, as a binary result's are.
                 state.pop_queued(evaluated_values)
             }
+            RuntimeOp::ParameterizedAggregate {
+                input,
+                parameter,
+                aggregate,
+                state,
+            } => {
+                let fold = aggregate;
+                // The φ is read at every point the fold answers, so it is drained whole before the
+                // fold computes an answer: a point's answer is decided from the group's samples and
+                // the φ the statement evaluated there, and the fold keeps the group's samples rather
+                // than a per-point state, so it cannot be handed the φ later. What has arrived of
+                // the input is still read while the φ is pending, which is what keeps it out of the
+                // source queue (see the pull below).
+                if let Some(parameter_node) = parameter.as_mut() {
+                    let mut slot = None;
+                    let mut held = 0usize;
+                    while let Some(chunk) = parameter_node.pull(inputs, inputs_finished)? {
+                        state
+                            .hold_scalar(&mut held, &mut slot, chunk)
+                            .map_err(|error| state.context(error))?;
+                    }
+                    let series = {
+                        // A parameter that folds its own input (a `scalar()` over a selector) has
+                        // nothing to hand over until that input ends, so its absence is a reason to
+                        // be pulled again rather than a failure. Being pulled again is not idling:
+                        // this fold keeps its whole input, so the chunks that have arrived are
+                        // retained now, exactly as they would be once the φ is in hand. Leaving them
+                        // where they are would bill them twice over for the same buffer -- the queue
+                        // charges every queued chunk for the whole allocation it is a slice of
+                        // (`NativeChunk::bytes`, where the retainer below bills that allocation
+                        // once), so an input of a thousand slices of one buffer would be refused by
+                        // a pool that holds the buffer a thousand times rather than once.
+                        if !parameter_node.settled(inputs) {
+                            while let Some(chunk) = input.pull(inputs, inputs_finished)? {
+                                state
+                                    .retain_aggregate(fold, chunk)
+                                    .map_err(|error| state.context(error))?;
+                            }
+                            return Ok(None);
+                        }
+                        slot.ok_or_else(|| {
+                            DataFusionError::Execution(
+                                "the quantile parameter produced no scalar".into(),
+                            )
+                        })?
+                    };
+                    fold.hold_parameter(series, &mut state.buffer)
+                        .map_err(|error| state.context(error))?;
+                    // Finish windows before dropping the consumed subtree; its children may still
+                    // hold charged emitted history or scalar series even after the scalar was read.
+                    parameter_node.finish_windows()?;
+                    *parameter = None;
+                }
+                while let Some(chunk) = input.pull(inputs, inputs_finished)? {
+                    state
+                        .retain_aggregate(fold, chunk)
+                        .map_err(|error| state.context(error))?;
+                }
+                if !inputs_finished || !input.settled(inputs) {
+                    return Ok(None);
+                }
+                state
+                    .compute_aggregate(fold)
+                    .map_err(|error| state.context(error))?;
+                state.pop_queued(evaluated_values)
+            }
             RuntimeOp::ParameterizedTopK {
                 input,
                 parameter,
@@ -4385,7 +4442,7 @@ impl RuntimeNode {
                         .settle_vector(operation)
                         .map_err(|error| state.context(error))?;
                     // Finish windows before dropping the consumed subtree; its children may still
-                    // hold charged emitted history or scalar series even after the scalar was read.
+                    // hold charged buffers or scalar series even after the scalar was read.
                     parameter_node.finish_windows()?;
                     *parameter = None;
                 }
@@ -4624,6 +4681,14 @@ impl RuntimeNode {
                 aggregate,
                 state,
             } => state.queued.is_empty() && aggregate.computed && input.settled(inputs),
+            // The same fold, with its parameter released after the fold holds it: `computed` already
+            // implies the parameter was consumed.
+            RuntimeOp::ParameterizedAggregate {
+                input,
+                aggregate,
+                state,
+                ..
+            } => state.queued.is_empty() && aggregate.computed && input.settled(inputs),
             RuntimeOp::Vector {
                 input,
                 vector,
@@ -4684,6 +4749,9 @@ impl RuntimeNode {
                 Ok(flushed)
             }
             RuntimeOp::ParameterizedTopK {
+                input, parameter, ..
+            }
+            | RuntimeOp::ParameterizedAggregate {
                 input, parameter, ..
             } => {
                 let mut flushed = input.flush_ready_merges(inputs)?;
@@ -4757,6 +4825,9 @@ impl RuntimeNode {
             }
             RuntimeOp::ParameterizedTopK {
                 input, parameter, ..
+            }
+            | RuntimeOp::ParameterizedAggregate {
+                input, parameter, ..
             } => {
                 input.any_merge_pending()
                     || parameter.as_ref().is_some_and(|p| p.any_merge_pending())
@@ -4811,6 +4882,17 @@ impl RuntimeNode {
                     .input
                     .ensure_closed(Reader::Vector)
                     .map_err(|e| state.context(e))?;
+                input.unclosed()?;
+                if let Some(parameter) = parameter {
+                    parameter.unclosed()?;
+                }
+                Ok(())
+            }
+            // The fold keeps its input rather than folding it away, so a series that ended inside
+            // the fold's input is exactly what this checks for; the parameter is one scalar series.
+            RuntimeOp::ParameterizedAggregate {
+                input, parameter, ..
+            } => {
                 input.unclosed()?;
                 if let Some(parameter) = parameter {
                     parameter.unclosed()?;
@@ -4889,6 +4971,9 @@ impl RuntimeNode {
             | RuntimeOp::Merge { input, .. } => input.finish_windows(),
             RuntimeOp::ParameterizedTopK {
                 input, parameter, ..
+            }
+            | RuntimeOp::ParameterizedAggregate {
+                input, parameter, ..
             } => {
                 let first = input.finish_windows();
                 let parameter = parameter.as_mut().map_or(Ok(()), |p| p.finish_windows());
@@ -4918,12 +5003,51 @@ impl RuntimeNode {
                 ..
             } => {
                 let child = input.finish_windows();
+                // Finishing evaluates the points still owed, which reads the grid's timestamps.
                 let own = window
                     .take()
-                    .map_or(Ok(()), RangeEvaluator::finish)
+                    .map_or(Ok(()), |evaluator| {
+                        state.buffer.reserve_grid(evaluator.grid())?;
+                        RangeEvaluator::finish(evaluator)
+                    })
                     .map_err(|error| state.context(error));
                 child.and(own)
             }
+        }
+    }
+}
+
+/// What a fused execution knows about the labels its inputs hand over.
+///
+/// The planner binds the tree's inputs and knows two things about each: the complete label set it
+/// reports, and - when the statement reads one table - the one metric every series it hands over is
+/// named. [`unifies_its_own_contributions`] reads exactly those facts, so the collection a consumer
+/// performs at run time is decided by the same proof the canonical pass placed its merges with. A
+/// caller that knows nothing sets no facts, and every consumer then collects conservatively.
+#[derive(Clone, Debug, Default)]
+pub struct SourceFacts {
+    /// The complete runtime label set of each input, indexed by the `source_index` of its leaf.
+    tags: Vec<Vec<String>>,
+    /// The one metric each input is bound to, indexed the same way; `None` when the input may hand
+    /// over several, which is what a statement reading several tables binds.
+    metrics: Vec<Option<Arc<str>>>,
+}
+
+impl SourceFacts {
+    /// Says nothing about any input, so every decision stays conservative.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// One statement-level fact, repeated for each of `sources` inputs.
+    ///
+    /// A binding names one metric and one tag set for the node as a whole, and every scan below it
+    /// reads that one table, so the fact holds for each of them. A binding that names no metric -
+    /// the node reads one raw source per input - proves nothing, and the proof fails with it.
+    pub fn uniform(tags: Vec<String>, metric: Option<Arc<str>>, sources: usize) -> Self {
+        Self {
+            tags: vec![tags; sources],
+            metrics: vec![metric; sources],
         }
     }
 }
@@ -4934,6 +5058,19 @@ impl NativeExecutionState {
         pool: Arc<dyn MemoryPool>,
         duplicate_evidence: Option<Arc<DuplicateEvidence>>,
     ) -> Result<Self> {
+        Self::try_new_with_sources(tree, pool, duplicate_evidence, &SourceFacts::none())
+    }
+
+    /// Builds the execution over `tree`, judging a dropped label set by `sources`.
+    ///
+    /// The canonical pass placed its merges with the same facts, so a consumer that collects here
+    /// collects exactly where the pass decided a consumer has to - and nowhere else.
+    pub fn try_new_with_sources(
+        tree: &NativeTree,
+        pool: Arc<dyn MemoryPool>,
+        duplicate_evidence: Option<Arc<DuplicateEvidence>>,
+        sources: &SourceFacts,
+    ) -> Result<Self> {
         let mut inputs = Vec::new();
         let mut binary_before = 0usize;
         let root = RuntimeNode::build(
@@ -4943,6 +5080,7 @@ impl NativeExecutionState {
             &mut binary_before,
             "root".to_string(),
             duplicate_evidence.clone(),
+            sources,
         )?;
         // A constant root has no node that produces its value, so the state produces it.
         let scalar_root = match (&tree.root().expr, &tree.root().output) {
@@ -5048,7 +5186,7 @@ impl LiveExecution {
     /// only then the nodes, because a node that retains its whole input reports the same truncation in
     /// its own terms.
     fn unclosed(&self) -> Result<()> {
-        if let Some(index) = self.inputs.iter().position(|slot| slot.open_source_series) {
+        if let Some(index) = self.inputs.iter().position(InputSlot::ends_open) {
             let slot = &self.inputs[index];
             return Err(slot.state.context(truncated_input(InputId::new(index))));
         }
@@ -5156,21 +5294,18 @@ impl NodeState {
         let output = match outcome {
             Ok(output) => output,
             Err(error) => {
-                self.buffer.resize(self.emitted_bytes())?;
+                self.buffer.resize(0)?;
                 return Err(error);
             }
         };
         if let Some(output) = &output {
             metrics.record_grid_points(output.series.time.len());
             metrics.record_output(1, valid_values(output));
-            // What it handed out is what the label sets of this node now hold: `map_chunk` has
-            // already rewritten the output's label set, so the label set of the output is the one
-            // two input series can share.
-            self.track(output)?;
         }
-        // The chunk is gone and the label sets this node has handed out are what is left.
-        let emitted = self.emitted_bytes();
-        self.buffer.resize(emitted)?;
+        // The chunk is gone and this node holds none of it: a rewritten label set is not this
+        // node's to remember, and what two series sharing one would mean is a canonical merge's
+        // question.
+        self.buffer.resize(0)?;
         Ok(output)
     }
 
@@ -5200,8 +5335,7 @@ impl NodeState {
         let outcome = match outcome {
             Ok(outcome) => outcome,
             Err(error) => {
-                self.buffer
-                    .resize(self.emitted_bytes().saturating_add(map.parameter_bytes))?;
+                self.buffer.resize(map.parameter_bytes)?;
                 return Err(error);
             }
         };
@@ -5219,11 +5353,9 @@ impl NodeState {
         if let Some(output) = &output {
             metrics.record_grid_points(output.series.time.len());
             metrics.record_output(1, valid_values(output));
-            self.track(output)?;
         }
-        let emitted = self.emitted_bytes();
-        self.buffer
-            .resize(emitted.saturating_add(map.parameter_bytes))?;
+        // What this node still holds is what it read for its parameters and nothing else.
+        self.buffer.resize(map.parameter_bytes)?;
         Ok(output)
     }
 
@@ -5235,21 +5367,16 @@ impl NodeState {
     ) -> Result<Option<EvaluatedChunk>> {
         let positions = chunk.series.time.len();
         let closing = chunk.is_last;
-        // The kernel reads the grid's timestamps, which it materializes when they are deferred.
-        let grid_points = schema.eval_grid.as_ref().map_or(0, |grid| {
-            usize::try_from(grid.spec().len).unwrap_or(usize::MAX)
-        });
+        // The kernel reads the grid's timestamps, which materializes them when the grid is
+        // deferred. They stay materialized for the rest of the execution, so this node reserves
+        // them beside what it holds and keeps them there rather than treating them as a workspace
+        // it gives back.
+        if let Some(grid) = schema.eval_grid.as_deref() {
+            self.buffer.reserve_grid(grid)?;
+        }
         let workspace = built_series_workspace_bytes(&chunk.series)?;
-        let scratch = grid_points
-            .checked_mul(std::mem::size_of::<i64>())
-            .and_then(|timestamps| timestamps.checked_add(workspace))
-            .ok_or_else(|| {
-                DataFusionError::Execution(
-                    "the workspace of timestamp does not fit one address space".to_string(),
-                )
-            })?;
         self.buffer.grow(evaluated_bytes(&chunk))?;
-        self.buffer.grow(scratch)?;
+        self.buffer.grow(workspace)?;
         let labels = drop_metric_name(&chunk.series.metric)?;
         let metrics = Arc::clone(&self.buffer.metrics);
         let result = {
@@ -5264,7 +5391,7 @@ impl NodeState {
         let result = match result {
             Ok(result) => result,
             Err(error) => {
-                self.buffer.resize(self.emitted_bytes())?;
+                self.buffer.resize(0)?;
                 return Err(error);
             }
         };
@@ -5276,9 +5403,8 @@ impl NodeState {
         if let Some(output) = &output {
             metrics.record_grid_points(output.series.time.len());
             metrics.record_output(1, valid_values(output));
-            self.track(output)?;
         }
-        self.buffer.resize(self.emitted_bytes())?;
+        self.buffer.resize(0)?;
         Ok(output)
     }
 
@@ -5325,8 +5451,7 @@ impl NodeState {
         let output = match outcome {
             Ok(output) => output,
             Err(error) => {
-                self.buffer
-                    .resize(self.emitted_bytes().saturating_add(broadcast.scalar_bytes))?;
+                self.buffer.resize(broadcast.scalar_bytes)?;
                 return Err(error);
             }
         };
@@ -5337,17 +5462,9 @@ impl NodeState {
         if let Some(output) = &output {
             metrics.record_grid_points(output.series.time.len());
             metrics.record_output(1, valid_values(output));
-            // Only an operation that rewrites the label set is where two input series can become one, and
-            // only that one keeps the table `track` records into.
-            if broadcast.drops_labels() {
-                self.track(output)?;
-            }
         }
-        // The chunk is gone: the label sets this node has handed out and the scalar's value are
-        // what is left.
-        let emitted = self.emitted_bytes();
-        self.buffer
-            .resize(emitted.saturating_add(broadcast.scalar_bytes))?;
+        // The chunk is gone and the scalar's value is what is left.
+        self.buffer.resize(broadcast.scalar_bytes)?;
         Ok(output)
     }
 
@@ -5413,6 +5530,9 @@ impl NodeState {
         merge: &mut Option<MergeInput>,
         chunk: NativeChunk,
     ) -> Result<Option<EvaluatedChunk>> {
+        // A window reads the grid's timestamps to place every point it decides, which materializes
+        // a deferred grid; the array stays materialized, so the reservation for it is kept.
+        self.buffer.reserve_grid(window.grid())?;
         if let Some(merge) = merge.as_mut() {
             let NativeChunk::Evaluated(chunk) = chunk else {
                 return Err(DataFusionError::Execution(
@@ -5473,22 +5593,19 @@ impl NodeState {
         let output = match outcome {
             Ok(output) => output,
             Err(error) => {
-                self.buffer
-                    .resize(window.retained_bytes().saturating_add(self.emitted_bytes()))?;
+                self.buffer.resize(window.retained_bytes())?;
                 return Err(error);
             }
         };
         if let Some(output) = &output {
             metrics.record_grid_points(output.series.time.len());
             metrics.record_output(1, valid_values(output));
-            self.track(output)?;
         }
-        // The chunk has been consumed: what this node still holds is what the evaluator kept of it and the
-        // label sets it has already handed out. Neither is charged per chunk consumed, which would make a
-        // fixed window over a long series read as an allocation failure.
-        let retained = window.retained_bytes();
-        let emitted = self.emitted_bytes();
-        self.buffer.resize(retained.saturating_add(emitted))?;
+        // The chunk has been consumed: what this node still holds is what the evaluator kept of it,
+        // charged whether or not this chunk produced an answer: a chunk that yields nothing leaves
+        // the evaluator's samples where they were, and the figure is not charged per chunk consumed,
+        // which would make a fixed window over a long series read as an allocation failure.
+        self.buffer.resize(window.retained_bytes())?;
         Ok(output)
     }
 
@@ -5778,6 +5895,11 @@ impl NodeState {
             ));
         };
         let (positions, closing) = (chunk.time.len(), chunk.is_last);
+        // A selection that answers with timestamps reads every point of the grid, which materializes
+        // a deferred grid's array; the reservation is kept because the array is.
+        if instant.selection.value != InstantValue::Sample {
+            self.buffer.reserve_grid(&instant.selection.output_grid)?;
+        }
         // The chunk is held from here on: a selection keeps every chunk of a series until the one
         // that closes it, so what this node reserves for is the series it has buffered.
         self.buffer.grow(raw_bytes(&chunk))?;
@@ -5816,9 +5938,6 @@ impl NodeState {
         if let Some(output) = &output {
             metrics.record_grid_points(output.series.time.len());
             metrics.record_output(1, valid_values(output));
-            if instant.selection.value == InstantValue::Timestamp {
-                self.track(output)?;
-            }
         }
         // What this node still holds is the chunks of the series it is selecting: a whole series is held
         // until it ends. The chunk just consumed and the gather's workspace are both gone, so this gives
@@ -5829,11 +5948,7 @@ impl NodeState {
 
     /// Sets this node's reservation to the chunks of the series it is still gathering.
     fn settle_buffered(&mut self, instant: &InstantRuntime) -> Result<()> {
-        self.buffer.resize(
-            instant
-                .buffered_bytes()
-                .saturating_add(self.emitted_bytes()),
-        )
+        self.buffer.resize(instant.buffered_bytes())
     }
 
     /// Retains and validates a fragment for canonicalization.
@@ -5890,12 +6005,9 @@ impl NodeState {
         chunk: EvaluatedChunk,
     ) -> Result<Option<EvaluatedChunk>> {
         self.collect_merge(merge, chunk)?;
-        // What this node holds is the fragments and the label sets it has already handed out; its
-        // evaluator has read none of them yet.
+        // What this node holds is the fragments; its evaluator has read none of them yet.
         let retained = window.retained_bytes();
-        let emitted = self.emitted_bytes();
-        self.buffer
-            .resize(retained.saturating_add(emitted).saturating_add(merge.bytes))?;
+        self.buffer.resize(retained.saturating_add(merge.bytes))?;
         Ok(None)
     }
 
@@ -5917,6 +6029,8 @@ impl NodeState {
             // evaluator never read a series and the charge goes back.
             return self.buffer.shrink(merge.bytes);
         }
+        // The merged series is evaluated by the window, which reads the grid's timestamps.
+        self.buffer.reserve_grid(window.grid())?;
         // The workspace the merge allocates is charged before it runs, from the rows, segments and
         // fields of the fragments as they were collected.
         let workspace = merge.workspace_bytes();
@@ -5957,15 +6071,9 @@ impl NodeState {
                 .metrics
                 .record_grid_points(output.series.time.len());
             self.buffer.metrics.record_output(1, valid_values(&output));
-            self.track(&output)?;
             let retained = window.retained_bytes();
-            let emitted = self.emitted_bytes();
-            self.buffer.resize(
-                retained
-                    .saturating_add(emitted)
-                    .saturating_add(held)
-                    .saturating_add(queued_bytes),
-            )?;
+            self.buffer
+                .resize(retained.saturating_add(held).saturating_add(queued_bytes))?;
             let bytes = evaluated_bytes(&output);
             self.enqueue_output(output)?;
             queued_bytes = queued_bytes.saturating_add(bytes);
@@ -6003,26 +6111,6 @@ impl NodeState {
         }
         Ok(())
     }
-
-    /// Records what this node hands out under its output label set.
-    ///
-    /// A node that rewrites labels is where two input series become indistinguishable, so this is where a
-    /// second one is refused: checking at the root would be too late for a window above, which would
-    /// already have evaluated the two as two series.
-    fn track(&mut self, output: &EvaluatedChunk) -> Result<()> {
-        match self.emitted.as_mut() {
-            Some(emitted) => emitted.occupy(output),
-            // A node that keeps its input's labels cannot make two series one.
-            None => Ok(()),
-        }
-    }
-
-    /// The bytes the label sets this node has handed out hold.
-    ///
-    /// Zero for a node that keeps its input's labels, which keeps no such table.
-    fn emitted_bytes(&self) -> usize {
-        self.emitted.as_ref().map_or(0, Emitted::bytes)
-    }
 }
 
 impl InputSlot {
@@ -6038,9 +6126,16 @@ impl InputSlot {
                 chunk.describe(),
             ))));
         }
+        // Finality is recorded on receipt as well as on handover: a chunk the tree has not pulled
+        // yet is still a chunk the caller sent, and whether it closes its series says so whether or
+        // not anything above this leaf ever reads it. A chunk the pool refuses never arrived, so
+        // the flag follows the queue.
+        let closing = chunk.is_last();
         self.state
             .enqueue(chunk)
-            .map_err(|error| self.state.context(error))
+            .map_err(|error| self.state.context(error))?;
+        self.open_queued_series = !closing;
+        Ok(())
     }
 
     /// Hands over the next queued source chunk, if there is one.
@@ -6480,24 +6575,6 @@ fn missing_row(index: usize) -> DataFusionError {
     ))
 }
 
-/// The rejection of a chunk holding a value where the same field already holds one.
-///
-/// No merge resolves this one: at `position`, field `field` of the label set `labels` would carry two
-/// values, which is what Prometheus rejects for two series whose label sets became equal.
-fn occupied_position(
-    labels: &LabelSet,
-    field: usize,
-    run: &Run,
-    previous: &Run,
-) -> DataFusionError {
-    DataFusionError::Execution(format!(
-        "vector cannot contain metrics with the same labelset {}: two series hold a value of field \
-         {field} at position {position} ({previous:?} and {run:?})",
-        crate::grid_series::render_label_set(labels),
-        position = run.start.max(previous.start),
-    ))
-}
-
 /// The rejection of an input that ended without the chunk closing its series.
 ///
 /// A tree with no window has no evaluator to hold the series, so the input node is the one node left that
@@ -6629,20 +6706,6 @@ fn broadcast_runtime(
         scalar_bytes: 0,
         annotations: None,
     })
-}
-
-/// Whether the [`Emitted`] table `broadcast` would keep only repeats the one its vector side keeps.
-///
-/// Literal arithmetic leaves missing samples missing and floats at their positions, so its output occupancy
-/// is a subset of the window's, and the second label drop removes only empty-valued labels that
-/// [`label_set`] ignores. Arithmetic therefore cannot create a collision the window did not already refuse.
-fn elides_emitted_table(broadcast: &BroadcastRuntime, vector: &NativeNode) -> bool {
-    matches!(broadcast.scalar, BroadcastScalar::Literal(_))
-        && matches!(broadcast.op, BroadcastOp::Arithmetic(_))
-        && matches!(
-            &vector.expr,
-            NativeExpr::Window { op, .. } if op.function.drops_metric_name()
-        )
 }
 
 /// The operation a binary node's `matching` describes.

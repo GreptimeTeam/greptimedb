@@ -42,7 +42,9 @@ use common_query::native_histogram::NativeHistogram;
 use common_query::series_frame::{
     frame_schema_with, pack_evaluated_series, unpack_evaluated_series, unpack_raw_series,
 };
-use common_recordbatch::adapter::{NATIVE_TREE_METRIC, format_metric};
+use common_recordbatch::adapter::{
+    NATIVE_TREE_METRIC, NativeTreeMetric, NativeTreeMetrics, format_metric,
+};
 use common_recordbatch::{
     EmptyRecordBatchStream, SendableRecordBatchStream as CommonSendableRecordBatchStream,
 };
@@ -114,7 +116,7 @@ use crate::histogram_eval::HistogramFunction;
 use crate::info::InfoSelector;
 use crate::map_label::LabelRewrite;
 use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
-use crate::native::metrics::{NodeMetric, NodeMetricsSnapshot};
+use crate::native::metrics::{NodeMetric, NodeMetricsSnapshot, is_node_metric};
 use crate::native::plan::{
     AggregateKind, AggregateStage, AggregateStateSchema, BoundAggregate, BoundInput, BoundInstant,
     BoundMap, BoundScalar, BoundVectorOp, BoundWindow, Grouping, InstantValue, MapOp, NativeExpr,
@@ -248,6 +250,97 @@ fn window_tree_of(function: RangeFunction) -> NativeTree {
     };
     op.function = function;
     NativeTree::try_new(root).expect("a window function keeps the raw input and its grid")
+}
+
+/// `rate(x[5m])` as the canonical pass hands it over: one merge over the window's output.
+///
+/// A range function drops the metric name, so two series that agreed on every other label leave the
+/// window under one label set. Collecting them is what refuses a second value at one position: the
+/// merge groups by the label set the window handed out and reports the collision, as Prometheus
+/// refuses two series of one label set.
+fn canonical_rate_tree_of(schema: Arc<SeriesSchema>) -> NativeTree {
+    let window = rate_tree_of(schema);
+    let output = window.root().output.clone();
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Merge {
+            input: Box::new(window.root().clone()),
+        },
+        output,
+    })
+    .expect("a merge over a window on a grid is a legal tree")
+}
+
+/// A canonical merge on the aggregate's input side refuses the split.
+///
+/// The merge answers one series per canonical label set from every piece of that set, and the pieces
+/// of one set are not in one partition: the rewrite that created them ran after the scan split the
+/// rows. A split keeps the merge in its per-partition prefix, where it sees only the pieces its own
+/// partition holds, so two colliding series that landed in different partitions are each collected
+/// apart and the final half adds their states - a value where Prometheus reports
+/// `vector cannot contain metrics with the same labelset`.
+///
+/// So the split declines and the statement keeps the plan a collected subtree gets: the merge is the
+/// boundary, its producer collects each partition's pieces, and the canonical router collects one
+/// label set from every partition before anything folds it. That is the shape an overlap is reported
+/// in, whether the aggregate is the statement root or sits under the merge.
+#[test]
+fn a_canonical_merge_below_the_aggregate_refuses_the_split() {
+    let merged = canonical_rate_tree_of(raw_schema());
+    let output = merged.root().output.clone();
+    let tree = NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(merged.root().clone()),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group: Grouping::Without(Arc::from([])),
+                stage: AggregateStage::Complete,
+                field_kind: FieldKind::Float,
+            },
+        },
+        output: output.clone(),
+    })
+    .expect("an aggregate over a collected window on a grid is a legal tree");
+    // `split_aggregate` reads a decline as "no split here", which is what leaves the merge above the
+    // partitions instead of inside them.
+    assert!(
+        FusedSeries::split_aggregate(&tree, TIME)
+            .unwrap_or_else(|error| panic!("a refused split is not a failure: {error}"))
+            .is_none(),
+        "a merge below the aggregate keeps the collected plan: {tree}"
+    );
+    let fields = crate::native::split::prefix_fields(&tree).expect("the prefix fields are bound");
+    let error = match crate::native::split::split(tree.root(), &fields, TIME) {
+        Ok(_) => panic!("a merge below the aggregate is not a prefix the split carries: {tree}"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("an aggregate split across a canonical merge"),
+        "{error}"
+    );
+
+    // A merge *above* the aggregate is refused for the same reason, and by the same arm: applying it
+    // to the merged state is what no arm of the split carries, and collecting the state it folds is
+    // what the merge cannot do.
+    let above = NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Merge {
+            input: Box::new(tree.root().clone()),
+        },
+        output,
+    })
+    .expect("a merge over an aggregate on a grid is a legal tree");
+    let fields = crate::native::split::prefix_fields(&above).expect("the prefix fields are bound");
+    let error = match crate::native::split::split(above.root(), &fields, TIME) {
+        Ok(_) => panic!("a merge above the aggregate has no arm that carries it: {above}"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("an aggregate split across a canonical merge"),
+        "{error}"
+    );
 }
 
 /// `left + right` on one grid, both operands reading the one actual source.
@@ -551,6 +644,9 @@ fn declaring_orderings(tree: &NativeTree, orderings: &[SeriesOrdering]) -> Nativ
                 }
             }
             NativeExpr::ParameterizedTopK {
+                input, parameter, ..
+            }
+            | NativeExpr::ParameterizedAggregate {
                 input, parameter, ..
             } => {
                 **input = rewrite(input, orderings, seen);
@@ -1957,7 +2053,11 @@ fn zone_output_schema() -> SchemaRef {
 
 /// `rate(x[5m])` over frames that carry `zone` as well as `host`, with both in the output.
 fn zone_node() -> FusedSeries {
-    let tree = rate_tree();
+    zone_node_with(rate_tree())
+}
+
+/// The same node over `tree`, so a test can stage the tree the canonical pass produces.
+fn zone_node_with(tree: NativeTree) -> FusedSeries {
     let binding = binding_of(
         &tree,
         raw_schema(),
@@ -3409,7 +3509,7 @@ fn rows(batches: &[RecordBatch]) -> Vec<Row> {
 const DUPLICATE_LABEL_SET: &str =
     "vector cannot contain metrics with the same labelset {host=\"web-1\"}";
 
-/// Two raw series that are already one Prometheus identity are refused by the runtime that would
+/// Two raw series that are already one Prometheus identity are refused by the merge that would
 /// have to answer both.
 ///
 /// `{host="web-1", zone=""}` and `{host="web-1"}` are one identity to Prometheus: an empty label
@@ -3417,12 +3517,16 @@ const DUPLICATE_LABEL_SET: &str =
 /// What the two *raw* keys differ in is the empty `zone` against the absent one, which the scan
 /// encodes differently and the decoder therefore opens two input series for. `rate` drops the
 /// metric name and the empty value, so the second raw series arrives on the canonical label set the
-/// first one already occupies; the refusal names that label set rather than answering it, because
-/// answering would report one point twice.
+/// first one already occupies, and the merge collecting the window's output refuses it: the
+/// refusal names that label set rather than answering it, because answering would report one point
+/// twice.
 #[tokio::test]
 async fn differing_raw_keys_that_close_on_one_label_set_are_refused() {
-    let exec = plan_of(zone_node(), memory_exec(frames(&zone_chunks())))
-        .expect("the runtime executes a rate tree");
+    let exec = plan_of(
+        zone_node_with(canonical_rate_tree_of(raw_schema())),
+        memory_exec(frames(&zone_chunks())),
+    )
+    .expect("the runtime executes a canonical rate tree");
     let error = collect(exec, SessionContext::default().task_ctx())
         .await
         .expect_err("the second raw key cannot be answered under the first one's label set");
@@ -3436,13 +3540,25 @@ async fn differing_raw_keys_that_close_on_one_label_set_are_refused() {
 ///
 /// The decoder holds the batch it is reading, the chunks it decoded from it and its own source, so a
 /// stream that kept its input after the error would hold all three until the consumer drops it. The
-/// collision above is the error: it happens on the second series, after the first one's rows have
-/// been handed out.
+/// error staged here is the truncated second series: the first one's rows are handed out, and the
+/// second one ends the input without saying it was its last chunk, which the frame decoder refuses.
 #[tokio::test]
 async fn a_runtime_error_after_rows_releases_the_input() {
     let dropped = Arc::new(AtomicBool::new(false));
     let schema = frame_schema();
-    let batches = frames(&zone_chunks());
+    // The second series is cut off: its chunk does not close it.
+    let mut chunks = zone_chunks();
+    chunks.pop().expect("the collision stages two series");
+    let samples = series_samples(1.0);
+    chunks.push(chunk_of(
+        &raw_schema(),
+        "zone-absent",
+        metric(&[(HOST, "web-1")], Some(METRIC)),
+        &times_of(&samples),
+        vec![values_of(&samples)],
+        false,
+    ));
+    let batches = frames(&chunks);
     let source = staged(schema.clone(), {
         let dropped = Arc::clone(&dropped);
         move || Box::pin(StagedStream::new(schema.clone(), batches.clone()).dropped(&dropped))
@@ -3464,7 +3580,7 @@ async fn a_runtime_error_after_rows_releases_the_input() {
         }
     };
     assert!(
-        error.to_string().contains(DUPLICATE_LABEL_SET),
+        error.to_string().contains("ended before key was final"),
         "refused for another reason: {error}"
     );
     // The first series' rows were handed out before the error, and the input is gone although the
@@ -3479,16 +3595,17 @@ async fn a_runtime_error_after_rows_releases_the_input() {
     );
 }
 
-/// A collision produced inside one native execution is still refused by its local runtime state.
+/// A collision produced inside one native execution is refused by the merge that collects it.
 ///
 /// This is the collision the canonical label set exists for, at the layer that sees it:
 /// `http_requests_total{host="web-1"}` and `http_errors_total{host="web-1"}` reach the window as two
 /// identities and leave it as `{host="web-1"}`. [`FusedSeries`] reads one metric per scan, so this
 /// collision cannot be staged through it; the runtime is driven directly, with the names on the raw
-/// chunks.
+/// chunks. The window is handed over collected, as the canonical pass places it: nothing is answered
+/// until its input ends, and the merge then refuses the second value of the one label set.
 #[test]
 fn two_differently_named_series_collide_once_rate_drops_the_name() {
-    let tree = rate_tree();
+    let tree = canonical_rate_tree_of(raw_schema());
     let mut execution = NativeExecutor::new(
         NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()), None)
             .expect("the runtime executes a rate tree"),
@@ -3507,13 +3624,6 @@ fn two_differently_named_series_collide_once_rate_drops_the_name() {
             ),
         )
         .expect("the first series is a legal raw chunk");
-    assert!(
-        execution
-            .next_chunk()
-            .expect("the first series runs")
-            .is_some(),
-        "the first series is answered"
-    );
     execution
         .push_raw(
             InputId::new(0),
@@ -3527,8 +3637,11 @@ fn two_differently_named_series_collide_once_rate_drops_the_name() {
             ),
         )
         .expect("the second series is a legal raw chunk");
+    // Both series sit in the merge's collection: the second one puts a value where the first one
+    // already holds one, and the merge refuses the pair as it collects them.
     let error = execution
-        .next_chunk()
+        .end_of_input()
+        .and_then(|()| execution.next_chunk().map(|_| ()))
         .expect_err("the second series puts a value where the first one already holds one");
     assert!(
         error.to_string().contains(DUPLICATE_LABEL_SET),
@@ -3633,6 +3746,26 @@ impl Display for Explain<'_> {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         self.0.fmt_for_explain(f)
     }
+}
+
+/// The live tree registered in a physical operator's own metrics.
+fn native_tree(metrics: &MetricsSet) -> &NativeTreeMetric {
+    metrics
+        .iter()
+        .find_map(|metric| match metric.value() {
+            MetricValue::Custom { name, value } if name.as_ref() == NATIVE_TREE_METRIC => {
+                value.as_any().downcast_ref::<NativeTreeMetric>()
+            }
+            _ => None,
+        })
+        .expect("the operator reports its native tree")
+}
+
+fn tree_output_values(tree: &NativeTreeMetrics) -> usize {
+    tree.metrics
+        .iter()
+        .find_map(|(name, value)| (name == "output_values").then_some(*value))
+        .unwrap_or(0)
 }
 
 /// The logical node prints the compiled tree without metrics.
@@ -3773,6 +3906,133 @@ async fn metrics_reports_no_figure_of_the_tree_it_runs() {
         count(&registered, "native.root.output_values") > 0,
         "the run recorded no output for the window"
     );
+}
+
+/// Caching membership preserves the old filtering rule and the live tree's changing values.
+#[tokio::test]
+async fn metrics_membership_is_fixed_while_native_tree_values_change() {
+    let exec = plan(rate_tree(), memory_exec(two_series_frames())).unwrap();
+    let before = exec.metrics().unwrap();
+    let names = |metrics: &MetricsSet| {
+        metrics
+            .iter()
+            .map(|metric| metric.value().name().to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(vec![NATIVE_TREE_METRIC.to_string()], names(&before));
+    assert_eq!(0, tree_output_values(&native_tree(&before).report()));
+
+    let batches = collect(Arc::clone(&exec), SessionContext::default().task_ctx())
+        .await
+        .unwrap();
+    let output_values = batches.iter().map(RecordBatch::num_rows).sum::<usize>();
+    assert!(output_values > 0);
+
+    let after = exec.metrics().unwrap();
+    assert_eq!(before.iter().count(), after.iter().count());
+    assert_eq!(names(&before), names(&after));
+    for (initial, current) in before.iter().zip(after.iter()) {
+        assert!(Arc::ptr_eq(initial, current));
+    }
+    // The handle captured before execution must observe values registered afterwards, too.
+    assert_eq!(
+        output_values,
+        tree_output_values(&native_tree(&before).report())
+    );
+    assert_eq!(
+        output_values,
+        tree_output_values(&native_tree(&after).report())
+    );
+
+    // Compare the cached membership against the complete set using the pre-cache filtering rule.
+    // This also catches a future operator metric registered during execute but omitted by the cache.
+    let registered = node_metric_set(&exec);
+    let formerly_reported = registered
+        .iter()
+        .filter(|metric| {
+            matches!(metric.value(), MetricValue::Custom { .. })
+                || !is_node_metric(metric.value().name())
+        })
+        .map(|metric| metric.value().name().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(formerly_reported, names(&after));
+}
+
+/// The complete registration and the ANALYZE tree retain figures from every execution partition.
+#[tokio::test]
+async fn native_tree_metrics_preserve_all_partitions() {
+    let partitions = [1.0, 2.0, 3.0]
+        .into_iter()
+        .enumerate()
+        .map(|(partition, scale)| {
+            vec![frame(&series_chunk(
+                &format!("web-{partition}"),
+                &series_samples(scale),
+                true,
+            ))]
+        })
+        .collect::<Vec<_>>();
+    let exec = plan(rate_tree(), memory_exec_partitioned(partitions)).unwrap();
+    let own = exec.metrics().unwrap();
+    assert_eq!(0, tree_output_values(&native_tree(&own).report()));
+    let context = SessionContext::default().task_ctx();
+
+    // Read the same cached handle after each partition; it must see later registrations as well.
+    for partition in 0..3 {
+        let batches = exec
+            .execute(partition, Arc::clone(&context))
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(
+            GRID_LEN as usize,
+            batches.iter().map(RecordBatch::num_rows).sum::<usize>()
+        );
+
+        let registered = node_metric_set(&exec);
+        for completed in 0..=partition {
+            let metric = registered
+                .iter()
+                .find(|metric| {
+                    metric.value().name() == "native.root.output_values"
+                        && metric.partition() == Some(completed)
+                })
+                .expect("the complete set retains each partition's output counter");
+            assert_eq!(GRID_LEN as usize, metric.value().as_usize());
+            assert!(registered.iter().any(|metric| {
+                metric.value().name() == "native.root.input.input_batches"
+                    && metric.partition() == Some(completed)
+                    && metric.value().as_usize() > 0
+            }));
+            assert!(registered.iter().any(|metric| {
+                metric.value().name() == format!("native.p{completed}.root.peak_reserved_bytes")
+                    && metric.partition() == Some(completed)
+            }));
+        }
+        let output_values = (partition + 1) * GRID_LEN as usize;
+        assert_eq!(
+            output_values,
+            count(&registered, "native.root.output_values")
+        );
+        let report = native_tree(&own).report();
+        assert_eq!(output_values, tree_output_values(&report));
+        // ANALYZE first aggregates operator metrics by name before reading the Custom tree.
+        let analyzed = native_tree(&own.aggregate_by_name()).report();
+        assert_eq!(output_values, tree_output_values(&analyzed));
+        assert!(
+            report.children[0]
+                .metrics
+                .iter()
+                .any(|(name, value)| { name == "input_batches" && *value == partition + 1 })
+        );
+
+        let text = displayable(exec.as_ref()).indent(false).to_string();
+        assert!(
+            tree_line(&text, "Window: rate").contains(&format!("output_values: {output_values}")),
+            "{text}"
+        );
+    }
 }
 
 /// Whether `name` is one of the figures a node of a tree registered, `native.<path>.<metric>`.
@@ -8793,6 +9053,146 @@ fn histogram_split_carries_a_per_point_parameter() {
             .unwrap()
             .is_none(),
         "`histogram_quantile(scalar(sum(rate(x[5m]))), sum by (le) (rate(x[5m])))` must decline: {reading}"
+    );
+}
+
+/// A `quantile` exports no state, with a per-point `φ` or without: the split declines both.
+///
+/// Its answer is the quantile of a group's whole sample set, and the quantile of two partitions'
+/// quantiles is not the quantile of their union. Reading the `φ` per point changes where the number
+/// comes from and nothing about that, so the fold that binds a number and the one that reads the
+/// statement's are declined by the same rule.
+#[test]
+fn a_per_point_quantile_is_not_split() {
+    let window = rate_tree().root().clone();
+    let grid = window
+        .output
+        .samples()
+        .expect("a window produces samples")
+        .eval_grid
+        .clone()
+        .expect("a window's output is evaluated on a grid");
+    let output = NativeType::Samples(Arc::new(SeriesSchema {
+        fields: raw_schema().fields.clone(),
+        eval_grid: Some(grid.clone()),
+    }));
+    let quantile = |parameter: NativeNode| NativeNode {
+        expr: NativeExpr::ParameterizedAggregate {
+            input: Box::new(window.clone()),
+            // Unused: the `φ` this fold reads is its parameter's.
+            op: BoundAggregate {
+                kind: AggregateKind::Quantile { quantile: 0.0 },
+                group: Grouping::By(Arc::from([Arc::from(JOB)])),
+                stage: AggregateStage::Complete,
+                field_kind: FieldKind::Float,
+            },
+            parameter: Box::new(parameter),
+        },
+        output: output.clone(),
+    };
+    // `time()`, and a scalar the statement reads from the series the split would read.
+    let eval_time = NativeNode {
+        expr: NativeExpr::EvalTime { date: None },
+        output: NativeType::Scalar(Arc::clone(&grid)),
+    };
+    let scalar_of_window = NativeNode {
+        expr: NativeExpr::ScalarOf {
+            input: Box::new(window.clone()),
+        },
+        output: NativeType::Scalar(Arc::clone(&grid)),
+    };
+    for parameter in [eval_time, scalar_of_window] {
+        let tree = NativeTree::try_new(quantile(parameter)).expect("the bound tree is legal");
+        assert!(
+            FusedSeries::split_aggregate(&tree, TIME).unwrap().is_none(),
+            "a per-point quantile must keep the plan it had: {tree}"
+        );
+    }
+}
+
+/// A fold above a state input reads every owner of the `Final` it folds.
+///
+/// The rows of a grouped `Final` state are split by their group's labels, which is how a split
+/// aggregate folds in parallel: each owner folds its own groups. A fold above that `Final` reads
+/// whole vectors, though, so the same split answers something else there: an ungrouped `quantile`
+/// is the quantile of every group's samples at once, and one fold per owner is a set of per-group
+/// quantiles instead. The state is therefore gathered when the fold above it reads across groups,
+/// wherever that fold sits: `quantile(time(), v)` reads the state as its input, and
+/// `quantile(scalar(v), v)` reads it through the parameter, where the routing walk finds it too.
+#[test]
+fn a_fold_across_groups_gathers_the_state_it_reads() {
+    let out = grid();
+    let samples = NativeType::Samples(Arc::new(SeriesSchema {
+        fields: raw_schema().fields.clone(),
+        eval_grid: Some(Arc::clone(&out)),
+    }));
+    let state = Arc::new(AggregateStateSchema {
+        group: Grouping::By(Arc::new([Arc::from(JOB)])),
+        kind: AggregateStateKind::Sum,
+        components: Arc::from([StateComponent::Value, StateComponent::Compensation]),
+        accumulators: raw_schema().fields.clone(),
+        grid: Arc::clone(&out),
+    });
+    let bound_input = |output: NativeType| NativeNode {
+        expr: NativeExpr::Input(BoundInput {
+            output: output.clone(),
+            source_index: 0,
+            ordering: SeriesOrdering::Contiguous,
+        }),
+        output,
+    };
+    // `sum by (job) (…)` at the end of its fold: one row per group and point.
+    let final_over_state = NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(bound_input(NativeType::AggregateState(Arc::clone(&state)))),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group: Grouping::By(Arc::new([Arc::from(JOB)])),
+                stage: AggregateStage::Final,
+                field_kind: FieldKind::Float,
+            },
+        },
+        output: samples.clone(),
+    };
+    let eval_time = NativeNode {
+        expr: NativeExpr::EvalTime { date: None },
+        output: NativeType::Scalar(Arc::clone(&out)),
+    };
+    let quantile = |input: NativeNode, parameter: NativeNode| NativeNode {
+        expr: NativeExpr::ParameterizedAggregate {
+            input: Box::new(input),
+            op: BoundAggregate {
+                kind: AggregateKind::Quantile { quantile: 0.5 },
+                group: Grouping::By(Arc::from([])),
+                stage: AggregateStage::Complete,
+                field_kind: FieldKind::Float,
+            },
+            parameter: Box::new(parameter),
+        },
+        output: samples.clone(),
+    };
+    // `quantile(time(), sum by (job) (…))`: ungrouped, so the fold folds every group together.
+    let across = quantile(final_over_state.clone(), eval_time);
+    assert_eq!(
+        Some((super::StateGroup::Single, SeriesRouting::CanonicalLabels)),
+        super::state_routing(&across),
+        "a fold across the Final's groups must read them on one owner"
+    );
+    // `quantile(scalar(sum by (job) (…)), v)`: the state is read by the parameter, which is one
+    // value of the whole vector, so it is as much a fold across groups as the one above.
+    let through_parameter = quantile(
+        bound_input(samples.clone()),
+        NativeNode {
+            expr: NativeExpr::ScalarOf {
+                input: Box::new(final_over_state),
+            },
+            output: NativeType::Scalar(Arc::clone(&out)),
+        },
+    );
+    assert_eq!(
+        Some((super::StateGroup::Single, SeriesRouting::CanonicalLabels)),
+        super::state_routing(&through_parameter),
+        "the Final under the fold's parameter is the state this tree reads"
     );
 }
 

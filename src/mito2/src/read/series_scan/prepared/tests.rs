@@ -54,6 +54,25 @@ use crate::series_index::samples::ColumnarSamplesFormat;
 use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
 use crate::test_util::{TestEnv, flush_region};
 
+#[test]
+fn narthex_partition_filter_ignores_empty_and_matching_rules() {
+    // Frontend-created unpartitioned regions persist Some("") rather than None.
+    assert!(narthex_partition_filter(None, None).unwrap().is_none());
+    assert!(narthex_partition_filter(Some(""), None).unwrap().is_none());
+    let rule = partition::expr::col("tag").eq(Value::from("api"));
+    let json = rule.as_json_str().unwrap();
+    assert!(
+        narthex_partition_filter(Some(&json), Some(&rule))
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        narthex_partition_filter(Some(&json), None).unwrap(),
+        Some(rule)
+    );
+    assert!(narthex_partition_filter(Some("invalid"), None).is_err());
+}
+
 async fn fixture() -> (TestEnv, MitoEngine, MitoRegionRef) {
     fixture_with(false).await
 }
@@ -153,44 +172,27 @@ async fn write_primary_key(
     timestamp: i64,
     value: Option<f64>,
 ) {
-    let mut schema = vec![
-        ColumnSchema {
-            column_name: "__primary_key".into(),
-            datatype: ColumnDataType::Binary as i32,
-            semantic_type: SemanticType::Tag as i32,
-            ..Default::default()
-        },
-        ColumnSchema {
-            column_name: "ts".into(),
-            datatype: ColumnDataType::TimestampMillisecond as i32,
-            semantic_type: SemanticType::Timestamp as i32,
-            ..Default::default()
-        },
-    ];
-    let mut values = vec![
-        ValueData::BinaryValue(primary_key),
-        ValueData::TimestampMillisecondValue(timestamp),
-    ];
     let request = if let Some(value) = value {
-        schema.push(ColumnSchema {
-            column_name: "field_0".into(),
-            datatype: ColumnDataType::Float64 as i32,
-            semantic_type: SemanticType::Field as i32,
-            ..Default::default()
-        });
-        values.push(ValueData::F64Value(value));
-        RegionRequest::Put(RegionPutRequest {
-            rows: Rows {
-                schema,
-                rows: vec![row(values)],
-            },
-            skip_wal: false,
-            hint: Some(api::v1::WriteHint {
-                primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse as i32,
-            }),
-            partition_expr_version: None,
-        })
+        crate::test_util::sparse_metric_put(primary_key, timestamp, Some(value))
     } else {
+        let schema = vec![
+            ColumnSchema {
+                column_name: "__primary_key".into(),
+                datatype: ColumnDataType::Binary as i32,
+                semantic_type: SemanticType::Tag as i32,
+                ..Default::default()
+            },
+            ColumnSchema {
+                column_name: "ts".into(),
+                datatype: ColumnDataType::TimestampMillisecond as i32,
+                semantic_type: SemanticType::Timestamp as i32,
+                ..Default::default()
+            },
+        ];
+        let values = vec![
+            ValueData::BinaryValue(primary_key),
+            ValueData::TimestampMillisecondValue(timestamp),
+        ];
         RegionRequest::Delete(RegionDeleteRequest {
             rows: Rows {
                 schema,
@@ -1147,6 +1149,9 @@ async fn ordinal_range_batches_sample_requests_and_pushes_time_bounds() {
     let source = scan.prepared.source.get().unwrap().as_ref().unwrap();
     let requests = Arc::new(Mutex::new(Vec::new()));
     let source = ColumnarPreparedSource {
+        dedup_append_raw: false,
+        scan_pool: source.scan_pool.clone(),
+        merge_field_start: 0,
         context: source.context.clone(),
         labels: source.labels.clone(),
         raw: source.raw.clone(),
@@ -2906,5 +2911,607 @@ async fn added_dynamic_filters_drop_the_preflight_cache() {
             .is_none(),
         "the ordinary scan covers a scan that added a dynamic filter"
     );
+    engine.stop().await.unwrap();
+}
+
+#[rstest::rstest]
+#[case::raw_bulk(false, false, "narthex")]
+#[case::raw_parquet(false, false, "flat")]
+#[case::encoded_bulk(true, false, "narthex")]
+#[case::append_bulk(false, true, "narthex")]
+#[case::append_raw_parquet(false, true, "flat")]
+#[case::append_encoded_bulk(true, true, "narthex")]
+#[tokio::test]
+async fn authoritative_narthex_preparation_without_sidecars(
+    #[case] encoded: bool,
+    #[case] append: bool,
+    #[case] format: &str,
+) {
+    let mut env = TestEnv::with_prefix("narthex-prepared-authoritative").await;
+    let engine = env
+        .create_engine(MitoConfig {
+            experimental_enable_series_index: false,
+            experimental_series_scan_v2: false,
+            ..Default::default()
+        })
+        .await;
+    let mut metadata = sst_region_metadata_with_encoding(PrimaryKeyEncoding::Sparse);
+    metadata
+        .column_metadatas
+        .iter_mut()
+        .find(|column| column.column_id == 2)
+        .unwrap()
+        .column_schema
+        .data_type = ConcreteDataType::float64_datatype();
+    let mut create = crate::test_util::CreateRequestBuilder::new()
+        .insert_option("primary_key_encoding", "sparse")
+        .insert_option("sst_format", format)
+        .insert_option("memtable.type", "bulk")
+        .build();
+    create.column_metadatas = metadata.column_metadatas;
+    create.primary_key = metadata.primary_key;
+    // Encoded writes must work and raw writes must be rejected regardless of metadata order.
+    create.primary_key[2..].reverse();
+    create
+        .options
+        .insert("append_mode".into(), append.to_string());
+    if encoded {
+        for (key, value) in [
+            ("memtable.bulk.merge_threshold", "2"),
+            ("memtable.bulk.encode_row_threshold", "1"),
+            ("memtable.bulk.encode_bytes_threshold", "1"),
+        ] {
+            create.options.insert(key.into(), value.into());
+        }
+    }
+    let id = store_api::storage::RegionId::new(42, 0);
+    let raw_schema = crate::test_util::rows_schema(&create);
+    let reopen = create.clone();
+    engine
+        .handle_request(id, RegionRequest::Create(create))
+        .await
+        .unwrap();
+    let region = engine.get_region(id).unwrap();
+    assert!(region.series_index_store.is_none());
+    let raw_count = 1;
+    if encoded {
+        write(&engine, &region, 7, 1000, Some(10.0)).await;
+    } else {
+        let values = raw_schema
+            .iter()
+            .map(|column| match column.column_name.as_str() {
+                "__table_id" => ValueData::U32Value(10),
+                "__tsid" => ValueData::U64Value(7),
+                "tag_0" => ValueData::StringValue("a".into()),
+                "tag_1" => ValueData::StringValue("x".into()),
+                "ts" => ValueData::TimestampMillisecondValue(1000),
+                "field_0" => ValueData::F64Value(10.0),
+                other => panic!("unexpected column {other}"),
+            })
+            .collect::<Vec<_>>();
+        let error = engine
+            .handle_request(
+                id,
+                RegionRequest::Put(store_api::region_request::RegionPutRequest {
+                    rows: Rows {
+                        schema: raw_schema.clone(),
+                        rows: vec![row(values)],
+                    },
+                    hint: None,
+                    partition_expr_version: None,
+                    skip_wal: false,
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("sparse regions require pre-encoded primary keys"),
+            "{error}"
+        );
+        engine.stop().await.unwrap();
+        return;
+    }
+    write_with_tags(&engine, &region, 7, 1000, Some(20.0), &["b", "x"]).await;
+    use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
+    let pool = Arc::new(GreedyMemoryPool::new(32 * 1024 * 1024));
+    let ctx = QueryScanContext {
+        memory_pool: pool.clone(),
+        ..Default::default()
+    };
+    let metrics = ExecutionPlanMetricsSet::new();
+    for stage in 0..3 {
+        if stage == 1 {
+            flush_region(&engine, id, None).await;
+            crate::test_util::reopen_region(
+                &engine,
+                id,
+                reopen.table_dir.clone(),
+                true,
+                reopen.options.clone(),
+            )
+            .await;
+        }
+        if stage == 2 {
+            write(&engine, &region, 7, 1000, Some(1.0)).await;
+        }
+        let request = ScanRequest {
+            distribution: Some(TimeSeriesDistribution::PerSeries),
+            filters: vec![col("field_0").gt(lit(5.0))],
+            ..Default::default()
+        };
+        let constrained = engine.handle_query(id, request.clone()).await.unwrap();
+        let limited = QueryScanContext {
+            memory_pool: Arc::new(GreedyMemoryPool::new(1)),
+            ..Default::default()
+        };
+        assert!(
+            constrained
+                .prepare_series(&limited, &metrics, &labels(constrained.metadata()))
+                .await
+                .is_err()
+        );
+        drop(constrained);
+        assert_eq!(limited.memory_pool.reserved(), 0);
+        let scan = engine.handle_query(id, request.clone()).await.unwrap();
+        let binding = labels(scan.metadata());
+        let prepared = scan
+            .prepare_series(&ctx, &metrics, &binding)
+            .await
+            .unwrap()
+            .expect("narthex reads must prepare without sidecars, including live memory");
+        assert!(pool.reserved() > 0);
+        let mut cancelled = prepared.read_series(0..prepared.num_series()).unwrap();
+        assert!(cancelled.try_next().await.unwrap().is_some());
+        drop(cancelled);
+        let chunks = prepared
+            .read_series(0..prepared.num_series())
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        let mut actual = samples(&chunks);
+        actual.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let expected = if stage < 2 {
+            vec![(1000, 10.0), (1000, 20.0)]
+        } else {
+            vec![(1000, 20.0)]
+        };
+        assert_eq!(expected, actual, "raw stage {stage}");
+        let scan = engine.handle_query(id, request).await.unwrap();
+        let mut rows = 0;
+        for partition in 0..scan.properties().num_partitions() {
+            let batches = scan
+                .scan_partition(&ctx, &metrics, partition)
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap();
+            rows += batches.iter().map(|batch| batch.num_rows()).sum::<usize>();
+        }
+        assert_eq!(
+            if append {
+                raw_count + 1
+            } else {
+                expected.len()
+            },
+            rows,
+            "batch stage {stage}"
+        );
+    }
+    assert_eq!(pool.reserved(), 0);
+    engine.stop().await.unwrap();
+}
+
+async fn authoritative_fixture(merge_mode: &str) -> (TestEnv, MitoEngine, MitoRegionRef) {
+    let mut env = TestEnv::with_prefix("narthex-review").await;
+    let engine = env
+        .create_engine(MitoConfig {
+            schedule_compaction_after_edit: false,
+            ..Default::default()
+        })
+        .await;
+    let mut metadata = sst_region_metadata_with_encoding(PrimaryKeyEncoding::Sparse);
+    metadata
+        .column_metadatas
+        .iter_mut()
+        .find(|c| c.column_id == 2)
+        .unwrap()
+        .column_schema
+        .data_type = ConcreteDataType::float64_datatype();
+    let mut create = crate::test_util::CreateRequestBuilder::new()
+        .insert_option("primary_key_encoding", "sparse")
+        .insert_option("sst_format", "narthex")
+        .insert_option("merge_mode", merge_mode)
+        .build();
+    create.column_metadatas = metadata.column_metadatas;
+    create.primary_key = metadata.primary_key;
+    let id = store_api::storage::RegionId::new(43, 0);
+    engine
+        .handle_request(id, RegionRequest::Create(create))
+        .await
+        .unwrap();
+    let region = engine.get_region(id).unwrap();
+    (env, engine, region)
+}
+
+#[tokio::test]
+async fn authoritative_strict_windows_preserve_rows() {
+    let (_env, engine, region) = authoritative_fixture("last_row").await;
+    for timestamp in [1000, 59_999, 60_000, 61_000] {
+        write(&engine, &region, 7, timestamp, Some(7.0)).await;
+    }
+    flush_region(&engine, region.region_id, None).await;
+    use store_api::region_request::{AlterKind, ModifyColumnType, RegionAlterRequest};
+    engine
+        .handle_request(
+            region.region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::ModifyColumnTypes {
+                    columns: vec![ModifyColumnType {
+                        column_name: "ts".into(),
+                        target_type: ConcreteDataType::timestamp_microsecond_datatype(),
+                    }],
+                },
+            }),
+        )
+        .await
+        .unwrap();
+
+    let ts = |value| {
+        lit(datafusion_common::ScalarValue::TimestampMicrosecond(
+            Some(value),
+            None,
+        ))
+    };
+    for (start, expected) in [(1_000_000, 1), (1_000_001, 0)] {
+        let stream = engine
+            .scan_to_stream(
+                region.region_id,
+                ScanRequest {
+                    filters: vec![col("ts").gt_eq(ts(start)), col("ts").lt(ts(start + 1))],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let batches = common_recordbatch::RecordBatches::try_collect(stream)
+            .await
+            .unwrap();
+        assert_eq!(
+            batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+            expected
+        );
+    }
+    engine
+        .handle_request(
+            region.region_id,
+            RegionRequest::Compact(store_api::region_request::RegionCompactRequest {
+                options: api::v1::region::compact_request::Options::StrictWindow(
+                    api::v1::region::StrictWindow { window_seconds: 60 },
+                ),
+                parallelism: None,
+                time_range: None,
+            }),
+        )
+        .await
+        .unwrap();
+    let version = region.version();
+    let files: Vec<_> = version
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .collect();
+    assert_eq!(files.len(), 2);
+    assert_eq!(
+        files
+            .iter()
+            .map(|file| file.meta_ref().num_rows)
+            .sum::<u64>(),
+        4
+    );
+    let mut windows = files
+        .iter()
+        .map(|file| {
+            let (start, end) = file.meta_ref().time_range;
+            (start, end, file.meta_ref().num_rows)
+        })
+        .collect::<Vec<_>>();
+    windows.sort_unstable();
+    use common_time::Timestamp;
+    assert_eq!(
+        windows,
+        vec![
+            (
+                Timestamp::new_millisecond(1000),
+                Timestamp::new_millisecond(59_999),
+                2
+            ),
+            (
+                Timestamp::new_millisecond(60_000),
+                Timestamp::new_millisecond(61_000),
+                2
+            ),
+        ]
+    );
+    engine.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn authoritative_compaction_and_raw_reads_use_last_non_null() {
+    let (_env, engine, region) = authoritative_fixture("last_non_null").await;
+    use mito_codec::row_converter::{PrimaryKeyCodec, SparsePrimaryKeyCodec};
+    use store_api::storage::consts::ReservedColumnId;
+    let mut key = Vec::new();
+    SparsePrimaryKeyCodec::schemaless()
+        .encode_values(
+            &[
+                (
+                    ReservedColumnId::table_id(),
+                    datatypes::value::Value::UInt32(10),
+                ),
+                (ReservedColumnId::tsid(), datatypes::value::Value::UInt64(7)),
+                (0, datatypes::value::Value::from("a")),
+            ],
+            &mut key,
+        )
+        .unwrap();
+    write_primary_key(&engine, &region, key.clone(), 1000, Some(7.0)).await;
+    flush_region(&engine, region.region_id, None).await;
+    engine
+        .handle_request(
+            region.region_id,
+            crate::test_util::sparse_metric_put(key, 1000, None),
+        )
+        .await
+        .unwrap();
+    flush_region(&engine, region.region_id, None).await;
+    let scan = engine
+        .handle_query(
+            region.region_id,
+            ScanRequest {
+                distribution: Some(TimeSeriesDistribution::PerSeries),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let source = scan
+        .prepare_series(
+            &QueryScanContext::default(),
+            &ExecutionPlanMetricsSet::new(),
+            &labels(scan.metadata()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let chunks = source
+        .read_series(0..source.num_series())
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(samples(&chunks), vec![(1000, 7.0)]);
+    let version = region.version();
+    let inputs: Vec<_> = version
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values().cloned())
+        .collect();
+    let mut source = crate::compaction::CompactionSstReaderBuilder {
+        metadata: region.metadata(),
+        sst_layer: region.access_layer.clone(),
+        cache: engine.cache_manager(),
+        inputs: &inputs,
+        append_mode: false,
+        narthex_format: true,
+        filter_deleted: false,
+        time_range: None,
+        merge_mode: crate::region::options::MergeMode::LastNonNull,
+        read_parallelism: 1,
+    }
+    .build_flat_sst_reader()
+    .await
+    .unwrap();
+    let batch = source.next_batch().await.unwrap().unwrap();
+    let values = batch
+        .column_by_name("field_0")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<datatypes::arrow::array::Float64Array>()
+        .unwrap();
+    assert_eq!(values.len(), 1);
+    assert_eq!(values.value(0), 7.0);
+    assert!(source.next_batch().await.unwrap().is_none());
+    engine.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn authoritative_compaction_opener_uses_persisted_format() {
+    use crate::compaction::compactor::{CompactionRegionOpener, OpenCompactionRegionRequest};
+    let (env, engine, region) = authoritative_fixture("last_row").await;
+    write(&engine, &region, 7, 1000, Some(7.0)).await;
+    flush_region(&engine, region.region_id, None).await;
+    let mut config = MitoConfig::default();
+    config.index.aux_path = env
+        .data_home()
+        .join("remote-compaction")
+        .display()
+        .to_string();
+    let opener = CompactionRegionOpener::new(config, env.get_object_store_manager().unwrap())
+        .await
+        .unwrap();
+    for format in [
+        None,
+        Some(crate::sst::FormatType::Narthex),
+        Some(crate::sst::FormatType::Flat),
+    ] {
+        let request = OpenCompactionRegionRequest {
+            region_id: region.region_id,
+            table_dir: region.table_dir().to_string(),
+            path_type: region.path_type(),
+            region_options: crate::region::options::RegionOptions {
+                sst_format: format,
+                ..Default::default()
+            },
+            max_parallelism: 1,
+            plugins: common_base::Plugins::new(),
+        };
+        let opened = opener
+            .open(
+                &request,
+                either::Either::Left(common_time::TimeToLive::default()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            opened.region_options.sst_format,
+            Some(crate::sst::FormatType::Narthex)
+        );
+        opened.stop_purger_scheduler().await.unwrap();
+    }
+    engine.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn authoritative_copy_failure_cleans_only_planned_objects() {
+    use crate::region::{FileDescriptor, RegionFileCopier};
+    let (_env, engine, region) = authoritative_fixture("last_row").await;
+    let store = region.access_layer.object_store();
+    store.write("copy/source", "payload").await.unwrap();
+    store
+        .write("copy/target/existing", "payload")
+        .await
+        .unwrap();
+    let descriptor = |source: &str, target: &str| FileDescriptor::NarthexObject {
+        source: source.into(),
+        target: target.into(),
+        size: 7,
+        manifest: None,
+    };
+    let copier = RegionFileCopier::new(region.access_layer.clone());
+    assert!(
+        copier
+            .copy_files(
+                store_api::storage::RegionId::new(43, 1),
+                region.region_id,
+                vec![
+                    descriptor("copy/source", "copy/target/new"),
+                    descriptor("copy/missing", "copy/target/failing")
+                ],
+                1,
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .read("copy/target/existing")
+            .await
+            .unwrap()
+            .to_bytes()
+            .as_ref(),
+        b"payload"
+    );
+    assert!(!store.exists("copy/target/new").await.unwrap());
+    engine.stop().await.unwrap();
+}
+
+#[rstest::rstest]
+#[case::newer_put(false)]
+#[case::newer_delete(true)]
+#[tokio::test]
+async fn authoritative_copy_preserves_source_order(#[case] delete: bool) {
+    let (_env, engine, source) = authoritative_fixture("last_row").await;
+    write(&engine, &source, 7, 1000, Some(7.0)).await;
+    flush_region(&engine, source.region_id, None).await;
+    write(
+        &engine,
+        &source,
+        7,
+        1000,
+        if delete { None } else { Some(9.0) },
+    )
+    .await;
+    flush_region(&engine, source.region_id, None).await;
+    let metadata = source.metadata();
+    let mut create = crate::test_util::CreateRequestBuilder::new()
+        .table_dir(source.table_dir())
+        .insert_option("primary_key_encoding", "sparse")
+        .insert_option("sst_format", "narthex")
+        .build();
+    create.column_metadatas = metadata.column_metadatas.clone();
+    create.primary_key = metadata.primary_key.clone();
+    let target = store_api::storage::RegionId::new(43, 1);
+    engine
+        .handle_request(target, RegionRequest::Create(create.clone()))
+        .await
+        .unwrap();
+    engine
+        .copy_region_from(
+            target,
+            store_api::region_engine::MitoCopyRegionFromRequest {
+                source_region_id: source.region_id,
+                parallelism: 2,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        engine
+            .get_region(target)
+            .unwrap()
+            .version_control
+            .committed_sequence(),
+        0
+    );
+    for reopen in [false, true] {
+        if reopen {
+            crate::test_util::reopen_region(
+                &engine,
+                target,
+                create.table_dir.clone(),
+                true,
+                create.options.clone(),
+            )
+            .await;
+        }
+        let scan = engine
+            .handle_query(
+                target,
+                ScanRequest {
+                    distribution: Some(TimeSeriesDistribution::PerSeries),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let values = all_raw_samples(
+            scan.as_ref(),
+            &QueryScanContext::default(),
+            &ExecutionPlanMetricsSet::new(),
+            &labels(scan.metadata()),
+            SeriesOrdering::KeyThenTime,
+        )
+        .await;
+        assert_eq!(values, if delete { vec![] } else { vec![(1000, 9.0)] });
+        assert!(
+            engine
+                .handle_query(
+                    target,
+                    ScanRequest {
+                        exact_sequence_range: true,
+                        memtable_min_sequence: Some(0),
+                        memtable_max_sequence: Some(1),
+                        ..Default::default()
+                    }
+                )
+                .await
+                .is_err()
+        );
+    }
     engine.stop().await.unwrap();
 }

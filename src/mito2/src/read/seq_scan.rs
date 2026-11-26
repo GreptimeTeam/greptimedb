@@ -70,6 +70,8 @@ pub(crate) enum FlatReadMode {
 /// The output order is always `order by primary keys, time index` inside every
 /// [`PartitionRange`]. Each "partition" may contains many [`PartitionRange`]s.
 pub struct SeqScan {
+    /// Shares narthex candidate discovery across batch-output partitions.
+    narthex_preparation: Option<Arc<crate::read::series_scan::prepared::Preparation>>,
     /// Properties of the scanner.
     properties: ScannerProperties,
     /// Context of streams.
@@ -100,6 +102,10 @@ impl SeqScan {
         let pruner = Arc::new(Pruner::new(stream_ctx.clone(), num_workers));
 
         Self {
+            narthex_preparation: stream_ctx
+                .input
+                .requires_narthex_preparation()
+                .then(|| Arc::new(crate::read::series_scan::prepared::Preparation::default())),
             properties,
             stream_ctx,
             pruner,
@@ -128,12 +134,13 @@ impl SeqScan {
 
     /// Scan [`Batch`] in all partitions one by one.
     pub(crate) fn scan_all_partitions(&self) -> Result<ScanBatchStream> {
+        let ctx = QueryScanContext::default();
         let metrics_set = ExecutionPlanMetricsSet::new();
 
         let streams = (0..self.properties.partitions.len())
             .map(|partition| {
                 let metrics = self.new_partition_metrics(false, &metrics_set, partition);
-                self.scan_flat_batch_in_partition(partition, metrics)
+                self.scan_flat_batch_in_partition(partition, metrics, &ctx)
             })
             .collect::<Result<Vec<_>>>()?;
 
@@ -156,6 +163,20 @@ impl SeqScan {
         let part_metrics = self.new_partition_metrics(false, &metrics_set, 0);
         debug_assert_eq!(1, self.properties.partitions.len());
         let partition_ranges = &self.properties.partitions[0];
+
+        if let Some(preparation) = &self.narthex_preparation {
+            let source = preparation
+                .prepare_batches(
+                    self.stream_ctx.clone(),
+                    partition_ranges.clone(),
+                    part_metrics,
+                    QueryScanContext::default().memory_pool,
+                )
+                .await?;
+            return source.read_batches(
+                0..store_api::region_engine::PreparedSeriesSource::num_series(source.as_ref()),
+            );
+        }
 
         let reader = Self::merge_all_flat_ranges_for_compaction(
             &self.stream_ctx,
@@ -198,7 +219,7 @@ impl SeqScan {
             partition_ranges.len(),
             sources.len()
         );
-        let channel_size = compute_parallel_channel_size(DEFAULT_READ_BATCH_SIZE);
+        let channel_size = compaction_input_channel_size();
         let parallelism = stream_ctx.input.compaction_read_parallelism;
         if parallelism > 1 && sources.len() > 1 {
             // More permits than inputs cannot increase concurrency. Clamping also
@@ -406,7 +427,7 @@ impl SeqScan {
         let metrics = self.new_partition_metrics(ctx.explain_verbose, metrics_set, partition);
         let input = &self.stream_ctx.input;
 
-        let batch_stream = self.scan_flat_batch_in_partition(partition, metrics.clone())?;
+        let batch_stream = self.scan_flat_batch_in_partition(partition, metrics.clone(), ctx)?;
         let record_batch_stream = ConvertBatchStream::new(
             batch_stream,
             input.mapper.clone(),
@@ -431,6 +452,7 @@ impl SeqScan {
         &self,
         partition: usize,
         part_metrics: PartitionMetrics,
+        ctx: &QueryScanContext,
     ) -> Result<ScanBatchStream> {
         ensure!(
             partition < self.properties.partitions.len(),
@@ -439,6 +461,23 @@ impl SeqScan {
                 all: self.properties.partitions.len(),
             }
         );
+
+        if let Some(preparation) = &self.narthex_preparation {
+            return Ok(crate::read::series_scan::prepared::scan_batches(
+                preparation.clone(),
+                self.stream_ctx.clone(),
+                self.properties
+                    .partitions
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .collect(),
+                partition,
+                self.properties.partitions.len().max(1),
+                part_metrics,
+                ctx.memory_pool.clone(),
+            ));
+        }
 
         if self.properties.partitions[partition].is_empty() {
             return Ok(Box::pin(futures::stream::empty()));
@@ -625,6 +664,9 @@ impl RegionScanner for SeqScan {
     }
 
     fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError> {
+        if let Some(preparation) = &mut self.narthex_preparation {
+            *preparation = Arc::new(crate::read::series_scan::prepared::Preparation::default());
+        }
         self.properties.prepare(request);
 
         self.check_scan_limit().map_err(BoxedError::new)?;
@@ -645,6 +687,11 @@ impl RegionScanner for SeqScan {
         &mut self,
         filter_exprs: Vec<Arc<dyn datafusion::physical_plan::PhysicalExpr>>,
     ) -> Vec<bool> {
+        if self.stream_ctx.input.requires_narthex_preparation() {
+            // Prepared ordinals are immutable. Keep changing filters in the caller
+            // rather than claiming pushdown that discovery cannot honor.
+            return vec![false; filter_exprs.len()];
+        }
         self.stream_ctx.add_dyn_filter_to_predicate(filter_exprs)
     }
 
@@ -694,6 +741,11 @@ impl fmt::Debug for SeqScan {
             .field("num_ranges", &self.stream_ctx.ranges.len())
             .finish()
     }
+}
+
+/// Channel capacity of each compaction input read in its own task.
+pub(crate) fn compaction_input_channel_size() -> usize {
+    compute_parallel_channel_size(DEFAULT_READ_BATCH_SIZE)
 }
 
 /// Builds flat sources for the partition range and push them to the `sources` vector.

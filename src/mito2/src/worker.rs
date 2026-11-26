@@ -847,6 +847,7 @@ impl<S: LogStore> WorkerStarter<S> {
             id: self.id,
             config: self.config.clone(),
             regions: regions.clone(),
+            copy_region_locks: handle_copy_region::CopyRegionLocks::default(),
             catchup_regions: catchup_regions.clone(),
             dropping_regions: Arc::new(RegionMap::default()),
             opening_regions: opening_regions.clone(),
@@ -1289,6 +1290,9 @@ struct RegionWorkerLoop<S> {
     config: Arc<MitoConfig>,
     /// Regions bound to the worker.
     regions: RegionMapRef,
+    /// Serializes COPY through publication and installation, including across region reopen.
+    /// Task guards remove entries when the last active or queued COPY finishes.
+    copy_region_locks: handle_copy_region::CopyRegionLocks,
     /// Regions that are not yet fully dropped.
     dropping_regions: RegionMapRef,
     /// Regions that are opening.

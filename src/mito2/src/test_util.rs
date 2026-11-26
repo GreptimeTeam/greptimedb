@@ -526,6 +526,11 @@ impl TestEnv {
         self
     }
 
+    pub(crate) fn with_file_ref_manager(mut self, manager: FileReferenceManagerRef) -> Self {
+        self.file_ref_manager = manager;
+        self
+    }
+
     /// Overwrites the original `log_store_factory`.
     pub fn with_log_store_factory(mut self, log_store_factory: LogStoreFactory) -> TestEnv {
         self.log_store_factory = log_store_factory;
@@ -1519,6 +1524,47 @@ pub fn delete_rows_schema(request: &RegionCreateRequest) -> Vec<api::v1::ColumnS
         .filter(|col| col.semantic_type != SemanticType::Field)
         .map(column_metadata_to_column_schema)
         .collect::<Vec<_>>()
+}
+
+/// Builds an encoded sparse metric put, including an explicitly nullable field.
+pub fn sparse_metric_put(key: Vec<u8>, ts: i64, value: Option<f64>) -> RegionRequest {
+    use api::v1::ColumnDataType;
+    let schema = [
+        ("__primary_key", ColumnDataType::Binary, SemanticType::Tag),
+        (
+            "ts",
+            ColumnDataType::TimestampMillisecond,
+            SemanticType::Timestamp,
+        ),
+        ("field_0", ColumnDataType::Float64, SemanticType::Field),
+    ]
+    .into_iter()
+    .map(|(name, datatype, semantic_type)| api::v1::ColumnSchema {
+        column_name: name.into(),
+        datatype: datatype as i32,
+        semantic_type: semantic_type as i32,
+        ..Default::default()
+    })
+    .collect();
+    let values = [
+        Some(ValueData::BinaryValue(key)),
+        Some(ValueData::TimestampMillisecondValue(ts)),
+        value.map(ValueData::F64Value),
+    ]
+    .into_iter()
+    .map(|value_data| api::v1::Value { value_data })
+    .collect();
+    RegionRequest::Put(RegionPutRequest {
+        rows: Rows {
+            schema,
+            rows: vec![Row { values }],
+        },
+        hint: Some(api::v1::WriteHint {
+            primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse as i32,
+        }),
+        partition_expr_version: None,
+        skip_wal: false,
+    })
 }
 
 /// Put rows into the engine.

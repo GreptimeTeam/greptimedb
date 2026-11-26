@@ -14,14 +14,13 @@ use std::sync::Arc;
 
 use common_base::readable_size::ReadableSize;
 use partition::expr::PartitionExpr;
-use snafu::{ResultExt, ensure};
-use store_api::codec::PrimaryKeyEncoding;
+use snafu::ensure;
 use tokio_util::sync::CancellationToken;
 
 use crate::access_layer::{Metrics, OperationType, SstWriteRequest, WriteType};
 use crate::compaction::multi_region::memory::{self, MemoryLimits};
 use crate::compaction::multi_region::{MultiRegionCompactionContext, MultiRegionTarget};
-use crate::error::{ComputeArrowSnafu, Result};
+use crate::error::Result;
 use crate::read::FlatSource;
 use crate::sst::FormatType;
 use crate::sst::file::FileMeta;
@@ -108,7 +107,7 @@ impl<'a> TargetWriter<'a> {
     fn request(&self, source: FlatSource) -> Result<SstWriteRequest> {
         let config = &self.context.config;
         // The shared source plan already applies the admitted index thresholds.
-        let source = output_projection(self.target, source, self.context.cancellation.clone())?;
+        let source = cancellable_source(source, self.context.cancellation.clone());
         let index_build_inputs = Some(IndexBuildInputs {
             output_rows: None,
             plan: self.index_plan.clone(),
@@ -143,7 +142,7 @@ impl<'a> TargetWriter<'a> {
 
     pub(super) fn options(&self) -> WriteOptions {
         WriteOptions {
-            write_buffer_size: ReadableSize(self.limits.batch as u64),
+            write_buffer_size: ReadableSize(self.limits.writer.upload_limits.chunk_bytes as u64),
             max_file_size: Some(self.max_file_size),
             // Capped so each admitted encoder stays within the task budget; see
             // [memory::MAX_ROW_GROUP_SIZE].
@@ -215,38 +214,13 @@ impl<'a> TargetWriter<'a> {
     }
 }
 
-fn output_projection(
-    target: &MultiRegionTarget,
-    mut source: FlatSource,
-    cancellation: CancellationToken,
-) -> Result<FlatSource> {
-    let projection: Vec<_> = source
-        .schema()
-        .fields()
-        .iter()
-        .enumerate()
-        .filter(|(_, field)| {
-            target.metadata.primary_key_encoding != PrimaryKeyEncoding::Sparse
-                || !target.metadata.primary_key.iter().any(|id| {
-                    target
-                        .metadata
-                        .column_by_id(*id)
-                        .is_some_and(|column| column.column_schema.name == *field.name())
-                })
-        })
-        .map(|(index, _)| index)
-        .collect();
-    let schema = Arc::new(
-        source
-            .schema()
-            .project(&projection)
-            .context(ComputeArrowSnafu)?,
-    );
+fn cancellable_source(mut source: FlatSource, cancellation: CancellationToken) -> FlatSource {
+    let schema = source.schema().clone();
     let stream = async_stream::try_stream! {
         while let Some(batch) = source.next_batch().await? {
             if cancellation.is_cancelled() { Err(crate::error::CompactionCancelledSnafu.build())?; }
-            yield batch.project(&projection).context(ComputeArrowSnafu)?;
+            yield batch;
         }
     };
-    Ok(FlatSource::new_stream(schema, Box::pin(stream)))
+    FlatSource::new_stream(schema, Box::pin(stream))
 }

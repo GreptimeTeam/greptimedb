@@ -567,6 +567,14 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("Failed to hand the WAL of region {} over to this node", region_id))]
+    HandoffWal {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
     #[snafu(display("Failed to resolve the WAL provider, region_id: {}", region_id))]
     ResolveWalProvider {
         region_id: RegionId,
@@ -1701,7 +1709,8 @@ impl ErrorExt for Error {
             | DeleteWal { source, .. }
             | WaitWalDurable { source, .. }
             | ResolveWalProvider { source, .. }
-            | CheckWalHistory { source, .. } => source.status_code(),
+            | CheckWalHistory { source, .. }
+            | HandoffWal { source, .. } => source.status_code(),
             CompressObject { .. }
             | DecompressObject { .. }
             | SerdeJson { .. }
@@ -1947,6 +1956,7 @@ impl ErrorExt for Error {
             | WaitWalDurable { source, .. }
             | ResolveWalProvider { source, .. }
             | CheckWalHistory { source, .. }
+            | HandoffWal { source, .. }
             | FetchManifests { source, .. }
             | External { source, .. } => source.retry_hint(),
 

@@ -86,6 +86,7 @@ use datafusion::physical_plan::{
     Partitioning, PlanProperties, RecordBatchStream, SendableRecordBatchStream,
 };
 use datatypes::data_type::DataType as _;
+use datatypes::schema::ColumnSchema;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::frame::{
     FrameContent, FrameLabelMode, SeriesFrameDeclaration, aggregate_state_frame_schema,
@@ -108,8 +109,8 @@ use crate::extension_plan::series_repartition::SeriesRepartitionExec;
 use crate::extension_plan::{RawSeriesSourceExec, SeriesRouting};
 use crate::grid_series::METADATA_LABELS;
 use crate::histogram_eval::HISTOGRAM_ROUTING_EXCLUDED_LABELS;
-use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
-use crate::native::metrics::{NodeMetricsSnapshot, is_node_metric};
+use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor, SourceFacts};
+use crate::native::metrics::NodeMetricsSnapshot;
 use crate::native::plan::{
     AggregateStage, AggregateStateSchema, BoundInput, BoundMap, Grouping, InstantValue, MapOp,
     NativeExpr, NativeNode, NativeTree, NativeType, reads_across_series,
@@ -1005,6 +1006,7 @@ impl FusedSeries {
             output_schema,
             self.binding.time_index.clone(),
             tags,
+            self.binding.metric_name.clone(),
             self.format,
             target_partitions,
             self.canonical_producer,
@@ -1369,11 +1371,13 @@ fn same_source(node: &NativeNode) -> Option<usize> {
         | NativeExpr::EvalTime { .. }
         | NativeExpr::Map { .. }
         | NativeExpr::ParameterizedMap { .. }
-        // `scalar()`, `topk` and a histogram function read the whole vector at a point, so they
-        // answer one value (or a whole ranking) rather than one output series per input series.
+        // `scalar()`, `topk`, a histogram function and a fold with a per-point argument read the
+        // whole vector at a point, so they answer one value (or a whole ranking, or one series per
+        // group) rather than one output series per input series.
         | NativeExpr::ScalarOf { .. }
         | NativeExpr::ParameterizedTopK { .. }
-        | NativeExpr::ParameterizedHistogram { .. } => None,
+        | NativeExpr::ParameterizedHistogram { .. }
+        | NativeExpr::ParameterizedAggregate { .. } => None,
     }
 }
 
@@ -1497,6 +1501,12 @@ fn needs_vector_matching(node: &NativeNode) -> bool {
         NativeExpr::ParameterizedHistogram {
             input, parameters, ..
         } => needs_vector_matching(input) || parameters.iter().any(needs_vector_matching),
+        // The fold reads its group, and its argument may be a scalar expression with a match of its
+        // own inside it: `quantile(scalar(a * on(k) b), c)`. A vector match anywhere in the tree
+        // needs its match keys co-located, wherever it sits.
+        NativeExpr::ParameterizedAggregate {
+            input, parameter, ..
+        } => needs_vector_matching(input) || needs_vector_matching(parameter),
         NativeExpr::Set { left, right, .. } => {
             needs_vector_matching(left) || needs_vector_matching(right)
         }
@@ -1598,44 +1608,66 @@ pub fn input_locality(root: &NativeNode) -> InputLocality {
 /// State rows already carry the cut's full group labels. Histogram suffixes need a coarser key:
 /// every bound of one histogram and every histogram whose metadata-free outputs collide must
 /// meet, while the Final kernel still folds separately by the original group labels.
+///
+/// A suffix that folds across groups needs every group's rows in one place, whatever the Final's
+/// grouping is: splitting the rows of one vector by group would answer one fold per owner rather
+/// than the fold of the whole vector. Such a consumer is a whole-vector operation -- the ranking
+/// operations, `scalar()`, and the fold whose argument is read per point -- and the walk below
+/// records it as it descends, so a `quantile(time(), v)` above a grouped `Final` reads every owner
+/// instead of one, and one whose parameter is the state itself reads it at all.
 fn state_routing(root: &NativeNode) -> Option<(StateGroup, SeriesRouting)> {
-    fn find(node: &NativeNode, histogram: bool) -> Option<(&Grouping, bool)> {
+    /// `gathered` says whether a node passed on the way down reads more than one group at a time.
+    fn find(node: &NativeNode, histogram: bool, gathered: bool) -> Option<(&Grouping, bool, bool)> {
         match &node.expr {
             NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Final => {
-                Some((&op.group, histogram))
+                Some((&op.group, histogram, gathered))
             }
+            // A fold that is not this one reads the values of the rows below it and folds whole
+            // groups together, so what it reads has to be in one place.
+            NativeExpr::Aggregate { input, .. } => find(input, histogram, true),
             NativeExpr::Vector { input, op } => find(
                 input,
                 histogram || matches!(op, crate::native::plan::BoundVectorOp::Histogram(_)),
+                gathered,
             ),
             // A parameterized histogram is a histogram suffix too: its function folds the bounds of
             // one histogram, so every bound has to meet where it runs.
             NativeExpr::ParameterizedHistogram { input, op, .. } => find(
                 input,
                 histogram || matches!(op, crate::native::plan::BoundVectorOp::Histogram(_)),
+                gathered,
             ),
+            // These answer from the whole vector rather than from one series at a time: `scalar()`
+            // and the per-point `k` of a ranking operation read every series.
+            NativeExpr::ScalarOf { input } | NativeExpr::ParameterizedTopK { input, .. } => {
+                find(input, histogram, true)
+            }
+            // A fold whose argument is read per point folds its group's whole sample set, and the
+            // state it reads may sit under either child: as the vector it folds, or as the series
+            // its `scalar()` argument is answered from. Either way this node reads across groups,
+            // so neither half may be left to another owner.
+            NativeExpr::ParameterizedAggregate {
+                input, parameter, ..
+            } => find(input, histogram, true).or_else(|| find(parameter, histogram, true)),
             NativeExpr::Instant { input, .. }
             | NativeExpr::Window { input, .. }
             | NativeExpr::Merge { input }
             | NativeExpr::Map { input, .. }
             | NativeExpr::Timestamp { input }
             | NativeExpr::VectorOf { input }
-            | NativeExpr::ParameterizedMap { input, .. }
-            | NativeExpr::ScalarOf { input }
-            | NativeExpr::ParameterizedTopK { input, .. }
-            | NativeExpr::Aggregate { input, .. } => find(input, histogram),
+            | NativeExpr::ParameterizedMap { input, .. } => find(input, histogram, gathered),
             NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
-                find(left, histogram).or_else(|| find(right, histogram))
+                find(left, histogram, gathered).or_else(|| find(right, histogram, gathered))
             }
             NativeExpr::Info { base, info, .. } => {
-                find(base, histogram).or_else(|| find(info, histogram))
+                find(base, histogram, gathered).or_else(|| find(info, histogram, gathered))
             }
             NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => None,
         }
     }
-    let (group, histogram) = find(root, false)?;
+    let (group, histogram, gathered) = find(root, false, false)?;
     if histogram {
-        let owners = if crate::native::split::histogram_group_is_single(group) {
+        let owners = if gathered || crate::native::split::histogram_group_is_single(group) {
             StateGroup::Single
         } else {
             StateGroup::Grouped
@@ -1653,6 +1685,7 @@ fn state_routing(root: &NativeNode) -> Option<(StateGroup, SeriesRouting)> {
         ))
     } else {
         let owners = match group {
+            _ if gathered => StateGroup::Single,
             Grouping::By(labels) if labels.is_empty() => StateGroup::Single,
             _ => StateGroup::Grouped,
         };
@@ -2140,6 +2173,13 @@ pub struct FusedSeriesExec {
     time_column: String,
     /// The tag column names, indexed by [`OutputColumn::Tag`].
     tags: Arc<[String]>,
+    /// The one metric every input series is named, taken from the binding.
+    ///
+    /// The canonical pass judged a dropped label set by this: a node that drops the metric name is
+    /// only told to stream when everything below it is named the same one. The execution reads it
+    /// so the collection it performs at run time is decided by that same proof; `None` is a binding
+    /// that names no metric - one raw source per input - and every consumer then collects.
+    metric_name: Option<Arc<str>>,
     /// The columns this node produces.
     output_schema: SchemaRef,
     /// The evidence claimed by this plan's output partitions.
@@ -2149,6 +2189,11 @@ pub struct FusedSeriesExec {
     /// Shared with the tree's own registration, which reads these figures when a reader asks for
     /// the tree: that reader outlives this borrow, and must never keep the set alive.
     metric: Arc<ExecutionPlanMetricsSet>,
+    /// The fixed membership returned by `metrics()`: at construction only the `native.tree` Custom
+    /// is registered; later per-partition `native.<path>.*` figures were always filtered out.
+    /// If a physical operator metric is registered during execution, it must also be included here
+    /// or this cache must gain invalidation; otherwise the membership regression test will fail.
+    own_metrics: MetricsSet,
     format: FusedOutputFormat,
     matching_parallelism: Option<usize>,
     /// Whether this node is a partition-local canonical producer.
@@ -2187,18 +2232,43 @@ struct StoredSeriesLabels {
     /// Every tag name a stored series reports besides its metric name.
     tags: Arc<[Arc<str>]>,
     /// Whether the primary key keeps telling two stored series apart once a name-dropping kernel
-    /// has normalized their labels.
-    ///
-    /// Two facts make that true. The tags and the primary key must be free of the metadata labels:
-    /// `__type__` and `__unit__` go with the metric name when a kernel drops it, so a binding that
-    /// keys a series by either of them stops telling two series apart once the name is gone. And
-    /// every primary-key column must always decode a value, which is what a non-nullable column
-    /// states. A kernel that drops the name drops every label whose value is empty with it, and a
-    /// nullable column lets one series hold `NULL` while another holds `''`: two different storage
-    /// keys, which decode to an absent label and to an empty one, so both are handed over as no
-    /// label at all once the empty one is dropped. Two such series that agree on every other tag
-    /// then leave as one identity, whether they arrive in one partition or in two.
+    /// has normalized their labels; see [`keys_survive_metadata_drop`] for the rule itself.
     keys_survive_metadata_drop: bool,
+}
+
+/// Whether the storage key of a scan keeps telling its stored series apart once a name-dropping
+/// kernel has normalized their labels.
+///
+/// `logical_tags` are the tag names every stored series of the scan reports, and `key_columns` are
+/// the columns the scan keys one series by. Two facts make the drop injective, and both are read
+/// from the scan's own binding rather than from a tree above it:
+///
+/// - Neither the tags nor the key columns may be a metadata label. `__type__` and `__unit__` go with
+///   the metric name when a kernel drops it, so a scan that keys a series by either of them stops
+///   telling two series apart once the name is gone.
+/// - Every key column must always decode a value, which is what a non-nullable column states. A
+///   kernel that drops the name drops every label whose value is empty with it, and a nullable
+///   column lets one series hold `NULL` while another holds `''`: two different storage keys, which
+///   decode to an absent label and to an empty one, so both are handed over as no label at all once
+///   the empty one is dropped. Two such series that agree on every other tag then leave as one
+///   identity, whether they arrive in one partition or in two.
+///
+/// The physical per-series scan asks this of its own binding to decide whether a node may stream, so
+/// that its partitions hand over whole series. The plan-time canonical proof does not read it: the
+/// labels alone decide whether a metadata drop is collected, and the planner reads this rule only to
+/// count the statements that proof leaves unproved
+/// ([`leaves_a_drop_to_the_storage_keys`](crate::native::plan::leaves_a_drop_to_the_storage_keys)).
+/// Keeping the rule here is what stops the scan's own answer - read from the bound scan at execution -
+/// from drifting away from the one the plan-time count is stated with.
+pub fn keys_survive_metadata_drop<'a, 'b>(
+    logical_tags: impl IntoIterator<Item = &'a str>,
+    key_columns: impl IntoIterator<Item = &'b ColumnSchema>,
+) -> bool {
+    let metadata = |name: &str| METADATA_LABELS.contains(&name);
+    logical_tags.into_iter().all(|tag| !metadata(tag))
+        && key_columns
+            .into_iter()
+            .all(|column| !metadata(&column.name) && !column.is_nullable())
 }
 
 impl StoredSeriesLabels {
@@ -2214,19 +2284,17 @@ impl StoredSeriesLabels {
         else {
             return None;
         };
-        let metadata = |name: &str| METADATA_LABELS.contains(&name);
         Some(Self {
             tags: logical_tags
                 .iter()
                 .map(|tag| Arc::clone(&tag.name))
                 .collect(),
-            keys_survive_metadata_drop: logical_tags.iter().all(|tag| !metadata(&tag.name))
-                && physical_metadata.primary_key_columns().all(|column| {
-                    // A nullable key column can be `NULL` in one series and `''` in another, and a
-                    // name-dropping kernel turns both into no label; only a column that always
-                    // decodes a value keeps the two apart under such a kernel.
-                    !metadata(&column.column_schema.name) && !column.column_schema.is_nullable()
-                }),
+            keys_survive_metadata_drop: keys_survive_metadata_drop(
+                logical_tags.iter().map(|tag| tag.name.as_ref()),
+                physical_metadata
+                    .primary_key_columns()
+                    .map(|column| &column.column_schema),
+            ),
         })
     }
 
@@ -2505,6 +2573,7 @@ impl FusedSeriesExec {
             output_schema,
             time_column,
             tags,
+            None,
             FusedOutputFormat::PlainRows,
             None,
             false,
@@ -2519,6 +2588,7 @@ impl FusedSeriesExec {
         output_schema: SchemaRef,
         time_column: String,
         tags: Vec<String>,
+        metric_name: Option<Arc<str>>,
         format: FusedOutputFormat,
         matching_parallelism: Option<usize>,
         canonical_producer: bool,
@@ -2793,6 +2863,7 @@ impl FusedSeriesExec {
         ));
         let metric = Arc::new(ExecutionPlanMetricsSet::new());
         register_tree_metric(&tree, &metric);
+        let own_metrics = metric.clone_inner();
         Ok(Self {
             promql,
             tree,
@@ -2802,12 +2873,14 @@ impl FusedSeriesExec {
             classification: classification.into(),
             time_column,
             tags: tags.into(),
+            metric_name,
             output_schema,
             duplicate_evidence: Mutex::new(EvidenceClaims {
                 evidence: None,
                 claimed: Vec::new(),
             }),
             metric,
+            own_metrics,
             properties,
             format,
             matching_parallelism,
@@ -2881,16 +2954,7 @@ impl ExecutionPlan for FusedSeriesExec {
     /// registers as [`NativeTreeMetric`] - so they are left out here and this node reports only what
     /// an operator of its own would add.
     fn metrics(&self) -> Option<MetricsSet> {
-        let mut own = MetricsSet::new();
-        for metric in self.metric.clone_inner().iter() {
-            // The tree is not a figure of this node: it is what the node runs, reported on its own
-            // (see `NativeTreeMetric`), so it stays here rather than being flattened into a number.
-            let tree = matches!(metric.value(), MetricValue::Custom { .. });
-            if tree || !is_node_metric(metric.value().name()) {
-                own.push(Arc::clone(metric));
-            }
-        }
-        Some(own)
+        Some(self.own_metrics.clone())
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {
@@ -2953,6 +3017,7 @@ impl ExecutionPlan for FusedSeriesExec {
             self.output_schema.clone(),
             self.time_column.clone(),
             self.tags.to_vec(),
+            self.metric_name.clone(),
             self.format,
             self.matching_parallelism,
             self.canonical_producer,
@@ -3061,10 +3126,19 @@ impl FusedSeriesExec {
             evidence: Arc::clone(evidence),
             active: true,
         });
-        let mut state = match NativeExecutionState::try_new(
+        // The canonical pass decided where a merge belongs from the labels the binding names; the
+        // execution judges the collection it performs by the same fact, so an already-streaming
+        // window is not turned into a collecting one here.
+        let sources = SourceFacts::uniform(
+            self.tags.to_vec(),
+            self.metric_name.clone(),
+            self.series_schemas.len(),
+        );
+        let mut state = match NativeExecutionState::try_new_with_sources(
             &self.tree,
             Arc::clone(&context.runtime_env().memory_pool),
             evidence.clone(),
+            &sources,
         ) {
             Ok(state) => state,
             Err(error) => {

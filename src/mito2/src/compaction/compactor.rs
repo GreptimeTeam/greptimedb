@@ -318,6 +318,8 @@ impl CompactionRegionOpener {
         };
 
         let manifest = manifest_manager.manifest();
+        let mut region_options = req.region_options.clone();
+        crate::region::opener::sanitize_region_options(&manifest, &mut region_options);
         let region_metadata = manifest.metadata.clone();
         let hook: Option<RegionHookRef> = req.plugins.get();
         let manifest_ctx = Arc::new(ManifestContext::new(
@@ -341,7 +343,7 @@ impl CompactionRegionOpener {
             ssts.add_files(file_purger.clone(), manifest.files.values().cloned());
             CompactionVersion {
                 metadata: region_metadata.clone(),
-                options: req.region_options.clone(),
+                options: region_options.clone(),
                 ssts: Arc::new(ssts),
                 // Remote execution uses an already picked output. A manifest-only
                 // opener cannot prove that a new LastNonNull pick is memtable-safe.
@@ -355,26 +357,23 @@ impl CompactionRegionOpener {
             Either::Left(ttl) => ttl,
             // Get the ttl from the schema metadata manager.
             Either::Right(schema_metadata_manager) => {
-                let (_, ttl) = find_dynamic_options(
-                    req.region_id,
-                    &req.region_options,
-                    &schema_metadata_manager,
-                )
-                .await
-                .unwrap_or_else(|e| {
-                    warn!(e; "Failed to get ttl for region: {}", region_metadata.region_id);
-                    (
-                        crate::region::options::CompactionOptions::default(),
-                        TimeToLive::default(),
-                    )
-                });
+                let (_, ttl) =
+                    find_dynamic_options(req.region_id, &region_options, &schema_metadata_manager)
+                        .await
+                        .unwrap_or_else(|e| {
+                            warn!(e; "Failed to get ttl for region: {}", region_metadata.region_id);
+                            (
+                                crate::region::options::CompactionOptions::default(),
+                                TimeToLive::default(),
+                            )
+                        });
                 ttl
             }
         };
 
         Ok(CompactionRegion {
             region_id: req.region_id,
-            region_options: req.region_options.clone(),
+            region_options: region_options.clone(),
             engine_config: self.mito_config.clone(),
             region_metadata: region_metadata.clone(),
             // Lets the scan reuse the input footers read while planning the merge.
@@ -397,6 +396,16 @@ impl CompactionRegionOpener {
 }
 
 impl CompactionRegion {
+    /// Estimates the memory admission reserves for merging `unit`, with the read parallelism and
+    /// merge mode the merge uses.
+    pub(crate) fn estimated_memory_bytes(&self, unit: &CompactionUnit) -> u64 {
+        let options = &self.current_version.options;
+        unit.estimated_memory_bytes(
+            compaction_output_parallelism(&self.region_options, &self.engine_config),
+            !options.append_mode && options.merge_mode() == MergeMode::LastNonNull,
+        )
+    }
+
     /// Get the file purger of the compaction region.
     pub fn file_purger(&self) -> Option<Arc<LocalFilePurger>> {
         self.file_purger.clone()
@@ -596,6 +605,16 @@ fn sst_info_from_file_meta(meta: &FileMeta) -> SstInfo {
     }
 }
 
+/// Parallelism of encoding an output, which is also the parallelism of reading its inputs.
+/// Admission sizes the read-ahead with it, so every caller must use this function.
+pub(crate) fn compaction_output_parallelism(
+    region_options: &RegionOptions,
+    engine_config: &MitoConfig,
+) -> usize {
+    region_options
+        .compaction_output_parallelism_or(engine_config.experimental_compaction_output_parallelism)
+}
+
 /// `[MergeOutput]` represents the output of merging SST files.
 #[derive(Default, Debug, Serialize, Deserialize)]
 pub struct MergeOutput {
@@ -792,6 +811,7 @@ impl DefaultSstMerger {
             .join(",");
         let sequence_metadata = output_sequence_metadata(&context, &output.inputs);
         let builder = CompactionSstReaderBuilder {
+            narthex_format: context.region_options.sst_format == Some(FormatType::Narthex),
             metadata: context.region_metadata.clone(),
             sst_layer: context.access_layer.clone(),
             cache: context.cache_manager.clone(),
@@ -864,7 +884,11 @@ impl DefaultSstMerger {
                     // their effective sequences here could promote old rows above
                     // versions in SSTs that were not part of this merge.
                     max_sequence: None,
-                    sst_write_format: if flat_format {
+                    sst_write_format: if context.region_options.sst_format
+                        == Some(FormatType::Narthex)
+                    {
+                        FormatType::Narthex
+                    } else if flat_format {
                         FormatType::Flat
                     } else {
                         FormatType::PrimaryKey
@@ -1002,6 +1026,8 @@ impl<M: SstMerger> DefaultCompactor<M> {
             compaction_time_window: Some(unit.time_window_size),
             ..Default::default()
         };
+        // Outputs are merged one at a time; `CompactionUnit::estimated_memory_bytes` reserves
+        // only the largest output.
         for output in &unit.outputs {
             if self.cancel_token.is_cancelled() {
                 return error::CompactionCancelledSnafu.fail();
@@ -1019,13 +1045,10 @@ impl<M: SstMerger> DefaultCompactor<M> {
                         // Narrowed by the decoded sizes of the inputs once their footers are read.
                         row_group_size: context.region_options.row_group_size(),
                         float_field_encoding: context.region_options.float_field_encoding,
-                        encode_parallelism: context
-                            .region_options
-                            .compaction_output_parallelism_or(
-                                context
-                                    .engine_config
-                                    .experimental_compaction_output_parallelism,
-                            ),
+                        encode_parallelism: compaction_output_parallelism(
+                            &context.region_options,
+                            &context.engine_config,
+                        ),
                         encode_runtime: EncodeRuntime::Compact,
                     },
                     self.cancel_token.clone(),
@@ -1100,13 +1123,10 @@ where
                 // Narrowed by the decoded sizes of the inputs once their footers are read.
                 row_group_size: compaction_region.region_options.row_group_size(),
                 float_field_encoding: compaction_region.region_options.float_field_encoding,
-                encode_parallelism: compaction_region
-                    .region_options
-                    .compaction_output_parallelism_or(
-                        compaction_region
-                            .engine_config
-                            .experimental_compaction_output_parallelism,
-                    ),
+                encode_parallelism: compaction_output_parallelism(
+                    &compaction_region.region_options,
+                    &compaction_region.engine_config,
+                ),
                 encode_runtime: EncodeRuntime::Compact,
             };
             let merger = self.merger.clone();
@@ -1912,6 +1932,7 @@ mod tests {
                 deletes.clone()
             });
             let mut reader = CompactionSstReaderBuilder {
+                narthex_format: false,
                 metadata: compaction_region.region_metadata.clone(),
                 sst_layer: region.access_layer.clone(),
                 cache: engine.cache_manager(),
@@ -2033,6 +2054,7 @@ mod tests {
         assert_eq!(1, files.len());
         let outputs: Vec<_> = files.into_iter().map(new_file_handle).collect();
         let mut reader = CompactionSstReaderBuilder {
+            narthex_format: false,
             metadata: version.metadata.clone(),
             sst_layer: region.access_layer.clone(),
             cache: Arc::new(CacheManager::default()),

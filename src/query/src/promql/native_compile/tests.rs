@@ -2333,6 +2333,87 @@ fn a_math_function_with_a_varying_parameter_binds_its_parameters_as_scalars() {
     ));
 }
 
+/// `quantile` is the one aggregate whose argument a query can evaluate, and that argument binds as a
+/// second operand of the fold rather than as the number it is not.
+///
+/// Prometheus reads the parameter at every step, so `quantile(scalar(x), y)` is the fold of `y` with
+/// the value `scalar(x)` answers at that point. The input is compiled first and the argument second,
+/// which is the order the selector walk binds their scans in. A number the statement itself decides,
+/// written as a literal or as arithmetic over literals, stays on the constant path, and a vector
+/// argument is refused: Prometheus rejects `quantile(x, y)` at type check, and this route never
+/// bound it.
+#[test]
+fn a_quantile_reads_its_argument_per_point() {
+    let compiled = |query: &str| {
+        compile_selectors(
+            &eval_stmt(query),
+            &|_| Ok(raw_schema()),
+            SeriesOrdering::KeyThenTime,
+            Some(FieldKind::Float),
+        )
+    };
+    let per_point = |query: &str| match &compiled(query)
+        .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"))
+        .tree
+        .root()
+        .expr
+    {
+        NativeExpr::ParameterizedAggregate { .. } => {}
+        other => panic!("`{query}`: expected a parameterized aggregate, got {other:?}"),
+    };
+    let tree = compiled("quantile(scalar(x), y)").unwrap().tree;
+    let NativeExpr::ParameterizedAggregate {
+        input,
+        op,
+        parameter,
+    } = &tree.root().expr
+    else {
+        panic!(
+            "expected a parameterized aggregate, got {:?}",
+            tree.root().expr
+        );
+    };
+    assert!(
+        matches!(op.kind, AggregateKind::Quantile { .. }),
+        "{:?}",
+        op.kind
+    );
+    assert_eq!(op.stage, AggregateStage::Complete);
+    // The fold reads `y`, the argument reads `x`: the input is the first source, the argument the
+    // second one the walk bound.
+    assert!(matches!(input.expr, NativeExpr::Instant { .. }));
+    assert!(matches!(parameter.expr, NativeExpr::ScalarOf { .. }));
+    assert!(matches!(tree.root().output, NativeType::Samples(_)));
+    assert_eq!(tree.root().inputs().len(), 2);
+    // An argument that varies at every point is no different from one that reads a selector.
+    per_point("quantile(time() / 150 + 0.5, y)");
+    per_point("quantile(scalar(x), y) by (tag_0)");
+
+    // A number the statement decides stays bound on the fold, whether it was written as one or as
+    // the arithmetic it means.
+    for (query, quantile) in [
+        ("quantile(0.25 + 0.1 + 0.15, y)", 0.25 + 0.1 + 0.15),
+        ("quantile(pi() / 4, y)", std::f64::consts::PI / 4.0),
+    ] {
+        let tree = compiled(query).unwrap().tree;
+        let NativeExpr::Aggregate { op, .. } = &tree.root().expr else {
+            panic!("`{query}`: the constant argument left the constant path");
+        };
+        assert!(
+            matches!(op.kind, AggregateKind::Quantile { quantile: value } if value.to_bits() == quantile.to_bits()),
+            "`{query}`: {:?}",
+            op.kind
+        );
+    }
+
+    // A vector argument never reaches this compiler: the parser's type check refuses it, which is
+    // where Prometheus refuses `quantile(foo, v)` as well.
+    assert!(
+        promql_parser::parser::parse("quantile(x, y)").is_err(),
+        "a vector argument parsed"
+    );
+}
+
 /// `max_of` and `min_of` take two scalars and answer a scalar, so the call binds the first argument
 /// as the map's input and the second as its one parameter. The two are `(scalar, scalar) -> scalar`
 /// in Prometheus, which is why neither of them carries a vector here.
@@ -2888,31 +2969,77 @@ fn a_quantile_aggregate_binds_the_quantile_it_was_written_with() {
     }
 }
 
-/// An aggregate's quantile computed at query time is refused, and the error names the argument: the
-/// tree binds a quantile as a constant, so one that only exists at run time has nowhere to go. This
-/// is the same refusal a parameterised range function gets, because it is the same missing field.
+/// An aggregate's quantile written as a vector is refused, and the error names the argument.
+///
+/// A scalar the query evaluates is bound beside the fold - the value the kernel reads `q` as, one
+/// per grid point - so `quantile(time(), x)` compiles. A vector is not a value at all: Prometheus
+/// refuses `quantile(foo, x)` at type check, and the parser this statement comes through refuses it
+/// before the compiler sees it, exactly as it did before. The compiler keeps its own refusal for a
+/// tree handed to it another way, under the name it always used.
 #[test]
-fn a_computed_aggregate_quantile_is_refused_and_names_the_argument() {
-    let query = "quantile(time(), x)";
-    let error = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
-        .expect_err(&format!("`{query}` compiled, and it should not have"));
+fn an_aggregate_quantile_over_a_vector_is_refused_and_names_the_argument() {
+    let query = "quantile(x, y)";
+    let error = promql_parser::parser::parse(query)
+        .expect_err(&format!("`{query}` parsed, and it should not have"));
+    assert!(
+        error.contains("expected type scalar"),
+        "`{query}` was refused by something other than the argument's type: {error}"
+    );
+
+    // The scalar the query evaluates instead is the argument this compiler binds per point, so the
+    // statement the old refusal was written for is one this route now answers.
+    let tree = compile(
+        &eval_stmt("quantile(time(), x)"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .expect("a scalar argument is a per-point `φ`");
+    assert!(matches!(
+        tree.root().expr,
+        NativeExpr::ParameterizedAggregate { .. }
+    ));
+
+    // The same fold with a vector argument, as a caller that did not come through the parser could
+    // build it: refused under the name it always was, which is what keeps such a statement off this
+    // route.
+    let PromExpr::VectorSelector(selector) = promql_parser::parser::parse("x").unwrap() else {
+        unreachable!("`x` is a selector")
+    };
+    let PromExpr::Aggregate(mut aggregate) =
+        promql_parser::parser::parse("quantile(0.5, x)").unwrap()
+    else {
+        unreachable!("`quantile(0.5, x)` is an aggregate")
+    };
+    aggregate.param = Some(Box::new(PromExpr::VectorSelector(selector)));
+    // The statement's grid is the one its well-formed twin would have; only the argument changes.
+    let stmt = EvalStmt {
+        expr: PromExpr::Aggregate(aggregate),
+        ..eval_stmt("quantile(0.5, x)")
+    };
+    let error = compile(&stmt, raw_schema(), SeriesOrdering::KeyThenTime)
+        .expect_err("a vector argument compiled");
     assert!(
         matches!(error, DataFusionError::NotImplemented(_)),
-        "`{query}` did not report NotImplemented: {error}"
+        "a vector argument did not report NotImplemented: {error}"
     );
     let message = error.to_string();
     assert!(
-        message.contains("whose first argument is `time()`"),
-        "`{query}` did not name the argument it found: {message}"
+        message.contains("whose first argument is `x`"),
+        "the refusal did not name the argument it found: {message}"
     );
     assert!(
         message.contains("number literal"),
-        "`{query}` did not say what the argument has to be: {message}"
+        "the refusal did not say what the argument has to be: {message}"
     );
 }
 
+/// A fill inside an aggregate's quantile argument is refused where the fill is written.
+///
+/// The argument is compiled as the scalar expression it is, so a binary operation carrying a fill is
+/// refused by the same rule that refuses one anywhere else, naming the operation it found. The
+/// statement is a `NotImplemented` either way, which is what keeps it on the existing plan.
 #[test]
-fn a_fill_inside_an_aggregate_quantile_is_refused_and_names_the_argument() {
+fn a_fill_inside_an_aggregate_quantile_is_refused_where_the_fill_is() {
     let query = "quantile(0.5 + fill(0) 0.1, x)";
     let error = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
         .expect_err(&format!("`{query}` compiled, and it should not have"));
@@ -2922,8 +3049,8 @@ fn a_fill_inside_an_aggregate_quantile_is_refused_and_names_the_argument() {
     );
     let message = error.to_string();
     assert!(
-        message.contains("first argument"),
-        "`{query}` blamed the wrong argument: {message}"
+        message.contains("0.5 + fill (0) 0.1"),
+        "`{query}` did not name the argument it found: {message}"
     );
     assert!(
         message.contains("fill"),
@@ -5621,6 +5748,9 @@ fn validate_inputs_rejects_misbound_occurrences_and_accepts_scalar_wrappers() {
                 set_input_source(right, source);
             }
             NativeExpr::ParameterizedTopK {
+                input, parameter, ..
+            }
+            | NativeExpr::ParameterizedAggregate {
                 input, parameter, ..
             } => {
                 set_input_source(input, source);

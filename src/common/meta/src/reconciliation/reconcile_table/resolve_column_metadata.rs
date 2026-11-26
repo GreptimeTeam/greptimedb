@@ -92,6 +92,9 @@ impl State for ResolveColumnMetadata {
         ctx.persistent_ctx.table_info_value = Some(table_info_value);
 
         if let Some(column_metadatas) = check_column_metadatas_consistent(&self.region_metadata) {
+            // The consistent regions share their key: order the tags as the regions keep them, which
+            // also checks that the region's primary key matches its tag columns. Column order still
+            // comes from the stored `TableInfo`; see `build_table_meta_from_column_metadatas`.
             let column_metadatas =
                 reorder_tag_columns(&column_metadatas, &self.region_metadata[0].primary_key)?;
             // Safety: fetched in the above.

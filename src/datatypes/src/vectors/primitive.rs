@@ -164,8 +164,7 @@ impl<T: LogicalPrimitiveType> Vector for PrimitiveVector<T> {
 
     fn get(&self, index: usize) -> Value {
         if self.array.is_valid(index) {
-            // Safety: The index have been checked by `is_valid()`.
-            let wrapper = unsafe { T::Wrapper::from_native(self.array.value_unchecked(index)) };
+            let wrapper = T::Wrapper::from_native(self.array.value(index));
             wrapper.into()
         } else {
             Value::Null
@@ -174,8 +173,7 @@ impl<T: LogicalPrimitiveType> Vector for PrimitiveVector<T> {
 
     fn get_ref(&self, index: usize) -> ValueRef<'_> {
         if self.array.is_valid(index) {
-            // Safety: The index have been checked by `is_valid()`.
-            let wrapper = unsafe { T::Wrapper::from_native(self.array.value_unchecked(index)) };
+            let wrapper = T::Wrapper::from_native(self.array.value(index));
             wrapper.into()
         } else {
             ValueRef::Null
@@ -414,6 +412,13 @@ mod tests {
         let arrow_arr = v.to_arrow_array();
         assert_eq!(4, arrow_arr.len());
         assert_eq!(&ArrowDataType::Int32, arrow_arr.data_type());
+    }
+
+    #[test]
+    #[should_panic(expected = "Trying to access an element at index")]
+    fn test_get_out_of_bounds_without_nulls_panics() {
+        let vector = Int32Vector::from_slice([1]);
+        vector.get(1);
     }
 
     #[test]

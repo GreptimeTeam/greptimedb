@@ -186,9 +186,11 @@ fn fetch_partition_range(input: Arc<dyn ExecutionPlan>) -> DataFusionResult<Opti
         }
 
         if let Some(region_scan_exec) = plan.downcast_ref::<RegionScanExec>() {
-            // `PerSeries` distribution is not supported in windowed sort.
+            // Series scans redistribute rows across source ranges, including Narthex SQL
+            // scans whose request does not explicitly specify `PerSeries`.
             if region_scan_exec.distribution()
                 == Some(store_api::storage::TimeSeriesDistribution::PerSeries)
+                || region_scan_exec.scanner_type() == "SeriesScan"
             {
                 partition_ranges = None;
                 return Ok(Transformed::no(plan));

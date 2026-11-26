@@ -20,8 +20,10 @@ use std::task::{Context, Poll};
 use async_trait::async_trait;
 use bytes::{BufMut, Bytes};
 use common_base::range_read::{Metadata, RangeReader, SizeAwareRangeReader};
+#[cfg(feature = "enterprise")]
+use futures::future::Either;
 use futures::{AsyncRead, AsyncSeek, AsyncWrite};
-use object_store::ObjectStore;
+use object_store::{FuturesAsyncWriter, ObjectStore};
 use pin_project::pin_project;
 use prometheus::IntCounter;
 use snafu::ResultExt;
@@ -36,8 +38,34 @@ use crate::error::{OpenDalSnafu, Result};
 pub(crate) struct InstrumentedStore {
     /// The underlying object store.
     object_store: ObjectStore,
-    /// The size of the write buffer.
-    write_buffer_size: Option<usize>,
+    write_buffer: IndexWriteBuffer,
+}
+
+/// Upload policy of the Puffin index writer opened by [`InstrumentedStore::writer`].
+///
+/// Each variant selects a different object-store writer, not only a buffer size.
+#[derive(Clone, Copy, Default)]
+pub(crate) enum IndexWriteBuffer {
+    /// Opens the store's default writer: no explicit chunk size or concurrency,
+    /// so the backend's own limits apply.
+    #[default]
+    Default,
+    /// Requests exact parts of the given size, clamped to the backend's limits,
+    /// with the store's default concurrency.
+    Chunk(usize),
+    /// Requests parts sized by the given limits with one upload at a time, and
+    /// buffers writes through [`crate::sst::upload::buffered::writer`], which
+    /// assembles whole parts and rejects writes beyond the object size limit.
+    #[cfg(feature = "enterprise")]
+    Bounded(crate::sst::upload::buffered::UploadLimits),
+}
+
+impl From<Option<usize>> for IndexWriteBuffer {
+    fn from(bytes: Option<usize>) -> Self {
+        bytes
+            .filter(|&size| size > 0)
+            .map_or(Self::Default, Self::Chunk)
+    }
 }
 
 impl InstrumentedStore {
@@ -45,7 +73,7 @@ impl InstrumentedStore {
     pub fn new(object_store: ObjectStore) -> Self {
         Self {
             object_store,
-            write_buffer_size: None,
+            write_buffer: IndexWriteBuffer::Default,
         }
     }
 
@@ -54,8 +82,12 @@ impl InstrumentedStore {
     }
 
     /// Set the size of the write buffer.
-    pub fn with_write_buffer_size(mut self, write_buffer_size: Option<usize>) -> Self {
-        self.write_buffer_size = write_buffer_size.filter(|&size| size > 0);
+    pub fn with_write_buffer_size(self, write_buffer_size: Option<usize>) -> Self {
+        self.with_write_buffer(write_buffer_size.into())
+    }
+
+    pub(crate) fn with_write_buffer(mut self, write_buffer: IndexWriteBuffer) -> Self {
+        self.write_buffer = write_buffer;
         self
     }
 
@@ -112,22 +144,31 @@ impl InstrumentedStore {
         write_byte_count: &'a IntCounter,
         write_count: &'a IntCounter,
         flush_count: &'a IntCounter,
-    ) -> Result<InstrumentedAsyncWrite<'a, object_store::FuturesAsyncWriter>> {
-        let writer = match self.write_buffer_size {
-            Some(size) => self
-                .object_store
-                .writer_with(path)
-                .chunk(size)
-                .await
-                .context(OpenDalSnafu)?
-                .into_futures_async_write(),
-            None => self
-                .object_store
-                .writer(path)
-                .await
-                .context(OpenDalSnafu)?
-                .into_futures_async_write(),
+    ) -> Result<InstrumentedAsyncWrite<'a, IndexObjectWriter>> {
+        let writer = match self.write_buffer {
+            IndexWriteBuffer::Default => self.object_store.writer(path).await,
+            IndexWriteBuffer::Chunk(bytes) => {
+                self.object_store.writer_with(path).chunk(bytes).await
+            }
+            #[cfg(feature = "enterprise")]
+            IndexWriteBuffer::Bounded(limits) => {
+                self.object_store
+                    .writer_with(path)
+                    .chunk(limits.chunk_bytes)
+                    .concurrent(1)
+                    .await
+            }
+        }
+        .context(OpenDalSnafu)?;
+        #[cfg(feature = "enterprise")]
+        let writer: IndexObjectWriter = match self.write_buffer {
+            IndexWriteBuffer::Bounded(limits) => Either::Right(Box::new(
+                crate::sst::upload::buffered::writer(writer, limits),
+            )),
+            _ => Either::Left(writer.into_futures_async_write()),
         };
+        #[cfg(not(feature = "enterprise"))]
+        let writer = writer.into_futures_async_write();
         Ok(InstrumentedAsyncWrite::new(
             writer,
             write_byte_count,
@@ -207,6 +248,17 @@ impl<R: AsyncSeek + Unpin + Send> AsyncSeek for InstrumentedAsyncRead<'_, R> {
         poll
     }
 }
+
+/// The [`AsyncWrite`] sink of a Puffin index file.
+///
+/// The bounded side is boxed because [`crate::sst::upload::buffered::writer`]
+/// returns an opaque `impl AsyncWrite`, which keeps that private adapter out of
+/// this alias; the plain side stays concrete.
+#[cfg(feature = "enterprise")]
+pub type IndexObjectWriter = Either<FuturesAsyncWriter, Box<dyn AsyncWrite + Send + Sync + Unpin>>;
+/// The [`AsyncWrite`] sink of a Puffin index file.
+#[cfg(not(feature = "enterprise"))]
+pub type IndexObjectWriter = FuturesAsyncWriter;
 
 /// A wrapper around [`AsyncWrite`] that adds instrumentation for monitoring
 #[pin_project]

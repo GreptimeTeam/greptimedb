@@ -450,6 +450,14 @@ impl<S> RegionWorkerLoop<S> {
                 continue;
             }
 
+            if let Err(e) = sender_req
+                .request
+                .check_primary_key_encoding(&region_ctx.version().metadata)
+            {
+                sender_req.sender.send(Err(e));
+                continue;
+            }
+
             // Double check the request schema
             let need_fill_missing_columns =
                 if let Some(ref region_metadata) = sender_req.request.region_metadata {
@@ -603,6 +611,13 @@ impl<S> RegionWorkerLoop<S> {
 
             // Fill missing columns if needed. The batch is checked again as the region
             // schema may have changed since the request was checked.
+            if !need_fill_missing_columns
+                && let Err(e) =
+                    check_bulk_insert_batch(&region_ctx.version().metadata, &bulk_req.request.batch)
+            {
+                bulk_req.sender.send(Err(e));
+                continue;
+            }
             if need_fill_missing_columns {
                 let metadata = &region_ctx.version().metadata;
                 if let Err(e) = check_bulk_insert_batch(metadata, &bulk_req.request.batch)

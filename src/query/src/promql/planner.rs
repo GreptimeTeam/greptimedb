@@ -22,7 +22,10 @@ pub use native::{NATIVE_PROMQL_EXTENSION_KEY, discovers_metric_name, native_prom
 mod set_operator;
 
 use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use arrow::datatypes::IntervalDayTime;
 use async_recursion::async_recursion;
@@ -217,6 +220,45 @@ struct PromPlannerContext {
     range_fold_offset: Option<Millisecond>,
 }
 
+/// Stack one planning descent level needs below it before the recursion grows its stack.
+///
+/// The planner recurses once per operator and the descent is a chain of nested `poll`s on boxed
+/// futures, so each level's frame is charged to the stack of the level above it. A debug build's
+/// frame is large: a chain of eight constant multiplications under a propagated matcher needs more
+/// than the 2 MiB a worker thread has, and there is no depth limit on the expressions this route
+/// accepts. The recursion grows its stack instead, at the same reserve the native runtime's own
+/// walks use.
+const PLANNER_STACK_RED_ZONE: usize = 512 * 1024;
+
+/// Stack a growth adds when the reserve above is spent. It holds several levels of the descent.
+const PLANNER_STACK_GROWTH: usize = 4 * 1024 * 1024;
+
+/// Polls one planning descent on a stack that grows on demand.
+///
+/// `stacker::maybe_grow` needs a synchronous callee to run on the segment it switches to, which an
+/// `async` body cannot be, so the growth wraps a `poll` instead: the segment stays live for that
+/// whole poll, every nested level the poll reaches included, and each nested level wraps its own
+/// poll in turn. This is the same reserve-and-grow rule `promql::native::execute` applies to the
+/// runtime node walks, which recurse synchronously.
+struct GrownStack<F>(Pin<Box<F>>);
+
+impl<F: Future> GrownStack<F> {
+    fn new(future: F) -> Self {
+        Self(Box::pin(future))
+    }
+}
+
+impl<F: Future> Future for GrownStack<F> {
+    type Output = F::Output;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut inner = self.get_mut().0.as_mut();
+        stacker::maybe_grow(PLANNER_STACK_RED_ZONE, PLANNER_STACK_GROWTH, || {
+            inner.as_mut().poll(cx)
+        })
+    }
+}
+
 /// Result labels a vector-vector binary operation derives from its matching modifier, projected
 /// from the operand each label belongs to.
 #[derive(Debug)]
@@ -304,6 +346,14 @@ pub struct PromPlanner {
     /// The engine-wide `QueryOptions::experimental_native_promql` is applied while `QueryEngineState`
     /// is built; this planner reads the per-query request extension instead.
     native_fused: bool,
+    /// Whether the binary node being planned may still offer its own subtree to the native route.
+    ///
+    /// An offer compiles a whole tree, so it is made where it covers the most: the statement root,
+    /// and the topmost binary below a node this route does not answer. Once a binary node has spent
+    /// the offer, the operands below it are planned by the existing path without offering
+    /// themselves again - re-offering each operand of a refused chain of n operators compiles its
+    /// subtrees again and costs O(n^2) passes instead of O(n).
+    native_binary_offer: bool,
 }
 
 type BinaryFieldPair<'a> = (&'a String, &'a String);
@@ -336,6 +386,9 @@ impl PromPlanner {
             ctx: PromPlannerContext::from_eval_stmt(stmt)?,
             promql_annotations,
             native_fused,
+            // The statement's own expression is offered below before anything else is planned, so
+            // the first binary node reached still holds the offer a wrapper would have spent.
+            native_binary_offer: true,
         };
 
         // The whole statement is offered to the native compiler first, because that compiler folds
@@ -381,6 +434,32 @@ impl PromPlanner {
         timestamp_fn: bool,
         query_engine_state: &QueryEngineState,
     ) -> Result<LogicalPlan> {
+        // Every operator of the existing expression planning descends through here, so this is
+        // where that recursion grows its stack instead of spending the caller's, below the reserve
+        // [`PLANNER_STACK_RED_ZONE`] names. Two limits come with it:
+        //
+        // - The native fused-series route is no part of this recursion. Its own composition
+        //   recursion grows at its own boundary (`PromPlanner::try_plan_native` in `native.rs`),
+        //   not here.
+        // - The synchronous walks around it are not covered at all: the literal construction
+        //   (`try_build_literal_expr`) and the logical row-key walk
+        //   (`collect_row_key_tag_columns_from_plan`) in this file, and the topology walk
+        //   (`native_raw_plan_bounds_region_reads`), the root-parenthesis traversal
+        //   (`root_subquery`), the input-order dependency walk (`depends_on_input_order`), the
+        //   selector collection (`collect_selectors_with_set_operations`) and the native root
+        //   subquery compilation in `native.rs`, recurse synchronously on the stack their caller
+        //   has. A deep enough expression or plan still costs them that stack.
+        let step = self.prom_expr_to_plan_step(prom_expr, timestamp_fn, query_engine_state);
+        GrownStack::new(step).await
+    }
+
+    #[async_recursion]
+    async fn prom_expr_to_plan_step(
+        &mut self,
+        prom_expr: &PromExpr,
+        timestamp_fn: bool,
+        query_engine_state: &QueryEngineState,
+    ) -> Result<LogicalPlan> {
         // An anchored range call is step-invariant: evaluate it once, at the start of the
         // evaluation, and report its result at every step; see
         // [`Self::promote_anchored_range_call`].
@@ -401,8 +480,18 @@ impl PromPlanner {
                     .await?
             }
             PromExpr::Binary(expr) => {
-                self.prom_binary_expr_to_plan(query_engine_state, expr)
-                    .await?
+                // One native offer per binary subtree: the offer at a node covers every node below
+                // it, because the compiler reads the whole tree at once. It is spent here, by the
+                // node that makes it, and handed back once the subtree is planned, so a refused
+                // chain of n operators makes one offer per position instead of one per operator
+                // and per subtree below it - O(n) instead of O(n^2). A wrapper this route cannot
+                // answer leaves the offer to the binary that sits under it.
+                let offer = std::mem::take(&mut self.native_binary_offer);
+                let plan = self
+                    .prom_binary_expr_to_plan(query_engine_state, expr, offer)
+                    .await;
+                self.native_binary_offer = offer;
+                plan?
             }
             PromExpr::Paren(ParenExpr { expr }) => {
                 self.prom_expr_to_plan_inner(expr, timestamp_fn, query_engine_state)
@@ -1186,10 +1275,13 @@ impl PromPlanner {
         })
     }
 
+    /// Plans `binary_expr`; `offer` says whether this node may still offer its subtree to the
+    /// native route, which the caller spends for the subtree it is about to plan.
     async fn prom_binary_expr_to_plan(
         &mut self,
         query_engine_state: &QueryEngineState,
         binary_expr: &PromBinaryExpr,
+        offer: bool,
     ) -> Result<LogicalPlan> {
         // promql-parser accepts fill modifiers, but Greptime does not implement the
         // required outer joins and missing-value substitution. Reject them before the
@@ -1206,6 +1298,7 @@ impl PromPlanner {
         // The same whole native binary the statement root was offered can sit below a
         // legacy-only wrapper. A nested retry is valid only on the statement's own grid.
         if self.native_fused
+            && offer
             && self.ctx.start == self.ctx.stmt_start
             && self.ctx.end == self.ctx.stmt_end
         {
@@ -1460,19 +1553,32 @@ impl PromPlanner {
                     // A copied matcher belongs to the scan, not to the operand's identity:
                     // `absent()` turns `selector_matcher` into the labels it reports, so the
                     // re-planned context keeps the matchers the operand was written with.
+                    //
+                    // A rewritten operand is an expression this node's offer never compiled: that
+                    // offer read the statement as it was written, and the matcher reached the scan
+                    // afterwards. The re-plan is therefore handed the offer, which the rewritten
+                    // operand then spends on its own subtree exactly as this node spent it - so a
+                    // chain below the rewrite still costs one offer, not one per operator and not
+                    // one per operator and subtree below it.
                     if rewritten.lhs.as_ref() != lhs.as_ref() {
                         let selectors = std::mem::take(&mut left_context.selector_matcher);
-                        left_input = self
+                        let offer = std::mem::replace(&mut self.native_binary_offer, true);
+                        let replanned = self
                             .prom_expr_to_plan(&rewritten.lhs, query_engine_state)
-                            .await?;
+                            .await;
+                        self.native_binary_offer = offer;
+                        left_input = replanned?;
                         left_context = self.ctx.clone();
                         left_context.selector_matcher = selectors;
                     }
                     if rewritten.rhs.as_ref() != rhs.as_ref() {
                         let selectors = std::mem::take(&mut right_context.selector_matcher);
-                        right_input = self
+                        let offer = std::mem::replace(&mut self.native_binary_offer, true);
+                        let replanned = self
                             .prom_expr_to_plan(&rewritten.rhs, query_engine_state)
-                            .await?;
+                            .await;
+                        self.native_binary_offer = offer;
+                        right_input = replanned?;
                         right_context = self.ctx.clone();
                         right_context.selector_matcher = selectors;
                     }

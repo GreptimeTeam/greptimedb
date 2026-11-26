@@ -496,6 +496,7 @@ impl ScanRegion {
     /// Returns true if the region can use series scan for current request.
     fn use_series_scan(&self) -> bool {
         self.request.distribution == Some(TimeSeriesDistribution::PerSeries)
+            || self.version.options.sst_format == Some(crate::sst::FormatType::Narthex)
     }
 
     /// Creates a scan input.
@@ -561,10 +562,23 @@ impl ScanRegion {
         let memtables = self.version.memtables.list_memtables();
         // Skip empty memtables and memtables out of time range.
         let mut mem_range_builders = Vec::new();
-        let filter_mode = pre_filter_mode(
-            self.version.options.append_mode,
-            self.version.options.merge_mode(),
-        );
+        // Narthex may serve raw-series output, which deduplicates append rows.
+        // Keep field predicates residual so they cannot hide the newest row.
+        // TODO: Derive effective append/merge options from raw-series read intent
+        // before building ranges, and use them for both prefiltering and merging.
+        // Append-mode raw reads should use append=false and LastRow for any format,
+        // including Parquet; non-append reads should retain their merge mode, and
+        // ordinary batch reads should retain the region options. This would replace
+        // this format check and the extra LastRow reader in prepared series scans.
+        let filter_mode =
+            if self.version.options.sst_format == Some(crate::sst::FormatType::Narthex) {
+                PreFilterMode::SkipFields
+            } else {
+                pre_filter_mode(
+                    self.version.options.append_mode,
+                    self.version.options.merge_mode(),
+                )
+            };
 
         for m in memtables {
             // check if memtable is empty by reading stats.
@@ -624,6 +638,17 @@ impl ScanRegion {
             .with_predicate(predicate)
             .with_memtables(mem_range_builders)
             .with_files(files)
+            .with_narthex_format(
+                self.version.options.sst_format == Some(crate::sst::FormatType::Narthex),
+            )
+            .with_narthex_series_indexes(
+                self.version
+                    .ssts
+                    .series_indexes()
+                    .values()
+                    .cloned()
+                    .collect(),
+            )
             .with_time_pruned_files(time_pruned_files)
             .with_primary_key_mapper(self.version.ssts.primary_key_mapper())
             .with_cache(self.cache_strategy)
@@ -965,7 +990,7 @@ pub struct ScanInput {
     /// Whether to ignore range indexes while retaining series-index candidate discovery.
     ignore_range_index: bool,
     /// Region SST access layer.
-    access_layer: AccessLayerRef,
+    pub(crate) access_layer: AccessLayerRef,
     /// Maps projected Batches to RecordBatches.
     pub(crate) mapper: Arc<FlatProjectionMapper>,
     /// The columns to read from memtables and SSTs.
@@ -984,6 +1009,9 @@ pub struct ScanInput {
     pub(crate) memtables: Vec<MemRangeBuilder>,
     /// Handles to SST files to scan.
     pub(crate) files: Vec<FileHandle>,
+    pub(crate) narthex_series_indexes: Vec<FileHandle>,
+    /// Narthex regions require prepared reads, even before the first flush.
+    pub(crate) narthex_format: bool,
     /// Visible sources excluded solely by the query time range.
     pub(crate) time_pruned_files: HashSet<store_api::storage::FileId>,
     /// Shares the pinned schema's encoded defaults across parallel range readers.
@@ -1030,6 +1058,8 @@ pub struct ScanInput {
     pub(crate) compaction_read_parallelism: usize,
     /// Compaction-only JSON2 physical rewrite targets.
     json2_rewrite_targets: Json2RewriteTargets,
+    /// Override for footer page-index loading. `None` uses the reader default.
+    page_index_policy: Option<parquet::file::metadata::PageIndexPolicy>,
     /// Counters that should receive query-load metrics.
     pub(crate) query_stat_counters: Option<RegionQueryStatCounters>,
     #[cfg(feature = "enterprise")]
@@ -1064,6 +1094,7 @@ impl ScanInput {
         ScanInputBuilder {
             input: ScanInput {
                 series_index: None,
+                page_index_policy: None,
                 ignore_range_index: false,
                 access_layer,
                 read_cols: mapper.read_columns().clone(),
@@ -1074,6 +1105,8 @@ impl ScanInput {
                 region_partition_expr: None,
                 memtables: Vec::new(),
                 files: Vec::new(),
+                narthex_series_indexes: Vec::new(),
+                narthex_format: false,
                 time_pruned_files: HashSet::new(),
                 primary_key_mapper: OnceLock::new(),
                 batch_size: crate::sst::parquet::DEFAULT_READ_BATCH_SIZE,
@@ -1305,10 +1338,31 @@ impl ScanInputBuilder {
         self
     }
 
-    /// Sets files to read.
+    /// Requires prepared reads even when this narthex region has no SSTs yet.
     #[must_use]
+    pub(crate) fn with_narthex_format(mut self, narthex_format: bool) -> Self {
+        self.input.narthex_format = narthex_format;
+        self
+    }
+
+    /// Sets the pinned authoritative series indexes.
+    fn with_narthex_series_indexes(mut self, indexes: Vec<FileHandle>) -> Self {
+        self.input.narthex_series_indexes = indexes;
+        self
+    }
+
     pub(crate) fn with_files(mut self, files: Vec<FileHandle>) -> Self {
         self.input.files = files;
+        self
+    }
+
+    /// Selects footer page-index loading for maintenance readers.
+    #[cfg(feature = "enterprise")]
+    pub(crate) fn with_page_index_policy(
+        mut self,
+        policy: parquet::file::metadata::PageIndexPolicy,
+    ) -> Self {
+        self.input.page_index_policy = Some(policy);
         self
     }
 
@@ -1488,6 +1542,10 @@ impl ScanInputBuilder {
 }
 
 impl ScanInput {
+    pub(crate) fn requires_narthex_preparation(&self) -> bool {
+        self.narthex_format
+    }
+
     pub(crate) fn uses_scan_memory_limit(&self) -> bool {
         let covered = self
             .scan_memory_tracker
@@ -1687,6 +1745,10 @@ impl ScanInput {
             .bloom_filter_index_appliers(self.bloom_filter_index_appliers.clone())
             .fulltext_index_appliers(self.fulltext_index_appliers.clone());
         let reader = reader.batch_size(self.batch_size);
+        let reader = match self.page_index_policy {
+            Some(policy) => reader.page_index_policy(policy),
+            None => reader,
+        };
         let reader = if !self.compaction && may_build_selective_row_selection {
             reader.deferred_optional_page_index()
         } else {

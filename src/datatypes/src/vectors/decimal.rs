@@ -138,8 +138,7 @@ impl Decimal128Vector {
     /// Get decimal128 Value from array by index.
     fn get_decimal128_value_from_array(&self, index: usize) -> Option<Decimal128> {
         if self.array.is_valid(index) {
-            // Safety: The index have been checked by `is_valid()`.
-            let value = unsafe { self.array.value_unchecked(index) };
+            let value = self.array.value(index);
             // Safety: The precision and scale have been checked by Vector.
             Some(Decimal128::new(value, self.precision(), self.scale()))
         } else {
