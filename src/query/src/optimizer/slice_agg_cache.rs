@@ -427,6 +427,9 @@ fn rewrite(
     if slices.len() < 2 {
         return skip("single_slice");
     }
+    if !slices.iter().any(|(lo, hi)| hi - lo == width) {
+        return skip("no_full_slice");
+    }
 
     let Some(identity) = plan_identity(agg, &exprs, scan, &implied, &ts_name, width, config)?
     else {
@@ -1000,14 +1003,19 @@ impl SliceAggExec {
                 start: lo,
                 end: hi,
             };
-            if let Some(fingerprint) = scan
-                .time_range_fingerprint(
+            // A slice the window cuts short gets other bounds once the window slides, so
+            // caching it would only hold memory until the idle timeout.
+            let fingerprint = if hi - lo == self.width {
+                scan.time_range_fingerprint(
                     Timestamp::new(lo, self.ts_unit),
                     Timestamp::new(hi, self.ts_unit),
                 )
                 .as_ref()
                 .map(fingerprint_digest)
-            {
+            } else {
+                None
+            };
+            if let Some(fingerprint) = fingerprint {
                 if let Some(entry) = self.store.entries.get(&key) {
                     if entry.fingerprint == fingerprint {
                         hits.extend(entry.batches.iter().cloned());
@@ -1058,8 +1066,8 @@ impl SliceAggExec {
 
         self.store.report_bytes();
 
-        // `uncacheable` slices have no fingerprint, `stale` ones a cached entry whose
-        // fingerprint differs, and `absent` ones no entry.
+        // `uncacheable` slices are cut short by the window or have no fingerprint, `stale`
+        // ones a cached entry whose fingerprint differs, and `absent` ones no entry.
         let uncacheable = self.slices.len() - hit_slices.len() - pending.len();
         for (name, result, count) in [
             ("slice_hits", "hit", hit_slices.len()),
