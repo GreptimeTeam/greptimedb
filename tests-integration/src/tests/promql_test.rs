@@ -2669,8 +2669,9 @@ fn assert_one_field_native_layout(batches: &common_recordbatch::RecordBatches, q
 ///
 /// The flow creates its sink table from the columns its plan publishes, so a plan that published
 /// the native root's columns would create a different table (with a metric-name column) than the
-/// same flow planned by the existing route. Each statement is one shape the native planner places
-/// differently: one selector, and two occurrences of a selector.
+/// same flow planned by the existing route. The aggregates are shapes the native planner places
+/// differently: one selector, and two occurrences of a selector. The rest keep one row per series
+/// with two labels each, so the published labels are paired with the native ones by name.
 #[test]
 fn native_promql_tql_flow_matches_the_sink_table() {
     // Flushing a flow overflows the default test stack in a debug build.
@@ -2705,7 +2706,13 @@ async fn native_promql_tql_flow_matches_the_sink_table_impl() {
          CREATE TABLE native_flow_part (`value` DOUBLE, ts TIMESTAMP TIME INDEX, \
              sensor STRING, loc STRING, PRIMARY KEY (sensor, loc)) \
              PARTITION ON COLUMNS (loc) (loc < 'B', loc >= 'B'); \
-         INSERT INTO native_flow_part SELECT * FROM native_flow_src",
+         INSERT INTO native_flow_part SELECT * FROM native_flow_src; \
+         CREATE TABLE native_flow_series (`value` DOUBLE, ts TIMESTAMP TIME INDEX, \
+             sensor STRING, loc STRING, PRIMARY KEY (sensor, loc)); \
+         INSERT INTO native_flow_series VALUES \
+             (20, now() - '90s'::interval, 's1', 'A'), (25, now() - '30s'::interval, 's1', 'A'), \
+             (30, now() - '90s'::interval, 's1', 'B'), (40, now() - '30s'::interval, 's1', 'B'), \
+             (10, now() - '90s'::interval, 's2', 'A'), (10, now() - '30s'::interval, 's2', 'A')",
         QueryContext::arc(),
     )
     .await;
@@ -2726,10 +2733,7 @@ async fn native_promql_tql_flow_matches_the_sink_table_impl() {
         let instance = instance.clone();
         async move {
             let output = instance
-                .do_query(
-                    &format!("SELECT * FROM {table} ORDER BY sensor"),
-                    QueryContext::arc(),
-                )
+                .do_query(&format!("SELECT * FROM {table}"), QueryContext::arc())
                 .await
                 .remove(0)
                 .unwrap();
@@ -2749,9 +2753,15 @@ async fn native_promql_tql_flow_matches_the_sink_table_impl() {
                     batch.project(&keep).unwrap()
                 })
                 .collect::<Vec<_>>();
-            datatypes::arrow::util::pretty::pretty_format_batches(&batches)
+            // Rows are compared as a set: a sink table returns them in no fixed order.
+            let mut lines = datatypes::arrow::util::pretty::pretty_format_batches(&batches)
                 .unwrap()
                 .to_string()
+                .lines()
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            lines.sort();
+            lines.join("\n")
         }
     };
     for (name, query) in [
@@ -2761,6 +2771,16 @@ async fn native_promql_tql_flow_matches_the_sink_table_impl() {
             "sum by (sensor) (native_flow_src) / count by (sensor) (native_flow_src)",
         ),
         ("partitioned", "avg by (sensor) (native_flow_part)"),
+        ("rate", "rate(native_flow_series[2m])"),
+        ("topk", "topk(1, native_flow_series)"),
+        (
+            "offset",
+            "native_flow_series + native_flow_series offset 1m",
+        ),
+        (
+            "label_replace",
+            "label_replace(native_flow_series, \"dst\", \"$1\", \"sensor\", \"(.*)\")",
+        ),
     ] {
         let mut sinks = Vec::new();
         for native in [false, true] {
@@ -2793,10 +2813,10 @@ async fn native_promql_tql_flow_matches_the_sink_table_impl() {
             ));
         }
         let rows = &sinks[0].1;
-        assert!(
-            rows.contains("| s1 ") && rows.contains("| 10.0 "),
-            "{name}: {rows}"
-        );
+        assert!(rows.contains("| s1 "), "{name}: {rows}");
+        if ["avg", "ratio", "partitioned"].contains(&name) {
+            assert!(rows.contains("| 10.0 "), "{name}: {rows}");
+        }
         assert_eq!(sinks[0], sinks[1], "{name}");
     }
 }
@@ -12111,6 +12131,62 @@ async fn cte_native_publishes_no_name_column() {
             schema.field_with_name("__name__").is_err(),
             "a scalar answer declares no name column (native={enabled}): {schema:?}"
         );
+    }
+}
+
+/// A CTE over a per-series answer runs the fused plan and publishes the existing planner's columns
+/// and rows.
+///
+/// Each statement keeps one row per input series, and every series carries two labels of the same
+/// type, so the published labels have to be paired with the native ones by name. The statements
+/// cover a range function, a selection that keeps input rows, a binary operation with an offset
+/// operand and a label rewrite.
+#[tokio::test(flavor = "multi_thread")]
+async fn cte_native_per_series_statements_run_the_fused_plan() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) =
+        native_test_instance(GreptimeDbStandaloneBuilder::new("cte_native_per_series")).await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE cte_series (`value` DOUBLE, ts TIMESTAMP TIME INDEX, \
+             sensor STRING, loc STRING, PRIMARY KEY (sensor, loc)); \
+         INSERT INTO cte_series VALUES \
+             (1, 0, 's1', 'A'), (3, 1000, 's1', 'A'), (6, 2000, 's1', 'A'), (10, 3000, 's1', 'A'), \
+             (2, 0, 's1', 'B'), (4, 1000, 's1', 'B'), (8, 2000, 's1', 'B'), (16, 3000, 's1', 'B'), \
+             (5, 0, 's2', 'A'), (5, 1000, 's2', 'A'), (7, 2000, 's2', 'A'), (7, 3000, 's2', 'A')",
+        QueryContext::arc(),
+    )
+    .await;
+
+    let sorted_rows = |output| async move {
+        let mut rows = cte_native_rows(output).await;
+        rows.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+        rows
+    };
+    for query in [
+        "rate(cte_series[2s])",
+        "topk(1, cte_series)",
+        "cte_series + cte_series offset 1s",
+        "label_replace(cte_series, \"dst\", \"$1\", \"sensor\", \"(.*)\")",
+    ] {
+        let statement = format!("WITH tql AS (TQL EVAL (0, 3, '1s') {query}) SELECT * FROM tql");
+        let legacy = native_tql_output(&instance, &statement, false).await;
+        let legacy_schema = cte_native_published_schema(&legacy);
+        let legacy_rows = sorted_rows(legacy).await;
+
+        observer.clear();
+        let native = native_tql_output(&instance, &statement, true).await;
+        let native_schema = cte_native_published_schema(&native);
+        let native_rows = sorted_rows(native).await;
+        assert!(
+            !cte_native_observed_fused(&observer).is_empty(),
+            "{query} runs the fused plan:\n{}",
+            cte_native_observed_plan_trees(&observer)
+        );
+        assert_eq!(native_schema, legacy_schema, "{query}");
+        assert!(!legacy_rows.is_empty(), "{query} answers rows");
+        assert_eq!(native_rows, legacy_rows, "{query}");
     }
 }
 
