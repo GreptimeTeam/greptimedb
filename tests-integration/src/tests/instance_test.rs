@@ -3831,6 +3831,48 @@ async fn test_copy_from_csv_skip_bad_records_numbers(instance: Arc<dyn MockInsta
     check_output_stream(output, expected).await;
 }
 
+// With skip_bad_records, the numbers of a column are parsed for its table type, whatever type
+// the column was inferred as. Here the first record makes the unsigned column a boolean.
+#[apply(standalone_instance_case)]
+async fn test_copy_from_csv_skip_bad_records_late_numbers(instance: Arc<dyn MockInstance>) {
+    common_telemetry::init_default_ut_logging();
+    let instance = instance.frontend();
+
+    assert!(matches!(
+        execute_sql(
+            &instance,
+            "create table csv_skip_bad_numbers_late(k string, n bigint unsigned, price decimal(38, 2), ts timestamp time index, primary key(k));",
+        )
+        .await
+        .data,
+        OutputData::AffectedRows(0)
+    ));
+
+    let filepath = find_testing_resource("/tests/data/csv/skip_bad_numbers_late.csv");
+    let output = execute_sql(
+        &instance,
+        &format!(
+            "copy csv_skip_bad_numbers_late from '{filepath}' WITH(FORMAT='csv', skip_bad_records='true', schema_infer_max_record=1);"
+        ),
+    )
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(1)));
+
+    let output = execute_sql(
+        &instance,
+        "select k, n, price from csv_skip_bad_numbers_late order by k;",
+    )
+    .await
+    .data;
+    let expected = r#"+---+------------------+-------+
+| k | n                | price |
++---+------------------+-------+
+| b | 9007199254740993 | 1.01  |
++---+------------------+-------+"#;
+    check_output_stream(output, expected).await;
+}
+
 #[apply(standalone_instance_case)]
 async fn test_execute_copy_from_orc(instance: Arc<dyn MockInstance>) {
     common_telemetry::init_default_ut_logging();

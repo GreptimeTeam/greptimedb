@@ -243,13 +243,18 @@ impl StatementExecutor {
                     .with_has_header(format.has_header)
                     .with_delimiter(format.delimiter);
                 let reader_schema = exact_numeric_reader_schema(schema, &compat_schema, true);
-                let numbers = text_number_columns(schema, &compat_schema, &projection, true);
                 let csv_source = CsvSource::new(Arc::new(reader_schema))
                     .with_csv_options(options)
                     .with_batch_size(DEFAULT_BATCH_SIZE);
                 let stream = if format.skip_bad_records {
                     let reader_schema =
                         csv_reader_schema_for_skip_bad_records(schema, &compat_schema);
+                    // This reader takes its types from the table, not from the inferred
+                    // schema, so the table types also say which columns to parse.
+                    let numbers = projection
+                        .iter()
+                        .map(|idx| table_text_number(compat_schema.fields().get(*idx)))
+                        .collect();
                     let stream = tolerant_csv_stream(
                         object_store,
                         path,
@@ -263,6 +268,7 @@ impl StatementExecutor {
                     // is skipped with its record.
                     parse_number_columns(stream, numbers, true)
                 } else {
+                    let numbers = text_number_columns(schema, &compat_schema, &projection, true);
                     let stream = file_to_stream(
                         object_store,
                         path,
@@ -818,6 +824,12 @@ fn text_number(
     if !number_text {
         return None;
     }
+    table_text_number(compat_field)
+}
+
+/// Returns the type to parse text into for a table column that is a `Decimal128` or a
+/// `UInt64`.
+fn table_text_number(compat_field: Option<&FieldRef>) -> Option<TextNumber> {
     match compat_field?.data_type() {
         ArrowDataType::Decimal128(precision, scale) => Some(TextNumber::Decimal128 {
             precision: *precision,
@@ -837,9 +849,9 @@ fn csv_reader_schema_for_skip_bad_records(file: &SchemaRef, compat: &SchemaRef) 
             // Arrow's csv reader drops the digits of a decimal beyond its scale, is wrong for
             // some numbers in scientific notation, and only reads an unsigned integer from
             // plain digits.
-            compat_field if text_number(file_field, compat_field, true).is_some() => {
-                text_field(file_field)
-            }
+            // Whatever type the column was inferred as: this reader uses the table type for
+            // every other column too.
+            compat_field if table_text_number(compat_field).is_some() => text_field(file_field),
             Some(compat_field) if can_csv_reader_parse_type(compat_field.data_type()) => {
                 compat_field.clone()
             }
@@ -1614,11 +1626,14 @@ mod tests {
             Field::new("price", DataType::Float64, true),
             Field::new("id", DataType::Utf8, true),
             Field::new("small", DataType::Int64, true),
+            // Inferred from a first value of `true`.
+            Field::new("flag", DataType::Boolean, true),
         ]);
         let compat_schema = make_test_schema(&[
             Field::new("price", DataType::Decimal128(38, 2), true),
             Field::new("id", DataType::UInt64, true),
             Field::new("small", DataType::UInt32, true),
+            Field::new("flag", DataType::UInt64, true),
         ]);
 
         let reader_schema = csv_reader_schema_for_skip_bad_records(&file_schema, &compat_schema);
@@ -1626,6 +1641,7 @@ mod tests {
         assert_eq!(reader_schema.field(0).data_type(), &DataType::Utf8);
         assert_eq!(reader_schema.field(1).data_type(), &DataType::Utf8);
         assert_eq!(reader_schema.field(2).data_type(), &DataType::UInt32);
+        assert_eq!(reader_schema.field(3).data_type(), &DataType::Utf8);
     }
 
     fn make_csv_metadata(schema: Arc<Schema>, has_header: bool) -> FileMetadata {
