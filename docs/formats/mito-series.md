@@ -35,18 +35,6 @@ bound. Missing or unreadable artifacts fall back to sample discovery. Expired
 windows are retired as a unit. An explicit removal of a contributing file
 invalidates that window's indexes.
 
-After builds and expiry, each reconciliation can merge four live index files in
-one window. Within each window, files are sorted by size and file ID. A
-consecutive group qualifies when its largest file is at most the combined size
-of its peers. The worker chooses the smallest qualifying total across windows,
-breaking ties by window start and file IDs. It awaits one merge per region
-per pass. Each engine can run up to `num_workers` reconciliations at once.
-
-The merge reads exact keys and stored row counts from the four index files. It
-sums counts for equal keys and atomically replaces the inputs with an index at
-their highest sequence watermark. Publication checks the window watermark and
-all four input IDs under the manifest write lock.
-
 Physical tag IDs and names are stored in the artifact manifest. The reader supplies
 null for newly added nullable labels that are absent from the index.
 
