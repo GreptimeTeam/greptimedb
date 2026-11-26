@@ -560,8 +560,8 @@ async fn test_narthex_merge_existing_series_indexes() -> WhateverResult<()> {
     let pause = engine.pause_compaction(id).await?;
     let dir = region.access_layer.build_region_dir(id);
     let store = region.access_layer.object_store().clone();
-    // Seed the manifest that a PR1 engine could leave on disk. Reconciliation
-    // starts with covered samples and enough artifacts for two successive merges.
+    // Seed one index per sample SST, as incremental builds leave them.
+    // There are enough covered inputs for two successive merges.
     let mut seed = RegionEdit::default();
     let mut sample_paths = Vec::new();
     for (n, ts) in [11000, 1000, 2000, 3000, 4000, 5000, 6000, 7000]
@@ -762,6 +762,39 @@ async fn test_narthex_merge_existing_series_indexes() -> WhateverResult<()> {
         Some(window)
     );
     assert_eq!(scan().await?, discovery);
+    // Fail the second discovery reader after the first window supplied candidates.
+    // Both windows contain the same TSID, and the main window has two exact keys.
+    let snapshot = engine.get_region(id).unwrap().version();
+    let parts: Vec<_> = snapshot
+        .ssts
+        .series_indexes()
+        .values()
+        .map(|handle| {
+            handle
+                .meta_ref()
+                .narthex_objects(&dir)
+                .unwrap()
+                .into_iter()
+                .find(|object| object.path.ends_with(".series"))
+                .unwrap()
+                .path
+        })
+        .collect();
+    let [healthy, missing] = parts.as_slice() else {
+        panic!("expected two index parts")
+    };
+    let saved = store.read(missing).await.unwrap().to_bytes();
+    store.delete(missing).await.unwrap();
+    reads.lock().unwrap().clear();
+    assert_eq!(scan().await?, discovery);
+    assert!(
+        reads
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|path| path.trim_start_matches('/') == healthy.trim_start_matches('/'))
+    );
+    store.write(missing, saved).await.unwrap();
     let error = engine
         .edit_region(
             id,
@@ -1010,8 +1043,7 @@ async fn test_narthex_incremental_index_after_compaction() -> WhateverResult<()>
         .delete(part)
         .await
         .unwrap();
-    let error = scan().await.unwrap_err();
-    assert!(format!("{error:?}").contains("NotFound"), "{error:?}");
+    assert_eq!(scan().await?, rows);
     // An index that cannot be opened still falls back to sample discovery.
     let manifest = objects
         .iter()
