@@ -338,6 +338,7 @@ fn collapse_repeated_samples(
         .map_err(boxed)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn make_stream(
     inner: ScanBatchStream,
     schema: Arc<SeriesSchema>,
