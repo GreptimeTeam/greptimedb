@@ -136,6 +136,8 @@ The rule picks the width from the span of the window:
 | 6 hours to 3 days | 15 minutes |
 | 3 days or longer | 30 minutes |
 
+A window that would need more than 10,000 slices takes the first wider width that keeps it under that bound.
+
 These widths were the fastest of 1 minute to 6 hours on sliding windows of 1 hour, 6 hours, 24 hours, and 7 days, with the newest 10 minutes unflushed and one minute of new rows per slide. Windows of 10 and 30 minutes were within 7% of uncached runs at every width. Mimir's range-vector splitting uses a fixed 2-hour block, and OpenObserve picks 5 minutes to 1 day from the span.
 
 If the aggregation groups by a bucket whose stride does not divide the width, the rule uses the first wider width that is a multiple of the stride and still fits four times in the window, so the slice still follows from the bucket. Otherwise it adds the slice key. The width is part of the plan digest, so entries of different widths never mix. A configuration option fixes the width for all plans.
