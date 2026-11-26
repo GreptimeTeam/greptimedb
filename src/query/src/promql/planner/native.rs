@@ -41,10 +41,12 @@ use common_query::prelude::OTLP_AGGREGATION_TEMPORALITY_LABEL;
 use common_query::series_frame::raw_series_frame_schema_with_ordering;
 use common_telemetry::debug;
 use datafusion::arrow::datatypes::DataType as ArrowDataType;
-use datafusion::common::{DFSchema, DFSchemaRef};
+use datafusion::common::{Column, DFSchema, DFSchemaRef};
 use datafusion::error::DataFusionError;
 use datafusion::logical_expr::UserDefinedLogicalNode;
-use datafusion::logical_expr::{EmptyRelation, Extension, LogicalPlan, TableScanBuilder, Union};
+use datafusion::logical_expr::{
+    EmptyRelation, Extension, LogicalPlan, LogicalPlanBuilder, TableScanBuilder, Union,
+};
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::Expr as DfExpr;
 use datafusion_expr::Expr;
@@ -77,14 +79,18 @@ use promql_parser::label::{METRIC_NAME, MatchOp, Matcher, Matchers};
 use promql_parser::parser::token;
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
-    EvalStmt, Expr as PromExpr, MatrixSelector, ParenExpr, SubqueryExpr, VectorSelector,
+    EvalStmt, Expr as PromExpr, LabelModifier, MatrixSelector, ParenExpr, SubqueryExpr,
+    VectorSelector,
 };
 use session::context::{MetricDiscoveryScope, QueryContextRef};
 use snafu::{ResultExt, ensure};
 use store_api::metric_engine_consts::{DATA_SCHEMA_TABLE_ID_COLUMN_NAME, METRIC_ENGINE_NAME};
 use store_api::region_engine::RawLabelSource;
 
-use crate::promql::error::{DataFusionPlanningSnafu, DuplicateOutputColumnsSnafu, Result};
+use crate::parser::AliasExpr;
+use crate::promql::error::{
+    DataFusionPlanningSnafu, DuplicateOutputColumnsSnafu, Result, UnsupportedExprSnafu,
+};
 use crate::promql::native_compile::{
     InfoInput, bind_evaluated_binary, compile_selectors_with_grid, compile_statement_with_grid,
     info_input, statement_grid, subquery_child_grid,
@@ -528,6 +534,36 @@ impl PromPlanner {
             split_series,
             keys_survive,
         )))
+    }
+
+    /// Offers a statement root to the native route, including a TQL `AS` alias over the expression
+    /// it names.
+    ///
+    /// An alias is not a PromQL shape: it renames the answer's one value column. So the aliased
+    /// expression is offered, and its rows are laid out the way the existing planner's
+    /// `apply_alias` publishes them - the value under the alias, then the labels, then the time
+    /// index - which a flow sinking the answer into a table relies on.
+    pub(super) async fn try_plan_native_statement(
+        &mut self,
+        prom_expr: &PromExpr,
+        query_engine_state: &QueryEngineState,
+    ) -> Result<Option<LogicalPlan>> {
+        let alias = match prom_expr {
+            PromExpr::Extension(extension) => extension.expr.as_any().downcast_ref::<AliasExpr>(),
+            _ => None,
+        };
+        let Some(alias) = alias else {
+            return self
+                .try_plan_native_fused(prom_expr, query_engine_state)
+                .await;
+        };
+        let Some(plan) = self
+            .try_plan_native_fused(&alias.expr, query_engine_state)
+            .await?
+        else {
+            return Ok(None);
+        };
+        aliased_rows(plan, &alias.alias, &alias.expr).map(Some)
     }
 
     pub(super) async fn try_plan_native_fused(
@@ -2210,6 +2246,93 @@ fn epoch_millis(millis: i64) -> Option<SystemTime> {
     } else {
         UNIX_EPOCH.checked_add(Duration::from_millis(millis as u64))
     }
+}
+
+/// Projects a native rows answer of `expr` into the layout of an aliased statement: the value column
+/// under `alias`, the labels in the existing planner's order ([`existing_label_order`]), then the
+/// time index.
+///
+/// A rows layout is the time index, the value columns, the labels as strings and the metric name
+/// last. The existing planner publishes no metric name for an alias, and refuses one over more than
+/// one value column, which is the answer kept here too.
+fn aliased_rows(plan: LogicalPlan, alias: &str, expr: &PromExpr) -> Result<LogicalPlan> {
+    let mut columns = plan
+        .schema()
+        .iter()
+        .filter(|(_, field)| field.name() != METRIC_NAME)
+        .map(|(qualifier, field)| (Column::from((qualifier, field)), field.data_type().clone()));
+    let Some((time, _)) = columns.next() else {
+        return Err(DataFusionError::Plan(
+            "a native rows answer has no time index".to_string(),
+        ))
+        .context(DataFusionPlanningSnafu);
+    };
+    let (mut tags, values): (Vec<_>, Vec<_>) = columns.partition(|(_, data_type)| {
+        matches!(
+            data_type,
+            ArrowDataType::Utf8 | ArrowDataType::Dictionary(..)
+        )
+    });
+    match existing_label_order(expr) {
+        Some(LabelOrder::Listed(order)) => tags.sort_by_key(|(column, _)| {
+            order
+                .iter()
+                .position(|label| label == &column.name)
+                .unwrap_or(order.len())
+        }),
+        Some(LabelOrder::Sorted) => {
+            tags.sort_by(|(left, _), (right, _)| left.name.cmp(&right.name))
+        }
+        None => {}
+    }
+    ensure!(
+        values.len() == 1,
+        UnsupportedExprSnafu {
+            name: "alias on multi-value result"
+        }
+    );
+    let projection = values
+        .into_iter()
+        .map(|(column, _)| DfExpr::Column(column).alias(alias))
+        .chain(tags.into_iter().map(|(column, _)| DfExpr::Column(column)))
+        .chain(std::iter::once(DfExpr::Column(time)));
+    LogicalPlanBuilder::from(plan)
+        .project(projection)
+        .and_then(LogicalPlanBuilder::build)
+        .context(DataFusionPlanningSnafu)
+}
+
+/// The order the existing planner reports an expression's labels in, where it differs from the
+/// native route's.
+///
+/// An aggregate's `by(...)` reports its labels in the order the list names them, and `without(...)`
+/// reports the remaining ones sorted, while the native route keeps its input's order for both. A
+/// binary operation reports its vector operand's labels, the left one where both are vectors.
+/// Every other shape reports its input's labels in the order both routes read them from the table.
+fn existing_label_order(expr: &PromExpr) -> Option<LabelOrder<'_>> {
+    match expr {
+        PromExpr::Paren(ParenExpr { expr }) => existing_label_order(expr),
+        PromExpr::Aggregate(aggregate) => match &aggregate.modifier {
+            Some(LabelModifier::Include(labels)) => Some(LabelOrder::Listed(&labels.labels)),
+            Some(LabelModifier::Exclude(_)) => Some(LabelOrder::Sorted),
+            None => None,
+        },
+        PromExpr::Binary(binary) => {
+            if binary.lhs.value_type() == ValueType::Vector {
+                existing_label_order(&binary.lhs)
+            } else {
+                existing_label_order(&binary.rhs)
+            }
+        }
+        _ => None,
+    }
+}
+
+/// See [`existing_label_order`].
+enum LabelOrder<'a> {
+    /// The labels in the order of this list; one it does not name goes last.
+    Listed(&'a [String]),
+    Sorted,
 }
 
 /// Finds a subquery at the statement root, treating parentheses as transparent.

@@ -13427,6 +13427,89 @@ async fn native_promql_declines_a_cast_over_an_integer_fold() {
     );
 }
 
+/// A TQL `AS` alias is answered natively with the existing plan's columns: the value under the
+/// alias, the labels, then the time index, with no metric name column.
+///
+/// A flow that sinks a TQL answer into a table reads it by these column names, so the layout is
+/// compared column by column, while the rows are compared by value: native `count` answers floats
+/// where the existing plan answers integers.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_answers_an_aliased_statement_in_the_existing_layout() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) =
+        native_test_instance(GreptimeDbStandaloneBuilder::new("native_promql_alias")).await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE alias_metric (k STRING, l STRING, ts TIMESTAMP(3) TIME INDEX, i DOUBLE, PRIMARY KEY (k, l)); \
+         INSERT INTO alias_metric (k, l, ts, i) VALUES \
+         ('a', 'x', 0, 1), ('a', 'y', 0, 2), ('b', 'x', 0, 3), \
+         ('a', 'x', 5000, 4), ('a', 'y', 5000, 5), ('b', 'x', 5000, 6); \
+         CREATE TABLE sensor_readings (`value` DOUBLE, ts TIMESTAMP(3) TIME INDEX, sensor STRING, loc STRING, PRIMARY KEY (sensor, loc)); \
+         INSERT INTO sensor_readings VALUES (20, 0, 'test', 'A'), (30, 0, 'test', 'B'), (10, 0, 'other', 'A');",
+        QueryContext::arc(),
+    )
+    .await;
+
+    for query in [
+        r#"{__name__="alias_metric"} AS test_series"#,
+        "count by (k) (alias_metric) AS c",
+        // `by` reports its labels in the order it names them.
+        "sum by (l, k) (alias_metric) AS s",
+        "2 * sum by (l, k) (alias_metric) AS s",
+        "alias_metric * 2 AS doubled",
+        // The two statements `flow_tql_avg` sinks into a table.
+        "avg by(sensor) (sensor_readings) AS value",
+        "(sum by(sensor) (sensor_readings) / count by(sensor) (sensor_readings)) AS value",
+    ] {
+        let sql = format!("TQL EVAL (0, 10, '5s') {query}");
+        observer.clear();
+        let (native_columns, native) =
+            native_columns_and_answer(native_tql_output(&instance, &sql, true).await).await;
+        assert_eq!(
+            Some("FusedSeriesExec".to_string()),
+            observer.answering_node(),
+            "`{query}` must answer from the fused node, not the existing plan"
+        );
+        let (legacy_columns, legacy) =
+            native_columns_and_answer(native_tql_output(&instance, &sql, false).await).await;
+        assert_eq!(native_columns, legacy_columns, "`{query}`: the columns");
+        let values = |answer: &Answer| {
+            answer
+                .rows
+                .iter()
+                .map(|(time, labels, values)| {
+                    let values = values
+                        .iter()
+                        .map(|value| value.parse::<f64>().unwrap())
+                        .collect::<Vec<_>>();
+                    (*time, labels.clone(), values)
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(values(&native), values(&legacy), "`{query}`: the rows");
+    }
+}
+
+/// Reads a TQL answer's column names in order, beside the [`Answer`] it holds.
+async fn native_columns_and_answer(output: Output) -> (Vec<String>, Answer) {
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!("TQL EVAL returns record batches"),
+    };
+    let columns = batches
+        .schema()
+        .column_schemas()
+        .iter()
+        .map(|column| column.name.clone())
+        .collect();
+    (
+        columns,
+        native_answer(Output::new_with_record_batches(batches)).await,
+    )
+}
+
 /// A store configured for the columnar series format publishes samples for sparse metric regions
 /// only, and a plain table on such a store reads its rows from the ordinary scan - the reader the
 /// existing plan uses for the very same rows. So the raw series path serves the frame from there
