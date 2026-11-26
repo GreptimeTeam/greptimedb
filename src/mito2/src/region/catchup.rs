@@ -42,19 +42,6 @@ const HANDOVER_SEQUENCE_GAP: SequenceNumber = 1 << 40;
 /// it to the region's writes, which allocate them without checking for overflow.
 const MAX_HANDOVER_SEQUENCE: SequenceNumber = 1 << 62;
 
-/// Returns the entry id a hand-off of the region has to cover: the largest of the one its source
-/// reported, its flushed entry id and the bounds of its pending tails.
-fn handoff_entry_id(
-    reported_entry_id: EntryId,
-    flushed_entry_id: EntryId,
-    pending_tails: &[PendingTail],
-) -> EntryId {
-    pending_tails
-        .iter()
-        .map(|tail| tail.upto)
-        .fold(reported_entry_id.max(flushed_entry_id), EntryId::max)
-}
-
 /// Hands a region whose manifest is published conditionally over to this node `node_id`, which
 /// becomes its writer, from the source node `source_node_id` that reported `reported_entry_id`
 /// as its last entry. Replays nothing.
@@ -65,41 +52,52 @@ fn handoff_entry_id(
 /// of the source over them, raising the committed sequence by [HANDOVER_SEQUENCE_GAP]. The tail is
 /// replayed in the background once the region is writable.
 ///
-/// A region that skips the WAL commits an empty edit. Fails, before the log store hands anything
-/// over, if the source has such entries and the request names no source, or if the region has no
-/// sequences left for another handover.
+/// Returns the receipt of the manifest hook and the committed edit, which the region's worker
+/// applies to the region's version, in order with the edits of flushes and compactions.
+///
+/// A region that skips the WAL commits an empty edit and returns no edit. Fails, before the log
+/// store hands anything over, if the source has such entries and the request names no source, or
+/// if the region has no sequences left for another handover.
 pub(crate) async fn hand_over<S: LogStore>(
     region: &MitoRegion,
     wal: &Wal<S>,
     node_id: Option<u64>,
     source_node_id: Option<u64>,
     reported_entry_id: EntryId,
-) -> Result<Option<PendingManifestHook>> {
+) -> Result<(PendingManifestHook, Option<RegionEdit>)> {
     let region_id = region.region_id;
     if region.version().options.skip_wal {
-        return region.manifest_ctx.commit_catchup().await;
+        let mut manager = region.manifest_ctx.manifest_manager.write().await;
+        let pending = region
+            .manifest_ctx
+            .commit_catchup_locked(&mut manager, RegionEdit::default())
+            .await?;
+        return Ok((pending, None));
     }
     let node_id = node_id.with_context(|| error::UnexpectedSnafu {
         reason: format!("No node id to hand region {region_id} over to"),
     })?;
-    let manifest = region.manifest_ctx.manifest().await;
-    let bound = handoff_entry_id(
-        reported_entry_id,
-        manifest.flushed_entry_id,
-        &manifest.pending_tails,
-    );
-    // A handover that cannot commit after this manifest fails before the log store hands the
-    // region over. The commit builds the edit again for the manifest it commits after.
-    handover_edit(
-        &manifest,
-        region.version_control.current().last_sequence,
-        HandoffFloor {
-            node_id,
-            entry_id: bound,
-        },
-        source_node_id,
-        reported_entry_id,
-    )?;
+    let bound = {
+        let manifest = region.manifest_ctx.manifest().await;
+        let bound = handoff_entry_id(
+            reported_entry_id,
+            manifest.flushed_entry_id,
+            &manifest.pending_tails,
+        );
+        // A handover that cannot commit after this manifest fails before the log store hands the
+        // region over. The commit builds the edit again for the manifest it commits after.
+        handover_edit(
+            &manifest,
+            region.version_control.current().last_sequence,
+            HandoffFloor {
+                node_id,
+                entry_id: bound,
+            },
+            source_node_id,
+            reported_entry_id,
+        )?;
+        bound
+    };
     let floor = wal.handoff(region_id, &region.provider, bound).await?;
     let mut manager = region.manifest_ctx.manifest_manager.write().await;
     let edit = handover_edit(
@@ -116,62 +114,7 @@ pub(crate) async fn hand_over<S: LogStore>(
         .manifest_ctx
         .commit_catchup_locked(&mut manager, edit.clone())
         .await?;
-    if pending.is_some() {
-        region
-            .version_control
-            .apply_edit(Some(edit), &[], region.file_purger.clone());
-    }
-    Ok(pending)
-}
-
-/// Returns the edit of a handover to `floor.node_id` (see [hand_over]) that commits after
-/// `manifest`. `last_sequence` is the largest sequence the region used on this node.
-fn handover_edit(
-    manifest: &RegionManifest,
-    last_sequence: SequenceNumber,
-    floor: HandoffFloor,
-    source_node_id: Option<u64>,
-    reported_entry_id: EntryId,
-) -> Result<RegionEdit> {
-    let region_id = manifest.metadata.region_id;
-    let mut edit = RegionEdit {
-        wal_recovery: WalRecoveryEdit {
-            pending_tails: None,
-            handoff_floor: Some(floor),
-        },
-        ..Default::default()
-    };
-    // Entries of the source up to here are flushed, in its tails or below its handoff floor.
-    let after = manifest.wal_replay_start(source_node_id);
-    if after >= reported_entry_id {
-        return Ok(edit);
-    }
-    let node_id = source_node_id.with_context(|| error::InvalidRequestSnafu {
-        region_id,
-        reason: format!(
-            "the request names no source of the entries in ({after}, {reported_entry_id}] to recover"
-        ),
-    })?;
-    let committed_sequence = manifest
-        .committed_sequence
-        .unwrap_or_default()
-        .max(manifest.flushed_sequence)
-        .max(last_sequence)
-        .checked_add(HANDOVER_SEQUENCE_GAP)
-        .filter(|sequence| *sequence <= MAX_HANDOVER_SEQUENCE)
-        .with_context(|| error::UnexpectedSnafu {
-            reason: format!("Region {region_id} has no sequences left for another handover"),
-        })?;
-    let mut tails = manifest.pending_tails.clone();
-    tails.push(PendingTail {
-        node_id,
-        after,
-        upto: reported_entry_id,
-        upto_kind: UptoKind::Reported,
-    });
-    edit.committed_sequence = Some(committed_sequence);
-    edit.wal_recovery.pending_tails = Some(tails);
-    Ok(edit)
+    Ok((pending, Some(edit)))
 }
 
 pub struct RegionCatchupTask<S> {
@@ -259,12 +202,17 @@ impl<S: LogStore> RegionCatchupTask<S> {
         let flushed_entry_id = self.region.version_control.current().last_entry_id;
         // Entries up to where the manifest recovers this node's WAL from are flushed, left to
         // the pending tails or below this node's handoff floor.
-        let manifest = self.region.manifest_ctx.manifest().await;
-        let replay_from_entry_id = self
-            .replay_checkpoint_entry_id
-            .unwrap_or(flushed_entry_id)
-            .max(flushed_entry_id)
-            .max(manifest.wal_replay_start(self.node_id));
+        let (replay_from_entry_id, release_entry_id) = {
+            let manifest = self.region.manifest_ctx.manifest().await;
+            let replay_from_entry_id = self
+                .replay_checkpoint_entry_id
+                .unwrap_or(flushed_entry_id)
+                .max(flushed_entry_id)
+                .max(manifest.wal_replay_start(self.node_id));
+            let release_entry_id =
+                cap_wal_release(&manifest.pending_tails, self.node_id, replay_from_entry_id);
+            (replay_from_entry_id, release_entry_id)
+        };
         let region_id = self.region.region_id;
         info!(
             "Trying to replay memtable for region: {region_id}, provider: {:?}, replay from entry id: {replay_from_entry_id}, flushed entry id: {flushed_entry_id}",
@@ -311,7 +259,7 @@ impl<S: LogStore> RegionCatchupTask<S> {
             wal_entry_reader,
             region_id,
             replay_from_entry_id,
-            cap_wal_release(&manifest.pending_tails, self.node_id, replay_from_entry_id),
+            release_entry_id,
             &self.region.version_control,
             self.allow_stale_entries,
             on_region_opened,
@@ -372,6 +320,69 @@ impl<S: LogStore> RegionCatchupTask<S> {
         on_region_opened(region_id, flushed_entry_id, &self.region.provider).await?;
         Ok(())
     }
+}
+
+/// Returns the entry id a hand-off of the region has to cover: the largest of the one its source
+/// reported, its flushed entry id and the bounds of its pending tails.
+fn handoff_entry_id(
+    reported_entry_id: EntryId,
+    flushed_entry_id: EntryId,
+    pending_tails: &[PendingTail],
+) -> EntryId {
+    pending_tails
+        .iter()
+        .map(|tail| tail.upto)
+        .fold(reported_entry_id.max(flushed_entry_id), EntryId::max)
+}
+
+/// Returns the edit of a handover to `floor.node_id` (see [hand_over]) that commits after
+/// `manifest`. `last_sequence` is the largest sequence the region used on this node.
+fn handover_edit(
+    manifest: &RegionManifest,
+    last_sequence: SequenceNumber,
+    floor: HandoffFloor,
+    source_node_id: Option<u64>,
+    reported_entry_id: EntryId,
+) -> Result<RegionEdit> {
+    let region_id = manifest.metadata.region_id;
+    let mut edit = RegionEdit {
+        wal_recovery: WalRecoveryEdit {
+            pending_tails: None,
+            handoff_floor: Some(floor),
+        },
+        ..Default::default()
+    };
+    // Entries of the source up to here are flushed, in its tails or below its handoff floor.
+    let after = manifest.wal_replay_start(source_node_id);
+    if after >= reported_entry_id {
+        return Ok(edit);
+    }
+    let node_id = source_node_id.with_context(|| error::InvalidRequestSnafu {
+        region_id,
+        reason: format!(
+            "the request names no source of the entries in ({after}, {reported_entry_id}] to recover"
+        ),
+    })?;
+    let committed_sequence = manifest
+        .committed_sequence
+        .unwrap_or_default()
+        .max(manifest.flushed_sequence)
+        .max(last_sequence)
+        .checked_add(HANDOVER_SEQUENCE_GAP)
+        .filter(|sequence| *sequence <= MAX_HANDOVER_SEQUENCE)
+        .with_context(|| error::UnexpectedSnafu {
+            reason: format!("Region {region_id} has no sequences left for another handover"),
+        })?;
+    let mut tails = manifest.pending_tails.clone();
+    tails.push(PendingTail {
+        node_id,
+        after,
+        upto: reported_entry_id,
+        upto_kind: UptoKind::Reported,
+    });
+    edit.committed_sequence = Some(committed_sequence);
+    edit.wal_recovery.pending_tails = Some(tails);
+    Ok(edit)
 }
 
 #[cfg(test)]

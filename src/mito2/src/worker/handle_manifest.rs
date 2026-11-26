@@ -245,6 +245,22 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) async fn handle_region_sync(&mut self, request: RegionSyncRequest) {
         let region_id = request.region_id;
         let sender = request.sender;
+        // A catchup replays the WAL into the memtable outside the worker, which the empty memtable
+        // a sync installs would drop, and a handover commits after the manifest it read before it
+        // handed the WAL over. A fenced region is refused while the worker holds a catchup or
+        // reload registration for it, as an option change is (see `is_catching_up_or_reloading`).
+        // Checked before the role: a catchup promotes the region as it clears its flag, and only
+        // the worker begins a catchup, so a region not catching up here is not promoted by a
+        // catchup before the role check. A fence marks the region before it makes it a Follower,
+        // so a sync that reads the fenced region as a Follower sees the mark in the check after
+        // the role; one that still reads it as a Leader gets the error a sync of any leader gets.
+        if let Some(region) = self.regions.get_region(region_id)
+            && self.is_catching_up_or_reloading(&region)
+        {
+            warn!("Region {region_id} is in a catchup or reload, refusing to sync its manifest");
+            let _ = sender.send(Err(RegionBusySnafu { region_id }.build()));
+            return;
+        }
         let region = match self.regions.follower_region(region_id) {
             Ok(region) => region,
             Err(e) => {
@@ -253,13 +269,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
         };
         // A region that awaits its Leader lease keeps its memtable for that lease or for a
-        // catchup again. A catchup reads the manifest and changes the version outside the
-        // worker, so a sync would overwrite what it applies.
-        if region.manifest_ctx.awaits_leader_lease()
-            || self.catchup_regions.is_region_exists(region_id)
-        {
+        // catchup again.
+        if region.manifest_ctx.awaits_leader_lease() || self.is_catching_up_or_reloading(&region) {
             warn!(
-                "Region {region_id} awaits its Leader lease or is in a catchup, refusing to sync its manifest"
+                "Region {region_id} awaits its Leader lease or is in a catchup or reload, refusing to sync its manifest"
             );
             let _ = sender.send(Err(RegionBusySnafu { region_id }.build()));
             return;

@@ -69,22 +69,24 @@ pub(crate) fn should_replay_tails(region: &MitoRegion) -> bool {
 /// Releases the WAL of `region` on node `node_id` up to where the region now replays it on
 /// open, keeping the node's remaining tails, after an edit of its pending tails or a handover's
 /// commit, which may record only a handoff floor or nothing. A failure is only logged.
-pub(crate) async fn release_wal_after_tails_edit<S: LogStore>(
+pub(crate) async fn release_wal_to_replay_start<S: LogStore>(
     region: &MitoRegion,
     wal: &Wal<S>,
     node_id: Option<u64>,
 ) {
-    let manifest = region.manifest_ctx.manifest().await;
-    let entry_id = cap_wal_release(
-        &manifest.pending_tails,
-        node_id,
-        manifest.wal_replay_start(node_id),
-    );
+    let entry_id = {
+        let manifest = region.manifest_ctx.manifest().await;
+        cap_wal_release(
+            &manifest.pending_tails,
+            node_id,
+            manifest.wal_replay_start(node_id),
+        )
+    };
     if let Err(e) = wal
         .obsolete(region.region_id, entry_id, &region.provider)
         .await
     {
-        error!(e; "Failed to release the WAL of region {} after its pending tails changed", region.region_id);
+        error!(e; "Failed to release the WAL of region {} up to entry {}", region.region_id, entry_id);
     }
 }
 
@@ -441,7 +443,7 @@ impl<S: LogStore> TailReplayTask<S> {
                     info!(
                         "Published the replayed WAL tails of region {region_id} in manifest version {manifest_version}"
                     );
-                    release_wal_after_tails_edit(&self.region, &self.wal, self.node_id).await;
+                    release_wal_to_replay_start(&self.region, &self.wal, self.node_id).await;
                     self.listener.on_tail_commit_end(region_id).await;
                     let region = self.region.clone();
                     let tails = tails.to_vec();

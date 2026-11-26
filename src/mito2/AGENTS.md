@@ -157,15 +157,16 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   it until the worker swaps in an instance reloaded from the new manifest
   (`worker/handle_reload.rs`). A tail replay round that fails while the storage holds a newer
   manifest fences a writable leader the same way. Never await a worker sender while holding a
-  manifest guard. The catchup commit (`ManifestContext::commit_catchup`) is the exception: it
-  commits as a Follower without the deadline check, and a conflict fails the catchup retryably
-  without fencing the region; a retry reopens it from the newer manifest.
+  manifest guard. The catchup commit (`ManifestContext::commit_catchup_locked`, which
+  `commit_catchup` wraps) is the exception: it commits as a Follower without the deadline
+  check, and a conflict fails the catchup retryably without fencing the region; a retry reopens
+  it from the newer manifest.
 - Pending tails (`RegionManifest::pending_tails`) are WAL ranges a region still has
   to recover; the flushed entry id never prunes them. Opening a region replays its
-  WAL after `RegionManifest::wal_replay_start`, and so does a catchup. The WAL releases
-  at open, after a flush, on close and in a catchup stay below this node's tails
-  (`cap_wal_release`); truncate, drop and offline cleanup release without that cap. Handoff
-  floors are dropped once the flushed entry id reaches them, in
+  WAL after `RegionManifest::wal_replay_start`, and so does a catchup's replay. The WAL
+  releases at open, after a flush, on close, after a catchup's replay and after a handover
+  stay below this node's tails (`cap_wal_release`); truncate, drop and offline cleanup
+  release without that cap. Handoff floors are dropped once the flushed entry id reaches them, in
   `RegionManifestBuilder::try_build`. While a
   region has pending tails, scans and memtable/SST stats fail with
   `RegionPendingTails`, and so do truncate, entering staging, a repartition flush,
@@ -176,8 +177,11 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
 - A catchup with `set_writable` and the source's last entry, of a region whose manifest is
   published conditionally and that does not await its Leader lease, hands the region over
   without replaying: see `hand_over` and `HANDOVER_SEQUENCE_GAP` in `region/catchup.rs`. It
-  refuses a region with rows in its memtable. During any catchup a manifest sync and a
-  follower's option change are refused, as the catchup changes the version outside the worker.
+  refuses a region with rows in its memtable or a tail replay that has not reported its end;
+  the worker applies the committed edit (`handle_handed_over`). A manifest sync and a
+  follower's skip-WAL change are refused while the instance is in a catchup, or is fenced while
+  the worker holds a catchup or reload registration for the region (`is_catching_up_or_reloading`);
+  a follower opened after a close is not refused for its predecessor's catchup.
 - A leader that is writable, altering or editing replays its pending tails in one
   background task (`tail_replay.rs`), started by the worker when a lease, catchup or
   role change makes the region writable, or when it registers a region created or opened

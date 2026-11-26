@@ -319,7 +319,7 @@ async fn test_downgrading_waits_for_checkpoint_and_stops_new_checkpoints() {
 
     // Final flush publishes a normal delta, but Downgrading must not start a
     // checkpoint after the barrier.
-    blocker.arm_next_close();
+    blocker.set_armed(true);
     engine
         .handle_request(
             region_id,

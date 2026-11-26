@@ -76,10 +76,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Followers only accept skip-WAL changes, which are in-memory option changes and must
         // never enter the leader path that may flush memtables.
         if let Some(skip_wal) = follower_skip_wal {
-            // A catchup reads the version and changes it outside the worker, so an option change
-            // could overwrite what it applies, or be overwritten by it.
-            if self.catchup_regions.is_region_exists(region_id) {
-                warn!("Region {region_id} is in a catchup, refusing to change its options");
+            // A catchup reads the region's skip_wal option outside the worker, when it decides
+            // whether to hand the region's WAL over, and a reload reopens the region with the
+            // options it read when it began.
+            if self.is_catching_up_or_reloading(&region) {
+                warn!(
+                    "Region {region_id} is in a catchup or reload, refusing to change its options"
+                );
                 sender.send(Err(RegionBusySnafu { region_id }.build()));
                 return;
             }
