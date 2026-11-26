@@ -2411,7 +2411,9 @@ pub async fn test_prometheus_native_promql_route(store_type: StorageType) {
         "CREATE TABLE native_route (ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING, PRIMARY KEY (host))",
         "CREATE TABLE native_zero (ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING, PRIMARY KEY (host))",
         "CREATE TABLE native_empty (ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING, PRIMARY KEY (host))",
+        "CREATE TABLE native_int (ts TIMESTAMP TIME INDEX, val BIGINT, host STRING, PRIMARY KEY (host))",
         "INSERT INTO native_route(host, val, ts) VALUES ('h1', 1.0, 0), ('h1', 2.0, 1000)",
+        "INSERT INTO native_int(host, val, ts) VALUES ('h1', 2, 1000), ('h2', 2, 1000)",
         "INSERT INTO native_zero(host, val, ts) VALUES ('z', 0.0, 0), ('z', 0.0, 1000)",
     ] {
         let res = client
@@ -2455,6 +2457,16 @@ pub async fn test_prometheus_native_promql_route(store_type: StorageType) {
             json!({"resultType":"vector","result":[]}),
         ),
         ("native_empty", json!({"resultType":"vector","result":[]})),
+        // An integer field answers float samples, and `count_values` writes the value as Go's `'f'`
+        // form does.
+        (
+            "native_int{host=\"h1\"}",
+            json!({"resultType":"vector","result":[{"metric":{"__name__":"native_int","host":"h1"},"value":[1.0,"2.0"]}]}),
+        ),
+        (
+            "count_values(\"v\", native_int)",
+            json!({"resultType":"vector","result":[{"metric":{"v":"2"},"value":[1.0,"2.0"]}]}),
+        ),
     ];
     for native in [false, true] {
         for (query, expected) in &instants {

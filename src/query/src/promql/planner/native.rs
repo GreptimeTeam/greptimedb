@@ -74,7 +74,6 @@ pub(crate) use promql::native::segment::{
     independent_scan_pair, is_empty_discovered_input, pointwise_operand,
 };
 use promql_parser::label::{METRIC_NAME, MatchOp, Matcher, Matchers};
-use promql_parser::parser::token;
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
     EvalStmt, Expr as PromExpr, MatrixSelector, ParenExpr, SubqueryExpr, VectorSelector,
@@ -321,9 +320,6 @@ impl PromPlanner {
         &mut self,
         matchers: Matchers,
         under_rate_or_increase: bool,
-        // The expression this statement asks for. Its shape, not the catalog type of a field, is what says
-        // whether the existing plan reports a `Float64` for a numeric field the raw scan reads as one.
-        statement_expr: &PromExpr,
         logical_scan_id: &mut Option<u32>,
         logical_ids_differ: &mut bool,
         statement_kind: &mut Option<FieldKind>,
@@ -461,35 +457,16 @@ impl PromPlanner {
         //
         // Which kind a field carries is what the raw series scan hands the node, not the catalog type: the
         // scan casts every numeric field to `Float64`, so an integer or a `Float32` field it reads is a
-        // float. The existing planner, on the other hand, publishes the field's own type for the shapes
-        // that do not cast, so a float here is only the same answer where the statement's own shape says
-        // the existing plan reports `Float64` too; [`read_field_type`] states that per field.
+        // float. That is the Prometheus data model, where every sample value is a `float64`, so the
+        // answer publishes `Float64` even where the existing plan publishes the field's own type.
         //
         // `Float64` fields are answered by the columnar series-index reader when a region prepares one. A
         // histogram field is not, since the logical plan cannot tell which reader a region will prepare, so
         // such a selection falls back to the ordinary scan.
-        //
-        // A numeric field whose statement publishes the field's own type keeps the existing plan. Naming
-        // that refusal here keeps it apart from a selection whose fields genuinely disagree, and it is the
-        // refusal a reader can act on: the expression needs an operator that casts - an arithmetic one, a
-        // range function, or an aggregate that answers a float.
-        let mut keeps_its_own_type = false;
         let read_types = fields
             .iter()
-            .map(|field| {
-                Self::field_column_type(input.schema(), field).map(|data_type| {
-                    keeps_its_own_type |= is_raw_numeric(data_type)
-                        && !publishes_float_values(statement_expr, data_type);
-                    read_field_type(data_type, statement_expr)
-                })
-            })
+            .map(|field| Self::field_column_type(input.schema(), field).map(read_field_type))
             .collect::<Vec<_>>();
-        if keeps_its_own_type {
-            // The existing plan publishes the field's own type for this shape - a bare selector copies the
-            // column, `sum` keeps an integer's type, `count` builds an `Int64` - while a fused node
-            // publishes `Float64` alone, so admitting it would change the answer's column type.
-            return Ok(declined("field_keeps_its_own_type"));
-        }
         let Some(field_kind) =
             uniform_field_kind(read_types.iter().map(|data_type| data_type.as_ref()))
         else {
@@ -1127,7 +1104,6 @@ impl PromPlanner {
                             .prepare_one_scan(
                                 matchers.clone(),
                                 *under_rate_or_increase,
-                                &stmt.expr,
                                 &mut logical_scan_id,
                                 &mut logical_ids_differ,
                                 &mut statement_kind,
@@ -1257,7 +1233,6 @@ impl PromPlanner {
                     .prepare_one_scan(
                         matchers,
                         *under_rate_or_increase,
-                        &stmt.expr,
                         &mut logical_scan_id,
                         &mut logical_ids_differ,
                         &mut statement_kind,
@@ -2839,17 +2814,13 @@ fn supports_native_raw_series(engine: &str) -> bool {
     matches!(engine, MITO_ENGINE | MITO2_ENGINE | METRIC_ENGINE)
 }
 
-/// The type the raw series scan hands one field of `statement` to the fused node as.
+/// The type the raw series scan hands one field to the fused node as.
 ///
 /// The scan casts a numeric field to `Float64` and converts a native histogram struct into histogram
 /// samples; nothing else has a raw representation, so every other type stays what it is here and is
-/// refused by the field-kind guard that reads this. A `Float64` field is a float under either route, so
-/// only the remaining numeric types depend on the statement: they may be planned as the float the scan
-/// reads only where the existing plan publishes a `Float64` for that field as well, which is
-/// [`publishes_float_values`]. A decimal is numeric to Arrow but has no float representation under
-/// either route, so it keeps the existing plan.
-fn read_field_type(data_type: &ArrowDataType, statement: &PromExpr) -> ArrowDataType {
-    if is_raw_numeric(data_type) && publishes_float_values(statement, data_type) {
+/// refused by the field-kind guard that reads this.
+fn read_field_type(data_type: &ArrowDataType) -> ArrowDataType {
+    if is_raw_numeric(data_type) {
         ArrowDataType::Float64
     } else {
         data_type.clone()
@@ -2874,215 +2845,6 @@ fn is_raw_numeric(data_type: &ArrowDataType) -> bool {
             | ArrowDataType::Float16
             | ArrowDataType::Float32
     )
-}
-
-/// The range functions, each of which answers a `Float64` whatever its window holds.
-///
-/// Every one of them is a UDF whose value window is a `Float64` range and whose return type is
-/// `Float64` (`promql::functions`), so the existing plan casts the window's values before folding them:
-/// `rate(integer_field[5m])` publishes `Float64`. The functions are named rather than matched by prefix
-/// so that a call this list does not state - `abs`, `ceil` and the rest of the math functions, which
-/// keep an integer's own type - keeps the existing plan.
-const FLOAT_ANSWERING_RANGE_FUNCTIONS: &[&str] = &[
-    "avg_over_time",
-    "changes",
-    "count_over_time",
-    "delta",
-    "deriv",
-    "double_exponential_smoothing",
-    "holt_winters",
-    "idelta",
-    "increase",
-    "irate",
-    "last_over_time",
-    "max_over_time",
-    "min_over_time",
-    "predict_linear",
-    "present_over_time",
-    "quantile_over_time",
-    "rate",
-    "resets",
-    "stddev_over_time",
-    "stdvar_over_time",
-    "sum_over_time",
-];
-
-/// The type the existing planner publishes for the values of one expression over one field.
-///
-/// The fused node declares one `Float64` value column per field, so a numeric field the raw scan reads as
-/// a float may only enter the route where the existing plan publishes a float for it too. That is a
-/// property of the shape of the expression and, for `sum`, of the type it folds - which is why this is a
-/// class rather than a boolean: an integer `sum` reports its argument's own type, and a `Float32` one is
-/// widened to `Float64`, whatever the shape below it publishes.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PublishedValues {
-    /// A `Float64`, which is the one kind the fused node declares.
-    Float64,
-    /// A narrower float, `Float16` or `Float32`. `sum` folds one into a `Float64`; everything else
-    /// publishes it as it is.
-    NarrowFloat,
-    /// An integer, `Int8` through `Int64` and `UInt8` through `UInt64`. `sum` keeps it, `count` builds
-    /// one, and the field itself is one under a bare selector.
-    Integer,
-    /// A type or a shape this rule does not model: a string, a decimal, a native histogram, or a call
-    /// whose answer is not written down here. Nothing is admitted on it.
-    Other,
-}
-
-/// Whether the existing planner publishes a `Float64` for `field_type` under `statement`.
-///
-/// Declining is what keeps the two routes' columns identical, so a shape this rule does not prove is a
-/// decline rather than a guess. The shapes it proves, and the existing planner's site that decides each:
-///
-/// - parentheses and subqueries are not shapes of their own: they publish what their inner expression
-///   publishes,
-/// - arithmetic binary operators are built by `PromPlanner::prom_token_to_binary_expr_builder`, which
-///   wraps both operands in `cast_float` - but the cast has to be the first thing that reaches the
-///   samples for the answer to stay the same, which is [`folds_before_cast`]: `<float fold> * 1` is
-///   admitted and `sum(integer_field) * 1` is not,
-/// - `min`/`max` fold through `common_function::aggrs::extremum::Extremum`, whose `return_type` is
-///   `Float64`, and `avg`, `stddev`, `stdvar`, `quantile` and `group` through UDAFs that answer `Float64`
-///   for every numeric input (`PromPlanner::create_numeric_aggregate_expr`),
-/// - `sum` follows DataFusion's `sum`, which answers `Float64` for a float argument and the argument's
-///   own type for an integer one,
-/// - the range functions answer `Float64`: each is a UDF whose value window is a `Float64` range
-///   ([`FLOAT_ANSWERING_RANGE_FUNCTIONS`]).
-///
-/// What is not proved, and why it keeps the existing plan:
-///
-/// - a bare selector copies the value column's own type (`InstantManipulate::calculate_output_schema`),
-/// - `count` and `count_values` fold through `count`, which answers `Int64` for every input,
-/// - the math functions keep the type they are given (`abs(integer_field)` is an integer) and so do
-///   `label_replace`/`label_join`, `ceil`, `floor`, `round`, `clamp*` and `sort*`,
-/// - `-x` negates a column of its own type, and a comparison without `bool` filters on one,
-/// - a set operation hands on the values it was given, and `topk`/`bottomk`/`limitk` keep the samples
-///   they pick.
-fn publishes_float_values(statement: &PromExpr, field_type: &ArrowDataType) -> bool {
-    published_values(statement, field_type) == PublishedValues::Float64
-}
-
-/// The class [`publishes_float_values`] reads: what the existing plan publishes for `statement`.
-fn published_values(statement: &PromExpr, field_type: &ArrowDataType) -> PublishedValues {
-    match statement {
-        // Neither parentheses nor a subquery is a shape of its own: the values a subquery publishes are
-        // those of the expression it ranges over.
-        PromExpr::Paren(ParenExpr { expr }) => published_values(expr, field_type),
-        PromExpr::Subquery(SubqueryExpr { expr, .. }) => published_values(expr, field_type),
-        // A selector publishes the value column itself, which is the field's own type.
-        PromExpr::VectorSelector(_) | PromExpr::MatrixSelector(_) => field_values(field_type),
-        // Every arithmetic operator is built by the planner's `cast_float` builder, which casts both
-        // operands: what it publishes is a `Float64` whatever the fields hold. A comparison publishes a
-        // float only when it is written with `bool`, and a set operation hands on the values it was given,
-        // so neither is a shape this rule models.
-        PromExpr::Binary(binary) => {
-            let arithmetic = matches!(
-                binary.op.id(),
-                token::T_ADD
-                    | token::T_SUB
-                    | token::T_MUL
-                    | token::T_DIV
-                    | token::T_MOD
-                    | token::T_POW
-                    | token::T_ATAN2
-            );
-            // The cast is the operator's own, so it reaches whatever an operand answers. An operand that
-            // folds raw samples into a non-float answer hands over a value the existing plan computed
-            // exactly, which the raw series scan cannot; such a shape keeps the existing plan.
-            if !arithmetic
-                || folds_before_cast(&binary.lhs, field_type)
-                || folds_before_cast(&binary.rhs, field_type)
-            {
-                PublishedValues::Other
-            } else {
-                PublishedValues::Float64
-            }
-        }
-        PromExpr::Aggregate(aggregate) => match aggregate.op.id() {
-            // `min` and `max` fold through `Extremum`, and `avg`, `stddev`, `stdvar`, `quantile` and
-            // `group` fold through UDAFs whose answer is a `Float64` for every numeric input.
-            token::T_MIN
-            | token::T_MAX
-            | token::T_AVG
-            | token::T_STDDEV
-            | token::T_STDVAR
-            | token::T_QUANTILE
-            | token::T_GROUP => PublishedValues::Float64,
-            // DataFusion's `sum` answers `Float64` for a float argument and the argument's own type for an
-            // integer one, so what it publishes is what it folds.
-            token::T_SUM => match published_values(&aggregate.expr, field_type) {
-                PublishedValues::Float64 | PublishedValues::NarrowFloat => PublishedValues::Float64,
-                // An integer sum keeps the integer it folds, and a type this rule does not model stays
-                // one.
-                PublishedValues::Integer => PublishedValues::Integer,
-                PublishedValues::Other => PublishedValues::Other,
-            },
-            // `count` and `count_values` fold through `count`, which answers `Int64` for every input.
-            token::T_COUNT | token::T_COUNT_VALUES => PublishedValues::Integer,
-            // `topk`, `bottomk`, `limitk` and `limit_ratio` report some of the samples they were given, so
-            // they publish what their input publishes.
-            token::T_TOPK | token::T_BOTTOMK | token::T_LIMITK | token::T_LIMIT_RATIO => {
-                published_values(&aggregate.expr, field_type)
-            }
-            _ => PublishedValues::Other,
-        },
-        // The range functions answer floats; every other call - the math functions, the label functions,
-        // `timestamp`, `vector`, `scalar` - publishes the type it is given or has no field at all.
-        PromExpr::Call(call) => {
-            if FLOAT_ANSWERING_RANGE_FUNCTIONS.contains(&call.func.name) {
-                PublishedValues::Float64
-            } else {
-                PublishedValues::Other
-            }
-        }
-        _ => PublishedValues::Other,
-    }
-}
-
-/// Whether `statement` folds raw samples into an answer that is not a float, which is what makes the
-/// cast above it late.
-///
-/// An arithmetic operator's `cast_float` makes its column a `Float64`, but a column type is not an
-/// answer: where an operand *folds* the samples before the cast reaches them, the existing plan folds
-/// exactly - `sum` of an `Int64` column adds integers and casts the sum - while the raw series scan
-/// casts every sample and only then folds. Two integers above `2^53` that cancel answer `1` before the
-/// cast and `0` after it, so `sum(integer_field) * 1` keeps the existing plan. `sum(rate(m[5m]))` is
-/// what that bound admits: the fold it applies is already a float fold, which is
-/// [`publishes_float_values`] of the aggregate itself.
-///
-/// A bare selector, a literal and a call hand over one sample at a time, so the cast reaches the same
-/// sample the scan casts and no fold happens in between.
-fn folds_before_cast(statement: &PromExpr, field_type: &ArrowDataType) -> bool {
-    match statement {
-        PromExpr::Paren(ParenExpr { expr }) => folds_before_cast(expr, field_type),
-        PromExpr::Subquery(SubqueryExpr { expr, .. }) => folds_before_cast(expr, field_type),
-        PromExpr::Binary(binary) => {
-            folds_before_cast(&binary.lhs, field_type) || folds_before_cast(&binary.rhs, field_type)
-        }
-        PromExpr::Unary(unary) => folds_before_cast(&unary.expr, field_type),
-        // A fold answers what it folds: an integer `sum` keeps the integer it added, `count` builds an
-        // `Int64`, and the ranking aggregates report the samples they were given. None of them is a
-        // `Float64`, so the cast above one of them is the late cast this refuses.
-        PromExpr::Aggregate(_) => !publishes_float_values(statement, field_type),
-        // A selector, a literal and a call reach one sample at a time; the cast reaches that same sample.
-        _ => false,
-    }
-}
-
-/// The class of a value column of this type: what a selector over a field of it publishes.
-fn field_values(field_type: &ArrowDataType) -> PublishedValues {
-    match field_type {
-        ArrowDataType::Float64 => PublishedValues::Float64,
-        ArrowDataType::Float16 | ArrowDataType::Float32 => PublishedValues::NarrowFloat,
-        ArrowDataType::Int8
-        | ArrowDataType::Int16
-        | ArrowDataType::Int32
-        | ArrowDataType::Int64
-        | ArrowDataType::UInt8
-        | ArrowDataType::UInt16
-        | ArrowDataType::UInt32
-        | ArrowDataType::UInt64 => PublishedValues::Integer,
-        _ => PublishedValues::Other,
-    }
 }
 
 /// Recognizes only the metric logical-table scan emitted by `create_table_scan_plan`, and reports

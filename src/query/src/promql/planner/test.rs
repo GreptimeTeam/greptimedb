@@ -5079,64 +5079,29 @@ async fn native_fused_unsupported_field_type_falls_back() {
     }
 }
 
-/// A numeric field the raw scan casts is admitted only under the shapes whose existing plan
-/// publishes a `Float64` for it too.
+/// A numeric field is answered as `Float64` whatever the shape of the statement.
 ///
-/// The scan hands the node a `Float64` (`series_scan/raw.rs` casts every numeric field), while the
-/// fused node declares one `Float64` value column per field. The existing planner publishes that same
-/// float for an arithmetic argument, for `min`/`max`/`avg`/`stddev`/`stdvar`/`quantile`/`group` and for
-/// a range function, but copies the field's own type through a bare selector, `sum` over an integer,
-/// `count`, `count_values`, `abs` and the other math functions. Admission therefore follows the shape,
-/// and a shape whose existing plan publishes the field's own type keeps that plan.
+/// The raw scan casts every numeric field to `Float64`, and a Prometheus sample is a `float64`, so the
+/// route publishes a float where the existing plan copies the field's own type: a bare selector, `sum`
+/// over an integer, `count`, `count_values`, a math function, a negation and a comparison.
 #[tokio::test]
-async fn native_fused_numeric_field_admission_follows_the_shape() {
+async fn native_fused_numeric_fields_answer_float64() {
     use ConcreteDataType as Dt;
 
-    for (field_type, query, admitted) in [
-        // A bare selector reports the field's own type, so it keeps the existing plan.
-        (Dt::int64_datatype(), "some_metric", false),
-        (Dt::float32_datatype(), "some_metric", false),
-        (Dt::uint64_datatype(), "some_metric", false),
-        // Arithmetic casts both operands, so the answer is a float under either route.
-        (Dt::int64_datatype(), "some_metric * 2", true),
-        (Dt::int64_datatype(), "some_metric + some_metric", true),
-        (Dt::float32_datatype(), "some_metric * 2", true),
-        (Dt::uint64_datatype(), "some_metric + some_metric", true),
-        // An aggregate whose UDAF answers a float for every numeric input.
-        (Dt::int64_datatype(), "min(some_metric)", true),
-        (Dt::int64_datatype(), "max(some_metric)", true),
-        (Dt::int64_datatype(), "avg(some_metric)", true),
-        (Dt::int64_datatype(), "stddev(some_metric)", true),
-        (Dt::uint64_datatype(), "quantile(0.5, some_metric)", true),
-        (Dt::int64_datatype(), "group(some_metric)", true),
-        // `sum` folds a float as a `Float64` and keeps an integer's own type.
-        (Dt::float32_datatype(), "sum(some_metric)", true),
-        (Dt::int64_datatype(), "sum(some_metric)", false),
-        (Dt::uint64_datatype(), "sum(some_metric)", false),
-        // `sum` publishes what it folds, so an integer answer one level down stays out as well.
-        (
-            Dt::float32_datatype(),
-            r#"sum(count_values("v", some_metric))"#,
-            false,
-        ),
-        // A range function answers a `Float64` for every numeric input.
-        (Dt::int64_datatype(), "rate(some_metric[5m])", true),
-        (Dt::int64_datatype(), "increase(some_metric[5m])", true),
-        (Dt::int64_datatype(), "sum_over_time(some_metric[5m])", true),
-        (Dt::uint64_datatype(), "changes(some_metric[5m])", true),
-        (Dt::float32_datatype(), "rate(some_metric[5m])", true),
-        // A count is an `Int64` whatever the field holds.
-        (Dt::int64_datatype(), "count(some_metric)", false),
-        (
-            Dt::float32_datatype(),
-            r#"count_values("v", some_metric)"#,
-            false,
-        ),
-        // A math function keeps the type it is given, and so does a negation.
-        (Dt::int64_datatype(), "abs(some_metric)", false),
-        (Dt::int64_datatype(), "-some_metric", false),
-        // A comparison without `bool` filters on the field's own column.
-        (Dt::int64_datatype(), "some_metric > 2", false),
+    for (field_type, query) in [
+        (Dt::int64_datatype(), "some_metric"),
+        (Dt::float32_datatype(), "some_metric"),
+        (Dt::uint64_datatype(), "some_metric"),
+        (Dt::int32_datatype(), r#"some_metric{tag_0=""}"#),
+        (Dt::int64_datatype(), "sum(some_metric)"),
+        (Dt::uint64_datatype(), "sum(some_metric)"),
+        (Dt::int64_datatype(), "count(some_metric)"),
+        (Dt::int64_datatype(), r#"count_values("v", some_metric)"#),
+        (Dt::int64_datatype(), "sum(some_metric) * 1"),
+        (Dt::int64_datatype(), "abs(some_metric)"),
+        (Dt::int64_datatype(), "-some_metric"),
+        (Dt::int64_datatype(), "some_metric > 2"),
+        (Dt::int64_datatype(), "topk(1, some_metric)"),
     ] {
         let native = build_native_fused_plan_with_provider(
             query,
@@ -5144,37 +5109,18 @@ async fn native_fused_numeric_field_admission_follows_the_shape() {
             build_test_table_provider_with_field_type(field_type.clone()).await,
         )
         .await;
-        if admitted {
-            let fused = find_fused_series(&native).unwrap_or_else(|| {
-                panic!(
-                    "{query} over {field_type} must reach the native route: {}",
-                    native.display_indent_schema()
-                )
-            });
-            // The value column is the one kind the node publishes, which is what the existing plan
-            // publishes for this shape too.
-            assert_eq!(
-                &ArrowDataType::Float64,
-                native_value_field(fused, query).data_type(),
-                "{query} over {field_type} publishes a float"
-            );
-        } else {
-            let without_flag = build_native_fused_plan_with_provider(
-                query,
-                false,
-                build_test_table_provider_with_field_type(field_type.clone()).await,
+        let fused = find_fused_series(&native).unwrap_or_else(|| {
+            panic!(
+                "{query} over {field_type} must reach the native route: {}",
+                native.display_indent_schema()
             )
-            .await;
-            assert!(
-                find_fused_series(&native).is_none(),
-                "{query} over {field_type} must not reach the native route"
-            );
-            assert_eq!(
-                native.display_indent().to_string(),
-                without_flag.display_indent().to_string(),
-                "{query} over {field_type} must keep the existing plan"
-            );
-        }
+        });
+        assert_eq!(
+            &ArrowDataType::Float64,
+            native_value_field(fused, query).data_type(),
+            "{query} over {field_type} publishes a float"
+        );
+        assert_eq!(None, take_reported_decline(), "{query} over {field_type}");
     }
 }
 

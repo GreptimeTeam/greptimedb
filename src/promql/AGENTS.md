@@ -40,8 +40,10 @@ aggregate on each scan partition is globally complete.
 
 The native `timestamp` operation evaluates on its input grid. A tree without
 a source (a literal, `time()`, `vector(s)`) is materialized on its bound grid
-without a scan. Native `count` produces Float64 values, unlike the legacy
-PromQL path's Int64 count. Native SQL/TQL output is not necessarily
+without a scan. Native answers every numeric field as Float64, as a Prometheus
+sample is a float64: integer samples are cast before any fold, and a bare
+selector, `sum` or `count` publishes Float64 where the legacy path keeps the
+field's integer type or builds Int64. Native SQL/TQL output is not necessarily
 schema-identical to legacy output.
 
 The native tree and its compiler describe the implemented model, not the whole

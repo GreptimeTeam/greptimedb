@@ -13210,19 +13210,19 @@ async fn native_answer(output: Output) -> Answer {
     }
 }
 
-/// A numeric field the raw series scan casts to a float is admitted only under the shapes whose
-/// existing plan publishes a `Float64` for it too, and the answer is that plan's answer.
+/// A numeric field is answered as `Float64` under every shape, with the existing plan's values.
 ///
 /// The table holds one integer and one float field, so every statement below reads both: the scan
 /// casts the integer to a `Float64` and the fused node declares one `Float64` value column per field.
-/// That is the column the existing plan publishes for an arithmetic operand, for a range function and
-/// for `min`/`max`/`avg`, so those shapes are admitted and must answer the same columns and rows. A
-/// bare selector and `sum` keep the existing plan instead: the first copies the field's own type and
-/// the second folds an integer as an integer, so a `Float64` column would not be the column reported.
+/// For an arithmetic operand, a range function and `min`/`max`/`avg` that is the column the existing
+/// plan publishes too. A bare selector, `sum` and `count` publish an integer column there instead,
+/// while a Prometheus sample is a `float64`, so the native answer keeps its float column and only the
+/// values are compared with the existing plan's.
 #[tokio::test(flavor = "multi_thread")]
-async fn native_promql_answers_a_numeric_field_where_the_shape_publishes_a_float() {
+async fn native_promql_answers_numeric_fields_as_float64() {
     common_telemetry::init_default_ut_logging();
     const TABLE: &str = "native_numeric_shape";
+    const INTEGER: &str = "native_numeric_shape_int";
     let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
         "native_promql_numeric_shape",
     ))
@@ -13235,72 +13235,67 @@ async fn native_promql_answers_a_numeric_field_where_the_shape_publishes_a_float
              INSERT INTO {TABLE} (host, ts, i, f) VALUES \
              ('a', 0, 1, 1.5), ('b', 0, 2, 2.5), \
              ('a', 1000, 3, 3.5), ('b', 1000, 4, 4.5), \
-             ('a', 2000, 5, 5.5), ('b', 2000, 6, 6.5);"
+             ('a', 2000, 5, 5.5), ('b', 2000, 6, 6.5); \
+             CREATE TABLE {INTEGER} (host STRING, ts TIMESTAMP(3) TIME INDEX, v BIGINT, PRIMARY KEY (host)); \
+             INSERT INTO {INTEGER} (host, ts, v) VALUES \
+             ('a', 0, 1), ('b', 0, 1), ('', 0, 7), \
+             ('a', 2000, 3), ('b', 2000, 5), ('', 2000, 7);"
         ),
         QueryContext::arc(),
     )
     .await;
     execute_all(
         &instance,
-        &format!("ADMIN FLUSH_TABLE('{TABLE}')"),
+        &format!("ADMIN FLUSH_TABLE('{TABLE}'); ADMIN FLUSH_TABLE('{INTEGER}');"),
         QueryContext::arc(),
     )
     .await;
 
     for query in [
-        // Arithmetic casts both operands, so `i` and `f` are folded as floats.
         format!("{TABLE} * 2"),
         format!("{TABLE} - {TABLE}"),
-        // `min`, `max` and `avg` answer a `Float64` for every numeric input.
         format!("min({TABLE})"),
         format!("max({TABLE})"),
         format!("avg({TABLE})"),
-        // A range function's value window and answer are both `Float64`.
         format!("rate({TABLE}[2s])"),
         format!("sum(rate({TABLE}[2s]))"),
+        // The existing plan publishes the integer field's own type for these.
+        TABLE.to_string(),
+        format!("sum({TABLE})"),
+        format!("count({TABLE})"),
+        INTEGER.to_string(),
+        format!("{INTEGER}{{host=\"\"}}"),
+        format!("sum({INTEGER})"),
+        format!("count({INTEGER})"),
+        // The counted value is written into the label in Go's `'f'` form: `1`, not `1.0`.
+        format!("count_values(\"v\", {INTEGER})"),
     ] {
-        let sql = format!("TQL EVAL (2, 2, '1s') {query}");
+        let sql = format!("TQL EVAL (0, 2, '1s') {query}");
         observer.clear();
         let native = native_answer(native_tql_output(&instance, &sql, true).await).await;
-        let answering_node = observer.answering_node();
         assert_eq!(
             Some("FusedSeriesExec".to_string()),
-            answering_node,
+            observer.answering_node(),
             "`{query}` must answer from the fused node, not the existing plan"
         );
-        // Both fields of the table are value columns, whatever the shape: the integer is read as the
-        // float the existing plan publishes for this shape.
-        assert_eq!(
-            vec![DataType::Float64, DataType::Float64],
-            native.value_types,
-            "`{query}`: one float value column per field of the table"
-        );
-        let legacy = native_answer(native_tql_output(&instance, &sql, false).await).await;
-        assert_eq!(
-            native, legacy,
-            "`{query}`: the value types and the rows must be the existing plan's"
-        );
-    }
-
-    // A bare selector copies the value column's own type, so it keeps the existing plan: the
-    // `BIGINT` field would come back as a `Float64` under the fused node.
-    for query in [TABLE.to_string(), format!("sum({TABLE})")] {
-        let sql = format!("TQL EVAL (2, 2, '1s') {query}");
-        observer.clear();
-        let native = native_answer(native_tql_output(&instance, &sql, true).await).await;
         assert!(
-            observer.fused().is_none(),
-            "`{query}` must keep the existing plan: a shape that does not publish a float for an \
-             integer field would report a different column than the existing plan"
-        );
-        let legacy = native_answer(native_tql_output(&instance, &sql, false).await).await;
-        assert_eq!(native, legacy, "`{query}`: the existing plan answers it");
-        // The reason the shape keeps the existing plan: the integer field is reported as an integer,
-        // which is the column the fused node would have to publish as a `Float64`.
-        assert!(
-            native.value_types.contains(&DataType::Int64),
-            "`{query}`: the existing plan reports the integer field as an `Int64`: {:?}",
+            native
+                .value_types
+                .iter()
+                .all(|data_type| data_type == &DataType::Float64),
+            "`{query}`: one float value column per field: {:?}",
             native.value_types
+        );
+        let legacy = native_answer(native_tql_output(&instance, &sql, false).await).await;
+        assert_eq!(
+            native.value_types.len(),
+            legacy.value_types.len(),
+            "`{query}`: one value column per field on both routes"
+        );
+        assert_eq!(
+            numeric_rows(&native),
+            numeric_rows(&legacy),
+            "`{query}`: the rows must be the existing plan's"
         );
     }
 
@@ -13352,28 +13347,45 @@ async fn native_run_ignoring_the_answer(instance: &Arc<Instance>, sql: &str, ena
     }
 }
 
-/// An arithmetic operator casts both operands, but the cast is the operator's, so it reaches whatever
-/// an operand answers. Where that operand *folds* raw samples into an integer, the existing plan folds
-/// exactly and casts the fold, while the raw series scan casts every sample and only then folds: two
-/// integers above `2^53` that cancel answer `1` before the cast and `0` after it. The shape therefore
-/// keeps the existing plan, while a fold that is a float fold - `sum` over a range function's window -
-/// is admitted as before.
+/// The rows of an [`Answer`] with each value read as the float it prints, so an integer column and
+/// a float column holding the same numbers compare equal.
+fn numeric_rows(
+    answer: &Answer,
+) -> Vec<(i64, std::collections::BTreeMap<String, String>, Vec<f64>)> {
+    answer
+        .rows
+        .iter()
+        .map(|(time, labels, values)| {
+            (
+                *time,
+                labels.clone(),
+                values
+                    .iter()
+                    .map(|value| value.parse::<f64>().unwrap())
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+/// An integer sample is a `float64` before anything folds it, as every Prometheus sample is.
+///
+/// `9007199254740993` is not a `Float64`: it rounds to `9007199254740992`, which is what makes the
+/// order of the cast and the fold visible. The existing plan sums the two `BIGINT`s exactly and
+/// answers `1`; the native route casts each sample first, so the two cancel and `sum` answers `0`.
 #[tokio::test(flavor = "multi_thread")]
-async fn native_promql_declines_a_cast_over_an_integer_fold() {
+async fn native_promql_casts_integer_samples_before_folding() {
     common_telemetry::init_default_ut_logging();
     const TABLE: &str = "native_late_cast";
     let (standalone, observer) =
         native_test_instance(GreptimeDbStandaloneBuilder::new("native_promql_late_cast")).await;
     let instance = standalone.fe_instance().clone();
-    // `9007199254740993` is not a `Float64`: it rounds to `9007199254740992`, which is what makes the
-    // order of the cast and the fold visible. Two series, so `sum` folds them into one value per step.
     execute_all(
         &instance,
         &format!(
             "CREATE TABLE {TABLE} (host STRING, ts TIMESTAMP(3) TIME INDEX, v BIGINT, PRIMARY KEY (host)); \
              INSERT INTO {TABLE} (host, ts, v) VALUES \
-             ('a', 0, 9007199254740993), ('a', 60000, 9007199254740993), \
-             ('b', 0, -9007199254740992), ('b', 60000, -9007199254740992);"
+             ('a', 0, 9007199254740993), ('b', 0, -9007199254740992);"
         ),
         QueryContext::arc(),
     )
@@ -13385,46 +13397,16 @@ async fn native_promql_declines_a_cast_over_an_integer_fold() {
     )
     .await;
 
-    // The integer sum is 1, and the cast is 1.0 whichever side of it the answer is read from: the
-    // existing plan sums the two `BIGINT`s exactly, so that is the answer these shapes keep.
     for (query, expected) in [
-        (format!("sum({TABLE}) * 1"), 1.0),
-        (format!("sum({TABLE}) + 1"), 2.0),
+        (format!("sum({TABLE})"), 0.0),
+        (format!("sum({TABLE}) + 1"), 1.0),
     ] {
         let sql = format!("TQL EVAL (0, 0, '1m') {query}");
-        let legacy = native_rows(native_tql_output(&instance, &sql, false).await, None).await;
-        assert_eq!(
-            legacy,
-            vec![(0, String::new(), expected)],
-            "`{query}`: the existing plan sums the integers before it casts"
-        );
         observer.clear();
         let native = native_rows(native_tql_output(&instance, &sql, true).await, None).await;
-        assert!(
-            observer.fused().is_none(),
-            "`{query}` must keep the existing plan: the raw scan would round each value before it \
-             summed them"
-        );
-        assert_eq!(
-            native, legacy,
-            "`{query}`: an integer fold is exact, and a fused node cannot repeat that"
-        );
+        assert!(observer.fused().is_some(), "`{query}` must be fused");
+        assert_eq!(native, vec![(0, String::new(), expected)], "`{query}`");
     }
-
-    // The inner fold is a float fold here, so the outer cast reaches values that were floats already:
-    // the route takes the statement and answers the existing plan's rows.
-    let sql = format!("TQL EVAL (60000, 60000, '1m') sum(rate({TABLE}[5m]))");
-    let legacy = native_rows(native_tql_output(&instance, &sql, false).await, None).await;
-    observer.clear();
-    let native = native_rows(native_tql_output(&instance, &sql, true).await, None).await;
-    assert!(
-        observer.fused().is_some(),
-        "`sum(rate(...))` folds a float window and must stay admitted"
-    );
-    assert_eq!(
-        native, legacy,
-        "`sum(rate(...))`: the fused route reports the existing plan's rows"
-    );
 }
 
 /// A store configured for the columnar series format publishes samples for sparse metric regions
@@ -13495,15 +13477,6 @@ async fn native_promql_columnar_config_answers_from_the_ordinary_scan() {
             );
         }
     }
-    // A bare selector keeps its plan for a type reason, which is what this route decides: it reports
-    // the column's own `BIGINT`, which no fused node publishes.
-    let sql = format!("TQL EVAL (120, 120, '1m') {INTEGER}");
-    observer.clear();
-    let _ = native_tql_output(&instance, &sql, true).await;
-    assert!(
-        observer.fused().is_none(),
-        "a bare selector over an integer field must keep the existing plan"
-    );
 }
 
 /// The positive counterpart of the test above: a sparse physical metric table whose series
