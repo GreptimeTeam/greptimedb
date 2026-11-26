@@ -46,16 +46,18 @@ use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
 use datatypes::json::JsonSettings;
 use datatypes::json::value::JsonValue;
 use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::ColumnSchema;
 use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
 use datatypes::vectors::json::array::JsonArray;
 use futures::TryStreamExt;
 use futures::future::try_join_all;
 use serde_json::json;
 use store_api::codec::PrimaryKeyEncoding;
+use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::PRIMARY_KEY_ENCODING;
 use store_api::region_engine::{PrepareRequest, RegionEngine, RegionScanner};
 use store_api::region_request::{
-    AlterKind, RegionAlterRequest, RegionBulkInsertsRequest, RegionCompactRequest,
+    AddColumn, AlterKind, RegionAlterRequest, RegionBulkInsertsRequest, RegionCompactRequest,
     RegionOpenRequest, RegionPutRequest, RegionRequest, SetRegionOption,
 };
 use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
@@ -68,11 +70,15 @@ use crate::error::Error;
 use crate::manifest::action::RegionEdit;
 use crate::read::read_columns::ReadColumns;
 use crate::read::scan_region::Scanner;
+use crate::series_index::format::{FormatReader, SamplesFormatReader};
 use crate::sst::file::{FileHandle, FileMeta};
 use crate::test_util;
 use crate::test_util::batch_util::sort_batches_and_print;
 use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
-use crate::test_util::{CreateRequestBuilder, TestEnv, reopen_region};
+use crate::test_util::{
+    CreateRequestBuilder, TestEnv, build_series_index_request, reopen_region,
+    sparse_metric_create_request,
+};
 
 #[tokio::test]
 async fn test_sparse_upsert_after_adding_nullable_tag() -> WhateverResult<()> {
@@ -84,38 +90,285 @@ async fn test_narthex_sparse_upsert_after_adding_nullable_tag() -> WhateverResul
     check_sparse_upsert_after_adding_nullable_tag("narthex").await
 }
 
-async fn check_sparse_upsert_after_adding_nullable_tag(format: &str) -> WhateverResult<()> {
-    use datatypes::schema::ColumnSchema;
-    use store_api::metadata::ColumnMetadata;
-    use store_api::region_request::AddColumn;
+#[tokio::test]
+async fn test_narthex_series_index_survives_added_label() -> WhateverResult<()> {
+    let reads = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = reads.clone();
+    let layer = object_store::layers::mock::MockLayerBuilder::default()
+        .reader_factory(Arc::new(move |path, _, inner| {
+            if path.ends_with(".series") {
+                captured.lock().unwrap().push(path.to_owned());
+            }
+            inner
+        }))
+        .build()
+        .unwrap();
+    let mut env = TestEnv::new().await.with_mock_layer(layer);
+    let engine = env
+        .create_engine(MitoConfig {
+            experimental_enable_series_index: true,
+            experimental_series_index_min_files: 1,
+            schedule_compaction_after_edit: false,
+            sst_meta_cache_size: ReadableSize(0),
+            ..Default::default()
+        })
+        .await;
+    let id = RegionId::new(1024, 0);
+    engine
+        .handle_request(
+            id,
+            RegionRequest::Create(sparse_metric_create_request("narthex")),
+        )
+        .await?;
+    let region = engine.get_region(id).unwrap();
+    let old = new_sparse_primary_key(&["old"], &region.metadata(), 42, 7);
+    engine
+        .handle_request(id, test_util::sparse_metric_put(old, 1000, Some(1.0)))
+        .await?;
+    test_util::flush_region(&engine, id, None).await;
+    engine
+        .handle_request(id, build_series_index_request())
+        .await?;
+    let snapshot = region.version();
+    let index = snapshot.ssts.series_indexes().values().next().unwrap();
+    let part = index
+        .meta_ref()
+        .narthex_objects(&region.access_layer.build_region_dir(id))
+        .unwrap()
+        .into_iter()
+        .find(|o| o.path.ends_with(".series"))
+        .unwrap()
+        .path;
+    engine
+        .handle_request(
+            id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::AddColumns {
+                    columns: vec![AddColumn {
+                        column_metadata: ColumnMetadata {
+                            column_schema: ColumnSchema::new(
+                                "tag_1",
+                                ConcreteDataType::string_datatype(),
+                                true,
+                            ),
+                            semantic_type: SemanticType::Tag,
+                            column_id: 3,
+                        },
+                        location: None,
+                    }],
+                },
+            }),
+        )
+        .await?;
+    let new = new_sparse_primary_key(&["new", "west"], &region.metadata(), 42, 7);
+    engine
+        .handle_request(id, test_util::sparse_metric_put(new, 2000, Some(2.0)))
+        .await?;
+    test_util::flush_region(&engine, id, None).await;
+    engine
+        .handle_request(id, build_series_index_request())
+        .await?;
+    assert!(
+        region
+            .version()
+            .ssts
+            .series_indexes()
+            .contains_key(&index.meta_ref().file_id)
+    );
+    for (filter, label) in [
+        (col("tag_1").eq(lit("west")), "new"),
+        (col("tag_1").is_null().or(col("tag_1").eq(lit(""))), "old"),
+    ] {
+        reads.lock().unwrap().clear();
+        let batches = RecordBatches::try_collect(
+            engine
+                .scan_to_stream(
+                    id,
+                    ScanRequest {
+                        filters: vec![filter],
+                        ..Default::default()
+                    },
+                )
+                .await?,
+        )
+        .await?;
+        assert_eq!(1, batches.iter().map(|b| b.num_rows()).sum::<usize>());
+        assert!(batches.pretty_print()?.contains(label));
+        assert!(
+            reads
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p.trim_start_matches('/') == part.trim_start_matches('/'))
+        );
+    }
+    engine.stop().await?;
+    Ok(())
+}
 
+#[tokio::test]
+async fn test_narthex_build_threshold_counts_uncovered_files_per_window() -> WhateverResult<()> {
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            experimental_enable_series_index: true,
+            experimental_series_index_min_files: 4,
+            experimental_series_index_bucket_width: Duration::from_secs(10),
+            ..Default::default()
+        })
+        .await;
+    let id = RegionId::new(1024, 0);
+    engine
+        .handle_request(
+            id,
+            RegionRequest::Create(sparse_metric_create_request("narthex")),
+        )
+        .await?;
+    let pause = engine.pause_compaction(id).await?;
+    let region = engine.get_region(id).unwrap();
+    let key = new_sparse_primary_key(&["api"], &region.metadata(), 42, 7);
+    // The first window starts at 0, the second at 10 seconds.
+    for (times, expected_indexes) in [
+        (&[1000, 2000, 3000, 10000][..], 0),
+        (&[4000][..], 1),
+        (&[5000, 6000, 7000][..], 1),
+        (&[8000][..], 2),
+    ] {
+        for &ts in times {
+            engine
+                .handle_request(id, test_util::sparse_metric_put(key.clone(), ts, Some(1.0)))
+                .await?;
+            test_util::flush_region(&engine, id, None).await;
+        }
+        engine
+            .handle_request(id, build_series_index_request())
+            .await?;
+        assert_eq!(
+            region.version().ssts.series_indexes().len(),
+            expected_indexes
+        );
+    }
+    drop(pause);
+    engine.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_narthex_spanning_sample_keeps_window_width_on_reopen() -> WhateverResult<()> {
+    let mut env = TestEnv::new().await;
+    let config = MitoConfig {
+        experimental_enable_series_index: true,
+        experimental_series_index_min_files: 1,
+        experimental_series_index_bucket_width: Duration::from_secs(10),
+        schedule_compaction_after_edit: false,
+        ..Default::default()
+    };
+    let engine = env.create_engine(config.clone()).await;
+    let id = RegionId::new(1, 0);
+    let request = sparse_metric_create_request("narthex");
+    let table_dir = request.table_dir.clone();
+    engine
+        .handle_request(id, RegionRequest::Create(request))
+        .await?;
+    let key = new_sparse_primary_key(&["api"], &engine.get_region(id).unwrap().metadata(), 42, 7);
+    for ts in [9000, 10000] {
+        engine
+            .handle_request(id, test_util::sparse_metric_put(key.clone(), ts, Some(1.0)))
+            .await?;
+    }
+    test_util::flush_region(&engine, id, None).await;
+    engine
+        .handle_request(id, build_series_index_request())
+        .await?;
+    let region = engine.get_region(id).unwrap();
+    let manifest = region.manifest_ctx.manifest().await;
+    assert_eq!(1, manifest.files.len());
+    assert_eq!(2, manifest.series_indexes.len());
+    assert_eq!(Some(10), manifest.series_window_seconds);
+    let engine = env
+        .reopen_engine(
+            engine,
+            MitoConfig {
+                experimental_series_index_bucket_width: Duration::from_secs(60),
+                ..config
+            },
+        )
+        .await;
+    reopen_region(&engine, id, table_dir, true, HashMap::new()).await;
+    engine
+        .handle_request(id, test_util::sparse_metric_put(key, 21000, Some(2.0)))
+        .await?;
+    test_util::flush_region(&engine, id, None).await;
+    engine
+        .handle_request(id, build_series_index_request())
+        .await?;
+    let manifest = engine.get_region(id).unwrap().manifest_ctx.manifest().await;
+    let mut bounds: Vec<_> = manifest
+        .series_indexes
+        .values()
+        .map(|file| {
+            let w = file.series_window().unwrap();
+            (w.start, w.end)
+        })
+        .collect();
+    bounds.sort_unstable();
+    assert_eq!(bounds, [(0, 10), (10, 20), (20, 30)]);
+    let rows = RecordBatches::try_collect(engine.scan_to_stream(id, ScanRequest::default()).await?)
+        .await?;
+    assert_eq!(3, rows.iter().map(|b| b.num_rows()).sum::<usize>());
+    engine.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_narthex_build_uses_no_local_sidecar_budget() -> WhateverResult<()> {
+    let mut env = TestEnv::new().await;
+    let budget = ReadableSize(1024);
+    let engine = env
+        .create_engine(MitoConfig {
+            experimental_enable_series_index: true,
+            experimental_series_index_min_files: 1,
+            experimental_series_index_max_size: budget,
+            ..Default::default()
+        })
+        .await;
+    let native = RegionId::new(1024, 0);
+    let local = RegionId::new(1025, 0);
+    for (id, format) in [(local, "flat"), (native, "narthex")] {
+        engine
+            .handle_request(
+                id,
+                RegionRequest::Create(sparse_metric_create_request(format)),
+            )
+            .await?;
+        let region = engine.find_region(id).unwrap();
+        let series = if id == local { 64 } else { 1 };
+        for tsid in 0..series {
+            let tag = uuid::Uuid::new_v4().to_string();
+            let key = new_sparse_primary_key(&[&tag], &region.metadata(), 42, tsid);
+            engine
+                .handle_request(id, test_util::sparse_metric_put(key, 1000, Some(1.0)))
+                .await?;
+        }
+        test_util::flush_region(&engine, id, None).await;
+        engine
+            .handle_request(id, build_series_index_request())
+            .await?;
+        if id == native {
+            assert_eq!(1, region.version().ssts.series_indexes().len());
+        } else {
+            assert!(region.series_index_version().disk_usage() >= budget.as_bytes());
+        }
+    }
+    engine.stop().await?;
+    Ok(())
+}
+
+async fn check_sparse_upsert_after_adding_nullable_tag(format: &str) -> WhateverResult<()> {
     let mut env = TestEnv::new().await;
     let engine = env.create_engine(MitoConfig::default()).await;
     let region_id = RegionId::new(1024, 0);
-    let mut request = CreateRequestBuilder::new()
-        .tag_num(1)
-        .field_num(1)
-        .insert_option("primary_key_encoding", "sparse")
-        .insert_option("sst_format", format)
-        .build();
-    if format == "narthex" {
-        for (key, value) in [
-            ("memtable.type", "bulk"),
-            ("memtable.bulk.merge_threshold", "2"),
-            ("memtable.bulk.encode_row_threshold", "1"),
-            ("memtable.bulk.encode_bytes_threshold", "1"),
-        ] {
-            request.options.insert(key.into(), value.into());
-        }
-    }
-    let reserved = sst_region_metadata_with_encoding(PrimaryKeyEncoding::Sparse);
-    request
-        .column_metadatas
-        .extend(reserved.column_metadatas.into_iter().take(2));
-    request
-        .primary_key
-        .splice(0..0, reserved.primary_key.into_iter().take(2));
-    let table_dir = request.table_dir.clone();
+    let request = sparse_metric_create_request(format);
     engine
         .handle_request(region_id, RegionRequest::Create(request))
         .await?;
@@ -202,176 +455,301 @@ async fn check_sparse_upsert_after_adding_nullable_tag(format: &str) -> Whatever
 +-------+---------+---------------------+------+";
         assert_eq!(batches.pretty_print()?, expected);
     }
-    if format == "narthex" {
-        let unindexed = RecordBatches::try_collect(
+    engine.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_narthex_index_counts_rows_across_flushes() -> WhateverResult<()> {
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            experimental_enable_series_index: true,
+            experimental_series_index_min_files: 1,
+            ..Default::default()
+        })
+        .await;
+    let id = RegionId::new(1024, 0);
+    engine
+        .handle_request(
+            id,
+            RegionRequest::Create(sparse_metric_create_request("narthex")),
+        )
+        .await?;
+    let region = engine.find_region(id).unwrap();
+    let key = new_sparse_primary_key(&["api"], &region.metadata(), 42, 7);
+    for timestamps in [&[1000, 2000][..], &[3000]] {
+        for &ts in timestamps {
             engine
-                .scan_to_stream(region_id, ScanRequest::default())
-                .await?,
-        )
-        .await?
-        .pretty_print()?;
-        let region = engine.find_region(region_id).unwrap();
-        assert!(
-            region
-                .version()
-                .ssts
-                .levels()
-                .iter()
-                .flat_map(|level| level.files.values())
-                .all(|file| matches!(
-                    file.meta_ref().format,
-                    crate::sst::file::FileFormat::NarthexSamples(_)
-                ))
-        );
-        let sources: Vec<_> = region
-            .version()
-            .ssts
-            .levels()
-            .iter()
-            .flat_map(|level| level.files.values().cloned())
-            .collect();
-        let flat = crate::compaction::CompactionSstReaderBuilder {
-            narthex_format: true,
-            metadata: region.metadata(),
-            sst_layer: region.access_layer.clone(),
-            cache: engine.cache_manager(),
-            inputs: &sources,
-            append_mode: true,
-            filter_deleted: false,
-            time_range: None,
-            merge_mode: crate::region::options::MergeMode::LastRow,
-            read_parallelism: 1,
+                .handle_request(id, test_util::sparse_metric_put(key.clone(), ts, Some(1.0)))
+                .await?;
         }
-        .build_flat_sst_reader()
+        test_util::flush_region(&engine, id, None).await;
+    }
+    engine
+        .handle_request(id, build_series_index_request())
         .await?;
-        let index = crate::sst::narthex::write_series(
-            &region.access_layer,
-            region.metadata(),
-            &sources,
-            flat,
-        )
+    let version = region.version();
+    let file = version.ssts.series_indexes().values().next().unwrap();
+    let handle = crate::series_index::SeriesIndexFileHandle::from_narthex(
+        file.clone(),
+        &region.access_layer.build_region_dir(id),
+    )?;
+    let reader = crate::series_index::columnar::reader::ColumnarReader::open(
+        region.access_layer.object_store().clone(),
+        handle,
+    )
+    .await?;
+    let mut stream = reader.read(crate::series_index::format::SeriesReadRequest {
+        projection: vec![crate::series_index::ROW_COUNT_COLUMN.to_owned()],
+        ..Default::default()
+    })?;
+    let batch = stream.try_next().await?.unwrap();
+    let counts = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<datatypes::arrow::array::UInt64Array>()
+        .unwrap();
+    assert_eq!(counts.values().as_ref(), &[3]);
+    assert!(stream.try_next().await?.is_none());
+    engine.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_narthex_incremental_index_after_compaction() -> WhateverResult<()> {
+    let series_reads = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let reads = series_reads.clone();
+    let layer = object_store::layers::mock::MockLayerBuilder::default()
+        .reader_factory(Arc::new(move |path, _, inner| {
+            reads.lock().unwrap().push(path.to_owned());
+            inner
+        }))
+        .build()
+        .unwrap();
+    let mut env = TestEnv::new().await.with_mock_layer(layer);
+    let engine = env
+        .create_engine(MitoConfig {
+            experimental_enable_series_index: true,
+            experimental_series_index_min_files: 1,
+            sst_meta_cache_size: ReadableSize(0),
+            schedule_compaction_after_edit: false,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1024, 0);
+    let request = sparse_metric_create_request("narthex");
+    let table_dir = request.table_dir.clone();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
         .await?;
-        let index_id = index.file_id;
+    let region = engine.find_region(region_id).unwrap();
+    let key = new_sparse_primary_key(&["api"], &region.metadata(), 42, 7);
+    for value in [1.0, 2.0] {
         engine
-            .edit_region(
+            .handle_request(
                 region_id,
-                crate::manifest::action::RegionEdit {
-                    series_indexes_to_add: vec![index],
-                    ..Default::default()
-                },
+                test_util::sparse_metric_put(key.clone(), 1000, Some(value)),
             )
             .await?;
-        reopen_region(&engine, region_id, table_dir.clone(), true, HashMap::new()).await;
-        let region = engine.find_region(region_id).unwrap();
-        assert!(
-            region
-                .version()
-                .ssts
-                .series_indexes()
-                .contains_key(&index_id)
-        );
-        let indexed = engine
+        test_util::flush_region(&engine, region_id, None).await;
+    }
+    let unindexed = RecordBatches::try_collect(
+        engine
             .scan_to_stream(region_id, ScanRequest::default())
-            .await?;
-        assert_eq!(
-            RecordBatches::try_collect(indexed).await?.pretty_print()?,
-            unindexed
-        );
-        let old_index = crate::series_index::SeriesIndexFileHandle::from_narthex(
-            region.version().ssts.series_indexes()[&index_id].clone(),
+            .await?,
+    )
+    .await?
+    .pretty_print()?;
+    engine
+        .handle_request(region_id, build_series_index_request())
+        .await?;
+    let snapshot = region.version();
+    let index = snapshot.ssts.series_indexes().values().next().unwrap();
+    let index_id = index.meta_ref().file_id;
+    let window = index.meta_ref().series_window().unwrap();
+    reopen_region(&engine, region_id, table_dir.clone(), true, HashMap::new()).await;
+    let region = engine.find_region(region_id).unwrap();
+    assert!(
+        region
+            .version()
+            .ssts
+            .series_indexes()
+            .contains_key(&index_id)
+    );
+    let indexed = engine
+        .scan_to_stream(region_id, ScanRequest::default())
+        .await?;
+    assert_eq!(
+        RecordBatches::try_collect(indexed).await?.pretty_print()?,
+        unindexed
+    );
+    let old_samples = region
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .next()
+        .unwrap()
+        .clone();
+    let samples_reader = crate::series_index::samples::reader::SamplesReader::open(
+        region.access_layer.object_store().clone(),
+        crate::series_index::artifact::SamplesFileHandle::from_narthex(
+            old_samples,
             &region.access_layer.build_region_dir(region_id),
-        )?;
-        let index_reader = crate::series_index::columnar::reader::ColumnarReader::open(
-            region.access_layer.object_store().clone(),
-            old_index,
-        )
-        .await?;
-        let old_samples = region
+        )?,
+    )
+    .await?;
+    let inputs: std::collections::HashSet<_> = region
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.keys().copied())
+        .collect();
+    assert_eq!(inputs.len(), 2);
+    crate::engine::compaction_test::compact(&engine, region_id).await;
+    let outputs: Vec<_> = region
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values().cloned())
+        .collect();
+    assert!(!outputs.is_empty());
+    assert!(
+        region
             .version()
             .ssts
-            .levels()
-            .iter()
-            .flat_map(|level| level.files.values())
-            .next()
-            .unwrap()
-            .clone();
-        let samples_reader = crate::series_index::samples::reader::SamplesReader::open(
-            region.access_layer.object_store().clone(),
-            crate::series_index::artifact::SamplesFileHandle::from_narthex(
-                old_samples,
-                &region.access_layer.build_region_dir(region_id),
-            )?,
-        )
-        .await?;
-        let inputs: std::collections::HashSet<_> = region
-            .version()
-            .ssts
-            .levels()
-            .iter()
-            .flat_map(|level| level.files.keys().copied())
-            .collect();
-        assert_eq!(inputs.len(), 2);
-        crate::engine::compaction_test::compact(&engine, region_id).await;
-        let outputs: Vec<_> = region
-            .version()
-            .ssts
-            .levels()
-            .iter()
-            .flat_map(|level| level.files.values().cloned())
-            .collect();
-        assert!(!outputs.is_empty());
-        assert!(
-            region
-                .version()
-                .ssts
-                .series_indexes()
-                .contains_key(&index_id)
-        );
-        use crate::series_index::format::{FormatReader, SamplesFormatReader};
-        let mut old_series = index_reader.read(crate::series_index::format::SeriesReadRequest {
-            projection: index_reader
-                .schema()
-                .fields()
-                .iter()
-                .map(|field| field.name().clone())
-                .collect(),
-            ..Default::default()
-        })?;
-        use futures::TryStreamExt;
-        assert!(old_series.try_next().await?.is_some());
-        assert!(
-            samples_reader
-                .read(Default::default())?
-                .try_next()
-                .await?
-                .is_some()
-        );
+            .series_indexes()
+            .contains_key(&index_id)
+    );
+    assert!(
+        samples_reader
+            .read(Default::default())?
+            .try_next()
+            .await?
+            .is_some()
+    );
 
-        assert!(
-            outputs
-                .iter()
-                .all(|file| !inputs.contains(&file.meta_ref().file_id))
-        );
-        assert!(outputs.iter().all(|file| matches!(
-            file.meta_ref().format,
-            crate::sst::file::FileFormat::NarthexSamples(_)
-        )));
-        reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
+    assert!(
+        outputs
+            .iter()
+            .all(|file| !inputs.contains(&file.meta_ref().file_id))
+    );
+    assert!(outputs.iter().all(|file| matches!(
+        file.meta_ref().format,
+        crate::sst::file::FileFormat::NarthexSamples(_)
+    )));
+    reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
+    let region = engine.find_region(region_id).unwrap();
+    let objects = index
+        .meta_ref()
+        .narthex_objects(&region.access_layer.build_region_dir(region_id))
+        .unwrap();
+    let part = &objects
+        .iter()
+        .find(|object| object.path.ends_with(".series"))
+        .unwrap()
+        .path;
+    series_reads.lock().unwrap().clear();
+    let scan = async || -> WhateverResult<String> {
         let stream = engine
             .scan_to_stream(region_id, ScanRequest::default())
             .await?;
-        let batches = RecordBatches::try_collect(stream).await?;
-        assert_eq!(batches.pretty_print()?, unindexed);
-    }
+        Ok(RecordBatches::try_collect(stream).await?.pretty_print()?)
+    };
+    assert_eq!(scan().await?, unindexed);
+    assert!(
+        series_reads
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|path| path.trim_start_matches('/') == part.trim_start_matches('/')),
+        "scan preparation must read the original index for compacted samples"
+    );
+    let late = new_sparse_primary_key(&["late"], &region.metadata(), 42, 7);
+    engine
+        .handle_request(
+            region_id,
+            test_util::sparse_metric_put(late, 1000, Some(3.0)),
+        )
+        .await?;
+    test_util::flush_region(&engine, region_id, None).await;
+    let rows = scan().await?;
+    assert!(rows.contains("late") && rows.contains("api"), "{rows}");
+    series_reads.lock().unwrap().clear();
+    engine
+        .handle_request(region_id, build_series_index_request())
+        .await?;
+    let covered_paths: Vec<_> = outputs
+        .iter()
+        .flat_map(|file| {
+            file.meta_ref()
+                .narthex_objects(&region.access_layer.build_region_dir(region_id))
+                .unwrap()
+        })
+        .collect();
+    assert!(!series_reads.lock().unwrap().iter().any(|path| {
+        covered_paths
+            .iter()
+            .any(|obj| path.trim_start_matches('/') == obj.path.trim_start_matches('/'))
+    }));
+    let indexed = region.version();
+    assert_eq!(indexed.ssts.series_indexes().len(), 2);
+    assert!(indexed.ssts.series_indexes().contains_key(&index_id));
+    assert!(indexed.ssts.series_indexes().values().any(|file| matches!(
+        &file.meta_ref().format, crate::sst::file::FileFormat::NarthexSeriesIndex(meta)
+            if meta.window.start == window.start && meta.window.max_sequence > window.max_sequence
+    )));
+    series_reads.lock().unwrap().clear();
+    engine
+        .handle_request(region_id, build_series_index_request())
+        .await?;
+    assert!(
+        series_reads.lock().unwrap().is_empty(),
+        "covered build read an object"
+    );
+    assert!(
+        indexed.ssts.series_indexes().keys().all(|id| region
+            .version()
+            .ssts
+            .series_indexes()
+            .contains_key(id))
+    );
+    assert_eq!(scan().await?, rows);
+    region
+        .access_layer
+        .object_store()
+        .delete(part)
+        .await
+        .unwrap();
+    assert_eq!(scan().await?, rows);
+    engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                series_indexes_to_remove: vec![index.file_id()],
+                ..Default::default()
+            },
+        )
+        .await?;
+    assert!(
+        region
+            .manifest_ctx
+            .manifest()
+            .await
+            .series_indexes
+            .is_empty()
+    );
+    assert_eq!(scan().await?, rows);
     engine.stop().await?;
     Ok(())
 }
 
 #[tokio::test]
 async fn test_exemplar_sparse_storage_lifecycle() -> WhateverResult<()> {
-    use datatypes::schema::ColumnSchema;
-    use store_api::metadata::ColumnMetadata;
-    use store_api::region_request::AddColumn;
     use store_api::storage::consts::ReservedColumnId;
 
     for default_flat_format in [false, true] {
@@ -2290,7 +2668,7 @@ async fn check_two_phase_series_scan(
             index_uuid: FileId::random(),
             bucket_start: Timestamp::new_millisecond(0),
             bucket_end: Timestamp::new_millisecond(2001),
-            source_file_ids: Vec::new(),
+            source_file_ids: Some(Vec::new()),
             min_file_sequence: sequence,
             max_file_sequence: sequence,
             compaction_window_secs: 1,

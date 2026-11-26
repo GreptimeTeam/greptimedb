@@ -58,7 +58,7 @@ fn entry() -> SeriesIndexEntry {
         index_uuid: FileId::random(),
         bucket_start: common_time::Timestamp::new_second(0),
         bucket_end: common_time::Timestamp::new_second(100),
-        source_file_ids: Vec::new(),
+        source_file_ids: Some(Vec::new()),
         min_file_sequence: 1,
         max_file_sequence: 2,
         compaction_window_secs: 100,

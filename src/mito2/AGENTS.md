@@ -131,6 +131,8 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   publication. Readers and compaction select storage from region options, not
   by inspecting individual files. Parquet flat/primary-key layouts may coexist.
 
+- Native series-index maintenance and scans share fixed-window sequence watermarks over manifest-tracked index files. The coverage contract lives in `docs/formats/mito-series.md`.
+
 - Parquet row groups have uniform row counts except for the final group
   (`sst/parquet/row_selection.rs`). Memory-pressure flushing must not create
   arbitrary partial groups: readers and index row IDs rely on this layout.
