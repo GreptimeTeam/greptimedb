@@ -118,11 +118,67 @@ fn deferred_grid_allocation_failure_is_reported_and_not_cached() {
         Arc::new(EvalGrid::try_deferred(GridSpec::try_new(i64::MIN, 1, len).unwrap()).unwrap());
     assert!(grid.timestamps().is_err());
     assert!(grid.timestamps.get().is_none());
-    let range = GridRange::try_new(grid.clone(), 0, 1).unwrap();
-    assert!(range.timestamps().is_err());
-    assert!(TimeAxis::Grid(range).timestamps().is_err());
+    // A range naming every point of that grid asks for the array that does not fit, and the
+    // failure is still the series error rather than an abort.
+    let whole = GridRange::try_new(grid.clone(), 0, len as usize).unwrap();
+    assert!(whole.timestamps().is_err());
+    assert!(TimeAxis::Grid(whole).timestamps().is_err());
     assert!(grid.timestamps().is_err());
     assert!(grid.timestamps.get().is_none());
+    // A range that is nearly the whole grid gathers its own rows, and its allocation fails too:
+    // the gathered array is the range's, so the failure is reported rather than aborted.
+    let nearly = GridRange::try_new(grid.clone(), 0, len as usize - 1).unwrap();
+    assert!(nearly.timestamps().is_err());
+    assert!(TimeAxis::Grid(nearly).timestamps().is_err());
+    assert!(grid.timestamps.get().is_none());
+}
+
+/// A window cut out of a large grid computes the rows it names instead of materializing the grid.
+///
+/// The gathered values are the grid's own points, so a subrange reads the same timestamps it did
+/// when it was a slice of the whole array; what changes is the cost, which is the window's rows
+/// and no longer the grid's.
+#[test]
+fn subrange_timestamps_gather_only_the_rows_they_name() {
+    let len = (isize::MAX as u64 / std::mem::size_of::<i64>() as u64) + 1;
+    let grid = Arc::new(EvalGrid::try_deferred(GridSpec::try_new(-5, 2, len).unwrap()).unwrap());
+    let range = GridRange::try_new(grid.clone(), 7, 3).unwrap();
+    assert!(!grid.is_materialized());
+    let gathered = range.timestamps().unwrap();
+    assert_eq!(&gathered[..], &[9, 11, 13]);
+    let axis = TimeAxis::Grid(range);
+    let axis_timestamps = axis.timestamps().unwrap();
+    assert_eq!(axis_timestamps.as_ref(), &[9, 11, 13]);
+    // Every gathered point is what the axis answers for the row holding it.
+    for (row, timestamp) in axis_timestamps.iter().enumerate() {
+        assert_eq!(*timestamp, axis.timestamp(row).unwrap());
+    }
+    assert!(
+        !grid.is_materialized(),
+        "the subrange materialized its grid"
+    );
+
+    // A range naming the whole grid still shares the grid's one array.
+    let small = Arc::new(EvalGrid::try_deferred(GridSpec::try_new(10, 10, 4).unwrap()).unwrap());
+    let all = GridRange::try_new(small.clone(), 0, 4).unwrap();
+    assert!(!small.is_materialized());
+    let shared = all.timestamps().unwrap();
+    assert!(
+        small.is_materialized(),
+        "the whole-grid range did not materialize the grid it shares"
+    );
+    assert_eq!(shared.as_ptr(), small.timestamps().unwrap().as_ptr());
+    assert_eq!(
+        TimeAxis::Grid(all).timestamps().unwrap().as_ref(),
+        &[10, 20, 30, 40]
+    );
+
+    // An empty range at the end of a grid has no row to gather and materializes nothing.
+    let grid = Arc::new(EvalGrid::try_deferred(GridSpec::try_new(0, 1, 3).unwrap()).unwrap());
+    let empty = GridRange::try_new(grid.clone(), 3, 0).unwrap();
+    assert!(empty.timestamps().unwrap().is_empty());
+    assert!(TimeAxis::Grid(empty).timestamps().unwrap().is_empty());
+    assert!(!grid.is_materialized());
 }
 
 #[test]
@@ -167,11 +223,20 @@ fn grid_materialization_revalidates_public_specs_and_shares_ranges_by_value() {
     let b = GridRange::try_new(Arc::new(EvalGrid::try_new(grid.spec()).unwrap()), 1, 3).unwrap();
     assert_eq!(a, b);
     let values = a.timestamps().unwrap();
-    assert_eq!(
+    // A subrange computes its own rows rather than slicing the grid's array, which it no longer
+    // shares: what it answers is still the grid's points, one per position it names.
+    assert_ne!(
         values.as_ptr(),
-        grid.timestamps().unwrap().as_ptr().wrapping_add(1)
+        grid.timestamps().unwrap().as_ptr().wrapping_add(1),
+        "the subrange borrowed the grid's array"
     );
     assert_eq!(&values[..], &[-2, 1, 4]);
+    let whole = GridRange::try_new(grid.clone(), 0, 5).unwrap();
+    assert_eq!(
+        whole.timestamps().unwrap().as_ptr(),
+        grid.timestamps().unwrap().as_ptr(),
+        "a whole-grid range copied the array it could share"
+    );
     assert!(GridRange::try_new(grid.clone(), 5, 0).unwrap().is_empty());
     assert!(GridRange::try_new(grid.clone(), 4, 2).is_err());
     assert!(GridRange::try_new(grid, usize::MAX, 1).is_err());

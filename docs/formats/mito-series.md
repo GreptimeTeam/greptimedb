@@ -5,22 +5,38 @@ for Prometheus-style metric data. It separates series identities and string tags
 from timestamped numeric samples.
 
 The format has two artifact roles: `NarthexSamples` owns sample data, and
-`NarthexSeriesIndex` indexes series and references the samples it covers.
+`NarthexSeriesIndex` indexes exact series identities for sample discovery.
 Region manifests serialize these roles as `narthex_samples` and
 `narthex_series_index`.
 
-## Authoritative storage and derived sidecars
+## Region manifest
 
 With `sst_format = 'narthex'`, samples are authoritative SSTs. Each artifact owns
 `<region_dir>/<file_id>/manifest.json` and its `part-<n>.samples` or
-`part-<n>.series` objects. The region manifest records the manifest size and a `parts` array in part-ID order.
-Each part record contains its encoded `file_size` in bytes. Series indexes reference region-qualified sample file IDs without owning those
-samples. Both artifact types use ordinary SST lifetimes and reclamation.
+`part-<n>.series` objects. The region manifest records the manifest size and a
+`parts` array in part-ID order.
+Each part record contains its encoded `file_size` in bytes.
 
-The same codecs also support rebuildable sidecars over Parquet SSTs. The catalog
-paths, source-SST coverage, daily consolidation, and local-cache rollout described
-below apply to that sidecar mode. They do not make authoritative Narthex samples
-rebuildable or subject them to local-cache eviction.
+A native index file belongs to one fixed, epoch-aligned time window. Its region
+manifest entry requires `window` with inclusive `start` and exclusive `end` in
+Unix seconds and the inclusive sequence watermark `max_sequence`. The region
+records `series_window_seconds` on first publication and retains it in
+checkpoints even after every index expires.
+
+Manual and periodic builds wait until a window has at least
+`experimental_series_index_min_files` uncovered live sample SSTs. This Mito
+setting defaults to four. Samples remain queryable while the window is below it.
+
+All index files in a window contribute series keys. Maintenance indexes sample
+SSTs above the previous watermark through a durable sequence boundary. A
+spanning SST contributes to each overlapping window. Discovery can rely on the
+indexes when every overlapping window reaches the sample's known sequence
+bound. Missing or unreadable artifacts fall back to sample discovery. Expired
+windows are retired as a unit. An explicit removal of a contributing file
+invalidates that window's indexes.
+
+Physical tag IDs and names are stored in the artifact manifest. The reader supplies
+null for newly added nullable labels that are absent from the index.
 
 ## Wire specification
 
@@ -63,7 +79,7 @@ One immutable artifact owns the following objects under a unique generation:
 | `region_id` | Physical region ID |
 | `generation` | Index UUID, using the existing `FileId` serialization |
 | `tags` | Ordered objects with `column_id` and `name`; all are nullable UTF-8 |
-| `coverage` | Existing `SeriesIndexEntry` representation, with `artifact` omitted and `file_size` zero |
+| `coverage` | Existing `SeriesIndexEntry` representation, with `artifact` omitted and `file_size` zero. Native artifacts omit `source_file_ids` |
 | `files` | Ordered objects with `part_id`, `file_size`, `num_series`, `first`, and `last` |
 
 `part_id` is an unsigned 32-bit integer, starting at zero and increasing by one
@@ -431,10 +447,3 @@ stored. A block contains at most 8,388,608 series. The manifest is at most 64 Mi
 Offsets, lengths, and counts must fit their enclosing areas without arithmetic
 overflow. Counts must not imply allocations larger than the enclosing decoded
 payload permits.
-
-## Local cache compatibility
-
-The local series-index cache has a root `version` marker independent of this
-format version. Before workers start, a missing or incompatible marker causes
-the entire derived cache (including samples, ranges, and catalogs) to be reset.
-Matching-version restarts preserve the cache.

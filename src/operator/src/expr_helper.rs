@@ -33,7 +33,7 @@ use api::v1::{
     set_index, unset_index,
 };
 use common_catalog::consts::RELATIONAL_ENGINE;
-use common_datasource::object_store::LocalFileAccess;
+use common_datasource::object_store::{LocalFileAccess, RemoteStorageAccess};
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
 use common_query::prelude::greptime_timestamp;
@@ -151,6 +151,7 @@ pub(crate) async fn create_external_expr(
     create: CreateExternalTable,
     query_ctx: &QueryContextRef,
     local_file_access: &LocalFileAccess,
+    remote_storage_access: &RemoteStorageAccess,
 ) -> Result<CreateTableExpr> {
     let (catalog_name, schema_name, table_name) =
         table_idents_to_full_name(&create.name, query_ctx)
@@ -164,6 +165,7 @@ pub(crate) async fn create_external_expr(
             create,
             query_ctx,
             local_file_access,
+            remote_storage_access,
             catalog_name,
             schema_name,
             table_name,
@@ -334,14 +336,16 @@ async fn create_file_expr(
     create: CreateExternalTable,
     query_ctx: &QueryContextRef,
     local_file_access: &LocalFileAccess,
+    remote_storage_access: &RemoteStorageAccess,
     catalog_name: String,
     schema_name: String,
     table_name: String,
 ) -> Result<CreateTableExpr> {
     let mut table_options = create.options.into_map();
-    let (object_store, files) = prepare_file_table_files(&table_options, local_file_access)
-        .await
-        .context(PrepareFileTableSnafu)?;
+    let (object_store, files) =
+        prepare_file_table_files(&table_options, local_file_access, remote_storage_access)
+            .await
+            .context(PrepareFileTableSnafu)?;
 
     let file_column_schemas = infer_file_table_schema(&object_store, &files, &table_options)
         .await

@@ -24,7 +24,8 @@ use super::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
     BoundVectorOp, BoundWindow, Grouping, InstantValue, MapOp, NativeExpr, NativeNode, NativeTree,
     NativeType, ParameterizedOp, aggregate_state_binding, duplicates_canonical_labels,
-    fused_output_tags, native_node_supported, reads_across_series, unifies_its_own_contributions,
+    fused_output_tags, leaves_a_drop_to_the_storage_keys, native_node_supported,
+    reads_across_series, unifies_its_own_contributions,
 };
 use crate::extension_plan::FieldKind;
 use crate::extension_plan::{FusedSeries, FusedSeriesBinding};
@@ -185,6 +186,44 @@ fn final_aggregate(state: NativeNode) -> NativeNode {
 
 fn window_over(inner: NativeNode, input_grid: Option<Arc<EvalGrid>>) -> NativeNode {
     window_on(inner, input_grid, grid(0, 60_000, 4))
+}
+
+/// An instant selection over `inner` reporting the sample it read, which keeps its identity.
+fn instant_sample(inner: NativeNode, out: Arc<EvalGrid>) -> NativeNode {
+    NativeNode {
+        expr: NativeExpr::Instant {
+            input: Box::new(inner),
+            op: BoundInstant {
+                lookback_ms: 300_000,
+                offset_ms: 0,
+                at_ms: None,
+                value: InstantValue::Sample,
+                output_grid: Arc::clone(&out),
+            },
+        },
+        output: evaluated(fields(1), out),
+    }
+}
+
+/// A window over `inner` whose function keeps the metric name, so it hands its input's identity on.
+fn keeping_window_fields(inner: NativeNode, out: Arc<EvalGrid>, count: usize) -> NativeNode {
+    NativeNode {
+        expr: NativeExpr::Window {
+            input: Box::new(inner),
+            op: BoundWindow {
+                function: RangeFunction::LastOverTime,
+                window: RangeWindow {
+                    range_ms: 300_000,
+                    offset_ms: 0,
+                    anchor_ms: None,
+                    modifier: None,
+                },
+                input_grid: None,
+                output_grid: Arc::clone(&out),
+            },
+        },
+        output: evaluated(fields(count), out),
+    }
 }
 
 /// A window over `inner` that produces `count` fields on `out`, so a consumer of it can be given a
@@ -546,8 +585,9 @@ fn binary_arithmetic_field_kind_accounts_for_fill() {
         );
     }
 
-    // The real mixed-kind operation and a fill may emit different kinds in one field. Neither
-    // silently claims homogeneity; mixed no-fill composition and comparisons keep their old kinds.
+    // The real mixed-kind operation and a fill may emit different kinds in one field, and neither
+    // silently claims homogeneity. A comparison over two kinds is a different question - it emits
+    // no sample whatever the fill says - and answers the empty float layout below.
     assert_eq!(
         binary_output_field_kind(Histogram, Float, BinaryOp::Mul, false, left),
         None
@@ -570,11 +610,260 @@ fn binary_arithmetic_field_kind_accounts_for_fill() {
     );
     assert_eq!(
         binary_output_field_kind(Histogram, Float, BinaryOp::Eq, false, both),
-        None
+        Some(Float)
     );
     assert_eq!(
         binary_output_field_kind(Histogram, Float, BinaryOp::Eq, true, both),
         Some(Float)
+    );
+}
+
+/// A comparison answers a float when its two sides carry different kinds.
+///
+/// The kernel skips every mixed pair without counting a match - `(Float, Histogram)` and
+/// `(Histogram, Float)` included (`vector_match::elem_binop`) - so no sample can end under either
+/// side's type. What is declared is the layout arithmetic keeps for a pair that emits nothing: one
+/// float. Two sides of one kind keep it, and a `bool` comparison answers `1`/`0` whatever it read.
+#[test]
+fn binary_comparison_names_a_mixed_pair_as_a_float() {
+    use super::binary_output_field_kind;
+    use crate::extension_plan::FieldKind::{Float, Histogram};
+
+    for op in [
+        BinaryOp::Eq,
+        BinaryOp::Ne,
+        BinaryOp::Gt,
+        BinaryOp::Lt,
+        BinaryOp::Ge,
+        BinaryOp::Le,
+    ] {
+        assert_eq!(
+            binary_output_field_kind(Histogram, Float, op, false, FillValues::default()),
+            Some(Float),
+            "{op:?} a histogram compared with a float"
+        );
+        assert_eq!(
+            binary_output_field_kind(Float, Histogram, op, false, FillValues::default()),
+            Some(Float),
+            "{op:?} a float compared with a histogram"
+        );
+        assert_eq!(
+            binary_output_field_kind(Histogram, Histogram, op, false, FillValues::default()),
+            Some(Histogram),
+            "{op:?} two histograms"
+        );
+        assert_eq!(
+            binary_output_field_kind(Float, Float, op, false, FillValues::default()),
+            Some(Float),
+            "{op:?} two floats"
+        );
+        assert_eq!(
+            binary_output_field_kind(Histogram, Float, op, true, FillValues::default()),
+            Some(Float),
+            "{op:?} with `bool`"
+        );
+    }
+
+    // The tree-level walk asks the same helper, so a mixed pair over two inputs answers the float
+    // layout there too, and the answer is the one the statement's column is declared with.
+    let histogram = input_on(grid(0, 60_000, 1));
+    let float = NativeNode {
+        expr: NativeExpr::Timestamp {
+            input: Box::new(histogram.clone()),
+        },
+        output: histogram.output.clone(),
+    };
+    for (left, right) in [(&histogram, &float), (&float, &histogram)] {
+        let node = NativeNode {
+            expr: NativeExpr::Binary {
+                left: Box::new(left.clone()),
+                right: Box::new(right.clone()),
+                matching: BinaryMatching {
+                    op: BinaryOp::Gt,
+                    ..add()
+                },
+            },
+            output: histogram.output.clone(),
+        };
+        assert_eq!(
+            node.output_field_kind(Some(FieldKind::Histogram)),
+            Some(FieldKind::Float)
+        );
+    }
+}
+
+/// A whole-vector operation answers either the series it selected or a value it computed.
+///
+/// `topk`, `bottomk`, `limitk`, `limit_ratio` and the `sort`s hand on the samples they read under
+/// the labels those samples carry, so a histogram stays a histogram - the same rule the per-point
+/// `k` form states for the same `TopK`. `absent` writes `1.0`, `histogram_quantile` and
+/// `histogram_fraction` reduce a classic histogram to one float, and `count_values` counts samples
+/// as floats: each answers a float whatever its input holds.
+#[test]
+fn vector_operation_field_kinds_follow_what_each_op_answers() {
+    use crate::extension_plan::FieldKind::{Float, Histogram};
+    use crate::histogram_eval::HistogramFunction;
+    use crate::select::SortOrder;
+
+    let out = grid(0, 60_000, 4);
+    let group = || Grouping::By(Arc::new([]));
+    let vector_of = |op| NativeNode {
+        expr: NativeExpr::Vector {
+            input: Box::new(window_fields(input_with_fields(1), Arc::clone(&out), 1)),
+            op,
+        },
+        output: evaluated(fields(1), Arc::clone(&out)),
+    };
+    for (op, expected) in [
+        (
+            BoundVectorOp::TopK {
+                k: 1.0,
+                top: true,
+                group: group(),
+            },
+            Histogram,
+        ),
+        (
+            BoundVectorOp::LimitK {
+                k: 1.0,
+                group: group(),
+            },
+            Histogram,
+        ),
+        (BoundVectorOp::LimitRatio { ratio: 0.5 }, Histogram),
+        (BoundVectorOp::Sort(SortOrder::Asc), Histogram),
+        (
+            BoundVectorOp::Sort(SortOrder::ByLabel(vec![Arc::from("job")])),
+            Histogram,
+        ),
+        (
+            BoundVectorOp::Absent {
+                labels: datatypes::series::SeriesLabels::try_new(None, Vec::new()).unwrap(),
+            },
+            Float,
+        ),
+        (
+            BoundVectorOp::Histogram(HistogramFunction::Quantile(0.5)),
+            Float,
+        ),
+        (
+            BoundVectorOp::Histogram(HistogramFunction::Fraction {
+                lower: 0.0,
+                upper: 1.0,
+            }),
+            Float,
+        ),
+        (
+            BoundVectorOp::CountValues {
+                label: Arc::from("v"),
+                group: group(),
+            },
+            Float,
+        ),
+    ] {
+        let node = vector_of(op);
+        node.validate().unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            node.output_field_kind(Some(Histogram)),
+            Some(expected),
+            "{:?}",
+            node.expr
+        );
+    }
+}
+
+/// `info` answers the base's samples, so its field is the base's field.
+///
+/// The info side is read as sample times (`InstantValue::InfoTimestamp`), which is a float the
+/// kernel compares rather than a value it answers with: a base carrying native histograms therefore
+/// keeps its histogram column.
+#[test]
+fn info_keeps_the_kind_of_its_base() {
+    let out = grid(0, 60_000, 4);
+    let info = NativeNode {
+        expr: NativeExpr::Instant {
+            input: Box::new(input_with_fields(1)),
+            op: BoundInstant {
+                lookback_ms: 300_000,
+                offset_ms: 0,
+                at_ms: None,
+                value: InstantValue::InfoTimestamp,
+                output_grid: Arc::clone(&out),
+            },
+        },
+        output: evaluated(fields(1), Arc::clone(&out)),
+    };
+    let node = NativeNode {
+        expr: NativeExpr::Info {
+            base: Box::new(window_fields(input_with_fields(1), Arc::clone(&out), 1)),
+            info: Box::new(info),
+            selector: InfoSelector {
+                name_matchers: Vec::new(),
+                data_labels: Vec::new(),
+                keep_unmatched: true,
+            },
+        },
+        output: evaluated(fields(1), out),
+    };
+    node.validate().unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        node.output_field_kind(Some(FieldKind::Histogram)),
+        Some(FieldKind::Histogram)
+    );
+    assert_eq!(
+        node.output_field_kind(Some(FieldKind::Float)),
+        Some(FieldKind::Float)
+    );
+}
+
+/// A parameterized map applies a math function, and math skips histograms rather than converting
+/// them, so the field shape is unchanged and keeps its input's kind.
+///
+/// `round` and the three `clamp`s map a vector onto the same fields; `max_of`/`min_of` answer one
+/// scalar from one, which is a float whatever the statement's sources hold.
+#[test]
+fn parameterized_map_keeps_the_kind_of_its_input() {
+    let out = grid(0, 60_000, 4);
+    let vector = window_fields(input_with_fields(1), Arc::clone(&out), 1);
+    for (op, parameters) in [
+        (
+            ParameterizedOp::Round,
+            vec![scalar_on(1.0, Arc::clone(&out))],
+        ),
+        (
+            ParameterizedOp::ClampMin,
+            vec![scalar_on(1.0, Arc::clone(&out))],
+        ),
+    ] {
+        let node = NativeNode {
+            expr: NativeExpr::ParameterizedMap {
+                input: Box::new(vector.clone()),
+                op,
+                parameters,
+            },
+            output: evaluated(fields(1), Arc::clone(&out)),
+        };
+        node.validate()
+            .unwrap_or_else(|error| panic!("{op:?}: {error}"));
+        assert_eq!(
+            node.output_field_kind(Some(FieldKind::Histogram)),
+            Some(FieldKind::Histogram),
+            "{op:?}"
+        );
+    }
+    // A function of two scalars answers a scalar, whose kind is a float either way.
+    let node = NativeNode {
+        expr: NativeExpr::ParameterizedMap {
+            input: Box::new(scalar_on(1.0, Arc::clone(&out))),
+            op: ParameterizedOp::MaxOf,
+            parameters: vec![scalar_on(2.0, Arc::clone(&out))],
+        },
+        output: NativeType::Scalar(out),
+    };
+    node.validate().unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        node.output_field_kind(Some(FieldKind::Histogram)),
+        Some(FieldKind::Float)
     );
 }
 
@@ -1223,12 +1512,12 @@ fn a_broadcast_side_contributes_no_labels() {
     // broadcast reaches each series of its vector side as it is, so whether two series can end
     // under one label set is that side's answer, not the constant's.
     assert!(
-        duplicates_canonical_labels(&aliasing(), &source_tags),
+        duplicates_canonical_labels(&aliasing(), &source_tags, &[]),
         "the fixture aliases: a rewrite of a label its input carries can fold two series into one"
     );
     assert_eq!(
-        duplicates_canonical_labels(&aliasing(), &source_tags),
-        duplicates_canonical_labels(&clamp_max(aliasing()), &source_tags),
+        duplicates_canonical_labels(&aliasing(), &source_tags, &[]),
+        duplicates_canonical_labels(&clamp_max(aliasing()), &source_tags, &[]),
         "a scalar parameter carries no labels, so the map answers its input's identity"
     );
     for node in [
@@ -1238,8 +1527,8 @@ fn a_broadcast_side_contributes_no_labels() {
         binary(eval_time(), clamp_max(aliasing())),
     ] {
         assert_eq!(
-            duplicates_canonical_labels(&aliasing(), &source_tags),
-            duplicates_canonical_labels(&node, &source_tags),
+            duplicates_canonical_labels(&aliasing(), &source_tags, &[]),
+            duplicates_canonical_labels(&node, &source_tags, &[]),
             "a broadcast keeps the series identity of its vector side"
         );
     }
@@ -1252,7 +1541,7 @@ fn a_broadcast_side_contributes_no_labels() {
         binary(vector_of_one(), aliasing()),
     ] {
         assert!(
-            !duplicates_canonical_labels(&node, &source_tags),
+            !duplicates_canonical_labels(&node, &source_tags, &[]),
             "a vector-vector match answers one series per label set, whatever aliases below it"
         );
     }
@@ -2209,15 +2498,24 @@ fn scan_tags() -> Vec<Vec<String>> {
     vec![vec!["host".to_string()]]
 }
 
+/// The labels a scan bound to one metric reports: its tag, and the name its binding gives every
+/// series it hands over, which is not one of its tag columns.
+fn named_scan_tags() -> Vec<Vec<String>> {
+    vec![vec!["host".to_string(), "__name__".to_string()]]
+}
+
 /// A rewrite that writes a label the input does not carry cannot make two series equal, which is
 /// what lets a query like `label_replace(x, "dst", "$1", "host", "(.*)")` keep every partition.
 #[test]
 fn a_fresh_destination_does_not_alias() {
     let out = grid(0, 60_000, 4);
-    let inner = window_fields(input_with_fields(1), Arc::clone(&out), 1);
+    // A window that keeps the metric name hands its input's identity on, so the rewrite is the only
+    // node that could make two series equal.
+    let inner = keeping_window_fields(input_with_fields(1), Arc::clone(&out), 1);
     assert!(!duplicates_canonical_labels(
         &rewritten(inner, "dst", "host"),
-        &scan_tags()
+        &scan_tags(),
+        &[]
     ));
 }
 
@@ -2229,7 +2527,8 @@ fn a_rewrite_of_an_existing_label_aliases() {
     let inner = window_fields(input_with_fields(1), Arc::clone(&out), 1);
     assert!(duplicates_canonical_labels(
         &rewritten(inner, "host", "host"),
-        &scan_tags()
+        &scan_tags(),
+        &[]
     ));
 }
 
@@ -2243,20 +2542,24 @@ fn a_rewrite_of_the_metric_name_aliases_a_named_source() {
     let named = vec![vec!["host".to_string(), "__name__".to_string()]];
     assert!(duplicates_canonical_labels(
         &rewritten(inner, "__name__", "__name__"),
-        &named
+        &named,
+        &[]
     ));
     // The delete-only form can fold the same two identities, so it is collected too.
     let inner = input_on(Arc::clone(&out));
     assert!(duplicates_canonical_labels(
         &replaced(inner, "__name__", "", "__name__"),
-        &named
+        &named,
+        &[]
     ));
 }
 
 /// A name write is collected even above a kernel that dropped the name: the scan below `abs`, a
 /// `timestamp` or a range function can still hold several metrics whose ordinary labels are equal,
-/// so writing one name puts those identities under one label set. A fresh ordinary destination is
-/// still uncollected, because no scan can carry an ordinary label it does not declare.
+/// so writing one name puts those identities under one label set. A fresh ordinary destination over
+/// a kernel that keeps the name is still uncollected, because no scan can carry an ordinary label it
+/// does not declare -- while over a name-dropping kernel the answer is `true` for the kernel's own
+/// sake, which is what [`dropping_the_metric_name_is_a_new_source`] pins.
 #[test]
 fn a_name_rewrite_above_a_dropped_name_is_collected() {
     let out = grid(0, 60_000, 4);
@@ -2279,16 +2582,20 @@ fn a_name_rewrite_above_a_dropped_name_is_collected() {
     ] {
         assert!(
             duplicates_canonical_labels(
-                &replaced(dropped.clone(), "__name__", "same", "missing"),
-                &named
+                &replaced(dropped, "__name__", "same", "missing"),
+                &named,
+                &[]
             ),
             "{name}: a name write may alias metrics the kernel left indistinguishable"
         );
-        assert!(
-            !duplicates_canonical_labels(&rewritten(dropped, "dst", "host"), &named),
-            "{name}: a fresh ordinary destination cannot alias"
-        );
     }
+    // The fresh destination is judged against a kernel that keeps the name, which is the only shape
+    // where the rewrite alone decides the answer.
+    let keeping = keeping_window_fields(input_with_fields(1), Arc::clone(&out), 1);
+    assert!(
+        !duplicates_canonical_labels(&rewritten(keeping, "dst", "host"), &named, &[]),
+        "a fresh ordinary destination cannot alias"
+    );
 }
 
 /// The label walk keeps a name a rewrite writes and drops it wherever the kernel does, so the
@@ -2460,20 +2767,180 @@ fn an_unknown_source_may_alias() {
     let inner = window_fields(input_with_fields(1), Arc::clone(&out), 1);
     assert!(duplicates_canonical_labels(
         &rewritten(inner, "dst", "host"),
+        &[],
         &[]
     ));
 }
 
-/// Dropping the metric name is not aliasing within one metric: the remaining tags are the primary
-/// key, so two series that agree on all of them are the same stored series.
+/// Dropping the metric name is a source of duplicates in its own right, and a window that keeps it
+/// is not.
+///
+/// The name is part of the identity a merge groups by, so a kernel that computes a value of its own
+/// and reports the name dropped can leave two series under one label set - but only when something
+/// below it could be told apart by that name.
+///
+/// A scan bound to one metric names every series it hands over, so no name of its tells two of them
+/// apart, and the labels are the whole proof. A scan that may hand over several metrics is collected,
+/// and so is one carrying `__type__` or `__unit__` among its tags, because only those labels told
+/// the two series apart. The scan's key columns are not asked: a key column that holds `NULL` in one
+/// series and `''` in another decodes to an absent and to an empty label, both of which the drop
+/// normalizes into one, and that pair is deliberately left outside the proof - see
+/// [`metadata_labels_keep_series_apart`].
 #[test]
-fn dropping_the_metric_name_keeps_the_inputs_answer() {
+fn dropping_the_metric_name_is_a_new_source() {
     let out = grid(0, 60_000, 4);
-    let plain = window_fields(input_with_fields(1), Arc::clone(&out), 1);
-    assert!(!duplicates_canonical_labels(&plain, &scan_tags()));
+    let single = [Some(Arc::<str>::from("some_metric"))];
+    let dropped = window_fields(input_with_fields(1), Arc::clone(&out), 1);
+    // A caller that says nothing about the metric is not proved.
+    assert!(duplicates_canonical_labels(
+        &dropped,
+        &named_scan_tags(),
+        &[]
+    ));
+    // The scan reads one metric, so the name it drops told none of its series apart.
     assert!(!duplicates_canonical_labels(
-        &map_over(rewritten(plain, "dst", "host")),
-        &scan_tags()
+        &dropped,
+        &named_scan_tags(),
+        &single
+    ));
+    // A source that may hand over several metrics is not proved, and neither is one that carries a
+    // metadata label of its own: both can hold two series that only that label told apart.
+    assert!(duplicates_canonical_labels(
+        &dropped,
+        &named_scan_tags(),
+        &[None]
+    ));
+    for metadata in ["__type__", "__unit__"] {
+        let mut tags = named_scan_tags();
+        tags[0].push(metadata.to_string());
+        assert!(
+            duplicates_canonical_labels(&dropped, &tags, &single),
+            "{metadata}"
+        );
+    }
+    // A key column that can hold `NULL` in one series and `''` in another is *not* part of that
+    // proof: the empty value leaves with the name, but the pair is a property of a nullable tag
+    // column rather than of the labels, and every tag column of a metric-engine table is nullable.
+    // Nothing is collected for it, above the window or above a map that drops the name again.
+    assert!(!duplicates_canonical_labels(
+        &dropped,
+        &named_scan_tags(),
+        &single
+    ));
+    assert!(!duplicates_canonical_labels(
+        &map_over(input_on(Arc::clone(&out))),
+        &named_scan_tags(),
+        &single
+    ));
+    // A window that keeps the name passes its input's answer on instead.
+    let keeping = keeping_window_fields(input_with_fields(1), Arc::clone(&out), 1);
+    assert!(!duplicates_canonical_labels(
+        &keeping,
+        &named_scan_tags(),
+        &[]
+    ));
+    // `timestamp` reports a sample's own time under the name dropped, in both of its forms.
+    let stamps = |inner: NativeNode| NativeNode {
+        expr: NativeExpr::Timestamp {
+            input: Box::new(inner),
+        },
+        output: evaluated(fields(1), Arc::clone(&out)),
+    };
+    assert!(duplicates_canonical_labels(
+        &stamps(input_on(Arc::clone(&out))),
+        &named_scan_tags(),
+        &[]
+    ));
+    assert!(duplicates_canonical_labels(
+        &stamps(input_on(Arc::clone(&out))),
+        &named_scan_tags(),
+        &[None]
+    ));
+    assert!(!duplicates_canonical_labels(
+        &stamps(input_on(Arc::clone(&out))),
+        &named_scan_tags(),
+        &single
+    ));
+    // A sample-preserving selection keeps the name it read, so it is no source of its own.
+    assert!(!duplicates_canonical_labels(
+        &instant_sample(input_on(Arc::clone(&out)), Arc::clone(&out)),
+        &named_scan_tags(),
+        &[]
+    ));
+}
+
+/// The plan-time counter's question: which statements drop the metadata labels over series whose
+/// labels prove them apart and whose keys do not.
+///
+/// The labels are what the walk reads; the key columns are stated by the caller, and a drop is
+/// counted exactly when the labels prove it, nothing below it has collected already, and the scan's
+/// key columns cannot tell the pair apart - a key column holding `NULL` in one series and `''` in
+/// another, which is a fact about the physical table. Nothing is collected for that pair, so the
+/// count is what keeps the statements it leaves unproved observable. This is the tree half of that
+/// count: the planner pairs it with the fact it read from the resolved table.
+#[test]
+fn a_drop_the_labels_prove_is_counted_only_when_its_keys_do_not() {
+    let out = grid(0, 60_000, 4);
+    let single = [Some(Arc::<str>::from("some_metric"))];
+    let named = named_scan_tags();
+    // `rate(x[5m])` and `abs(abs(x))` over one metric: the drop removes a name every series shares,
+    // and nothing below either node is collected, so the key columns are what decides the answer.
+    for keys in [false, true] {
+        let counted = !keys;
+        assert_eq!(
+            counted,
+            leaves_a_drop_to_the_storage_keys(
+                &NativeTree::try_new(window_fields(input_with_fields(1), Arc::clone(&out), 1))
+                    .unwrap(),
+                &named,
+                &single,
+                keys,
+            ),
+            "`rate(x[5m])` with keys_survive = {keys}"
+        );
+        assert_eq!(
+            counted,
+            leaves_a_drop_to_the_storage_keys(
+                &NativeTree::try_new(map_over(map_over(input_on(Arc::clone(&out))))).unwrap(),
+                &named,
+                &single,
+                keys,
+            ),
+            "`abs(abs(x))` with keys_survive = {keys}"
+        );
+    }
+    // A source that may hand over several metrics is collected by the labels, so nothing is left to
+    // the key columns.
+    assert!(!leaves_a_drop_to_the_storage_keys(
+        &NativeTree::try_new(window_fields(input_with_fields(1), Arc::clone(&out), 1)).unwrap(),
+        &named,
+        &[None],
+        false,
+    ));
+    // A window that keeps the name drops nothing.
+    assert!(!leaves_a_drop_to_the_storage_keys(
+        &NativeTree::try_new(keeping_window_fields(
+            input_with_fields(1),
+            Arc::clone(&out),
+            1
+        ))
+        .unwrap(),
+        &named,
+        &single,
+        false,
+    ));
+    // A merge below the drop hands over one series per canonical label set, which is unique even
+    // where the grouping treats an empty label value as no label, so the key columns decide nothing.
+    assert!(!leaves_a_drop_to_the_storage_keys(
+        &NativeTree::try_new(window_on(
+            merge_over(input_on(Arc::clone(&out))),
+            Some(Arc::clone(&out)),
+            Arc::clone(&out),
+        ))
+        .unwrap(),
+        &named,
+        &single,
+        false,
     ));
 }
 
@@ -2482,7 +2949,8 @@ fn dropping_the_metric_name_keeps_the_inputs_answer() {
 #[test]
 fn a_rewrite_after_ranking_or_grouping_may_alias() {
     let out = grid(0, 60_000, 4);
-    let selected = || window_fields(input_with_fields(1), Arc::clone(&out), 1);
+    // A name-keeping window, so the ranking below is the only node whose answer is in question.
+    let selected = || keeping_window_fields(input_with_fields(1), Arc::clone(&out), 1);
     let vector = |op| NativeNode {
         expr: NativeExpr::Vector {
             input: Box::new(selected()),
@@ -2523,7 +2991,10 @@ fn a_rewrite_after_ranking_or_grouping_may_alias() {
         ),
         ("sum by host", grouped_sum),
     ] {
-        assert!(!duplicates_canonical_labels(&inner, &source_tags), "{name}");
+        assert!(
+            !duplicates_canonical_labels(&inner, &source_tags, &[]),
+            "{name}"
+        );
         let output = inner.output.clone();
         let renamed = NativeNode {
             expr: NativeExpr::Map {
@@ -2539,7 +3010,7 @@ fn a_rewrite_after_ranking_or_grouping_may_alias() {
         };
         assert!(renamed.validate().is_ok(), "{name}");
         assert!(
-            duplicates_canonical_labels(&renamed, &source_tags),
+            duplicates_canonical_labels(&renamed, &source_tags, &[]),
             "{name}"
         );
     }
@@ -2659,7 +3130,8 @@ fn a_merge_answers_one_series_per_set() {
     );
     assert!(!duplicates_canonical_labels(
         &merge_over(aliasing),
-        &scan_tags()
+        &scan_tags(),
+        &[]
     ));
 }
 
@@ -2709,25 +3181,77 @@ fn a_window_unifies_its_own_contributions() {
     ] {
         assert_eq!(
             child_answer,
-            unifies_its_own_contributions(&child),
+            unifies_its_own_contributions(&child, &[], &[]),
             "{name}: the child's own answer"
         );
         assert_eq!(
             window_answer,
-            unifies_its_own_contributions(&window_of(child, RangeFunction::LastOverTime)),
+            unifies_its_own_contributions(&window_of(child, RangeFunction::LastOverTime), &[], &[]),
             "{name}: a name-keeping window unifies whatever its child reported, and only a \
              boundary leaves it aliasing"
         );
     }
-    // A function that drops the metric name can give two series one label set whatever its child
-    // answered, so the window reports it whatever the child said.
-    for child in [collected(), fragments(), boundary()] {
+    // A function that drops the metadata labels can give two series one label set, so the window
+    // reports it whatever its child said - and a caller that cannot say which metric the child reads
+    // has no proof to offer on the child's behalf.
+    for child in [collected(), fragments()] {
         assert_eq!(
             Some(false),
-            unifies_its_own_contributions(&window_of(child, RangeFunction::Rate)),
-            "a name-dropping window may alias"
+            unifies_its_own_contributions(&window_of(child, RangeFunction::Rate), &[], &[]),
+            "a name-dropping window over an unproved source may alias"
         );
     }
+    // A boundary is the one child the proof says nothing about: the window folds the pieces of one
+    // series one at a time, so what it emits aliases them whatever the labels say.
+    assert_eq!(
+        Some(false),
+        unifies_its_own_contributions(&window_of(boundary(), RangeFunction::Rate), &[], &[]),
+        "a boundary leaves the window's own answer aliasing"
+    );
+    // The proof is the one the canonical pass reads: a child whose labels lost the name, over a
+    // source bound to a single metric without a metadata tag of its own, keeps the name-dropping
+    // window from reporting fragments.
+    let named = [vec!["host".to_string(), "__name__".to_string()]];
+    let single = [Some(Arc::<str>::from("some_metric"))];
+    let dropped = map_over(input_on(Arc::clone(&out)));
+    assert_eq!(
+        Some(true),
+        unifies_its_own_contributions(
+            &window_of(dropped.clone(), RangeFunction::Rate),
+            &named,
+            &single
+        ),
+        "a single metric's dropped name tells none of its series apart"
+    );
+    assert_eq!(
+        Some(false),
+        unifies_its_own_contributions(
+            &window_of(dropped.clone(), RangeFunction::Rate),
+            &named,
+            &[None]
+        ),
+        "a source that may hand over several metrics is not proved"
+    );
+    let mut typed = named.clone();
+    typed[0].push("__type__".to_string());
+    // A metadata tag of the source is one the drop removes, and two series that differed only in it
+    // end under one label set - so a window reading the tagged scan directly is not proved.
+    assert_eq!(
+        Some(false),
+        unifies_its_own_contributions(
+            &window_of(input_on(Arc::clone(&out)), RangeFunction::Rate),
+            &typed,
+            &single
+        ),
+        "a metadata tag the window drops is not proved constant"
+    );
+    // A map below the window drops that tag first, and its own drop is what the pass collects: what
+    // the window reads has already lost it, so the window above the map is proved.
+    assert_eq!(
+        Some(true),
+        unifies_its_own_contributions(&window_of(dropped, RangeFunction::Rate), &typed, &single),
+        "the tag left with the map's own collected drop"
+    );
 }
 
 /// `info` reads its info side through a canonical merge: the merge only collects the pieces of one

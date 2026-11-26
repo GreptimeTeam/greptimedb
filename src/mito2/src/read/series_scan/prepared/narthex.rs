@@ -14,7 +14,7 @@
 
 //! Authoritative narthex inputs for scanner-wide series preparation.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use datatypes::arrow::array::{ArrayRef, StringArray, UInt32Array, UInt64Array};
@@ -29,9 +29,11 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::PartitionRange;
 use store_api::storage::consts::{ReservedColumnId, SEQUENCE_COLUMN_NAME};
 
-use crate::error::{ComputeArrowSnafu, DecodeSnafu, NewRecordBatchSnafu, RecordBatchSnafu, Result};
+use crate::error::{
+    ComputeArrowSnafu, DecodeSnafu, Error, NewRecordBatchSnafu, RecordBatchSnafu, Result,
+};
 use crate::read::scan_region::StreamContext;
-use crate::read::series_scan::prepared::invalid;
+use crate::read::series_scan::prepared::{SeriesDiscovery, invalid};
 use crate::series_index::ROW_COUNT_COLUMN;
 use crate::series_index::artifact::SamplesFileHandle;
 use crate::series_index::format::{
@@ -39,7 +41,7 @@ use crate::series_index::format::{
 };
 use crate::series_index::identity::ExactSeriesKey;
 use crate::series_index::samples::reader::SamplesReader;
-use crate::sst::file::FileFormat;
+use crate::sst::file::{FileFormat, WindowSequence};
 use store_api::metric_engine_consts::{
     DATA_SCHEMA_TABLE_ID_COLUMN_NAME as TABLE_ID_COLUMN,
     DATA_SCHEMA_TSID_COLUMN_NAME as TSID_COLUMN,
@@ -78,37 +80,52 @@ pub(crate) fn file_indices(
     Ok(files)
 }
 
+impl SeriesDiscovery {
+    pub(crate) fn fallback_to_samples(
+        &mut self,
+        window: WindowSequence,
+        samples: &[Arc<dyn SamplesFormatReader>],
+        metadata: &RegionMetadataRef,
+        pool: &Arc<dyn datafusion::execution::memory_pool::MemoryPool>,
+    ) -> Result<()> {
+        self.readers
+            .retain(|(_, coverage)| coverage.is_none_or(|w| w.start != window.start));
+        // A sample spanning multiple failed windows needs only one discovery pass.
+        for (_, i) in self
+            .covered_samples
+            .extract_if(.., |(range, _)| window.intersects(*range))
+        {
+            let reader =
+                NarthexSeriesReader::new(metadata.clone(), samples[i].clone(), pool.clone())?;
+            self.readers.push_back((Box::new(reader), None));
+        }
+        Ok(())
+    }
+}
+
 pub(crate) async fn open_sources(
     context: &StreamContext,
     ranges: &[PartitionRange],
     pool: &Arc<dyn datafusion::execution::memory_pool::MemoryPool>,
-) -> Result<(
-    Vec<Arc<dyn SamplesFormatReader>>,
-    Vec<Box<dyn FormatReader>>,
-)> {
+) -> Result<(Vec<Arc<dyn SamplesFormatReader>>, SeriesDiscovery)> {
     let mut samples = Vec::<Arc<dyn SamplesFormatReader>>::new();
-    let mut series = Vec::<Box<dyn FormatReader>>::new();
+    let mut series = SeriesDiscovery::default();
     let indices = file_indices(context, ranges)?;
-    let mut covered = std::collections::HashSet::new();
+    let mut windows = BTreeMap::new();
+    let mut unavailable = BTreeSet::new();
     for file in &context.input.narthex_series_indexes {
         let FileFormat::NarthexSeriesIndex(index) = &file.meta_ref().format else {
             continue;
         };
-        // Never borrow candidates from an index whose source coverage is outside this
-        // snapshot. Uncovered samples remain prepared through metadata discovery.
-        if !index.sources.iter().all(|source| {
-            context
-                .input
-                .files
+        let window = index.window;
+        if file.region_id() != context.input.region_metadata().region_id
+            || !indices
                 .iter()
-                .any(|file| file.file_id() == *source)
-        }) || !indices
-            .iter()
-            .any(|i| index.sources.contains(&context.input.files[*i].file_id()))
+                .any(|i| window.intersects(context.input.files[*i].time_range()))
         {
             continue;
         }
-        let reader = crate::series_index::columnar::reader::ColumnarReader::open_cached(
+        let mut reader = match crate::series_index::columnar::reader::ColumnarReader::open_cached(
             context.input.access_layer.object_store().clone(),
             crate::series_index::SeriesIndexFileHandle::from_narthex(
                 file.clone(),
@@ -122,20 +139,30 @@ pub(crate) async fn open_sources(
                 .cache_strategy
                 .columnar_metadata(file.meta_ref().file_id),
         )
-        .await?;
-        // Indexes built before a schema extension need sample-key discovery until
-        // they can supply the current tag schema, including newly nullable tags.
-        if crate::series_index::format::validate_series_schema(
-            &reader.schema(),
-            context.input.region_metadata(),
-        )
-        .is_err()
+        .await
         {
+            Ok(reader) => reader,
+            Err(error)
+                if error.is_object_not_found()
+                    || matches!(
+                        error,
+                        Error::InvalidMeta { .. } | Error::UnsupportedOperation { .. }
+                    ) =>
+            {
+                unavailable.insert(window.start);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        if reader.adapt_tags(context.input.region_metadata()).is_err() {
+            unavailable.insert(window.start);
             continue;
         }
-        covered.extend(index.sources.iter().copied());
-        series.push(Box::new(reader));
+        let current = windows.entry(window.start).or_insert(window);
+        current.max_sequence = current.max_sequence.max(window.max_sequence);
+        series.readers.push_back((Box::new(reader), Some(window)));
     }
+    windows.retain(|start, _| !unavailable.contains(start));
     for i in indices {
         let file = &context.input.files[i];
         let namespace = file.meta_ref().file_id;
@@ -161,12 +188,19 @@ pub(crate) async fn open_sources(
         };
         let reader: Arc<dyn SamplesFormatReader> =
             Arc::new(NarthexSamplesReader { reader, sequence });
-        if !covered.contains(&file.file_id()) {
-            series.push(Box::new(NarthexSeriesReader::new(
-                context.input.region_metadata().clone(),
-                reader.clone(),
-                pool.clone(),
-            )?));
+        if !crate::sst::file::series_windows_cover(&windows, file.meta_ref()) {
+            series.readers.push_back((
+                Box::new(NarthexSeriesReader::new(
+                    context.input.region_metadata().clone(),
+                    reader.clone(),
+                    pool.clone(),
+                )?),
+                None,
+            ));
+        } else {
+            series
+                .covered_samples
+                .push((file.time_range(), samples.len()));
         }
         samples.push(reader);
     }
@@ -181,11 +215,14 @@ pub(crate) async fn open_sources(
                     range,
                     schema: context.input.mapper.input_arrow_schema(false),
                 });
-                series.push(Box::new(NarthexSeriesReader::new(
-                    context.input.region_metadata().clone(),
-                    reader.clone(),
-                    pool.clone(),
-                )?));
+                series.readers.push_back((
+                    Box::new(NarthexSeriesReader::new(
+                        context.input.region_metadata().clone(),
+                        reader.clone(),
+                        pool.clone(),
+                    )?),
+                    None,
+                ));
                 samples.push(reader);
             }
         }

@@ -114,8 +114,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 }
 
                 let discarded_rows = memtables.num_rows();
-                let discarded_bytes =
-                    (memtables.mutable_usage() + memtables.immutables_usage()) as u64;
+                let discarded_bytes = memtables.decoded_bytes() as u64;
                 warn!(
                     "Discarding unflushed data from region {}, entry_id: {}, sequence: {}, estimated rows: {}, estimated bytes: {}",
                     region_id,

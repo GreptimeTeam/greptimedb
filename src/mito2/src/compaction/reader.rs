@@ -236,7 +236,7 @@ pub(crate) fn json2_rewrite_targets(
 const MAX_CONCURRENT_METADATA_READS: usize = 8;
 
 /// Number of merged batches buffered between the merge task and the SST writer.
-const MERGED_BATCH_CHANNEL_SIZE: usize = 2;
+pub(crate) const MERGED_BATCH_CHANNEL_SIZE: usize = 2;
 
 /// Reads and merges `source` on a separate task, so the SST writer can encode
 /// merged batches while the next ones are being read and merged.
