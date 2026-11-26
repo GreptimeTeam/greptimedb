@@ -1193,6 +1193,11 @@ pub(crate) enum BackgroundNotify {
     },
     /// The catchup again of a region that awaited its Leader lease has finished.
     CaughtUpAgain(CaughtUpAgain),
+    /// The staging edit of a region landed: open the publish window in the worker loop
+    /// and publish the staged layout in the background.
+    ExitStaging(ExitStagingRequest),
+    /// A publish window that queued ordinary writes was released: admit them again.
+    EditingWindowClosed,
     /// The region became writable and may have pending tails to replay.
     RegionBecameWritable,
     /// A lease ended the region's wait for its Leader lease, so the work the wait deferred may
@@ -1231,6 +1236,13 @@ pub(crate) enum BackgroundNotify {
     },
 }
 
+/// Notifies that the staged layout of a region must be published.
+#[derive(Debug)]
+pub(crate) struct ExitStagingRequest {
+    pub(crate) region_id: RegionId,
+    pub(crate) sender: OptionOutputTx,
+}
+
 impl BackgroundNotify {
     /// Whether the worker dispatches pending requests after handling this notification.
     ///
@@ -1263,6 +1275,11 @@ impl BackgroundNotify {
             | Self::RegionFenced
             | Self::RegionReloaded { .. }
             | Self::CaughtUpAgain(_)
+            // The publish window opens and publishes in the background; the writes it
+            // queues are admitted by the `EditingWindowClosed` it sends when it ends.
+            | Self::ExitStaging(_)
+            // Admits the queued writes itself, then dispatches.
+            | Self::EditingWindowClosed
             | Self::RegionBecameWritable
             | Self::LeaderLeaseWaitEnded
             | Self::RegionCannotReplay { .. }
@@ -1478,8 +1495,13 @@ pub(crate) struct EnterStagingResult {
 pub(crate) struct CopyRegionFromFinished {
     /// Region id.
     pub(crate) region_id: RegionId,
-    /// Region edit to apply.
-    pub(crate) edit: RegionEdit,
+    /// The files the copy installed in the target's storage, remapped to the target but
+    /// without their sequence: the worker loop stamps the admission barrier on them when it
+    /// opens the publish window, so no barrier is allocated while the copy runs.
+    pub(crate) files_to_add: Vec<FileMeta>,
+    /// Ids of all files of the source region, including shared references whose objects stay
+    /// in place. They are the response of the copy.
+    pub(crate) source_file_ids: Vec<FileId>,
     /// Result sender.
     pub(crate) sender: Sender<Result<MitoCopyRegionFromResponse>>,
 }

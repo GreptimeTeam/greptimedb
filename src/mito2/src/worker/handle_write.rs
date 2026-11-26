@@ -25,9 +25,9 @@ use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
 use crate::error::{
-    InvalidRequestSnafu, PartitionExprVersionMismatchSnafu, RegionLeaseExpiredSnafu,
-    RegionNotFoundSnafu, RegionStateSnafu, RejectWriteInStagingSnafu, RejectWriteSnafu, Result,
-    UnacknowledgedWriteSnafu,
+    EndStagingPendingSnafu, InvalidRequestSnafu, PartitionExprVersionMismatchSnafu,
+    RegionLeaseExpiredSnafu, RegionNotFoundSnafu, RegionStateSnafu, RejectWriteInStagingSnafu,
+    RejectWriteSnafu, Result, UnacknowledgedWriteSnafu,
 };
 use crate::metrics;
 use crate::metrics::{
@@ -375,8 +375,9 @@ impl<S> RegionWorkerLoop<S> {
                     state @ (RegionRoleState::Leader(RegionLeaderState::Altering)
                     | RegionRoleState::Leader(RegionLeaderState::Editing)
                     | RegionRoleState::Leader(RegionLeaderState::EndingStaging)) => {
-                        // Editing is transient: queue the write so edit completion can drain it
-                        // before starting the next queued edit.
+                        // Both publication windows are transient: queue the write so the publish
+                        // can allocate its boundary above it and the completion drains it before
+                        // starting the next queued edit.
                         debug!(
                             "Region {} is {:?}, add request to pending writes",
                             region.region_id,
@@ -385,6 +386,8 @@ impl<S> RegionWorkerLoop<S> {
                         self.stalling_count.add(1);
                         WRITE_STALL_TOTAL.inc();
                         self.stalled_requests.push(sender_req);
+                        // The exit publishes a layout that re-homes rows, so its stalled writes
+                        // are drained in order and later ones wait behind them.
                         if state == RegionRoleState::Leader(RegionLeaderState::EndingStaging) {
                             self.stalled_requests.add_staging_drain(region_id);
                             self.listener.on_write_stall();
@@ -428,6 +431,17 @@ impl<S> RegionWorkerLoop<S> {
                 sender_req
                     .sender
                     .send(RejectWriteInStagingSnafu { region_id }.fail());
+                continue;
+            }
+            // A frozen end-of-staging payload already fixes the boundary it publishes, so a
+            // write admitted now could be attributed a sequence at or below it and report a
+            // commit watermark `C >= B` before the published files are visible. Refuse it with
+            // the retryable error of the pending commit instead of queueing it: the region is
+            // `Staging` again, so nothing would release such a queue.
+            if region.staging_end_pending() {
+                sender_req
+                    .sender
+                    .send(EndStagingPendingSnafu { region_id }.fail());
                 continue;
             }
             let expected_version = region.expected_partition_expr_version();
@@ -543,8 +557,9 @@ impl<S> RegionWorkerLoop<S> {
                     state @ (RegionRoleState::Leader(RegionLeaderState::Altering)
                     | RegionRoleState::Leader(RegionLeaderState::Editing)
                     | RegionRoleState::Leader(RegionLeaderState::EndingStaging)) => {
-                        // Editing is transient: queue the bulk write so edit completion can drain
-                        // it before starting the next queued edit.
+                        // Both publication windows are transient: queue the bulk write so the
+                        // publish can allocate its boundary above it and the completion drains it
+                        // before starting the next queued edit.
                         debug!(
                             "Region {} is {:?}, add request to pending writes",
                             region.region_id,
@@ -583,6 +598,14 @@ impl<S> RegionWorkerLoop<S> {
                 bulk_req
                     .sender
                     .send(RejectWriteInStagingSnafu { region_id }.fail());
+                continue;
+            }
+            // See `process_write_requests`: a bulk write is refused for the same reason while the
+            // region waits for its end-of-staging commit to be retried.
+            if region.staging_end_pending() {
+                bulk_req
+                    .sender
+                    .send(EndStagingPendingSnafu { region_id }.fail());
                 continue;
             }
             let expected_version = region.expected_partition_expr_version();

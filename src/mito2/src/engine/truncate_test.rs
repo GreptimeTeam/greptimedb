@@ -142,6 +142,8 @@ async fn test_engine_truncate_region_basic_with_format(flat_format: bool) {
     assert_eq!(expected, batches.pretty_print().unwrap());
 }
 
+/// A truncation removes rows owned by the region; the rows it keeps keep their own
+/// numbers, so the region records no sequence boundary.
 #[tokio::test]
 async fn test_engine_put_data_after_truncate() {
     test_engine_put_data_after_truncate_with_format(false).await;
@@ -306,6 +308,9 @@ async fn test_engine_truncate_after_flush_with_format(flat_format: bool) {
     assert_eq!(expected, batches.pretty_print().unwrap());
 }
 
+/// `Truncate::Unflushed` discards unflushed rows through a flush-shaped edit
+/// (`handle_manifest_discard_unflushed_action`); the rows it keeps keep their own
+/// numbers, so no sequence boundary is recorded.
 #[tokio::test]
 async fn test_engine_truncate_reopen() {
     test_engine_truncate_reopen_with_format(false).await;
@@ -558,6 +563,122 @@ async fn test_engine_discard_unflushed_with_format(flat_format: bool) {
     assert_eq!(
         5,
         batches.iter().map(|batch| batch.num_rows()).sum::<usize>()
+    );
+}
+
+#[tokio::test]
+async fn test_discard_unflushed_reopen_keeps_committed_watermark() {
+    let mut env = TestEnv::with_prefix("discard-unflushed-reopen-watermark").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let table_dir = request.table_dir.clone();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Persist the first batch and leave the second one in the memtable and the WAL.
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows(0, 3),
+        },
+    )
+    .await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Flush(RegionFlushRequest::default()),
+        )
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows(3, 6),
+        },
+    )
+    .await;
+
+    let region = engine.get_region(region_id).unwrap();
+    let before = region.version_control.current();
+    // The discard drops the rows above the flushed frontier and moves the frontier to the
+    // discarded sequence. The rows that stay keep their own numbers, so no sequence
+    // boundary is published.
+    let boundary = before.committed_sequence + 1;
+    let discarded_sequence = before.committed_sequence;
+
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Truncate(RegionTruncateRequest::Unflushed),
+        )
+        .await
+        .unwrap();
+
+    let version = region.version();
+    assert_eq!(discarded_sequence, version.flushed_sequence);
+
+    // A Flow checkpoint at `B` may already be durable, so the boundary must survive the
+    // reopen together with a commit watermark of at least `B`.
+    let engine = env.reopen_engine(engine, MitoConfig::default()).await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Open(RegionOpenRequest {
+                engine: String::new(),
+                table_dir,
+                path_type: PathType::Bare,
+                options: HashMap::default(),
+                skip_wal_replay: false,
+                checkpoint: None,
+                requirements: Default::default(),
+            }),
+        )
+        .await
+        .unwrap();
+    engine
+        .set_region_role(region_id, RegionRole::Leader)
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    let recovered = region.version_control.current();
+    assert!(
+        recovered.committed_sequence >= discarded_sequence,
+        "the recovered commit watermark must stay at or above the discarded sequence: {} < {}",
+        recovered.committed_sequence,
+        discarded_sequence
+    );
+    // The flushed frontier keeps the value the WAL and the manifest name: the boundary is
+    // published above it, not by forging it.
+    assert_eq!(
+        discarded_sequence, recovered.version.flushed_sequence,
+        "the recover must not forge the flushed frontier"
+    );
+
+    // The first write after the reopen must not reuse the sequence a checkpoint consumed.
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: build_rows(6, 8),
+        },
+    )
+    .await;
+    assert!(
+        region.version_control.current().last_sequence > boundary,
+        "a write after the reopen must be attributed a sequence above the boundary, \
+         last_sequence: {}, boundary: {}",
+        region.version_control.current().last_sequence,
+        boundary
     );
 }
 
