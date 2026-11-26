@@ -83,7 +83,7 @@ pub(crate) struct TablePartitioner {
     table_id: TableId,
     rule: PartitionRuleRef,
     versions: HashMap<RegionNumber, Option<PartitionExprVersion>>,
-    sparse_partition_columns: Vec<SparsePartitionColumn>,
+    sparse_partition_tags: Vec<String>,
 }
 
 impl<'a> Partitioner<'a> {
@@ -173,10 +173,9 @@ impl TablePartitioner {
                 .map(|request| (request, WriteAttribution::default()))
                 .collect());
         }
-        let routing = restore_partition_tags_for_columns(&batch, &self.sparse_partition_columns)?;
         let masks = self
             .rule
-            .split_record_batch(routing.as_ref().unwrap_or(&batch))
+            .split_record_batch(&batch)
             .context(SplitInsertSnafu)?;
         self.build_attributed_bulk_requests(batch, masks, None, skip_wal, attribution)
     }
@@ -310,10 +309,9 @@ impl TablePartitioner {
         owners: Vec<usize>,
         skip_wal: bool,
     ) -> Result<Vec<(BulkInsertRequest, Vec<usize>)>> {
-        let routing = restore_partition_tags_for_columns(&batch, &self.sparse_partition_columns)?;
         let masks = self
             .rule
-            .split_record_batch(routing.as_ref().unwrap_or(&batch))
+            .split_record_batch(&batch)
             .context(SplitInsertSnafu)?;
         self.build_tracked_bulk_insert_requests(batch, masks, owners, None, skip_wal)
     }
@@ -368,18 +366,16 @@ impl TablePartitioner {
         let (rule, versions) = partition_manager
             .find_table_partition_rule(table_info)
             .await?;
-        let sparse_partition_columns =
-            resolve_sparse_partition_columns(rule.partition_columns(), table_info);
         Ok(Self {
             table_id: table_info.table_id(),
             rule,
+            sparse_partition_tags: sparse_partition_tags(table_info),
             versions: versions
                 .into_iter()
                 .map(|(region, version)| {
                     (region, version.map(|value| PartitionExprVersion { value }))
                 })
                 .collect(),
-            sparse_partition_columns,
         })
     }
 
@@ -460,21 +456,42 @@ impl TablePartitioner {
         original_ipc: Option<ArrowIpc>,
         skip_wal: bool,
     ) -> Result<Vec<BulkInsertRequest>> {
-        let routing = restore_partition_tags_for_columns(&batch, &self.sparse_partition_columns)?;
         let masks = self
             .rule
-            .split_record_batch(routing.as_ref().unwrap_or(&batch))
+            .split_record_batch(&batch)
             .context(SplitInsertSnafu)?;
         self.build_bulk_insert_requests(batch, masks, original_ipc, skip_wal)
     }
 
     fn build_bulk_insert_requests(
         &self,
-        batch: RecordBatch,
+        mut batch: RecordBatch,
         masks: HashMap<RegionNumber, RegionMask>,
         mut original_ipc: Option<ArrowIpc>,
         skip_wal: bool,
     ) -> Result<Vec<BulkInsertRequest>> {
+        // The region masks have already consumed the tags carried alongside the encoded key.
+        if !self.sparse_partition_tags.is_empty()
+            && batch
+                .column_by_name(consts::PRIMARY_KEY_COLUMN_NAME)
+                .is_some()
+        {
+            let projection: Vec<_> = batch
+                .schema_ref()
+                .fields()
+                .iter()
+                .enumerate()
+                .filter_map(|(i, field)| {
+                    (!self.sparse_partition_tags.contains(field.name())).then_some(i)
+                })
+                .collect();
+            if projection.len() != batch.num_columns() {
+                batch = batch
+                    .project(&projection)
+                    .context(error::ComputeArrowSnafu)?;
+                original_ipc = None;
+            }
+        }
         let mut requests = Vec::with_capacity(masks.len());
         for (region, mask) in masks {
             if mask.select_none() {
@@ -629,6 +646,18 @@ impl TablePartitioner {
     fn version(&self, region: RegionNumber) -> Option<PartitionExprVersion> {
         self.versions.get(&region).copied().flatten()
     }
+}
+
+fn sparse_partition_tags(table_info: &TableInfo) -> Vec<String> {
+    if !is_sparse_mito_table(table_info) {
+        return Vec::new();
+    }
+    let meta = &table_info.meta;
+    meta.partition_key_indices
+        .iter()
+        .filter(|idx| meta.primary_key_indices.contains(idx))
+        .map(|&idx| meta.schema.column_name_by_index(idx).to_owned())
+        .collect()
 }
 
 fn resolve_sparse_partition_columns(
@@ -829,7 +858,6 @@ mod tests {
     use mito_codec::row_converter::sparse;
     use mito_codec::row_converter::{PrimaryKeyCodec, SparsePrimaryKeyCodec};
     use moka::future::Cache;
-    use partition::PartitionRule;
     use partition::expr;
     use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
     use partition::multi_dim::MultiDimPartitionRule;
@@ -844,6 +872,7 @@ mod tests {
     fn build_sparse_partitioner() -> TablePartitioner {
         TablePartitioner {
             table_id: 1,
+            sparse_partition_tags: Vec::new(),
             rule: Arc::new(
                 MultiDimPartitionRule::try_new(
                     vec!["zone".to_string()],
@@ -862,7 +891,6 @@ mod tests {
             ]
             .into_iter()
             .collect(),
-            sparse_partition_columns: Vec::new(),
         }
     }
 
@@ -969,9 +997,9 @@ mod tests {
         // Initially no partition uses table id, but the payload must retain it.
         let initial = TablePartitioner {
             table_id: 1,
+            sparse_partition_tags: sparse_partition_tags(&table_info),
             rule: Arc::new(MultiDimPartitionRule::try_new(vec![], vec![1], vec![], false).unwrap()),
             versions: HashMap::from([(1, Some(PartitionExprVersion { value: 1 }))]),
-            sparse_partition_columns: Vec::new(),
         };
         let requests = initial
             .partition_bulk_insert_requests(batch.clone(), None, false)
@@ -979,6 +1007,7 @@ mod tests {
         assert_eq!(requests.len(), 1);
         let refreshed = TablePartitioner {
             table_id: 1,
+            sparse_partition_tags: sparse_partition_tags(&table_info),
             rule: Arc::new(
                 MultiDimPartitionRule::try_new(
                     vec![metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_string()],
@@ -997,7 +1026,6 @@ mod tests {
                 (1, Some(PartitionExprVersion { value: 2 })),
                 (2, Some(PartitionExprVersion { value: 2 })),
             ]),
-            sparse_partition_columns: Vec::new(),
         };
         assert_eq!(
             refreshed.rule.eval_context(),
@@ -2181,16 +2209,27 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_initial_sparse_partition_restores_tags_without_leaking_payload() {
-        use datatypes::arrow::array::{Float64Array, TimestampMillisecondArray};
+    #[test]
+    fn test_sparse_partition_initial_columns_and_retry_recovery() {
+        use std::collections::BTreeMap;
 
-        let backend = Arc::new(MemoryKvBackend::new());
-        let table_route_cache = test_new_table_route_cache(backend.clone());
-        let partition_info_cache = test_new_partition_info_cache(table_route_cache.clone());
-        let manager = PartitionRuleManager::new(backend, table_route_cache, partition_info_cache);
+        use api::v1::{ColumnDataType as ProtoColType, ColumnSchema as ProtoColSchema, Row, Rows};
+        use common_catalog::consts::METRICS_EXEMPLARS_TABLE;
+        use common_query::prelude::{
+            EXEMPLAR_METRIC_COLUMN, greptime_exemplar_labels, greptime_timestamp, greptime_value,
+        };
+        use datatypes::arrow::array::{Float64Array, TimestampMillisecondArray};
+        use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
+        use datatypes::json::JsonSettings;
+        use datatypes::types::json_type::JsonNativeType;
+
+        use crate::insert::{Exemplar, ExemplarBatch};
+        use crate::req_convert::insert::{
+            exemplars_to_sparse_record_batch, sparse_rows_to_record_batch,
+        };
 
         let mut table_info = test_util::new_test_table_info(1, "sparse_sql", [1, 2].into_iter());
+        table_info.meta.engine = MITO_ENGINE.to_string();
         table_info.meta.schema = Arc::new(schema::Schema::new(vec![
             schema::ColumnSchema::new(
                 metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
@@ -2212,7 +2251,7 @@ mod tests {
             schema::ColumnSchema::new("val", ConcreteDataType::float64_datatype(), true),
         ]));
         table_info.meta.primary_key_indices = vec![0, 1, 2];
-        table_info.meta.partition_key_indices = vec![0, 1, 2];
+        table_info.meta.partition_key_indices = vec![0, 1, 2, 3, 4];
         table_info.meta.column_ids = vec![
             consts::ReservedColumnId::table_id(),
             consts::ReservedColumnId::tsid(),
@@ -2225,26 +2264,79 @@ mod tests {
             "SpArSe".to_string(),
         );
 
-        let codec = SparsePrimaryKeyCodec::schemaless();
         let rows_meta = [
             (10_u32, 1_u64, Some("east"), 1.0_f64),
             (50_u32, 9_u64, Some("west"), 2.0_f64),
             (60_u32, 2_u64, Some(""), 3.0_f64),
         ];
+        let initial_rows = Rows {
+            schema: vec![
+                ProtoColSchema {
+                    column_name: metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_string(),
+                    datatype: ProtoColType::Uint32 as i32,
+                    semantic_type: api::v1::SemanticType::Tag as i32,
+                    ..Default::default()
+                },
+                ProtoColSchema {
+                    column_name: metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
+                    datatype: ProtoColType::Uint64 as i32,
+                    semantic_type: api::v1::SemanticType::Tag as i32,
+                    ..Default::default()
+                },
+                ProtoColSchema {
+                    column_name: "zone".to_string(),
+                    datatype: ProtoColType::String as i32,
+                    semantic_type: api::v1::SemanticType::Tag as i32,
+                    ..Default::default()
+                },
+                ProtoColSchema {
+                    column_name: "ts".to_string(),
+                    datatype: ProtoColType::TimestampMillisecond as i32,
+                    semantic_type: api::v1::SemanticType::Timestamp as i32,
+                    ..Default::default()
+                },
+                ProtoColSchema {
+                    column_name: "val".to_string(),
+                    datatype: ProtoColType::Float64 as i32,
+                    semantic_type: api::v1::SemanticType::Field as i32,
+                    ..Default::default()
+                },
+            ],
+            rows: rows_meta
+                .iter()
+                .enumerate()
+                .map(|(i, (tid, tsid, zone, val))| Row {
+                    values: vec![
+                        ValueData::U32Value(*tid).into(),
+                        ValueData::U64Value(*tsid).into(),
+                        zone.map(|z| ValueData::StringValue(z.to_string()).into())
+                            .unwrap_or_default(),
+                        ValueData::TimestampMillisecondValue((i as i64 + 1) * 1000).into(),
+                        ValueData::F64Value(*val).into(),
+                    ],
+                })
+                .collect(),
+        };
+        let initial_batch = sparse_rows_to_record_batch(&initial_rows, &table_info).unwrap();
+        let storage_batch = initial_batch.project(&[0, 4, 5]).unwrap();
+
+        let codec = SparsePrimaryKeyCodec::schemaless();
         let keys: Vec<Vec<u8>> = rows_meta
             .iter()
             .map(|(tid, tsid, zone, _)| {
                 let mut key = Vec::new();
-                codec.encode_internal(*tid, *tsid, &mut key).unwrap();
-                if let Some(zone) = zone {
-                    codec
-                        .encode_raw_tag_value([(20, zone.as_bytes())].into_iter(), &mut key)
-                        .unwrap();
-                }
+                codec
+                    .encode_raw(
+                        *tid,
+                        *tsid,
+                        zone.iter().map(|z| (20, z.as_bytes())),
+                        &mut key,
+                    )
+                    .unwrap();
                 key
             })
             .collect();
-        let batch = RecordBatch::try_new(
+        let legacy_batch = RecordBatch::try_new(
             Arc::new(Schema::new(vec![
                 Field::new(consts::PRIMARY_KEY_COLUMN_NAME, DataType::Binary, false),
                 Field::new(
@@ -2261,12 +2353,40 @@ mod tests {
             ],
         )
         .unwrap();
+        let (legacy_schema, legacy_header, legacy_payload) =
+            flight::record_batch_to_ipc(legacy_batch.clone()).unwrap();
+        let stale_bulk = BulkInsertRequest {
+            region_id: RegionId::new(1, 99).as_u64(),
+            partition_expr_version: Some(PartitionExprVersion { value: 0 }),
+            skip_wal: false,
+            body: Some(bulk_insert_request::Body::ArrowIpc(ArrowIpc {
+                schema: legacy_schema,
+                data_header: legacy_header,
+                payload: legacy_payload,
+            })),
+            ..Default::default()
+        };
 
         let versions = HashMap::from([
             (1, Some(PartitionExprVersion { value: 1 })),
             (2, Some(PartitionExprVersion { value: 1 })),
         ]);
         for (col, rule) in [
+            (
+                "val",
+                Arc::new(
+                    MultiDimPartitionRule::try_new(
+                        vec!["val".into()],
+                        vec![1, 2],
+                        vec![
+                            expr::col("val").lt(DataValue::from(2.0)),
+                            expr::col("val").gt_eq(DataValue::from(2.0)),
+                        ],
+                        true,
+                    )
+                    .unwrap(),
+                ),
+            ),
             (
                 "zone",
                 Arc::new(
@@ -2319,41 +2439,192 @@ mod tests {
         ] {
             let partitioner = TablePartitioner {
                 table_id: 1,
-                rule: rule.clone(),
+                rule,
+                sparse_partition_tags: sparse_partition_tags(&table_info),
                 versions: versions.clone(),
-                sparse_partition_columns: resolve_sparse_partition_columns(
-                    rule.partition_columns(),
-                    &table_info,
-                ),
             };
+            // Initial conversion carries partition columns so no primary-key decoding runs here.
             let plain = partitioner
-                .partition_bulk_insert_requests(batch.clone(), None, false)
+                .partition_bulk_insert_requests(initial_batch.clone(), None, false)
                 .unwrap();
             let tracked = partitioner
-                .partition_tracked_bulk_insert_requests(batch.clone(), vec![10, 20, 30], false)
+                .partition_tracked_bulk_insert_requests(
+                    initial_batch.clone(),
+                    vec![10, 20, 30],
+                    false,
+                )
                 .unwrap();
             let attributed = partitioner
                 .partition_attributed_bulk_requests(
-                    batch.clone(),
+                    initial_batch.clone(),
                     false,
-                    WriteAttribution::default(),
+                    WriteAttribution::new(initial_batch.num_rows(), Some(Arc::default())),
                 )
                 .unwrap();
             assert_eq!(plain.len(), 2, "{col}");
             assert_eq!(tracked.len(), 2, "{col}");
             assert_eq!(attributed.len(), 2, "{col}");
-            let mut total_rows = 0;
-            for req in &plain {
+            let masks = partitioner.rule.split_record_batch(&initial_batch).unwrap();
+            for req in plain
+                .iter()
+                .chain(tracked.iter().map(|(req, _)| req))
+                .chain(attributed.iter().map(|(req, _)| req))
+            {
                 let Some(bulk_insert_request::Body::ArrowIpc(ipc)) = &req.body else {
                     unreachable!()
                 };
-                let decoded = decode_ipc(ipc);
-                assert_eq!(decoded.num_columns(), 3, "{col}");
-                assert!(decoded.column_by_name(col).is_none());
-                total_rows += decoded.num_rows();
+                let region = RegionId::from_u64(req.region_id).region_number();
+                let expected =
+                    compute::filter_record_batch(&storage_batch, masks[&region].array()).unwrap();
+                assert_eq!(decode_ipc(ipc), expected, "{col}");
             }
-            assert_eq!(total_rows, 3, "{col}");
+
+            // Retry after a rule refresh restores missing partition tags without leaking them into IPC.
+            let rebuilt = partitioner
+                .rebuild_write_requests(
+                    build_request(Body::BulkInsert(stale_bulk.clone())),
+                    &table_info,
+                )
+                .unwrap();
+            let rebuilt_tracked = partitioner
+                .rebuild_tracked_write_requests(
+                    build_request(Body::BulkInsert(stale_bulk.clone())),
+                    &table_info,
+                    Some(vec![10, 20, 30]),
+                )
+                .unwrap();
+            assert_eq!(rebuilt.len(), 2, "{col}");
+            assert_eq!(rebuilt_tracked.len(), 2, "{col}");
+            let mut rebuilt_rows = 0;
+            for req in &rebuilt {
+                let Some(Body::BulkInsert(bulk)) = &req.body else {
+                    unreachable!()
+                };
+                let Some(bulk_insert_request::Body::ArrowIpc(ipc)) = &bulk.body else {
+                    unreachable!()
+                };
+                let decoded = decode_ipc(ipc);
+                assert_eq!(decoded.schema(), legacy_batch.schema(), "{col}");
+                rebuilt_rows += decoded.num_rows();
+            }
+            assert_eq!(rebuilt_rows, 3, "{col}");
         }
-        let _ = manager;
+
+        // Exemplar batches also carry partition columns directly for initial splitting.
+        let mut labels_col = schema::ColumnSchema::new(
+            greptime_exemplar_labels(),
+            ConcreteDataType::json2(JsonNativeType::Null),
+            true,
+        );
+        labels_col.with_extension_type(&Json2ExtensionType::new(Arc::new(JsonMetadata::new(
+            JsonSettings::new_v2(),
+        ))));
+        let mut ex_table =
+            test_util::new_test_table_info(2, METRICS_EXEMPLARS_TABLE, [1, 2].into_iter());
+        ex_table.meta.engine = MITO_ENGINE.to_string();
+        ex_table.meta.schema = Arc::new(schema::Schema::new(vec![
+            schema::ColumnSchema::new(
+                metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                ConcreteDataType::uint32_datatype(),
+                false,
+            ),
+            schema::ColumnSchema::new(
+                metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME,
+                ConcreteDataType::uint64_datatype(),
+                false,
+            ),
+            schema::ColumnSchema::new(
+                EXEMPLAR_METRIC_COLUMN,
+                ConcreteDataType::string_datatype(),
+                true,
+            ),
+            schema::ColumnSchema::new("zone", ConcreteDataType::string_datatype(), true),
+            schema::ColumnSchema::new(
+                greptime_timestamp(),
+                ConcreteDataType::timestamp_nanosecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            schema::ColumnSchema::new(greptime_value(), ConcreteDataType::float64_datatype(), true),
+            labels_col,
+        ]));
+        ex_table.meta.primary_key_indices = vec![0, 1, 2, 3];
+        ex_table.meta.partition_key_indices = vec![3];
+        ex_table.meta.column_ids = vec![
+            consts::ReservedColumnId::table_id(),
+            consts::ReservedColumnId::tsid(),
+            10,
+            20,
+            21,
+            22,
+            23,
+        ];
+        ex_table.meta.options.extra_options.insert(
+            metric_engine_consts::PRIMARY_KEY_ENCODING.to_string(),
+            "sparse".to_string(),
+        );
+        let exemplars = ExemplarBatch::try_new(vec![
+            Exemplar {
+                metric: "cpu".into(),
+                series_labels: Arc::new(BTreeMap::from([("zone".into(), "east".into())])),
+                timestamp: 1000,
+                value: 1.0,
+                labels: BTreeMap::new(),
+            },
+            Exemplar {
+                metric: "cpu".into(),
+                series_labels: Arc::new(BTreeMap::from([("zone".into(), "west".into())])),
+                timestamp: 2000,
+                value: 2.0,
+                labels: BTreeMap::new(),
+            },
+        ])
+        .unwrap();
+        let ex_batch = exemplars_to_sparse_record_batch(
+            &exemplars,
+            &ahash::HashMap::from_iter([("cpu".into(), 10)]),
+            &ex_table,
+        )
+        .unwrap();
+        let ex_partitioner = TablePartitioner {
+            table_id: 2,
+            sparse_partition_tags: sparse_partition_tags(&ex_table),
+            rule: Arc::new(
+                MultiDimPartitionRule::try_new(
+                    vec!["zone".to_string()],
+                    vec![1, 2],
+                    vec![
+                        expr::col("zone").lt(DataValue::String("m".into())),
+                        expr::col("zone").gt_eq(DataValue::String("m".into())),
+                    ],
+                    true,
+                )
+                .unwrap(),
+            ),
+            versions,
+        };
+        for batch in [ex_batch.slice(0, 1), ex_batch] {
+            let (schema, data_header, payload) =
+                flight::record_batch_to_ipc(batch.clone()).unwrap();
+            let original = ArrowIpc {
+                schema,
+                data_header,
+                payload,
+            };
+            let rows = batch.num_rows();
+            let requests = ex_partitioner
+                .partition_bulk_insert_requests(batch, Some(original), false)
+                .unwrap();
+            assert_eq!(requests.len(), rows);
+            for req in requests {
+                let Some(bulk_insert_request::Body::ArrowIpc(ipc)) = req.body else {
+                    unreachable!()
+                };
+                let decoded = decode_ipc(&ipc);
+                assert_eq!(decoded.num_rows(), 1);
+                assert_eq!(decoded.num_columns(), 4);
+                assert!(decoded.column_by_name("zone").is_none());
+            }
+        }
     }
 }

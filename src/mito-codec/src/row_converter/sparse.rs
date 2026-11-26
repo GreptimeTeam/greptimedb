@@ -416,6 +416,23 @@ impl SparsePrimaryKeyCodec {
         Ok(())
     }
 
+    /// Appends the reserved `(table_id, tsid)` prefix followed by ordered non-null raw tag values.
+    ///
+    /// Callers must pass non-null tags in the destination primary-key layout order.
+    pub fn encode_raw<'a, I>(
+        &self,
+        table_id: u32,
+        tsid: u64,
+        ordered_tags: I,
+        buffer: &mut Vec<u8>,
+    ) -> Result<()>
+    where
+        I: IntoIterator<Item = (ColumnId, &'a [u8])>,
+    {
+        self.encode_internal(table_id, tsid, buffer)?;
+        self.encode_raw_tag_value(ordered_tags.into_iter(), buffer)
+    }
+
     /// Decodes the reserved `(table_id, tsid)` prefix from a sparse primary key.
     pub fn decode_ids(&self, bytes: &[u8]) -> Result<(u32, u64)> {
         // Two column IDs, two non-null markers, a u32 table ID, and a u64 TSID.
@@ -935,12 +952,36 @@ mod tests {
                 .encode_to_vec([(1, ValueRef::String(&label))].into_iter(), &mut expected)
                 .unwrap();
             actual.clear();
-            codec.encode_internal(42, 7, &mut actual).unwrap();
             codec
-                .encode_raw_tag_value([(1, label.as_bytes())].into_iter(), &mut actual)
+                .encode_raw(42, 7, [(1, label.as_bytes())], &mut actual)
                 .unwrap();
             assert_eq!(actual, expected, "label length {len}");
         }
+
+        let mut appended = b"prefix".to_vec();
+        let mut expected = b"prefix".to_vec();
+        let utf8_label = "1234567🦀_multi_chunk";
+        codec
+            .encode_to_vec(
+                [
+                    (RESERVED_COLUMN_ID_TABLE_ID, ValueRef::UInt32(99)),
+                    (RESERVED_COLUMN_ID_TSID, ValueRef::UInt64(1234)),
+                    (2, ValueRef::String("")),
+                    (5, ValueRef::String(utf8_label)),
+                ]
+                .into_iter(),
+                &mut expected,
+            )
+            .unwrap();
+        codec
+            .encode_raw(
+                99,
+                1234,
+                [(2, b"".as_slice()), (5, utf8_label.as_bytes())],
+                &mut appended,
+            )
+            .unwrap();
+        assert_eq!(appended, expected);
     }
 
     #[test]
