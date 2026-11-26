@@ -22,6 +22,7 @@ mod postgres_copy_in_test;
 mod promql_test;
 mod reconcile_table;
 mod remote_dyn_filter_test;
+mod slice_agg_cache_test;
 pub mod test_util;
 
 use std::collections::HashMap;

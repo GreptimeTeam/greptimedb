@@ -153,6 +153,10 @@
 | `query.experimental_spill_path` | String | Unset | Spill directory path. Ignored unless mode is "custom". |
 | `query.experimental_spill_max_temp_directory_size` | String | `1GiB` | Maximum total size of spill directory (default: "1GiB").<br/>Ignored unless mode is "custom". |
 | `query.experimental_spill_compression` | String | `uncompressed` | Compression for spilled data files: "uncompressed" (default), "lz4_frame", "zstd".<br/>Ignored unless mode is "custom". |
+| `query.experimental_slice_agg_cache` | Bool | `false` | Cache partial aggregation states per one-hour time slice, so aggregations repeated<br/>over sliding time windows, such as dashboards, scan only changed slices.<br/>A per-request query.experimental_slice_agg_cache option overrides it. |
+| `query.experimental_slice_agg_cache_size` | String | `256MiB` | Memory capacity of the slice aggregate cache. |
+| `query.experimental_slice_agg_cache_max_collect_size` | String | `256MiB` | Most states one query collects for the cache. A query whose states exceed it is not<br/>cached until the idle timeout passes. |
+| `query.experimental_slice_agg_cache_idle_timeout` | String | `1h` | Cache entries not read for this long are dropped. |
 | `storage` | -- | -- | The data storage options. |
 | `storage.data_home` | String | `./greptimedb_data` | The working home directory. |
 | `storage.copy_root` | String | `./greptimedb_data/copy` | Root directory for standalone SQL access to local files.<br/>Relative SQL paths are resolved below this directory. Absolute paths are accepted only when<br/>they are inside this directory. Defaults to `<data_home>/copy`.<br/>Distributed deployments always reject SQL access to local files.<br/>Upgrade note: COPY commands and existing external tables that reference paths outside this<br/>directory will fail. Move those files below the copy root, set this option to a dedicated<br/>directory containing them, or migrate the files to object storage before upgrading. |
@@ -641,6 +645,10 @@
 | `query.experimental_spill_path` | String | Unset | Spill directory path. Ignored unless mode is "custom". |
 | `query.experimental_spill_max_temp_directory_size` | String | `1GiB` | Maximum total size of spill directory (default: "1GiB").<br/>Ignored unless mode is "custom". |
 | `query.experimental_spill_compression` | String | `uncompressed` | Compression for spilled data files: "uncompressed" (default), "lz4_frame", "zstd".<br/>Ignored unless mode is "custom". |
+| `query.experimental_slice_agg_cache` | Bool | `false` | Cache partial aggregation states per one-hour time slice, so aggregations repeated<br/>over sliding time windows, such as dashboards, scan only changed slices.<br/>A per-request query.experimental_slice_agg_cache option overrides it. |
+| `query.experimental_slice_agg_cache_size` | String | `256MiB` | Memory capacity of the slice aggregate cache. |
+| `query.experimental_slice_agg_cache_max_collect_size` | String | `256MiB` | Most states one query collects for the cache. A query whose states exceed it is not<br/>cached until the idle timeout passes. |
+| `query.experimental_slice_agg_cache_idle_timeout` | String | `1h` | Cache entries not read for this long are dropped. |
 | `storage` | -- | -- | The data storage options. |
 | `storage.data_home` | String | `./greptimedb_data` | The working home directory. |
 | `storage.probe_on_startup` | Bool | `true` | Whether to probe every remote object storage when the datanode starts.<br/>The probe writes, reads, overwrites, lists and deletes an object under<br/>`.greptime_probe/`, and a failure aborts startup. The probe lives at the storage<br/>root, so the credentials must allow writes and deletes below the root. Disable it<br/>when the credentials are scoped to narrower prefixes or when the storage may be<br/>unavailable at startup. |

@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use common_base::memory_limit::MemoryLimit;
@@ -153,6 +154,19 @@ pub struct QueryOptions {
     /// a `true` default routes every query natively and a `false` one still lets one query or one
     /// session ask for it. Default: `false`.
     pub experimental_native_promql: bool,
+    /// Experimental: caches partial aggregation states per time slice, for aggregations
+    /// repeated over sliding time windows such as dashboards. A per-request
+    /// `query.experimental_slice_agg_cache` option overrides it. Default: `false`.
+    pub experimental_slice_agg_cache: bool,
+    /// Experimental: capacity of the slice aggregate cache. Default: `256MiB`.
+    pub experimental_slice_agg_cache_size: ReadableSize,
+    /// Experimental: most states one query collects for the slice aggregate cache. A plan
+    /// whose states exceed it is not cached until the idle timeout passes. Default: `256MiB`.
+    pub experimental_slice_agg_cache_max_collect_size: ReadableSize,
+    /// Experimental: slice aggregate cache entries not read for this long are dropped.
+    /// Default: `1h`.
+    #[serde(with = "humantime_serde")]
+    pub experimental_slice_agg_cache_idle_timeout: Duration,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -170,6 +184,10 @@ impl Default for QueryOptions {
             experimental_spill_compression: QuerySpillCompression::Uncompressed,
             experimental_memory_pool_policy: QueryMemoryPoolPolicy::Greedy,
             experimental_native_promql: false,
+            experimental_slice_agg_cache: false,
+            experimental_slice_agg_cache_size: ReadableSize::mb(256),
+            experimental_slice_agg_cache_max_collect_size: ReadableSize::mb(256),
+            experimental_slice_agg_cache_idle_timeout: Duration::from_secs(3600),
         }
     }
 }
@@ -539,6 +557,46 @@ impl ExtensionOptions for NativePromqlExtension {
             key: "requested".to_string(),
             value: Some(self.requested.to_string()),
             description: "Whether the query requests the native fused-series PromQL route",
+        }]
+    }
+}
+
+/// Whether a query caches partial aggregation states per time slice: the per-request
+/// `query.experimental_slice_agg_cache` option, or the
+/// [`QueryOptions::experimental_slice_agg_cache`] default.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SliceAggCacheExtension {
+    pub(crate) enabled: bool,
+}
+
+impl ConfigExtension for SliceAggCacheExtension {
+    const PREFIX: &'static str = "slice_agg_cache";
+}
+
+impl ExtensionOptions for SliceAggCacheExtension {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn cloned(&self) -> Box<dyn ExtensionOptions> {
+        Box::new(*self)
+    }
+
+    fn set(&mut self, key: &str, value: &str) -> datafusion::error::Result<()> {
+        Err(datafusion_common::DataFusionError::NotImplemented(format!(
+            "SliceAggCacheExtension does not support set key: {key} with value: {value}"
+        )))
+    }
+
+    fn entries(&self) -> Vec<ConfigEntry> {
+        vec![ConfigEntry {
+            key: "enabled".to_string(),
+            value: Some(self.enabled.to_string()),
+            description: "Whether partial aggregation states are cached per time slice",
         }]
     }
 }

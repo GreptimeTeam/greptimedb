@@ -4969,6 +4969,10 @@ experimental_spill_max_temp_directory_size = "1GiB"
 experimental_spill_compression = "uncompressed"
 experimental_memory_pool_policy = "greedy"
 experimental_native_promql = false
+experimental_slice_agg_cache = false
+experimental_slice_agg_cache_size = "256MiB"
+experimental_slice_agg_cache_max_collect_size = "256MiB"
+experimental_slice_agg_cache_idle_timeout = "1h"
 
 [memory]
 enable_heap_profiling = true

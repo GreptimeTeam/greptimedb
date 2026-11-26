@@ -375,6 +375,20 @@ memory_pool_size = "50%"
 #+ experimental_spill_compression = "uncompressed"
 # --- End spill-to-disk ---
 
+# --- Experimental: slice aggregate cache ---
+## Cache partial aggregation states per one-hour time slice, so aggregations repeated
+## over sliding time windows, such as dashboards, scan only changed slices.
+## A per-request query.experimental_slice_agg_cache option overrides it.
+#+ experimental_slice_agg_cache = false
+## Memory capacity of the slice aggregate cache.
+#+ experimental_slice_agg_cache_size = "256MiB"
+## Most states one query collects for the cache. A query whose states exceed it is not
+## cached until the idle timeout passes.
+#+ experimental_slice_agg_cache_max_collect_size = "256MiB"
+## Cache entries not read for this long are dropped.
+#+ experimental_slice_agg_cache_idle_timeout = "1h"
+# --- End slice aggregate cache ---
+
 ## The data storage options.
 [storage]
 ## The working home directory.
