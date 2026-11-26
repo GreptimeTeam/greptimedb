@@ -154,8 +154,8 @@
 | `query.experimental_spill_max_temp_directory_size` | String | `1GiB` | Maximum total size of spill directory (default: "1GiB").<br/>Ignored unless mode is "custom". |
 | `query.experimental_spill_compression` | String | `uncompressed` | Compression for spilled data files: "uncompressed" (default), "lz4_frame", "zstd".<br/>Ignored unless mode is "custom". |
 | `query.experimental_slice_agg_cache` | Bool | `false` | Cache partial aggregation states per one-hour time slice, so aggregations repeated<br/>over sliding time windows, such as dashboards, scan only changed slices.<br/>A per-request query.experimental_slice_agg_cache option overrides it. |
-| `query.experimental_slice_agg_cache_size` | String | `256MiB` | Memory capacity of the slice aggregate cache. |
-| `query.experimental_slice_agg_cache_max_collect_size` | String | `256MiB` | Most states one aggregation collects for the cache. An aggregation whose states exceed<br/>it is not cached until the idle timeout passes. |
+| `query.experimental_slice_agg_cache_size` | String | Auto | Memory capacity of the slice aggregate cache.<br/>If not set, it's default to 1/16 of OS memory with a max limitation of 512MB. |
+| `query.experimental_slice_agg_cache_max_collect_size` | String | Auto | Most states one aggregation collects for the cache. An aggregation whose states exceed<br/>it is not cached until the idle timeout passes.<br/>If not set, it's default to 1/4 of experimental_slice_agg_cache_size. |
 | `query.experimental_slice_agg_cache_idle_timeout` | String | `1h` | Cache entries not read for this long are dropped. |
 | `storage` | -- | -- | The data storage options. |
 | `storage.data_home` | String | `./greptimedb_data` | The working home directory. |
@@ -646,8 +646,8 @@
 | `query.experimental_spill_max_temp_directory_size` | String | `1GiB` | Maximum total size of spill directory (default: "1GiB").<br/>Ignored unless mode is "custom". |
 | `query.experimental_spill_compression` | String | `uncompressed` | Compression for spilled data files: "uncompressed" (default), "lz4_frame", "zstd".<br/>Ignored unless mode is "custom". |
 | `query.experimental_slice_agg_cache` | Bool | `false` | Cache partial aggregation states per one-hour time slice, so aggregations repeated<br/>over sliding time windows, such as dashboards, scan only changed slices.<br/>A per-request query.experimental_slice_agg_cache option overrides it. |
-| `query.experimental_slice_agg_cache_size` | String | `256MiB` | Memory capacity of the slice aggregate cache. |
-| `query.experimental_slice_agg_cache_max_collect_size` | String | `256MiB` | Most states one aggregation collects for the cache. An aggregation whose states exceed<br/>it is not cached until the idle timeout passes. |
+| `query.experimental_slice_agg_cache_size` | String | Auto | Memory capacity of the slice aggregate cache.<br/>If not set, it's default to 1/16 of OS memory with a max limitation of 512MB. |
+| `query.experimental_slice_agg_cache_max_collect_size` | String | Auto | Most states one aggregation collects for the cache. An aggregation whose states exceed<br/>it is not cached until the idle timeout passes.<br/>If not set, it's default to 1/4 of experimental_slice_agg_cache_size. |
 | `query.experimental_slice_agg_cache_idle_timeout` | String | `1h` | Cache entries not read for this long are dropped. |
 | `storage` | -- | -- | The data storage options. |
 | `storage.data_home` | String | `./greptimedb_data` | The working home directory. |
