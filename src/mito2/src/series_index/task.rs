@@ -178,7 +178,7 @@ struct SeriesIndexTask {
     disk_usage: Arc<AtomicU64>,
     max_size: u64,
     reported_usage: u64,
-    /// Resume after an unusable group on the next pass. Holds no reader pins.
+    /// Resume after a failed merge write on the next pass. Holds no reader pins.
     failed_merge: HashMap<RegionId, MergeRank>,
     worker_id: u32,
     state: Arc<SeriesIndexTaskState>,
@@ -400,10 +400,8 @@ impl SeriesIndexTask {
             let output =
                 crate::sst::narthex::write_series(&region.access_layer, metadata, &inputs, window)
                     .await
-                    .inspect_err(|error| {
-                        if error.is_unusable_series_index() {
-                            self.failed_merge.insert(region.region_id, rank);
-                        }
+                    .inspect_err(|_| {
+                        self.failed_merge.insert(region.region_id, rank);
                     })?;
             let handle = FileHandle::new(output.clone(), region.file_purger.clone());
             let edit = crate::manifest::action::RegionEdit {
@@ -962,13 +960,19 @@ mod tests {
         engine.stop().await.unwrap();
     }
 
+    #[derive(Clone, Copy)]
+    enum BrokenIndex {
+        MissingPart,
+        TruncatedPart,
+        IncompatibleSchema,
+    }
+
     #[rstest::rstest]
-    #[case::missing_part(false)]
-    #[case::incompatible_schema(true)]
+    #[case::missing_part(BrokenIndex::MissingPart)]
+    #[case::truncated_part(BrokenIndex::TruncatedPart)]
+    #[case::incompatible_schema(BrokenIndex::IncompatibleSchema)]
     #[tokio::test]
-    async fn test_unreadable_merge_does_not_starve_another_window(
-        #[case] incompatible_schema: bool,
-    ) {
+    async fn test_unreadable_merge_does_not_starve_another_window(#[case] broken: BrokenIndex) {
         let mut env = TestEnv::new().await;
         let engine = env
             .create_engine(MitoConfig {
@@ -1025,10 +1029,9 @@ mod tests {
             })
             .unwrap();
         let broken_window = cheapest.meta_ref().series_window().unwrap().start;
-        let suffix = if incompatible_schema {
-            "manifest.json"
-        } else {
-            ".series"
+        let suffix = match broken {
+            BrokenIndex::IncompatibleSchema => "manifest.json",
+            BrokenIndex::MissingPart | BrokenIndex::TruncatedPart => ".series",
         };
         let path = cheapest
             .meta_ref()
@@ -1040,21 +1043,25 @@ mod tests {
             .path;
         let store = region.access_layer.object_store();
         let saved = store.read(&path).await.unwrap().to_bytes();
-        if incompatible_schema {
-            let mut manifest: crate::series_index::columnar::Manifest =
-                serde_json::from_slice(&saved).unwrap();
-            manifest.tags[0].column_id = 9;
-            assert!(metadata.column_by_id(9).is_none());
-            let incompatible = serde_json::to_vec(&manifest).unwrap();
-            assert_eq!(saved.len(), incompatible.len());
-            store.write(&path, incompatible).await.unwrap();
-        } else {
-            store.delete(&path).await.unwrap();
+        match broken {
+            BrokenIndex::MissingPart => store.delete(&path).await.unwrap(),
+            BrokenIndex::TruncatedPart => {
+                store.write(&path, saved.slice(..1)).await.unwrap();
+            }
+            BrokenIndex::IncompatibleSchema => {
+                let mut manifest: crate::series_index::columnar::Manifest =
+                    serde_json::from_slice(&saved).unwrap();
+                manifest.tags[0].column_id = 9;
+                assert!(metadata.column_by_id(9).is_none());
+                let incompatible = serde_json::to_vec(&manifest).unwrap();
+                assert_eq!(saved.len(), incompatible.len());
+                store.write(&path, incompatible).await.unwrap();
+            }
         }
         drop(version);
         flush_windows(3).await;
         let error = reconcile().await.unwrap_err();
-        if incompatible_schema {
+        if matches!(broken, BrokenIndex::IncompatibleSchema) {
             assert!(
                 format!("{error:?}").contains("series tag absent from scan schema"),
                 "{error:?}"

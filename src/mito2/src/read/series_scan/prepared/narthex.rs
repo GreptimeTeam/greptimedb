@@ -29,7 +29,9 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::PartitionRange;
 use store_api::storage::consts::{ReservedColumnId, SEQUENCE_COLUMN_NAME};
 
-use crate::error::{ComputeArrowSnafu, DecodeSnafu, NewRecordBatchSnafu, RecordBatchSnafu, Result};
+use crate::error::{
+    ComputeArrowSnafu, DecodeSnafu, Error, NewRecordBatchSnafu, RecordBatchSnafu, Result,
+};
 use crate::read::scan_region::StreamContext;
 use crate::read::series_scan::prepared::invalid;
 use crate::series_index::ROW_COUNT_COLUMN;
@@ -82,7 +84,6 @@ pub(crate) async fn open_sources(
     context: &StreamContext,
     ranges: &[PartitionRange],
     pool: &Arc<dyn datafusion::execution::memory_pool::MemoryPool>,
-    use_indexes: bool,
 ) -> Result<(
     Vec<Arc<dyn SamplesFormatReader>>,
     Vec<Box<dyn FormatReader>>,
@@ -92,12 +93,7 @@ pub(crate) async fn open_sources(
     let indices = file_indices(context, ranges)?;
     let mut windows = BTreeMap::new();
     let mut unavailable = BTreeSet::new();
-    let indexes = if use_indexes {
-        context.input.narthex_series_indexes.as_slice()
-    } else {
-        &[]
-    };
-    for file in indexes {
+    for file in &context.input.narthex_series_indexes {
         let FileFormat::NarthexSeriesIndex(index) = &file.meta_ref().format else {
             continue;
         };
@@ -126,7 +122,13 @@ pub(crate) async fn open_sources(
         .await
         {
             Ok(reader) => reader,
-            Err(error) if error.is_unusable_series_index() => {
+            Err(error)
+                if error.is_object_not_found()
+                    || matches!(
+                        error,
+                        Error::InvalidMeta { .. } | Error::UnsupportedOperation { .. }
+                    ) =>
+            {
                 unavailable.insert(window.start);
                 continue;
             }

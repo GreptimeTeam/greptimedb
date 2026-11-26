@@ -1010,6 +1010,19 @@ async fn test_narthex_incremental_index_after_compaction() -> WhateverResult<()>
         .delete(part)
         .await
         .unwrap();
+    let error = scan().await.unwrap_err();
+    assert!(format!("{error:?}").contains("NotFound"), "{error:?}");
+    // An index that cannot be opened still falls back to sample discovery.
+    let manifest = objects
+        .iter()
+        .find(|object| object.path.ends_with("manifest.json"))
+        .unwrap();
+    region
+        .access_layer
+        .object_store()
+        .delete(&manifest.path)
+        .await
+        .unwrap();
     assert_eq!(scan().await?, rows);
     engine
         .edit_region(
