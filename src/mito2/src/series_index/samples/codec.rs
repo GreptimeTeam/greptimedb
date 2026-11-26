@@ -125,6 +125,7 @@ pub(super) fn decode_numbers(bytes: &[u8], encoding: u16, rows: usize) -> Result
 }
 
 pub(super) fn encode_float(values: &[Option<u64>]) -> Vec<u8> {
+    // An all-null column keeps the self-describing bitmap and stores no value bytes at all.
     let nullable = values.iter().any(Option::is_none);
     let mut out = vec![u8::from(nullable)];
     if nullable {
@@ -148,7 +149,7 @@ pub(super) fn encode_float(values: &[Option<u64>]) -> Vec<u8> {
 }
 pub(super) fn decode_float(bytes: &[u8], rows: usize, nulls: u32) -> Result<Vec<Option<u64>>> {
     require(
-        (1..=MAX_ROWS).contains(&rows) && (nulls as usize) < rows,
+        (1..=MAX_ROWS).contains(&rows) && nulls as usize <= rows,
         "invalid samples float count",
     )?;
     let mut c = Cursor::new(bytes);
@@ -175,6 +176,12 @@ pub(super) fn decode_float(bytes: &[u8], rows: usize, nulls: u32) -> Result<Vec<
         }
         _ => return Err(unsupported("samples validity kind")),
     };
+    if nulls as usize == rows {
+        // An all-null column encodes as the validity kind, an all-zero bitmap, and nothing else:
+        // there is no first value and no XOR delta to read. Trailing bytes are still corruption.
+        c.end()?;
+        return Ok(vec![None; rows]);
+    }
     let first = c.u64()?;
     require(
         rows - nulls as usize - 1 <= c.remaining(),

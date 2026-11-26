@@ -477,6 +477,9 @@ impl SeriesIndexTask {
                 region_id: region.region_id,
                 origin: region.clone(),
                 edit,
+                // A native maintenance publication adds no SST, so it installs through the
+                // import path without admitting any file.
+                kind: crate::request::RegionEditKind::Import,
                 result: result.map_err(Arc::new),
                 waiters: Waiters::one(tx),
                 is_staging: false,

@@ -326,4 +326,68 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn narthex_bulk_all_null_float_column_round_trips() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("value", DataType::Float64, true),
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(PRIMARY_KEY_COLUMN_NAME, DataType::Binary, false),
+            Field::new(SEQUENCE_COLUMN_NAME, DataType::UInt64, false),
+            Field::new(OP_TYPE_COLUMN_NAME, DataType::UInt8, false),
+        ]));
+        // One block per key. Nine rows straddle the validity byte, one and eight do not.
+        let keys = [b"a".as_slice(), b"b", b"c"];
+        let rows_per_key = [8usize, 1, 9];
+        let mut key_values = Vec::new();
+        let mut times = Vec::new();
+        let mut sequences = Vec::new();
+        let mut operations = Vec::new();
+        for (key, rows) in keys.iter().zip(rows_per_key) {
+            for row in 0..rows {
+                key_values.push(*key);
+                times.push(row as i64);
+                sequences.push(row as u64);
+                operations.push(1);
+            }
+        }
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Float64Array::from(vec![None::<f64>; times.len()])),
+                Arc::new(TimestampMillisecondArray::from(times)),
+                Arc::new(BinaryArray::from_iter_values(key_values)),
+                Arc::new(UInt64Array::from(sequences)),
+                Arc::new(UInt8Array::from(operations)),
+            ],
+        )
+        .unwrap();
+        let mut encoded = NarthexBulkPart::default();
+        encoded.push(&batch).unwrap();
+        assert_eq!(rows_per_key.len(), encoded.blocks.len());
+        for (block, rows) in encoded.blocks.iter().zip(rows_per_key) {
+            // An all-null value column keeps its validity kind and bitmap and stores no values.
+            let NarthexBulkColumn::Float { nulls, bytes } = &block.columns[0] else {
+                panic!("expected an encoded narthex bulk float column");
+            };
+            assert_eq!(rows as u32, *nulls);
+            assert_eq!(1 + rows.div_ceil(8), bytes.len());
+            assert!(bytes[1..].iter().all(|byte| *byte == 0));
+        }
+        let decoded = encoded.read(schema).collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(rows_per_key.len(), decoded.len());
+        for (block, rows) in decoded.iter().zip(rows_per_key) {
+            let values = block
+                .column(0)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            assert_eq!(rows, values.len());
+            assert_eq!(rows, values.null_count());
+        }
+    }
 }

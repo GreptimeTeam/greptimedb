@@ -262,6 +262,9 @@ pub(crate) struct ScanRegion {
     filter_deleted: bool,
     /// Files and exact sequence capability selected together by the engine.
     exact_selection: Option<(Vec<FileHandle>, Option<SequenceRange>)>,
+    /// Whether `request.memtable_max_sequence` was derived at scan open rather
+    /// than requested by the caller.
+    implicit_snapshot_bound: bool,
     /// Counters that should receive query-load metrics.
     query_stat_counters: Option<RegionQueryStatCounters>,
     #[cfg(feature = "enterprise")]
@@ -292,6 +295,7 @@ impl ScanRegion {
             start_time: None,
             filter_deleted: true,
             exact_selection: None,
+            implicit_snapshot_bound: false,
             query_stat_counters: None,
             #[cfg(feature = "enterprise")]
             extension_range_provider: None,
@@ -409,6 +413,14 @@ impl ScanRegion {
         exact_selection: (Vec<FileHandle>, Option<SequenceRange>),
     ) -> Self {
         self.exact_selection = Some(exact_selection);
+        self
+    }
+
+    /// Marks a snapshot upper bound that the engine derived at open instead of
+    /// receiving it with the request.
+    #[must_use]
+    pub(crate) fn with_implicit_snapshot_bound(mut self, implicit: bool) -> Self {
+        self.implicit_snapshot_bound = implicit;
         self
     }
 
@@ -548,6 +560,11 @@ impl ScanRegion {
             } else {
                 exact_sequence_range(&self.request, &self.version)?
             };
+        // A snapshot bound derived at open is authoritative only for the part of
+        // the scan the pinned version cannot bound by itself: memtable ranges.
+        // Exact ranges keep enforcing their requested `(min, max]` delta
+        // row-level, so they keep the current comparison against `max`.
+        let implicit_snapshot_bound = self.implicit_snapshot_bound && sequence_range.is_none();
         if sst_min_sequence.is_some() && sequence_range.is_some() {
             return SequenceRangeUnsupportedSnafu {
                 region_id: self.region_id(),
@@ -672,6 +689,7 @@ impl ScanRegion {
                     .then_some(self.request.memtable_max_sequence)
                     .flatten(),
             )
+            .with_implicit_snapshot_bound(implicit_snapshot_bound)
             .with_sequence_range(sequence_range)
             .with_query_stat_counters(self.query_stat_counters);
         #[cfg(feature = "enterprise")]
@@ -1046,6 +1064,13 @@ pub struct ScanInput {
     explain_flat_format: bool,
     /// Snapshot upper bound bound at scan open and propagated back to the caller.
     pub(crate) snapshot_sequence: Option<SequenceNumber>,
+    /// Whether `snapshot_sequence` was derived at open (no explicit
+    /// `memtable_max_sequence` in the request) for a non-exact scan. Such a
+    /// bound fences memtable ranges only: the pinned `Version` already decides
+    /// which SST rows are visible, while their encoded sequences need not be
+    /// bounded by this region's committed sequence (a physical COPY installs
+    /// source sequences).
+    pub(crate) implicit_snapshot_bound: bool,
     /// Set only when the region preserves per-row sequences
     /// (`preserve_row_sequence` on an append-only table) and the scan
     /// carries an explicit exact range. When set, SST readers apply the same
@@ -1125,6 +1150,7 @@ impl ScanInput {
                 distribution: None,
                 explain_flat_format: false,
                 snapshot_sequence: None,
+                implicit_snapshot_bound: false,
                 sequence_range: None,
                 compaction: false,
                 compaction_read_parallelism: 1,
@@ -1500,6 +1526,14 @@ impl ScanInputBuilder {
         snapshot_sequence: Option<SequenceNumber>,
     ) -> Self {
         self.input.snapshot_sequence = snapshot_sequence;
+        self
+    }
+
+    /// Sets whether the snapshot upper bound was derived at open for a non-exact
+    /// scan, i.e. whether it fences memtable ranges only.
+    #[must_use]
+    pub(crate) fn with_implicit_snapshot_bound(mut self, implicit: bool) -> Self {
+        self.input.implicit_snapshot_bound = implicit;
         self
     }
 

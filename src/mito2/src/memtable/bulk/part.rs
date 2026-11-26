@@ -45,7 +45,7 @@ use datatypes::prelude::{MutableVector, Vector};
 use datatypes::value::ValueRef;
 use datatypes::vectors::Helper;
 use mito_codec::key_values::{KeyValue, KeyValues};
-use mito_codec::row_converter::sparse::SparsePrimaryKeyValidator;
+use mito_codec::row_converter::sparse::{SparseLabelNameRanks, SparsePrimaryKeyValidator};
 use mito_codec::row_converter::{PrimaryKeyCodec, SortField, build_primary_key_codec_with_fields};
 use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, ZstdLevel};
@@ -605,6 +605,8 @@ pub struct BulkPartConverter {
     key_array_builder: PrimaryKeyArrayBuilder,
     /// Whether any input key was supplied pre-encoded and still needs validation.
     has_pre_encoded_keys: bool,
+    /// Canonical label order of the region, to check pre-encoded sparse keys.
+    label_name_ranks: SparseLabelNameRanks,
     /// Builders for non-primary key columns.
     value_builder: ValueBuilder,
     /// Builders for individual primary key columns.
@@ -637,6 +639,7 @@ impl BulkPartConverter {
             region_metadata.primary_key_encoding,
             primary_key_codec.encoding()
         );
+        let label_name_ranks = SparseLabelNameRanks::new(region_metadata);
 
         let primary_key_column_builders = if store_primary_key_columns
             && region_metadata.primary_key_encoding != PrimaryKeyEncoding::Sparse
@@ -652,6 +655,7 @@ impl BulkPartConverter {
             key_buf: Vec::new(),
             key_array_builder: PrimaryKeyArrayBuilder::new(),
             has_pre_encoded_keys: false,
+            label_name_ranks,
             value_builder: ValueBuilder::new(region_metadata, capacity),
             primary_key_column_builders,
             min_ts: i64::MAX,
@@ -769,7 +773,7 @@ impl BulkPartConverter {
         // Primary key.
         let pk_array = self.key_array_builder.finish();
         if self.has_pre_encoded_keys {
-            validate_sparse_dictionary(&pk_array)?;
+            validate_sparse_dictionary(&pk_array, &self.label_name_ranks)?;
         }
         columns.push(Arc::new(pk_array));
         // Sequence and op type.
@@ -796,7 +800,10 @@ impl BulkPartConverter {
 }
 
 /// Validates each referenced key once; sliced dictionaries may retain unused invalid values.
-fn validate_sparse_dictionary(keys: &PrimaryKeyArray) -> Result<()> {
+fn validate_sparse_dictionary(
+    keys: &PrimaryKeyArray,
+    label_name_ranks: &SparseLabelNameRanks,
+) -> Result<()> {
     let values = keys
         .values()
         .as_any()
@@ -816,7 +823,7 @@ fn validate_sparse_dictionary(keys: &PrimaryKeyArray) -> Result<()> {
         let index = index as usize;
         if !validated[index] {
             validator
-                .validate(values.value(index))
+                .validate_canonical_order(values.value(index), label_name_ranks)
                 .context(EncodeSnafu)?;
             validated[index] = true;
         }
@@ -1097,7 +1104,7 @@ pub fn convert_bulk_part(
                 reason: "encoded primary keys must be a UInt32 binary dictionary",
             },
         )?;
-        validate_sparse_dictionary(keys)?;
+        validate_sparse_dictionary(keys, &SparseLabelNameRanks::new(region_metadata))?;
         column
     } else {
         // Extract and encode primary key columns by name.
@@ -3061,6 +3068,43 @@ mod tests {
                     invalid_converter.append_key_values(batch).unwrap();
                 }
                 assert!(invalid_converter.convert().is_err());
+            }
+        }
+
+        // Labels are ordered by name, so `k1` (column 1) must not precede `k0` (column 0).
+        let mut swapped_key = Vec::new();
+        mito_codec::row_converter::SparsePrimaryKeyCodec::schemaless()
+            .encode_values(
+                &[
+                    (ReservedColumnId::table_id(), Value::UInt32(2048)),
+                    (ReservedColumnId::tsid(), Value::UInt64(100)),
+                    (1, Value::String("key21".into())),
+                    (0, Value::String("key11".into())),
+                ],
+                &mut swapped_key,
+            )
+            .unwrap();
+        let mut mutation = key_values1.mutation.clone();
+        mutation.rows.as_mut().unwrap().rows[1].values[0].value_data =
+            Some(api::v1::value::ValueData::BinaryValue(swapped_key));
+        let swapped = KeyValues::new(&metadata, mutation).unwrap();
+        for batches in [vec![&swapped], vec![&raw, &swapped], vec![&swapped, &raw]] {
+            let mut swapped_converter = BulkPartConverter::new(
+                &metadata,
+                schema.clone(),
+                capacity,
+                primary_key_codec.clone(),
+                true,
+            );
+            for batch in batches {
+                swapped_converter.append_key_values(batch).unwrap();
+            }
+            match swapped_converter.convert() {
+                Ok(_) => panic!("non-canonical sparse key must be rejected"),
+                Err(error) => assert!(
+                    format!("{error:?}").contains("label-name order"),
+                    "{error:?}"
+                ),
             }
         }
 

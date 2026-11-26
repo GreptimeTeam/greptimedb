@@ -322,8 +322,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
-    fn is_import_without_staging_binding(request: &RegionEditRequest) -> bool {
-        matches!(request.kind, RegionEditKind::Import) && request.staging_partition_expr.is_none()
+    /// Whether the edit publishes objects the region must own outright, so it cannot enter a
+    /// staging manifest: an unbound import or a physical copy.
+    fn is_unbound_direct_edit(request: &RegionEditRequest) -> bool {
+        matches!(request.kind, RegionEditKind::Import | RegionEditKind::Copy)
+            && request.staging_partition_expr.is_none()
     }
 
     /// Whether EnterStaging is pending in the worker, flush, or compaction queue.
@@ -335,16 +338,14 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             || self.pending_ddls.has_enter_staging(region_id)
     }
 
-    /// Handles a newly received edit, rejecting unbound imports while EnterStaging drains
-    /// previously accepted edits. Queued edits bypass this admission check.
+    /// Handles a newly received edit, rejecting unbound imports and physical copies while
+    /// EnterStaging drains previously accepted edits. Queued edits bypass this admission check.
     pub(crate) fn handle_incoming_region_edit(
         &mut self,
         request: RegionEditRequest,
     ) -> RegionEditDispatch {
         let region_id = request.region_id;
-        if Self::is_import_without_staging_binding(&request)
-            && self.has_pending_enter_staging(region_id)
-        {
+        if Self::is_unbound_direct_edit(&request) && self.has_pending_enter_staging(region_id) {
             request
                 .waiters
                 .reply_with(|| RegionBusySnafu { region_id }.fail());
@@ -363,8 +364,23 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return RegionEditDispatch::Rejected;
         };
 
-        // Unbound imports must not be acknowledged into a manifest that staging can discard.
-        if Self::is_import_without_staging_binding(&request) && region.in_staging_session() {
+        // An edit prepared outside the worker against an older instance (a physical copy
+        // copies its objects first) describes what that instance saw. Admission looks the
+        // region up by id, so without this check a region reopened meanwhile would take the
+        // stale preparation.
+        if let Some(prepared_for) = &request.prepared_for
+            && !Arc::ptr_eq(prepared_for, &region)
+        {
+            request
+                .waiters
+                .reply_with(|| RegionNotFoundSnafu { region_id }.fail());
+            return RegionEditDispatch::Rejected;
+        }
+        let unbound = Self::is_unbound_direct_edit(&request);
+
+        // Unbound imports and physical copies must not be acknowledged into a manifest that
+        // staging can discard.
+        if unbound && region.in_staging_session() {
             request
                 .waiters
                 .reply_with(|| RejectWriteInStagingSnafu { region_id }.fail());
@@ -426,6 +442,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             mut edit,
             waiters,
             preload_sst_cache,
+            prepared_for: _,
             staging_partition_expr: _,
         } = request;
         #[cfg(feature = "enterprise")]
@@ -442,11 +459,18 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
 
         // Allow retrieving `is_staging` before spawn the edit region task.
-        let is_staging = region.is_staging();
-        let expect_state = if is_staging {
-            RegionLeaderState::Staging
+        //
+        // An unbound direct edit publishes objects the region must own outright, so it is
+        // only admitted through the atomic transition from `Writable`: a graceful staging
+        // transition racing this admission leaves the region `Staging`, the transition below
+        // fails, and the edit is rejected instead of being staged by an edit completion that
+        // skips installation. It never derives permission to stage from the second read.
+        let (is_staging, expect_state) = if unbound {
+            (false, RegionLeaderState::Writable)
+        } else if region.is_staging() {
+            (true, RegionLeaderState::Staging)
         } else {
-            RegionLeaderState::Writable
+            (false, RegionLeaderState::Writable)
         };
         // Marks the region as editing.
         if let Err(e) = region.set_editing(expect_state) {
@@ -464,8 +488,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Now the region is in editing state.
         // Updates manifest in background.
         common_runtime::spawn_global(async move {
-            let result = match kind {
-                RegionEditKind::Import => {
+            let result = match &kind {
+                // A physical copy publishes and installs exactly like an import, but its
+                // edit was prepared by the copy and must not pass `prepare_region_edit`.
+                RegionEditKind::Import | RegionEditKind::Copy => {
                     // Removing one contributor invalidates the collective watermark.
                     // Editing excludes new native publications while the import is committed.
                     if !edit.series_indexes_to_remove.is_empty() {
@@ -510,7 +536,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 }
                 #[cfg(feature = "enterprise")]
                 RegionEditKind::Compaction(context) => {
-                    crate::worker::handle_table_compaction::publish(&region, &context, edit.clone())
+                    crate::worker::handle_table_compaction::publish(&region, context, edit.clone())
                         .await
                 }
             }
@@ -522,6 +548,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     origin: region,
                     waiters,
                     edit,
+                    kind,
                     result,
                     // we always need to restore region state after region edit
                     update_region_state: true,
@@ -605,8 +632,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
             false
         } else {
+            // A physical copy installs files the copy already made visible; only an
+            // import triggers a compaction.
             let need_compaction = self.config.schedule_compaction_after_edit
                 && edit_result.result.is_ok()
+                && !matches!(&edit_result.kind, RegionEditKind::Copy)
                 && edit_result
                     .edit
                     .files_to_add

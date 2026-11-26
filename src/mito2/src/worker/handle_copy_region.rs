@@ -15,20 +15,16 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use common_telemetry::{debug, error, info};
+use common_telemetry::{debug, info};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::region_engine::MitoCopyRegionFromResponse;
 use store_api::region_request::PathType;
 use store_api::storage::{FileId, RegionId};
 
 use crate::error::{InvalidRequestSnafu, MissingManifestSnafu, Result};
-use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
-use crate::region::{
-    FileDescriptor, MitoRegionRef, RegionFileCopier, RegionLeaderState, RegionMetadataLoader,
-};
-use crate::request::{
-    BackgroundNotify, CopyRegionFromFinished, CopyRegionFromRequest, WorkerRequest,
-};
+use crate::manifest::action::RegionEdit;
+use crate::region::{FileDescriptor, MitoRegionRef, RegionFileCopier, RegionMetadataLoader};
+use crate::request::{CopyInstalledRequest, CopyRegionFromRequest, WorkerRequest};
 use crate::sst::file::{self, FileMeta};
 use crate::sst::location::region_dir_from_table_dir;
 use crate::worker::{RegionWorkerLoop, WorkerRequestWithTime};
@@ -80,6 +76,15 @@ impl Drop for CopyRegionGuard {
     }
 }
 
+/// What a COPY prepared for its target.
+struct CopyPreparation {
+    /// The edit to publish and install, or `None` when the target manifest already lists
+    /// every source sample.
+    edit: Option<RegionEdit>,
+    /// Sample file ids of the source manifest.
+    source_file_ids: Vec<FileId>,
+}
+
 impl<S> RegionWorkerLoop<S> {
     pub(crate) fn handle_copy_region_from_request(&mut self, request: CopyRegionFromRequest) {
         let region_id = request.region_id;
@@ -126,7 +131,7 @@ impl<S> RegionWorkerLoop<S> {
         let copy_guard = self.copy_region_locks.register(region_id);
         common_runtime::spawn_global(async move {
             let _copy_lock = copy_guard.mutex.lock().await;
-            let (region_edit, source_file_ids) = match Self::copy_region_from(
+            let preparation = match Self::copy_region_from(
                 &region,
                 region_metadata_loader,
                 source_region_id,
@@ -135,123 +140,144 @@ impl<S> RegionWorkerLoop<S> {
             )
             .await
             {
-                Ok(region_files) => region_files,
+                Ok(preparation) => preparation,
                 Err(e) => {
                     let _ = sender.send(Err(e));
                     return;
                 }
             };
 
-            match region_edit {
-                Some(region_edit)
-                    if region_edit
-                        .files_to_add
-                        .iter()
-                        .any(|file| file.level == file::LEVEL_SHARED) =>
-                {
-                    // Shared references enter the serialized
-                    // edit lane for destination admission sequences.
-                    // The response lists installed references, including shared SSTs
-                    // whose objects stay in place; it is not a physical COPY count.
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let result = match preparation.edit {
+                Some(region_edit) => {
+                    // The response lists installed entries, including shared SSTs whose
+                    // objects stay in place; it is not a physical COPY count.
                     let copied_file_ids = region_edit
                         .files_to_add
                         .iter()
                         .map(|file| file.file_id)
                         .collect();
-                    let (tx, rx) = tokio::sync::oneshot::channel();
-                    if worker_sender
-                        .send(WorkerRequestWithTime::new(WorkerRequest::EditRegion(
-                            crate::request::RegionEditRequest::new(
-                                region_id,
-                                region_edit,
-                                false,
-                                tx,
-                            ),
-                        )))
-                        .await
-                        .is_err()
+                    // Publish and install the edit on the worker's edit lane: the region
+                    // stays `Editing` from admission until the worker applied the edit, so
+                    // no ordinary edit can observe a published version that is not
+                    // installed yet, and this request resolves only once the edit is live.
+                    let request = if region_edit
+                        .files_to_add
+                        .iter()
+                        .any(|file| file.level == file::LEVEL_SHARED)
                     {
-                        let _ = sender.send(crate::error::RegionNotFoundSnafu { region_id }.fail());
-                        return;
-                    }
-                    let result = match rx.await {
-                        Ok(result) => {
-                            result.map(|_| MitoCopyRegionFromResponse { copied_file_ids })
-                        }
-                        Err(error) => Err(error).context(crate::error::RecvSnafu),
+                        // Shared references enter the edit lane for destination admission
+                        // sequences. The edit stays bound to the instance that prepared it,
+                        // like every other COPY edit.
+                        crate::request::RegionEditRequest::new(region_id, region_edit, false, tx)
+                            .prepared_against(region.clone())
+                    } else {
+                        // A physical copy installs the metadata it prepared: its objects are
+                        // already copied and its files keep the cleared source sequence
+                        // trust. The edit stays bound to the instance that prepared it.
+                        crate::request::RegionEditRequest::for_physical_copy(
+                            region.clone(),
+                            region_edit,
+                            tx,
+                        )
                     };
-                    let _ = sender.send(result);
-                }
-                Some(region_edit) => {
-                    let (tx, rx) = tokio::sync::oneshot::channel();
-                    if let Err(e) = worker_sender
-                        .send(WorkerRequestWithTime::new(WorkerRequest::Background {
-                            region_id,
-                            notify: BackgroundNotify::CopyRegionFromFinished(
-                                CopyRegionFromFinished {
-                                    region_id,
-                                    edit: region_edit,
-                                    sender: tx,
-                                },
-                            ),
-                        }))
-                        .await
-                    {
-                        error!(e; "Failed to send copy region from finished notification, region_id: {}", region_id);
-                        let _ = sender.send(crate::error::RegionNotFoundSnafu { region_id }.fail());
-                        return;
-                    }
-                    // Keep ownership until the worker installs the published version.
-                    let result = match rx.await {
-                        Ok(result) => result,
-                        Err(error) => Err(error).context(crate::error::RecvSnafu),
-                    };
-                    let _ = sender.send(result);
+                    Self::submit_copy_request(
+                        &worker_sender,
+                        region_id,
+                        WorkerRequest::EditRegion(request),
+                        rx,
+                    )
+                    .await
+                    .map(|()| MitoCopyRegionFromResponse { copied_file_ids })
                 }
                 None => {
-                    let _ = sender.send(Ok(MitoCopyRegionFromResponse {
-                        copied_file_ids: source_file_ids,
-                    }));
+                    // Every entry is manifested already. The manifest may hold an edit that
+                    // the worker has not installed yet, so acknowledge only what the live
+                    // version actually serves.
+                    let copied_file_ids = preparation.source_file_ids.clone();
+                    Self::submit_copy_request(
+                        &worker_sender,
+                        region_id,
+                        WorkerRequest::CopyInstalled(CopyInstalledRequest {
+                            region_id,
+                            file_ids: preparation.source_file_ids,
+                            sender: tx,
+                        }),
+                        rx,
+                    )
+                    .await
+                    .map(|()| MitoCopyRegionFromResponse { copied_file_ids })
                 }
-            }
+            };
+            let _ = sender.send(result);
         });
     }
 
-    pub(crate) fn handle_copy_region_from_finished(&mut self, request: CopyRegionFromFinished) {
-        let region_id = request.region_id;
-        let sender = request.sender;
-        let region = match self.regions.writable_region(region_id) {
-            Ok(region) => region,
-            Err(e) => {
-                let _ = sender.send(Err(e));
-                return;
-            }
-        };
-
-        let copied_file_ids = request
-            .edit
-            .files_to_add
-            .iter()
-            .map(|file_meta| file_meta.file_id)
-            .collect();
-
-        region
-            .version_control
-            .apply_edit(Some(request.edit), &[], region.file_purger.clone());
-
-        let _ = sender.send(Ok(MitoCopyRegionFromResponse { copied_file_ids }));
+    /// Submits a COPY request to the worker and waits for its answer.
+    async fn submit_copy_request(
+        worker_sender: &tokio::sync::mpsc::Sender<WorkerRequestWithTime>,
+        region_id: RegionId,
+        request: WorkerRequest,
+        rx: tokio::sync::oneshot::Receiver<Result<()>>,
+    ) -> Result<()> {
+        if worker_sender
+            .send(WorkerRequestWithTime::new(request))
+            .await
+            .is_err()
+        {
+            return crate::error::RegionNotFoundSnafu { region_id }.fail();
+        }
+        match rx.await {
+            Ok(result) => result,
+            Err(error) => Err(error).context(crate::error::RecvSnafu),
+        }
     }
 
-    /// Returns the region edit and source file IDs, including shared logical references.
+    /// Checks that the entries a COPY found in the target manifest are installed in the live
+    /// version of the region.
     ///
-    /// If no need to copy files, returns (None, source_file_ids).
+    /// Manifest membership is not proof: another edit may have published the same entries
+    /// and not installed them yet, in which case acknowledging the COPY would report rows the
+    /// region does not serve.
+    pub(crate) fn handle_copy_installed(&mut self, request: CopyInstalledRequest) {
+        let region_id = request.region_id;
+        let Some(region) = self.regions.get_region(region_id) else {
+            let _ = request
+                .sender
+                .send(crate::error::RegionNotFoundSnafu { region_id }.fail());
+            return;
+        };
+        let version = region.version();
+        let levels = version.ssts.levels();
+        let missing = request
+            .file_ids
+            .iter()
+            .find(|id| !levels.iter().any(|level| level.files.contains_key(id)));
+        let result = match missing {
+            None => Ok(()),
+            Some(missing) => {
+                info!(
+                    "COPY of region {} found sample {} in the manifest but not in the live version",
+                    region_id, missing
+                );
+                Err(crate::error::RegionBusySnafu { region_id }.build())
+            }
+        };
+        let _ = request.sender.send(result);
+    }
+
+    /// Prepares the entries the target manifest lacks, including shared logical references.
+    ///
+    /// The returned edit is prepared but not published: the caller installs it on the
+    /// worker's edit lane. If the target manifest lists every source entry there is no edit,
+    /// and the caller must verify the entries are installed instead of acknowledging them.
     async fn copy_region_from(
         region: &MitoRegionRef,
         region_metadata_loader: RegionMetadataLoader,
         source_region_id: RegionId,
         target_region_id: RegionId,
         parallelism: usize,
-    ) -> Result<(Option<RegionEdit>, Vec<FileId>)> {
+    ) -> Result<CopyPreparation> {
         let table_dir = region.table_dir();
         let path_type = region.path_type();
         let region_dir = region_dir_from_table_dir(table_dir, source_region_id, path_type);
@@ -306,6 +332,21 @@ impl<S> RegionWorkerLoop<S> {
             }
             if file_meta.level == file::LEVEL_SHARED {
                 new_file_metas.push(file_meta.as_ref().clone());
+            } else if file_meta.region_id == target_region_id {
+                // Ownership, not target manifest membership, decides whether the
+                // objects already live in the target: a remap moves references
+                // between manifests but keeps the physical owner. Installing such
+                // an entry publishes this reference only, so the copy plans no
+                // object operation for it. A planned copy would target every object
+                // onto itself and let a failure elsewhere in the copy delete an
+                // artifact that still serves its source.
+                //
+                // The reference also carries the admission sequence of the region it
+                // came from, which cannot bound the rows of a file whose physical
+                // sequences belong to the target. Clear it together with the trust
+                // marker so an exact sequence-range read fails closed instead of
+                // pruning the file and returning a wrong empty result.
+                new_file_metas.push(remap_copied_file_meta(file_meta, target_region_id));
             } else if narthex_format {
                 let (copied, objects) = prepare_narthex_copy(region, file_meta).await?;
                 new_file_metas.push(copied);
@@ -316,9 +357,13 @@ impl<S> RegionWorkerLoop<S> {
                 new_file_metas.push(copied);
             }
         }
-        // Native series coverage belongs to the source region's sequence domain.
+        // Native series coverage belongs to the source region's sequence domain, so a COPY
+        // installs samples only and leaves the target's series indexes alone.
         if new_file_metas.is_empty() {
-            return Ok((None, source_file_ids));
+            return Ok(CopyPreparation {
+                edit: None,
+                source_file_ids,
+            });
         }
 
         debug!("File descriptors to copy: {:?}", file_descriptors);
@@ -342,27 +387,13 @@ impl<S> RegionWorkerLoop<S> {
             committed_sequence: None,
             ..Default::default()
         };
-        if edit
-            .files_to_add
-            .iter()
-            .any(|file| file.level == file::LEVEL_SHARED)
-        {
-            return Ok((Some(edit), source_file_ids));
-        }
-        let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
-        info!(
-            "Applying {:?} to region {target_region_id}, reason: CopyRegionFrom",
-            edit
-        );
-        let version = region
-            .manifest_ctx
-            .update_manifest(RegionLeaderState::Writable, action_list, false)
-            .await?;
-        info!(
-            "Successfully update manifest version to {version}, region: {target_region_id}, reason: CopyRegionFrom"
-        );
-
-        Ok((Some(edit), source_file_ids))
+        // The edit is not published here: the caller publishes and installs it on the
+        // worker's edit lane, which keeps publication and installation serialized against
+        // every other edit of the region.
+        Ok(CopyPreparation {
+            edit: Some(edit),
+            source_file_ids,
+        })
     }
 }
 

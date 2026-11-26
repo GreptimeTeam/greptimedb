@@ -17,6 +17,7 @@ mod checked;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use api::v1::SemanticType;
 use bytes::BufMut;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use datatypes::prelude::ConcreteDataType;
@@ -25,7 +26,7 @@ use memcomparable::{Deserializer, Serializer};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
-use store_api::metadata::RegionMetadataRef;
+use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
 use store_api::storage::consts::ReservedColumnId;
 
@@ -158,49 +159,132 @@ impl SparsePrimaryKeyValidator {
     pub fn validate(&mut self, bytes: &[u8]) -> Result<()> {
         self.column_ids.clear();
         validate_prefix(bytes)?;
-        let mut remaining = &bytes[TAGS_START_OFFSET..];
-        while !remaining.is_empty() {
-            let id = remaining.first_chunk::<COLUMN_ID_ENCODE_SIZE>().context(
-                InvalidSparsePrimaryKeySnafu {
-                    reason: "truncated label column id",
-                },
-            )?;
-            let column_id = u32::from_be_bytes(*id);
-            ensure!(
-                !ReservedColumnId::is_reserved(column_id),
-                InvalidSparsePrimaryKeySnafu {
-                    reason: "reserved column id in sparse labels",
+        for_each_label(bytes, &mut self.column_ids, &mut self.label_buf)?;
+        reject_duplicate_column_ids(&mut self.column_ids)
+    }
+
+    /// Checks the key like [`Self::validate`] and additionally rejects labels that are not in
+    /// canonical label-name order, as required by readers that seek series through the labels.
+    pub fn validate_canonical_order(
+        &mut self,
+        bytes: &[u8],
+        label_ranks: &SparseLabelNameRanks,
+    ) -> Result<()> {
+        self.column_ids.clear();
+        validate_prefix(bytes)?;
+        for_each_label(bytes, &mut self.column_ids, &mut self.label_buf)?;
+        let mut previous_rank = None;
+        let mut out_of_order = false;
+        for &column_id in &self.column_ids {
+            match label_ranks.rank(column_id) {
+                Some(rank) => {
+                    out_of_order |= previous_rank.is_some_and(|previous| previous >= rank);
+                    previous_rank = Some(rank);
                 }
-            );
-            self.column_ids.push(column_id);
-            let encoded = &remaining[COLUMN_ID_ENCODE_SIZE..];
-            let (length, ascii) = crate::row_converter::encoded_string_info::<true>(encoded)
-                .context(DeserializeFieldSnafu)?;
-            let encoded = &encoded[..length];
-            // Framing is already checked; ASCII needs no unchunking to establish valid UTF-8.
-            if !ascii {
-                self.label_buf.clear();
-                self.label_buf.reserve(length);
-                Deserializer::new(&encoded[1..])
-                    .read_bytes_into(&mut self.label_buf)
-                    .context(DeserializeFieldSnafu)?;
-                std::str::from_utf8(&self.label_buf).map_err(|_| {
-                    InvalidSparsePrimaryKeySnafu {
-                        reason: "label is not valid UTF-8",
-                    }
-                    .build()
-                })?;
+                // Labels that the region does not declare carry no name order to compare.
+                None => previous_rank = None,
             }
-            remaining = &remaining[COLUMN_ID_ENCODE_SIZE + length..];
         }
-        self.column_ids.sort_unstable();
+        reject_duplicate_column_ids(&mut self.column_ids)?;
         ensure!(
-            !self.column_ids.windows(2).any(|pair| pair[0] == pair[1]),
+            !out_of_order,
             InvalidSparsePrimaryKeySnafu {
-                reason: "duplicate column id in sparse key",
+                reason: "sparse key labels are not in label-name order",
             }
         );
         Ok(())
+    }
+}
+
+/// Rejects a sparse key that carries the same label column id twice.
+fn reject_duplicate_column_ids(column_ids: &mut [ColumnId]) -> Result<()> {
+    column_ids.sort_unstable();
+    ensure!(
+        !column_ids.windows(2).any(|pair| pair[0] == pair[1]),
+        InvalidSparsePrimaryKeySnafu {
+            reason: "duplicate column id in sparse key",
+        }
+    );
+    Ok(())
+}
+
+/// Walks the labels of a complete sparse key, checking framing, UTF-8 and reserved ids.
+///
+/// Pushes every label column id to `column_ids` in encoded order.
+fn for_each_label(
+    bytes: &[u8],
+    column_ids: &mut Vec<ColumnId>,
+    label_buf: &mut Vec<u8>,
+) -> Result<()> {
+    let mut remaining = &bytes[TAGS_START_OFFSET..];
+    while !remaining.is_empty() {
+        let id = remaining.first_chunk::<COLUMN_ID_ENCODE_SIZE>().context(
+            InvalidSparsePrimaryKeySnafu {
+                reason: "truncated label column id",
+            },
+        )?;
+        let column_id = u32::from_be_bytes(*id);
+        ensure!(
+            !ReservedColumnId::is_reserved(column_id),
+            InvalidSparsePrimaryKeySnafu {
+                reason: "reserved column id in sparse labels",
+            }
+        );
+        column_ids.push(column_id);
+        let encoded = &remaining[COLUMN_ID_ENCODE_SIZE..];
+        let (length, ascii) = crate::row_converter::encoded_string_info::<true>(encoded)
+            .context(DeserializeFieldSnafu)?;
+        let encoded = &encoded[..length];
+        // Framing is already checked; ASCII needs no unchunking to establish valid UTF-8.
+        if !ascii {
+            label_buf.clear();
+            label_buf.reserve(length);
+            Deserializer::new(&encoded[1..])
+                .read_bytes_into(label_buf)
+                .context(DeserializeFieldSnafu)?;
+            std::str::from_utf8(label_buf).map_err(|_| {
+                InvalidSparsePrimaryKeySnafu {
+                    reason: "label is not valid UTF-8",
+                }
+                .build()
+            })?;
+        }
+        remaining = &remaining[COLUMN_ID_ENCODE_SIZE + length..];
+    }
+    Ok(())
+}
+
+/// The canonical label-name order of the tags of a region, used to validate sparse keys.
+///
+/// Readers find a series by walking the labels of an encoded key in column-name order, so a key
+/// whose labels are stored in another order can never be found again. Column ids do not encode
+/// that order: the primary key keeps id order, and the metric engine reverses it.
+#[derive(Debug)]
+pub struct SparseLabelNameRanks {
+    /// Rank of every tag column, by column id.
+    ranks: HashMap<ColumnId, u32>,
+}
+
+impl SparseLabelNameRanks {
+    /// Ranks the tag columns of `metadata` by column name.
+    pub fn new(metadata: &RegionMetadata) -> Self {
+        let mut tags: Vec<_> = metadata
+            .column_metadatas
+            .iter()
+            .filter(|column| column.semantic_type == SemanticType::Tag)
+            .collect();
+        tags.sort_unstable_by_key(|column| &column.column_schema.name);
+        let ranks = tags
+            .into_iter()
+            .enumerate()
+            .map(|(rank, column)| (column.column_id, rank as u32))
+            .collect();
+        Self { ranks }
+    }
+
+    /// Returns the label-name rank of `column_id`, or `None` if it is not a tag of the region.
+    fn rank(&self, column_id: ColumnId) -> Option<u32> {
+        self.ranks.get(&column_id).copied()
     }
 }
 
