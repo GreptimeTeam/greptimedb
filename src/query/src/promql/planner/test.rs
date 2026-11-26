@@ -12288,13 +12288,12 @@ async fn native_histogram_plan(query: &str) -> String {
     plan.display_indent_schema().to_string()
 }
 
-/// A histogram-consuming aggregate remains a legacy fold even if its child is native.
+/// A histogram fold over a set operation runs natively; one over a collected rewrite does not.
 ///
-/// A label rewrite or a set expression can pass histograms to the aggregate. Admitting that fold
-/// natively would send histograms into a float-only kernel, but independently supported child
-/// expressions may still have their own native producers below the legacy histogram aggregate.
+/// A set operation hands its fold histograms of a kind its two sides agree on, so the fold binds
+/// histogram state and runs once above the set's frames.
 #[tokio::test]
-async fn an_aggregate_over_an_unnamed_kind_keeps_the_existing_plan() {
+async fn histogram_folds_over_sets_and_collected_rewrites() {
     for query in [
         "sum(some_metric or some_metric)",
         "sum(some_metric and some_metric)",
@@ -12304,27 +12303,20 @@ async fn an_aggregate_over_an_unnamed_kind_keeps_the_existing_plan() {
         let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
         let display = plan.display_indent_schema().to_string();
         assert!(
-            display.contains("Aggregate: groupBy=")
-                && display.contains("prom_native_histogram_agg_sum("),
-            "{query} did not retain the legacy histogram aggregate: {display}"
+            !display.contains("prom_native_histogram_agg_sum("),
+            "{query} kept the legacy histogram aggregate: {display}"
         );
-        // Inspect every fused node's complete native tree, not just its root: a set child and its
-        // frame producers may be native, but none may perform this histogram fold.
-        let mut pending = vec![&plan];
-        while let Some(node) = pending.pop() {
-            if let LogicalPlan::Extension(Extension { node }) = node
-                && let Some(fused) = node.as_any().downcast_ref::<FusedSeries>()
-            {
-                let tree = fused.tree().to_string();
-                assert!(
-                    !tree
-                        .lines()
-                        .any(|line| line.split_whitespace().nth(1) == Some("Aggregate")),
-                    "{query} ran a native aggregate: {tree}\n{display}"
-                );
-            }
-            pending.extend(node.inputs());
-        }
+        let fused = find_fused_series(&plan)
+            .unwrap_or_else(|| panic!("{query} left the native route: {display}"));
+        assert!(
+            matches!(fused.tree().root().expr, NativeExpr::Aggregate { .. }),
+            "{query} does not fold natively: {display}"
+        );
+        assert_eq!(
+            &native_histogram_value_type().as_arrow_type(),
+            native_value_field(fused, query).data_type(),
+            "{query} answers the histograms it folded: {display}"
+        );
     }
     // `sum(label_replace(...))` is one of the shapes above. The rewrite collapses every series onto
     // one `tag_0`, so the canonical pass collects it with a `Merge` on the fold's own input side -
@@ -18266,8 +18258,7 @@ async fn histogram_state_stays_out_of_the_shapes_it_cannot_cross() {
     );
     // Two histogram tables are a multi-input tree, but each fold is its own subtree: the binary
     // above them combines two already-folded histograms, so no aggregate state crosses the pairing
-    // and the statement runs. The state gate is about an aggregate reading several inputs, not
-    // about a value built from two of them.
+    // and the statement runs.
     let provider = build_test_native_histogram_tables(&["some_metric", "other_metric"]).await;
     let plan = build_native_fused_plan_with_provider(
         "sum(some_metric) + sum(other_metric)",
@@ -18361,4 +18352,49 @@ async fn native_missing_table_named_after_its_own_columns_answers_the_empty_vect
         let (_, batches) = execute(plan, &state).await;
         assert_eq!(0, batch_rows(&batches), "`{query}`: {batches:?}");
     }
+}
+
+/// A fold over a pairing of two histogram metrics runs natively.
+///
+/// The pairing is segmented into a frame of its own and the fold runs once above it, so every
+/// contribution meets in one execution. A bare pairing of two vectors keeps the composed plan, one
+/// frame per operand.
+#[tokio::test]
+async fn a_histogram_fold_over_several_inputs_runs_natively() {
+    for query in [
+        "sum(some_metric + other_metric)",
+        "avg by (tag_0) (some_metric - other_metric)",
+        "count(some_metric + other_metric)",
+        "histogram_count(sum(some_metric + other_metric))",
+        "sum without (tag_0) (some_metric or other_metric)",
+    ] {
+        let provider = build_test_native_histogram_tables(&["some_metric", "other_metric"]).await;
+        let plan = build_native_fused_plan_with_provider(query, true, provider).await;
+        let display = plan.display_indent_schema().to_string();
+        assert_eq!(None, take_reported_decline(), "{query}: {display}");
+        let LogicalPlan::Extension(Extension { node }) = &plan else {
+            panic!("{query} is not answered by a native node: {display}");
+        };
+        let fused = node
+            .as_any()
+            .downcast_ref::<FusedSeries>()
+            .unwrap_or_else(|| panic!("{query} is not answered by a native node: {display}"));
+        assert!(
+            fused
+                .tree()
+                .root()
+                .any(&|node| matches!(node.expr, NativeExpr::Aggregate { .. })),
+            "{query} left its fold to the existing plan: {display}"
+        );
+    }
+    let provider = build_test_native_histogram_tables(&["some_metric", "other_metric"]).await;
+    let plan =
+        build_native_fused_plan_with_provider("some_metric + other_metric", true, provider).await;
+    let fused = find_fused_series(&plan).expect("the pairing composes natively");
+    assert_eq!(
+        2,
+        fused.children().len(),
+        "the pairing reads one frame per operand: {}",
+        plan.display_indent_schema()
+    );
 }

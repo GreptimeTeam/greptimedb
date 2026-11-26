@@ -1737,14 +1737,18 @@ impl PromPlanner {
             None
         };
         // A tree over more than one input needs no split: each input already answers from its own source,
-        // and the one node above them folds every partition in one execution. The aggregate split folds
-        // float state, and a node reading several sources runs over frames it reconciled rather than over
-        // its own scans, so a histogram keeps the existing plan for both. The kind entering each
-        // aggregate is what decides, not the shape of the root: `sum(h) * 2` has a binary root.
-        if let Some(kind @ FieldKind::Histogram) = statement_kind
-            && ((multi_input && per_source_inputs) || aggregate_reads_histogram(root, kind))
-        {
-            return Ok(declined("histogram_aggregate_needs_state_this_route_lacks"));
+        // and the one node above them folds every partition in one execution, histograms included. A
+        // pairing of two histogram vectors at the root is still planned the way the composed binary
+        // route plans it, one evaluated frame per operand, rather than as one node over raw sources.
+        // The kind entering each aggregate is what decides the fold, not the shape of the root:
+        // `sum(h) * 2` has a binary root.
+        if let Some(kind @ FieldKind::Histogram) = statement_kind {
+            if multi_input && per_source_inputs && pairs_two_vectors(root) {
+                return Ok(declined("histogram_pairing_composes_from_operand_frames"));
+            }
+            if aggregate_reads_histogram(root, kind) {
+                return Ok(declined("histogram_aggregate_needs_state_this_route_lacks"));
+            }
         }
         // The split keeps its prefix per-series, which is why it declines an operation whose
         // answer depends on the order its input arrives in. A node over more than one input reads
@@ -1865,14 +1869,11 @@ impl PromPlanner {
                     grid,
                 )));
             }
-            // A tree that folds native histograms anywhere and whose split declined keeps the
-            // existing plan instead of being segmented. A segment reads the frames a boundary above
-            // it assembles - the canonical merge's collected pieces, or a region-local producer's
-            // frames - and this route has no execution that folds a histogram state out of those:
-            // every histogram fold it runs today reads its own scan. Until one is covered, the
-            // statement keeps the plan that already answers it rather than publishing a column
-            // nothing here can fill.
-            if binds_histogram_state_anywhere(root) {
+            // A tree over one input that folds native histograms anywhere and whose split declined
+            // keeps the existing plan instead of being segmented. A tree over several inputs is
+            // segmented below its fold: each operand's per-series prefix publishes its frames, and the
+            // fold runs once above all of them, as it does for floats.
+            if !multi_input && binds_histogram_state_anywhere(root) {
                 return Ok(declined("histogram_state_above_a_segment_boundary"));
             }
         }
@@ -2478,6 +2479,17 @@ fn aggregate_reads_histogram(node: &NativeNode, input_kind: FieldKind) -> bool {
 /// answers a float whatever it reads.
 fn binds_histogram_state(op: &BoundAggregate) -> bool {
     aggregate_state_binding(op.kind, op.field_kind).is_some_and(|(kind, _)| kind.is_histogram())
+}
+
+/// Whether `node` is a vector-vector binary operation: the shape the composed binary route plans
+/// from one evaluated frame per operand.
+fn pairs_two_vectors(node: &NativeNode) -> bool {
+    matches!(
+        &node.expr,
+        NativeExpr::Binary { left, right, .. }
+            if !matches!(left.output, NativeType::Scalar(_))
+                && !matches!(right.output, NativeType::Scalar(_))
+    )
 }
 
 /// Whether any aggregate in `node` binds a state that carries a native histogram.
