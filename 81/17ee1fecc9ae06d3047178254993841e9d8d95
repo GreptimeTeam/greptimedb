@@ -1,0 +1,175 @@
+src/mito2/src/worker/handle_drop.rs
+  s_9f1907403ce291::t_5fac50bad6b195 118
+src/file-engine/src/engine.rs
+  s_9f1907403ce291::t_5fac50bad6b195 23,57,60-64,78-82,215-216,240-244,250
+src/file-engine/src/query.rs
+  s_9f1907403ce291::t_5fac50bad6b195 22,48,50-57
+src/common/datasource/src/object_store/s3.rs
+  s_9f1907403ce291::t_5fac50bad6b195 18,22-24,51,63-84,117
+src/mito2/src/compaction.rs
+  s_9f1907403ce291::t_5fac50bad6b195 176-180
+tests-integration/tests/repartition.rs
+  s_9f1907403ce291::t_5fac50bad6b195 456,467,488,490,497,1833-1860
+src/operator/src/expr_helper.rs
+  s_9f1907403ce291::t_5fac50bad6b195 36,154,168,339,345-348
+src/mito2/src/worker/handle_tail_replay.rs
+  s_9f1907403ce291::t_5fac50bad6b195 276-277,279-283
+src/common/datasource/src/object_store/oss.rs
+  s_9f1907403ce291::t_5fac50bad6b195 18,22-24,53,61,71,82-102,133-138
+src/common/datasource/src/object_store/azblob.rs
+  s_9f1907403ce291::t_5fac50bad6b195 18,20,23-25,40,52-71,74-76,78
+src/operator/src/statement/copy_database.rs
+  s_9f1907403ce291::t_5fac50bad6b195 22-24,85-92,163-169,270,272-279,295,333-347
+src/operator/src/statement/copy_table_to.rs
+  s_9f1907403ce291::t_5fac50bad6b195 26-28,200,220,231,234,265-272,545,568
+src/mito2/src/manifest/manager.rs
+  s_9f1907403ce291::t_5fac50bad6b195 864-866
+src/mito2/src/engine/lease_test.rs
+  s_9f1907403ce291::t_5fac50bad6b195 31,42,65-70,72,1004-1007,1012-1019,1025,1032-1060,1065-1082,1107,1111-1162,1164,1166-1169,1171,1173-1183,1187-1324,1326-1336,1338-1838,1956-1963,1965-1967,1970-1977,1979-1982,1984,1991-2017
+Cargo.toml
+  s_9f1907403ce291::t_5fac50bad6b195 202-203
+src/operator/src/statement/export_database.rs
+  s_9f1907403ce291::t_5fac50bad6b195 167-174,212-219
+src/common/datasource/src/object_store/remote_tests.rs
+  s_9f1907403ce291::t_5fac50bad6b195 1-333
+src/file-engine/src/region.rs
+  s_9f1907403ce291::t_5fac50bad6b195 110,180-184
+src/common/datasource/src/object_store/gcs.rs
+  s_9f1907403ce291::t_5fac50bad6b195 17-18,20,22,25-27,41,49-59,66-109,116-149
+  s_9f1907403ce291::t_e1cf74b380f64b 150
+src/object-store/src/error.rs
+  s_9f1907403ce291::t_5fac50bad6b195 42-49,82
+src/mito2/src/gc/worker_test.rs
+  s_9f1907403ce291::t_5fac50bad6b195 32,529-536,555-564
+src/mito2/src/series_index/columnar/reader.rs
+  s_9f1907403ce291::t_5fac50bad6b195 25-26,28,42,268-349,359,367,400,408,414,639-650
+  s_9f1907403ce291::t_d86c3542bcfa16 651
+src/datanode/src/config.rs
+  s_9f1907403ce291::t_5fac50bad6b195 183
+src/mito2/src/series_index/columnar/tests.rs
+  s_9f1907403ce291::t_5fac50bad6b195 201-241
+  s_9f1907403ce291::t_ada8bd7e9793f6 200
+config/frontend.example.toml
+  s_9f1907403ce291::t_5fac50bad6b195 423-439
+src/object-store/Cargo.toml
+  s_9f1907403ce291::t_5fac50bad6b195 26,44
+src/object-store/src/test_util.rs
+  s_9f1907403ce291::t_5fac50bad6b195 36-117
+src/mito2/src/read/series_scan/prepared/narthex.rs
+  s_9f1907403ce291::t_5fac50bad6b195 32-34,36,44,83-105,110,112,116,145-151,163,192-203,218-225
+src/operator/src/statement/export_logical_tables.rs
+  s_9f1907403ce291::t_5fac50bad6b195 33-35,362,388,398
+config/datanode.example.toml
+  s_9f1907403ce291::t_5fac50bad6b195 378-394
+src/common/datasource/Cargo.toml
+  s_9f1907403ce291::t_5fac50bad6b195 22,38
+config/standalone.example.toml
+  s_9f1907403ce291::t_5fac50bad6b195 613-629
+src/operator/src/statement/export_logical_tables/tests.rs
+  s_9f1907403ce291::t_5fac50bad6b195 324-331,345,789
+src/mito2/src/engine/tail_replay_test.rs
+  s_9f1907403ce291::t_5fac50bad6b195 47-50,74,79,107-112,139-163,1758,1884-1885,1887-1890,1895,1955-1967,1971,1973-1989,1999-2095
+  s_9f1907403ce291::t_955c6deedb10ab 2096-2097
+src/datanode/src/datanode.rs
+  s_9f1907403ce291::t_5fac50bad6b195 27,770-774
+src/mito2/AGENTS.md
+  s_9f1907403ce291::t_5fac50bad6b195 134,246-248,260
+src/mito2/src/region.rs
+  s_9f1907403ce291::t_5fac50bad6b195 804-807,809-813,819-826,835,838-846,1481-1490,1532-1534,1559-1560,1851-1860,2396,2404,2408,2410,2412,2422,2510,2512-2515,2522-2525,3636-3641
+src/query/src/dist_plan/planner.rs
+  s_9f1907403ce291::t_5fac50bad6b195 37-42,45-46,314-321,323-332,335-337,346,350-355,357-360,363-392,394,396,429,450-451,457-458,479-480,510-605,762-763,766,768,770,829-835,884,887-903,1044-1163
+  s_9f1907403ce291::t_b456aec0ad6732 1164
+src/operator/src/statement/copy_table_from.rs
+  s_9f1907403ce291::t_5fac50bad6b195 31-33,101,103-110,524-526,1082-1085,1091-1093,1096-1099,1104,1112,1121,1128,1133-1138,1146,1167,1174-1176,1180,1245-1251,1262-1268,1293
+src/mito2/src/engine/scan_test.rs
+  s_9f1907403ce291::t_5fac50bad6b195 520-836,1047-1057
+  s_9f1907403ce291::t_5f5c67a4e79f59 519,1058
+src/cmd/tests/load_config_test.rs
+  s_9f1907403ce291::t_5fac50bad6b195 904-942
+  s_9f1907403ce291::t_b3d827fb5a586a 903
+src/mito2/src/read/series_scan/prepared.rs
+  s_9f1907403ce291::t_5fac50bad6b195 21,71,392-399,404,459,461-470,493-494,504,539,594,596-608
+src/frontend/src/frontend.rs
+  s_9f1907403ce291::t_5fac50bad6b195 181
+src/common/datasource/src/parquet_writer.rs
+  s_9f1907403ce291::t_5fac50bad6b195 669
+src/mito2/src/engine.rs
+  s_9f1907403ce291::t_5fac50bad6b195 1413,1416,1419-1420,1455-1462,1818-1819
+src/mito2/src/request.rs
+  s_9f1907403ce291::t_5fac50bad6b195 1219-1220,1225-1230,1298
+src/operator/src/statement/database_copy.rs
+  s_9f1907403ce291::t_5fac50bad6b195 347-349,369-376
+src/mito2/src/engine/copy_region_from_test.rs
+  s_9f1907403ce291::t_5fac50bad6b195 988-998,1000
+src/operator/src/statement.rs
+  s_9f1907403ce291::t_5fac50bad6b195 45,153,193,210
+src/mito2/src/worker/handle_catchup.rs
+  s_9f1907403ce291::t_5fac50bad6b195 44-45,434,438-439,442-446,450-510,512-513,515,524-541,608,611-613,619-621,626-631
+tests-integration/tests/export_logical_tables.rs
+  s_9f1907403ce291::t_5fac50bad6b195 1084
+src/object-store/src/remote_access.rs
+  s_9f1907403ce291::t_5fac50bad6b195 1-439
+src/mito2/src/series_index/task.rs
+  s_9f1907403ce291::t_5fac50bad6b195 27,159,182-183,192-267,340,345,381,384-430,575-577,579-596,600,604,610,634,663-664,759,966-1157,1471,1558,1698
+src/mito2/src/worker/handle_manifest.rs
+  s_9f1907403ce291::t_5fac50bad6b195 19,468-477,1093,1100-1128,1220,1318,1333
+src/query/src/options.rs
+  s_9f1907403ce291::t_5fac50bad6b195 156-161,179-180
+tests-integration/tests/http.rs
+  s_9f1907403ce291::t_5fac50bad6b195 5028-5029
+src/mito2/src/engine/listener.rs
+  s_9f1907403ce291::t_5fac50bad6b195 49-68
+src/mito2/src/worker/handle_rebuild_index.rs
+  s_9f1907403ce291::t_5fac50bad6b195 225-226,231,233,236-237,243,245-246,248-251,255-258,267,270-271,277-278,282,310,360,375,385,401-406,491-510
+src/common/datasource/src/object_store.rs
+  s_9f1907403ce291::t_5fac50bad6b195 19-20,30-31,33,44-45,385,387-393,395-396,404,406-414,422,424-430,432-433,441,443-451,458,507,513,519,525,540-569,591-592,669-675,720-727,736-743,754-761,765-772,777-783,787-794,799-806,812-818,824-831,836-842,846-852,869-876,898-904,913,920-926,931-938,956-963,978-984,1034,1060-1067,1070-1077,1081-1088
+src/mito2/src/worker.rs
+  s_9f1907403ce291::t_5fac50bad6b195 914,1384-1399,1570,1872,1902-1906,1910,2037,2130-2171
+  s_9f1907403ce291::t_365f919189e625 2172
+src/frontend/src/instance/builder.rs
+  s_9f1907403ce291::t_5fac50bad6b195 26-27,369-374
+src/query/src/sql.rs
+  s_9f1907403ce291::t_5fac50bad6b195 34-36,1451,1464
+src/common/datasource/src/error.rs
+  s_9f1907403ce291::t_5fac50bad6b195 103-111,318
+  s_9f1907403ce291::t_39b4f9cd5945cd 102
+src/operator/src/statement/import_packed.rs
+  s_9f1907403ce291::t_5fac50bad6b195 70-77
+config/config.md
+  s_9f1907403ce291::t_5fac50bad6b195 156-157,413-414,649-650
+src/mito2/src/compaction/twcs.rs
+  s_9f1907403ce291::t_5fac50bad6b195 806
+src/mito2/src/series_index/columnar/metadata.rs
+  s_9f1907403ce291::t_5fac50bad6b195 296-302
+src/standalone/src/options.rs
+  s_9f1907403ce291::t_5fac50bad6b195 165
+src/mito2/src/test_util.rs
+  s_9f1907403ce291::t_5fac50bad6b195 256-286,294-295,308-313,317,331-336,342-359
+  s_9f1907403ce291::t_b6ceb359e2f53e 360
+src/mito2/src/worker/handle_close.rs
+  s_9f1907403ce291::t_5fac50bad6b195 140
+src/mito2/src/sst/narthex.rs
+  s_9f1907403ce291::t_5fac50bad6b195 15,24-25,27,34-35,37,41-42,175-190,194,197,222,231-249,254-256
+src/operator/src/statement/ddl.rs
+  s_9f1907403ce291::t_5fac50bad6b195 552-558
+src/object-store/src/lib.rs
+  s_9f1907403ce291::t_5fac50bad6b195 27
+Cargo.lock
+  s_9f1907403ce291::t_63e628967379f9 2401,2418,9692,9706
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8117ee1fecc9ae06d3047178254993841e9d8d95",
+  "prompts": {},
+  "sessions": {
+    "s_9f1907403ce291": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a216ed-1b7b-7a02-bfe6-1e58c297bce9",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
