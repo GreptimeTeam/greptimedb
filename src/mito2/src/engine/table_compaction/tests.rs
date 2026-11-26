@@ -147,12 +147,24 @@ async fn row_count(engine: &MitoEngine, region_id: RegionId) -> usize {
     .sum()
 }
 
+#[rstest::rstest]
+#[case::fresh(false)]
+#[case::replay(true)]
 #[tokio::test]
-async fn test_publication_refused_awaiting_leader_lease() {
+async fn test_publication_refused_awaiting_leader_lease(#[case] replay: bool) {
     let mut env = TestEnv::new().await;
     let engine = env.create_engine(config()).await;
     let region_id = RegionId::new(1, 1);
     let (snapshot, output) = seed(&engine, region_id).await;
+    if replay {
+        assert_eq!(
+            PublicationOutcome::Applied,
+            engine
+                .publish_table_compaction(region_id, snapshot.clone(), vec![output.clone()])
+                .await
+                .unwrap()
+        );
+    }
     engine.require_write_lease();
     engine.freeze_lease_clock(Instant::now());
     promote_to_await_leader_lease(&engine, region_id).await;
@@ -196,25 +208,16 @@ async fn test_duplicate_publication_and_later_replacement_do_not_readmit_inputs(
     let (snapshot, output) = seed(&engine, region_id).await;
     let region = engine.get_region(region_id).unwrap();
     let sequence = region.version_control.committed_sequence();
+    let version = region.manifest_ctx.manifest_version().await;
     let (first, second) = tokio::join!(
         engine.publish_table_compaction(region_id, snapshot.clone(), vec![output.clone()]),
         engine.publish_table_compaction(region_id, snapshot.clone(), vec![output.clone()])
     );
-    let outcomes = [first.unwrap(), second.unwrap()];
     assert_eq!(
-        1,
-        outcomes
-            .iter()
-            .filter(|outcome| **outcome == PublicationOutcome::Applied)
-            .count()
+        [PublicationOutcome::Applied; 2],
+        [first.unwrap(), second.unwrap()]
     );
-    assert_eq!(
-        1,
-        outcomes
-            .iter()
-            .filter(|outcome| **outcome == PublicationOutcome::StaleInputs)
-            .count()
-    );
+    assert_eq!(version + 1, region.manifest_ctx.manifest_version().await);
     assert_eq!(sequence, region.version_control.committed_sequence());
     assert_eq!(sequence, region.version_control.current().last_sequence);
     assert_eq!(3, row_count(&engine, region_id).await);
@@ -267,6 +270,45 @@ async fn test_duplicate_publication_and_later_replacement_do_not_readmit_inputs(
 }
 
 #[tokio::test]
+async fn test_replay_requires_all_inputs_absent_and_all_outputs_matching() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(config()).await;
+    let region_id = RegionId::new(1, 1);
+    let (snapshot, outputs) = seed_shared_inputs(&engine, region_id, &[(0, 3), (3, 6)]).await;
+    let mut subset = snapshot.clone();
+    subset.inputs.truncate(1);
+    let output = outputs[0].clone();
+    assert_eq!(
+        PublicationOutcome::Applied,
+        engine
+            .publish_table_compaction(region_id, subset.clone(), vec![output.clone()])
+            .await
+            .unwrap()
+    );
+    let region = engine.get_region(region_id).unwrap();
+    let version = region.manifest_ctx.manifest_version().await;
+    let different = FileMeta {
+        file_size: output.file_size + 1,
+        ..output.clone()
+    };
+    for (request, expected_outputs) in [
+        (snapshot, vec![output]),
+        (subset.clone(), outputs),
+        (subset, vec![different]),
+    ] {
+        assert_eq!(
+            PublicationOutcome::StaleInputs,
+            engine
+                .publish_table_compaction(region_id, request, expected_outputs)
+                .await
+                .unwrap()
+        );
+    }
+    assert_eq!(version, region.manifest_ctx.manifest_version().await);
+    assert_eq!(6, row_count(&engine, region_id).await);
+}
+
+#[tokio::test]
 async fn test_partial_success_can_retry_both_regions_without_duplicate_files() {
     let mut env = TestEnv::new().await;
     let engine = env.create_engine(config()).await;
@@ -292,7 +334,7 @@ async fn test_partial_success_can_retry_both_regions_without_duplicate_files() {
         engine.publish_table_compaction(a, snapshot_a, vec![output_a.clone()]),
         engine.publish_table_compaction(b, snapshot_b, vec![output_b.clone()])
     );
-    assert_eq!(PublicationOutcome::StaleInputs, retry_a.unwrap());
+    assert_eq!(PublicationOutcome::Applied, retry_a.unwrap());
     assert_eq!(PublicationOutcome::Applied, retry_b.unwrap());
     for (id, output) in [(a, output_a), (b, output_b)] {
         let region = engine.get_region(id).unwrap();
@@ -870,7 +912,11 @@ async fn test_uncertain_write_recovers_files_before_retry(#[case] persisted: boo
     let mut env = TestEnv::new().await.with_mock_layer(layer);
     let engine = env.create_engine(config()).await;
     let region_id = RegionId::new(1, 1);
-    let (snapshot, output) = seed(&engine, region_id).await;
+    let (_, output) = seed(&engine, region_id).await;
+    // Open materializes persisted region options. Capture those options so the
+    // two attempts have identical publication preconditions across recovery.
+    reopen_region(&engine, region_id, "test".into(), true, Default::default()).await;
+    let snapshot = engine.table_compaction_snapshot(region_id).unwrap();
     let access = engine.get_region(region_id).unwrap().access_layer.clone();
     armed.store(true, Ordering::SeqCst);
     assert!(
@@ -885,24 +931,21 @@ async fn test_uncertain_write_recovers_files_before_retry(#[case] persisted: boo
     assert!(access.object_store().exists(&path).await.unwrap());
     reopen_region(&engine, region_id, "test".into(), true, Default::default()).await;
     let fresh = engine.table_compaction_snapshot(region_id).unwrap();
+    assert_eq!(snapshot.options, fresh.options);
     assert_eq!(!persisted, !fresh.inputs.is_empty());
-    if persisted {
-        assert_eq!(
-            PublicationOutcome::StaleInputs,
-            engine
-                .publish_table_compaction(region_id, snapshot, vec![output])
-                .await
-                .unwrap()
-        );
-    } else {
-        assert_eq!(
-            PublicationOutcome::Applied,
-            engine
-                .publish_table_compaction(region_id, fresh, vec![output])
-                .await
-                .unwrap()
-        );
-    }
+    let region = engine.get_region(region_id).unwrap();
+    let version = region.manifest_ctx.manifest_version().await;
+    assert_eq!(
+        PublicationOutcome::Applied,
+        engine
+            .publish_table_compaction(region_id, snapshot, vec![output])
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        version + u64::from(!persisted),
+        region.manifest_ctx.manifest_version().await
+    );
     assert_eq!(3, row_count(&engine, region_id).await);
 }
 
@@ -1070,13 +1113,12 @@ async fn test_multiple_outputs_verify_notify_once_and_release_footers(#[case] wi
     };
     let region_id = RegionId::new(1, 1);
     let (snapshot, outputs) = seed_shared_inputs(&engine, region_id, &[(0, 3), (3, 6)]).await;
-    assert_eq!(
-        PublicationOutcome::Applied,
-        engine
-            .publish_table_compaction(region_id, snapshot, outputs.clone())
-            .await
-            .unwrap()
-    );
+    let publish = || engine.publish_table_compaction(region_id, snapshot.clone(), outputs.clone());
+    assert_eq!(PublicationOutcome::Applied, publish().await.unwrap());
+    let region = engine.get_region(region_id).unwrap();
+    let installed = region.version();
+    assert_eq!(PublicationOutcome::Applied, publish().await.unwrap());
+    assert!(Arc::ptr_eq(&installed, &region.version()));
     let expected_notifications = usize::from(with_hook);
     assert_eq!(
         expected_notifications * outputs.len(),
@@ -1100,7 +1142,6 @@ async fn test_multiple_outputs_verify_notify_once_and_release_footers(#[case] wi
     } else {
         assert_eq!(0, recorder.manifest_updates.load(Ordering::SeqCst));
     }
-    let region = engine.get_region(region_id).unwrap();
     let manifest = region.manifest_ctx.manifest().await;
     assert_eq!(outputs.len(), manifest.files.len());
     for output in &outputs {

@@ -50,6 +50,8 @@ pub(crate) struct PublicationContext {
 /// A result for this publication attempt, not a durable task receipt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PublicationOutcome {
+    /// This attempt installed the replacement, or its nonempty outputs are still fully visible
+    /// with all of its inputs absent.
     Applied,
     /// The captured inputs/schema/options no longer match. Re-snapshot and replan.
     StaleInputs,

@@ -46,8 +46,8 @@ use crate::region::version::VersionControlRef;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::request::{
     BackgroundNotify, BuildIndexRequest, DdlRequest, DiscardUnflushedResult, OptionOutputTx,
-    RegionChangeResult, RegionEditKind, RegionEditRequest, RegionEditResult, RegionSyncRequest,
-    SenderDdlRequest, TruncateResult, WorkerRequest, WorkerRequestWithTime,
+    RegionChangeResult, RegionEditKind, RegionEditOutcome, RegionEditRequest, RegionEditResult,
+    RegionSyncRequest, SenderDdlRequest, TruncateResult, WorkerRequest, WorkerRequestWithTime,
 };
 use crate::sst::index::IndexBuildType;
 use crate::sst::{file, location};
@@ -507,6 +507,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         preload_sst_cache,
                     )
                     .await
+                    .map(|()| RegionEditOutcome::Written)
                 }
                 #[cfg(feature = "enterprise")]
                 RegionEditKind::Compaction(context) => {
@@ -605,16 +606,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
             false
         } else {
+            let written = matches!(edit_result.result, Ok(RegionEditOutcome::Written));
             let need_compaction = self.config.schedule_compaction_after_edit
-                && edit_result.result.is_ok()
+                && written
                 && edit_result
                     .edit
                     .files_to_add
                     .iter()
                     .any(|file| file.level < file::LEVEL_SHARED);
 
-            // Only apply the edit if the result is ok and region is not in staging state.
-            if edit_result.result.is_ok() {
+            if written {
                 let mut edit = edit_result.edit;
                 // A background publication can be superseded before its notification arrives.
                 let guard = if !edit_result.update_region_state {
@@ -649,7 +650,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         edit_result
             .waiters
             .reply_with(|| match &edit_result.result {
-                Ok(()) => Ok(()),
+                Ok(_) => Ok(()),
                 Err(e) => Err(e.clone()).context(EditRegionSnafu {
                     region_id: edit_result.region_id,
                 }),

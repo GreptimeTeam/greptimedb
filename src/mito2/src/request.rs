@@ -1575,7 +1575,14 @@ impl RegionEditRequest {
     }
 }
 
-/// Notifies the regin the result of editing region.
+#[derive(Debug)]
+pub(crate) enum RegionEditOutcome {
+    Written,
+    #[cfg(feature = "enterprise")]
+    AlreadyApplied,
+}
+
+/// Notifies the region of the result of editing its manifest.
 #[derive(Debug)]
 pub(crate) struct RegionEditResult {
     /// Region id.
@@ -1587,7 +1594,7 @@ pub(crate) struct RegionEditResult {
     /// Region edit to apply.
     pub(crate) edit: RegionEdit,
     /// Result from the manifest manager.
-    pub(crate) result: std::result::Result<(), Arc<Error>>,
+    pub(crate) result: std::result::Result<RegionEditOutcome, Arc<Error>>,
     /// Whether region state need to be set to Writable after handling this request.
     pub(crate) update_region_state: bool,
     /// The region is in staging mode before handling this request.

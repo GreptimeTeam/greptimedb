@@ -36,7 +36,8 @@ use crate::metrics::{
 use crate::read::series_candidate::is_sparse_metric_metadata;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionMapRef, RegionRoleState};
 use crate::request::{
-    BackgroundNotify, RegionEditResult, Waiters, WorkerRequest, WorkerRequestWithTime,
+    BackgroundNotify, RegionEditOutcome, RegionEditResult, Waiters, WorkerRequest,
+    WorkerRequestWithTime,
 };
 
 use crate::series_index::maintenance::{ReconcileStats, reconcile_series_indexes_with_mode};
@@ -477,7 +478,9 @@ impl SeriesIndexTask {
                 region_id: region.region_id,
                 origin: region.clone(),
                 edit,
-                result: result.map_err(Arc::new),
+                result: result
+                    .map(|()| RegionEditOutcome::Written)
+                    .map_err(Arc::new),
                 waiters: Waiters::one(tx),
                 is_staging: false,
                 update_region_state: false,
