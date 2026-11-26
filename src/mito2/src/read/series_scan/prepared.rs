@@ -345,6 +345,7 @@ fn series_read_request(schema: &Schema, conjuncts: &[&Expr]) -> (SeriesReadReque
             // Keep all equality filters, including contradictory ones, for exact evaluation.
             request.table_id = Some(table_id);
         }
+        request.filter_exprs.push(expr.to_string());
         request.filters.push(filter);
         accepted.push(true);
     }

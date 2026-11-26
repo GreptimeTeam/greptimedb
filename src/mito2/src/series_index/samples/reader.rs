@@ -30,7 +30,7 @@ use object_store::{ObjectStore, Reader};
 use snafu::ResultExt;
 use tokio::sync::OnceCell;
 
-use crate::cache::columnar::{self as metadata_cache, MetadataCache};
+use crate::cache::columnar::{self as metadata_cache, MetadataCache, PartArea};
 use crate::error::{NewRecordBatchSnafu, OpenDalSnafu, Result};
 use crate::metrics::ColumnarReadMetrics;
 use crate::series_index::artifact::{ArtifactFormat, SamplesFileHandle};
@@ -311,6 +311,10 @@ impl SamplesFormatReader for SamplesReader {
                     Ok(trailer)
                 }).await?;
                 require(trailer.root.bounds == bounds, "sample root/part bounds mismatch")?;
+                let part_path: Arc<str> = path.as_str().into();
+                let payload = PartArea::new(reader.clone(), cache.clone(), part_path.clone(), metadata::HEADER_SIZE..trailer.payload_end, request.memory_pool.clone());
+                let key_area = trailer.areas().keys;
+                let keys = PartArea::new(reader.clone(), cache.clone(), part_path, key_area.start..key_area.end, request.memory_pool.clone());
                 let root = load_metadata_page(cache.as_ref(), reader, (&path, size), &trailer.root, trailer.depth, trailer.areas(), &manifest).await?;
                 metrics.add_elapsed("columnar_metadata_wall", metadata_started.elapsed());
                 let (mut active, children) = match root.as_ref() { Page::Leaf(_) => (Some(root.clone()), Vec::new()), Page::Internal(children) => (None, children.clone()) };
@@ -338,7 +342,7 @@ impl SamplesFormatReader for SamplesReader {
                     // hold hundreds of short series, and one read per series would multiply
                     // this scan's I/O by the number of series it touches.
                     load_page_keys(
-                        reader,
+                        &keys,
                         trailer.areas(),
                         blocks,
                         &request,
@@ -383,7 +387,7 @@ impl SamplesFormatReader for SamplesReader {
                                 // this series has no copy cached for the part yet. This path
                                 // reserves its own read before issuing it.
                                 let key = load_block_key(
-                                    reader,
+                                    &keys,
                                     trailer.areas(),
                                     block,
                                     keys_reservation.as_ref(),
@@ -441,11 +445,11 @@ impl SamplesFormatReader for SamplesReader {
                             if block_index >= prefetched.end {
                                 // Release the previous window before reserving the next one.
                                 drop(std::mem::take(&mut prefetched));
-                                prefetched = prefetch_blocks(reader, blocks, block_index, &field_ids, &request, ids.as_ref(), &projection, trailer.payload_end, &mut metrics).await?;
+                                prefetched = prefetch_blocks(&payload, blocks, block_index, &field_ids, &request, ids.as_ref(), &projection, trailer.payload_end, &mut metrics).await?;
                             }
                             *metrics.counts.entry("blocks").or_default() += 1;
                             *metrics.counts.entry("decoded_rows").or_default() += u64::from(block.rows);
-                            read_block(reader, block, &manifest, &request, buffers_consumer.as_ref(), &projection, &field_ids, projected.clone(), &mut prefetched, &mut scratch, &mut decoder, &mut metrics).await?
+                            read_block(&payload, block, &manifest, &request, buffers_consumer.as_ref(), &projection, &field_ids, projected.clone(), &mut prefetched, &mut scratch, &mut decoder, &mut metrics).await?
                         } else { None };
                         // The block's payload slices are shared with the read-ahead window and
                         // the part cache, so they are dropped before the yield: the block's
@@ -605,7 +609,7 @@ fn verified_key(entry: &[u8], length: u32) -> Result<&[u8]> {
 /// fetched entry, whatever alignment or assembly that fetch costs, and the owned key built from
 /// it. Reading first and refusing the key afterwards would leave the bytes already fetched.
 async fn load_block_key(
-    reader: &Reader,
+    reader: &PartArea,
     areas: Areas,
     block: &Block,
     reservation: Option<&MemoryReservation>,
@@ -663,7 +667,7 @@ fn fetch_peak(ranges: &[std::ops::Range<u64>]) -> usize {
 /// fetched.
 #[allow(clippy::too_many_arguments)]
 async fn load_page_keys(
-    reader: &Reader,
+    reader: &PartArea,
     areas: Areas,
     blocks: &[Block],
     request: &SamplesReadRequest,
@@ -902,7 +906,7 @@ fn timestamp_array(values: impl Iterator<Item = i64>, unit: TimestampUnit) -> Ar
 }
 #[allow(clippy::too_many_arguments)]
 async fn read_block(
-    reader: &Reader,
+    reader: &PartArea,
     block: &Block,
     manifest: &Manifest,
     request: &SamplesReadRequest,
@@ -1141,7 +1145,7 @@ async fn read_part_range(reader: &Reader, start: u64, end: u64) -> Result<bytes:
 /// The read window and scan reservation bound retained buffers;
 /// OpenDAL bounds concurrency to 8.
 async fn fetch_columns(
-    reader: &Reader,
+    reader: &PartArea,
     columns: &[&Column],
     buffers: &mut HashMap<u64, bytes::Bytes>,
     metrics: &mut ColumnarReadMetrics,
@@ -1167,7 +1171,7 @@ async fn fetch_columns(
 
 /// Fetches nearby ranges in bounded merged reads.
 async fn fetch_ranges(
-    reader: &Reader,
+    reader: &PartArea,
     ranges: &[std::ops::Range<u64>],
     metrics: &mut ColumnarReadMetrics,
 ) -> Result<Vec<bytes::Bytes>> {
@@ -1178,12 +1182,19 @@ async fn fetch_ranges(
         return Ok(Vec::new());
     }
 
+    if let Some((buffers, stats)) = reader.cached_ranges(ranges).await? {
+        *metrics.counts.entry("payload_reads").or_default() += stats.cache_miss as u64;
+        *metrics.counts.entry("payload_cache_hits").or_default() += stats.cache_hit as u64;
+        *metrics.bytes.entry("fetched").or_default() += stats.independently_loaded_bytes;
+        return Ok(buffers);
+    }
+
     // Merging is bounded by [`MAX_READ_BYTES`], and a requested range never exceeds that, so
     // every range lies inside exactly one merged read.
     let merged = merge_read_ranges(ranges);
     *metrics.counts.entry("payload_reads").or_default() += merged.len() as u64;
     let started = Instant::now();
-    let fetched = reader.fetch(merged.clone()).await.context(OpenDalSnafu)?;
+    let fetched = reader.reader.fetch(merged.clone()).await.context(OpenDalSnafu)?;
     metrics.add_elapsed("columnar_payload_fetch_wall", started.elapsed());
     require(
         fetched.len() == merged.len(),
@@ -1261,7 +1272,7 @@ struct PrefetchedBlocks {
 
 #[allow(clippy::too_many_arguments)]
 async fn prefetch_blocks(
-    reader: &Reader,
+    reader: &PartArea,
     blocks: &[Block],
     start: usize,
     field_ids: &HashSet<u32>,

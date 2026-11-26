@@ -613,6 +613,7 @@ impl From<&RowSelector> for PrefilterRowSelector {
 /// Key for a cached prefilter result.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct PrefilterKey {
+    native_block: Option<(Arc<str>, u64)>,
     file_id: FileId,
     row_group_idx: u32,
     row_selection: Option<Arc<Vec<PrefilterRowSelector>>>,
@@ -654,6 +655,7 @@ impl PrefilterKey {
         let expr_bytes = filter_exprs.iter().map(|s| s.capacity()).sum::<usize>();
 
         Self {
+            native_block: None,
             file_id,
             row_group_idx,
             row_selection,

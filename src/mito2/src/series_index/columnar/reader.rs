@@ -29,7 +29,7 @@ use mito_codec::row_converter::{SparseOffsetsCache, SparsePrimaryKeyCodec};
 use object_store::ObjectStore;
 use snafu::ResultExt;
 
-use crate::cache::columnar::{self as metadata_cache, MetadataCache};
+use crate::cache::columnar::{self as metadata_cache, MetadataCache, PartArea};
 use crate::error::{NewRecordBatchSnafu, OpenDalSnafu, RecordBatchSnafu, Result};
 use crate::metrics::ColumnarReadMetrics;
 use crate::series_index::artifact::ArtifactFormat;
@@ -267,10 +267,9 @@ impl FormatReader for ColumnarReader {
         );
         let request = Arc::new(request);
         let mut pages = self.leaf_pages(request.clone());
-        let store = self.store.clone();
         Ok(Box::pin(async_stream::try_stream! {
             let mut metrics = ColumnarReadMetrics::default();
-            while let Some((path, page)) = pages.try_next().await? {
+            while let Some((area, page)) = pages.try_next().await? {
                 for block in page.blocks()? {
                     if !matches_range(block.first_id(), block.last_id(), &request)
                         || !matches_statistics(block, &request.filters)
@@ -279,7 +278,7 @@ impl FormatReader for ColumnarReader {
                     }
                     *metrics.counts.entry("series_blocks_read").or_default() += 1;
                     *metrics.counts.entry("series_rows_examined").or_default() += u64::from(block.rows);
-                    if let Some(mut output) = read_block(&store, &path, block, &request, projected.clone(), &mut metrics).await? {
+                    if let Some(mut output) = read_block(&area, block, &request, projected.clone(), &mut metrics).await? {
                         loop {
                             let started = Instant::now();
                             let batch = output.next_batch()?;
@@ -299,7 +298,6 @@ impl ColumnarReader {
     /// Stream every exact sparse key and its stored row count in file order.
     pub(crate) fn read_full_keys(&self) -> BoxStream<'static, Result<(ExactSeriesKey, u64)>> {
         let mut pages = self.leaf_pages(Default::default());
-        let store = self.store.clone();
         let manifest = self.manifest.clone();
         Box::pin(async_stream::try_stream! {
             let tag_ids: HashMap<_, _> = manifest.tags.iter()
@@ -309,15 +307,15 @@ impl ColumnarReader {
             let codec = SparsePrimaryKeyCodec::schemaless();
             let mut offsets = SparseOffsetsCache::new();
             let mut encoded = Vec::new();
-            while let Some((path, page)) = pages.try_next().await? {
+            while let Some((area, page)) = pages.try_next().await? {
                 for block in page.blocks()? {
-                    let tsids = read_integers(&store, &path, block, TSID_COLUMN, &mut metrics).await?;
-                    let counts = read_integers(&store, &path, block, ROW_COUNT_COLUMN, &mut metrics).await?;
+                    let tsids = read_integers(&area, block, TSID_COLUMN, &mut metrics).await?;
+                    let counts = read_integers(&area, block, ROW_COUNT_COLUMN, &mut metrics).await?;
                     // Block metadata lists only physically present tag chunks.
                     let mut tags = Vec::new();
                     for column in &block.columns {
                         if let Some(&id) = tag_ids.get(column.name.as_str()) {
-                            let decoded = load_column_chunk(&store, &path, column, block, &mut metrics).await?;
+                            let decoded = load_column_chunk(&area, column, block, &mut metrics).await?;
                             let Decoded::Strings(dictionary) = decoded else {
                                 Err(invalid("expected a series tag dictionary"))?
                             };
@@ -346,7 +344,7 @@ impl ColumnarReader {
     fn leaf_pages(
         &self,
         request: Arc<SeriesReadRequest>,
-    ) -> BoxStream<'static, Result<(Arc<str>, Arc<Page>)>> {
+    ) -> BoxStream<'static, Result<(PartArea, Arc<Page>)>> {
         let cache = self.cache.clone();
         let manifest = self.manifest.clone();
         let store = self.store.clone();
@@ -379,6 +377,8 @@ impl ColumnarReader {
                     Ok(trailer)
                 }).await?;
                 require(trailer.root.first == part.first && trailer.root.last == part.last, "series part/root bounds mismatch")?;
+                let reader = store.reader_with(&path).concurrent(8).gap(0).await.context(OpenDalSnafu)?;
+                let area = PartArea::new(reader, cache.clone(), path.clone(), metadata::HEADER_SIZE..trailer.payload_end, None);
                 let root = load_metadata_page(cache.as_ref(), &store, (&path, size), &trailer.root, trailer.depth, trailer.payload_end, &names).await?;
                 drop(timer);
                 let (mut active, children) = match root.as_ref() {
@@ -405,7 +405,7 @@ impl ColumnarReader {
                             previous_payload_end = column.payload.end()?;
                         }
                     }
-                    yield (path.clone(), page);
+                    yield (area.clone(), page);
                 }
                 if request.ids.is_none() && request.table_id.is_none() {
                     require(observed_rows == part.num_series, "series part row count mismatch")?;
@@ -566,8 +566,7 @@ impl Decoded {
 
 /// TODO: share decoded chunks through the existing Mito cache, not a new cache framework.
 async fn load_column_chunk(
-    store: &ObjectStore,
-    path: &str,
+    area: &PartArea,
     column: &Column,
     block: &Block,
     metrics: &mut ColumnarReadMetrics,
@@ -585,7 +584,12 @@ async fn load_column_chunk(
         )));
     }
     let timer = metrics.timer("columnar_series_fetch_wall");
-    let bytes = read_range(store, path, column.payload.offset, column.payload.end()?).await?;
+    let range = column.payload.offset..column.payload.end()?;
+    let bytes = if let Some((mut bytes, _)) = area.cached_ranges(std::slice::from_ref(&range)).await? {
+        bytes.pop().unwrap()
+    } else {
+        area.reader.read(range).await.context(OpenDalSnafu)?.to_bytes()
+    };
     drop(timer);
     *metrics.counts.entry("series_column_reads").or_default() += 1;
     *metrics.bytes.entry("series_payload_fetched").or_default() += bytes.len() as u64;
@@ -637,21 +641,19 @@ async fn load_column_chunk(
 }
 
 async fn read_integers(
-    store: &ObjectStore,
-    path: &str,
+    area: &PartArea,
     block: &Block,
     name: &str,
     metrics: &mut ColumnarReadMetrics,
 ) -> Result<Vec<u64>> {
-    match get_column(store, path, block, name, metrics).await? {
+    match get_column(area, block, name, metrics).await? {
         Decoded::Integers(values) => Ok(values),
         _ => Err(invalid(format!("missing integer column {name}"))),
     }
 }
 
 async fn get_column(
-    store: &ObjectStore,
-    path: &str,
+    area: &PartArea,
     block: &Block,
     name: &str,
     metrics: &mut ColumnarReadMetrics,
@@ -660,14 +662,13 @@ async fn get_column(
         return Ok(Decoded::Table(block.table_id, block.rows as usize));
     }
     match block.columns.iter().find(|c| c.name == name) {
-        Some(column) => load_column_chunk(store, path, column, block, metrics).await,
+        Some(column) => load_column_chunk(area, column, block, metrics).await,
         None => Ok(Decoded::Null(block.rows as usize)),
     }
 }
 
 async fn read_block(
-    store: &ObjectStore,
-    path: &str,
+    area: &PartArea,
     block: &Block,
     request: &SeriesReadRequest,
     schema: SchemaRef,
@@ -676,7 +677,7 @@ async fn read_block(
     let mut decoded = HashMap::new();
     let mut selected: Vec<_> = (0..block.rows as usize).collect();
     if let Some(ids) = &request.ids {
-        let column = get_column(store, path, block, TSID_COLUMN, metrics).await?;
+        let column = get_column(area, block, TSID_COLUMN, metrics).await?;
         if let Decoded::Integers(values) = &column {
             selected.retain(|&i| {
                 ids.contains(&MetricSeriesId {
@@ -687,16 +688,26 @@ async fn read_block(
         }
         decoded.insert(TSID_COLUMN.to_owned(), Arc::new(column));
     }
+    // A complete block mask can be reused without hashing an arbitrary ID selection.
+    let prefilter = if request.ids.is_none() && !request.filters.is_empty()
+        && request.filters.len() == request.filter_exprs.len() {
+        block.columns.first().and_then(|column| area.prefilter(column.payload.offset, &request.filter_exprs))
+    } else {
+        None
+    };
+    if let Some(mask) = prefilter.as_ref().and_then(|(cache, key)| cache.get_prefilter_result(key)) {
+        selected.retain(|&row| mask.value(row));
+    } else {
     for filter in &request.filters {
         if selected.is_empty() {
-            return Ok(None);
+            break;
         }
         let name = filter.column_name();
         if !decoded.contains_key(name) {
             *metrics.counts.entry("series_filter_columns").or_default() += 1;
             decoded.insert(
                 name.to_owned(),
-                Arc::new(get_column(store, path, block, name, metrics).await?),
+                Arc::new(get_column(area, block, name, metrics).await?),
             );
         }
         let started = Instant::now();
@@ -705,6 +716,15 @@ async fn read_block(
             .ok_or_else(|| invalid("missing decoded filter column"))?
             .filter(filter, &mut selected)?;
         metrics.add_elapsed("columnar_series_filter", started.elapsed());
+    }
+        if let Some((cache, key)) = prefilter {
+            let mut mask = datatypes::arrow::array::BooleanBufferBuilder::new(block.rows as usize);
+            mask.append_n(block.rows as usize, false);
+            for &row in &selected {
+                mask.set_bit(row, true);
+            }
+            cache.put_prefilter_result(key, Arc::new(mask.finish()));
+        }
     }
     if selected.is_empty() {
         return Ok(None);
@@ -718,7 +738,7 @@ async fn read_block(
                 .or_default() += 1;
             decoded.insert(
                 name.clone(),
-                Arc::new(get_column(store, path, block, name, metrics).await?),
+                Arc::new(get_column(area, block, name, metrics).await?),
             );
         }
         columns.push(

@@ -54,6 +54,8 @@ pub struct PageCacheObserver {
 /// Byte accounting for one successful fetch. Hits are initial lookups, not waiters.
 #[derive(Debug, Default)]
 pub struct PageFetchStats {
+    /// Bytes read by this caller on independent native page misses.
+    pub independently_loaded_bytes: u64,
     pub cache_hit: usize,
     pub cache_miss: usize,
     /// Requested intersections already cached; overlapping requests count repeatedly.
@@ -162,6 +164,29 @@ impl<K: Hash + Eq + Clone + Send + Sync + 'static> PagedCache<K> {
         ranges: &[Range<u64>],
         reader: &R,
     ) -> Result<(Vec<Bytes>, PageFetchStats), Arc<io::Error>> {
+        self.fetch_inner(file, file_size, ranges, reader, false).await
+    }
+
+    /// Loads missing pages independently. A paused reader never owns another
+    /// reader's pending I/O, even when both request the same page.
+    pub async fn fetch_independently<R: RangeReader + ?Sized>(
+        &self,
+        file: K,
+        file_size: u64,
+        ranges: &[Range<u64>],
+        reader: &R,
+    ) -> Result<(Vec<Bytes>, PageFetchStats), Arc<io::Error>> {
+        self.fetch_inner(file, file_size, ranges, reader, true).await
+    }
+
+    async fn fetch_inner<R: RangeReader + ?Sized>(
+        &self,
+        file: K,
+        file_size: u64,
+        ranges: &[Range<u64>],
+        reader: &R,
+        independent: bool,
+    ) -> Result<(Vec<Bytes>, PageFetchStats), Arc<io::Error>> {
         if ranges.iter().any(|r| r.start > r.end || r.end > file_size) {
             return Err(invalid_request());
         }
@@ -207,7 +232,23 @@ impl<K: Hash + Eq + Clone + Send + Sync + 'static> PagedCache<K> {
             hits: stats.cache_hit,
             misses: stats.cache_miss,
         });
-        if !missing.is_empty() {
+        if independent && !missing.is_empty() {
+            let spans = missing.iter().map(|id| layout.page_range(*id).ok_or_else(invalid_request))
+                .collect::<Result<Vec<_>, _>>()?;
+            let buffers = reader.read_vec(&spans).await?;
+            if buffers.len() != spans.len() {
+                return Err(invalid_request());
+            }
+            for ((id, range), bytes) in missing.into_iter().zip(spans).zip(buffers) {
+                if bytes.len() as u64 != range.end - range.start {
+                    return Err(invalid_request());
+                }
+                stats.independently_loaded_bytes += bytes.len() as u64;
+                let page = self.create_cached_page(file_size, Bytes::copy_from_slice(&bytes));
+                let admitted = self.cache.get_or_insert((file.clone(), id), page).await;
+                pages.insert(id, admitted.bytes.clone());
+            }
+        } else if !missing.is_empty() {
             let loads = |requests: batch::BatchSender<_, _>| {
                 missing.into_iter().map(move |id| {
                     self.load_page((file.clone(), id), layout, file_size, requests.clone())
