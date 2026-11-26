@@ -475,6 +475,168 @@ async fn test_metadata_aggr_replacement_with_duplicate_rows_falls_back() {
     engine.stop().await.unwrap();
 }
 
+#[rstest::rstest]
+#[case::non_append_key_filter(false, false)]
+#[case::append_key_filter(true, false)]
+#[case::overlapping_files(false, true)]
+#[tokio::test]
+async fn test_metadata_aggr_replacement_with_changed_key_falls_back(
+    #[case] append: bool,
+    #[case] keep_second_file: bool,
+) {
+    use store_api::region_request::RegionOpenRequest;
+
+    use crate::manifest::action::RegionEdit;
+
+    let mut env = TestEnv::new().await;
+    let config = MitoConfig {
+        experimental_metadata_aggr: true,
+        schedule_compaction_after_edit: false,
+        ..Default::default()
+    };
+    let engine = env.create_engine(config.clone()).await;
+    let region_id = RegionId::new(1, 1);
+    let create = CreateRequestBuilder::new()
+        .insert_option("append_mode", if append { "true" } else { "false" })
+        .build();
+    let table_dir = create.table_dir.clone();
+    let path_type = create.path_type;
+    let schema = test_util::rows_schema(&create);
+    engine
+        .handle_request(region_id, RegionRequest::Create(create))
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let store = region.access_layer.object_store().clone();
+
+    let put = |key| api::v1::Rows {
+        schema: schema.clone(),
+        rows: test_util::build_rows_for_key(key, 0, 1, 0),
+    };
+    test_util::put_rows(&engine, region_id, put("a")).await;
+    test_util::flush_region(&engine, region_id, None).await;
+    let old_file = region.version().ssts.levels()[0]
+        .files
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    let mut request = ScanRequest {
+        metadata_aggr_hint: true,
+        ..Default::default()
+    };
+    if !keep_second_file {
+        request.filters = vec![col("tag_0").eq(lit("a"))];
+        let scan = engine
+            .handle_query(region_id, request.clone())
+            .await
+            .unwrap();
+        assert_eq!(scan.properties().exact_num_rows(), Some(1));
+    }
+
+    test_util::put_rows(&engine, region_id, put("b")).await;
+    test_util::flush_region(&engine, region_id, None).await;
+    let second_file = region.version().ssts.levels()[0]
+        .files
+        .values()
+        .find(|file| file.file_id() != old_file.file_id())
+        .unwrap()
+        .clone();
+    assert_eq!(old_file.time_range(), second_file.time_range());
+    assert_eq!(old_file.num_rows(), second_file.num_rows());
+    assert_eq!(
+        old_file.meta_ref().num_row_groups,
+        second_file.meta_ref().num_row_groups
+    );
+    assert_ne!(
+        old_file.raw_primary_key_range(),
+        second_file.raw_primary_key_range()
+    );
+    if keep_second_file {
+        let scan = engine
+            .handle_query(region_id, request.clone())
+            .await
+            .unwrap();
+        assert_eq!(scan.properties().exact_num_rows(), Some(2));
+    }
+
+    let bytes = store
+        .read(&second_file.file_path(&table_dir, path_type))
+        .await
+        .unwrap();
+    let replacement = crate::sst::file::FileMeta {
+        file_size: bytes.len() as u64,
+        ..old_file.meta_ref().clone()
+    };
+    // Like sst-replace, keep the file ID and the old manifest key bounds.
+    store
+        .write(&replacement.file_path(&table_dir, path_type), bytes)
+        .await
+        .unwrap();
+    engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                files_to_add: vec![replacement],
+                files_to_remove: if keep_second_file {
+                    vec![]
+                } else {
+                    vec![second_file.meta_ref().clone()]
+                },
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let engine = env.reopen_engine(engine, config).await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Open(RegionOpenRequest {
+                engine: String::new(),
+                table_dir,
+                path_type,
+                options: Default::default(),
+                skip_wal_replay: false,
+                checkpoint: None,
+                requirements: Default::default(),
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        engine
+            .get_region(region_id)
+            .unwrap()
+            .version()
+            .options
+            .append_mode,
+        append
+    );
+    let scan = engine
+        .handle_query(region_id, request.clone())
+        .await
+        .unwrap();
+    assert_eq!(scan.properties().exact_num_rows(), None);
+    for hint in [false, true] {
+        request.metadata_aggr_hint = hint;
+        let rows = common_recordbatch::RecordBatches::try_collect(
+            engine
+                .scan_to_stream(region_id, request.clone())
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rows.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+            usize::from(keep_second_file)
+        );
+    }
+    engine.stop().await.unwrap();
+}
+
 #[tokio::test]
 async fn test_metadata_aggr_statistics_follow_row_visibility() {
     let mut env = TestEnv::new().await;
