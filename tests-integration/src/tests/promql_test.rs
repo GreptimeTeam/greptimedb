@@ -4477,6 +4477,14 @@ async fn native_promql_composed_binary_canonical_operand() {
 /// `(Histogram, Float)` as unsupported and skips it without keeping the left element, so its one
 /// column is the empty float layout both routes answer with no rows.
 ///
+/// The same holds for a histogram beside a literal scalar, and what that column *is* follows the
+/// operator rather than the histogram it read: `bool` answers `1` or `0` whatever it compared, so
+/// `kind_hist > bool 2` declares `Float64`; a comparison without `bool` only filters, so it keeps
+/// the histogram column; arithmetic keeps the histogram where a kernel scales one - `hist * 2`,
+/// `2 * hist`, `hist / 2` - and declares the empty float layout for the directions that pair nothing
+/// at all, `2 / hist` and `hist + 2`, as the existing plan does for them. Both the type and the rows
+/// are compared here, on both routes.
+///
 /// The observer says which route ran - the native one while the option is on, the existing plan
 /// when it is off - and the rows are compared with the existing plan's.
 #[tokio::test(flavor = "multi_thread")]
@@ -4484,6 +4492,7 @@ async fn native_promql_kind_rules_match_legacy() {
     use api::greptime_proto::io::prometheus::write::v2::histogram::{Count, ZeroCount};
     use api::greptime_proto::io::prometheus::write::v2::{Histogram, Sample};
     use axum::body::{Body, to_bytes};
+    use common_query::native_histogram::native_histogram_arrow_type;
     use http::Request;
     use prost::Message;
     use servers::prom_remote_write::v2::test_util as remote_write_v2;
@@ -4609,6 +4618,132 @@ async fn native_promql_kind_rules_match_legacy() {
         native_rows,
         "{comparison} must answer the existing plan's rows"
     );
+
+    // A histogram broadcast over a literal scalar declares the kind its operator answers, on both
+    // routes. A scalar carries no field, so the column is what the operator makes of the histogram
+    // and not the histogram's own type in every case: `bool` answers `1` or `0` whatever it read,
+    // which is a float, while a comparison without `bool` only filters and keeps the histogram
+    // column. Both of those pairs emit nothing here - the kernel pairs no histogram with a float at
+    // all - so the answers are the empty columns this block compares, type included.
+    let empty_answers = [
+        ("kind_hist > bool 2", DataType::Float64),
+        ("kind_hist > 2", native_histogram_arrow_type()),
+        ("2 / kind_hist", DataType::Float64),
+        ("kind_hist + 2", DataType::Float64),
+    ];
+    for (expression, expected) in empty_answers {
+        let sql = format!("TQL EVAL (0, 600, '600s') {expression}");
+        observer.clear();
+        let native = native_tql_output(&instance, &sql, true).await;
+        assert!(
+            observer.fused().is_some(),
+            "{expression} did not run natively: {:#?}",
+            observer.root_plan()
+        );
+        let (native_type, native_rows) = native_answer_value_column(native, expression).await;
+        assert_eq!(&expected, &native_type, "{expression} native value column");
+        assert_eq!(0, native_rows, "{expression} pairs no histogram sample");
+        observer.clear();
+        let legacy = native_tql_output(&instance, &sql, false).await;
+        assert!(
+            observer.fused().is_none(),
+            "{expression} must keep the existing plan when the native route is off"
+        );
+        let (legacy_type, legacy_rows) = native_answer_value_column(legacy, expression).await;
+        assert_eq!(
+            &expected, &legacy_type,
+            "{expression} existing value column"
+        );
+        assert_eq!(
+            legacy_rows, native_rows,
+            "{expression} must answer the existing plan's rows"
+        );
+    }
+
+    // Arithmetic keeps the histogram for the directions that scale one - `hist * 2`, `2 * hist` and
+    // `hist / 2` - and the values are the existing plan's, row for row. `2 / hist` has no kernel at
+    // all, so it declares the empty float layout above rather than the histogram it reads.
+    for (expression, scale) in [
+        ("kind_hist * 2", 2.0),
+        ("2 * kind_hist", 2.0),
+        ("kind_hist / 2", 0.5),
+    ] {
+        let sql = format!("TQL EVAL (0, 600, '600s') {expression}");
+        observer.clear();
+        let native = native_tql_output(&instance, &sql, true).await;
+        assert!(
+            observer.fused().is_some(),
+            "{expression} did not run natively: {:#?}",
+            observer.root_plan()
+        );
+        let (native_type, _) = native_answer_value_column(native, expression).await;
+        assert_eq!(
+            native_histogram_arrow_type(),
+            native_type,
+            "{expression} stays a histogram column"
+        );
+        observer.clear();
+        let native = native_tql_output(&instance, &sql, true).await;
+        let native_rows = histogram_label_rows(native).await;
+        assert_eq!(
+            vec![
+                (0, vec!["job=api".to_string()], 4.0 * scale, 8.0 * scale),
+                (
+                    600_000,
+                    vec!["job=api".to_string()],
+                    4.0 * scale,
+                    8.0 * scale
+                ),
+            ],
+            native_rows,
+            "{expression} scales the histogram it read"
+        );
+        observer.clear();
+        let legacy = native_tql_output(&instance, &sql, false).await;
+        assert!(
+            observer.fused().is_none(),
+            "{expression} must keep the existing plan when the native route is off"
+        );
+        assert_eq!(
+            histogram_label_rows(legacy).await,
+            native_rows,
+            "{expression} must answer the existing plan's rows row for row"
+        );
+    }
+}
+
+/// The declared type of a PromQL answer's value column, and how many rows the answer holds.
+///
+/// The answer publishes its time index first, its value next and its labels after it, so the value
+/// is the one column that is neither a timestamp nor a label. The declaration is read off the
+/// execution plan the answer ran, because an answer with no row carries no batch to read it from.
+/// Both routes declare the same column for the statement, and comparing the declarations is the
+/// point: a histogram answer and the empty float layout an unsupported pair keeps are what a reader
+/// tells apart by this type.
+async fn native_answer_value_column(output: Output, query: &str) -> (DataType, usize) {
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!("PromQL answers record batches"),
+    };
+    let rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
+    // An answer with no row carries no batch to read the declaration from, so it comes from the
+    // plan the answer ran; a batch that does carry rows names the same columns.
+    let schema = match output.meta.plan {
+        Some(plan) => plan.schema(),
+        None => Arc::clone(batches.schema().arrow_schema()),
+    };
+    let value = schema
+        .fields()
+        .iter()
+        .find(|field| {
+            !matches!(
+                field.data_type(),
+                DataType::Timestamp(..) | DataType::Utf8 | DataType::Dictionary(_, _)
+            )
+        })
+        .unwrap_or_else(|| panic!("{query} declares a value column: {schema:?}"));
+    (value.data_type().clone(), rows)
 }
 
 /// A scalar operand broadcasts over the vector it meets on both routes, row for row.

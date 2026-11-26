@@ -33,10 +33,9 @@ use std::f64::consts::PI;
 use std::sync::Arc;
 
 use datafusion::error::{DataFusionError, Result};
-use datatypes::arrow::array::{Float64Array, Float64Builder, UInt32Builder};
-use datatypes::series::histogram::HistogramBatchBuilder;
+use datatypes::arrow::array::Float64Array;
 use datatypes::series::samples::{
-    DenseSamplesRef, HistogramSamples, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
+    DenseSamplesRef, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
 };
 use datatypes::series::time::{GridRange, TimeAxis};
 use datatypes::series::{Label, SeriesLabels};
@@ -44,7 +43,7 @@ use datatypes::series::{Label, SeriesLabels};
 use crate::histogram_eval::float_histogram::FloatHistogram;
 
 use crate::functions::Round;
-use crate::grid_series::GridSeriesBuilder;
+use crate::grid_series::{GridSample, GridSeriesBuilder};
 use crate::map_time::DateFunction;
 
 /// Float math supported by the evaluated-series kernel.
@@ -204,110 +203,76 @@ pub fn map_arithmetic(
 /// Applies literal scalar arithmetic to float and histogram samples. Float-only series retain the
 /// original kernel unchanged; histogram-capable fields are traversed sample-by-sample.
 ///
-/// The second element of the answer reports whether a histogram sample was dropped because the
-/// operation has no histogram form — `2 / h`, or `h + 1`, which Prometheus answers by dropping the
-/// sample rather than failing the query. The caller records the info; this kernel is also used on
-/// paths that hold no collector.
+/// The operation covers the positions that come out with a value and nothing else, which is what
+/// [`map_arithmetic_series_with_histograms`] answers for a scalar that varies per point: a histogram
+/// scaled by a factor on either side and divided by a divisor on its right keeps its position, and a
+/// position the operator has no histogram form for — `2 / h`, or `h + 1` — is dropped, which is what
+/// Prometheus does with a histogram under an operator it has no meaning for rather than failing the
+/// query. `None` therefore means every position was dropped, and the caller publishes the empty
+/// layout rather than rows holding no value. The second element of the answer reports whether such a
+/// position was dropped so the caller can say so; this kernel is also used on paths that hold no
+/// collector.
 pub(crate) fn map_arithmetic_literal(
     schema: &SeriesSchema,
     series: &Series,
     op: ArithmeticOp,
     scalar: ScalarOperand,
-) -> Result<(Series, bool)> {
-    validate_grid_series(schema, series)?;
+) -> Result<(Option<Series>, bool)> {
     if is_float_series(series) {
-        return Ok((map_arithmetic(schema, series, op, scalar)?, false));
+        return Ok((Some(map_arithmetic(schema, series, op, scalar)?), false));
     }
-
+    let time = validate_grid_series(schema, series)?;
+    let mut builder = GridSeriesBuilder::try_new(Arc::new(schema.clone()))?;
     let mut dropped_histogram = false;
-    let fields = series
-        .fields
-        .iter()
-        .map(|samples| {
-            let segments = samples
-                .segments()
-                .iter()
-                .map(|segment| {
-                    let (segment, dropped) = map_arithmetic_segment(segment, op, scalar)?;
-                    dropped_histogram |= dropped;
-                    Ok(segment)
-                })
-                .collect::<Result<Vec<_>>>()?;
-            Samples::try_from_chunks(segments).map_err(series_error)
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let mut output = Series::try_new(
-        schema,
-        series.metric.clone(),
-        series.time.clone(),
-        SeriesFields::try_from_vec(fields).map_err(series_error)?,
-    )
-    .map_err(series_error)?;
-    output.metric = drop_metric_name(&output.metric)?;
-    Ok((output, dropped_histogram))
-}
-
-/// Applies one literal scalar operation to one run of samples, reporting whether any histogram
-/// position had no answer.
-fn map_arithmetic_segment(
-    samples: &Samples,
-    op: ArithmeticOp,
-    scalar: ScalarOperand,
-) -> Result<(Samples, bool)> {
-    let mut floats = Float64Builder::with_capacity(samples.len());
-    let mut indices = UInt32Builder::with_capacity(samples.len());
-    let mut histograms = HistogramBatchBuilder::new();
-
-    let mut dropped_histogram = false;
-    for index in 0..samples.len() {
-        match samples.sample(index) {
-            SampleRef::Missing => {
-                floats.append_null();
-                indices.append_null();
-            }
-            SampleRef::Float(value) => {
-                let result = match scalar {
-                    ScalarOperand::Left(left) => op.calculate(left, value),
-                    ScalarOperand::Right(right) => op.calculate(value, right),
-                };
-                floats.append_value(result);
-                indices.append_null();
-            }
-            SampleRef::Histogram(view) => {
-                floats.append_null();
-                let histogram_result = match (op, scalar) {
-                    (ArithmeticOp::Multiply, ScalarOperand::Left(factor))
-                    | (ArithmeticOp::Multiply, ScalarOperand::Right(factor)) => {
-                        let mut histogram = FloatHistogram::try_from_view(&view)?;
-                        histogram.mul(factor);
-                        Some(histogram)
+    let mut cursors: Vec<_> = series.fields.iter().map(|field| field.cursor()).collect();
+    let mut row = Vec::with_capacity(cursors.len());
+    for (position, index) in time.positions() {
+        row.clear();
+        for cursor in &mut cursors {
+            row.push(
+                match cursor
+                    .at(index)
+                    .expect("the axis and the fields are aligned")
+                {
+                    SampleRef::Missing => None,
+                    SampleRef::Float(value) => Some(GridSample::Float(match scalar {
+                        ScalarOperand::Left(scalar) => op.calculate(scalar, value),
+                        ScalarOperand::Right(scalar) => op.calculate(value, scalar),
+                    })),
+                    SampleRef::Histogram(view) => {
+                        let scaled = match (op, scalar) {
+                            (ArithmeticOp::Multiply, ScalarOperand::Left(factor))
+                            | (ArithmeticOp::Multiply, ScalarOperand::Right(factor)) => {
+                                let mut histogram = FloatHistogram::try_from_view(&view)?;
+                                histogram.mul(factor);
+                                Some(histogram)
+                            }
+                            (ArithmeticOp::Divide, ScalarOperand::Right(divisor)) => {
+                                let mut histogram = FloatHistogram::try_from_view(&view)?;
+                                histogram.div(divisor);
+                                Some(histogram)
+                            }
+                            // `scalar / histogram` and every other operator have no histogram form.
+                            _ => None,
+                        };
+                        match scaled {
+                            Some(mut histogram) => {
+                                histogram.compact();
+                                Some(GridSample::Histogram(Box::new(histogram)))
+                            }
+                            None => {
+                                dropped_histogram = true;
+                                None
+                            }
+                        }
                     }
-                    (ArithmeticOp::Divide, ScalarOperand::Right(divisor)) => {
-                        let mut histogram = FloatHistogram::try_from_view(&view)?;
-                        histogram.div(divisor);
-                        Some(histogram)
-                    }
-                    // Scalar / histogram and all other histogram operators drop this position.
-                    _ => None,
-                };
-                if let Some(mut histogram) = histogram_result {
-                    histogram.compact();
-                    let index = histogram.push_to(&mut histograms)?;
-                    indices.append_value(index);
-                } else {
-                    dropped_histogram = true;
-                    indices.append_null();
-                }
-            }
+                },
+            );
         }
+        builder.push_samples(position, &row)?;
     }
-
-    let histogram_samples =
-        HistogramSamples::try_new(indices.finish(), histograms.finish().map_err(series_error)?)
-            .map_err(series_error)?;
-    let samples =
-        Samples::try_from_mixed(floats.finish(), histogram_samples).map_err(series_error)?;
-    Ok((samples, dropped_histogram))
+    let metric = drop_metric_name(&series.metric)?;
+    Ok((builder.finish(metric)?, dropped_histogram))
 }
 
 /// Produces an unlabelled scalar over exactly the requested evaluated range.

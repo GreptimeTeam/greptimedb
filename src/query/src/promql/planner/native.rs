@@ -59,8 +59,8 @@ use promql::extension_plan::{
 };
 use promql::native::plan::{
     AggregateKind, BoundAggregate, BoundInput, BoundVectorOp, NativeExpr, NativeNode, NativeTree,
-    NativeType, aggregate_state_binding, binary_output_field_kind, fused_output_tags,
-    native_tree_supported, uniform_field_kind,
+    NativeType, aggregate_state_binding, binary_output_field_kind, broadcast_output_field_kind,
+    fused_output_tags, native_tree_supported, uniform_field_kind,
 };
 use promql::native::segment::{
     self, NATIVE_ORDERING, canonical_boundary_stages, canonical_local_prefix,
@@ -809,7 +809,7 @@ impl PromPlanner {
                     vec![left_tags, right_tags],
                     left_time,
                     left_grid,
-                    (left_kind, right_kind),
+                    (Some(left_kind), Some(right_kind)),
                 )
             }
             // One side is a scalar, so the operation is a broadcast over the frame side: it keeps
@@ -847,11 +847,13 @@ impl PromPlanner {
                 // A scalar is one float per grid point and carries no field, so the pair answers the
                 // frame's own kind where the operator has a kernel for it - `hist * 2` stays a
                 // histogram - and the empty float layout everywhere else, which is the same answer
-                // the whole-statement attempt declares for the same pair.
+                // the whole-statement attempt declares for the same pair: `None` is the scalar
+                // side, and `publish_native_composition` reads the kind through the same rule a
+                // whole compiled tree does.
                 let kinds = if left_scalar {
-                    (FieldKind::Float, kind)
+                    (None, Some(kind))
                 } else {
-                    (kind, FieldKind::Float)
+                    (Some(kind), None)
                 };
                 let tree = match bind_evaluated_broadcast(binary, left, right) {
                     Ok(tree) => tree,
@@ -924,10 +926,14 @@ impl PromPlanner {
 
     /// Publishes a bound composition as one node over `children`.
     ///
-    /// `kinds` are the kinds the operation pairs, in the order the operands were written: a scalar
-    /// side is a float, which is what keeps `hist * 2` a histogram while `hist + 2` - a pair with no
-    /// sample to emit - declares the empty float layout. `source_tags` names the labels of each
-    /// child, so the output labels of the node follow the operands it actually reads.
+    /// `kinds` are the kinds the operation pairs, in the order the operands were written, with
+    /// `None` for a scalar side - which is a float per grid point and carries no field of its own.
+    /// Two frames read the arithmetic result's kind, and a scalar beside one frame reads
+    /// [`broadcast_output_field_kind`]: the same rule a whole compiled tree applies to the same
+    /// pair, which is what keeps `hist * 2` a histogram, `hist > 2` the histogram column it filters
+    /// and `2 / hist` the empty float layout while `hist + 2`, a pair with no sample to emit,
+    /// declares that layout too. `source_tags` names the labels of each child, so the output labels
+    /// of the node follow the operands it actually reads.
     #[allow(clippy::too_many_arguments)]
     fn publish_native_composition(
         expr: &PromExpr,
@@ -937,18 +943,29 @@ impl PromPlanner {
         children: Vec<LogicalPlan>,
         time: String,
         grid: Arc<EvalGrid>,
-        kinds: (FieldKind, FieldKind),
+        kinds: (Option<FieldKind>, Option<FieldKind>),
     ) -> Result<Option<NativePlanned>> {
         let NativeExpr::Binary { matching, .. } = &tree.root().expr else {
             return Ok(declined("bound_root_is_not_the_binary"));
         };
-        let Some(root_kind) = binary_output_field_kind(
-            kinds.0,
-            kinds.1,
-            matching.op,
-            matching.return_bool,
-            matching.fill,
-        ) else {
+        let kind = match kinds {
+            (Some(left), Some(right)) => binary_output_field_kind(
+                left,
+                right,
+                matching.op,
+                matching.return_bool,
+                matching.fill,
+            ),
+            (Some(vector), None) => {
+                broadcast_output_field_kind(false, vector, matching.op, matching.return_bool)
+            }
+            (None, Some(vector)) => {
+                broadcast_output_field_kind(true, vector, matching.op, matching.return_bool)
+            }
+            // Two scalars are not a composition: the whole-statement attempt answers that shape.
+            (None, None) => None,
+        };
+        let Some(root_kind) = kind else {
             return Ok(declined("no_output_kind_for_the_pair"));
         };
         if !native_tree_supported(&tree) {
@@ -2565,18 +2582,8 @@ fn plan_split_aggregate(
     value_schema: DFSchemaRef,
     format: FusedOutputFormat,
 ) -> Result<FusedSeries> {
-    // The kind a value column carries is the state's own: a numeric fold publishes `Float64`, a
-    // native-histogram fold publishes the histogram value type. Reading it here keeps the layout and
-    // the schema it is checked against in one place.
-    let (state_accumulators, value_type) = match &partial.root().output {
-        NativeType::AggregateState(state) => (
-            state.accumulators.len(),
-            if state.kind.is_histogram() {
-                native_histogram_value_type().as_arrow_type()
-            } else {
-                ArrowDataType::Float64
-            },
-        ),
+    let state_accumulators = match &partial.root().output {
+        NativeType::AggregateState(state) => state.accumulators.len(),
         _ => {
             return Err(DataFusionError::Plan(format!(
                 "the partial tree for `{promql}` does not produce aggregate state"
@@ -2584,10 +2591,20 @@ fn plan_split_aggregate(
             .context(DataFusionPlanningSnafu);
         }
     };
+    // The row layout this split publishes is the statement's, so its value columns carry the kind
+    // the statement's own root answers - a histogram where the operator keeps histograms, the empty
+    // float layout where it pairs none - and what the state says is how many of them there are:
+    // `sum(h)` declares the histogram its state exports, and `avg(h) + 1`, which pairs a histogram
+    // with a float and so answers no sample at all, declares the float layout the existing plan
+    // declares for it. Counting value columns rather than columns of the state's own type is what
+    // keeps the two apart; a count that disagrees with the state is still refused below.
     let values = value_schema
         .fields()
         .iter()
-        .filter(|field| field.data_type() == &value_type)
+        .filter(|field| {
+            field.data_type() == &ArrowDataType::Float64
+                || field.data_type() == &native_histogram_value_type().as_arrow_type()
+        })
         .count();
     if values != state_accumulators {
         return Err(DataFusionError::Plan(format!(

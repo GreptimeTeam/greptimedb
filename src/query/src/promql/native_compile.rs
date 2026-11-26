@@ -816,6 +816,12 @@ fn set_operation(context: &Context, binary: &BinaryExpr, op: SetOp) -> Result<Na
 ///
 /// The output is the vector side's own binding, because a scalar carries no fields: a broadcast keeps
 /// the vector's fields and the grid it is evaluated on, which is the statement's grid on both sides.
+/// The column these fields declare is not the vector's kind in every case - `bool` makes a comparison
+/// answer a float and `2 / hist` answers no sample at all - so the kind is read off the node's shape
+/// by `NativeNode::output_field_kind` rather than stored here: see
+/// [`promql::native::plan::broadcast_output_field_kind`], the one rule that walk and a composition
+/// both call.
+///
 /// Two scalars are possible as a nested operand — a pair that [`constant_value`] refuses to fold, such
 /// as a comparison between two constants — and the node reports the left one's grid, which is the
 /// statement's too. The operands keep the order they were written in, because a non-commutative

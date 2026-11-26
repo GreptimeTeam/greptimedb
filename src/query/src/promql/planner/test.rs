@@ -2820,18 +2820,18 @@ async fn native_named_selector_over_a_missing_table_plans_as_an_empty_input() {
         }
     }
 
-    // A `__field__` matcher still declines over a table this route can read: the matcher narrows the
-    // field set of the scan below the node, and the raw series scan reports every field the scan
-    // carries. That refusal is about the scan, not about the table existing - a missing table has no
-    // field set to narrow and is admitted as the empty input, which
-    // `native_missing_table_with_a_field_matcher_answers_the_empty_vector` asserts beside its rows.
+    // A `__field__` matcher narrows the scan to the fields it names, so a table this route can read
+    // is admitted with that projection - the tree's declared field layout is then exactly what the
+    // scan below it reports. `native_field_selector_reads_the_fields_it_names` covers which fields
+    // each operator selects; here the point is that a table that exists is no longer refused for
+    // the scan's field set alone.
     let query = r#"x{__field__="field_0"}"#;
     let plan =
         build_native_fused_plan_with_provider(query, true, named_missing_table_provider().await)
             .await;
     assert!(
-        find_fused_series(&plan).is_none(),
-        "`{query}` claimed a field layout its scan does not report: {plan:?}"
+        find_fused_series(&plan).is_some(),
+        "`{query}` narrows the scan to the field it names: {plan:?}"
     );
 }
 
@@ -13229,17 +13229,23 @@ async fn a_segmented_histogram_answer_crosses_its_collected_boundary() {
 /// The gate cannot look at the root alone: `sum(h) * 2` has a binary root and the fold sits below
 /// it, so the value entering each aggregate is what decides. A scalar multiple of a histogram - a
 /// negation included - is a histogram, which this route's binary kernel answers, so those
-/// statements run and publish the histogram column. The shapes whose state cannot cross keep the
-/// existing plan instead, which `a_histogram_aggregate_the_split_declines_keeps_the_existing_plan`
-/// pins.
+/// statements run and publish the histogram column. What the column carries is the kind the
+/// statement's own operator answers rather than the kind the fold's state carries: `avg(h) + 1`
+/// pairs a histogram with a float, which no kernel covers, so it pairs no sample and declares the
+/// empty float layout the existing plan declares for it - while the fold itself still runs as the
+/// split. The shapes whose state cannot cross keep the existing plan instead, which
+/// `a_histogram_aggregate_the_split_declines_keeps_the_existing_plan` pins.
 #[tokio::test]
 async fn a_histogram_fold_is_admitted_below_a_pointwise_operator() {
-    for query in [
-        "sum(some_metric)",
-        "sum(some_metric) * 2",
-        "sum(some_metric) / 2",
-        "avg(some_metric) + 1",
-        "-sum(some_metric)",
+    let histogram_type = native_histogram_value_type().as_arrow_type();
+    for (query, expected) in [
+        ("sum(some_metric)", histogram_type.clone()),
+        ("sum(some_metric) * 2", histogram_type.clone()),
+        ("sum(some_metric) / 2", histogram_type.clone()),
+        ("-sum(some_metric)", histogram_type.clone()),
+        // A pair no kernel covers answers no sample at all, so the column is the empty float layout
+        // the existing plan declares for the same statement.
+        ("avg(some_metric) + 1", ArrowDataType::Float64),
     ] {
         // A metric-engine table, whose tag columns are all nullable: the fixture the statements
         // below ran against before the drop's proof changed, and the one this test pins.
@@ -13248,17 +13254,18 @@ async fn a_histogram_fold_is_admitted_below_a_pointwise_operator() {
         let display = plan.display_indent_schema().to_string();
         let final_node = find_final_split(&plan)
             .unwrap_or_else(|| panic!("{query} kept the existing plan: {display}"));
-        // Named after the expression now, so the histogram type is what identifies the column.
-        let histogram_type = native_histogram_value_type().as_arrow_type();
+        // Named after the expression now, so the type is what identifies the column.
         let fields = final_node.schema().fields();
         let field = fields
             .iter()
-            .find(|field| field.data_type() == &histogram_type)
+            .find(|field| {
+                field.data_type() == &ArrowDataType::Float64 || field.data_type() == &histogram_type
+            })
             .unwrap_or_else(|| panic!("{query} published no field column: {display}"));
         assert_eq!(
-            &histogram_type,
+            &expected,
             field.data_type(),
-            "{query} answered something other than the histogram it folded: {display}"
+            "{query} declared something other than what its operator answers: {display}"
         );
     }
 }
@@ -18989,5 +18996,72 @@ async fn native_missing_table_named_after_its_own_columns_answers_the_empty_vect
         .unwrap_or_else(|error| panic!("`{query}` is not planned at all: {error}"));
         let (_, batches) = execute(plan, &state).await;
         assert_eq!(0, batch_rows(&batches), "`{query}`: {batches:?}");
+    }
+}
+/// A histogram beside a literal scalar declares the kind its operator answers, as the existing plan
+/// does for the same statement.
+///
+/// A scalar carries no field, so the column is what the operator makes of the vector's samples and
+/// not the vector's own kind in every case: `bool` answers `1` or `0` whatever it read, which is a
+/// float, so `hist > bool 2` declares the empty float layout the existing plan declares - the
+/// kernel drops every histogram a float is compared with, and the statement answers no row. A
+/// comparison without `bool` only filters, so `hist > 2` keeps the histogram column. Arithmetic
+/// answers the kind the kernel emits: `hist * 2`, `2 * hist` and `hist / 2` scale the histogram and
+/// stay histograms, while `2 / hist` and `hist + 2` pair no sample at all and declare the empty
+/// float layout the existing plan declares for them.
+///
+/// Both routes are read off the plan, because the column a statement publishes is the plan's own
+/// schema: the native one is the fused node's, and the existing one is the plan the same statement
+/// is built by when the native route is off.
+#[tokio::test]
+async fn native_histogram_scalar_broadcasts_declare_the_operators_kind() {
+    let histogram = native_histogram_value_type().as_arrow_type();
+    for (query, expected) in [
+        ("hist > bool 2", ArrowDataType::Float64),
+        ("hist > 2", histogram.clone()),
+        ("hist * 2", histogram.clone()),
+        ("2 * hist", histogram.clone()),
+        ("hist / 2", histogram.clone()),
+        ("2 / hist", ArrowDataType::Float64),
+        ("hist + 2", ArrowDataType::Float64),
+        // A composed operand answers the same kinds: the scalar is bound over the frame the
+        // composition read, and that pair follows the rule a whole tree follows.
+        ("(hist * on(tag_0) floats) > bool 2", ArrowDataType::Float64),
+        ("(hist * on(tag_0) floats) > 2", histogram.clone()),
+        ("2 / (hist * on(tag_0) floats)", ArrowDataType::Float64),
+    ] {
+        let plan =
+            build_native_fused_plan_with_provider(query, true, native_mixed_kind_provider().await)
+                .await;
+        let fused = find_fused_series(&plan)
+            .unwrap_or_else(|| panic!("{query} left the native route: {plan}"));
+        assert_eq!(
+            &expected,
+            native_value_field(fused, query).data_type(),
+            "{query} native value column: {plan}"
+        );
+        let legacy = PromPlanner::stmt_to_plan_with_annotations(
+            native_mixed_kind_provider().await,
+            &build_eval_stmt(query),
+            &build_query_engine_state(),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        let legacy_types = legacy
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.data_type().clone())
+            .collect::<Vec<_>>();
+        let legacy_type = legacy_types
+            .iter()
+            .find(|data_type| **data_type == ArrowDataType::Float64 || **data_type == histogram)
+            .unwrap_or_else(|| panic!("{query} existing plan publishes no value column: {legacy}"));
+        assert_eq!(
+            &expected, legacy_type,
+            "{query} existing value column: {legacy}"
+        );
     }
 }

@@ -610,6 +610,41 @@ pub fn binary_output_field_kind(
     }
 }
 
+/// The output kind of a broadcast between one evaluated vector and one scalar.
+///
+/// A scalar is one float per grid point and carries no field, so a broadcast answers the vector
+/// side's shape rather than a pair of kinds: `bool` rewrites every value to `1` or `0`, which is a
+/// float whatever the vector holds; a comparison without `bool` only filters the vector's own
+/// samples, so the column keeps the kind it read - the kernel pairs no histogram with a float at
+/// all (`vector_match::elem_binop`), which leaves that histogram column empty rather than
+/// converted; and arithmetic answers what [`binary_output_field_kind`] states for the float and the
+/// vector written in the order the query wrote them - a histogram for `h * 2`, `2 * h` and `h / 2`,
+/// and the empty float layout for a pair that emits no sample, such as `2 / h`.
+///
+/// This is the one source both a whole compiled tree and a composition read, so a statement's
+/// column cannot be declared two ways depending on how the planner reached it.
+pub fn broadcast_output_field_kind(
+    scalar_on_left: bool,
+    vector: FieldKind,
+    op: BinaryOp,
+    return_bool: bool,
+) -> Option<FieldKind> {
+    if return_bool {
+        return Some(FieldKind::Float);
+    }
+    // A comparison hands on the samples it keeps instead of converting them, so the field keeps
+    // what the vector side carries - a float stays a float and a histogram stays a histogram.
+    if op.is_comparison() {
+        return Some(vector);
+    }
+    let (left, right) = if scalar_on_left {
+        (FieldKind::Float, vector)
+    } else {
+        (vector, FieldKind::Float)
+    };
+    binary_output_field_kind(left, right, op, false, FillValues::default())
+}
+
 impl NativeNode {
     /// The kind this node's output field carries, given the kind its sources carry.
     ///
@@ -660,24 +695,38 @@ impl NativeNode {
                 }
                 Some(kind)
             }
-            // A constant beside a vector is broadcast over it, so the operation answers with the
-            // vector's own samples: a histogram times a float is still a histogram. Two vectors
-            // use the arithmetic result's kind, including any samples emitted by fill, and an
-            // empty float field only when no possible pairing can emit a sample.
+            // A constant beside a vector is broadcast over it, so the operation answers the kind
+            // [`broadcast_output_field_kind`] states for the vector it meets: `bool` makes the
+            // column a float, a comparison without it keeps the vector's own kind, and arithmetic
+            // answers the arithmetic result - a histogram for `hist * 2` and an empty float layout
+            // only for a pair no sample can come out of, such as `2 / hist`. Two vectors use the
+            // arithmetic result's kind, including any samples emitted by fill, and an empty float
+            // field only when no possible pairing can emit a sample.
             NativeExpr::Binary {
                 left,
                 right,
                 matching,
             } => {
                 // `bool` makes a comparison answer 1 or 0 whatever its operands hold, which is
-                // what the kernel does before it looks at the kinds.
+                // what the kernel does before it looks at the kinds - so the column is a float
+                // without any operand's kind having to be named.
                 if matching.return_bool {
                     return Some(FieldKind::Float);
                 }
                 match (&left.expr, &right.expr) {
                     (NativeExpr::Scalar(_), NativeExpr::Scalar(_)) => Some(FieldKind::Float),
-                    (NativeExpr::Scalar(_), _) => kind_of(right),
-                    (_, NativeExpr::Scalar(_)) => kind_of(left),
+                    (NativeExpr::Scalar(_), _) => broadcast_output_field_kind(
+                        true,
+                        kind_of(right)?,
+                        matching.op,
+                        matching.return_bool,
+                    ),
+                    (_, NativeExpr::Scalar(_)) => broadcast_output_field_kind(
+                        false,
+                        kind_of(left)?,
+                        matching.op,
+                        matching.return_bool,
+                    ),
                     (_, _) => {
                         let left_kind = kind_of(left)?;
                         let right_kind = kind_of(right)?;
@@ -685,7 +734,7 @@ impl NativeNode {
                             left_kind,
                             right_kind,
                             matching.op,
-                            false,
+                            matching.return_bool,
                             matching.fill,
                         )
                     }

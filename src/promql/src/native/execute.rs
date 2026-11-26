@@ -2121,10 +2121,13 @@ impl BroadcastRuntime {
         let output = match &self.scalar {
             BroadcastScalar::Literal(operand) => match self.op {
                 BroadcastOp::Arithmetic(op) => {
+                    // A position the operator has no histogram form for is dropped, and a field
+                    // that dropped every one of them answers no row at all: the caller publishes
+                    // the empty layout rather than rows holding no value.
                     let (output, dropped_histogram) =
                         map_arithmetic_literal(&self.sample_schema, &chunk.series, op, *operand)?;
                     self.record_dropped_histograms(dropped_histogram, op);
-                    Some(output)
+                    output
                 }
                 BroadcastOp::Compare(comparison) => {
                     let (output, dropped_histogram) = map_compare_literal(
