@@ -558,12 +558,23 @@ async fn test_metadata_aggr_replacement_with_changed_key_falls_back(
         old_file.raw_primary_key_range(),
         second_file.raw_primary_key_range()
     );
+    let residual_request = ScanRequest {
+        filters: vec![col("tag_0").eq(lit("b"))],
+        metadata_aggr_hint: true,
+        ..Default::default()
+    };
     if keep_second_file {
         let scan = engine
             .handle_query(region_id, request.clone())
             .await
             .unwrap();
         assert_eq!(scan.properties().exact_num_rows(), Some(2));
+        let mut scan = engine
+            .handle_query(region_id, residual_request.clone())
+            .await
+            .unwrap();
+        let split = scan.take_statistics_split().expect("disjoint key bounds");
+        assert_eq!(split.exact_rows, 1);
     }
 
     let bytes = store
@@ -625,6 +636,15 @@ async fn test_metadata_aggr_replacement_with_changed_key_falls_back(
         .await
         .unwrap();
     assert_eq!(scan.properties().exact_num_rows(), None);
+    if keep_second_file {
+        // The candidate's own key bounds still match. The stale bounds of its
+        // residual peer must also invalidate the split's disjointness proof.
+        let mut scan = engine
+            .handle_query(region_id, residual_request)
+            .await
+            .unwrap();
+        assert!(scan.take_statistics_split().is_none());
+    }
     for hint in [false, true] {
         request.metadata_aggr_hint = hint;
         let rows = common_recordbatch::RecordBatches::try_collect(
