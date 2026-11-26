@@ -17,13 +17,17 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use common_function::aggrs::aggr_wrapper::{aggr_state_func_name, is_builtin_count_or_state};
+use common_function::function_registry::FUNCTION_REGISTRY;
 use datafusion::catalog::Session;
 use datafusion::datasource::TableProvider;
 use datafusion::logical_expr::{Expr, TableType};
 use datafusion::physical_plan::expressions::Column;
 use datafusion::physical_plan::expressions::{DynamicFilterPhysicalExpr, lit as physical_lit};
 use datafusion::physical_plan::projection::ProjectionExec;
-use datafusion::physical_plan::{ExecutionPlan, StatisticsArgs, StatisticsContext, displayable};
+use datafusion::physical_plan::{
+    ExecutionPlan, StatisticsArgs, StatisticsContext, collect, displayable,
+};
 use datafusion::prelude::SessionContext;
 use datafusion_common::ScalarValue;
 use datafusion_common::stats::Precision;
@@ -33,7 +37,7 @@ use object_store::layers::mock::MockLayerBuilder;
 use store_api::region_engine::{RegionEngine, RegionScannerRef};
 use store_api::region_request::{RegionDeleteRequest, RegionPutRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest, TimeSeriesRowSelector};
-use table::table::scan::RegionScanExec;
+use table::table::scan::{PartialAggrRule, RegionScanExec};
 
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
@@ -76,6 +80,73 @@ impl TableProvider for CountTable {
             Ok(self.plan.clone())
         }
     }
+}
+
+/// A session whose physical optimizer wraps COUNT over a split scan like the
+/// query engine.
+fn count_context() -> SessionContext {
+    let mut rules = datafusion::physical_optimizer::optimizer::PhysicalOptimizer::new().rules;
+    let index = rules
+        .iter()
+        .position(|rule| rule.name() == "aggregate_statistics")
+        .unwrap();
+    rules.insert(
+        index,
+        Arc::new(PartialAggrRule::with_count_state(is_builtin_count_or_state)),
+    );
+    let state = datafusion::execution::session_state::SessionStateBuilder::new()
+        .with_default_features()
+        .with_physical_optimizer_rules(rules)
+        .build();
+    let ctx = SessionContext::new_with_state(state);
+    ctx.register_udaf(
+        FUNCTION_REGISTRY
+            .get_aggr_func(&aggr_state_func_name("count"))
+            .unwrap(),
+    );
+    ctx
+}
+
+/// Plans and runs `SELECT count(*)` over a scan of the region with the query
+/// engine's COUNT rule. Returns the physical plan and the count.
+async fn sql_count(
+    engine: &MitoEngine,
+    region_id: RegionId,
+    request: ScanRequest,
+) -> (String, i64) {
+    let (plan, result) = sql_aggregate(engine, region_id, request, "SELECT count(*) FROM t").await;
+    let ScalarValue::Int64(Some(count)) = result else {
+        unreachable!()
+    };
+    (plan, count)
+}
+
+/// Plans once: creating the physical plan can consume the scan's one-shot split.
+async fn sql_aggregate(
+    engine: &MitoEngine,
+    region_id: RegionId,
+    request: ScanRequest,
+    sql: &str,
+) -> (String, ScalarValue) {
+    let scanner = engine
+        .handle_query(region_id, request.clone())
+        .await
+        .unwrap();
+    let plan = Arc::new(RegionScanExec::new(scanner, request, None).unwrap());
+    let ctx = count_context();
+    ctx.register_table("t", Arc::new(CountTable { plan }))
+        .unwrap();
+    let plan = ctx
+        .sql(sql)
+        .await
+        .unwrap()
+        .create_physical_plan()
+        .await
+        .unwrap();
+    let text = displayable(plan.as_ref()).indent(true).to_string();
+    let batches = collect(plan, ctx.task_ctx()).await.unwrap();
+    let result = ScalarValue::try_from_array(batches[0].column(0), 0).unwrap();
+    (text, result)
 }
 
 #[tokio::test]
@@ -967,4 +1038,87 @@ async fn test_metadata_aggr_split_bounds_memtables_by_container(
 async fn put_and_flush_rows(engine: &MitoEngine, region_id: RegionId, rows: api::v1::Rows) {
     test_util::put_rows(engine, region_id, rows).await;
     test_util::flush_region(engine, region_id, None).await;
+}
+
+/// The COUNT rule wraps the partial COUNT over a split scan and merges the
+/// metadata rows once. Without a split the plan is unchanged.
+#[tokio::test]
+async fn test_metadata_aggr_exec_merges_metadata_rows() {
+    use api::v1::value::ValueData;
+
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            experimental_metadata_aggr: true,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let create = CreateRequestBuilder::new().build();
+    let schema = test_util::rows_schema(&create);
+    engine
+        .handle_request(region_id, RegionRequest::Create(create))
+        .await
+        .unwrap();
+    let day_rows = |day: i64, rows: usize| {
+        let mut rows = test_util::build_rows_for_key("a", 0, rows, 0);
+        for (second, row) in rows.iter_mut().enumerate() {
+            row.values[2].value_data = Some(ValueData::TimestampMillisecondValue(
+                day * 86_400_000 + second as i64 * 1000,
+            ));
+        }
+        api::v1::Rows {
+            schema: schema.clone(),
+            rows,
+        }
+    };
+    put_and_flush_rows(&engine, region_id, day_rows(0, 7)).await;
+    put_and_flush_rows(&engine, region_id, day_rows(1, 5)).await;
+    // The memtable partition of day 2 is disjoint from both files.
+    test_util::put_rows(&engine, region_id, day_rows(2, 3)).await;
+
+    let hinted = ScanRequest {
+        metadata_aggr_hint: true,
+        ..Default::default()
+    };
+    let (plan, count) = sql_count(&engine, region_id, hinted.clone()).await;
+    assert!(plan.contains("MetadataAggrExec: exact_rows=12"), "{plan}");
+    assert_eq!(count, 15);
+
+    // Distributed planning uses the registered state wrapper; its final
+    // aggregate returns a struct whose first field is the merged COUNT state.
+    let (plan, state) = sql_aggregate(
+        &engine,
+        region_id,
+        hinted.clone(),
+        "SELECT __count_state(1) FROM t",
+    )
+    .await;
+    assert!(plan.contains("MetadataAggrExec: exact_rows=12"), "{plan}");
+    let ScalarValue::Struct(state) = state else {
+        panic!("expected a COUNT state struct");
+    };
+    assert_eq!(
+        ScalarValue::try_from_array(state.column(0), 0).unwrap(),
+        ScalarValue::Int64(Some(15)),
+    );
+
+    // Without the hint the scan carries no split.
+    let (plan, count) = sql_count(&engine, region_id, ScanRequest::default()).await;
+    assert!(!plan.contains("MetadataAggrExec"), "{plan}");
+    assert_eq!(count, 15);
+
+    // A row in the partition of day 1 overlaps the second file; the first
+    // file is still exact.
+    test_util::put_rows(&engine, region_id, day_rows(1, 1)).await;
+    let (plan, count) = sql_count(&engine, region_id, hinted.clone()).await;
+    assert!(plan.contains("MetadataAggrExec: exact_rows=7"), "{plan}");
+    assert_eq!(count, 15);
+
+    // A row in the partition of day 0 leaves no exact file.
+    test_util::put_rows(&engine, region_id, day_rows(0, 1)).await;
+    let (plan, count) = sql_count(&engine, region_id, hinted).await;
+    assert!(!plan.contains("MetadataAggrExec"), "{plan}");
+    assert_eq!(count, 15);
+    engine.stop().await.unwrap();
 }
