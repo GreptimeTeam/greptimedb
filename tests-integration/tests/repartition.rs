@@ -738,6 +738,17 @@ async fn test_repartition_multi_hop_fulltext_index_gc() {
         "expected at least one cross-origin indexed SST before GC, got {manifest_entries:?}"
     );
 
+    // Both grandchildren inherit the ancestor SST, which carries the expression of the region
+    // that wrote it, not theirs; a merge requires every participant to hold only files it wrote,
+    // so materialise each region first. Strict-window compaction rewrites even a lone file.
+    run_sql(
+        instance,
+        "ADMIN COMPACT_TABLE('repartition_multi_hop_index_table', 'strict_window', 'window=3600')",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+
     run_sql(
         instance,
         r#"
