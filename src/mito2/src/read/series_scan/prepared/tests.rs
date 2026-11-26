@@ -1145,6 +1145,7 @@ async fn ordinal_range_batches_sample_requests_and_pushes_time_bounds() {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let source = ColumnarPreparedSource {
         dedup_append_raw: false,
+        sample_partition: None,
         scan_pool: source.scan_pool.clone(),
         merge_field_start: 0,
         context: source.context.clone(),
@@ -3098,6 +3099,13 @@ async fn authoritative_narthex_preparation_without_sidecars(
 }
 
 async fn authoritative_fixture(merge_mode: &str) -> (TestEnv, MitoEngine, MitoRegionRef) {
+    authoritative_fixture_with(merge_mode, None).await
+}
+
+async fn authoritative_fixture_with(
+    merge_mode: &str,
+    partition_expr: Option<String>,
+) -> (TestEnv, MitoEngine, MitoRegionRef) {
     let mut env = TestEnv::with_prefix("narthex-review").await;
     let engine = env
         .create_engine(MitoConfig {
@@ -3117,6 +3125,7 @@ async fn authoritative_fixture(merge_mode: &str) -> (TestEnv, MitoEngine, MitoRe
         .insert_option("primary_key_encoding", "sparse")
         .insert_option("sst_format", "narthex")
         .insert_option("merge_mode", merge_mode)
+        .partition_expr_json(partition_expr)
         .build();
     create.column_metadatas = metadata.column_metadatas;
     create.primary_key = metadata.primary_key;
@@ -3127,6 +3136,60 @@ async fn authoritative_fixture(merge_mode: &str) -> (TestEnv, MitoEngine, MitoRe
         .unwrap();
     let region = engine.get_region(id).unwrap();
     (env, engine, region)
+}
+
+/// A time-partitioned region keeps only its own rows, though a file shared after repartition
+/// holds rows of both partitions and series rows carry no time index to filter on.
+#[tokio::test]
+async fn authoritative_time_partition_filters_sample_rows() {
+    let rule = partition::expr::col("ts").lt(datatypes::value::Value::Timestamp(
+        common_time::Timestamp::new_millisecond(60_000),
+    ));
+    let (_env, engine, region) =
+        authoritative_fixture_with("last_row", Some(rule.as_json_str().unwrap())).await;
+    // 61_000 belongs to the other partition, as rows of a shared file do.
+    for timestamp in [1000, 61_000] {
+        write(&engine, &region, 7, timestamp, Some(7.0)).await;
+    }
+    flush_region(&engine, region.region_id, None).await;
+
+    let stream = engine
+        .scan_to_stream(region.region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let batches = common_recordbatch::RecordBatches::try_collect(stream)
+        .await
+        .unwrap();
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        1
+    );
+
+    // Compaction reads without the region predicate, so only the rule keeps the other
+    // partition's row out of the output.
+    engine
+        .handle_request(
+            region.region_id,
+            RegionRequest::Compact(store_api::region_request::RegionCompactRequest {
+                options: api::v1::region::compact_request::Options::StrictWindow(
+                    api::v1::region::StrictWindow { window_seconds: 60 },
+                ),
+                parallelism: None,
+                time_range: None,
+            }),
+        )
+        .await
+        .unwrap();
+    let version = region.version();
+    let rows = version
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .map(|file| file.meta_ref().num_rows)
+        .sum::<u64>();
+    assert_eq!(rows, 1);
+    engine.stop().await.unwrap();
 }
 
 #[tokio::test]
