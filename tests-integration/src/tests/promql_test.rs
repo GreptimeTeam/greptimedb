@@ -12892,8 +12892,7 @@ async fn native_promql_answers_a_limitk_over_more_than_one_input() {
     );
     // Every series it answers is one the data holds: each value is the two tables' sum at that host,
     // which the same binary computes without the ranking over it.
-    let unranked =
-        format!("TQL EVAL (0, 0, '1s') native_limitk_left + on(host) native_limitk_right");
+    let unranked = "TQL EVAL (0, 0, '1s') native_limitk_left + on(host) native_limitk_right";
     let all = native_result_rows(native_tql_output(&instance, &unranked, true).await).await;
     assert_eq!(all.len(), 3, "`{unranked}`: every host holds a sample");
     for row in &rows {
