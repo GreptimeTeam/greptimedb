@@ -29,11 +29,7 @@ pub(crate) async fn publish(
 ) -> Result<RegionEditOutcome> {
     let snapshot = region.manifest_ctx.manifest().await;
     let replay = is_replay(region, context, &edit, &snapshot)?;
-    let trusted_inputs = edit
-        .files_to_remove
-        .iter()
-        .all(|file| file.is_effective_target_sequence_trusted(region.region_id));
-    validate_files(region, context, &edit, trusted_inputs)?;
+    validate_files(region, context, &edit)?;
     if !replay {
         output::verify_and_notify(region, &context.metadata, &edit.files_to_add).await?;
     }
@@ -62,9 +58,9 @@ pub(crate) async fn publish(
             region_id: region.region_id
         }
     );
-    // A job prepared before an ALTER must not replace trusted inputs with files
-    // that can no longer serve exact sequence-range reads.
-    if trusted_inputs && region.version().options.preserve_row_sequence {
+    // An exact scan can skip an unmarked input below its lower bound, but
+    // an unmarked replacement can inherit a higher sequence from another input.
+    if !context.options.preserve_row_sequence && region.version().options.preserve_row_sequence {
         ensure!(
             edit.files_to_add
                 .iter()
@@ -140,7 +136,6 @@ fn validate_files(
     region: &MitoRegionRef,
     context: &PublicationContext,
     edit: &RegionEdit,
-    trusted_inputs: bool,
 ) -> Result<()> {
     let region_id = region.region_id;
     let mut inputs = HashSet::new();
@@ -155,7 +150,11 @@ fn validate_files(
             reason: "Expected distinct, already-admitted shared inputs"
         }
     );
-    let trusted = context.options.preserve_row_sequence && trusted_inputs;
+    let trusted = context.options.preserve_row_sequence
+        && edit
+            .files_to_remove
+            .iter()
+            .all(|file| file.is_effective_target_sequence_trusted(region_id));
     let partition =
         crate::region::parse_partition_expr(context.metadata.partition_expr.as_deref())?;
     let sequence = edit
