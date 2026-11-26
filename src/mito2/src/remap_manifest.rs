@@ -79,25 +79,19 @@ impl RemapManifest {
         })
     }
 
-    /// Rejects the merge of a region that holds a file another region produced.
+    /// Rejects a merge while a participant holds a file another region produced.
     ///
-    /// A file records the partition expression of the region that wrote it (`flush` or a region
-    /// compaction), and a reader drops the region partition predicate exactly when the region's
-    /// expression equals the file's (`ScanRegion::should_skip_region_partition`,
-    /// `src/mito2/src/read/scan_region.rs`). A region that holds a file it did not produce reads
-    /// it through the region predicate, which keeps the rows of a shared physical file apart
-    /// only for as long as nobody materializes a copy of it under a new file id: once a holder
-    /// compacts, one row lives in the shared file *and* in the holder's own copy, and a later
-    /// remap that removes the region predicate for the shared file publishes the row twice.
+    /// A reader drops the region predicate exactly when the region's expression equals the
+    /// file's (`ScanRegion::should_skip_region_partition`), so once a holder materializes a copy
+    /// under a new file id the same row sits in the shared file and in the copy, and publishing
+    /// both reads it twice.
     ///
-    /// Merging therefore requires every participating region to hold only files it produced.
-    /// The caller makes the region compact, which stamps the materialized file with the
-    /// region's own expression, and retries the merge.
+    /// The operator resolves the refusal by hand: abort the repartition (a region in a staging
+    /// session is skipped by the compaction scheduler), compact, retry. Nothing triggers that
+    /// compaction automatically.
     ///
-    /// A *split* (one source published into several targets) is not such a merge and is left
-    /// working as it is: every target receives only that source's files, its domain is narrower
-    /// than their stamp, so the region predicate keeps the targets' rows apart and no target
-    /// combines copies of a file.
+    /// A split is exempt: each target receives only that source's files and no target combines
+    /// copies, so the region predicate still keeps their rows apart.
     fn ensure_regions_own_their_files(&self) -> Result<()> {
         if self.is_split() {
             return Ok(());
@@ -114,6 +108,11 @@ impl RemapManifest {
                 from_manifest.metadata.partition_expr.as_deref(),
             )?;
             for (file_id, file_meta) in &from_manifest.files {
+                // Legacy files carry no creator, so their provenance cannot be established;
+                // the read path does not narrow them either. Treat them as the region's own.
+                if file_meta.partition_expr.is_none() {
+                    continue;
+                }
                 let creator_expr = file_meta.partition_expr.as_deref();
                 if creator_expr != region_expr.as_ref() {
                     offenders.push(format!(
@@ -776,6 +775,41 @@ mod tests {
         let result = remapper.remap_manifests().unwrap();
         assert_eq!(result.new_manifests[&new_region_id_1].files.len(), 1);
         assert_eq!(result.new_manifests[&new_region_id_2].files.len(), 1);
+    }
+
+    #[test]
+    fn test_legacy_files_without_a_creator_stay_mergeable() {
+        // Files written before the expression was recorded carry no creator. Their provenance
+        // cannot be established, and the read path does not narrow them either, so a merge must
+        // not refuse them: otherwise upgrading a table would break its first repartition.
+        let old_region_id_1 = RegionId::new(1, 1);
+        let old_region_id_2 = RegionId::new(1, 2);
+        let new_region_id = RegionId::new(1, 3);
+
+        let mut old_manifests = HashMap::new();
+        for (old_region_id, expr) in [
+            (old_region_id_1, range_expr("x", 0, 50)),
+            (old_region_id_2, range_expr("x", 50, 100)),
+        ] {
+            let mut old_manifest = create_manifest(old_region_id, 1, Some(expr), 100, 200);
+            let file_id = *old_manifest.files.keys().next().unwrap();
+            old_manifest.files.insert(
+                file_id,
+                create_file_meta(old_region_id, file_id, None).into(),
+            );
+            old_manifests.insert(old_region_id, old_manifest);
+        }
+
+        let mut new_partition_exprs = HashMap::new();
+        new_partition_exprs.insert(new_region_id, range_expr("x", 0, 100));
+
+        let mut region_mapping = HashMap::new();
+        region_mapping.insert(old_region_id_1, vec![new_region_id]);
+        region_mapping.insert(old_region_id_2, vec![new_region_id]);
+
+        let mut remapper = RemapManifest::new(old_manifests, new_partition_exprs, region_mapping);
+        let result = remapper.remap_manifests().unwrap();
+        assert_eq!(result.new_manifests[&new_region_id].files.len(), 2);
     }
 
     #[test]
