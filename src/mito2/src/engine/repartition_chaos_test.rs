@@ -46,8 +46,9 @@
 //! After every step the harness scans the regions of the published routing and asserts
 //!
 //! 1. `visibility`: the multiset of visible `event_id`s over the live regions equals the
-//!    ledger's committed multiset, each event exactly once (no duplicate, no loss), and no
-//!    event is visible in a region whose published domain does not own it;
+//!    ledger's committed multiset, each event exactly once (no duplicate, no loss, and no
+//!    region reading one event twice), and no event is visible in a region whose published
+//!    domain does not own it;
 //! 2. `manifest-consistency`: the persisted manifest file set equals the live version file
 //!    set, and the published routing equals the regions that actually applied it;
 //! 3. `model-authorization`: a region shows no row outside the domain scheme B lets it show
@@ -55,7 +56,9 @@
 //! 4. `reference-bounds`: every reference a live holder shows stays inside that holder's
 //!    domain (reported, never fatal — one *legal* split already fires it on this branch);
 //! 5. `sequence-monotonicity`: the committed sequence of a region never moves backwards;
-//! 6. `physical-liveness`: every object a live holder references still reads back complete.
+//! 6. `physical-liveness`: every object a live holder references still reads back complete;
+//! 7. `perturbation`: the lever of the step actually fired. Fatal, because a perturbation
+//!    that never reached the engine leaves the scenario passing while proving nothing.
 //!
 //! # Levers
 //!
@@ -108,6 +111,7 @@ use api::v1::helper::row;
 use api::v1::region::{StrictWindow, compact_request};
 use api::v1::value::ValueData;
 use api::v1::{Rows, SemanticType};
+use common_error::ext::ErrorExt;
 use common_recordbatch::RecordBatches;
 use datatypes::arrow::array::AsArray;
 use datatypes::arrow::datatypes::Int64Type;
@@ -420,15 +424,11 @@ impl StorageModel {
                             slot_level: level.level,
                             num_rows: meta.num_rows,
                             sequence: meta.sequence.map(|sequence| sequence.get()),
-                            creator_domain: meta
-                                .partition_expr
-                                .as_ref()
-                                .map(|expr| {
-                                    decode_domain(expr).unwrap_or_else(|| {
-                                        panic!("harness cannot decode a file's creator domain")
-                                    })
+                            creator_domain: meta.partition_expr.as_ref().map(|expr| {
+                                decode_domain(expr).unwrap_or_else(|| {
+                                    panic!("harness cannot decode a file's creator domain")
                                 })
-                                .unwrap_or(Domain::FULL),
+                            }),
                         },
                     );
                 }
@@ -955,7 +955,7 @@ impl StorageModel {
             self.spec.note_refused_merge(&verdict);
             let expected = verdict.describe();
             let named = describe_offenders(offenders);
-            let message = match self.probe_merge_refusal(&inputs).await {
+            let err = match self.probe_merge_refusal(&inputs).await {
                 Ok(probe) => panic!(
                     "SCHEME B DIVERGES FROM THE ENGINE: {expected}, but the engine accepted the \
                      remap of {} into staging region {probe}. Scheme B allows a merge only while \
@@ -963,13 +963,56 @@ impl StorageModel {
                      foreign ones: {named}",
                     describe_regions(&inputs)
                 ),
-                Err(message) => message,
+                Err(err) => err,
             };
+            // The refusal has to be the specific failure scheme B states, not just any error
+            // the remap can return: an unrelated remap error would otherwise pass for one. The
+            // trait's remap boxes the mito2 error, so it is downcast back to the variant.
+            let refusal_variant = err.as_any().downcast_ref::<crate::error::Error>();
+            if !matches!(
+                refusal_variant,
+                Some(crate::error::Error::ForeignFilePartitionExpr { .. })
+            ) {
+                panic!(
+                    "SCHEME B DIVERGES FROM THE ENGINE: {expected} for inputs [{}], but the \
+                     remap failed with an error that is not the refusal: {err:?}. Only \
+                     Error::ForeignFilePartitionExpr is the refusal; these hold foreign files: \
+                     {named}",
+                    describe_regions(&inputs)
+                );
+            }
+            let message = err.to_string();
+            // The message has to name every offending region *and* every offending file id. The
+            // model's file ids are its own (opaque, never an engine `FileId`), so the ids to look
+            // for are read from the engine's persisted manifests, the way the remap reads them,
+            // and the model's offender count has to agree with that set.
+            let engine_offenders = self.engine_foreign_files(&inputs).await;
+            assert_eq!(
+                offenders.len(),
+                engine_offenders.len(),
+                "the model expects a refusal naming {} offending reference(s) ({named}), but the \
+                 engine's persisted manifests hold {} file(s) another region created: \
+                 {engine_offenders:?}",
+                offenders.len(),
+                engine_offenders.len()
+            );
             for offender in offenders {
                 assert!(
                     message.contains(&offender.region.to_string()),
                     "the refusal must name the offending region {}: {message}",
                     offender.region
+                );
+            }
+            for (region_id, file_id) in &engine_offenders {
+                assert!(
+                    message.contains(&region_id.to_string()),
+                    "the refusal must name the offending region {region_id} that holds \
+                     {file_id}: {message}"
+                );
+                assert!(
+                    message.contains(&file_id.to_string()),
+                    "the refusal must name the offending file {file_id} held by region \
+                     {region_id}: {message}"
                 );
             }
             common_telemetry::info!(
@@ -1025,13 +1068,18 @@ impl StorageModel {
     }
 
     /// Issues the coordinator's remap for `inputs` into a fresh staging survivor and reports
-    /// whether the engine refused it.
+    /// whether the engine refused it, with the engine's own error so the caller can assert
+    /// *which* failure it is (`RegionEngine::remap_manifests` boxes the mito2 error, so the
+    /// caller downcasts it back to [`crate::error::Error`]).
     ///
     /// Only the remap runs: it reads every input's persisted manifest, so it is where an engine
     /// implementing scheme B would see the foreign file and refuse. Nothing is published and the
     /// inputs are not retired, so a refusal leaves the fixtures exactly as they were and the
     /// compactions that follow can still run.
-    async fn probe_merge_refusal(&mut self, inputs: &[RegionId]) -> Result<RegionId, String> {
+    async fn probe_merge_refusal(
+        &mut self,
+        inputs: &[RegionId],
+    ) -> Result<RegionId, common_error::ext::BoxedError> {
         let probe = self.alloc_region_id();
         self.create_and_enter_staging(probe, Domain::FULL).await;
         let remap = self
@@ -1052,12 +1100,47 @@ impl StorageModel {
                 // staged identity alive behind the fixture's back.
                 let _ = self
                     .engine
-                    .handle_request(probe, RegionRequest::Close(Default::default()))
+                    .handle_request(
+                        probe,
+                        RegionRequest::Close(RegionCloseRequest {
+                            flush_on_close: false,
+                        }),
+                    )
                     .await;
-                Err(format!("{err}"))
+                Err(err)
             }
             Ok(_) => Ok(probe),
         }
+    }
+
+    /// The `(region, file)` pairs a scheme B refusal has to name: every file an input's
+    /// persisted manifest holds whose recorded creator is not that region.
+    ///
+    /// This is the rule the remap itself applies, read straight from the engine so the refusal
+    /// can be checked against the engine's real `FileId`s — the model mints its own, opaque
+    /// ones. A file that records no creator cannot be called foreign (the remap treats it as
+    /// the region's own), so it is skipped for the same reason.
+    async fn engine_foreign_files(&self, inputs: &[RegionId]) -> Vec<(RegionId, FileId)> {
+        let mut foreign = Vec::new();
+        for region_id in inputs {
+            let region = self
+                .engine
+                .get_region(*region_id)
+                .unwrap_or_else(|| panic!("region {region_id} disappeared"));
+            let manifest = region.manifest_ctx.manifest().await;
+            let holder_expr =
+                crate::region::parse_partition_expr(manifest.metadata.partition_expr.as_deref())
+                    .expect("the harness reads a region's persisted partition expr");
+            for (file_id, meta) in &manifest.files {
+                let Some(creator) = meta.partition_expr.as_deref() else {
+                    continue;
+                };
+                if Some(creator) != holder_expr.as_ref() {
+                    foreign.push((*region_id, *file_id));
+                }
+            }
+        }
+        foreign
     }
 
     /// Region compaction on one published region.
@@ -2081,6 +2164,9 @@ enum ChaosOp {
     CancelCompaction { point: CancelPoint },
     /// Cut a split publication at `abort`, then hand the source back its domain.
     AbortSplit { abort: SplitAbort },
+    /// Fail the read a staged target needs to consume the coordinator's staging manifest
+    /// `times` times, then complete the split.
+    StagingReadFault { times: usize },
     /// Two compactions of the same region at once.
     ConcurrentCompactions { choice: usize },
     /// A compaction and a scan of the same region at once.
@@ -2126,6 +2212,10 @@ impl ChaosOp {
                 format!("region compaction, {}", point.describe())
             }
             ChaosOp::AbortSplit { abort } => abort.describe(),
+            ChaosOp::StagingReadFault { times } => format!(
+                "split apply with {} failing {times}x",
+                FaultKind::StagingRead.name()
+            ),
             ChaosOp::ConcurrentCompactions { choice } => {
                 format!("two compactions at once (choice {choice})")
             }
@@ -2159,6 +2249,7 @@ impl ChaosOp {
             ChaosOp::DeleteFault { .. } => FaultKind::ManifestDelete.breaks(),
             ChaosOp::CancelCompaction { .. } => "a compaction stops between reading and publishing",
             ChaosOp::AbortSplit { .. } => "a split stops between remap_manifests and apply",
+            ChaosOp::StagingReadFault { .. } => FaultKind::StagingRead.breaks(),
             ChaosOp::ConcurrentCompactions { .. }
             | ChaosOp::CompactionWithScan { .. }
             | ChaosOp::CompactionWithSplit { .. }
@@ -2603,6 +2694,11 @@ async fn run_op(model: &mut StorageModel, op: &ChaosOp) -> OpOutcome {
             if model.dirty.contains(&target) {
                 model.flush_region(target).await;
             }
+            // The file set the cancellation must not move, read at rest *before* the gate is
+            // armed: a parked compaction keeps the task list non-empty, so a view read while it
+            // is parked would fail instead of observing.
+            model.refresh_views().await;
+            let before_files = model.holder_files(target);
             let gate = match point {
                 CancelPoint::AfterRead => &model.gates.merge_finished,
                 CancelPoint::InCommit => &model.gates.commit_begin,
@@ -2618,15 +2714,27 @@ async fn run_op(model: &mut StorageModel, op: &ChaosOp) -> OpOutcome {
             if entered.is_err() {
                 gate.release();
                 let joined = compact.await.unwrap();
-                return OpOutcome::clean(
+                // The gate was never reached, so the perturbation never ran and this step proved
+                // nothing: a scenario that silently stops injecting has to be visible, so it
+                // fails instead of reporting a clean step.
+                let mut outcome = OpOutcome::clean(
                     format!("compaction on {target} never reached the gate: {joined:?}"),
                     format!(
                         "{} (unreachable: the engine never called the gate)",
                         point.describe()
                     ),
                 );
+                outcome.interim.push((
+                    Category::Perturbation,
+                    format!(
+                        "the {} lever never fired: the compaction on {target} never reached the \
+                         engine callback it cancels at, so the step observed a plain compaction \
+                         and its report is not evidence about cancellation ({joined:?})",
+                        point.describe()
+                    ),
+                ));
+                return outcome;
             }
-            let before_files = model.holder_files(target);
             // While the compaction is parked, ask the engine to cancel this exact cycle.
             let cancel = match model
                 .engine
@@ -2657,6 +2765,9 @@ async fn run_op(model: &mut StorageModel, op: &ChaosOp) -> OpOutcome {
             gate.release();
             let joined = compact.await.unwrap();
             let settled = model.settle().await;
+            // Re-read at rest: the comparison below is between two observed file sets, not
+            // between one observation and the model's memory of it.
+            model.refresh_views().await;
             let after_files = model.holder_files(target);
             let mut outcome = OpOutcome::clean(
                 format!(
@@ -2677,7 +2788,8 @@ async fn run_op(model: &mut StorageModel, op: &ChaosOp) -> OpOutcome {
             );
             match point {
                 CancelPoint::AfterRead => {
-                    // A cancelled cycle must not publish: the live file set is unchanged.
+                    // A cancelled cycle must not publish: the live file set of the region after
+                    // the cancellation is the set it had when the cancel was issued.
                     if joined.is_ok() {
                         outcome.interim.push((
                             Category::ManifestConsistency,
@@ -2686,6 +2798,16 @@ async fn run_op(model: &mut StorageModel, op: &ChaosOp) -> OpOutcome {
                                  the request still reported success ({} -> {} files)",
                                 before_files.len(),
                                 after_files.len()
+                            ),
+                        ));
+                    }
+                    if before_files != after_files {
+                        outcome.interim.push((
+                            Category::ManifestConsistency,
+                            format!(
+                                "the cancel of a parked compaction on {target} moved the region's \
+                                 file set: before {before_files:?}, after {after_files:?} after \
+                                 settle({settled}); a cancelled cycle publishes nothing"
                             ),
                         ));
                     }
@@ -2700,6 +2822,8 @@ async fn run_op(model: &mut StorageModel, op: &ChaosOp) -> OpOutcome {
         }
 
         ChaosOp::AbortSplit { abort } => abort_split(model, *abort).await,
+
+        ChaosOp::StagingReadFault { times } => staging_read_fault(model, *times).await,
 
         ChaosOp::ConcurrentCompactions { choice } => {
             let target = model.live_target(*choice);
@@ -3201,6 +3325,144 @@ async fn abort_split(model: &mut StorageModel, abort: SplitAbort) -> OpOutcome {
     )
 }
 
+/// Fails the read a staged target needs in order to consume the coordinator's manifest, then
+/// completes the split.
+///
+/// `ApplyStagingManifest` opens the coordinator's staging manifest, so that read is the one the
+/// fault hits: a target that cannot read it must not half-publish, and the coordinator's retry
+/// has to land. The lever must fire — a scenario whose fault never reaches the engine proves
+/// nothing, so a silent lever fails the step instead of passing it.
+async fn staging_read_fault(model: &mut StorageModel, times: usize) -> OpOutcome {
+    let perturbation = format!("{} fails {times}x", FaultKind::StagingRead.name());
+    model.flush_dirty().await;
+    let Some((source, cut)) = model.split_target(0) else {
+        // Nothing to split means nothing to apply, so the lever cannot fire: the step would
+        // pass while proving nothing.
+        let mut outcome = OpOutcome::clean(
+            "staging read fault (no live region with two distinct keys)".to_string(),
+            perturbation,
+        );
+        outcome.interim.push((
+            Category::Perturbation,
+            "no live region with two distinct keys, so the split whose staging read this step \
+             fails was never issued"
+                .to_string(),
+        ));
+        return outcome;
+    };
+    let domain = model.domain_of(source);
+    let left_domain = Domain::new(domain.lo, cut);
+    let right_domain = Domain::new(cut, domain.hi);
+    let left = model.alloc_region_id();
+    let right = model.alloc_region_id();
+
+    model
+        .engine
+        .set_region_role_state_gracefully(source, SettableRegionRoleState::StagingLeader)
+        .await
+        .unwrap();
+
+    let before = model.faults.hit_count();
+    model.faults.arm(FaultKind::StagingRead, times);
+    let remap = model
+        .engine
+        .remap_manifests(RemapManifestsRequest {
+            region_id: source,
+            input_regions: vec![source],
+            region_mapping: [(source, vec![left, right])].into_iter().collect(),
+            new_partition_exprs: [
+                (left, left_domain.expr_json()),
+                (right, right_domain.expr_json()),
+            ]
+            .into_iter()
+            .collect(),
+        })
+        .await;
+    let response = match remap {
+        Ok(response) => response,
+        Err(error) => {
+            // Without a manifest there is nothing to apply: hand the source back its domain.
+            model.faults.disarm(FaultKind::StagingRead);
+            model
+                .engine
+                .set_region_role_state_gracefully(source, SettableRegionRoleState::Leader)
+                .await
+                .unwrap();
+            return OpOutcome::clean(
+                format!("{source}: remap_manifests failed: {error}"),
+                perturbation,
+            );
+        }
+    };
+
+    // The first target is the one whose apply meets the fault; its retry must land.
+    model.create_and_enter_staging(left, left_domain).await;
+    let mut failures = Vec::new();
+    let mut applied = false;
+    for _ in 0..(times + 2) {
+        match model
+            .apply_staging_manifest_result(left, left_domain, source, &response.manifest_paths)
+            .await
+        {
+            Ok(()) => {
+                applied = true;
+                break;
+            }
+            Err(error) => failures.push(error),
+        }
+    }
+    model.faults.disarm(FaultKind::StagingRead);
+    let hits = model.faults.last_hits(before);
+    let mut outcome = OpOutcome::clean(
+        format!(
+            "{source} -> {left}, {right}: {} failed apply(ies) {failures:?}, then \
+             applied={applied}; faults fired: {hits:?}",
+            failures.len()
+        ),
+        perturbation,
+    );
+    if failures.is_empty() {
+        // The lever is armed but the engine never read a staging manifest, so the step would
+        // pass while proving nothing about a target that cannot consume the coordinator's
+        // manifest: that is a hole in the coverage, not a clean step.
+        outcome.interim.push((
+            Category::Perturbation,
+            format!(
+                "{} x{times} never fired on the staging read path (hits: {hits:?}): \
+                 ApplyStagingManifest on {left} never read the coordinator's manifest",
+                FaultKind::StagingRead.name()
+            ),
+        ));
+        return outcome;
+    }
+    if !applied {
+        outcome.interim.push((
+            Category::Perturbation,
+            format!(
+                "the retry of ApplyStagingManifest on {left} never landed after {} \
+                 failure(s): {failures:?}",
+                failures.len()
+            ),
+        ));
+        return outcome;
+    }
+
+    model.create_and_enter_staging(right, right_domain).await;
+    model
+        .apply_staging_manifest(right, right_domain, source, &response.manifest_paths)
+        .await;
+    model.retire_split_source(source).await;
+    model.tracked.insert(left);
+    model.tracked.insert(right);
+    model.routing.insert(left, left_domain);
+    model.routing.insert(right, right_domain);
+    model
+        .spec
+        .split(source, left, left_domain, right, right_domain);
+    model.refresh_views().await;
+    outcome
+}
+
 // ---------------------------------------------------------------------------
 // L5: scenarios
 // ---------------------------------------------------------------------------
@@ -3445,6 +3707,7 @@ fn scenarios() -> Vec<Scenario> {
             ChaosOp::AbortSplit {
                 abort: SplitAbort::RemapWriteFault { times: 2 },
             },
+            ChaosOp::StagingReadFault { times: 2 },
             ChaosOp::Base(Op::Split { choice: 1 }),
             ChaosOp::Base(Op::Merge),
             ChaosOp::RecoverRegions,

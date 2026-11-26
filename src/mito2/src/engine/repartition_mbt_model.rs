@@ -42,6 +42,12 @@
 //!   `creator_domain == that input's domain`; otherwise the model expects a **refusal** naming
 //!   every offending `(region, file, creator)`. On success the survivor holds the union of the
 //!   inputs' references, deduplicated by file id.
+//! - A **legacy** file records no creator at all (`FileMeta::partition_expr == None`, a file
+//!   written before the expression was persisted). Nothing can be compared with a region's
+//!   domain, so a merge does not call such a reference foreign — the remap admits it as the
+//!   region's own for the same reason (#10646) — while a scan still narrows it by the holder's
+//!   domain, because the region predicate is only dropped when the file's expression *is* the
+//!   region's. [`RefModel::forget_creator`] is the transition that reaches that state.
 //! - Visibility: a reference contributes the rows whose key lies in the **region's domain**,
 //!   one physical copy per row, plus the rows of the region's unflushed memtable.
 //!
@@ -191,8 +197,16 @@ pub(crate) struct FileRow {
 /// transition states the first form because that is the rule B states.
 #[derive(Debug, Clone)]
 pub(crate) struct PhysicalFile {
-    /// The domain of the region that created the file.
-    pub(crate) creator: Domain,
+    /// The domain of the region that created the file, or `None` for a **legacy** file: one
+    /// written before the creating expression was persisted, so its provenance cannot be
+    /// established at all.
+    ///
+    /// `None` is not "created by the whole table": nothing can be compared with a region's
+    /// domain, so [`RefModel::merge_verdict`] does not call such a reference foreign (the
+    /// remap treats it as the region's own for the same reason), while the read path still
+    /// narrows it by the region's expression — the region predicate is only dropped when the
+    /// file's expression *is* the region's, which an unrecorded stamp never is.
+    pub(crate) creator: Option<Domain>,
     /// Event id -> the row's physical presence in this file.
     pub(crate) rows: BTreeMap<i64, FileRow>,
 }
@@ -463,7 +477,7 @@ impl<R: RegionKey> RefModel<R> {
         self.files.insert(
             file,
             PhysicalFile {
-                creator: domain,
+                creator: Some(domain),
                 rows: rows
                     .into_iter()
                     .map(|(event_id, key)| (event_id, FileRow { key, copies: 1 }))
@@ -567,11 +581,16 @@ impl<R: RegionKey> RefModel<R> {
                 let Some(physical) = self.files.get(file) else {
                     continue;
                 };
-                if physical.creator != state.domain {
+                // A legacy file records no creator, so the merge cannot call it foreign: the
+                // remap treats it as the region's own for exactly that reason (#10646).
+                let Some(creator) = physical.creator else {
+                    continue;
+                };
+                if creator != state.domain {
                     offenders.push(ForeignRef {
                         region: *input,
                         file: *file,
-                        creator: physical.creator,
+                        creator,
                     });
                 }
             }
@@ -684,7 +703,9 @@ impl<R: RegionKey> RefModel<R> {
             let Some(physical) = self.files.get(file) else {
                 continue;
             };
-            let self_stamped = physical.creator == domain;
+            // A file whose stamp is unknown is not the region's own either, so all of its rows
+            // are filtered by the region's domain — which is what the read path does with it.
+            let self_stamped = physical.creator == Some(domain);
             for (event_id, row) in &physical.rows {
                 if !self_stamped && !domain.contains_key(row.key) {
                     continue;
@@ -700,7 +721,7 @@ impl<R: RegionKey> RefModel<R> {
         self.files.insert(
             file,
             PhysicalFile {
-                creator: domain,
+                creator: Some(domain),
                 rows,
             },
         );
@@ -736,6 +757,31 @@ impl<R: RegionKey> RefModel<R> {
             .expect("an imported region is published");
         state.refs.remove(&file);
         state.refs.insert(new_file, Level::Shared);
+    }
+
+    /// A **legacy** reference: the region re-registers its file under a new physical id with
+    /// the creator left unrecorded — the state a file written before the expression was
+    /// persisted is in, which the remap admits (#10646).
+    ///
+    /// The rows and the level stay; only the stamp is gone. Nothing can be compared with a
+    /// region's domain afterwards, so a merge cannot call the reference foreign
+    /// ([`RefModel::merge_verdict`]) and a compaction filters all of its rows by the region's
+    /// domain, exactly as the read path does. The new physical id is returned so a case can
+    /// name the reference it created.
+    pub(crate) fn forget_creator(&mut self, region: R) -> Option<u64> {
+        let file = self.regions.get(&region)?.refs.keys().next().copied()?;
+        let new_file = self.mint();
+        if let Some(mut physical) = self.files.remove(&file) {
+            physical.creator = None;
+            self.files.insert(new_file, physical);
+        }
+        let state = self
+            .regions
+            .get_mut(&region)
+            .expect("a region holding a file is published");
+        let level = state.refs.remove(&file)?;
+        state.refs.insert(new_file, level);
+        Some(new_file)
     }
 
     /// The keys `region` may show: its own domain, plus the in-domain keys of its memtable
@@ -775,7 +821,10 @@ impl<R: RegionKey> RefModel<R> {
                     .map(|(file, level)| match self.files.get(file) {
                         Some(physical) => format!(
                             "f{file}(creator {}, {})",
-                            physical.creator.label(),
+                            match physical.creator {
+                                Some(domain) => domain.label(),
+                                None => "unrecorded (legacy file)".to_string(),
+                            },
                             level.name()
                         ),
                         None => format!("f{file}(<unknown file>, {})", level.name()),
@@ -850,7 +899,7 @@ mod tests {
         assert_eq!(BTreeMap::from([(0, 1)]), spec.predict_counts(1));
         let state = spec.region(1).expect("published");
         assert_eq!(BTreeMap::from([(0, Level::L0)]), state.refs);
-        assert_eq!(Domain::FULL, spec.files[&0].creator);
+        assert_eq!(Some(Domain::FULL), spec.files[&0].creator);
         // The whole domain, because the region's own domain is the only gate.
         assert_eq!(Domain::FULL.keys(), spec.authorized_keys(1));
         assert_eq!(BTreeSet::from([1]), spec.holders_of(0));
@@ -865,6 +914,50 @@ mod tests {
         let mut spec = RefModel::<Rid>::new();
         spec.publish(1, Domain::new(0, 5));
         spec.note_write(1, 0, 7);
+    }
+
+    #[test]
+    fn a_legacy_reference_blocks_no_merge_and_is_still_narrowed_by_the_domain() {
+        let mut spec = one_shared_file();
+        // A file written before its creator was recorded: the stamp is unknown, the rows stay.
+        let legacy = spec
+            .forget_creator(1)
+            .expect("the region holds a flushed file");
+        assert_eq!(None, spec.files[&legacy].creator);
+        assert_eq!(
+            BTreeMap::from([(0, 1), (1, 1)]),
+            spec.predict_counts(1),
+            "an unknown stamp still leaves the region's domain as the only gate"
+        );
+        spec.split(1, 2, Domain::new(0, 5), 3, Domain::new(5, 10));
+        // Nothing can be called foreign when no creator was recorded, so the merge proceeds.
+        assert!(
+            spec.merge_verdict(&[2, 3]).is_allowed(),
+            "a file with no recorded creator is the region's own, so it blocks no merge"
+        );
+        // Each half still reads only the rows inside its own domain.
+        assert_eq!(BTreeMap::from([(0, 1)]), spec.predict_counts(2));
+        assert_eq!(BTreeMap::from([(1, 1)]), spec.predict_counts(3));
+        spec.merge(&[2, 3], 4);
+        assert_eq!(
+            BTreeMap::from([(0, 1), (1, 1)]),
+            spec.predict_counts(4),
+            "a merge of two holders of one legacy file republishes the single reference, so each \
+             row is still read once"
+        );
+        assert_eq!(BTreeSet::from([4]), spec.holders_of(legacy));
+
+        // Compacting a legacy reference takes the rows its own domain holds and stamps the
+        // output with that domain, the same way a foreign stamp is handled.
+        spec.split(4, 5, Domain::new(0, 5), 6, Domain::new(5, 10));
+        spec.compact(5);
+        let output = *spec
+            .ref_ids(5)
+            .iter()
+            .next()
+            .expect("the compaction output");
+        assert_eq!(Some(Domain::new(0, 5)), spec.files[&output].creator);
+        assert_eq!(BTreeMap::from([(0, 1)]), spec.predict_counts(5));
     }
 
     #[test]
@@ -973,7 +1066,7 @@ mod tests {
         spec.compact(2);
         let file = *spec.ref_ids(2).iter().next().expect("the copy");
         // The copy is stamped with the compacting half's domain and holds only its row.
-        assert_eq!(Domain::new(0, 5), spec.files[&file].creator);
+        assert_eq!(Some(Domain::new(0, 5)), spec.files[&file].creator);
         assert_eq!(
             BTreeMap::from([(0, FileRow { key: 2, copies: 1 })]),
             spec.files[&file].rows
@@ -1049,7 +1142,7 @@ mod tests {
             BTreeMap::from([(1, Level::Shared)]),
             spec.region(1).unwrap().refs
         );
-        assert_eq!(Domain::FULL, spec.files[&1].creator);
+        assert_eq!(Some(Domain::FULL), spec.files[&1].creator);
     }
 
     #[test]

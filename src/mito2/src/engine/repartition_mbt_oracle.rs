@@ -29,7 +29,9 @@
 //!
 //! 1. the multiset of visible `event_id`s equals the ledger's committed multiset, each
 //!    event exactly once (a multiset, not a count and not a sum, so a lost event and a
-//!    duplicated event are both visible, including when their payload is zero);
+//!    duplicated event are both visible, including when their payload is zero), **and** no
+//!    single region reads one event twice: a double in one region cancelled by a miss in
+//!    another nets out in the global multiset, so "exactly once" is also stated per region;
 //! 2. every live region only shows events whose partition key is inside that region's
 //!    published domain, so the union in (1) cannot be satisfied by misplacing rows.
 //!
@@ -272,11 +274,18 @@ pub(crate) struct SstRef {
     /// This is the range of rows the reference let a reader see for as long as a reference
     /// carried no row authorization of its own.
     ///
+    /// `None` is a **legacy** object: a file written before the creating expression was
+    /// recorded, whose provenance therefore cannot be established. The remap treats such a
+    /// file as the region's own and the read path narrows it by the region's expression
+    /// (`should_skip_region_partition` only skips the region predicate when the file's
+    /// expression *is* the region's), so it is not the same state as "created by the whole
+    /// table" and must not be reported as one.
+    ///
     /// TODO(repart-mbt): this branch has no `FileMeta::owned_range`, so the authorized range
     /// is reported as the creator domain. Once `FileMeta::owned_range` exists, the
     /// authorized range is `creator_domain ∩ owned_range`, and `owned_range` itself must be
     /// inside `creator_domain`.
-    pub(crate) creator_domain: Domain,
+    pub(crate) creator_domain: Option<Domain>,
 }
 
 /// Layer 2: one region's own manifest view of the objects it references.
@@ -344,6 +353,11 @@ pub(crate) enum Category {
     ReferenceBounds,
     SequenceMonotonicity,
     PhysicalLiveness,
+    /// The chaos lever itself: a perturbation that never reached the engine, so the step
+    /// proved nothing about the state it was meant to create. Reported by the chaos driver
+    /// only, and fatal, because a scenario that silently stops injecting is a hole in the
+    /// coverage rather than a passing step.
+    Perturbation,
 }
 
 impl Category {
@@ -355,6 +369,7 @@ impl Category {
             Category::ReferenceBounds => "reference-bounds",
             Category::SequenceMonotonicity => "sequence-monotonicity",
             Category::PhysicalLiveness => "physical-liveness",
+            Category::Perturbation => "perturbation",
         }
     }
 
@@ -435,6 +450,10 @@ impl Oracle {
         let mut visible: BTreeMap<i64, usize> = BTreeMap::new();
         let mut per_region: Vec<(RegionId, BTreeMap<i64, usize>)> = Vec::new();
         let mut misplaced: Vec<String> = Vec::new();
+        // One region reading the same event twice. The global multiset cannot see it: one
+        // event read twice in one region plus another event missing everywhere nets to the
+        // same total, so "each event exactly once" has to be stated per region as well.
+        let mut duplicated_in_region: Vec<String> = Vec::new();
         for (region_id, counts) in observed {
             let domain = *routing
                 .get(region_id)
@@ -453,6 +472,15 @@ impl Oracle {
                 }
             }
             for (event_id, count) in counts {
+                if *count > 1 {
+                    duplicated_in_region.push(format!(
+                        "region {} (domain [{}, {})) reads {} x{count}",
+                        region_id,
+                        key_name(domain.lo),
+                        key_name(domain.hi),
+                        ledger.describe(*event_id)
+                    ));
+                }
                 *visible.entry(*event_id).or_default() += count;
             }
             per_region.push((*region_id, counts.clone()));
@@ -479,6 +507,7 @@ impl Oracle {
             && missing.is_empty()
             && unexpected.is_empty()
             && misplaced.is_empty()
+            && duplicated_in_region.is_empty()
         {
             return None;
         }
@@ -511,6 +540,7 @@ impl Oracle {
              \x20 visible multiset over the published regions (event_id -> count): {visible:?}\n\
              \x20 ledger expectation (event_id -> count): {expected:?}\n\
              \x20 duplicated event ids: {duplicated:?}\n\
+             \x20 events one region reads twice: {duplicated_in_region:?}\n\
              \x20 missing event ids: {missing:?}\n\
              \x20 unexpected event ids: {unexpected:?}\n\
              \x20 misplaced rows: {misplaced:?}\n\
@@ -674,7 +704,12 @@ impl Oracle {
                 continue;
             };
             for (file_id, sst) in &view.files {
-                if holder_domain.contains_domain(&sst.creator_domain) {
+                // A legacy object records no creator, so it states no bound: the region
+                // predicate still narrows it, but nothing here says which keys it holds.
+                let Some(creator_domain) = sst.creator_domain else {
+                    continue;
+                };
+                if holder_domain.contains_domain(&creator_domain) {
                     continue;
                 }
                 let holders = physical
@@ -691,8 +726,8 @@ impl Oracle {
                          {holders:?}",
                         key_name(holder_domain.lo),
                         key_name(holder_domain.hi),
-                        key_name(sst.creator_domain.lo),
-                        key_name(sst.creator_domain.hi),
+                        key_name(creator_domain.lo),
+                        key_name(creator_domain.hi),
                         sst.owner,
                         sst.level,
                         sst.sequence

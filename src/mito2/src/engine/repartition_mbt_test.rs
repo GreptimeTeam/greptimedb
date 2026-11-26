@@ -134,6 +134,7 @@ use api::v1::helper::row;
 use api::v1::region::{StrictWindow, compact_request};
 use api::v1::value::ValueData;
 use api::v1::{Rows, SemanticType};
+use common_error::ext::ErrorExt;
 use common_recordbatch::RecordBatches;
 use datatypes::arrow::array::AsArray;
 use datatypes::arrow::datatypes::Int64Type;
@@ -190,6 +191,20 @@ fn describe_regions(inputs: &[RegionId]) -> String {
         .map(|region_id| region_id.to_string())
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// Renders an offending reference's creator for the reports. A legacy file that records no
+/// creator is a different state from one created by the whole table, so it is not rendered as
+/// a domain.
+fn describe_creator(creator: Option<Domain>) -> String {
+    match creator {
+        Some(domain) => format!(
+            "creator domain [{}, {})",
+            key_name(domain.lo),
+            key_name(domain.hi)
+        ),
+        None => "no recorded creator (legacy)".to_string(),
+    }
 }
 
 /// Renders the offending references a scheme B refusal has to name.
@@ -526,15 +541,11 @@ impl StorageModel {
                             slot_level: level.level,
                             num_rows: meta.num_rows,
                             sequence: meta.sequence.map(|sequence| sequence.get()),
-                            creator_domain: meta
-                                .partition_expr
-                                .as_ref()
-                                .map(|expr| {
-                                    decode_domain(expr).unwrap_or_else(|| {
-                                        panic!("harness cannot decode a file's creator domain")
-                                    })
+                            creator_domain: meta.partition_expr.as_ref().map(|expr| {
+                                decode_domain(expr).unwrap_or_else(|| {
+                                    panic!("harness cannot decode a file's creator domain")
                                 })
-                                .unwrap_or(Domain::FULL),
+                            }),
                         },
                     );
                 }
@@ -936,10 +947,9 @@ impl StorageModel {
                     .values()
                     .map(|sst| {
                         format!(
-                            "{:?}(creator [{} ({}, {})], L{}, rows={}, sequence={:?})",
+                            "{:?}({}, owner={}, L{}, rows={}, sequence={:?})",
                             sst.file_id,
-                            key_name(sst.creator_domain.lo),
-                            key_name(sst.creator_domain.hi),
+                            describe_creator(sst.creator_domain),
                             sst.owner,
                             sst.level,
                             sst.num_rows,
@@ -1221,7 +1231,7 @@ impl StorageModel {
             let expected = verdict.describe();
             let named = describe_offenders(offenders);
             let refusal = self.probe_merge_refusal(inputs).await;
-            let message = match refusal {
+            let err = match refusal {
                 Ok(merged) => panic!(
                     "SCHEME B DIVERGES FROM THE ENGINE: {expected}, but the engine published \
                      survivor {merged} for inputs [{}]. Scheme B allows a merge only while every \
@@ -1229,13 +1239,56 @@ impl StorageModel {
                      ones: {named}",
                     describe_regions(inputs)
                 ),
-                Err(message) => message,
+                Err(err) => err,
             };
+            // The refusal has to be the specific failure scheme B states, not just any error
+            // the remap can return: an unrelated remap error would otherwise pass for one. The
+            // trait's remap boxes the mito2 error, so it is downcast back to the variant.
+            let refusal_variant = err.as_any().downcast_ref::<crate::error::Error>();
+            if !matches!(
+                refusal_variant,
+                Some(crate::error::Error::ForeignFilePartitionExpr { .. })
+            ) {
+                panic!(
+                    "SCHEME B DIVERGES FROM THE ENGINE: {expected} for inputs [{}], but the \
+                     remap failed with an error that is not the refusal: {err:?}. Only \
+                     Error::ForeignFilePartitionExpr is the refusal; these hold foreign files: \
+                     {named}",
+                    describe_regions(inputs)
+                );
+            }
+            let message = err.to_string();
+            // The message has to name every offending region *and* every offending file id.
+            // The model's file ids are its own (opaque, never an engine `FileId`), so the ids to
+            // look for are read from the engine's persisted manifests, the way the remap reads
+            // them, and the model's offender count has to agree with that set.
+            let engine_offenders = self.engine_foreign_files(inputs).await;
+            assert_eq!(
+                offenders.len(),
+                engine_offenders.len(),
+                "the model expects a refusal naming {} offending reference(s) ({named}), but the \
+                 engine's persisted manifests hold {} file(s) another region created: \
+                 {engine_offenders:?}",
+                offenders.len(),
+                engine_offenders.len()
+            );
             for offender in offenders {
                 assert!(
                     message.contains(&offender.region.to_string()),
                     "the refusal must name the offending region {}: {message}",
                     offender.region
+                );
+            }
+            for (region_id, file_id) in &engine_offenders {
+                assert!(
+                    message.contains(&region_id.to_string()),
+                    "the refusal must name the offending region {region_id} that holds \
+                     {file_id}: {message}"
+                );
+                assert!(
+                    message.contains(&file_id.to_string()),
+                    "the refusal must name the offending file {file_id} held by region \
+                     {region_id}: {message}"
                 );
             }
             common_telemetry::info!(
@@ -1262,14 +1315,19 @@ impl StorageModel {
     }
 
     /// Issues the coordinator's remap for `inputs` into a fresh staging survivor and reports
-    /// whether the engine refused it.
+    /// whether the engine refused it, with the engine's own error so the caller can assert
+    /// *which* failure it is (`RegionEngine::remap_manifests` boxes the mito2 error, so the
+    /// caller downcasts it back to [`crate::error::Error`]).
     ///
     /// Only the remap runs: it is the step that reads every input's persisted manifest, so it is
     /// where an engine implementing scheme B would see the foreign file and refuse. Nothing is
     /// published and the inputs are not retired, so a refusal leaves the fixtures exactly as
     /// they were and the following compaction can still run. When the engine accepts the remap
     /// the state is already inconsistent with B and the caller stops with the finding.
-    async fn probe_merge_refusal(&mut self, inputs: &[RegionId]) -> Result<RegionId, String> {
+    async fn probe_merge_refusal(
+        &mut self,
+        inputs: &[RegionId],
+    ) -> Result<RegionId, common_error::ext::BoxedError> {
         let probe = self.alloc_region_id();
         self.create_and_enter_staging(probe, Domain::FULL).await;
         let remap = self
@@ -1297,10 +1355,40 @@ impl StorageModel {
                         }),
                     )
                     .await;
-                Err(format!("{err}"))
+                Err(err)
             }
             Ok(_) => Ok(probe),
         }
+    }
+
+    /// The `(region, file)` pairs a scheme B refusal has to name: every file an input's
+    /// persisted manifest holds whose recorded creator is not that region.
+    ///
+    /// This is the rule the remap itself applies, read straight from the engine so the refusal
+    /// can be checked against the engine's real `FileId`s — the model mints its own, opaque
+    /// ones. A file that records no creator cannot be called foreign (the remap treats it as
+    /// the region's own), so it is skipped for the same reason.
+    async fn engine_foreign_files(&self, inputs: &[RegionId]) -> Vec<(RegionId, FileId)> {
+        let mut foreign = Vec::new();
+        for region_id in inputs {
+            let region = self
+                .engine
+                .get_region(*region_id)
+                .unwrap_or_else(|| panic!("region {region_id} disappeared"));
+            let manifest = region.manifest_ctx.manifest().await;
+            let holder_expr =
+                crate::region::parse_partition_expr(manifest.metadata.partition_expr.as_deref())
+                    .expect("the harness reads a region's persisted partition expr");
+            for (file_id, meta) in &manifest.files {
+                let Some(creator) = meta.partition_expr.as_deref() else {
+                    continue;
+                };
+                if Some(creator) != holder_expr.as_ref() {
+                    foreign.push((*region_id, *file_id));
+                }
+            }
+        }
+        foreign
     }
 
     /// Runs the merge machinery for `inputs` into a fresh whole-domain survivor, publishes
@@ -1476,11 +1564,10 @@ impl StorageModel {
             .values()
             .map(|sst| {
                 format!(
-                    "{:?}(creator {}, creator domain [{}, {}), L{}, rows={}, sequence={:?})",
+                    "{:?}({}, creator {}, L{}, rows={}, sequence={:?})",
                     sst.file_id,
+                    describe_creator(sst.creator_domain),
                     sst.owner,
-                    key_name(sst.creator_domain.lo),
-                    key_name(sst.creator_domain.hi),
                     sst.level,
                     sst.num_rows,
                     sst.sequence
@@ -1680,6 +1767,79 @@ impl StorageModel {
             Err(err) => outcome.push_str(&format!("; repeat import rejected ({err})")),
         }
         outcome
+    }
+
+    /// Publishes a **legacy** SST reference: a byte copy of one of `target`'s own flushed SSTs,
+    /// re-registered under a brand-new `FileId` with **no recorded partition expression**, while
+    /// the target's own L0 reference leaves in the same edit.
+    ///
+    /// That is the state a file written before the creating expression was persisted is in, which
+    /// #10646 admits: the provenance cannot be established, so the remap treats the file as the
+    /// region's own, while the read path still narrows it by the region's expression. The bytes
+    /// and the admission sequence are the ones the flush produced, so the region keeps exactly
+    /// the rows it had and only one reference's identity and stamp change.
+    ///
+    /// Publication: `MitoEngine::edit_region` is a synchronous worker request; when it returns,
+    /// the reference is in the manifest and the version.
+    async fn publish_creatorless_file(&mut self, target: RegionId) -> String {
+        self.flush_region(target).await;
+        self.refresh_views().await;
+        let original_id = self.holders.get(&target).and_then(|view| {
+            view.files
+                .iter()
+                .find(|(_, sst)| sst.level == 0 && sst.owner == target)
+                .map(|(file_id, _)| *file_id)
+        });
+        let Some(original_id) = original_id else {
+            return format!(
+                "legacy file into {target} (no self-flushed L0 SST to re-register, nothing \
+                 published)"
+            );
+        };
+
+        let original = self.file_meta(target, original_id);
+        let legacy_id = FileId::random();
+        let source_path = self.sst_path(original.region_id, original.file_id);
+        let target_path = self.sst_path(target, legacy_id);
+        if let Err(err) = self.store.copy(&source_path, &target_path).await {
+            return format!(
+                "legacy file into {target} (copying {source_path} -> {target_path} failed: {err})"
+            );
+        }
+
+        let mut published = original.clone();
+        published.file_id = legacy_id;
+        published.region_id = target;
+        // The creator is simply not recorded on this object: that is the whole point.
+        published.partition_expr = None;
+        let edit = self
+            .engine
+            .edit_region(
+                target,
+                RegionEdit {
+                    files_to_add: vec![published],
+                    files_to_remove: vec![original],
+                    ..Default::default()
+                },
+            )
+            .await;
+        if let Err(err) = edit {
+            return format!(
+                "legacy file {legacy_id:?} into {target}: rejected at the edit ({err:?})"
+            );
+        }
+        // The replacement mints a new physical id whose stamp is unrecorded.
+        let model_file = self.spec.forget_creator(target);
+        self.refresh_views().await;
+        let recorded = self
+            .holders
+            .get(&target)
+            .and_then(|view| view.files.get(&legacy_id))
+            .map(|sst| sst.creator_domain);
+        format!(
+            "legacy file into {target}: {original_id:?} re-registered as {legacy_id:?} with no \
+             recorded creator (observed {recorded:?}, model ref {model_file:?})"
+        )
     }
 
     /// A live region whose own flush produced an L0 SST, so an import has an object to
@@ -3179,6 +3339,139 @@ async fn test_mbt_case_same_key_and_timestamp() {
         model.spec.predict_counts(merged),
         "after the refusal and the other half's compaction the survivor holds one file per half, \
          so each of the two events is visible once and never collapsed into one row"
+    );
+    assert!(
+        agreed,
+        "the prediction must agree with the engine in every step of this case:\n\n{}",
+        report.join("\n\n")
+    );
+}
+
+/// Case 6: a file whose creator was never recorded (the legacy state #10646 admits).
+///
+/// A region's own flushed SST is re-registered under a new `FileId` with
+/// `partition_expr == None`, which is the state a file written before the creating expression
+/// was persisted is in. #10646 says such a file is the region's own — the remap cannot compare
+/// an unrecorded creator with anything, so it must not refuse a merge for it — and the read path
+/// keeps narrowing it by the region's expression (`should_skip_region_partition` only skips the
+/// region predicate when the file's expression *is* the region's, which `None` never is).
+///
+/// So after the split both halves still hold that one creator-less file, each reads only the
+/// rows its own domain owns, and the merge **proceeds** (no refusal, no compaction) and leaves
+/// the single reference, so each row is still read exactly once.
+#[tokio::test]
+async fn test_mbt_case_legacy_file_without_creator() {
+    common_telemetry::init_default_ut_logging();
+    const CASE: &str = "legacy file without a recorded creator";
+    let mut model = StorageModel::new("mbt-case-legacy-file").await;
+    let mut report = Vec::new();
+    let mut agreed = true;
+
+    let source = model.live_regions()[0];
+    let written = model
+        .write(&[
+            PlannedRow {
+                key: 1,
+                ts: 0,
+                payload: 1.0,
+            },
+            PlannedRow {
+                key: 7,
+                ts: 1000,
+                payload: 7.0,
+            },
+        ])
+        .await;
+    let ids: Vec<i64> = written.iter().map(|event| event.event_id).collect();
+    model.flush_dirty().await;
+    let step = model
+        .record_step(
+            CASE,
+            "after flushing F0 (creator = whole domain)",
+            &mut report,
+        )
+        .await;
+    agreed &= step.mismatched().is_empty();
+
+    // The state under test: the same file, re-registered with no recorded creator.
+    let published = model.publish_creatorless_file(source).await;
+    common_telemetry::info!("[mbt-case] {published}");
+    let step = model
+        .record_step(
+            CASE,
+            "after re-registering F0 with no recorded creator",
+            &mut report,
+        )
+        .await;
+    agreed &= step.mismatched().is_empty();
+    assert_eq!(
+        BTreeMap::from([(ids[0], 1), (ids[1], 1)]),
+        model.spec.predict_counts(source),
+        "a file with no recorded creator still shows exactly its own rows once"
+    );
+    let files = model.holder_files(source);
+    assert_eq!(
+        1,
+        files.len(),
+        "the edit replaced the file, it did not add one"
+    );
+    let file_id = *files.iter().next().expect("the legacy file");
+    assert!(
+        model.file_meta(source, file_id).partition_expr.is_none(),
+        "the published reference has to record no creator at all"
+    );
+
+    let (left, right) = model.split(source, 5).await;
+    let step = model
+        .record_step(CASE, "after the split of the legacy file", &mut report)
+        .await;
+    agreed &= step.mismatched().is_empty();
+    assert_eq!(
+        BTreeMap::from([(ids[0], 1)]),
+        model.spec.predict_counts(left),
+        "the left half reads only the rows its domain owns from the creator-less file"
+    );
+    assert_eq!(
+        BTreeMap::from([(ids[1], 1)]),
+        model.spec.predict_counts(right),
+        "the right half reads only the rows its domain owns from the creator-less file"
+    );
+    assert_eq!(
+        model.holder_files(left),
+        model.holder_files(right),
+        "a split hands both halves the same reference"
+    );
+
+    // #10646: a file with no recorded creator is the region's own, so this merge is *allowed* —
+    // scheme B refuses only a file another region demonstrably created.
+    let verdict = model.spec.merge_verdict(&[left, right]);
+    assert!(
+        verdict.is_allowed(),
+        "a creator-less file must not block the merge: {}",
+        verdict.describe()
+    );
+    let survivor = model.merge_all().await;
+    let step = model
+        .record_step(
+            CASE,
+            "after merging both holders of the legacy file",
+            &mut report,
+        )
+        .await;
+    agreed &= step.mismatched().is_empty();
+    assert_eq!(
+        BTreeMap::from([(ids[0], 1), (ids[1], 1)]),
+        model.spec.predict_counts(survivor),
+        "the merge republishes the single creator-less reference, so each row is still read once"
+    );
+    assert_eq!(
+        BTreeSet::from([file_id]),
+        model.holder_files(survivor),
+        "the survivor holds exactly the one legacy object the halves shared"
+    );
+    assert!(
+        !step.oracle_fired(),
+        "no row was lost, duplicated or misplaced while merging a creator-less file"
     );
     assert!(
         agreed,
