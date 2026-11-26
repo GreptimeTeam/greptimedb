@@ -2865,6 +2865,117 @@ async fn native_promql_delta_temporality_corpus_matches_legacy() {
     }
 }
 
+/// `rate` and `increase` over OTLP delta exponential histograms run natively and answer what the
+/// existing plan answers.
+///
+/// OTLP ingest stores each delta point as a gauge-hinted native histogram whose start timestamp is
+/// the previous point's end, with the series marked `otlp_aggregation_temporality="delta"`. Both
+/// routes rate those histograms the same way whatever the marker says.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_otlp_delta_histogram_rates_match_legacy() {
+    use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
+    use otel_arrow_rust::proto::opentelemetry::metrics::v1::exponential_histogram_data_point::Buckets;
+    use otel_arrow_rust::proto::opentelemetry::metrics::v1::{
+        AggregationTemporality, ExponentialHistogram, ExponentialHistogramDataPoint, Metric,
+        ResourceMetrics, ScopeMetrics, metric,
+    };
+    use servers::query_handler::OpenTelemetryProtocolHandler;
+    use session::protocol_ctx::{OtlpMetricCtx, ProtocolCtx};
+
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_otlp_delta_histogram_rates",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    let mut ctx = QueryContext::with_db_name(None);
+    ctx.set_protocol_ctx(ProtocolCtx::OtlpMetric(OtlpMetricCtx {
+        with_metric_engine: true,
+        ..Default::default()
+    }));
+    let data_points = [(60, 10), (120, 20), (180, 15), (240, 40)]
+        .into_iter()
+        .map(|(end, count)| ExponentialHistogramDataPoint {
+            start_time_unix_nano: (end - 60) * 1_000_000_000,
+            time_unix_nano: end * 1_000_000_000,
+            count,
+            sum: Some(count as f64 * 1.5),
+            zero_threshold: 0.001,
+            positive: Some(Buckets {
+                offset: 0,
+                bucket_counts: vec![count],
+            }),
+            ..Default::default()
+        })
+        .collect();
+    let request = ExportMetricsServiceRequest {
+        resource_metrics: vec![ResourceMetrics {
+            scope_metrics: vec![ScopeMetrics {
+                metrics: vec![Metric {
+                    name: "otlp_delta_h".into(),
+                    data: Some(metric::Data::ExponentialHistogram(ExponentialHistogram {
+                        aggregation_temporality: AggregationTemporality::Delta as i32,
+                        data_points,
+                    })),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    };
+    let outcome = instance
+        .metrics(request, Arc::new(ctx), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        (outcome.accepted_data_points, outcome.rejected_data_points),
+        (4, 0)
+    );
+    for sql in [
+        "TQL EVAL (240, 240, '1m') histogram_count(rate(otlp_delta_h[3m]))",
+        "TQL EVAL (240, 240, '1m') histogram_sum(increase(otlp_delta_h[3m]))",
+        "TQL EVAL (180, 240, '1m') histogram_count(increase(otlp_delta_h[2m]))",
+        "TQL EVAL (240, 240, '1m') histogram_count(rate(otlp_delta_h[2m] offset 1m))",
+    ] {
+        observer.clear();
+        let output = native_tql_output(&instance, sql, true).await;
+        let native = eval_text_rows(collected(output).await, ReportedName::Nothing);
+        assert!(observer.fused().is_some(), "{sql}");
+        let legacy = eval_text(collected(native_tql_output(&instance, sql, false).await).await);
+        // The two routes extrapolate in a different order, so the value may differ in its last
+        // digits; everything else is compared exactly.
+        let rows = |text: &str| {
+            text.lines()
+                .map(|line| {
+                    let (labels, value) = line.rsplit_once(" | ").unwrap();
+                    (labels.to_string(), value.parse::<f64>().ok())
+                })
+                .collect::<Vec<_>>()
+        };
+        let (native_rows, legacy_rows) = (rows(&native), rows(&legacy));
+        assert!(legacy_rows.len() > 1, "{sql} answers nothing: {legacy}");
+        assert_eq!(
+            native_rows.len(),
+            legacy_rows.len(),
+            "{sql}: {native} vs {legacy}"
+        );
+        for ((native_labels, native_value), (legacy_labels, legacy_value)) in
+            native_rows.iter().zip(&legacy_rows)
+        {
+            assert_eq!(native_labels, legacy_labels, "{sql}: {native} vs {legacy}");
+            match (native_value, legacy_value) {
+                (Some(native_value), Some(legacy_value)) => assert!(
+                    (native_value - legacy_value).abs() <= 1e-12 * legacy_value.abs().max(1.0),
+                    "{sql}: {native} vs {legacy}"
+                ),
+                (native_value, legacy_value) => {
+                    assert_eq!(native_value, legacy_value, "{sql}: {native} vs {legacy}")
+                }
+            }
+        }
+    }
+}
+
 /// `output` with its stream read here: [`eval_text_rows`] blocks on the stream, which inside this
 /// runtime stops being woken once the test task has spent its cooperative budget.
 async fn collected(output: Output) -> Output {
