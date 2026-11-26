@@ -15,7 +15,7 @@
 //! Region Engine's definition
 
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt::{Debug, Display};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -893,10 +893,58 @@ impl SyncRegionFromResponse {
     }
 }
 
+/// The source regions that publish their files into a target region another source publishes
+/// into too.
+///
+/// This is the shape in which a repartition can publish one object twice: two distinct sources
+/// hand their file sets to the same target, so a shared object and a materialized copy of it can
+/// both become visible there. It is also the exact shape that the two ownership checks guard - the
+/// pre-publication check of the repartition procedure, which asks [`Self`] which sources to
+/// validate, and the remap-time guard
+/// (`mito2::remap_manifest::RemapManifest::is_split`), which exempts the other shapes.
+///
+/// The predicate is deliberately stated per *target*, not per source count: whether one source
+/// feeds one target or several says nothing about combining file sets. A one-to-many mapping
+/// hands each child its own part of every object, and a one-to-one mapping hands the object to
+/// the only target, so neither combines two sources' copies. Only a target fed by two or more
+/// distinct sources does.
+///
+/// Returned in ascending region id order, so a message that names them is stable.
+pub fn sources_sharing_a_target(mapping: &HashMap<RegionId, Vec<RegionId>>) -> Vec<RegionId> {
+    let mut sources_per_target: HashMap<RegionId, BTreeSet<RegionId>> = HashMap::new();
+    for (source, targets) in mapping {
+        for target in targets {
+            sources_per_target
+                .entry(*target)
+                .or_default()
+                .insert(*source);
+        }
+    }
+    let mut shared: BTreeSet<RegionId> = BTreeSet::new();
+    for sources in sources_per_target
+        .values()
+        .filter(|sources| sources.len() > 1)
+    {
+        shared.extend(sources.iter().copied());
+    }
+    shared.into_iter().collect()
+}
+
+/// Whether every target region receives files from at most one source region, i.e. whether
+/// no repartition in this mapping can publish an object twice.
+///
+/// The negation of [`sources_sharing_a_target`] being empty.
+pub fn every_target_has_a_single_source(mapping: &HashMap<RegionId, Vec<RegionId>>) -> bool {
+    sources_sharing_a_target(mapping).is_empty()
+}
+
 /// Request to remap manifests from old regions to new regions.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RemapManifestsRequest {
     /// The [`RegionId`] of a staging region used to obtain table directory and storage configuration for the remap operation.
+    ///
+    /// For a [`Self::validate_only`] request this is the region the check reads, which is an
+    /// ordinary (not staging) region.
     pub region_id: RegionId,
     /// Regions to remap manifests from.
     pub input_regions: Vec<RegionId>,
@@ -904,6 +952,13 @@ pub struct RemapManifestsRequest {
     pub region_mapping: HashMap<RegionId, Vec<RegionId>>,
     /// New partition expressions for the new regions.
     pub new_partition_exprs: HashMap<RegionId, String>,
+    /// Only verify that the request would be accepted, without remapping anything.
+    ///
+    /// A validate-only request reads the persisted manifest of [`Self::region_id`] and reports
+    /// whether the region holds a file it did not create itself; it does not require staging, does
+    /// not write and returns no manifest paths. `false` (the [`Default`]) keeps the ordinary
+    /// remapping behaviour, so an older caller is unaffected.
+    pub validate_only: bool,
 }
 
 /// Response to remap manifests from old regions to new regions.

@@ -43,6 +43,7 @@ fn range_expr_string(col_name: &str, start: f64, end: f64) -> String {
 async fn apply_staging(engine: &MitoEngine, region_id: RegionId, partition_expr: String) {
     let result = engine
         .remap_manifests(RemapManifestsRequest {
+            validate_only: false,
             region_id,
             input_regions: vec![region_id],
             region_mapping: [(region_id, vec![region_id])].into_iter().collect(),

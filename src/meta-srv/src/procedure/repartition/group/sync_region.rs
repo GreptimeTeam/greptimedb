@@ -35,6 +35,7 @@ use crate::handler::HeartbeatMailbox;
 use crate::procedure::repartition::group::update_metadata::UpdateMetadata;
 use crate::procedure::repartition::group::utils::{
     HandleMultipleResult, group_region_routes_by_peer, handle_multiple_results,
+    validate_merge_sources,
 };
 use crate::procedure::repartition::group::{Context, State};
 use crate::procedure::utils::{ErrorStrategy, instruction_error_result};
@@ -57,7 +58,13 @@ impl State for SyncRegion {
         _procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
         Self::flush_central_region(ctx).await?;
+<<<<<<< HEAD
         self.sync_regions(ctx).await?;
+=======
+        self.sync_with_paused_source(ctx).await?;
+        // The other edge into `UpdateMetadata::ApplyStaging`, still before publication.
+        validate_merge_sources(ctx).await?;
+>>>>>>> 0127d63865 (fix(mito2): require a region to own its files before a remap (#10646))
 
         Ok((
             Box::new(UpdateMetadata::ApplyStaging),
