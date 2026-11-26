@@ -414,8 +414,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     /// lease. The worker loop calls it after each batch, so the work runs after the requests the
     /// batch started; a DDL that the batch queued behind a flush or a compaction has not started.
     /// It costs one `is_empty()` per batch and, per entry, which regions rarely have, one region
-    /// lookup (a read lock of the region map) and a few atomic loads, with no I/O, allocation or
-    /// await until a region qualifies.
+    /// lookup (a read lock of the region map) and a few atomic loads, with no I/O or await until
+    /// a region qualifies; the `Vec` of the regions that qualify allocates only once one does.
     pub(crate) async fn sweep_deferred_lease_work(&mut self) {
         if self.deferred_lease_work.is_empty() {
             return;
@@ -442,7 +442,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         self.listener.on_deferred_lease_work_begin(region_id).await;
         if work.missing_index_pass && self.build_missing_indexes(&region).await {
             // A role change outside the worker stopped the pass, so the region does the work
-            // once it is a writable leader again.
+            // once it is a writable leader again. Nothing deferred work for the region while the
+            // pass ran: it is not a retry, and the worker handles no request until it returns.
             self.deferred_lease_work.insert(region_id, work);
             return;
         }
