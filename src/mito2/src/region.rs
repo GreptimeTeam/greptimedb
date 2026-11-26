@@ -2172,10 +2172,9 @@ impl ManifestContext {
         commit: impl AsyncFnOnce(&mut RegionManifestManager) -> Result<T>,
     ) -> Result<T> {
         let region_id = manager.manifest().metadata.region_id;
-        let result = if manager.is_conditional_publication() && self.is_leader_lease_expired() {
-            RegionLeaseExpiredSnafu { region_id }.fail()
-        } else {
-            commit(manager).await
+        let result = match self.ensure_commit_deadline(manager) {
+            Ok(()) => commit(manager).await,
+            Err(error) => Err(error),
         };
         if let Err(e) = &result {
             error!(e; "Failed to update manifest, region_id: {}", region_id);
@@ -2184,6 +2183,17 @@ impl ManifestContext {
             }
         }
         result
+    }
+
+    /// Checks the leader deadline for a conditionally published manifest.
+    pub(crate) fn ensure_commit_deadline(&self, manager: &RegionManifestManager) -> Result<()> {
+        ensure!(
+            !manager.is_conditional_publication() || !self.is_leader_lease_expired(),
+            RegionLeaseExpiredSnafu {
+                region_id: manager.manifest().metadata.region_id
+            }
+        );
+        Ok(())
     }
 
     /// Returns whether a commit, once written, checks that no checkpoint covers its version: a

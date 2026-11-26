@@ -21,7 +21,9 @@ use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
 use parquet::file::metadata::ParquetMetaData;
 use store_api::region_engine::{RegionEngine, RegionRole};
-use store_api::region_request::{RegionRequest, RegionTruncateRequest};
+use store_api::region_request::{
+    AlterKind, RegionAlterRequest, RegionRequest, RegionTruncateRequest, SetRegionOption,
+};
 use store_api::storage::{FileId, RegionId};
 
 use super::{PublicationOutcome, TableCompactionSnapshot};
@@ -147,12 +149,24 @@ async fn row_count(engine: &MitoEngine, region_id: RegionId) -> usize {
     .sum()
 }
 
+#[rstest::rstest]
+#[case::fresh(false)]
+#[case::replay(true)]
 #[tokio::test]
-async fn test_publication_refused_awaiting_leader_lease() {
+async fn test_publication_refused_awaiting_leader_lease(#[case] replay: bool) {
     let mut env = TestEnv::new().await;
     let engine = env.create_engine(config()).await;
     let region_id = RegionId::new(1, 1);
     let (snapshot, output) = seed(&engine, region_id).await;
+    if replay {
+        assert_eq!(
+            PublicationOutcome::Applied,
+            engine
+                .publish_table_compaction(region_id, snapshot.clone(), vec![output.clone()])
+                .await
+                .unwrap()
+        );
+    }
     engine.require_write_lease();
     engine.freeze_lease_clock(Instant::now());
     promote_to_await_leader_lease(&engine, region_id).await;
@@ -196,25 +210,16 @@ async fn test_duplicate_publication_and_later_replacement_do_not_readmit_inputs(
     let (snapshot, output) = seed(&engine, region_id).await;
     let region = engine.get_region(region_id).unwrap();
     let sequence = region.version_control.committed_sequence();
+    let version = region.manifest_ctx.manifest_version().await;
     let (first, second) = tokio::join!(
         engine.publish_table_compaction(region_id, snapshot.clone(), vec![output.clone()]),
         engine.publish_table_compaction(region_id, snapshot.clone(), vec![output.clone()])
     );
-    let outcomes = [first.unwrap(), second.unwrap()];
     assert_eq!(
-        1,
-        outcomes
-            .iter()
-            .filter(|outcome| **outcome == PublicationOutcome::Applied)
-            .count()
+        [PublicationOutcome::Applied; 2],
+        [first.unwrap(), second.unwrap()]
     );
-    assert_eq!(
-        1,
-        outcomes
-            .iter()
-            .filter(|outcome| **outcome == PublicationOutcome::StaleInputs)
-            .count()
-    );
+    assert_eq!(version + 1, region.manifest_ctx.manifest_version().await);
     assert_eq!(sequence, region.version_control.committed_sequence());
     assert_eq!(sequence, region.version_control.current().last_sequence);
     assert_eq!(3, row_count(&engine, region_id).await);
@@ -267,6 +272,45 @@ async fn test_duplicate_publication_and_later_replacement_do_not_readmit_inputs(
 }
 
 #[tokio::test]
+async fn test_replay_requires_all_inputs_absent_and_all_outputs_matching() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(config()).await;
+    let region_id = RegionId::new(1, 1);
+    let (snapshot, outputs) = seed_shared_inputs(&engine, region_id, &[(0, 3), (3, 6)]).await;
+    let mut subset = snapshot.clone();
+    subset.inputs.truncate(1);
+    let output = outputs[0].clone();
+    assert_eq!(
+        PublicationOutcome::Applied,
+        engine
+            .publish_table_compaction(region_id, subset.clone(), vec![output.clone()])
+            .await
+            .unwrap()
+    );
+    let region = engine.get_region(region_id).unwrap();
+    let version = region.manifest_ctx.manifest_version().await;
+    let different = FileMeta {
+        file_size: output.file_size + 1,
+        ..output.clone()
+    };
+    for (request, expected_outputs) in [
+        (snapshot, vec![output]),
+        (subset.clone(), outputs),
+        (subset, vec![different]),
+    ] {
+        assert_eq!(
+            PublicationOutcome::StaleInputs,
+            engine
+                .publish_table_compaction(region_id, request, expected_outputs)
+                .await
+                .unwrap()
+        );
+    }
+    assert_eq!(version, region.manifest_ctx.manifest_version().await);
+    assert_eq!(6, row_count(&engine, region_id).await);
+}
+
+#[tokio::test]
 async fn test_partial_success_can_retry_both_regions_without_duplicate_files() {
     let mut env = TestEnv::new().await;
     let engine = env.create_engine(config()).await;
@@ -292,7 +336,7 @@ async fn test_partial_success_can_retry_both_regions_without_duplicate_files() {
         engine.publish_table_compaction(a, snapshot_a, vec![output_a.clone()]),
         engine.publish_table_compaction(b, snapshot_b, vec![output_b.clone()])
     );
-    assert_eq!(PublicationOutcome::StaleInputs, retry_a.unwrap());
+    assert_eq!(PublicationOutcome::Applied, retry_a.unwrap());
     assert_eq!(PublicationOutcome::Applied, retry_b.unwrap());
     for (id, output) in [(a, output_a), (b, output_b)] {
         let region = engine.get_region(id).unwrap();
@@ -532,22 +576,13 @@ async fn test_invalid_results_preserve_inputs_and_reopen_can_replan() {
         snapshot.inputs,
         engine.table_compaction_snapshot(region_id).unwrap().inputs
     );
-    let mut stale = snapshot;
-    stale.options["append_mode"] = serde_json::json!(true);
-    assert_eq!(
-        PublicationOutcome::StaleInputs,
-        engine
-            .publish_table_compaction(region_id, stale, vec![output.clone()])
-            .await
-            .unwrap()
-    );
-    assert_eq!(version, region.manifest_ctx.manifest_version().await);
     reopen_region(&engine, region_id, "test".into(), true, Default::default()).await;
     // V1 refreshes the snapshot after restart instead of resuming a Prepared task.
     // The public snapshot contract is JSON, so a serde round trip must still publish.
     let fresh = engine.table_compaction_snapshot(region_id).unwrap();
-    let fresh: TableCompactionSnapshot =
+    let mut fresh: TableCompactionSnapshot =
         serde_json::from_value(serde_json::to_value(&fresh).unwrap()).unwrap();
+    fresh.options["append_mode"] = serde_json::json!(true);
     // Writers of older versions leave the decoded size unknown.
     assert!(output.max_row_group_decoded_size > 0);
     let legacy_output = FileMeta {
@@ -627,45 +662,64 @@ async fn test_indexed_output_with_real_index_object_publishes() {
     assert_eq!(3, row_count(&engine, region_id).await);
 }
 
-/// A preserve-row-sequence region trusts output markers only when the typed
-/// snapshot options and the admitted inputs both carry the marker.
-#[tokio::test]
-async fn test_preserve_row_sequence_option_drives_output_admission() {
-    let mut env = TestEnv::new().await;
-    let engine = env.create_engine(config()).await;
-    let region_id = RegionId::new(1, 1);
+async fn set_sequence_preservation(engine: &MitoEngine, region_id: RegionId, enabled: bool) {
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::SetRegionOptions {
+                    options: vec![SetRegionOption::PreserveRowSequence(enabled)],
+                },
+            }),
+        )
+        .await
+        .unwrap();
+}
+
+async fn seed_sequence_inputs(engine: &MitoEngine, region_id: RegionId, mixed: bool) {
     let create = CreateRequestBuilder::new()
         .insert_option("append_mode", "true")
-        .insert_option("preserve_row_sequence", "true")
+        .insert_option(
+            "preserve_row_sequence",
+            if mixed { "false" } else { "true" },
+        )
         .build();
     engine
         .handle_request(region_id, RegionRequest::Create(create.clone()))
         .await
         .unwrap();
-    put_rows(
-        &engine,
-        region_id,
-        Rows {
-            schema: rows_schema(&create),
-            rows: build_rows(0, 3),
-        },
-    )
-    .await;
-    flush_region(&engine, region_id, None).await;
+    let flush_rows = async |start, end| {
+        put_rows(
+            engine,
+            region_id,
+            Rows {
+                schema: rows_schema(&create),
+                rows: build_rows(start, end),
+            },
+        )
+        .await;
+        flush_region(engine, region_id, None).await;
+    };
+    if mixed {
+        flush_rows(0, 5).await;
+        set_sequence_preservation(engine, region_id, true).await;
+        flush_rows(5, 10).await;
+    } else {
+        flush_rows(0, 3).await;
+    }
     let region = engine.get_region(region_id).unwrap();
-    let original = region.version().ssts.levels()[0]
+    let originals: Vec<_> = region.version().ssts.levels()[0]
         .files()
-        .next()
-        .unwrap()
-        .meta_ref()
-        .clone();
-    assert!(original.preserve_row_sequence);
-    // A generic import clears the trust marker, so install the admitted shared
-    // input directly: this is the shape table compaction receives after admission.
-    let shared = copy_sst(&region, &original, LEVEL_SHARED).await;
+        .map(|file| file.meta_ref().clone())
+        .collect();
+    // A generic import clears the trust marker. Keep both the marker and the flush sequence.
+    let mut shared = Vec::new();
+    for original in &originals {
+        shared.push(copy_sst(&region, original, LEVEL_SHARED).await);
+    }
     let edit = RegionEdit {
-        files_to_add: vec![shared],
-        files_to_remove: vec![original],
+        files_to_add: shared,
+        files_to_remove: originals,
         ..Default::default()
     };
     region
@@ -678,6 +732,15 @@ async fn test_preserve_row_sequence_option_drives_output_admission() {
     region
         .version_control
         .apply_edit(Some(edit), &[], region.file_purger.clone());
+}
+
+#[tokio::test]
+async fn test_preserve_row_sequence_option_drives_output_admission() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(config()).await;
+    let region_id = RegionId::new(1, 1);
+    seed_sequence_inputs(&engine, region_id, false).await;
+    let region = engine.get_region(region_id).unwrap();
     let snapshot = engine.table_compaction_snapshot(region_id).unwrap();
     assert_eq!(
         Some(true),
@@ -718,6 +781,83 @@ async fn test_preserve_row_sequence_option_drives_output_admission() {
         manifest.files.get(&output.file_id).map(AsRef::as_ref)
     );
     assert_eq!(3, row_count(&engine, region_id).await);
+}
+
+#[rstest::rstest]
+#[case::fresh(false, false)]
+#[case::mixed(false, true)]
+#[case::replay(true, false)]
+#[case::mixed_replay(true, true)]
+#[tokio::test]
+async fn test_publication_after_enabling_sequence_preservation(
+    #[case] replay: bool,
+    #[case] mixed: bool,
+) {
+    use store_api::storage::ScanRequest;
+
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(config()).await;
+    let region_id = RegionId::new(1, 1);
+    seed_sequence_inputs(&engine, region_id, mixed).await;
+    let region = engine.get_region(region_id).unwrap();
+    set_sequence_preservation(&engine, region_id, false).await;
+    let snapshot = engine.table_compaction_snapshot(region_id).unwrap();
+    let max_sequence = snapshot
+        .inputs
+        .iter()
+        .map(|file| file.sequence.unwrap())
+        .max()
+        .unwrap();
+    let mut outputs = Vec::new();
+    for input in &snapshot.inputs {
+        let mut output = copy_sst(&region, input, 0).await;
+        output.preserve_row_sequence = false;
+        output.sequence = Some(max_sequence);
+        outputs.push(output);
+    }
+    let publish = || engine.publish_table_compaction(region_id, snapshot.clone(), outputs.clone());
+    if replay {
+        assert_eq!(PublicationOutcome::Applied, publish().await.unwrap());
+    }
+    set_sequence_preservation(&engine, region_id, true).await;
+    let version = region.manifest_ctx.manifest_version().await;
+    if replay {
+        assert_eq!(PublicationOutcome::Applied, publish().await.unwrap());
+    } else {
+        let scan = async || {
+            let stream = engine
+                .scan_to_stream(
+                    region_id,
+                    ScanRequest {
+                        exact_sequence_range: true,
+                        memtable_min_sequence: Some(if mixed { 5 } else { 0 }),
+                        memtable_max_sequence: Some(max_sequence.get()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            RecordBatches::try_collect(stream).await.unwrap()
+        };
+        let before = scan().await;
+        assert_eq!(
+            if mixed { 5 } else { 3 },
+            before.iter().map(|batch| batch.num_rows()).sum::<usize>()
+        );
+        assert_eq!(PublicationOutcome::StaleInputs, publish().await.unwrap());
+
+        // A stale job must be told to replan even if its output object is gone.
+        let access = &region.access_layer;
+        let path =
+            location::sst_file_path(access.table_dir(), outputs[0].file_id(), access.path_type());
+        access.object_store().delete(&path).await.unwrap();
+        assert_eq!(PublicationOutcome::StaleInputs, publish().await.unwrap());
+        assert_eq!(
+            before.pretty_print().unwrap(),
+            scan().await.pretty_print().unwrap()
+        );
+    }
+    assert_eq!(version, region.manifest_ctx.manifest_version().await);
 }
 
 #[tokio::test]
@@ -886,23 +1026,19 @@ async fn test_uncertain_write_recovers_files_before_retry(#[case] persisted: boo
     reopen_region(&engine, region_id, "test".into(), true, Default::default()).await;
     let fresh = engine.table_compaction_snapshot(region_id).unwrap();
     assert_eq!(!persisted, !fresh.inputs.is_empty());
-    if persisted {
-        assert_eq!(
-            PublicationOutcome::StaleInputs,
-            engine
-                .publish_table_compaction(region_id, snapshot, vec![output])
-                .await
-                .unwrap()
-        );
-    } else {
-        assert_eq!(
-            PublicationOutcome::Applied,
-            engine
-                .publish_table_compaction(region_id, fresh, vec![output])
-                .await
-                .unwrap()
-        );
-    }
+    let region = engine.get_region(region_id).unwrap();
+    let version = region.manifest_ctx.manifest_version().await;
+    assert_eq!(
+        PublicationOutcome::Applied,
+        engine
+            .publish_table_compaction(region_id, snapshot, vec![output])
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        version + u64::from(!persisted),
+        region.manifest_ctx.manifest_version().await
+    );
     assert_eq!(3, row_count(&engine, region_id).await);
 }
 
@@ -1070,13 +1206,12 @@ async fn test_multiple_outputs_verify_notify_once_and_release_footers(#[case] wi
     };
     let region_id = RegionId::new(1, 1);
     let (snapshot, outputs) = seed_shared_inputs(&engine, region_id, &[(0, 3), (3, 6)]).await;
-    assert_eq!(
-        PublicationOutcome::Applied,
-        engine
-            .publish_table_compaction(region_id, snapshot, outputs.clone())
-            .await
-            .unwrap()
-    );
+    let publish = || engine.publish_table_compaction(region_id, snapshot.clone(), outputs.clone());
+    assert_eq!(PublicationOutcome::Applied, publish().await.unwrap());
+    let region = engine.get_region(region_id).unwrap();
+    let installed = region.version();
+    assert_eq!(PublicationOutcome::Applied, publish().await.unwrap());
+    assert!(Arc::ptr_eq(&installed, &region.version()));
     let expected_notifications = usize::from(with_hook);
     assert_eq!(
         expected_notifications * outputs.len(),
@@ -1100,7 +1235,6 @@ async fn test_multiple_outputs_verify_notify_once_and_release_footers(#[case] wi
     } else {
         assert_eq!(0, recorder.manifest_updates.load(Ordering::SeqCst));
     }
-    let region = engine.get_region(region_id).unwrap();
     let manifest = region.manifest_ctx.manifest().await;
     assert_eq!(outputs.len(), manifest.files.len());
     for output in &outputs {
