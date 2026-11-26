@@ -360,6 +360,14 @@ impl RegionScanner for UnorderedScan {
         predicate.is_some()
     }
 
+    fn time_range_fingerprint(
+        &self,
+        start: common_time::Timestamp,
+        end: common_time::Timestamp,
+    ) -> Option<store_api::region_engine::TimeRangeFingerprint> {
+        self.stream_ctx.time_range_fingerprint(start, end)
+    }
+
     fn add_dyn_filter_to_predicate(
         &mut self,
         filter_exprs: Vec<Arc<dyn datafusion::physical_plan::PhysicalExpr>>,
