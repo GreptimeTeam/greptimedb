@@ -2512,6 +2512,7 @@ dependencies = [
  "axum 0.8.4",
  "bincode",
  "catalog",
+ "chrono",
  "common-base",
  "common-catalog",
  "common-error",
