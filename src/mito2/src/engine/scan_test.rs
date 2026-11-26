@@ -517,6 +517,324 @@ async fn test_narthex_index_counts_rows_across_flushes() -> WhateverResult<()> {
 }
 
 #[tokio::test]
+async fn test_narthex_merge_existing_series_indexes() -> WhateverResult<()> {
+    use crate::series_index::SeriesIndexFileHandle;
+    use crate::series_index::columnar::reader::ColumnarReader;
+    use crate::series_index::format::SeriesReadRequest;
+    use crate::sst::file::WindowSequence;
+
+    let reads = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = reads.clone();
+    let layer = object_store::layers::mock::MockLayerBuilder::default()
+        .reader_factory(Arc::new(move |path, _, inner| {
+            captured.lock().unwrap().push(path.to_owned());
+            inner
+        }))
+        .build()
+        .unwrap();
+    let mut env = TestEnv::new().await.with_mock_layer(layer);
+    let engine = env
+        .create_engine(MitoConfig {
+            num_workers: 1,
+            experimental_enable_series_index: true,
+            experimental_series_index_bucket_width: Duration::from_secs(10),
+            experimental_series_index_min_files: 100,
+            schedule_compaction_after_edit: false,
+            ..Default::default()
+        })
+        .await;
+    let id = RegionId::new(1234, 0);
+    let request = sparse_metric_create_request("narthex");
+    let table_dir = request.table_dir.clone();
+    engine
+        .handle_request(id, RegionRequest::Create(request))
+        .await?;
+    // Opening a region wakes periodic maintenance on this worker.
+    let other = RegionId::new(1234, 1);
+    let other_request = sparse_metric_create_request("narthex");
+    let other_dir = other_request.table_dir.clone();
+    engine
+        .handle_request(other, RegionRequest::Create(other_request))
+        .await?;
+    let region = engine.get_region(id).unwrap();
+    let pause = engine.pause_compaction(id).await?;
+    let dir = region.access_layer.build_region_dir(id);
+    let store = region.access_layer.object_store().clone();
+    // Seed one index per sample SST, as incremental builds leave them.
+    // There are enough covered inputs for two successive merges.
+    let mut seed = RegionEdit::default();
+    let mut sample_paths = Vec::new();
+    for (n, ts) in [11000, 1000, 2000, 3000, 4000, 5000, 6000, 7000]
+        .into_iter()
+        .enumerate()
+    {
+        if n == 4 {
+            engine
+                .handle_request(
+                    id,
+                    RegionRequest::Alter(RegionAlterRequest {
+                        kind: AlterKind::AddColumns {
+                            columns: vec![AddColumn {
+                                column_metadata: ColumnMetadata {
+                                    column_schema: ColumnSchema::new(
+                                        "tag_1",
+                                        ConcreteDataType::string_datatype(),
+                                        true,
+                                    ),
+                                    semantic_type: SemanticType::Tag,
+                                    column_id: 3,
+                                },
+                                location: None,
+                            }],
+                        },
+                    }),
+                )
+                .await?;
+        }
+        let tags: &[&str] = if n >= 4 { &["api", "west"] } else { &["api"] };
+        let key = new_sparse_primary_key(tags, &region.metadata(), 42, 7);
+        engine
+            .handle_request(id, test_util::sparse_metric_put(key, ts, Some(1.0)))
+            .await?;
+        test_util::flush_region(&engine, id, None).await;
+        let version = region.version();
+        let source = version
+            .ssts
+            .levels()
+            .iter()
+            .flat_map(|l| l.files.values())
+            .max_by_key(|f| f.meta_ref().sequence)
+            .unwrap();
+        sample_paths.extend(
+            source
+                .meta_ref()
+                .narthex_objects(&dir)
+                .unwrap()
+                .into_iter()
+                .map(|o| o.path),
+        );
+        let start = if n == 0 { 10 } else { 0 };
+        let window = WindowSequence {
+            start,
+            end: start + 10,
+            max_sequence: source.meta_ref().sequence.unwrap().get(),
+        };
+        seed.series_indexes_to_add.push(
+            crate::sst::narthex::write_series(
+                &region.access_layer,
+                region.metadata(),
+                std::slice::from_ref(source),
+                window,
+            )
+            .await?,
+        );
+    }
+    let scan = async || -> WhateverResult<String> {
+        let rows =
+            RecordBatches::try_collect(engine.scan_to_stream(id, ScanRequest::default()).await?)
+                .await?;
+        Ok(sort_batches_and_print(&rows, &["ts"]))
+    };
+    let discovery = scan().await?;
+    let neighbor = seed.series_indexes_to_add[0].clone();
+    let watermark = seed
+        .series_indexes_to_add
+        .last()
+        .unwrap()
+        .series_window()
+        .unwrap()
+        .max_sequence;
+    let truncated = region.version().truncated_entry_id;
+    region
+        .manifest_ctx
+        .publish_series_indexes(&seed, truncated, &HashMap::new())
+        .await?;
+    region
+        .version_control
+        .apply_edit(Some(seed), &[], region.file_purger.clone());
+    let pins = region.version();
+    let old = pins
+        .ssts
+        .series_indexes()
+        .values()
+        .find(|f| f.meta_ref().series_window().unwrap().start == 0)
+        .unwrap();
+    let open = |file: &FileHandle| SeriesIndexFileHandle::from_narthex(file.clone(), &dir);
+    let retired_id = old.file_id();
+    let old_path = old.meta_ref().narthex_objects(&dir).unwrap()[0]
+        .path
+        .clone();
+    let pinned_reader = ColumnarReader::open(store.clone(), open(old)?).await?;
+    for expected in [5, 2] {
+        reads.lock().unwrap().clear();
+        if expected == 5 {
+            engine
+                .handle_request(id, build_series_index_request())
+                .await?;
+        } else {
+            reopen_region(&engine, other, other_dir.clone(), true, HashMap::new()).await;
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while region.version().ssts.series_indexes().len() != expected {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("periodic reconciliation did not compact the remaining inputs");
+        }
+        assert_eq!(expected, region.version().ssts.series_indexes().len());
+        let paths = reads.lock().unwrap();
+        assert!(paths.iter().any(|p| p.ends_with(".series")));
+        assert!(!paths.iter().any(|p| {
+            sample_paths
+                .iter()
+                .any(|s| p.trim_start_matches('/') == s.trim_start_matches('/'))
+        }));
+    }
+    let count_request = || SeriesReadRequest {
+        projection: vec![crate::series_index::ROW_COUNT_COLUMN.to_owned()],
+        ..Default::default()
+    };
+
+    let merged = region
+        .version()
+        .ssts
+        .series_indexes()
+        .values()
+        .find(|f| f.meta_ref().series_window().unwrap().start == 0)
+        .unwrap()
+        .clone();
+    let window = merged.meta_ref().series_window().unwrap();
+    assert_eq!(window.max_sequence, watermark);
+    let reader = ColumnarReader::open(store.clone(), open(&merged)?).await?;
+    let mut stream = reader.read(count_request())?;
+    let mut counts = Vec::new();
+    while let Some(batch) = stream.try_next().await? {
+        counts.extend_from_slice(batch.column(0).as_primitive::<UInt64Type>().values());
+    }
+    counts.sort_unstable();
+    assert_eq!(counts, [3, 4]);
+    // Replaying the old selection sees the same watermark but missing inputs.
+    let stale = RegionEdit {
+        series_indexes_to_add: vec![merged.meta_ref().clone()],
+        series_indexes_to_remove: pins
+            .ssts
+            .series_indexes()
+            .values()
+            .filter(|f| f.meta_ref().series_window().unwrap().start == 0)
+            .take(4)
+            .map(FileHandle::file_id)
+            .collect(),
+        ..Default::default()
+    };
+    assert!(matches!(
+        region
+            .manifest_ctx
+            .publish_series_indexes(&stale, truncated, &HashMap::from([(0, watermark)]))
+            .await,
+        Err(Error::RegionBusy { .. })
+    ));
+    drop(pins);
+    assert!(
+        pinned_reader
+            .read(count_request())?
+            .try_next()
+            .await?
+            .is_some()
+    );
+    drop(pinned_reader);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while store.exists(&old_path).await.unwrap() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("retired input was not purged after releasing its last reader");
+    drop(pause);
+    reopen_region(&engine, id, table_dir, true, HashMap::new()).await;
+    let manifest = engine.get_region(id).unwrap().manifest_ctx.manifest().await;
+    assert_eq!(manifest.series_indexes.len(), 2);
+    assert_eq!(
+        manifest.series_indexes[&neighbor.file_id].series_window(),
+        neighbor.series_window()
+    );
+    assert_eq!(
+        manifest.series_indexes[&merged.meta_ref().file_id].series_window(),
+        Some(window)
+    );
+    assert_eq!(scan().await?, discovery);
+    // Fail the second discovery reader after the first window supplied candidates.
+    // Both windows contain the same TSID, and the main window has two exact keys.
+    let snapshot = engine.get_region(id).unwrap().version();
+    let parts: Vec<_> = snapshot
+        .ssts
+        .series_indexes()
+        .values()
+        .map(|handle| {
+            handle
+                .meta_ref()
+                .narthex_objects(&dir)
+                .unwrap()
+                .into_iter()
+                .find(|object| object.path.ends_with(".series"))
+                .unwrap()
+                .path
+        })
+        .collect();
+    let [healthy, missing] = parts.as_slice() else {
+        panic!("expected two index parts")
+    };
+    let saved = store.read(missing).await.unwrap().to_bytes();
+    store.delete(missing).await.unwrap();
+    reads.lock().unwrap().clear();
+    assert_eq!(scan().await?, discovery);
+    assert!(
+        reads
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|path| path.trim_start_matches('/') == healthy.trim_start_matches('/'))
+    );
+    store.write(missing, saved).await.unwrap();
+    let error = engine
+        .edit_region(
+            id,
+            RegionEdit {
+                series_indexes_to_remove: vec![neighbor.file_id(), retired_id],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.status_code(), StatusCode::RegionBusy);
+    let region = engine.get_region(id).unwrap();
+    let current = region.manifest_ctx.manifest().await;
+    assert_eq!(current.series_indexes, manifest.series_indexes);
+    let replacement = current
+        .series_indexes
+        .values()
+        .find(|f| f.series_window() == Some(window))
+        .unwrap();
+    engine
+        .edit_region(
+            id,
+            RegionEdit {
+                series_indexes_to_remove: vec![replacement.file_id()],
+                ..Default::default()
+            },
+        )
+        .await?;
+    let current = region.manifest_ctx.manifest().await;
+    assert_eq!(current.series_indexes.len(), 1);
+    assert_eq!(
+        current.series_indexes[&neighbor.file_id].series_window(),
+        neighbor.series_window()
+    );
+    assert_eq!(scan().await?, discovery);
+    engine.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_narthex_incremental_index_after_compaction() -> WhateverResult<()> {
     let series_reads = Arc::new(std::sync::Mutex::new(Vec::new()));
     let reads = series_reads.clone();
@@ -723,6 +1041,18 @@ async fn test_narthex_incremental_index_after_compaction() -> WhateverResult<()>
         .access_layer
         .object_store()
         .delete(part)
+        .await
+        .unwrap();
+    assert_eq!(scan().await?, rows);
+    // An index that cannot be opened still falls back to sample discovery.
+    let manifest = objects
+        .iter()
+        .find(|object| object.path.ends_with("manifest.json"))
+        .unwrap();
+    region
+        .access_layer
+        .object_store()
+        .delete(&manifest.path)
         .await
         .unwrap();
     assert_eq!(scan().await?, rows);

@@ -985,18 +985,20 @@ async fn test_narthex_copy_and_remap(
     let text = batches.pretty_print().unwrap();
     assert!(text.contains("api"));
     assert_eq!(text.contains("worker"), !remap);
-    assert!(
-        engine
-            .get_region(target)
-            .unwrap()
-            .version()
-            .ssts
-            .series_indexes()
-            .is_empty()
-    );
+    // Reopening wakes maintenance, which may already have built fresh target indexes.
+    // Neither reopen nor sample compaction may restore a source index reference.
+    let assert_target_indexes = || {
+        let version = engine.get_region(target).unwrap().version();
+        for (id, file) in version.ssts.series_indexes() {
+            assert!(remap && with_index);
+            assert_eq!(file.region_id(), target);
+            assert!(!before.series_indexes.contains_key(id));
+        }
+    };
+    assert_target_indexes();
     crate::engine::compaction_test::compact(&engine, target).await;
+    assert_target_indexes();
     let compacted = engine.get_region(target).unwrap();
-    assert!(compacted.version().ssts.series_indexes().is_empty());
     assert!(
         compacted
             .version()
