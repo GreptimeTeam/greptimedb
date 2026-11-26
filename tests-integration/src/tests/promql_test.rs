@@ -2812,6 +2812,58 @@ async fn native_promql_canonical_merge_over_partitioned_table() {
     }
 }
 
+/// An instant query of a range selector answers the samples of its window with their own
+/// timestamps, as the existing route and Prometheus do; the cases are `range_vector_result.sql`'s.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_range_selector_root_answers_like_legacy() {
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_range_selector_root",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE range_root (ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING PRIMARY KEY); \
+         INSERT INTO range_root VALUES (0, 1.0, 'a'), (10000, 2.0, 'a'), (20000, 3.0, 'a'), \
+         (30000, 4.0, 'a'), (0, 10.0, 'b'), (20000, 30.0, 'b')",
+        QueryContext::arc(),
+    )
+    .await;
+    for sql in [
+        "TQL EVAL (30, 30, '1s') range_root[20s]",
+        "TQL EVAL (30, 30, '1s') range_root[20s] offset 10s",
+        "TQL EVAL (30, 30, '1s') range_root[15s] @ 20",
+        "TQL EVAL (30, 30, '1s') (range_root{host=\"a\"}[1h])",
+    ] {
+        observer.clear();
+        let output = native_tql_output(&instance, sql, true).await;
+        let native = eval_text_rows(collected(output).await, ReportedName::Metric("range_root"));
+        assert_native_rows_plan(&observer);
+        let legacy = eval_text(collected(native_tql_output(&instance, sql, false).await).await);
+        assert_eq!(legacy, native, "{sql}");
+    }
+    // A range query of a range vector is refused by both routes, as Prometheus refuses it.
+    let sql = "TQL EVAL (0, 30, '10s') range_root[20s]";
+    for native in [true, false] {
+        let error = instance
+            .do_query(sql, native_query_context(native, 4))
+            .await
+            .remove(0);
+        assert!(error.is_err(), "native={native}");
+    }
+}
+
+/// `output` with its stream read here: [`eval_text_rows`] blocks on the stream, which inside this
+/// runtime stops being woken once the test task has spent its cooperative budget.
+async fn collected(output: Output) -> Output {
+    match output.data {
+        OutputData::Stream(stream) => {
+            Output::new_with_record_batches(collect_batches(stream).await.unwrap())
+        }
+        _ => output,
+    }
+}
+
 /// The plan the last query ran is the native one, so a row assertion above is about this route.
 fn assert_native_rows_plan(observer: &NativePlanObserver) {
     let root = observer.root_plan();
@@ -18236,12 +18288,12 @@ async fn native_promql_matrix_root_matches_legacy() {
         "{err:?}"
     );
 
-    // This remains on the existing planner: a raw-sample matrix has no evaluation grid to bind.
+    // A raw-sample matrix is answered on a one-millisecond grid over its window.
     let sql = "TQL EVAL (600, 600, '1m') native_matrix_root[5m]";
     let native = run(&instance, &observer, sql, true).await;
     assert!(
-        observer.fused().is_none(),
-        "raw matrix roots must use existing planning"
+        observer.fused().is_some(),
+        "a range selector root did not run natively"
     );
     let legacy = run(&instance, &observer, sql, false).await;
     assert_eq!(native, legacy);

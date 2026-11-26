@@ -834,10 +834,22 @@ impl PromPlanner {
         // node's own label follows the same text. It is the whole statement's expression even when a
         // subquery root compiles its inner one, because that is the statement the reader wrote.
         let expression = prom_expr.to_string();
-        // A range selector returns raw samples, which have no evaluation grid to bind. A subquery root
-        // instead returns its inner expression on the subquery's child grid, and a range query has no grid
-        // to bind a matrix root to.
-        let subquery_root = root_subquery(prom_expr);
+        // A subquery root returns its inner expression on the subquery's child grid, and a range query
+        // has no grid to bind a matrix root to. A range selector root returns the samples of its window
+        // with their own timestamps: exactly the points of a one-millisecond subquery over the same
+        // window at which the bare selector, read with no lookback, finds a sample.
+        let sample_window = root_matrix_selector(prom_expr).map(|selector| SubqueryExpr {
+            expr: Box::new(PromExpr::VectorSelector(VectorSelector {
+                offset: None,
+                at: None,
+                ..selector.vs.clone()
+            })),
+            offset: selector.vs.offset.clone(),
+            at: selector.vs.at.clone(),
+            range: selector.range,
+            step: Some(Duration::from_millis(1)),
+        });
+        let subquery_root = root_subquery(prom_expr).or(sample_window.as_ref());
         if prom_expr.value_type() == ValueType::Matrix
             && (subquery_root.is_none() || self.ctx.start != self.ctx.end)
         {
@@ -893,6 +905,9 @@ impl PromPlanner {
         if selectors.is_empty() {
             let mut compile_stmt = stmt.clone();
             compile_stmt.expr = effective_expr.clone();
+            if sample_window.is_some() {
+                compile_stmt.lookback_delta = Duration::ZERO;
+            }
             let tree = match compile_statement_with_grid(&compile_stmt, Arc::clone(&grid)) {
                 Ok(tree) => tree,
                 Err(DataFusionError::NotImplemented(_)) => {
@@ -1375,6 +1390,9 @@ impl PromPlanner {
         let bind_index = std::cell::Cell::new(0usize);
         let mut compile_stmt = stmt.clone();
         compile_stmt.expr = effective_expr.clone();
+        if sample_window.is_some() {
+            compile_stmt.lookback_delta = Duration::ZERO;
+        }
         let compiled = match compile_selectors_with_grid(
             &compile_stmt,
             &|req| {
@@ -2213,6 +2231,14 @@ fn epoch_millis(millis: i64) -> Option<SystemTime> {
 }
 
 /// Finds a subquery at the statement root, treating parentheses as transparent.
+fn root_matrix_selector(expr: &PromExpr) -> Option<&MatrixSelector> {
+    match expr {
+        PromExpr::MatrixSelector(selector) => Some(selector),
+        PromExpr::Paren(paren) => root_matrix_selector(&paren.expr),
+        _ => None,
+    }
+}
+
 fn root_subquery(expr: &PromExpr) -> Option<&SubqueryExpr> {
     match expr {
         PromExpr::Subquery(subquery) => Some(subquery),

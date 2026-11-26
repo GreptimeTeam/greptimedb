@@ -175,9 +175,41 @@ pub fn select_instants(
         lookback_ms,
         offset_ms,
     );
+    let mut sample_iters: Vec<_> = fields.iter().map(|field| field.iter()).collect();
+    if lookback_ms == 0 {
+        // Without a lookback a point selects only a sample exactly at it, so the samples are walked
+        // instead of the points: a fine grid over a sparse series, such as the one-millisecond grid a
+        // range selector's samples are answered on, would otherwise cost a step per point.
+        let mut indices = Vec::new();
+        let mut evaluation_timestamps = Vec::new();
+        for (row, &timestamp) in timestamps.iter().enumerate() {
+            let mut stale = false;
+            for samples in &mut sample_iters {
+                stale |= match samples.next() {
+                    Some(SampleRef::Float(value)) => is_prometheus_stale_nan(value),
+                    Some(SampleRef::Histogram(histogram)) => is_prometheus_stale_nan(histogram.sum),
+                    Some(SampleRef::Missing) => false,
+                    None => {
+                        return Err(DataFusionError::Execution(
+                            "series sample iterator ended before the time axis".into(),
+                        ));
+                    }
+                };
+            }
+            row_read();
+            let point = timestamp as i128 + offset_ms as i128;
+            if !stale
+                && (span.start..=span.end).contains(&point)
+                && (point - span.start) % step_ms as i128 == 0
+            {
+                indices.push(row as u64);
+                evaluation_timestamps.push(point as i64);
+            }
+        }
+        return Ok((indices, evaluation_timestamps));
+    }
     let mut indices = Vec::with_capacity(span.count as usize);
     let mut evaluation_timestamps = Vec::with_capacity(span.count as usize);
-    let mut sample_iters: Vec<_> = fields.iter().map(|field| field.iter()).collect();
     let mut current_stale = false;
     let mut cursor = 0usize;
     for expected in (span.start..=span.end).step_by(step_ms as usize) {

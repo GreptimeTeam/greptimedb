@@ -825,7 +825,15 @@ impl InstantRuntime {
             self.selection.lookback_ms,
             self.selection.offset_ms,
         );
-        usize::try_from(span.count).unwrap_or(usize::MAX)
+        let points = usize::try_from(span.count).unwrap_or(usize::MAX);
+        if self.selection.lookback_ms == 0 {
+            // Each point then selects a sample exactly at it, so no more points than samples.
+            let rows = series()
+                .map(|chunk| chunk.time.len())
+                .fold(0usize, usize::saturating_add);
+            return points.min(rows);
+        }
+        points
     }
 
     /// The largest histogram a row of each field can carry, `None` for a field of floats.
