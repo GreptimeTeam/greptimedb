@@ -27,6 +27,9 @@ pub const LIVE_ANALYZE_METRICS_EXTENSION_KEY: &str = "query.live_analyze_metrics
 pub const INSERT_SKIP_WAL_HINT: &str = "insert_skip_wal";
 
 pub const READ_PREFERENCE_HINT: &str = "read_preference";
+pub const ROLLUP_CACHE_NOCACHE: &str = "internal.rollup_cache_nocache";
+
+/// Reserved extension key marking a query as not cacheable by the rollup cache.
 pub const READ_PREFERENCE_EXTENSION_KEY: &str = "query.read_preference";
 pub const RESERVED_EXTENSION_KEYS: [&str; 5] = [
     REMOTE_QUERY_ID_EXTENSION_KEY,

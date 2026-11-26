@@ -39,6 +39,7 @@ use common_meta::instruction::{CacheIdent, Instruction};
 use common_meta::key::MetadataKey;
 use common_meta::key::schema_name::{SchemaName, SchemaNameKey};
 use common_meta::key::table_info::TableInfoKey;
+use common_recordbatch::RecordBatches;
 use common_stat::ResourceStatImpl;
 use common_telemetry::tracing_context::TracingContext;
 use meta_client::client::MetaClient;
@@ -668,6 +669,7 @@ fn test_task(
         &extensions,
         Arc::new(AtomicBool::new(false)),
         Arc::new(MockKvCacheInvalidator::default()),
+        None,
     );
     HeartbeatTask::new_with_connector(
         "127.0.0.1:4001".to_string(),
@@ -895,8 +897,12 @@ async fn test_response_extension_handler_order() {
     });
     let extensions = FrontendHeartbeatExtensions::default();
     extensions.register(TestExtension::with_handler("response", handler));
-    let executor =
-        heartbeat_response_handler_executor(&extensions, suspend_state.clone(), cache.clone());
+    let executor = heartbeat_response_handler_executor(
+        &extensions,
+        suspend_state.clone(),
+        cache.clone(),
+        None,
+    );
     let (mailbox_tx, _) = mpsc::channel(1);
     let mailbox = Arc::new(HeartbeatMailbox::new(mailbox_tx));
 
@@ -950,6 +956,7 @@ async fn test_heartbeat_response_wire_compatibility_preserves_handlers() {
         &FrontendHeartbeatExtensions::default(),
         suspend_state.clone(),
         cache.clone(),
+        None,
     );
     let (mailbox_tx, _) = mpsc::channel(1);
     let mailbox = Arc::new(HeartbeatMailbox::new(mailbox_tx));
@@ -1034,6 +1041,125 @@ async fn test_heartbeat_response_wire_compatibility_preserves_handlers() {
     assert!(!cache.inner.lock().unwrap().contains_key(&table_key));
 }
 
+/// A rollup cache holding one chunk for each of `table_ids`, under an otherwise
+/// identical identity, so a test can tell which table's chunks a clear dropped.
+fn rollup_cache_with_chunks(table_ids: &[u32]) -> Arc<RollupCache> {
+    let config = crate::query_cache::RollupCacheConfig::new(
+        1 << 20,
+        Duration::ZERO,
+        Duration::from_secs(300),
+        Duration::from_secs(3_600),
+    )
+    .expect("the test configuration is valid");
+    let cache = Arc::new(RollupCache::new(config));
+    for table_id in table_ids {
+        let identity = crate::query_cache::QueryIdentity {
+            tenant: "greptime".to_string(),
+            catalog: "greptime".to_string(),
+            schema: "public".to_string(),
+            query: "rate(cpu[5m])".to_string(),
+            source_table: "cpu".to_string(),
+            table_id: *table_id,
+            step_ms: 60_000,
+            lookback_ms: 300_000,
+            route: crate::query_cache::QueryRoute::Legacy,
+            alias: None,
+            read_preference: None,
+        };
+        let chunk = crate::query_cache::TimeChunk::new(0, 300_000);
+        let key = crate::query_cache::TimeChunkKey::new(identity, chunk);
+        assert_eq!(
+            cache.insert(&key, Arc::new(RecordBatches::empty()), Arc::default()),
+            crate::query_cache::Insert::Stored
+        );
+    }
+    cache
+}
+
+#[tokio::test]
+async fn test_table_id_invalidation_clears_the_rollup_cache_of_that_table() {
+    let table_id = 42;
+    let rollup_cache = rollup_cache_with_chunks(&[table_id, table_id + 1]);
+    assert_eq!(2, rollup_cache.entry_count());
+    let kv_cache = Arc::new(MockKvCacheInvalidator {
+        inner: Mutex::new(HashMap::from([(TableInfoKey::new(table_id).to_bytes(), 1)])),
+    });
+    let executor = heartbeat_response_handler_executor(
+        &FrontendHeartbeatExtensions::default(),
+        Arc::new(AtomicBool::new(false)),
+        kv_cache.clone(),
+        Some(rollup_cache.clone()),
+    );
+    let (mailbox_tx, _) = mpsc::channel(1);
+    let mailbox = Arc::new(HeartbeatMailbox::new(mailbox_tx));
+
+    executor
+        .handle(HeartbeatResponseHandlerContext::new(
+            mailbox,
+            HeartbeatResponse {
+                mailbox_message: Some(MailboxMessage {
+                    payload: Some(Payload::Json(
+                        serde_json::to_string(&Instruction::InvalidateCaches(vec![
+                            CacheIdent::TableId(table_id),
+                        ]))
+                        .unwrap(),
+                    )),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ))
+        .await
+        .unwrap();
+
+    assert!(
+        !kv_cache
+            .inner
+            .lock()
+            .unwrap()
+            .contains_key(&TableInfoKey::new(table_id).to_bytes()),
+        "the metadata caches are still invalidated"
+    );
+    assert_eq!(
+        1,
+        rollup_cache.entry_count(),
+        "only the named table's chunk is dropped"
+    );
+}
+
+#[tokio::test]
+async fn test_invalidation_without_a_rollup_cache_keeps_the_metadata_path() {
+    let table_id = 42;
+    let cache = Arc::new(MockKvCacheInvalidator::default());
+    let executor = heartbeat_response_handler_executor(
+        &FrontendHeartbeatExtensions::default(),
+        Arc::new(AtomicBool::new(false)),
+        cache.clone(),
+        None,
+    );
+    let (mailbox_tx, _) = mpsc::channel(1);
+    let mailbox = Arc::new(HeartbeatMailbox::new(mailbox_tx));
+
+    executor
+        .handle(HeartbeatResponseHandlerContext::new(
+            mailbox,
+            HeartbeatResponse {
+                mailbox_message: Some(MailboxMessage {
+                    payload: Some(Payload::Json(
+                        serde_json::to_string(&Instruction::InvalidateCaches(vec![
+                            CacheIdent::TableId(table_id),
+                        ]))
+                        .unwrap(),
+                    )),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ))
+        .await
+        .unwrap();
+}
+
 async fn assert_extension_short_circuit_is_isolated(result: ShortCircuitResult) {
     let table_id = 42;
     let table_key = TableInfoKey::new(table_id).to_bytes();
@@ -1060,8 +1186,12 @@ async fn assert_extension_short_circuit_is_isolated(result: ShortCircuitResult) 
             table_key: table_key.clone(),
         }),
     ));
-    let executor =
-        heartbeat_response_handler_executor(&extensions, suspend_state.clone(), cache.clone());
+    let executor = heartbeat_response_handler_executor(
+        &extensions,
+        suspend_state.clone(),
+        cache.clone(),
+        None,
+    );
     let (mailbox_tx, _) = mpsc::channel(1);
     let mailbox = Arc::new(HeartbeatMailbox::new(mailbox_tx));
 

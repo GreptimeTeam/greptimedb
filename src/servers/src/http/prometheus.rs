@@ -61,6 +61,7 @@ use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use session::context::{Channel, QueryContext, QueryContextRef};
+use session::hints::ROLLUP_CACHE_NOCACHE;
 use snafu::{Location, OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::{
     DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME, LOGICAL_TABLE_METADATA_KEY,
@@ -610,6 +611,7 @@ pub struct RangeQuery {
     lookback: Option<String>,
     timeout: Option<String>,
     db: Option<String>,
+    nocache: Option<String>,
 }
 
 #[axum_macros::debug_handler]
@@ -635,6 +637,14 @@ pub async fn range_query(
             .unwrap_or_else(|| DEFAULT_LOOKBACK_STRING.to_string()),
         alias: None,
     };
+
+    if params
+        .nocache
+        .as_deref()
+        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+    {
+        query_ctx.set_extension(ROLLUP_CACHE_NOCACHE, "true");
+    }
 
     // update catalog and schema in query context if necessary
     if let Err(error) = select_database(

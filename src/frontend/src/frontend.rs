@@ -39,7 +39,8 @@ use crate::heartbeat::HeartbeatTask;
 use crate::instance::Instance;
 use crate::service_config::{
     InfluxdbOptions, JaegerOptions, MysqlOptions, OpentsdbOptions, OtlpOptions,
-    PendingRowsBatcherOptions, PostgresOptions, PromStoreOptions, WriteRetryOptions,
+    PendingRowsBatcherOptions, PostgresOptions, PromStoreOptions, RollupCacheOptions,
+    WriteRetryOptions,
 };
 
 /// Configures frontend protocols, query execution, and distributed write retries.
@@ -104,6 +105,8 @@ pub struct FrontendOptions {
     pub pipeline: PipelineOptions,
     /// The event recorder options.
     pub event_recorder: EventRecorderOptions,
+    /// The frontend-local cache of PromQL range-query chunks.
+    pub rollup_cache: RollupCacheOptions,
     /// Environment variable keys to read and report in heartbeat messages.
     pub heartbeat_env_vars: Vec<String>,
 }
@@ -140,6 +143,7 @@ impl Default for FrontendOptions {
             memory: MemoryOptions::default(),
             pipeline: PipelineOptions::default(),
             event_recorder: EventRecorderOptions::default(),
+            rollup_cache: RollupCacheOptions::default(),
             heartbeat_env_vars: vec![],
         }
     }

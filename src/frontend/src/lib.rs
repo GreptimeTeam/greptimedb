@@ -20,6 +20,7 @@ pub mod frontend;
 pub mod heartbeat;
 pub mod instance;
 pub(crate) mod metrics;
+pub(crate) mod query_cache;
 pub mod server;
 pub mod service_config;
 mod stream_wrapper;
