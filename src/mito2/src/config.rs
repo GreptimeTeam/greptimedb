@@ -248,8 +248,8 @@ pub struct MitoConfig {
     pub experimental_series_scan_v2: bool,
 
     /// Answers eligible scalar COUNT queries from manifest row counts instead
-    /// of scanning SST data. May read Parquet footers to rule out deletions;
-    /// ingestion does no extra work.
+    /// of scanning SST rows. May read Parquet footers to prove uniqueness and
+    /// the absence of deletes.
     pub experimental_metadata_aggr: bool,
 
     pub gc: GcConfig,

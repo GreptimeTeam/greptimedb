@@ -21,16 +21,18 @@ use datafusion::catalog::Session;
 use datafusion::datasource::TableProvider;
 use datafusion::logical_expr::{Expr, TableType};
 use datafusion::physical_plan::expressions::Column;
+use datafusion::physical_plan::expressions::{DynamicFilterPhysicalExpr, lit as physical_lit};
 use datafusion::physical_plan::projection::ProjectionExec;
-use datafusion::physical_plan::{ExecutionPlan, displayable};
+use datafusion::physical_plan::{ExecutionPlan, StatisticsArgs, StatisticsContext, displayable};
 use datafusion::prelude::SessionContext;
 use datafusion_common::ScalarValue;
+use datafusion_common::stats::Precision;
 use datafusion_expr::{col, lit};
 use datatypes::arrow::datatypes::SchemaRef;
 use object_store::layers::mock::MockLayerBuilder;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{RegionDeleteRequest, RegionPutRequest, RegionRequest};
-use store_api::storage::{RegionId, ScanRequest};
+use store_api::storage::{RegionId, ScanRequest, TimeSeriesRowSelector};
 use table::table::scan::RegionScanExec;
 
 use crate::config::MitoConfig;
@@ -80,8 +82,7 @@ async fn test_metadata_aggr_compaction_sql_and_fallback() {
     run_compaction_sql_and_fallback("last_row").await;
 }
 
-/// Both dedup merge modes keep one row per primary key and timestamp, so
-/// field merging does not change which files are exact.
+/// Compaction certifies LastNonNull outputs once delete barriers are removed.
 #[tokio::test]
 async fn test_metadata_aggr_compaction_sql_and_fallback_last_non_null() {
     run_compaction_sql_and_fallback("last_non_null").await;
@@ -171,7 +172,7 @@ async fn run_compaction_sql_and_fallback(merge_mode: &str) {
     assert_eq!(ordinary.properties().exact_num_rows(), None);
     drop(ordinary);
     // The first count may load the file's Parquet metadata. Later ones are
-    // served from the SST metadata cache, and no count reads SST data.
+    // served from the SST metadata cache without opening the SST.
     let scanner = engine
         .handle_query(region_id, request.clone())
         .await
@@ -349,6 +350,197 @@ async fn test_metadata_aggr_reads_deletes_from_sst_statistics() {
         .await
         .unwrap();
         assert_eq!(rows.iter().map(|batch| batch.num_rows()).sum::<usize>(), 5);
+    }
+    engine.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_metadata_aggr_replacement_with_duplicate_rows_falls_back() {
+    use bytes::Bytes;
+    use datatypes::arrow::array::UInt32Array;
+    use datatypes::arrow::compute::take_record_batch;
+    use parquet::arrow::ArrowWriter;
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use parquet::file::properties::WriterProperties;
+    use store_api::storage::FileId;
+
+    use crate::manifest::action::RegionEdit;
+    use crate::sst::parquet::PARQUET_METADATA_KEY;
+    use crate::sst::parquet::metadata::DEDUPED_SST_KEY;
+
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            experimental_metadata_aggr: true,
+            schedule_compaction_after_edit: false,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let create = CreateRequestBuilder::new().build();
+    let table_dir = create.table_dir.clone();
+    let path_type = create.path_type;
+    let schema = test_util::rows_schema(&create);
+    engine
+        .handle_request(region_id, RegionRequest::Create(create))
+        .await
+        .unwrap();
+    put_and_flush(&engine, region_id, &schema, 0..3).await;
+    put_and_flush(&engine, region_id, &schema, 10..13).await;
+    let request = ScanRequest {
+        metadata_aggr_hint: true,
+        ..Default::default()
+    };
+    let scan = engine
+        .handle_query(region_id, request.clone())
+        .await
+        .unwrap();
+    assert_eq!(scan.properties().exact_num_rows(), Some(6));
+    drop(scan);
+
+    let region = engine.get_region(region_id).unwrap();
+    let version = region.version();
+    let file = version.ssts.levels()[0]
+        .files
+        .values()
+        .min_by_key(|file| file.time_range().0)
+        .unwrap();
+    let store = region.access_layer.object_store();
+    let bytes = store
+        .read(&file.file_path(&table_dir, path_type))
+        .await
+        .unwrap()
+        .to_bytes();
+    let reader = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
+    let entries = reader
+        .metadata()
+        .file_metadata()
+        .key_value_metadata()
+        .unwrap();
+    assert!(entries.iter().any(|entry| entry.key == DEDUPED_SST_KEY));
+    let region_metadata = entries
+        .iter()
+        .find(|entry| entry.key == PARQUET_METADATA_KEY)
+        .unwrap()
+        .clone();
+    let batch = reader.build().unwrap().next().unwrap().unwrap();
+    // Preserve physical row count and time bounds, but replace the middle row
+    // with a second put for the first row's (primary key, timestamp).
+    let duplicate = take_record_batch(&batch, &UInt32Array::from(vec![0, 0, 2])).unwrap();
+    let mut replacement_bytes = Vec::new();
+    let props = WriterProperties::builder()
+        .set_key_value_metadata(Some(vec![region_metadata]))
+        .build();
+    let mut writer =
+        ArrowWriter::try_new(&mut replacement_bytes, duplicate.schema(), Some(props)).unwrap();
+    writer.write(&duplicate).unwrap();
+    writer.close().unwrap();
+    let replacement = crate::sst::file::FileMeta {
+        file_id: FileId::random(),
+        file_size: replacement_bytes.len() as u64,
+        ..file.meta_ref().clone()
+    };
+    store
+        .write(
+            &replacement.file_path(&table_dir, path_type),
+            Bytes::from(replacement_bytes),
+        )
+        .await
+        .unwrap();
+    engine
+        .edit_region(
+            region_id,
+            RegionEdit {
+                files_to_add: vec![replacement],
+                files_to_remove: vec![file.meta_ref().clone()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let scan = engine
+        .handle_query(region_id, request.clone())
+        .await
+        .unwrap();
+    assert_eq!(scan.properties().exact_num_rows(), None);
+    for request in [request, ScanRequest::default()] {
+        let rows = common_recordbatch::RecordBatches::try_collect(
+            engine.scan_to_stream(region_id, request).await.unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows.iter().map(|batch| batch.num_rows()).sum::<usize>(), 5);
+    }
+    engine.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_metadata_aggr_statistics_follow_row_visibility() {
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            experimental_metadata_aggr: true,
+            ..Default::default()
+        })
+        .await;
+    for append in [false, true] {
+        let region_id = RegionId::new(1, if append { 2 } else { 1 });
+        let create = CreateRequestBuilder::new()
+            .insert_option("append_mode", if append { "true" } else { "false" })
+            .build();
+        let schema = test_util::rows_schema(&create);
+        engine
+            .handle_request(region_id, RegionRequest::Create(create))
+            .await
+            .unwrap();
+        put_and_flush(&engine, region_id, &schema, 0..3).await;
+
+        let request = ScanRequest {
+            metadata_aggr_hint: true,
+            ..Default::default()
+        };
+        let scan = engine
+            .handle_query(region_id, request.clone())
+            .await
+            .unwrap();
+        let plan = RegionScanExec::new(scan, request.clone(), None).unwrap();
+        let row_count = |plan: &RegionScanExec| {
+            StatisticsContext::new()
+                .compute(plan, &StatisticsArgs::new())
+                .unwrap()
+                .num_rows
+        };
+        assert_eq!(row_count(&plan), Precision::Exact(3));
+        let filter = Arc::new(DynamicFilterPhysicalExpr::new(vec![], physical_lit(false)));
+        assert_eq!(plan.add_dyn_filters_to_predicate(vec![filter]), vec![true]);
+        assert_eq!(row_count(&plan), Precision::Absent);
+
+        for request in [
+            ScanRequest {
+                memtable_max_sequence: Some(1),
+                ..request.clone()
+            },
+            ScanRequest {
+                snapshot_on_scan: true,
+                ..request.clone()
+            },
+            ScanRequest {
+                series_row_selector: Some(TimeSeriesRowSelector::LastRow { after_merge: true }),
+                ..request.clone()
+            },
+            ScanRequest {
+                limit: Some(1),
+                ..request.clone()
+            },
+        ] {
+            let scan = engine
+                .handle_query(region_id, request.clone())
+                .await
+                .unwrap();
+            let plan = RegionScanExec::new(scan, request, None).unwrap();
+            assert_eq!(row_count(&plan), Precision::Absent);
+        }
     }
     engine.stop().await.unwrap();
 }

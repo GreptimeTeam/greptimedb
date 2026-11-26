@@ -87,14 +87,7 @@ impl SeqScan {
     /// Creates a new [SeqScan] with the given input.
     /// If `input.compaction` is true, the scanner will not attempt to split ranges.
     pub(crate) fn new(input: ScanInput) -> Self {
-        let mut properties = ScannerProperties::default()
-            .with_append_mode(input.append_mode)
-            .with_total_rows(input.total_rows())
-            .with_exact_num_rows(input.exact_num_rows)
-            .with_total_rows_is_exact(input.append_mode && input.total_rows_is_exact());
-        if let Some(counters) = input.query_stat_counters.clone() {
-            properties.set_query_stat_counters(counters);
-        }
+        let mut properties = input.scanner_properties();
         let stream_ctx = Arc::new(StreamContext::seq_scan_ctx(input));
         properties.partitions = vec![stream_ctx.partition_ranges()];
 

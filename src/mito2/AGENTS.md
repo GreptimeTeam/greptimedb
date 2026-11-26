@@ -95,11 +95,11 @@ pending. DDL cancellation retains its existing scheduling fence and priority.
   `tests/compatibility/manifest/table_compaction/` and
   `tests/compatibility/manifest/pending_tails/`.
 - **SST/Parquet layout** (`sst/`): readers must stay compatible with existing files.
-  Metadata COUNT (`read/scan_region/aggr.rs`) trusts a non-append SST's
-  `num_rows` only when its `__op_type` statistics show no deletes, which assumes
-  every SST of a non-append region is deduplicated within itself. Mito's flush,
-  bulk-part merge and compaction writers guarantee this; SSTs imported by region
-  edits or `sst_replace` must too.
+  Metadata COUNT (`read/scan_region/aggr.rs`) uses the footer for both file-local
+  uniqueness and all-Put evidence. Only writers that fold versions may add
+  `greptimedb.deduped`. LastNonNull can retain delete barriers, so it requires
+  all-Put output before adding the marker. Unmarked multi-row SSTs stay on the
+  scan path.
 - **Index extensions**: shared contracts and provider validation live in `sst/index/registry.rs`;
   typed sketch options are enterprise-gated. Lifecycle and failure tests live in
   `engine/index_build_test.rs` and `compaction/`. A background rebuild must not replace a file

@@ -52,6 +52,15 @@ pub mod fix_order;
 #[cfg(test)]
 mod tests;
 
+/// Checks the builtin COUNT identity, including inside its distributed state wrapper.
+pub fn is_builtin_count_or_state(function: &AggregateUDF) -> bool {
+    let inner = function.inner();
+    inner.is::<Count>()
+        || inner
+            .downcast_ref::<StateWrapper>()
+            .is_some_and(|state| state.inner().inner().is::<Count>())
+}
+
 /// Returns the name of the state function for the given aggregate function name.
 /// The state function is used to compute the state of the aggregate function.
 /// The state function's name is in the format `__<aggr_name>_state

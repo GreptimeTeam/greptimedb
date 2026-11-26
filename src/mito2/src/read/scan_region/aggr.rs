@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! Answers aggregates of a scan from manifest and SST statistics instead of
-//! reading SST data. The preparation result, an exact answer or a split into
+//! scanning SST rows. The preparation result, an exact answer or a split into
 //! exact and residual sources, does not depend on the aggregate; scalar COUNT
 //! is the only aggregate served so far.
 
@@ -21,107 +21,99 @@ pub mod overlap;
 
 use std::sync::Arc;
 
-use api::v1::OpType;
 use common_telemetry::debug;
 use common_time::range::TimestampRange;
 use datafusion_common::ScalarValue;
 use datafusion_expr::{Expr, Operator};
 use datatypes::data_type::DataType;
 use datatypes::value::Value;
-use futures::StreamExt;
-use futures::future::BoxFuture;
+use futures::{FutureExt, StreamExt};
 use mito_codec::row_converter::{PrimaryKeyCodec, build_primary_key_codec};
 use parquet::file::metadata::ParquetMetaData;
-use parquet::file::statistics::Statistics;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
 use store_api::storage::ScanRequest;
-use store_api::storage::consts::OP_TYPE_COLUMN_NAME;
 
-use crate::read::scan_region::ScanInput;
 use crate::read::scan_region::aggr::overlap::{Extent, find_overlaps};
+use crate::read::scan_region::{ScanInput, request_preserves_rows};
 use crate::sst::file::FileHandle;
+use crate::sst::parquet::metadata::{DEDUPED_SST_KEY, has_only_puts};
 
 /// Returns the exact number of rows the scan yields, or `None` if it cannot
-/// be proven. Reads no SST data: candidates come from the manifest, and in a
-/// deduplicating region their Parquet metadata is read through the SST
-/// metadata caches to rule out deletions.
+/// be proven. Non-append candidates use cached Parquet footers to prove
+/// file-local uniqueness and the absence of deletes.
 pub(crate) async fn prepare(input: &ScanInput, request: &ScanRequest) -> Option<usize> {
-    let classification = classify(input, request)?;
-    if !classification.remaining.is_empty() || !input.memtables.is_empty() {
+    if !input.memtables.is_empty() {
         return None;
     }
-    let no_deletes = read_no_deletes(input, &classification).await;
-    resolve(input, classification, &no_deletes)
+    let classification = classify(input, request, false)?;
+    if !classification.remaining.is_empty() {
+        return None;
+    }
+    let evidence = read_file_evidence(input, &classification).await;
+    resolve(input, classification, &evidence)
 }
 
-/// Applies the deletion evidence of the exact candidates.
+/// Applies the footer evidence of the exact candidates.
 fn resolve(
     input: &ScanInput,
     mut classification: Classification,
-    no_deletes: &[bool],
+    evidence: &[bool],
 ) -> Option<usize> {
-    classification.retain_exact(input, no_deletes);
+    classification.retain_exact(input, evidence);
     (classification.remaining.is_empty() && input.memtables.is_empty())
         .then_some(classification.exact_rows)
 }
 
-/// Returns, for each exact candidate, whether it holds no deletion markers.
-/// Append-mode files need no evidence. In a deduplicating region every SST is
-/// deduplicated within itself, so a file without deletions yields each of its
-/// rows. A file whose metadata cannot be read counts as having deletions.
-async fn read_no_deletes(input: &ScanInput, classification: &Classification) -> Vec<bool> {
+/// Returns whether each candidate yields all of its physical rows once.
+async fn read_file_evidence(input: &ScanInput, classification: &Classification) -> Vec<bool> {
     if input.append_mode {
         return vec![true; classification.exact.len()];
     }
-    // Each future owns its reader, so the stream does not borrow `input`.
-    // Boxing erases the metadata loader's deep future type for callers.
-    let reads: Vec<BoxFuture<'static, bool>> = classification
-        .exact
-        .iter()
-        .map(|&index| {
-            let file = input.files[index].clone();
-            let reader = input
-                .access_layer
-                .read_sst(file.clone())
-                .cache(input.cache_strategy.clone());
-            Box::pin(async move {
-                match reader.read_statistics().await {
-                    Ok(metadata) => has_no_deletes(&metadata),
-                    Err(e) => {
-                        debug!(
-                            "Metadata count falls back to scanning file {}: {e:?}",
-                            file.file_id()
-                        );
-                        false
-                    }
+    let reads = classification.exact.iter().map(|&index| {
+        let file = input.files[index].clone();
+        let reader = input
+            .access_layer
+            .read_sst(file.clone())
+            .cache(input.cache_strategy.clone());
+        async move {
+            match reader.read_statistics().await {
+                Ok(metadata) => footer_proves_visible_rows(&metadata, file.num_rows()),
+                Err(e) => {
+                    debug!(
+                        "Metadata count falls back to scanning file {}: {e:?}",
+                        file.file_id()
+                    );
+                    false
                 }
-            }) as BoxFuture<'static, bool>
-        })
-        .collect();
+            }
+        }
+        .boxed()
+    });
     futures::stream::iter(reads)
         .buffered(input.max_concurrent_scan_files.max(1))
         .collect()
         .await
 }
 
-/// Whether every row group's `__op_type` statistics prove it holds only puts.
-fn has_no_deletes(metadata: &ParquetMetaData) -> bool {
-    let Some(column) = metadata
-        .file_metadata()
-        .schema_descr()
-        .columns()
-        .iter()
-        .position(|column| column.name() == OP_TYPE_COLUMN_NAME)
-    else {
-        return false;
-    };
-    metadata.row_groups().iter().all(|row_group| {
-        matches!(
-            row_group.column(column).statistics(),
-            Some(Statistics::Int32(stats)) if stats.min_opt() == Some(&(OpType::Put as i32))
-        )
-    })
+/// The footer and manifest must agree. Without the writer's uniqueness claim,
+/// only a single physical row is independently known to be unique.
+fn footer_proves_visible_rows(metadata: &ParquetMetaData, manifest_rows: usize) -> bool {
+    let footer = metadata.file_metadata();
+    let unique = manifest_rows == 1
+        || footer
+            .key_value_metadata()
+            .is_some_and(|entries| entries.iter().any(|entry| entry.key == DEDUPED_SST_KEY));
+    unique
+        && usize::try_from(footer.num_rows()) == Ok(manifest_rows)
+        && metadata
+            .row_groups()
+            .iter()
+            .try_fold(0usize, |total, group| {
+                total.checked_add(usize::try_from(group.num_rows()).ok()?)
+            })
+            == Some(manifest_rows)
+        && has_only_puts(metadata.row_groups())
 }
 
 /// Files of one scan classified against its pinned read view.
@@ -157,27 +149,17 @@ impl Classification {
 ///   all of its rows (see [`AggrFilters`]).
 /// - Its manifest row count is known.
 /// - In a deduplicating region, no other file or memtable may hold a row with
-///   the same primary key and timestamp. The candidate must still be proven
-///   free of deletions (see [`read_no_deletes`]).
+///   the same primary key and timestamp. The footer must still prove
+///   uniqueness within the file and that it holds only puts.
 ///
 /// Returns `None` for scans whose visible rows can differ from the sources'
 /// rows for reasons other than the files themselves.
-fn classify(input: &ScanInput, request: &ScanRequest) -> Option<Classification> {
-    if input.compaction
-        || input.series_row_selector.is_some()
-        || input.sequence_range.is_some()
-        || request.limit.is_some()
-        || request.memtable_min_sequence.is_some()
-        || request.memtable_max_sequence.is_some()
-        || request.sst_min_sequence.is_some()
-        || request.snapshot_on_scan
-        || request.exact_sequence_range
-        || request.skip_sst_files
-    {
-        return None;
-    }
-    #[cfg(feature = "enterprise")]
-    if !input.extension_ranges.is_empty() {
+fn classify(
+    input: &ScanInput,
+    request: &ScanRequest,
+    allow_partial: bool,
+) -> Option<Classification> {
+    if !input.allows_exact_row_count() || !request_preserves_rows(request) {
         return None;
     }
     let filters = AggrFilters::new(input.region_metadata(), &request.filters)?;
@@ -189,15 +171,26 @@ fn classify(input: &ScanInput, request: &ScanRequest) -> Option<Classification> 
         if start > end {
             return None;
         }
-        if range.intersects(&TimestampRange::new_inclusive(Some(start), Some(end))) {
-            intersecting.push(index);
+        if !range.intersects(&TimestampRange::new_inclusive(Some(start), Some(end))) {
+            continue;
         }
+        let candidate = range.contains(&start)
+            && range.contains(&end)
+            // Zero is unknown in legacy manifests.
+            && file.num_rows() > 0
+            && input.file_time_bounds_fit(file)
+            && (input.region_partition_expr.is_none() || input.should_skip_region_partition(file))
+            && filters.covers(file);
+        if !candidate && !allow_partial {
+            return None;
+        }
+        intersecting.push((index, candidate));
     }
     // Append mode never merges rows, so sources cannot hide each other's rows.
-    let overlaps = if input.append_mode {
-        vec![false; intersecting.len()]
-    } else {
+    let overlaps = if !input.append_mode && intersecting.iter().any(|&(_, candidate)| candidate) {
         overlapping_files(input, &intersecting)
+    } else {
+        Vec::new()
     };
 
     let mut classification = Classification {
@@ -205,33 +198,26 @@ fn classify(input: &ScanInput, request: &ScanRequest) -> Option<Classification> 
         remaining: Vec::new(),
         exact_rows: 0,
     };
-    for (index, overlaps) in intersecting.into_iter().zip(overlaps) {
+    for (position, (index, candidate)) in intersecting.into_iter().enumerate() {
         let file = &input.files[index];
-        let (start, end) = file.time_range();
-        let exact = range.contains(&start)
-            && range.contains(&end)
-            // Zero is unknown in legacy manifests.
-            && file.num_rows() > 0
-            && (input.region_partition_expr.is_none() || input.should_skip_region_partition(file))
-            && filters.covers(file)
-            && (input.append_mode || !overlaps);
-        if exact {
+        if candidate && !overlaps.get(position).copied().unwrap_or(false) {
             classification.exact_rows = classification.exact_rows.checked_add(file.num_rows())?;
             classification.exact.push(index);
         } else {
             classification.remaining.push(index);
         }
     }
+    i64::try_from(classification.exact_rows).ok()?;
     Some(classification)
 }
 
 /// Returns, for each file in `files`, whether another file or a memtable may
 /// hold a row with the same primary key and timestamp.
-fn overlapping_files(input: &ScanInput, files: &[usize]) -> Vec<bool> {
+fn overlapping_files(input: &ScanInput, files: &[(usize, bool)]) -> Vec<bool> {
     let mapper = input.primary_key_mapper();
     let mut extents: Vec<_> = files
         .iter()
-        .map(|&index| {
+        .map(|&(index, _)| {
             let file = &input.files[index];
             Extent {
                 time: file.time_range(),
@@ -340,6 +326,15 @@ fn eq_literal<'a>(
         | (Expr::Literal(value, _), Expr::Column(column)) => (column, value),
         _ => return None,
     };
+    // Arrow uses total ordering for floats. Decoded Values equate NaNs and
+    // both signs of zero, so those equalities cannot prove Arrow coverage.
+    if match value {
+        ScalarValue::Float32(Some(value)) => value.is_nan() || *value == 0.0,
+        ScalarValue::Float64(Some(value)) => value.is_nan() || *value == 0.0,
+        _ => false,
+    } {
+        return None;
+    }
     (column.name == name && !value.is_null() && &value.data_type() == data_type).then_some(value)
 }
 
@@ -444,7 +439,7 @@ mod tests {
         )
     }
 
-    /// The deletion evidence [`read_no_deletes`] would read for the candidates.
+    /// Footer evidence for the synthetic files in these classification tests.
     fn evidence(input: &ScanInput, classification: &Classification) -> Vec<bool> {
         let with_deletes = WITH_DELETES.lock().unwrap();
         classification
@@ -457,13 +452,13 @@ mod tests {
     }
 
     fn exact_count(input: &ScanInput, request: &ScanRequest) -> Option<usize> {
-        let classification = classify(input, request)?;
+        let classification = classify(input, request, false)?;
         let no_deletes = evidence(input, &classification);
         resolve(input, classification, &no_deletes)
     }
 
     fn classified(input: &ScanInput, request: &ScanRequest) -> Classification {
-        let mut classification = classify(input, request).unwrap();
+        let mut classification = classify(input, request, true).unwrap();
         let no_deletes = evidence(input, &classification);
         classification.retain_exact(input, &no_deletes);
         classification
@@ -664,19 +659,25 @@ mod tests {
 
     #[test]
     fn test_metadata_aggr_reads_op_type_statistics() {
-        use datatypes::arrow::array::{ArrayRef, Int64Array, UInt8Array};
+        use api::v1::OpType;
+        use datatypes::arrow::array::{ArrayRef, StructArray, UInt8Array};
+        use datatypes::arrow::datatypes::{DataType as ArrowType, Field};
         use datatypes::arrow::record_batch::RecordBatch;
         use parquet::arrow::ArrowWriter;
         use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-        use parquet::file::properties::WriterProperties;
+        use parquet::file::metadata::KeyValue;
+        use parquet::file::properties::{EnabledStatistics, WriterProperties};
+        use store_api::storage::consts::OP_TYPE_COLUMN_NAME;
 
-        let metadata = |name: &str, ops: Vec<u8>| {
-            let len = ops.len() as i64;
+        let put = OpType::Put as u8;
+        let del = OpType::Delete as u8;
+        let metadata = |name: &str, ops: Vec<Option<u8>>, stats, marker: bool| {
+            let nested = StructArray::from(vec![(
+                Arc::new(Field::new(OP_TYPE_COLUMN_NAME, ArrowType::UInt8, false)),
+                Arc::new(UInt8Array::from_value(put, ops.len())) as ArrayRef,
+            )]);
             let batch = RecordBatch::try_from_iter([
-                (
-                    "v",
-                    Arc::new(Int64Array::from_iter_values(0..len)) as ArrayRef,
-                ),
+                ("payload", Arc::new(nested) as ArrayRef),
                 (name, Arc::new(UInt8Array::from(ops)) as ArrayRef),
             ])
             .unwrap();
@@ -684,6 +685,10 @@ mod tests {
             // Two rows per row group, so a delete in a later row group counts.
             let props = WriterProperties::builder()
                 .set_max_row_group_row_count(Some(2))
+                .set_statistics_enabled(stats)
+                .set_key_value_metadata(
+                    marker.then(|| vec![KeyValue::new(DEDUPED_SST_KEY.to_owned(), None)]),
+                )
                 .build();
             let mut writer =
                 ArrowWriter::try_new(&mut buffer, batch.schema(), Some(props)).unwrap();
@@ -694,13 +699,97 @@ mod tests {
                 .metadata()
                 .clone()
         };
-        let put = OpType::Put as u8;
-        let delete = OpType::Delete as u8;
-        assert!(has_no_deletes(&metadata(OP_TYPE_COLUMN_NAME, vec![put; 4])));
-        assert!(!has_no_deletes(&metadata(
-            OP_TYPE_COLUMN_NAME,
-            vec![put, put, put, delete]
-        )));
-        assert!(!has_no_deletes(&metadata("other", vec![put; 4])));
+        let ops = vec![Some(put); 4];
+        let stats = EnabledStatistics::Page;
+        for (name, ops, statistics, certified, expected) in [
+            (OP_TYPE_COLUMN_NAME, ops.clone(), stats, true, true),
+            (OP_TYPE_COLUMN_NAME, ops.clone(), stats, false, false),
+            (OP_TYPE_COLUMN_NAME, vec![Some(put)], stats, false, true),
+            ("other", ops.clone(), stats, true, false),
+            (
+                OP_TYPE_COLUMN_NAME,
+                ops,
+                EnabledStatistics::None,
+                true,
+                false,
+            ),
+            (OP_TYPE_COLUMN_NAME, vec![None; 4], stats, true, false),
+            (
+                OP_TYPE_COLUMN_NAME,
+                vec![Some(put), None],
+                stats,
+                true,
+                false,
+            ),
+            (
+                OP_TYPE_COLUMN_NAME,
+                vec![Some(put), Some(put), Some(put), Some(del)],
+                stats,
+                true,
+                false,
+            ),
+        ] {
+            let rows = ops.len();
+            let footer = metadata(name, ops, statistics, certified);
+            assert_eq!(
+                footer_proves_visible_rows(&footer, rows),
+                expected,
+                "{footer:?}"
+            );
+            assert!(!footer_proves_visible_rows(&footer, rows + 1));
+        }
+    }
+
+    #[test]
+    fn test_metadata_aggr_rejects_non_arrow_float_equalities() {
+        use datatypes::arrow::datatypes::DataType as ArrowType;
+
+        for (value, data_type) in [
+            (
+                ScalarValue::Float32(Some(f32::from_bits(0x7fc0_0001))),
+                ArrowType::Float32,
+            ),
+            (
+                ScalarValue::Float64(Some(f64::from_bits(0x7ff8_0000_0000_0001))),
+                ArrowType::Float64,
+            ),
+            (ScalarValue::Float64(Some(-0.0)), ArrowType::Float64),
+        ] {
+            let filter = col("k0").eq(lit(value));
+            assert!(eq_literal(&filter, "k0", &data_type).is_none());
+        }
+        let ordinary = col("k0").eq(lit(1.5f64));
+        assert!(eq_literal(&ordinary, "k0", &ArrowType::Float64).is_some());
+    }
+
+    #[tokio::test]
+    async fn test_metadata_aggr_narrowed_partition_falls_back() {
+        use partition::expr::col as partition_col;
+
+        let mut input = input(vec![file(0, 10, 3, true)], &[]).await;
+        input.region_partition_expr = Some(partition_col("k0").gt_eq(Value::String("x".into())));
+        assert_eq!(exact_count(&input, &ScanRequest::default()), None);
+    }
+
+    #[tokio::test]
+    async fn test_metadata_aggr_file_timestamp_unit_overflow() {
+        for (start, end) in [(i64::MIN / 1000 - 1, 0), (0, i64::MAX / 1000 + 1), (-1, 1)] {
+            let file = FileHandle::new(
+                FileMeta {
+                    time_range: (Timestamp::new_second(start), Timestamp::new_second(end)),
+                    num_rows: 2,
+                    ..Default::default()
+                },
+                new_noop_file_purger(),
+            );
+            let mut input = input(vec![file], &[]).await;
+            let fits = start == -1;
+            assert_eq!(
+                exact_count(&input, &ScanRequest::default()),
+                fits.then_some(2),
+            );
+            input.append_mode = true;
+            assert_eq!(input.scanner_properties().total_rows_is_exact(), fits);
+        }
     }
 }

@@ -16,7 +16,7 @@ use std::collections::HashSet;
 
 use api::v1::SemanticType;
 use arrow_schema::SortOptions;
-use common_function::aggrs::aggr_wrapper::aggr_state_func_name;
+use common_function::aggrs::aggr_wrapper::{aggr_state_func_name, is_builtin_count_or_state};
 use common_recordbatch::OrderOption;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use datafusion::datasource::DefaultTableSource;
@@ -109,8 +109,7 @@ impl ScanHintRule {
             [Expr::Literal(value, _)] => !value.is_null(),
             _ => false,
         };
-        if (function.func.name() != "count"
-            && function.func.name() != aggr_state_func_name("count"))
+        if !is_builtin_count_or_state(&function.func)
             || function.params.distinct
             || function.params.filter.is_some()
             || !function.params.order_by.is_empty()
@@ -802,7 +801,11 @@ mod test {
 
     #[test]
     fn metadata_aggr_hint_is_scoped_and_restricted() {
+        use common_function::aggrs::aggr_wrapper::StateWrapper;
+        use datafusion::functions_aggregate::count::count_udaf;
         use datafusion::functions_aggregate::expr_fn::{count, count_distinct};
+        use datafusion_expr::{AggregateUDF, Volatility, create_udaf};
+
         let region_id = RegionId::new(1, 1);
         let metadata = mock_table_provider(region_id).region_metadata();
         let provider = Arc::new(DummyTableProvider::new(
@@ -810,12 +813,26 @@ mod test {
             Arc::new(MetaRegionEngine::with_metadata(metadata.clone()).with_engine_name("mito")),
             metadata,
         ));
+        let user_count = create_udaf(
+            "count",
+            vec![DataType::Int64],
+            Arc::new(DataType::Int64),
+            Volatility::Immutable,
+            Arc::new(|_| unreachable!("a logical hint does not instantiate the function")),
+            Arc::new(vec![DataType::Int64]),
+        );
+        let builtin_state =
+            AggregateUDF::from(StateWrapper::new(count_udaf().as_ref().clone()).unwrap());
+        let user_state = AggregateUDF::from(StateWrapper::new(user_count.clone()).unwrap());
         for (groups, function, expected) in [
             (vec![], count(col("ts")), true),
             (vec![], count(lit(1i64)), true),
             (vec![], count(col("v0")), false),
             (vec![], count_distinct(col("ts")), false),
             (vec![col("k0")], count(col("ts")), false),
+            (vec![], builtin_state.call(vec![lit(1i64)]), true),
+            (vec![], user_count.call(vec![lit(2i64)]), false),
+            (vec![], user_state.call(vec![lit(2i64)]), false),
         ] {
             let plan = LogicalPlanBuilder::from(scan_plan(provider.clone(), "t"))
                 .aggregate(groups, vec![function])

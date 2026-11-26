@@ -1187,6 +1187,23 @@ mod tests {
             let range = build_time_range_predicate("ts", TimeUnit::Millisecond, &[expr]);
             assert!(range.is_empty(), "{range:?}");
         }
+        for (literal, successor) in [
+            (
+                ScalarValue::TimestampMillisecond(Some(i64::MIN), None),
+                i64::MIN + 1,
+            ),
+            (ScalarValue::TimestampMicrosecond(Some(-1001), None), -1),
+            (ScalarValue::TimestampMicrosecond(Some(-1), None), 0),
+            (ScalarValue::TimestampSecond(Some(0), None), 1),
+        ] {
+            let literal = lit(literal);
+            for expr in [col("ts").gt(literal.clone()), literal.lt(col("ts"))] {
+                check_build_predicate(
+                    expr,
+                    TimestampRange::from_start(Timestamp::new_millisecond(successor)),
+                );
+            }
+        }
     }
 
     #[test]

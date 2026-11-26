@@ -1577,7 +1577,8 @@ impl MemtableCompactor {
                 ),
                 float_field_encoding,
             )?
-            .with_narthex_format(narthex_format);
+            .with_narthex_format(narthex_format)
+            .with_dedup_mode(dedup.then_some(merge_mode));
             let mut metrics = BulkPartEncodeMetrics::default();
             let encoded_part = encoder.encode_record_batch_iter(
                 boxed_iter,

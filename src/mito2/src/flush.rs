@@ -908,8 +908,12 @@ impl MemtableSstWriter {
         let file_total = self.file_total();
         let mut tasks = Vec::with_capacity(flat_sources.encoded.len() + flat_sources.sources.len());
         let num_encoded = flat_sources.encoded.len();
+        let dedup_mode = (matches!(self.kind, MemtableWriteKind::Flush(_))
+            && !version.options.append_mode)
+            .then(|| version.options.merge_mode());
         for (source, max_sequence) in flat_sources.sources {
-            let write_request = self.new_write_request(version, max_sequence, source);
+            let write_request =
+                self.new_write_request(version, max_sequence, source.with_dedup_mode(dedup_mode));
             let access_layer = self.access_layer.clone();
             let write_opts = write_opts.clone();
             let semaphore = self.write_semaphore.clone();

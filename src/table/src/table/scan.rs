@@ -162,7 +162,7 @@ pub fn assign_partition_ranges(
     for range in ranges {
         let mut node = part_heap.pop().unwrap();
         let partition_idx = node.partition_idx;
-        node.num_rows += range.num_rows;
+        node.num_rows = node.num_rows.saturating_add(range.num_rows);
         partition_ranges[partition_idx].push(range);
         part_heap.push(node);
     }

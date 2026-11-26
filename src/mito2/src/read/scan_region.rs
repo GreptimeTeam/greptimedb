@@ -50,7 +50,7 @@ use partition::expr::PartitionExpr;
 use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
-use store_api::region_engine::{PartitionRange, RegionScannerRef};
+use store_api::region_engine::{PartitionRange, RegionScannerRef, ScannerProperties};
 use store_api::storage::{
     ColumnId, RegionId, ScanRequest, SequenceNumber, SequenceRange, TimeSeriesDistribution,
     TimeSeriesRowSelector,
@@ -715,6 +715,7 @@ impl ScanRegion {
             input
         };
         let mut input = input.build();
+        input.row_preserving_request = request_preserves_rows(&self.request);
         if self.experimental_metadata_aggr && self.request.metadata_aggr_hint {
             input.exact_num_rows = aggr::prepare(&input, &self.request).await;
         }
@@ -990,6 +991,18 @@ fn file_in_range(file: &FileHandle, predicate: &TimestampRange) -> bool {
     file_ts_range.intersects(predicate)
 }
 
+/// Whether the scan request leaves the source rows visible before predicates.
+pub(crate) fn request_preserves_rows(request: &ScanRequest) -> bool {
+    request.series_row_selector.is_none()
+        && request.limit.is_none()
+        && request.memtable_min_sequence.is_none()
+        && request.memtable_max_sequence.is_none()
+        && request.sst_min_sequence.is_none()
+        && !request.snapshot_on_scan
+        && !request.exact_sequence_range
+        && !request.skip_sst_files
+}
+
 /// Returns true if `time_range` contains the inclusive time range of `file`.
 fn time_range_covers_file(time_range: Option<&TimestampRange>, file: &FileHandle) -> bool {
     let Some(time_range) = time_range else {
@@ -1003,6 +1016,8 @@ fn time_range_covers_file(time_range: Option<&TimestampRange>, file: &FileHandle
 pub struct ScanInput {
     /// Count proven against this read view and the complete static predicate.
     pub(crate) exact_num_rows: Option<usize>,
+    /// Whether the request leaves the source rows visible before predicates.
+    row_preserving_request: bool,
     /// Pinned series-index snapshot and its storage, when configured.
     pub(crate) series_index: Option<SeriesIndexReadContext>,
     /// Whether to ignore range indexes while retaining series-index candidate discovery.
@@ -1112,6 +1127,7 @@ impl ScanInput {
         ScanInputBuilder {
             input: ScanInput {
                 exact_num_rows: None,
+                row_preserving_request: true,
                 series_index: None,
                 page_index_policy: None,
                 ignore_range_index: false,
@@ -1908,45 +1924,86 @@ impl ScanInput {
         );
     }
 
-    /// Whether physical source row counts are known and equal the rows visible
-    /// to this region, before applying query predicates.
-    pub(crate) fn total_rows_is_exact(&self) -> bool {
-        // Legacy SST metadata uses zero for unknown row counts.
-        if self.files.iter().any(|file| file.num_rows() == 0) {
-            return false;
-        }
-
-        if self.region_partition_expr.is_none() {
-            return true;
-        }
-
-        // Extension ranges do not expose their partition expressions.
+    /// Whether this read path preserves the ordinary row visibility semantics.
+    pub(crate) fn allows_exact_row_count(&self) -> bool {
         #[cfg(feature = "enterprise")]
         if !self.extension_ranges.is_empty() {
             return false;
         }
-
-        // Repartition flushes existing memtables before entering staging. New
-        // writes are routed under the target partition rules, whereas historical
-        // SSTs can be shared by regions and still need partition filtering.
-        self.files
-            .iter()
-            .all(|file| self.should_skip_region_partition(file))
+        self.row_preserving_request
+            && !self.compaction
+            && self.series_row_selector.is_none()
+            && self.snapshot_sequence.is_none()
+            && self.sequence_range.is_none()
+            && !self.requires_narthex_preparation()
     }
 
-    pub(crate) fn total_rows(&self) -> usize {
-        let rows_in_files: usize = self.files.iter().map(|f| f.num_rows()).sum();
-        let rows_in_memtables: usize = self.memtables.iter().map(|m| m.stats().num_rows()).sum();
+    /// Whether all timestamps in the file can be represented in the current
+    /// time-index unit. An older SST can overflow after a precision widening.
+    pub(crate) fn file_time_bounds_fit(&self, file: &FileHandle) -> bool {
+        let Some(timestamp_type) = self
+            .region_metadata()
+            .time_index_column()
+            .column_schema
+            .data_type
+            .as_timestamp()
+        else {
+            return false;
+        };
+        let (start, end) = file.time_range();
+        let unit = timestamp_type.unit();
+        start <= end
+            && start.unit() == end.unit()
+            && start.unit().factor() >= unit.factor()
+            && start.convert_to(unit).is_some()
+            && end.convert_to(unit).is_some()
+    }
 
-        let rows = rows_in_files + rows_in_memtables;
+    /// Whether physical source row counts are known and equal the rows visible
+    /// to this region, before applying query predicates.
+    fn source_row_counts_are_exact(&self) -> bool {
+        self.allows_exact_row_count()
+            && self.files.iter().all(|file| {
+                // Legacy SST metadata uses zero for unknown row counts.
+                file.num_rows() > 0
+                    && self.file_time_bounds_fit(file)
+                    // Historical SSTs can be shared and still need partition filtering.
+                    && (self.region_partition_expr.is_none()
+                        || self.should_skip_region_partition(file))
+            })
+    }
+
+    pub(crate) fn scanner_properties(&self) -> ScannerProperties {
+        let rows = self.checked_total_rows();
+        let exact = self.append_mode
+            && rows.is_some_and(|rows| i64::try_from(rows).is_ok())
+            && self.source_row_counts_are_exact();
+        let mut properties = ScannerProperties::default()
+            .with_append_mode(self.append_mode)
+            .with_total_rows(rows.unwrap_or(usize::MAX))
+            .with_total_rows_is_exact(exact)
+            .with_exact_num_rows(self.exact_num_rows);
+        if let Some(counters) = self.query_stat_counters.clone() {
+            properties.set_query_stat_counters(counters);
+        }
+        properties
+    }
+
+    fn checked_total_rows(&self) -> Option<usize> {
+        let rows = self
+            .files
+            .iter()
+            .map(FileHandle::num_rows)
+            .chain(self.memtables.iter().map(|m| m.stats().num_rows()))
+            .try_fold(0usize, usize::checked_add)?;
         #[cfg(feature = "enterprise")]
-        let rows = rows
-            + self
-                .extension_ranges
-                .iter()
-                .map(|x| x.num_rows())
-                .sum::<u64>() as usize;
-        rows
+        let rows = self
+            .extension_ranges
+            .iter()
+            .try_fold(rows, |total, range| {
+                total.checked_add(usize::try_from(range.num_rows()).ok()?)
+            })?;
+        Some(rows)
     }
 
     pub(crate) fn predicate_group(&self) -> &PredicateGroup {
@@ -2797,6 +2854,17 @@ mod tests {
             (vec![file_meta.clone()], 10, true),
             (vec![legacy_meta.clone()], 0, false),
             (vec![file_meta, legacy_meta], 10, false),
+            (
+                vec![
+                    FileMeta {
+                        num_rows: usize::MAX as u64,
+                        ..Default::default()
+                    };
+                    2
+                ],
+                usize::MAX,
+                false,
+            ),
         ] {
             let files = file_metas
                 .into_iter()
@@ -2809,8 +2877,9 @@ mod tests {
                 .with_append_mode(true)
                 .with_files(files)
                 .build();
-            assert_eq!(input.total_rows(), expected_rows);
-            assert_eq!(input.total_rows_is_exact(), exact);
+            let properties = input.scanner_properties();
+            assert_eq!(properties.total_rows(), expected_rows);
+            assert_eq!(properties.total_rows_is_exact(), exact);
         }
     }
 
@@ -2847,8 +2916,9 @@ mod tests {
             let input = new_scan_input(metadata, vec![])
                 .await
                 .with_files(files)
+                .with_append_mode(true)
                 .build();
-            assert_eq!(input.total_rows_is_exact(), exact);
+            assert_eq!(input.scanner_properties().total_rows_is_exact(), exact);
         }
     }
 

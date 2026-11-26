@@ -867,7 +867,7 @@ impl DefaultSstMerger {
             row_group_size,
             ..write_opts
         };
-        let source = spawn_merge(source);
+        let source = spawn_merge(source).with_dedup_mode((!append_mode).then_some(merge_mode));
 
         let mut metrics = Metrics::new(WriteType::Compaction);
         let region_metadata = context.region_metadata.clone();

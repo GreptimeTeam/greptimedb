@@ -182,6 +182,11 @@ impl<W: AsyncFileWriter> ParallelArrowWriter<W> {
         self.file_writer.append_key_value_metadata(kv);
     }
 
+    /// Returns the metadata of all encoded and flushed row groups.
+    pub(crate) fn flushed_row_groups(&self) -> &[parquet::file::metadata::RowGroupMetaData] {
+        self.file_writer.flushed_row_groups()
+    }
+
     /// Finalizes the file while retaining the upload for abort if it fails.
     pub(crate) async fn finish(&mut self) -> Result<ParquetMetaData> {
         self.flush().await?;

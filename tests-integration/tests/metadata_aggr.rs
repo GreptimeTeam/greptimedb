@@ -19,6 +19,7 @@ use frontend::instance::Instance;
 use mito2::config::MitoConfig;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContext;
+use tests_integration::cluster::GreptimeDbClusterBuilder;
 use tests_integration::standalone::GreptimeDbStandaloneBuilder;
 
 const COUNT_SQL: &str = "SELECT count(*) FROM metadata_count";
@@ -65,6 +66,39 @@ async fn test_metadata_count_non_append(#[case] enabled: bool) {
     )
     .await;
     assert_count_and_scan(frontend, 2, true).await;
+}
+
+#[rstest::rstest]
+#[case::enabled(true)]
+#[case::disabled(false)]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_metadata_count_distributed(#[case] enabled: bool) {
+    let cluster = GreptimeDbClusterBuilder::new("metadata_count_distributed")
+        .await
+        .with_datanodes(2)
+        .with_mito_config(MitoConfig {
+            experimental_metadata_aggr: enabled,
+            ..Default::default()
+        })
+        .build(false)
+        .await;
+    let frontend = cluster.fe_instance();
+    execute_sql(
+        frontend,
+        "CREATE TABLE metadata_count (
+            host STRING PRIMARY KEY, ts TIMESTAMP TIME INDEX, v BIGINT
+        ) PARTITION ON COLUMNS (host) (host < 'm', host >= 'm')
+        ENGINE=mito WITH (append_mode = 'false')",
+    )
+    .await;
+    execute_sql(
+        frontend,
+        "INSERT INTO metadata_count VALUES
+            ('a', 1000, 1), ('a', 2000, 2), ('z', 1000, 3), ('z', 2000, 4)",
+    )
+    .await;
+    execute_sql(frontend, "ADMIN FLUSH_TABLE('metadata_count')").await;
+    assert_count_and_scan(frontend, 4, !enabled).await;
 }
 
 async fn execute_sql(frontend: &Instance, sql: &str) -> Output {

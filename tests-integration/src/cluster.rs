@@ -259,6 +259,7 @@ pub struct GreptimeDbClusterBuilder {
     store_config: Option<ObjectStoreConfig>,
     store_providers: Option<Vec<StorageType>>,
     datanodes: Option<u32>,
+    mito_config: Option<mito2::config::MitoConfig>,
     datanode_wal_config: DatanodeWalConfig,
     metasrv_wal_config: MetasrvWalConfig,
     datanode_gc_config: GcConfig,
@@ -301,6 +302,7 @@ impl GreptimeDbClusterBuilder {
             store_config: None,
             store_providers: None,
             datanodes: None,
+            mito_config: None,
             datanode_wal_config: DatanodeWalConfig::default(),
             metasrv_wal_config: MetasrvWalConfig::default(),
             datanode_gc_config: GcConfig::default(),
@@ -334,6 +336,12 @@ impl GreptimeDbClusterBuilder {
     #[must_use]
     pub fn with_datanodes(mut self, datanodes: u32) -> Self {
         self.datanodes = Some(datanodes);
+        self
+    }
+
+    /// Overrides the Mito config of each datanode in the test cluster.
+    pub fn with_mito_config(mut self, config: mito2::config::MitoConfig) -> Self {
+        self.mito_config = Some(config);
         self
     }
 
@@ -626,6 +634,13 @@ impl GreptimeDbClusterBuilder {
 
                 opts
             };
+            if let Some(config) = &self.mito_config {
+                for engine in &mut opts.region_engine {
+                    if let datanode::config::RegionEngineConfig::Mito(mito) = engine {
+                        *mito = config.clone();
+                    }
+                }
+            }
             // Shared object storage must not make datanodes share a local WAL.
             if self.shared_home_dir.is_some()
                 && let DatanodeWalConfig::RaftEngine(config) = &mut opts.wal
