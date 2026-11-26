@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 356" width="820" height="356" role="img" aria-labelledby="title">
+  <title id="title">SST files of one region by time range and file sequence, and the chunks they fall into</title>
+  <style>
+    :root {
+      --bg: #ffffff; --fg: #1f2328; --muted: #59636e; --border: #d1d9e0; --file: #f6f8fa;
+      --dirty: #cf222e; --dirty-fill: #ffebe9; --new: #0969da; --new-fill: #ddf4ff;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0d1117; --fg: #f0f6fc; --muted: #9198a1; --border: #3d444d; --file: #151b23;
+        --dirty: #f85149; --dirty-fill: #3c1618; --new: #4493f8; --new-fill: #10233f;
+      }
+    }
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 12px; fill: var(--fg); }
+    .m { fill: var(--muted); }
+    .b { font-weight: 600; }
+    .c { text-anchor: middle; }
+    .bg { fill: var(--bg); }
+    .axis { stroke: var(--muted); stroke-width: 1; fill: none; }
+    .grid { stroke: var(--border); stroke-width: 1; }
+    .file { fill: var(--file); stroke: var(--border); }
+    .dirty { fill: var(--dirty-fill); stroke: var(--dirty); }
+    .new { fill: var(--new-fill); stroke: var(--new); }
+    .band-dirty { fill: var(--dirty); opacity: .09; }
+    .band-new { fill: var(--new); opacity: .09; }
+    .w { stroke: var(--fg); stroke-width: 1.5; }
+    .f { stroke: var(--fg); stroke-width: 1.5; stroke-dasharray: 5 4; }
+    .mem { fill: none; stroke: var(--muted); stroke-dasharray: 3 3; }
+    .td { fill: var(--dirty); }
+    .tn { fill: var(--new); }
+  </style>
+  <rect class="bg" width="820" height="356"/>
+
+  <!-- time ranges of the files above W(r), projected onto the chunks -->
+  <rect class="band-dirty" x="220" y="94" width="40" height="192"/>
+  <rect class="band-new" x="422" y="124" width="110" height="162"/>
+
+  <line class="grid" x1="180" y1="20" x2="180" y2="250"/>
+  <line class="grid" x1="300" y1="20" x2="300" y2="250"/>
+  <line class="grid" x1="420" y1="20" x2="420" y2="250"/>
+  <line class="grid" x1="540" y1="20" x2="540" y2="250"/>
+  <path class="axis" d="M60 250V14M56 20l4-7 4 7"/>
+  <path class="axis" d="M60 250H548M542 246l7 4-7 4"/>
+  <text class="m c" transform="translate(24 135) rotate(-90)">file sequence</text>
+  <text class="m" x="556" y="254">time index</text>
+
+  <rect class="mem" x="462" y="26" width="76" height="22" rx="3"/>
+  <text class="m c" x="500" y="41">memtable</text>
+  <text class="m" x="556" y="41">not flushed yet: found by a later run</text>
+
+  <line class="f" x1="60" y1="60" x2="540" y2="60"/>
+  <text class="b" x="556" y="64">F(r) = 160, read by this run</text>
+
+  <rect class="dirty" x="220" y="72" width="40" height="22" rx="3"/>
+  <text class="b c" x="240" y="87">E</text>
+  <text class="td" x="266" y="87">sequence 160, late rows</text>
+  <rect class="new" x="422" y="102" width="110" height="22" rx="3"/>
+  <text class="c" x="477" y="117">D, sequence 150</text>
+  <text class="m" x="556" y="94">flushed after the previous run:</text>
+  <text class="m" x="556" y="110">the time range is dirty</text>
+
+  <line class="w" x1="60" y1="136" x2="540" y2="136"/>
+  <text class="b" x="556" y="140">W(r) = 100, stored by the previous run</text>
+
+  <rect class="file" x="302" y="148" width="116" height="22" rx="3"/>
+  <text class="c" x="360" y="163">C, sequence 100</text>
+  <rect class="file" x="184" y="178" width="113" height="22" rx="3"/>
+  <text class="c" x="240" y="193">B, sequence 70</text>
+  <rect class="file" x="62" y="208" width="114" height="22" rx="3"/>
+  <text class="c" x="119" y="223">A, sequence 40</text>
+  <text class="m" x="556" y="186">at or below W(r):</text>
+  <text class="m" x="556" y="202">exported by an earlier run</text>
+
+  <text class="m c" x="60" y="266">00:00</text>
+  <text class="m c" x="180" y="266">01:00</text>
+  <text class="m c" x="300" y="266">02:00</text>
+  <text class="m c" x="420" y="266">03:00</text>
+  <text class="m c" x="540" y="266">04:00</text>
+
+  <rect class="file" x="61" y="286" width="118" height="30" rx="3"/>
+  <rect class="dirty" x="181" y="286" width="118" height="30" rx="3"/>
+  <rect class="file" x="301" y="286" width="118" height="30" rx="3"/>
+  <rect class="new" x="421" y="286" width="118" height="30" rx="3"/>
+  <text class="c" x="120" y="305">chunk 1</text>
+  <text class="c" x="240" y="305">chunk 2</text>
+  <text class="c" x="360" y="305">chunk 3</text>
+  <text class="c" x="480" y="305">chunk 4</text>
+  <text class="m" x="556" y="305">chunks of the snapshot</text>
+  <text class="m c" x="120" y="336">kept, not read</text>
+  <text class="td b c" x="240" y="336">exported again</text>
+  <text class="m c" x="360" y="336">kept, not read</text>
+  <text class="tn b c" x="480" y="336">added range</text>
+</svg>

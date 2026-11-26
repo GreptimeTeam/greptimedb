@@ -124,22 +124,7 @@ The figure shows one region. Each box is an SST file, placed horizontally by
 the time range of its rows and vertically by its file sequence. The chunk grid
 is one hour wide. The previous run ended at 03:00 and this run ends at 04:00.
 
-```text
-sequence
-      ^
-      |                               [ memtable ] in a memtable: found by a later run
-      + - - - - - - - - - - - - - - - - - - - -    F(r) = 160, read by this run
- 160  |            [ E ]                           late rows, flushed after the previous run
- 150  |                              [   D   ]     rows of the added range
-      + - - - - - - - - - - - - - - - - - - - -    W(r) = 100, stored by the previous run
- 100  |                    [   C   ]
-  70  |          [   B   ]                         exported by an earlier run
-  40  |[   A   ]
-      +---------+---------+---------+---------+--> time index
-    00:00     01:00     02:00     03:00     04:00
-      | chunk 1 | chunk 2 | chunk 3 | chunk 4 |
-          kept    replaced    kept     added
-```
+![SST files of one region by time range and file sequence, and the chunks they fall into](sequence-and-chunks.svg)
 
 - Files A, B and C have a sequence at or below `W(r)`. Their rows were exported
   by an earlier run.
