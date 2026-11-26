@@ -1,0 +1,17 @@
+SELECT count(*) AS total FROM t_metadata_count_footer;
+
++-------+
+| total |
++-------+
+| 3     |
++-------+
+
+SELECT host, v FROM t_metadata_count_footer ORDER BY host, ts;
+
++------+---+
+| host | v |
++------+---+
+| a    | 3 |
+| a    | 2 |
+| b    | 4 |
++------+---+
