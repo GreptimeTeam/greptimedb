@@ -1865,16 +1865,6 @@ impl PromPlanner {
                     grid,
                 )));
             }
-            // A tree that folds native histograms anywhere and whose split declined keeps the
-            // existing plan instead of being segmented. A segment reads the frames a boundary above
-            // it assembles - the canonical merge's collected pieces, or a region-local producer's
-            // frames - and this route has no execution that folds a histogram state out of those:
-            // every histogram fold it runs today reads its own scan. Until one is covered, the
-            // statement keeps the plan that already answers it rather than publishing a column
-            // nothing here can fill.
-            if binds_histogram_state_anywhere(root) {
-                return Ok(declined("histogram_state_above_a_segment_boundary"));
-            }
         }
         // The tags are asked for before the fields, because the walk answers for a tree the
         // compiler produced: a scalar root has no labels at all, and a sample root's are the ones
@@ -2474,20 +2464,6 @@ fn aggregate_reads_histogram(node: &NativeNode, input_kind: FieldKind) -> bool {
 /// answers a float whatever it reads.
 fn binds_histogram_state(op: &BoundAggregate) -> bool {
     aggregate_state_binding(op.kind, op.field_kind).is_some_and(|(kind, _)| kind.is_histogram())
-}
-
-/// Whether any aggregate in `node` binds a state that carries a native histogram.
-///
-/// Unlike [`aggregate_reads_histogram`] this asks what each aggregate *keeps*, not what enters it:
-/// a tree that folds a histogram anywhere in it needs the split (or nothing at all), because only
-/// the split's state carries that fold across a partition boundary.
-fn binds_histogram_state_anywhere(node: &NativeNode) -> bool {
-    node.any(&|node| {
-        matches!(
-            &node.expr,
-            NativeExpr::Aggregate { op, .. } if binds_histogram_state(op)
-        )
-    })
 }
 
 /// Whether the state a split tree exports is a native histogram's.

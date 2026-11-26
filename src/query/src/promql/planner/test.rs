@@ -6070,37 +6070,22 @@ async fn native_composed_binary_admits_complex_operands() {
         "{fused_query}: the empty answer keeps the legacy float layout: {display}"
     );
 
-    // A fold above a fold is still refused, and not because the inner one has no histogram state:
-    // `sum(sum(hist))` is an aggregate over a split aggregate, which the split declines
-    // ("an aggregate above a split aggregate"), so the state that inner fold exports cannot cross
-    // the boundary. A tree that binds histogram state anywhere and whose split declined keeps the
-    // existing plan, so the whole statement is answered there rather than segmented.
-    let refused_query = "hist * on(tag_0) sum by (tag_0) (sum(hist))";
+    // A fold above a fold runs natively too: the split declines `sum(sum(hist))`, so the tree is
+    // segmented and the outer fold runs once over the inner one's frames.
+    let segmented_query = "hist * on(tag_0) sum by (tag_0) (sum(hist))";
     let plan = build_native_fused_plan_with_provider(
-        refused_query,
+        segmented_query,
         true,
         native_mixed_kind_provider().await,
     )
     .await;
     let display = plan.display_indent().to_string();
+    let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{segmented_query}: {display}"));
     assert!(
-        find_fused_series(&plan).is_none(),
-        "`{refused_query}` has no composed answer: {display}"
+        matches!(fused.tree().root().expr, NativeExpr::Binary { .. }),
+        "{segmented_query}: the statement root is the pairing: {display}"
     );
-    let legacy = PromPlanner::stmt_to_plan_with_annotations(
-        native_mixed_kind_provider().await,
-        &build_eval_stmt(refused_query),
-        &build_query_engine_state(),
-        None,
-        false,
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        legacy.display_indent().to_string(),
-        display,
-        "`{refused_query}` must keep the existing plan"
-    );
+    assert!(!display.contains("Join:"), "{segmented_query}: {display}");
 }
 
 /// A composed binary that meets a shape its kernels refuse keeps the existing plan.
@@ -12288,11 +12273,11 @@ async fn native_histogram_plan(query: &str) -> String {
     plan.display_indent_schema().to_string()
 }
 
-/// A histogram-consuming aggregate remains a legacy fold even if its child is native.
+/// A histogram fold over a set expression remains a legacy fold even if its child is native, while
+/// one over a collapsing rewrite runs natively.
 ///
-/// A label rewrite or a set expression can pass histograms to the aggregate. Admitting that fold
-/// natively would send histograms into a float-only kernel, but independently supported child
-/// expressions may still have their own native producers below the legacy histogram aggregate.
+/// Independently supported child expressions of the set may still have their own native producers
+/// below the legacy histogram aggregate.
 #[tokio::test]
 async fn an_aggregate_over_an_unnamed_kind_keeps_the_existing_plan() {
     for query in [
@@ -12326,17 +12311,8 @@ async fn an_aggregate_over_an_unnamed_kind_keeps_the_existing_plan() {
             pending.extend(node.inputs());
         }
     }
-    // `sum(label_replace(...))` is one of the shapes above. The rewrite collapses every series onto
-    // one `tag_0`, so the canonical pass collects it with a `Merge` on the fold's own input side -
-    // and a split keeps that merge inside its per-partition prefix, where the pieces of one label
-    // set are collected a partition at a time: two colliding series that landed in different
-    // partitions are each folded apart, their states are added above the router, and the statement
-    // answers a value where Prometheus reports `vector cannot contain metrics with the same
-    // labelset`. The split therefore refuses a merge, and no other execution of this route folds a
-    // histogram state: the chain built above a boundary folds floats, and what carries a histogram
-    // fold across a partition boundary is the split's state alone. So the statement keeps the
-    // existing plan - the plan it had before the split carried a merge - and the collision is the
-    // existing route's to report.
+    // A fold over a collapsing rewrite reads what the canonical merge collected from every
+    // partition: the merge is a segment boundary, and the fold runs once above it natively.
     let table_provider =
         build_test_native_histogram_table_provider_with_stable_keys("some_metric").await;
     let plan = build_native_fused_plan_with_provider(
@@ -12347,13 +12323,12 @@ async fn an_aggregate_over_an_unnamed_kind_keeps_the_existing_plan() {
     .await;
     let display = plan.display_indent_schema().to_string();
     assert!(
-        display.contains("Aggregate: groupBy=")
-            && display.contains("prom_native_histogram_agg_sum("),
+        !display.contains("prom_native_histogram_agg_sum("),
         "the collected histogram fold kept the existing plan: {display}"
     );
     assert!(
-        find_fused_series(&plan).is_none(),
-        "the collected histogram fold ran a native fold per segment: {display}"
+        find_fused_series(&plan).is_some(),
+        "the collected histogram fold left the route: {display}"
     );
 
     // A float-producing window still answers on the route: its count, not the input histogram,
@@ -12699,9 +12674,8 @@ async fn a_segmented_histogram_answer_crosses_its_collected_boundary() {
 /// The gate cannot look at the root alone: `sum(h) * 2` has a binary root and the fold sits below
 /// it, so the value entering each aggregate is what decides. A scalar multiple of a histogram - a
 /// negation included - is a histogram, which this route's binary kernel answers, so those
-/// statements run and publish the histogram column. The shapes whose state cannot cross keep the
-/// existing plan instead, which `a_histogram_aggregate_the_split_declines_keeps_the_existing_plan`
-/// pins.
+/// statements run and publish the histogram column. The shapes the split declines are segmented
+/// instead, which `a_histogram_fold_the_split_declines_is_segmented` pins.
 #[tokio::test]
 async fn a_histogram_fold_is_admitted_below_a_pointwise_operator() {
     for query in [
@@ -12794,27 +12768,19 @@ async fn presence_and_order_aggregates_fold_histograms_natively() {
             "{query} answers a count or a `1`, not a histogram: {display}"
         );
     }
-    for query in [
-        // A skipping or counting aggregate at the root does not excuse the payload-folding one
-        // below it: the split cannot carry an aggregate above an aggregate, and a segmented tree
-        // would fold each segment's histograms into an answer no segment owns.
-        "count(sum(some_metric))",
-        "min(sum(some_metric))",
-    ] {
+    // A skipping or counting aggregate above the payload-folding one is two cuts, which the split
+    // declines; the statement is segmented and the outer aggregate reads the folded histograms.
+    for query in ["count(sum(some_metric))", "min(sum(some_metric))"] {
         let table_provider = build_test_native_histogram_table_provider("some_metric").await;
         let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
-        assert!(
-            find_fused_series(&plan).is_none(),
-            "{query} ran a native fold over histograms: {}",
-            plan.display_indent_schema()
-        );
-        // The two-aggregate cut declines the split, and a tree that folds histogram state has no
-        // segment execution here, so this is the refusal that answers it - recorded, not silent.
+        let display = plan.display_indent_schema().to_string();
+        let fused =
+            find_fused_series(&plan).unwrap_or_else(|| panic!("{query} left the route: {display}"));
+        assert_eq!(None, take_reported_decline(), "{query}: {display}");
         assert_eq!(
-            Some("histogram_state_above_a_segment_boundary"),
-            take_reported_decline(),
-            "{query}: {}",
-            plan.display_indent_schema()
+            &ArrowDataType::Float64,
+            native_value_field(fused, query).data_type(),
+            "{query} answers a count or nothing, not a histogram: {display}"
         );
     }
 }
@@ -12851,7 +12817,10 @@ async fn a_histogram_sum_over_stable_keys_keeps_its_split() {
 async fn a_float_function_over_a_split_histogram_fold_publishes_floats() {
     for query in [
         "histogram_count(sum(some_metric))",
+        "histogram_sum(sum(some_metric))",
+        "histogram_avg(sum(some_metric))",
         "histogram_quantile(0.9, sum(rate(some_metric[2m])))",
+        "histogram_fraction(0, 1, sum(some_metric))",
     ] {
         let table_provider =
             build_test_native_histogram_table_provider_with_stable_keys("some_metric").await;
@@ -12910,8 +12879,8 @@ async fn histogram_statements_run_natively_until_an_aggregate_folds_them() {
     }
     // An aggregate over a histogram now folds it natively - `sum(some_metric)` and
     // `sum(rate(some_metric[5m]))` - which is what `a_histogram_sum_or_avg_folds_natively`
-    // covers; the histogram shapes the split still declines are pinned by
-    // `a_histogram_aggregate_the_split_declines_keeps_the_existing_plan`.
+    // covers; the histogram shapes the split declines are pinned by
+    // `a_histogram_fold_the_split_declines_is_segmented`.
 }
 
 /// An instant selection over a native histogram keeps the histogram, so its output column stays the
@@ -18225,72 +18194,70 @@ async fn native_composed_binary_restores_the_context_after_a_refused_operand() {
     );
 }
 
-/// A histogram aggregate the split cannot carry keeps the existing plan instead of being segmented.
+/// A histogram fold the split cannot carry is segmented.
 ///
-/// Segmentation answers a group by folding each segment's samples and appending the pieces, so a
-/// histogram point whose contributions are spread over partitions would be folded once per segment:
-/// a sum would merge histograms that never met, and an average would average averages. Neither an
-/// aggregate above another aggregate nor a whole-vector ranking is a shape the split can move across
-/// the boundary, so the whole statement falls back rather than being cut.
+/// Neither an aggregate above another aggregate nor a whole-vector consumer is a shape the split can
+/// move across the boundary, so the per-series prefix is cut into its own segment and everything
+/// above it, the histogram fold included, runs once over every segment's frames.
 #[tokio::test]
-async fn a_histogram_aggregate_the_split_declines_keeps_the_existing_plan() {
+async fn a_histogram_fold_the_split_declines_is_segmented() {
     for query in [
         "sum(sum(some_metric))",
         "count(sum(some_metric))",
         "min(sum(some_metric))",
         "avg(sum(some_metric))",
         "topk(1, sum(some_metric))",
+        "sort(sum(some_metric))",
+        "scalar(sum(some_metric))",
+        "absent(sum(some_metric))",
+        "sum(sort(some_metric))",
     ] {
         let table_provider = build_test_native_histogram_table_provider("some_metric").await;
         let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
         let display = plan.display_indent_schema().to_string();
+        assert_eq!(None, take_reported_decline(), "{query}: {display}");
+        let fused =
+            find_fused_series(&plan).unwrap_or_else(|| panic!("{query} left the route: {display}"));
         assert!(
-            find_fused_series(&plan).is_none(),
-            "{query} ran a histogram fold per segment: {display}"
+            fused
+                .tree()
+                .root()
+                .any(&|node| matches!(node.expr, NativeExpr::Aggregate { .. })),
+            "{query} does not fold above its segment: {display}"
         );
-        // The fallback is the legacy plan, not a native segment above a missing partial.
         assert!(
-            !display.contains("FusedSeriesExec"),
-            "{query} was segmented instead of kept: {display}"
+            find_final_split(&plan).is_none(),
+            "{query} was split instead of segmented: {display}"
         );
     }
 }
 
-/// The gates that admit a histogram fold do not admit the shapes whose histogram state has no
-/// execution: a canonical merge carrying histograms.
+/// A histogram fold above a canonical merge runs natively.
+///
+/// The split refuses a merge on the fold's input side, because the merge has to collect each label
+/// set from every partition. The merge is therefore a segment boundary of its own, and the fold
+/// runs once above what it collected, so two colliding series are reported rather than folded apart.
 #[tokio::test]
-async fn histogram_state_stays_out_of_the_shapes_it_cannot_cross() {
-    // A `Merge` on the aggregate's own input side is such a shape. The merge answers one series per
-    // label set from pieces that are spread over the scan's partitions, and a split keeps it in the
-    // per-partition prefix, where two colliding pieces from different partitions are folded apart
-    // instead of reported. A histogram fold has no execution above a boundary either - the chain
-    // this route builds there folds floats - so the statement keeps the existing plan.
-    let table_provider = build_test_native_histogram_table_provider("some_metric").await;
-    let plan = build_native_fused_plan_with_provider(
+async fn histogram_state_crosses_a_canonical_merge() {
+    for query in [
         "sum(label_replace(some_metric, \"tag_0\", \"x\", \"tag_0\", \".*\"))",
-        true,
-        table_provider,
-    )
-    .await;
-    let display = plan.display_indent_schema().to_string();
-    assert!(
-        find_fused_series(&plan).is_none(),
-        "the collected histogram fold ran a native fold: {display}"
-    );
-    // Two aggregates are two cuts, which this split still cannot carry: the inner one would have to
-    // be replanned as its own pair above the outer one's answer.
-    let table_provider = build_test_native_histogram_table_provider("some_metric").await;
-    let plan = build_native_fused_plan_with_provider(
         "sum(sum(label_replace(some_metric, \"tag_0\", \"x\", \"tag_0\", \".*\")))",
-        true,
-        table_provider,
-    )
-    .await;
-    assert!(
-        find_fused_series(&plan).is_none(),
-        "the two-aggregate shape ran a native fold: {}",
-        plan.display_indent_schema()
-    );
+    ] {
+        let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+        let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+        let display = plan.display_indent_schema().to_string();
+        assert_eq!(None, take_reported_decline(), "{query}: {display}");
+        let fused =
+            find_fused_series(&plan).unwrap_or_else(|| panic!("{query} left the route: {display}"));
+        assert!(
+            matches!(fused.tree().root().expr, NativeExpr::Aggregate { .. }),
+            "{query} does not fold natively: {display}"
+        );
+        assert!(
+            find_final_split(&plan).is_none(),
+            "{query} split across the merge: {display}"
+        );
+    }
     // Two histogram tables are a multi-input tree, but each fold is its own subtree: the binary
     // above them combines two already-folded histograms, so no aggregate state crosses the pairing
     // and the statement runs. The state gate is about an aggregate reading several inputs, not
