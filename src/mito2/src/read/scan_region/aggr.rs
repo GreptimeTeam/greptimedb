@@ -905,8 +905,7 @@ mod tests {
             let file = FileHandle::new(
                 FileMeta {
                     time_range: (Timestamp::new_second(start), Timestamp::new_second(end)),
-                    num_rows: 2,
-                    ..Default::default()
+                    ..file(0, 0, 2, true).meta_ref().clone()
                 },
                 new_noop_file_purger(),
             );
