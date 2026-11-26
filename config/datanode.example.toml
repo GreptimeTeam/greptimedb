@@ -381,10 +381,14 @@ memory_pool_size = "50%"
 ## A per-request query.experimental_slice_agg_cache option overrides it.
 #+ experimental_slice_agg_cache = false
 ## Memory capacity of the slice aggregate cache.
-#+ experimental_slice_agg_cache_size = "256MiB"
+## If not set, it's default to 1/16 of OS memory with a max limitation of 512MB.
+## @toml2docs:none-default="Auto"
+#+ experimental_slice_agg_cache_size = "512MB"
 ## Most states one aggregation collects for the cache. An aggregation whose states exceed
 ## it is not cached until the idle timeout passes.
-#+ experimental_slice_agg_cache_max_collect_size = "256MiB"
+## If not set, it's default to 1/4 of experimental_slice_agg_cache_size.
+## @toml2docs:none-default="Auto"
+#+ experimental_slice_agg_cache_max_collect_size = "128MB"
 ## Cache entries not read for this long are dropped.
 #+ experimental_slice_agg_cache_idle_timeout = "1h"
 # --- End slice aggregate cache ---

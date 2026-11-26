@@ -158,6 +158,7 @@ impl SliceCacheStore {
                 .build(),
             max_collect_bytes: options
                 .experimental_slice_agg_cache_max_collect_size
+                .unwrap_or(options.experimental_slice_agg_cache_size / 4)
                 .as_bytes() as usize,
             reported_bytes: AtomicU64::new(0),
         }

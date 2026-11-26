@@ -19,6 +19,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use common_base::memory_limit::MemoryLimit;
 use common_base::readable_size::ReadableSize;
+use common_stat::get_total_memory_readable;
 use datafusion::config::{ConfigEntry, ConfigExtension, ExtensionOptions};
 use serde::{Deserialize, Serialize};
 use session::context::QueryContextRef;
@@ -158,11 +159,13 @@ pub struct QueryOptions {
     /// repeated over sliding time windows such as dashboards. A per-request
     /// `query.experimental_slice_agg_cache` option overrides it. Default: `false`.
     pub experimental_slice_agg_cache: bool,
-    /// Experimental: capacity of the slice aggregate cache. Default: `256MiB`.
+    /// Experimental: capacity of the slice aggregate cache. Default: 1/16 of the system
+    /// memory, at most `512MiB`; `256MiB` if the system memory is unknown.
     pub experimental_slice_agg_cache_size: ReadableSize,
     /// Experimental: most states one aggregation collects for the slice aggregate cache. A
-    /// plan whose states exceed it is not cached until the idle timeout passes. Default: `256MiB`.
-    pub experimental_slice_agg_cache_max_collect_size: ReadableSize,
+    /// plan whose states exceed it is not cached until the idle timeout passes. Default: 1/4
+    /// of [Self::experimental_slice_agg_cache_size], so one plan cannot fill the cache.
+    pub experimental_slice_agg_cache_max_collect_size: Option<ReadableSize>,
     /// Experimental: slice aggregate cache entries not read for this long are dropped.
     /// Default: `1h`.
     #[serde(with = "humantime_serde")]
@@ -185,8 +188,11 @@ impl Default for QueryOptions {
             experimental_memory_pool_policy: QueryMemoryPoolPolicy::Greedy,
             experimental_native_promql: false,
             experimental_slice_agg_cache: false,
-            experimental_slice_agg_cache_size: ReadableSize::mb(256),
-            experimental_slice_agg_cache_max_collect_size: ReadableSize::mb(256),
+            experimental_slice_agg_cache_size: get_total_memory_readable()
+                .map_or(ReadableSize::mb(256), |memory| {
+                    std::cmp::min(memory / 16, ReadableSize::mb(512))
+                }),
+            experimental_slice_agg_cache_max_collect_size: None,
             experimental_slice_agg_cache_idle_timeout: Duration::from_secs(3600),
         }
     }
