@@ -6019,7 +6019,6 @@ async fn test_fenced_repair_rejects_upper_bound_behind_flushed_frontier() {
             region_id,
             ScanRequest {
                 memtable_max_sequence: Some(frozen_high),
-                require_flushed_frontier: true,
                 ..Default::default()
             },
         )
@@ -6040,17 +6039,17 @@ async fn test_fenced_repair_rejects_upper_bound_behind_flushed_frontier() {
     assert_eq!(StatusCode::RequestOutdated, err.status_code());
 }
 
-/// A read that requires the flushed frontier recomputes a whole window under a frozen `H`,
-/// so it reads as a plain scan: no exact sequence range is requested, which keeps every
-/// candidate file (there is no file-granularity pruning by the cursor, even when a file's
-/// own barrier is at or below it) and applies no row-level sequence range at all. Only a
-/// read that may cross an invalid boundary forces a row-sequence override, so this read
-/// reports the numbers its writer allocated instead of virtualizing every row at the file's
-/// barrier: what a stale cursor can no longer explain is stated per file, so the rows under
-/// the invalid boundary are read instead of being cut by a region-level boundary.
+/// A scan whose cursor sits exactly on an SST's admission barrier keeps that file: without an
+/// exact sequence range there is no file-granularity pruning by the cursor (even when a file's
+/// own barrier is at or below it) and no row-level sequence range at all. Only a read that may
+/// cross a boundary a stale cursor can no longer explain forces a row-sequence override, so this
+/// read reports the numbers its writer allocated instead of virtualizing every row at the file's
+/// barrier, and the rows below the barrier are read instead of being cut by a region-level
+/// boundary.
 #[tokio::test]
-async fn test_require_flushed_frontier_reads_the_complete_window() {
-    let mut env = TestEnv::with_prefix("test_require_flushed_frontier_reads_complete_window").await;
+async fn test_scan_with_cursor_on_file_barrier_reads_the_complete_window() {
+    let mut env =
+        TestEnv::with_prefix("test_scan_with_cursor_on_file_barrier_reads_complete_window").await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
@@ -6115,10 +6114,9 @@ async fn test_require_flushed_frontier_reads_the_complete_window() {
         region_id,
         ScanRequest {
             // The cursor sits exactly on the file's barrier: an exact range would prune the
-            // whole file, and a read that requires the flushed frontier keeps it.
+            // whole file, while this plain scan keeps it.
             memtable_min_sequence: Some(file_barrier),
             memtable_max_sequence: Some(frozen_high),
-            require_flushed_frontier: true,
             ..Default::default()
         },
     )
@@ -6134,8 +6132,8 @@ async fn test_require_flushed_frontier_reads_the_complete_window() {
             (5_000, 6)
         ],
         rows,
-        "a read that requires the flushed frontier keeps the rows below it and reports the \
-         numbers their writer allocated, not the file's barrier"
+        "a plain scan keeps the rows below the cursor's barrier and reports the numbers their \
+         writer allocated, not the file's barrier"
     );
 }
 

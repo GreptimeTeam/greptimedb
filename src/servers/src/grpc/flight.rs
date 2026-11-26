@@ -841,17 +841,16 @@ mod tests {
             ),
             (
                 r#"{"1":{"shards":[{"expr":null,"seq":10}]}}"#,
-                "Missing cursor version in flow.incremental_after_seqs for region 1: an object value must state version 2 or 3",
+                "Missing cursor version in flow.incremental_after_seqs for region 1: an object value must state version 2",
             ),
             (
                 r#"{"1":{"version":1,"shards":[{"expr":null,"seq":10}]}}"#,
-                "Unsupported cursor version Number(1) in flow.incremental_after_seqs for region 1: this build reads versions 2 and 3",
+                "Unsupported cursor version Number(1) in flow.incremental_after_seqs for region 1: this build reads version 2",
             ),
-            // A version this build does not know is refused, which is how an older build
-            // refuses the version that states a cursor's upper bound.
+            // A version this build does not know is refused.
             (
                 r#"{"1":{"version":4,"shards":[{"expr":null,"seq":10,"until":20}]}}"#,
-                "Unsupported cursor version Number(4) in flow.incremental_after_seqs for region 1: this build reads versions 2 and 3",
+                "Unsupported cursor version Number(4) in flow.incremental_after_seqs for region 1: this build reads version 2",
             ),
             (
                 r#"{"not-a-region":{"version":2,"shards":[{"expr":null,"seq":10}]}}"#,
