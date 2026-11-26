@@ -190,7 +190,7 @@ impl MemtableVersion {
             + self
                 .immutables
                 .iter()
-                .map(|mem| mem.stats().decoded_bytes())
+                .map(|(mem, _)| mem.stats().decoded_bytes())
                 .sum::<usize>()
     }
 
