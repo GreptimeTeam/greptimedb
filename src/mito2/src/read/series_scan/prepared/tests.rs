@@ -338,14 +338,9 @@ fn rows(chunks: &[RawSeriesChunk]) -> Vec<(Vec<u8>, i64, f64)> {
                 };
                 (
                     {
-                        let key = if chunk.metric.is_some() {
-                            &chunk.primary_key.as_slice()[8..]
-                        } else {
-                            chunk.primary_key.as_slice()
-                        };
                         let (table, tsid) =
                             mito_codec::row_converter::SparsePrimaryKeyCodec::schemaless()
-                                .decode_ids(key)
+                                .decode_ids(chunk.primary_key.as_slice())
                                 .unwrap();
                         [
                             table.to_be_bytes().as_slice(),
@@ -1192,7 +1187,7 @@ async fn ordinal_range_batches_sample_requests_and_pushes_time_bounds() {
         let keys = source
             .candidates
             .iter()
-            .map(|c| c.merge_key.to_vec())
+            .map(|c| c.key.to_vec())
             .collect::<BTreeSet<_>>();
         for request in requests.iter() {
             let requested = request
@@ -2463,7 +2458,7 @@ async fn overlapping_buckets_keep_colliding_physical_tags(#[case] mixed: bool) {
     let identities: HashSet<Vec<u8>> = source
         .candidates
         .iter()
-        .map(|candidate| candidate.merge_key.to_vec())
+        .map(|candidate| candidate.key.to_vec())
         .collect();
     assert_eq!(2, identities.len(), "colliding series keep distinct keys");
     if !mixed {
@@ -2642,13 +2637,11 @@ async fn long_keys_prepare_and_read() {
         .unwrap();
     let source = scan.prepared.source.get().unwrap().as_ref().unwrap();
     // The fixture's own series prepare beside this one; the long key must survive preparation
-    // byte for byte and own its samples. Served samples make `primary_key` region-qualified.
-    let mut expected = metadata.region_id.as_u64().to_be_bytes().to_vec();
-    expected.extend_from_slice(&key);
+    // byte for byte and own its samples. The identity is the stored key itself, not a
+    // region-qualified form, so fragments of a series in other regions report the same one.
     let ordinal = (0..source.num_series())
         .find(|ordinal| {
-            source.series_info(*ordinal).unwrap().primary_key.as_ref() as &[u8]
-                == expected.as_slice()
+            source.series_info(*ordinal).unwrap().primary_key.as_ref() as &[u8] == key.as_slice()
         })
         .expect("preparation must keep the series whose key is longer than 8 KiB");
     let chunks = source

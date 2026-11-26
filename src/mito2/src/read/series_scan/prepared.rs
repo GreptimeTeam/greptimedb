@@ -363,12 +363,11 @@ fn predicate_conjuncts(predicate: Option<&Predicate>) -> Vec<&Expr> {
 struct Candidate {
     /// Coarse prefix of the exact key; only a hash, never identity.
     id: MetricSeriesId,
-    /// The one owned key allocation: the region-qualified exact key.
+    /// The canonical sparse key: the identity every comparison, sample attribution and output
+    /// chunk uses. It must not be qualified by region: every region holding a fragment of one
+    /// series has to report the same identity, or the fragments never meet in one owner above
+    /// the regions.
     key: Buffer,
-    /// The canonical sparse key, a view of `key`'s bytes. This is the identity every
-    /// comparison and sample attribution uses, so it is stored once rather than once per
-    /// representation.
-    merge_key: Buffer,
     tags: HashMap<u32, Option<String>>,
     metric: Option<SeriesLabels>,
 }
@@ -754,24 +753,7 @@ impl ColumnarPreparedSource {
                         }
                     }
                     tag_values += values.len() as u64;
-                    // `merge_key` is always the exact key bytes. Explicit-label chunks keep
-                    // the region-qualified form as their `key`, so `primary_key` stays
-                    // region-scoped while identity and ordering stay exact.
-                    let key = if direct_labels {
-                        let mut buffer = Vec::with_capacity(8 + exact.bytes().len());
-                        buffer.extend_from_slice(&metadata.region_id.as_u64().to_be_bytes());
-                        buffer.extend_from_slice(exact.bytes());
-                        Buffer::from(buffer)
-                    } else {
-                        Buffer::from(exact.bytes().to_vec())
-                    };
-                    let merge_key = if direct_labels {
-                        key.slice_with_length(8, exact.bytes().len())
-                    } else {
-                        key.clone()
-                    };
-                    // The exact key is stored once: `merge_key` is a view of `key`, so the
-                    // reservation charges the single key allocation the candidate retains.
+                    let key = Buffer::from(exact.bytes().to_vec());
                     let bytes = key.len()
                         + values.values().flatten().map(String::len).sum::<usize>()
                         + values.capacity() * (std::mem::size_of::<(u32, Option<String>)>() + 16)
@@ -802,7 +784,6 @@ impl ColumnarPreparedSource {
                         Candidate {
                             id,
                             key,
-                            merge_key,
                             tags: values,
                             metric,
                         },
@@ -903,7 +884,7 @@ impl ColumnarPreparedSource {
                         .iter()
                         .map(|candidate| {
                             std::mem::size_of::<ExactSeriesKey>()
-                                + candidate.merge_key.len()
+                                + candidate.key.len()
                                 + std::mem::size_of::<MetricSeriesId>()
                                 + 64
                         })
@@ -918,7 +899,7 @@ impl ColumnarPreparedSource {
                     let mut offsets = mito_codec::row_converter::SparseOffsetsCache::new();
                     let keys = candidates[range.clone()]
                         .iter()
-                        .map(|c| ExactSeriesKey::from_sparse_key(c.merge_key.as_slice(), &mut offsets))
+                        .map(|c| ExactSeriesKey::from_sparse_key(c.key.as_slice(), &mut offsets))
                         .collect::<Result<BTreeSet<_>>>()?;
                     let mut stage_metrics = crate::metrics::ColumnarReadMetrics::default();
                     let schema = reader.schema();
@@ -946,7 +927,7 @@ impl ColumnarPreparedSource {
                         let SamplesBatch { batch, key } = samples;
                         let ordinal = candidates[range.clone()]
                             .binary_search_by(|candidate| {
-                                candidate.merge_key.as_slice().cmp(key.bytes())
+                                candidate.key.as_slice().cmp(key.bytes())
                             })
                             .map_err(|_| invalid("sample contains an unselected series"))?
                             + range.start;
@@ -1036,7 +1017,7 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
             // The resolver can outlive the exhausted sample stream.
             let _reservation = &reservation;
             let ordinal = candidates
-                .binary_search_by(|candidate| candidate.merge_key.as_slice().cmp(key.as_slice()))
+                .binary_search_by(|candidate| candidate.key.as_slice().cmp(key.as_slice()))
                 .map_err(|_| BoxedError::new(invalid("unknown merged series identity")))?;
             Ok((
                 candidates[ordinal].key.clone(),
@@ -1118,11 +1099,7 @@ fn sample_to_flat(
     let schema = sample_schema
         .cloned()
         .unwrap_or_else(|| context.input.mapper.input_arrow_schema(false));
-    let key = if sample_schema.is_some() {
-        &candidate.merge_key
-    } else {
-        &candidate.key
-    };
+    let key = &candidate.key;
     let metadata = context.input.region_metadata();
     let mut arrays = Vec::<ArrayRef>::new();
     for field in schema.fields() {
