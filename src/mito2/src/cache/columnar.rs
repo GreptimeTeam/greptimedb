@@ -287,7 +287,7 @@ impl PartArea {
         &self,
         range: std::ops::Range<u64>,
         bytes: bytes::Bytes,
-        decode: impl Fn(&bytes::Bytes) -> Result<T>,
+        mut decode: impl FnMut(&bytes::Bytes) -> Result<T>,
     ) -> Result<T> {
         use snafu::ResultExt;
         let result = decode(&bytes);

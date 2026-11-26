@@ -652,24 +652,32 @@ async fn load_block_key(
     let entry = fetched
         .pop()
         .ok_or_else(|| invalid("missing sample key response"))?;
-    let entry = reader
+    decode_block_key(reader, block, entry, offsets).await
+}
+
+async fn decode_block_key(
+    reader: &PartArea,
+    block: &Block,
+    entry: bytes::Bytes,
+    offsets: &mut mito_codec::row_converter::SparseOffsetsCache,
+) -> Result<ExactSeriesKey> {
+    reader
         .recover(
             block.key.offset..block.key.checksum_end()?,
             entry,
             |bytes| {
-                verified_key(bytes, block.key.length)?;
-                Ok(bytes.clone())
+                let key = ExactSeriesKey::from_sparse_key(
+                    verified_key(bytes, block.key.length)?,
+                    offsets,
+                )?;
+                require(
+                    key.id() == block.id,
+                    "sample block series key disagrees with its identifier",
+                )?;
+                Ok(key)
             },
         )
-        .await?;
-    let key = ExactSeriesKey::from_sparse_key(&entry[..block.key.length as usize], offsets)?;
-    // A key that parses but claims another identifier is a malformed reference: ownership would
-    // silently point at the wrong series.
-    require(
-        key.id() == block.id,
-        "sample block series key disagrees with its identifier",
-    )?;
-    Ok(key)
+        .await
 }
 
 /// Peak bytes [`fetch_ranges`] can hold at once while serving `ranges`.
@@ -757,23 +765,7 @@ async fn load_page_keys(
     };
     let fetched = fetch_ranges(reader, &ranges, metrics).await?;
     for (block, entry) in wanted.iter().take(window).zip(fetched) {
-        let entry = reader
-            .recover(
-                block.key.offset..block.key.checksum_end()?,
-                entry,
-                |bytes| {
-                    verified_key(bytes, block.key.length)?;
-                    Ok(bytes.clone())
-                },
-            )
-            .await?;
-        let key = ExactSeriesKey::from_sparse_key(&entry[..block.key.length as usize], offsets)?;
-        // A key that parses but claims another identifier is a malformed reference: ownership
-        // would silently point at the wrong series.
-        require(
-            key.id() == block.id,
-            "sample block series key disagrees with its identifier",
-        )?;
+        let key = decode_block_key(reader, block, entry, offsets).await?;
         keys.insert((block.key.offset, block.key.length), key);
     }
     Ok(())
