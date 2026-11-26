@@ -148,6 +148,10 @@ impl ParquetPageCache {
         Ok(result)
     }
 
+    pub(crate) fn invalidate_native(&self, namespace: store_api::storage::FileId, path: Arc<str>) {
+        self.cache.invalidate_if(move |file| matches!(file, PageFile::Native { namespace: ns, path: p, .. } if *ns == namespace && p == &path)).expect("page cache supports invalidation predicates");
+    }
+
     pub(crate) fn page_size(&self) -> u64 {
         self.page_size
     }

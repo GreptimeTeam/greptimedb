@@ -480,64 +480,11 @@ impl WriteCache {
         Ok(true)
     }
 
+    pub(crate) const NATIVE_STAGE: &'static str = "cache/staging/narthex/";
+
     /// Staging is distinct from authoritative paths even if both stores share an FS root.
     pub(crate) fn native_stage(path: &str) -> String {
-        format!("cache/staging/narthex/{path}")
-    }
-
-    /// Uploads staged parts in inventory order, then publishes the manifest.
-    pub(crate) async fn upload_native(
-        &self,
-        inventory: Vec<(IndexKey, crate::series_index::artifact::ArtifactObject)>,
-        remote: &ObjectStore,
-        op_type: OperationType,
-        cancellation: Option<&CancellationToken>,
-    ) -> Result<()> {
-        let mut guard = NativeUpload {
-            cache: self.file_cache.clone(),
-            remote: remote.clone(),
-            inventory,
-        };
-        let result = async {
-            for (key, object) in &guard.inventory {
-                let path = self.file_cache.cache_file_path(*key);
-                self.file_cache
-                    .local_store()
-                    .rename(&Self::native_stage(&object.path), &path)
-                    .await
-                    .context(error::OpenDalSnafu)?;
-                self.upload_with_cancellation(
-                    *key,
-                    &object.path,
-                    remote,
-                    UploadOptions {
-                        op_type,
-                        write_buffer_size: DEFAULT_WRITE_BUFFER_SIZE,
-                    },
-                    cancellation,
-                )
-                .await?;
-            }
-            Ok(())
-        }
-        .await;
-        if result.is_err() {
-            guard.clean().await;
-        } else {
-            if let Some(dir) = guard
-                .inventory
-                .first()
-                .and_then(|(_, o)| crate::sst::location::parent_dir(&o.path))
-            {
-                let _ = self
-                    .file_cache
-                    .local_store()
-                    .delete(&Self::native_stage(dir))
-                    .await;
-            }
-            guard.inventory.clear();
-        }
-        result
+        format!("{}{path}", Self::NATIVE_STAGE)
     }
 
     /// Uploads a Parquet file or a Puffin file to the remote object store.
@@ -664,40 +611,72 @@ impl WriteCache {
 }
 
 /// The writer owns a fresh physical file ID until the complete upload returns.
-struct NativeUpload {
-    cache: FileCacheRef,
+pub(crate) struct NativeUpload {
+    cache: WriteCacheRef,
     remote: ObjectStore,
-    inventory: Vec<(IndexKey, crate::series_index::artifact::ArtifactObject)>,
+    manifest_key: IndexKey,
+    op_type: OperationType,
+    cancellation: Option<CancellationToken>,
+    uploaded: Vec<(IndexKey, String)>,
 }
 
 impl NativeUpload {
-    async fn clean(&mut self) {
-        for (key, object) in &self.inventory {
+    pub(crate) fn new(
+        cache: &WriteCacheRef,
+        remote: &ObjectStore,
+        manifest_key: IndexKey,
+        op_type: OperationType,
+        cancellation: Option<CancellationToken>,
+    ) -> Self {
+        Self {
+            cache: cache.clone(),
+            remote: remote.clone(),
+            manifest_key,
+            op_type,
+            cancellation,
+            uploaded: Vec::new(),
+        }
+    }
+
+    /// Each codec closes parts in ID order and closes the manifest last.
+    pub(crate) async fn upload_closed(&mut self, path: &str) -> Result<()> {
+        let mut key = self.manifest_key;
+        if !path.ends_with("/manifest.json") {
+            let part = Some(self.uploaded.len() as u32);
+            key.file_type = match key.file_type {
+                FileType::Samples(_) => FileType::Samples(part),
+                FileType::Series(_) => FileType::Series(part),
+                _ => unreachable!(),
+            };
+        }
+        self.uploaded.push((key, path.to_owned()));
+        let disk = self.cache.file_cache();
+        disk.local_store()
+            .rename(&WriteCache::native_stage(path), &disk.cache_file_path(key))
+            .await
+            .context(error::OpenDalSnafu)?;
+        self.cache
+            .upload_with_cancellation(
+                key,
+                path,
+                &self.remote,
+                UploadOptions {
+                    op_type: self.op_type,
+                    write_buffer_size: DEFAULT_WRITE_BUFFER_SIZE,
+                },
+                self.cancellation.as_ref(),
+            )
+            .await
+    }
+
+    pub(crate) async fn clean(&mut self) {
+        for (key, path) in &self.uploaded {
             self.cache.remove(*key).await;
-            let local = self.cache.local_store();
-            for (store, path) in [
-                (&local, WriteCache::native_stage(&object.path)),
-                (&self.remote, object.path.clone()),
-            ] {
-                if let Err(error) = store.delete(&path).await {
-                    common_telemetry::warn!(error; "Failed to remove unpublished native object {}", path);
-                }
+            if let Err(error) = self.remote.delete(path).await {
+                common_telemetry::warn!(error; "Failed to remove unpublished native object {}", path);
             }
         }
-        self.inventory.clear();
-    }
-}
-
-impl Drop for NativeUpload {
-    fn drop(&mut self) {
-        if !self.inventory.is_empty() {
-            let mut owned = Self {
-                cache: self.cache.clone(),
-                remote: self.remote.clone(),
-                inventory: std::mem::take(&mut self.inventory),
-            };
-            common_runtime::spawn_compact(async move { owned.clean().await });
-        }
+        self.uploaded.clear();
     }
 }
 
@@ -1068,15 +1047,28 @@ mod tests {
                 },
             ));
         }
-        let error = cache
-            .upload_native(
-                inventory.clone(),
-                &remote,
-                OperationType::Compact,
-                Some(&signal),
-            )
+        let mut upload = NativeUpload::new(
+            &cache,
+            &remote,
+            IndexKey::new(owner, id, FileType::Series(None)),
+            OperationType::Compact,
+            Some(signal),
+        );
+        for (_, object) in &inventory[..2] {
+            upload.upload_closed(&object.path).await.unwrap();
+            assert!(remote.exists(&object.path).await.unwrap());
+            assert!(
+                !local
+                    .exists(&WriteCache::native_stage(&object.path))
+                    .await
+                    .unwrap()
+            );
+        }
+        let error = upload
+            .upload_closed(&inventory[2].1.path)
             .await
             .unwrap_err();
+        upload.clean().await;
         assert_eq!(
             matches!(error, error::Error::SstWriteCancelled { .. }),
             cancel

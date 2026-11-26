@@ -20,7 +20,7 @@ mod metadata;
 pub(crate) mod reader;
 #[cfg(test)]
 mod tests;
-mod writer;
+pub(crate) mod writer;
 
 use std::collections::HashSet;
 use std::sync::Arc;

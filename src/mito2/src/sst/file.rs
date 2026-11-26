@@ -1319,6 +1319,15 @@ impl UncommittedSsts {
             return Ok(());
         }
 
+        if let Some(cache) = self.cache_manager.as_ref().and_then(|c| c.write_cache()) {
+            let ids: std::collections::HashSet<_> = files
+                .iter()
+                .filter_map(|(id, f)| matches!(f, UncommittedFile::Narthex).then_some(*id))
+                .collect();
+            if !ids.is_empty() {
+                cache.file_cache().remove_native(self.region_id, &ids).await;
+            }
+        }
         let mut delete_index = false;
         let mut file_ids = Vec::new();
         let mut failure = None;

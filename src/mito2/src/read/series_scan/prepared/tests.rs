@@ -1858,6 +1858,23 @@ async fn native_preparation_metadata_benchmark() {
 }
 
 #[test]
+fn prefilter_distinguishes_a_tag_name_from_a_compound_predicate() {
+    use datatypes::arrow::datatypes::{DataType, Field};
+    let tag = "x IS NULL OR x";
+    let schema = Schema::new(vec![
+        Field::new("x", DataType::Utf8, true),
+        Field::new(tag, DataType::Utf8, true),
+    ]);
+    let left = col("x").is_null().or(col("x").is_null());
+    let right = Expr::Column(datafusion_common::Column::from_name(tag)).is_null();
+    assert_eq!(left.to_string(), right.to_string());
+    let (left, accepted_left) = series_read_request(&schema, &[&left]);
+    let (right, accepted_right) = series_read_request(&schema, &[&right]);
+    assert_eq!((accepted_left, accepted_right), (vec![true], vec![true]));
+    assert_ne!(left.filter_exprs, right.filter_exprs);
+}
+
+#[test]
 fn series_pushdown_preserves_predicate_semantics() {
     use datafusion_expr::{Expr, Operator};
     use datatypes::arrow::datatypes::{DataType, Field};

@@ -492,6 +492,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     edit,
                     result,
                     // we always need to restore region state after region edit
+                    preload_sst_cache,
                     update_region_state: true,
                     is_staging,
                 }),
@@ -603,9 +604,22 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     edit.series_indexes_to_remove
                         .retain(|id| !manifest.series_indexes.contains_key(&id.file_id()));
                 }
+                let preload = edit_result.preload_sst_cache.then(|| {
+                    edit.files_to_add
+                        .iter()
+                        .chain(&edit.series_indexes_to_add)
+                        .filter(|file| !matches!(file.format, file::FileFormat::Parquet))
+                        .map(|file| (file.file_id(), file.level))
+                        .collect::<Vec<_>>()
+                });
                 region
                     .version_control
                     .apply_edit(Some(edit), &[], region.file_purger.clone());
+                if let Some(files) = preload
+                    && let Some(cache) = self.cache_manager.write_cache()
+                {
+                    preload_native_files(&region, cache, &self.listener, files);
+                }
             }
             if edit_result.update_region_state {
                 region.switch_state_to_writable(RegionLeaderState::Editing);
@@ -1235,48 +1249,68 @@ async fn edit_region(
             .stop()
             .await;
     }
-    if result.is_ok()
-        && narthex_format
-        && preload_sst_cache
-        && let Some(write_cache) = cache_manager.write_cache()
-    {
-        for file in edit.files_to_add.iter().chain(&edit.series_indexes_to_add) {
-            let inventory = IndexKey::native_objects(
-                file,
-                &region.access_layer.build_region_dir(file.region_id),
-            );
-            let cache = write_cache.clone();
-            let store = region.access_layer.object_store().clone();
-            let listener = listener.clone();
-            let id = file.file_id;
-            common_runtime::spawn_global(async move {
-                WRITE_CACHE_INFLIGHT_DOWNLOAD.inc();
-                let mut downloaded = false;
-                for (key, object) in &inventory {
-                    match cache
-                        .download_if_absent(*key, &object.path, &store, object.file_size)
-                        .await
-                    {
-                        Ok(new) => downloaded |= new,
-                        Err(error) => {
-                            WRITE_CACHE_INFLIGHT_DOWNLOAD.dec();
-                            common_telemetry::warn!(error; "Failed to preload native object {}", object.path);
-                            return;
-                        }
+    result.map(|_| ())
+}
+
+fn preload_native_files(
+    region: &MitoRegionRef,
+    cache: &crate::cache::write_cache::WriteCacheRef,
+    listener: &WorkerListener,
+    files: Vec<(file::RegionFileId, file::Level)>,
+) {
+    let version = region.version();
+    for (id, level) in files {
+        let Some(handle) = version
+            .ssts
+            .series_indexes()
+            .get(&id.file_id())
+            .or_else(|| {
+                version.ssts.levels()[level as usize]
+                    .files
+                    .get(&id.file_id())
+            })
+            .filter(|h| h.file_id() == id)
+            .cloned()
+        else {
+            continue;
+        };
+        let file = handle.meta_ref();
+        let inventory =
+            IndexKey::native_objects(file, &region.access_layer.build_region_dir(file.region_id));
+        let cache = cache.clone();
+        let store = region.access_layer.object_store().clone();
+        let listener = listener.clone();
+        let id = file.file_id;
+        common_runtime::spawn_global(async move {
+            WRITE_CACHE_INFLIGHT_DOWNLOAD.inc();
+            let _pin = handle;
+            let mut downloaded = false;
+            for (key, object) in &inventory {
+                if !cache.file_cache().can_retain(*key, object.file_size) {
+                    continue;
+                }
+                match cache
+                    .download_if_absent(*key, &object.path, &store, object.file_size)
+                    .await
+                {
+                    Ok(new) => downloaded |= new,
+                    Err(error) => {
+                        WRITE_CACHE_INFLIGHT_DOWNLOAD.dec();
+                        common_telemetry::warn!(error; "Failed to preload native object {}", object.path);
+                        return;
                     }
                 }
-                WRITE_CACHE_INFLIGHT_DOWNLOAD.dec();
-                if downloaded
-                    && inventory
-                        .iter()
-                        .all(|(key, _)| cache.file_cache().contains_key(key))
-                {
-                    listener.on_file_cache_filled(id);
-                }
-            });
-        }
+            }
+            WRITE_CACHE_INFLIGHT_DOWNLOAD.dec();
+            if downloaded
+                && inventory
+                    .iter()
+                    .all(|(key, _)| cache.file_cache().contains_key(key))
+            {
+                listener.on_file_cache_filled(id);
+            }
+        });
     }
-    result.map(|_| ())
 }
 
 #[cfg(test)]

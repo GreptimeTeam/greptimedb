@@ -161,92 +161,97 @@ impl ColumnarReader {
             length,
         )
         .await?;
-        let bytes = object.read(0..length).await.context(OpenDalSnafu)?;
-        // A manifest that the current format cannot read predates exact identity or is
-        // corrupt; either way it must never be reused.
-        let mut manifest: Manifest = serde_json::from_slice(&bytes).map_err(|error| {
-            invalid(format!(
-                "series manifest is not readable; rebuild the index: {error}"
-            ))
-        })?;
-        manifest.prefix = Some(
-            path.strip_suffix("manifest.json")
-                .ok_or_else(|| invalid("invalid narthex series manifest path"))?
-                .to_string(),
-        );
-        if manifest.version != VERSION {
-            return Err(unsupported("series manifest version"));
-        }
-        // Old artifacts can be structurally valid and perfectly ordered, so identity
-        // encoding is the only thing that keeps their lost labels out of reads.
-        if manifest.identity_encoding != IdentityEncoding::CURRENT_SERIES_INDEX {
-            return Err(unsupported(
-                "series manifest identity encoding; rebuild the series index",
-            ));
-        }
-        require(
-            manifest.format == ArtifactFormat::ColumnarSeries
-                && manifest.region_id == region
-                && manifest.generation == entry.index_uuid,
-            "series manifest identity mismatch",
-        )?;
-        let mut coverage = entry.clone();
-        coverage.artifact = None;
-        coverage.file_size = 0;
-        require(
-            manifest.coverage == coverage,
-            "series manifest coverage mismatch",
-        )?;
-        let mut names = HashSet::from([
-            TABLE_ID_COLUMN.to_owned(),
-            TSID_COLUMN.to_owned(),
-            ROW_COUNT_COLUMN.to_owned(),
-        ]);
-        let mut ids = HashSet::new();
-        for tag in &manifest.tags {
-            require(
-                names.insert(tag.name.clone()) && ids.insert(tag.column_id),
-                "duplicate series tag name/id",
-            )?;
-        }
-        let mut paths = HashSet::from([path]);
-        let mut file_size = length;
-        let mut previous = None;
-        for (index, part) in manifest.files.iter().enumerate() {
-            require(
-                index as u64 == u64::from(part.part_id)
-                    && part.first <= part.last
-                    && part.num_series > 0
-                    && part.file_size >= metadata::HEADER_SIZE + metadata::TRAILER_SIZE,
-                "invalid series part entry",
-            )?;
-            if let Some(last) = previous {
-                // Coarse bounds may touch when two colliding series straddle a part.
-                require(last <= part.first, "unordered series parts")?;
-            }
-            previous = Some(part.last);
-            let part_path = manifest.part_path(part.part_id);
-            require(
-                objects.get(part_path.as_str()) == Some(&part.file_size),
-                "series part length mismatch",
-            )?;
-            paths.insert(part_path);
-            file_size = file_size
-                .checked_add(part.file_size)
-                .ok_or_else(|| invalid("series artifact length overflow"))?;
-        }
-        require(
-            paths.len() == artifact.objects.len()
-                && artifact
-                    .objects
-                    .iter()
-                    .all(|object| paths.contains(&object.path)),
-            "series artifact object set mismatch",
-        )?;
-        require(
-            file_size == artifact.file_size && file_size == entry.file_size,
-            "series artifact size mismatch",
-        )?;
+        let manifest = object
+            .validated(vec![0..length], |buffers| {
+                let bytes = &buffers[0];
+                // A manifest that the current format cannot read predates exact identity or is
+                // corrupt; either way it must never be reused.
+                let mut manifest: Manifest = serde_json::from_slice(bytes).map_err(|error| {
+                    invalid(format!(
+                        "series manifest is not readable; rebuild the index: {error}"
+                    ))
+                })?;
+                manifest.prefix = Some(
+                    path.strip_suffix("manifest.json")
+                        .ok_or_else(|| invalid("invalid narthex series manifest path"))?
+                        .to_string(),
+                );
+                if manifest.version != VERSION {
+                    return Err(unsupported("series manifest version"));
+                }
+                // Old artifacts can be structurally valid and perfectly ordered, so identity
+                // encoding is the only thing that keeps their lost labels out of reads.
+                if manifest.identity_encoding != IdentityEncoding::CURRENT_SERIES_INDEX {
+                    return Err(unsupported(
+                        "series manifest identity encoding; rebuild the series index",
+                    ));
+                }
+                require(
+                    manifest.format == ArtifactFormat::ColumnarSeries
+                        && manifest.region_id == region
+                        && manifest.generation == entry.index_uuid,
+                    "series manifest identity mismatch",
+                )?;
+                let mut coverage = entry.clone();
+                coverage.artifact = None;
+                coverage.file_size = 0;
+                require(
+                    manifest.coverage == coverage,
+                    "series manifest coverage mismatch",
+                )?;
+                let mut names = HashSet::from([
+                    TABLE_ID_COLUMN.to_owned(),
+                    TSID_COLUMN.to_owned(),
+                    ROW_COUNT_COLUMN.to_owned(),
+                ]);
+                let mut ids = HashSet::new();
+                for tag in &manifest.tags {
+                    require(
+                        names.insert(tag.name.clone()) && ids.insert(tag.column_id),
+                        "duplicate series tag name/id",
+                    )?;
+                }
+                let mut paths = HashSet::from([path.clone()]);
+                let mut file_size = length;
+                let mut previous = None;
+                for (index, part) in manifest.files.iter().enumerate() {
+                    require(
+                        index as u64 == u64::from(part.part_id)
+                            && part.first <= part.last
+                            && part.num_series > 0
+                            && part.file_size >= metadata::HEADER_SIZE + metadata::TRAILER_SIZE,
+                        "invalid series part entry",
+                    )?;
+                    if let Some(last) = previous {
+                        // Coarse bounds may touch when two colliding series straddle a part.
+                        require(last <= part.first, "unordered series parts")?;
+                    }
+                    previous = Some(part.last);
+                    let part_path = manifest.part_path(part.part_id);
+                    require(
+                        objects.get(part_path.as_str()) == Some(&part.file_size),
+                        "series part length mismatch",
+                    )?;
+                    paths.insert(part_path);
+                    file_size = file_size
+                        .checked_add(part.file_size)
+                        .ok_or_else(|| invalid("series artifact length overflow"))?;
+                }
+                require(
+                    paths.len() == artifact.objects.len()
+                        && artifact
+                            .objects
+                            .iter()
+                            .all(|object| paths.contains(&object.path)),
+                    "series artifact object set mismatch",
+                )?;
+                require(
+                    file_size == artifact.file_size && file_size == entry.file_size,
+                    "series artifact size mismatch",
+                )?;
+                Ok(manifest)
+            })
+            .await?;
         Ok(Self {
             store,
             schema: manifest.schema(),
@@ -383,7 +388,7 @@ impl ColumnarReader {
                 let size = part.file_size;
                 let reader = ObjectReader::open(cache.as_ref(), _handle.native_file(), crate::cache::file_cache::FileType::Series(Some(part.part_id)), &store, &path, size).await?;
                 let trailer = metadata_cache::load(cache.as_ref(), format!("{path}/{size}/framing"), |_| std::mem::size_of::<Trailer>(), async {
-                let framing = reader.fetch(vec![0..metadata::HEADER_SIZE, size-metadata::TRAILER_SIZE..size]).await.context(OpenDalSnafu)?;
+                reader.validated(vec![0..metadata::HEADER_SIZE, size-metadata::TRAILER_SIZE..size], |framing| {
                 require(
                     framing.len() == 2
                         && framing[0].len() as u64 == metadata::HEADER_SIZE
@@ -392,9 +397,10 @@ impl ColumnarReader {
                 )?;
                 metadata::validate_header(&framing[0])?;
                 let trailer = Trailer::decode(&framing[1], size)?;
+                    require(trailer.root.first == part.first && trailer.root.last == part.last, "series part/root bounds mismatch")?;
                     Ok(trailer)
+                }).await
                 }).await?;
-                require(trailer.root.first == part.first && trailer.root.last == part.last, "series part/root bounds mismatch")?;
                 let area = PartArea::new(reader.clone(), cache.clone(), path.clone(), metadata::HEADER_SIZE..trailer.payload_end, None);
                 let root = load_metadata_page(cache.as_ref(), &reader, (&path, size), &trailer.root, trailer.depth, trailer.payload_end, &names).await?;
                 drop(timer);
@@ -494,14 +500,15 @@ async fn load_metadata_page(
                     reference.payload.encoding
                 )));
             }
-            let bytes = reader
-                .read(reference.payload.offset..reference.payload.end()?)
+            reader
+                .validated(
+                    vec![reference.payload.offset..reference.payload.end()?],
+                    |bytes| {
+                        let decoded = reference.payload.unpack(&bytes[0])?;
+                        Page::decode(&decoded, reference, depth, payload_end, names)
+                    },
+                )
                 .await
-                .context(OpenDalSnafu)?;
-            // TODO: benchmark inline versus offloaded codecs for latency, throughput,
-            // and async-worker responsiveness before adding scheduling overhead.
-            let decoded = reference.payload.unpack(&bytes)?;
-            Page::decode(&decoded, reference, depth, payload_end, names)
         },
     )
     .await
@@ -603,7 +610,13 @@ async fn load_column_chunk(
     let rows = block.rows as usize;
     let first = block.first;
     let last = block.last;
-    let bytes = column.payload.unpack(&bytes)?;
+    let bytes = area
+        .recover(
+            column.payload.offset..column.payload.end()?,
+            bytes,
+            |bytes| column.payload.unpack(bytes),
+        )
+        .await?;
     let result = if integer {
         let values = codec::decode_integers(&bytes, rows)?;
         if column.name == TSID_COLUMN {

@@ -105,6 +105,7 @@ async fn test_delayed_series_index_notification_after_removal() -> WhateverResul
                         waiters: crate::request::Waiters::one(tx),
                         result: Ok(()),
                         is_staging: false,
+                        preload_sst_cache: false,
                         update_region_state: false,
                     },
                 ),

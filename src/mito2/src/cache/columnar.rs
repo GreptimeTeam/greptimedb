@@ -22,7 +22,10 @@ use store_api::storage::FileId;
 
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::write_cache::WriteCacheRef;
-use crate::cache::{CacheManagerRef, CacheStrategy, MetaValue, PrefilterKey, SstDecodedMetaKey};
+use crate::cache::{
+    CacheManagerRef, CacheStrategy, MetaValue, NativePrefilterBlock, PrefilterKey,
+    SstDecodedMetaKey,
+};
 use crate::error::Result;
 use crate::metrics::{CACHE_HIT, CACHE_MISS};
 
@@ -96,7 +99,16 @@ impl MetadataCache {
 #[derive(Clone)]
 pub(crate) struct ObjectReader {
     remote: object_store::Reader,
+    refill: Option<Arc<NativeRefill>>,
     local: Option<(FileCacheRef, IndexKey)>,
+}
+
+struct NativeRefill {
+    store: object_store::ObjectStore,
+    path: String,
+    size: u64,
+    pin: crate::sst::file::FileHandle,
+    queued: std::sync::atomic::AtomicBool,
 }
 
 impl ObjectReader {
@@ -116,17 +128,17 @@ impl ObjectReader {
             .map(|(cache, file)| {
                 let disk = cache.file_cache();
                 let key = IndexKey::new(file.region_id(), file.file_id().file_id(), kind);
-                if download && !disk.contains_key(&key) {
-                    disk.queue_download(
-                        key,
-                        path.to_owned(),
-                        store.clone(),
-                        size,
-                        Some(file.clone()),
-                    );
-                }
                 (disk, key)
             });
+        let refill = file.filter(|_| download && local.is_some()).map(|file| {
+            Arc::new(NativeRefill {
+                store: store.clone(),
+                path: path.to_owned(),
+                size,
+                pin: file.clone(),
+                queued: false.into(),
+            })
+        });
         let gap = match kind {
             FileType::Series(_) => crate::sst::parquet::helper::MERGE_GAP,
             _ => 0,
@@ -138,7 +150,60 @@ impl ObjectReader {
             .gap(gap)
             .await
             .context(crate::error::OpenDalSnafu)?;
-        Ok(Self { remote, local })
+        Ok(Self {
+            remote,
+            local,
+            refill,
+        })
+    }
+
+    /// Decode metadata before trusting a local copy. A failed validation gets
+    /// one read from the authoritative object without touching the disk cache.
+    pub(crate) async fn validated<T>(
+        &self,
+        ranges: Vec<std::ops::Range<u64>>,
+        decode: impl Fn(Vec<bytes::Bytes>) -> Result<T>,
+    ) -> Result<T> {
+        use snafu::ResultExt;
+        if let Some((cache, key)) = &self.local
+            && let Some(bytes) = cache.read_ranges(*key, &ranges).await
+        {
+            match decode(bytes) {
+                Ok(value) => return Ok(value),
+                Err(_) => cache.remove(*key).await,
+            }
+        }
+        let buffers = self
+            .remote
+            .fetch(ranges)
+            .await
+            .context(crate::error::OpenDalSnafu)?;
+        let value = decode(buffers.into_iter().map(|b| b.to_bytes()).collect())?;
+        if self.local.as_ref().is_some_and(|(_, key)| {
+            matches!(
+                key.file_type,
+                FileType::Samples(None) | FileType::Series(None)
+            )
+        }) {
+            self.queue_refill();
+        }
+        Ok(value)
+    }
+
+    fn queue_refill(&self) {
+        if let (Some(refill), Some((disk, key))) = (&self.refill, &self.local)
+            && !refill
+                .queued
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            disk.queue_download(
+                *key,
+                refill.path.clone(),
+                refill.store.clone(),
+                refill.size,
+                Some(refill.pin.clone()),
+            );
+        }
     }
 
     pub(crate) async fn fetch(
@@ -150,6 +215,7 @@ impl ObjectReader {
         {
             return Ok(bytes);
         }
+        self.queue_refill();
         self.remote
             .fetch(ranges)
             .await
@@ -165,6 +231,7 @@ impl ObjectReader {
         {
             return Ok(bytes.pop().unwrap());
         }
+        self.queue_refill();
         self.remote.read(range).await.map(|b| b.to_bytes())
     }
 }
@@ -199,15 +266,49 @@ impl PartArea {
     pub(crate) fn prefilter(
         &self,
         block_offset: u64,
-        exprs: &smallvec::SmallVec<[String; 1]>,
+        exprs: &Arc<[datafusion_expr::Expr]>,
     ) -> Option<(&CacheManagerRef, PrefilterKey)> {
         let context = self.cache.as_ref()?;
         let manager = context.memory.as_ref()?;
         manager.prefilter_result_cache.as_ref()?;
-        let mut key = PrefilterKey::new(context.namespace, 0, None, 0, exprs.clone());
-        key.mem_usage += self.path.len();
-        key.native_block = Some((self.path.clone(), block_offset));
+        let mut key = PrefilterKey::new(context.namespace, 0, None, 0, Default::default());
+        key.mem_usage += self.path.len() + std::mem::size_of_val(exprs.as_ref());
+        key.native_block = Some(NativePrefilterBlock {
+            path: self.path.clone(),
+            offset: block_offset,
+            predicates: exprs.clone(),
+        });
         Some((manager, key))
+    }
+
+    /// Re-read a damaged payload directly. Evict its disk copy and any pages
+    /// already admitted from that object, including adjacent cached areas.
+    pub(crate) async fn recover<T>(
+        &self,
+        range: std::ops::Range<u64>,
+        bytes: bytes::Bytes,
+        decode: impl Fn(&bytes::Bytes) -> Result<T>,
+    ) -> Result<T> {
+        use snafu::ResultExt;
+        let result = decode(&bytes);
+        let (Err(_), Some((disk, key))) = (&result, &self.reader.local) else {
+            return result;
+        };
+        drop(bytes);
+        disk.remove(*key).await;
+        if let Some(context) = &self.cache
+            && let Some(pages) = context.memory.as_ref().and_then(|c| c.page_cache.as_ref())
+        {
+            pages.invalidate_native(context.namespace, self.path.clone());
+        }
+        let bytes = self
+            .reader
+            .remote
+            .read(range)
+            .await
+            .context(crate::error::OpenDalSnafu)?
+            .to_bytes();
+        decode(&bytes)
     }
 
     pub(crate) async fn cached_ranges(
@@ -230,16 +331,14 @@ impl PartArea {
         });
         if let Some(memory) = &mut reservation {
             let size = pages.page_size();
-            let bytes = relative
+            let area_size = self.bounds.end - self.bounds.start;
+            let aligned = relative
                 .iter()
                 .filter(|r| !r.is_empty())
-                .map(|r| {
-                    let aligned = ((r.end.div_ceil(size) * size)
-                        .min(self.bounds.end - self.bounds.start))
-                        - r.start / size * size;
-                    2 * aligned + r.end - r.start
-                })
-                .sum::<u64>();
+                .map(|r| r.start / size * size..(r.end.div_ceil(size) * size).min(area_size))
+                .collect::<Vec<_>>();
+            let bytes = 2 * common_cache::paged::unique_requested_bytes(&aligned)
+                + relative.iter().map(|r| r.end - r.start).sum::<u64>();
             if memory.try_grow(bytes as usize).is_err() {
                 return Ok(None);
             }

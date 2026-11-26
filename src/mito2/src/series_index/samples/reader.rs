@@ -139,71 +139,76 @@ impl SamplesReader {
             length,
         )
         .await?;
-        let bytes = object.read(0..length).await.context(OpenDalSnafu)?;
-        // A manifest that the current format cannot read predates exact identity or is
-        // corrupt; either way it must never be reused.
-        let mut manifest: Manifest = serde_json::from_slice(&bytes).map_err(|error| {
-            invalid(format!(
-                "samples manifest is not readable; rebuild the artifact: {error}"
-            ))
-        })?;
-        manifest.prefix = Some(
-            path.strip_suffix("manifest.json")
-                .ok_or_else(|| invalid("invalid narthex manifest path"))?
-                .to_string(),
-        );
-        if manifest.version != VERSION {
-            return Err(unsupported("samples manifest version"));
-        }
-        // Old artifacts can be structurally valid and perfectly ordered, so identity
-        // encoding is the only thing that keeps their lost labels out of reads.
-        if manifest.identity_encoding != IdentityEncoding::CURRENT_SAMPLES {
-            return Err(unsupported(
-                "samples manifest identity encoding; rebuild the samples artifact",
-            ));
-        }
-        require(
-            manifest.format == artifact.format
-                && manifest.region_id == region
-                && manifest.source_file_id == entry.file_id
-                && manifest.generation == artifact.generation,
-            "samples manifest identity mismatch",
-        )?;
-        manifest.validate_schema()?;
-        let mut paths = HashSet::from([path]);
-        let mut total = length;
-        let mut previous = None;
-        for (index, part) in manifest.files.iter().enumerate() {
-            require(
-                index as u64 == u64::from(part.part_id)
-                    && part.num_rows > 0
-                    && part.num_blocks > 0
-                    && part.num_blocks <= part.num_rows
-                    && part.first <= part.last
-                    && part.min_timestamp <= part.max_timestamp
-                    && part.file_size >= metadata::HEADER_SIZE + metadata::TRAILER_SIZE,
-                "invalid sample part descriptor",
-            )?;
-            if let Some(last) = previous {
-                require(last <= part.first, "unordered sample parts")?;
-            }
-            previous = Some(part.last);
-            let part_path = manifest.part_path(part.part_id);
-            require(
-                objects.get(part_path.as_str()) == Some(&part.file_size),
-                "sample part size mismatch",
-            )?;
-            paths.insert(part_path);
-            total = total
-                .checked_add(part.file_size)
-                .ok_or_else(|| invalid("sample artifact size overflow"))?;
-        }
-        require(
-            total == artifact.file_size
-                && paths.len() == artifact.objects.len()
-                && artifact.objects.iter().all(|o| paths.contains(&o.path)),
-            "sample artifact objects/size mismatch",
-        )?;
+        let manifest = object
+            .validated(vec![0..length], |buffers| {
+                let bytes = &buffers[0];
+                // A manifest that the current format cannot read predates exact identity or is
+                // corrupt; either way it must never be reused.
+                let mut manifest: Manifest = serde_json::from_slice(bytes).map_err(|error| {
+                    invalid(format!(
+                        "samples manifest is not readable; rebuild the artifact: {error}"
+                    ))
+                })?;
+                manifest.prefix = Some(
+                    path.strip_suffix("manifest.json")
+                        .ok_or_else(|| invalid("invalid narthex manifest path"))?
+                        .to_string(),
+                );
+                if manifest.version != VERSION {
+                    return Err(unsupported("samples manifest version"));
+                }
+                // Old artifacts can be structurally valid and perfectly ordered, so identity
+                // encoding is the only thing that keeps their lost labels out of reads.
+                if manifest.identity_encoding != IdentityEncoding::CURRENT_SAMPLES {
+                    return Err(unsupported(
+                        "samples manifest identity encoding; rebuild the samples artifact",
+                    ));
+                }
+                require(
+                    manifest.format == artifact.format
+                        && manifest.region_id == region
+                        && manifest.source_file_id == entry.file_id
+                        && manifest.generation == artifact.generation,
+                    "samples manifest identity mismatch",
+                )?;
+                manifest.validate_schema()?;
+                let mut paths = HashSet::from([path.clone()]);
+                let mut total = length;
+                let mut previous = None;
+                for (index, part) in manifest.files.iter().enumerate() {
+                    require(
+                        index as u64 == u64::from(part.part_id)
+                            && part.num_rows > 0
+                            && part.num_blocks > 0
+                            && part.num_blocks <= part.num_rows
+                            && part.first <= part.last
+                            && part.min_timestamp <= part.max_timestamp
+                            && part.file_size >= metadata::HEADER_SIZE + metadata::TRAILER_SIZE,
+                        "invalid sample part descriptor",
+                    )?;
+                    if let Some(last) = previous {
+                        require(last <= part.first, "unordered sample parts")?;
+                    }
+                    previous = Some(part.last);
+                    let part_path = manifest.part_path(part.part_id);
+                    require(
+                        objects.get(part_path.as_str()) == Some(&part.file_size),
+                        "sample part size mismatch",
+                    )?;
+                    paths.insert(part_path);
+                    total = total
+                        .checked_add(part.file_size)
+                        .ok_or_else(|| invalid("sample artifact size overflow"))?;
+                }
+                require(
+                    total == artifact.file_size
+                        && paths.len() == artifact.objects.len()
+                        && artifact.objects.iter().all(|o| paths.contains(&o.path)),
+                    "sample artifact objects/size mismatch",
+                )?;
+                Ok(manifest)
+            })
+            .await?;
         Ok(Self {
             store,
             parts: Arc::new((0..manifest.files.len()).map(|_| OnceCell::new()).collect()),
@@ -321,13 +326,13 @@ impl SamplesFormatReader for SamplesReader {
                 let size = part.file_size;
                 let metadata_started = Instant::now();
                 let trailer = metadata_cache::load(cache.as_ref(), format!("{path}/{size}/framing"), |_| std::mem::size_of::<Trailer>(), async {
-                let header = read_part_range(reader, 0, metadata::HEADER_SIZE).await?;
-                metadata::validate_header(&header)?;
-                let bytes = read_part_range(reader, part.file_size - metadata::TRAILER_SIZE, part.file_size).await?;
-                let trailer = Trailer::decode(&bytes, part.file_size)?;
-                    Ok(trailer)
+                    reader.validated(vec![0..metadata::HEADER_SIZE, size-metadata::TRAILER_SIZE..size], |framing| {
+                        metadata::validate_header(&framing[0])?;
+                        let trailer = Trailer::decode(&framing[1], size)?;
+                        require(trailer.root.bounds == bounds, "sample root/part bounds mismatch")?;
+                        Ok(trailer)
+                    }).await
                 }).await?;
-                require(trailer.root.bounds == bounds, "sample root/part bounds mismatch")?;
                 let part_path: Arc<str> = path.as_str().into();
                 let payload = PartArea::new(reader.clone(), cache.clone(), part_path.clone(), metadata::HEADER_SIZE..trailer.payload_end, request.memory_pool.clone());
                 let key_area = trailer.areas().keys;
@@ -647,7 +652,17 @@ async fn load_block_key(
     let entry = fetched
         .pop()
         .ok_or_else(|| invalid("missing sample key response"))?;
-    let key = ExactSeriesKey::from_sparse_key(verified_key(&entry, block.key.length)?, offsets)?;
+    let entry = reader
+        .recover(
+            block.key.offset..block.key.checksum_end()?,
+            entry,
+            |bytes| {
+                verified_key(bytes, block.key.length)?;
+                Ok(bytes.clone())
+            },
+        )
+        .await?;
+    let key = ExactSeriesKey::from_sparse_key(&entry[..block.key.length as usize], offsets)?;
     // A key that parses but claims another identifier is a malformed reference: ownership would
     // silently point at the wrong series.
     require(
@@ -742,8 +757,17 @@ async fn load_page_keys(
     };
     let fetched = fetch_ranges(reader, &ranges, metrics).await?;
     for (block, entry) in wanted.iter().take(window).zip(fetched) {
-        let key =
-            ExactSeriesKey::from_sparse_key(verified_key(&entry, block.key.length)?, offsets)?;
+        let entry = reader
+            .recover(
+                block.key.offset..block.key.checksum_end()?,
+                entry,
+                |bytes| {
+                    verified_key(bytes, block.key.length)?;
+                    Ok(bytes.clone())
+                },
+            )
+            .await?;
+        let key = ExactSeriesKey::from_sparse_key(&entry[..block.key.length as usize], offsets)?;
         // A key that parses but claims another identifier is a malformed reference: ownership
         // would silently point at the wrong series.
         require(
@@ -796,15 +820,20 @@ async fn load_metadata_page(
             if reference.payload.encoding != 1 {
                 return Err(unsupported("sample metadata codec"));
             }
-            let bytes =
-                read_part_range(reader, reference.payload.offset, reference.payload.end()?).await?;
-            Page::decode(
-                &reference.payload.unpack(&bytes)?,
-                reference,
-                depth,
-                areas,
-                manifest,
-            )
+            reader
+                .validated(
+                    vec![reference.payload.offset..reference.payload.end()?],
+                    |bytes| {
+                        Page::decode(
+                            &reference.payload.unpack(&bytes[0])?,
+                            reference,
+                            depth,
+                            areas,
+                            manifest,
+                        )
+                    },
+                )
+                .await
         },
     )
     .await
@@ -1130,16 +1159,6 @@ async fn read_block(
     Ok(Some((batch, reservation)))
 }
 
-async fn read_part_range(reader: &ObjectReader, start: u64, end: u64) -> Result<bytes::Bytes> {
-    require(start <= end, "reversed sample byte range")?;
-    let bytes = reader.read(start..end).await.context(OpenDalSnafu)?;
-    require(
-        bytes.len() as u64 == end - start,
-        "sample range length mismatch",
-    )?;
-    Ok(bytes)
-}
-
 /// Fetch selected ranges with bounded gap coalescing and shared-buffer slices.
 /// The read window and scan reservation bound retained buffers;
 /// OpenDAL bounds concurrency to 8.
@@ -1163,6 +1182,16 @@ async fn fetch_columns(
         .collect::<Result<Vec<_>>>()?;
     let fetched = fetch_ranges(reader, &ranges, metrics).await?;
     for (column, bytes) in columns.iter().zip(fetched) {
+        let bytes = reader
+            .recover(
+                column.payload.offset..column.payload.end()?,
+                bytes,
+                |bytes| {
+                    column.payload.validate_payload(bytes)?;
+                    Ok(bytes.clone())
+                },
+            )
+            .await?;
         buffers.insert(column.payload.offset, bytes);
     }
     Ok(())
@@ -1181,8 +1210,12 @@ async fn fetch_ranges(
         return Ok(Vec::new());
     }
 
+    // Count vector fetch calls on both paths. OpenDAL handles physical range coalescing.
+    let started = Instant::now();
     if let Some((buffers, stats)) = reader.cached_ranges(ranges).await? {
-        *metrics.counts.entry("payload_reads").or_default() += stats.cache_miss as u64;
+        metrics.add_elapsed("columnar_payload_fetch_wall", started.elapsed());
+        *metrics.counts.entry("payload_cache_misses").or_default() += stats.cache_miss as u64;
+        *metrics.counts.entry("payload_reads").or_default() += u64::from(stats.cache_miss > 0);
         *metrics.counts.entry("payload_cache_hits").or_default() += stats.cache_hit as u64;
         *metrics.bytes.entry("fetched").or_default() += stats.independently_loaded_bytes;
         return Ok(buffers);
@@ -1191,8 +1224,7 @@ async fn fetch_ranges(
     // Merging is bounded by [`MAX_READ_BYTES`], and a requested range never exceeds that, so
     // every range lies inside exactly one merged read.
     let merged = merge_read_ranges(ranges);
-    *metrics.counts.entry("payload_reads").or_default() += merged.len() as u64;
-    let started = Instant::now();
+    *metrics.counts.entry("payload_reads").or_default() += 1;
     let fetched = reader
         .reader
         .fetch(merged.clone())

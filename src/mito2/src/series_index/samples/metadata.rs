@@ -99,7 +99,7 @@ impl PayloadReference {
         require(c.u32()? == 0, "nonzero sample payload reserved field")?;
         Ok(result)
     }
-    fn validate_payload(&self, bytes: &[u8]) -> Result<()> {
+    pub(super) fn validate_payload(&self, bytes: &[u8]) -> Result<()> {
         require(
             bytes.len() == self.stored as usize && codec::checksum(bytes) == self.checksum,
             "sample checksum mismatch",
@@ -114,7 +114,7 @@ impl PayloadReference {
         bytes: &'a [u8],
         decoder: &'a mut codec::PayloadDecoder,
     ) -> Result<&'a [u8]> {
-        self.validate_payload(bytes)?;
+        // fetch_columns validated the stored bytes before inserting them into the block buffers.
         decoder.decompress(bytes, self.compression, self.decoded as usize)
     }
 }

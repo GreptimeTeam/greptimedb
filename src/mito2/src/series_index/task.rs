@@ -628,6 +628,7 @@ impl SeriesIndexTask {
                 result: result.map_err(Arc::new),
                 waiters: Waiters::one(tx),
                 is_staging: false,
+                preload_sst_cache: false,
                 update_region_state: false,
             }),
         };

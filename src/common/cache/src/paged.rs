@@ -392,7 +392,7 @@ fn check_file_size(page: &CachedPage, expected: u64) -> Result<(), Arc<io::Error
 }
 
 /// Counts the union of request ranges already validated by fetch.
-fn unique_requested_bytes(ranges: &[Range<u64>]) -> u64 {
+pub fn unique_requested_bytes(ranges: &[Range<u64>]) -> u64 {
     let mut ranges = ranges.to_vec();
     ranges.sort_unstable_by_key(|range| range.start);
     let mut end = 0;

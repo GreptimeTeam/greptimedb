@@ -466,6 +466,7 @@ async fn test_narthex_index_counts_rows_across_flushes() -> WhateverResult<()> {
     let engine = env
         .create_engine(
             MitoConfig {
+                enable_refill_cache_on_read: false,
                 experimental_enable_series_index: true,
                 experimental_series_index_min_files: 1,
                 ..Default::default()
@@ -532,15 +533,36 @@ async fn test_narthex_index_counts_rows_across_flushes() -> WhateverResult<()> {
         file.clone(),
         &region.access_layer.build_region_dir(id),
     )?;
-    let reader = crate::series_index::columnar::reader::ColumnarReader::open(
+    let part = crate::cache::file_cache::IndexKey::new(
+        id,
+        file.meta_ref().file_id,
+        crate::cache::file_cache::FileType::Series(Some(0)),
+    );
+    let path = disk.cache_file_path(part);
+    let local = disk.local_store();
+    let mut bytes = local.read(&path).await.unwrap().to_bytes().to_vec();
+    // The first payload immediately follows the 16-byte series part header and holds TSIDs.
+    bytes[16] ^= 0xff;
+    local.write(&path, bytes).await.unwrap();
+    let strategy = crate::cache::CacheStrategy::EnableAll(engine.cache_manager());
+    let reader = crate::series_index::columnar::reader::ColumnarReader::open_cached(
         region.access_layer.object_store().clone(),
         handle,
+        strategy.columnar_metadata(file.meta_ref().file_id),
     )
     .await?;
-    let mut stream = reader.read(crate::series_index::format::SeriesReadRequest {
-        projection: vec![crate::series_index::ROW_COUNT_COLUMN.to_owned()],
+    let request = crate::series_index::format::SeriesReadRequest {
+        projection: vec![
+            crate::series_index::ROW_COUNT_COLUMN.to_owned(),
+            store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME.to_owned(),
+        ],
         ..Default::default()
-    })?;
+    };
+    // The first query must recover the poisoned page. A second scan reuses healthy bytes.
+    let mut stream = reader.read(request.clone())?;
+    assert!(stream.try_next().await?.is_some());
+    assert!(!disk.contains_key(&part));
+    let mut stream = reader.read(request)?;
     let batch = stream.try_next().await?.unwrap();
     let counts = batch
         .column(0)

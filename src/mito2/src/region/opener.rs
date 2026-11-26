@@ -1251,7 +1251,8 @@ impl RegionLoadCacheTask {
         let mut files_downloaded = 0;
         let mut files_skipped = 0;
 
-        for (index_key, file_size, max_timestamp, path, _pin) in files_to_download {
+        let mut remaining = files_to_download.into_iter();
+        while let Some((index_key, file_size, max_timestamp, path, _pin)) = remaining.next() {
             let current_size = file_cache.puffin_cache_size();
             let capacity = file_cache.puffin_cache_capacity();
             let region_state = self.region.state();
@@ -1260,18 +1261,20 @@ impl RegionLoadCacheTask {
                     "Stopping index cache by state: {:?}, region: {}, current_size: {}, capacity: {}",
                     region_state, region_id, current_size, capacity
                 );
+                files_skipped += remaining.len() + 1;
+                CACHE_FILL_PENDING_FILES.sub((remaining.len() + 1) as i64);
                 break;
             }
 
             // Checks if adding this file would exceed capacity
-            if current_size + file_size > capacity {
+            if file_size > capacity.saturating_sub(current_size) {
                 info!(
-                    "Stopping index cache preload due to capacity limit, region: {}, file_id: {}, current_size: {}, file_size: {}, capacity: {}, file_timestamp: {:?}",
+                    "Skipping index cache object due to capacity limit, region: {}, file_id: {}, current_size: {}, file_size: {}, capacity: {}, file_timestamp: {:?}",
                     region_id, index_key.file_id, current_size, file_size, capacity, max_timestamp
                 );
-                files_skipped = (total_files - files_downloaded) as usize;
-                CACHE_FILL_PENDING_FILES.sub(total_files - files_downloaded);
-                break;
+                files_skipped += 1;
+                CACHE_FILL_PENDING_FILES.dec();
+                continue;
             }
 
             match file_cache

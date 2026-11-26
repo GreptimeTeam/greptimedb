@@ -510,14 +510,22 @@ impl FileCache {
             fetch_byte_ranges(&file_path, self.inner.local_store.clone(), ranges).await
         };
         match bytes_result {
-            Ok(bytes) => {
+            Ok(bytes)
+                if bytes.len() == ranges.len()
+                    && bytes
+                        .iter()
+                        .zip(ranges)
+                        .all(|(b, r)| b.len() as u64 == r.end - r.start) =>
+            {
                 CACHE_HIT
                     .with_label_values(&[key.file_type.metric_label()])
                     .inc();
                 Some(bytes)
             }
-            Err(e) => {
-                if e.kind() != ErrorKind::NotFound {
+            result => {
+                if let Err(e) = result
+                    && e.kind() != ErrorKind::NotFound
+                {
                     warn!(e; "Failed to get file for key {:?}", key);
                 }
 
@@ -540,6 +548,23 @@ impl FileCache {
         // Always delete the file from the local store.
         if let Err(e) = self.inner.local_store.delete(&file_path).await {
             warn!(e; "Failed to delete a cached file {}", file_path);
+        }
+    }
+
+    pub(crate) async fn remove_native(
+        &self,
+        region_id: RegionId,
+        files: &std::collections::HashSet<FileId>,
+    ) {
+        for index in [&self.inner.parquet_index, &self.inner.puffin_index] {
+            for (key, _) in index.iter() {
+                if key.region_id == region_id
+                    && files.contains(&key.file_id)
+                    && matches!(key.file_type, FileType::Samples(_) | FileType::Series(_))
+                {
+                    self.remove(*key).await;
+                }
+            }
         }
     }
 
@@ -702,6 +727,15 @@ impl FileCache {
         self.inner.contains_key(key)
     }
 
+    pub(crate) fn can_retain(&self, key: IndexKey, size: u64) -> bool {
+        size <= self
+            .inner
+            .memory_index(key.file_type)
+            .policy()
+            .max_capacity()
+            .unwrap_or(0)
+    }
+
     /// Returns the capacity of the puffin (index) cache in bytes.
     pub(crate) fn puffin_cache_capacity(&self) -> u64 {
         self.puffin_capacity
@@ -754,6 +788,9 @@ impl FileCache {
             return;
         };
 
+        if !self.can_retain(index_key, file_size) {
+            return;
+        }
         let task = DownloadTask {
             _pin: pin,
             index_key,

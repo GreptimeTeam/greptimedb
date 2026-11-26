@@ -725,6 +725,18 @@ impl LocalGcWorker {
         )
         .await?;
 
+        if let Some(cache) = self.cache_manager.as_ref().and_then(|c| c.write_cache()) {
+            let ids: HashSet<_> = removed_files
+                .iter()
+                .filter_map(|f| match f {
+                    RemovedFile::Narthex(id) => Some(*id),
+                    _ => None,
+                })
+                .collect();
+            if !ids.is_empty() {
+                cache.file_cache().remove_native(region_id, &ids).await;
+            }
+        }
         for removed in removed_files {
             if let RemovedFile::Narthex(id) = removed {
                 self.access_layer

@@ -610,10 +610,17 @@ impl From<&RowSelector> for PrefilterRowSelector {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct NativePrefilterBlock {
+    path: Arc<str>,
+    offset: u64,
+    predicates: Arc<[datafusion_expr::Expr]>,
+}
+
 /// Key for a cached prefilter result.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct PrefilterKey {
-    native_block: Option<(Arc<str>, u64)>,
+    native_block: Option<NativePrefilterBlock>,
     file_id: FileId,
     row_group_idx: u32,
     row_selection: Option<Arc<Vec<PrefilterRowSelector>>>,
