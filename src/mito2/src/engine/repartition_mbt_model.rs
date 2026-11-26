@@ -284,7 +284,8 @@ impl<R: RegionKey> ForeignRef<R> {
 /// What scheme B says about a merge of the given inputs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MergeVerdict<R> {
-    /// Every participant holds only the files it created itself.
+    /// Every participant holds only the files it created itself, or the merge has a single
+    /// source: no target combines two file sets either way.
     Allowed,
     /// At least one participant holds a file someone else created, so the merge must be
     /// refused, naming every offending `(region, file, creator)`.
@@ -578,9 +579,20 @@ impl<R: RegionKey> RefModel<R> {
         );
     }
 
-    /// What scheme B says about merging `inputs`: allowed only while every participant holds
-    /// nothing but the files it created itself.
+    /// What scheme B says about merging `inputs`.
+    ///
+    /// A merge that publishes one target from **two or more distinct sources** combines their
+    /// file sets, so it is allowed only while every participant holds nothing but the files it
+    /// created itself. A merge of a single source (a one-to-one repartition, the region id
+    /// reused) combines nothing: the target receives that source's files unchanged and reads
+    /// them through its own expression, so it is exempt even when the source still holds a file
+    /// another region created - the same reason a split is exempt, where every child receives
+    /// only that one source's files.
     pub(crate) fn merge_verdict(&self, inputs: &[R]) -> MergeVerdict<R> {
+        let distinct_sources = inputs.iter().copied().collect::<BTreeSet<R>>().len();
+        if distinct_sources < 2 {
+            return MergeVerdict::Allowed;
+        }
         let mut offenders = Vec::new();
         for input in inputs {
             let Some(state) = self.regions.get(input) else {
@@ -613,8 +625,9 @@ impl<R: RegionKey> RefModel<R> {
     /// `merge`: the survivor serves the whole table and holds the union of the inputs'
     /// references, deduplicated by file id.
     ///
-    /// Scheme B allows this only while every input holds only its own files
-    /// ([`RefModel::merge_verdict`]); otherwise the transition panics, because the engine is
+    /// Scheme B allows this only for a merge of two or more distinct sources whose inputs hold
+    /// only their own files ([`RefModel::merge_verdict`]); otherwise the transition panics,
+    /// because the engine is
     /// expected to refuse the merge instead of publishing a survivor that would have to widen
     /// a reference to read a file someone else wrote. Inputs that disagree about a file's level
     /// cannot occur on a reachable state (a split copies the level unchanged); if they did, the
@@ -1150,12 +1163,21 @@ mod tests {
     fn the_survivor_of_a_merge_holds_foreign_files_again() {
         let mut spec = one_shared_file_both_compacted();
         spec.merge(&[2, 3], 4);
-        // The survivor serves the whole domain but holds the halves' files, so a merge that
-        // consumes it is refused until it compacts.
-        let verdict = spec.merge_verdict(&[4]);
+        // The survivor serves the whole domain but holds the halves' files. Consuming it alone is
+        // a one-to-one repartition: no target combines two file sets, so it is exempt even though
+        // the file is foreign.
+        assert!(
+            spec.merge_verdict(&[4]).is_allowed(),
+            "a single-source merge combines nothing and is exempt"
+        );
+        // Splitting it hands that foreign file to both children, and merging the two of them does
+        // combine file sets again, so that merge is refused until each child has compacted.
+        spec.split(4, 5, Domain::new(0, 5), 6, Domain::new(5, 10));
+        let verdict = spec.merge_verdict(&[5, 6]);
         assert!(!verdict.is_allowed(), "{verdict:?}");
-        spec.compact(4);
-        assert!(spec.merge_verdict(&[4]).is_allowed());
+        spec.compact(5);
+        spec.compact(6);
+        assert!(spec.merge_verdict(&[5, 6]).is_allowed());
     }
 
     #[test]

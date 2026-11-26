@@ -1212,8 +1212,9 @@ impl StorageModel {
     /// Merges `inputs` into a fresh whole-domain survivor, first making the merge legal under
     /// scheme B.
     ///
-    /// B allows a merge only while **every** input holds nothing but the files it created
-    /// itself. So before merging, the model is asked what it expects:
+    /// B allows a merge of **two or more distinct sources** only while every input holds nothing
+    /// but the files it created itself: a single-source merge combines no file sets, so the model
+    /// allows it and no probe runs. Before merging, the model is asked what it expects:
     ///
     /// 1. if it allows the merge, the merge runs and the specification takes the union of the
     ///    inputs' references;

@@ -963,7 +963,8 @@ impl Model {
 
     /// Makes `inputs` mergeable under scheme B, or reports why the cell cannot continue.
     ///
-    /// B refuses a merge whose participants hold a foreign file, so a cell that reaches one:
+    /// B refuses a merge of two or more distinct sources whose participants hold a foreign file,
+    /// so a cell that reaches one:
     ///
     /// 1. asks the engine for the coordinator's remap into a throwaway staging region and
     ///    **expects** it to be refused, naming every offending `(region, file, creator)` — an
@@ -973,6 +974,14 @@ impl Model {
     ///    itself;
     /// 3. re-checks the precondition, which must now hold, and lets the caller run the merge.
     async fn settle_scheme_b(&mut self, inputs: &[RegionId], domain: Domain) -> Result<(), String> {
+        // A merge of a single source is a one-to-one repartition: the target receives that
+        // source's files unchanged, so no file set is combined and the engine publishes it
+        // whether or not the source still holds a file another region created. There is nothing
+        // to refuse, and probing for a refusal would report a divergence that does not exist.
+        let distinct_sources = inputs.iter().copied().collect::<BTreeSet<RegionId>>().len();
+        if distinct_sources < 2 {
+            return Ok(());
+        }
         let offenders = self.foreign_refs(inputs);
         if offenders.is_empty() {
             return Ok(());
@@ -1862,9 +1871,11 @@ impl Model {
     /// inputs stop serving and the target installs the remapped manifest before the routing
     /// switches.
     ///
-    /// Scheme B allows the merge only while every input holds nothing but the files it created
-    /// itself, so [`Model::settle_scheme_b`] runs first: it expects the engine's refusal for a
-    /// cell whose participants hold foreign files, compacts the offending sides and retries.
+    /// Scheme B allows a merge of two or more distinct sources only while every input holds
+    /// nothing but the files it created itself, so [`Model::settle_scheme_b`] runs first: it
+    /// expects the engine's refusal for such a cell whose participants hold foreign files,
+    /// compacts the offending sides and retries. A single-source merge combines nothing, so
+    /// `settle_scheme_b` lets it through without a probe.
     async fn merge(
         &mut self,
         inputs: &[RegionId],

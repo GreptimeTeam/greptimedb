@@ -933,7 +933,9 @@ impl StorageModel {
     /// Merges every published region into one new whole-domain region, first making the merge
     /// legal under scheme B.
     ///
-    /// B allows a merge only while every input holds nothing but the files it created itself.
+    /// B allows a merge of two or more distinct sources only while every input holds nothing but
+    /// the files it created itself; a single-source merge combines no file sets and is exempt, so
+    /// no probe runs for it.
     /// When the model expects a refusal the driver issues the coordinator's remap and asserts
     /// the engine refuses it, naming every offending `(region, file, creator)`; it then
     /// compacts every offending region and retries the merge the model now allows. An engine
