@@ -112,6 +112,7 @@ fn source(schema: &Arc<SeriesSchema>) -> NativeNode {
             output: output.clone(),
             source_index: 0,
             ordering: SeriesOrdering::KeyThenTime,
+            time_unit: Default::default(),
         }),
         output,
     }

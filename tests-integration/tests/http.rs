@@ -2074,6 +2074,7 @@ async fn assert_raw_scan_fused_formats(observer: &NativeFusedObserver, frontend:
                     source_index: 0,
                     output: raw_type.clone(),
                     ordering,
+                    time_unit: Default::default(),
                 }),
                 output: raw_type,
             }),

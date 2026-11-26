@@ -954,6 +954,7 @@ mod tests {
                         source_index: 0,
                         output: raw_type.clone(),
                         ordering: SeriesOrdering::Contiguous,
+                        time_unit: Default::default(),
                     }),
                     output: raw_type,
                 }),
