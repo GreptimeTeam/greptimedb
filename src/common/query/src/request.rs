@@ -903,6 +903,13 @@ pub struct QueryRequest {
 
     /// The form of the query: a logical plan.
     pub plan: LogicalPlan,
+
+    /// An optional pre-encoded Substrait payload for [`Self::plan`].
+    ///
+    /// The materialized-broadcast path encodes the completed plan once and reuses the
+    /// bytes for every region request. The bytes must correspond to `plan`; the logical
+    /// form stays available for in-process routes that inject sources into it.
+    pub prepared_plan: Option<bytes::Bytes>,
 }
 
 /// First node of type `T` anywhere in `expr`.

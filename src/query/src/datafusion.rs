@@ -20,10 +20,13 @@ mod pg_oid_alias_expr_planner;
 mod planner;
 
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use async_trait::async_trait;
+use catalog::kvbackend::KvBackendCatalogManager;
 use common_base::Plugins;
 use common_catalog::consts::is_readonly_table;
 use common_error::ext::BoxedError;
@@ -31,24 +34,30 @@ use common_function::function::FunctionContext;
 use common_function::function_factory::ScalarFunctionFactory;
 use common_query::{Output, OutputData, OutputMeta};
 use common_recordbatch::adapter::{
-    RecordBatchStreamAdapter, RegionQueryStatCounters, SERIES_SCAN_EXEC_NAME,
+    RecordBatchMetrics, RecordBatchStreamAdapter, RegionQueryStatCounters, SERIES_SCAN_EXEC_NAME,
 };
-use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
+use common_recordbatch::{
+    EmptyRecordBatchStream, OrderOption, RecordBatchStream, SendableRecordBatchStream,
+};
 use common_telemetry::tracing;
 use datafusion::catalog::TableFunction;
 use datafusion::dataframe::DataFrame;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::analyze::AnalyzeExec;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
-use datafusion_common::ResolvedTableReference;
+use datafusion_common::{DFSchemaRef, ResolvedTableReference};
 use datafusion_expr::{
-    AggregateUDF, DmlStatement, LogicalPlan as DfLogicalPlan, LogicalPlan, WindowUDF, WriteOp,
+    AggregateUDF, DmlStatement, LogicalPlan as DfLogicalPlan, LogicalPlan,
+    UserDefinedLogicalNodeCore, WindowUDF, WriteOp,
 };
+use datatypes::extension::json::is_json2_extension_type;
 use datatypes::prelude::VectorRef;
-use datatypes::schema::Schema;
+use datatypes::schema::{Schema, SchemaRef};
+use futures::future::BoxFuture;
+use futures::{FutureExt, Stream};
 use futures_util::StreamExt;
 use session::context::QueryContextRef;
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{IntoError, OptionExt, ResultExt, ensure};
 use sqlparser::ast::AnalyzeFormat;
 use table::TableRef;
 use table::requests::{DeleteRequest, InsertRequest};
@@ -57,7 +66,11 @@ use tracing::Span;
 
 use crate::analyze::DistAnalyzeExec;
 pub use crate::datafusion::planner::DfContextProviderAdapter;
-use crate::dist_plan::{MergeScanLogicalPlan, RemoteDynFilterReceiverInjectorRef};
+use crate::dist_plan::{
+    BroadcastMaterializeError, DistJoinStats, MaterializeExec, MergeScanLogicalPlan,
+    RemoteDynFilterReceiverInjectorRef, aggregate_region_stats, candidate_joins,
+    expected_region_ids,
+};
 use crate::error::{
     CatalogSnafu, CreateRecordBatchSnafu, MissingTableMutationHandlerSnafu,
     MissingTimestampColumnSnafu, QueryExecutionSnafu, Result, TableMutationSnafu,
@@ -153,6 +166,39 @@ fn query_stat_counters(plan: &Arc<dyn ExecutionPlan>) -> Option<RegionQueryStatC
     counters
 }
 
+/// Whether the output stream of `physical_plan` falls back to the original plan when its broadcast
+/// materialization fails.
+///
+/// The broadcast join rewrite replaces a join of two distributed inputs with a merge stage whose
+/// local child reads the build side on the frontend, so only a plan with that stage can fail on the
+/// materialization. `allow_broadcast_fallback` is `false` for a statement that consumes the stream
+/// itself, as the retry replays the query from its start.
+fn needs_broadcast_fallback(
+    physical_plan: &Arc<dyn ExecutionPlan>,
+    allow_broadcast_fallback: bool,
+) -> bool {
+    allow_broadcast_fallback && contains_broadcast_materialization(physical_plan)
+}
+
+/// Whether `schema` describes a JSON2 column at a distributed boundary.
+///
+/// `JsonSchemaConcretizeRule` gives each `MergeScan` the concrete Arrow type its remote stage
+/// emits, so a JSON2 column of a boundary is either still the raw empty `Struct` or the
+/// concretized `large` type. Both keep the JSON2 extension marker.
+fn has_json2_boundary_schema(schema: &DFSchemaRef) -> bool {
+    schema.fields().iter().any(is_json2_extension_type)
+}
+
+/// Whether `plan` evaluates the build side of a broadcast join on the frontend.
+fn contains_broadcast_materialization(plan: &Arc<dyn ExecutionPlan>) -> bool {
+    if plan.downcast_ref::<MaterializeExec>().is_some() {
+        return true;
+    }
+    plan.children()
+        .iter()
+        .any(|child| contains_broadcast_materialization(child))
+}
+
 pub struct DatafusionQueryEngine {
     state: Arc<QueryEngineState>,
     plugins: Plugins,
@@ -173,27 +219,365 @@ impl DatafusionQueryEngine {
         self.engine_context(query_ctx).unwrap()
     }
 
-    #[tracing::instrument(skip_all)]
-    async fn exec_query_plan(
+    /// Statistics of the candidate tables of `logical_plan`, or `None` when the nested broadcast
+    /// join rewrite has to keep the existing plan.
+    ///
+    /// Gated by the session opt-in and the registered distributed rules.
+    ///
+    /// The candidate tables are resolved to their physical routes before the statistics of the
+    /// query are fetched: the route must still describe the table the plan captured and at least
+    /// one candidate pair must have usable routes, otherwise this is `None` without any
+    /// `region_stats` call. The region sizes of the resolved tables then come from one
+    /// `region_stats` call of the information extension, so the result belongs to this query only
+    /// and never reaches the shared engine state. The rewrite is an optimization, so a table
+    /// whose statistics are unusable (missing, duplicate, zero-sized or overflowing) is left out
+    /// instead of failing the query.
+    async fn maybe_materialize_volatile_broadcast(
         &self,
-        plan: LogicalPlan,
-        query_ctx: QueryContextRef,
-    ) -> Result<Output> {
-        let mut ctx = self.engine_context(query_ctx)?;
-        let query_ctx = ctx.query_ctx();
-        let plan = if let Some(receiver_injector) =
-            self.plugins.get::<RemoteDynFilterReceiverInjectorRef>()
+        analyzed_plan: &LogicalPlan,
+        ctx: &QueryEngineContext,
+    ) -> Result<LogicalPlan> {
+        use crate::dist_plan::{
+            DistJoinStats, MAX_BROADCAST_BUILD_BYTES, MaterializeBroadcastJoin,
+            MaterializeLogicalPlan, MaterializedInput, MergeScanLogicalPlan, restore_join_schema,
+            side_base_table_id,
+        };
+        use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
+        use datafusion_expr::{Join, LogicalPlan as DfLogicalPlan};
+
+        fn strip_merge_scan(plan: &LogicalPlan) -> Option<(LogicalPlan, MergeScanLogicalPlan)> {
+            match plan {
+                DfLogicalPlan::Extension(extension) => {
+                    let merge_scan = extension
+                        .node
+                        .as_any()
+                        .downcast_ref::<MergeScanLogicalPlan>()?;
+                    Some((merge_scan.input().clone(), merge_scan.clone()))
+                }
+                DfLogicalPlan::Projection(projection) => {
+                    let (input, merge_scan) = strip_merge_scan(&projection.input)?;
+                    let plan = plan
+                        .with_new_exprs(projection.expr.clone(), vec![input])
+                        .ok()?;
+                    Some((plan, merge_scan))
+                }
+                _ => None,
+            }
+        }
+
+        /// A `LIMIT 0` above the join makes the query empty; the optimized plan never
+        /// evaluates the small side, so materializing it eagerly would surface errors
+        /// (e.g. a cast) that the baseline never raises.
+        fn contains_zero_limit(plan: &LogicalPlan) -> bool {
+            if let DfLogicalPlan::Limit(limit) = plan
+                && let Some(fetch) = limit.fetch.as_deref()
+                && matches!(
+                    fetch,
+                    datafusion_expr::Expr::Literal(
+                        datafusion_common::ScalarValue::Int64(Some(0)),
+                        _
+                    ) | datafusion_expr::Expr::Literal(
+                        datafusion_common::ScalarValue::UInt64(Some(0)),
+                        _
+                    )
+                )
+            {
+                return true;
+            }
+            plan.inputs().iter().any(|input| contains_zero_limit(input))
+        }
+
+        fn find_materializable_small(
+            plan: &LogicalPlan,
+        ) -> Option<(
+            Join,
+            LogicalPlan,
+            MergeScanLogicalPlan,
+            LogicalPlan,
+            MergeScanLogicalPlan,
+        )> {
+            // Volatile expressions are safe here: the small side is materialized
+            // once on the frontend, so every region sees the same values.
+            if let DfLogicalPlan::Join(join) = plan
+                && join.join_type == datafusion_expr::JoinType::Inner
+                // The pinned Substrait producer rejects `JoinConstraint::Using`, so a
+                // materialized payload containing such a join could not be encoded.
+                && join.join_constraint == datafusion_expr::JoinConstraint::On
+                // A volatile join key is evaluated by the remote join on every probe
+                // region, so materializing the input rows alone cannot make it
+                // consistent. Keep such joins on the frontend.
+                && !join
+                    .on
+                    .iter()
+                    .any(|(left, right)| left.is_volatile() || right.is_volatile())
+                && !join.on.is_empty()
+                && let Some((large_plan, large)) = strip_merge_scan(&join.left)
+                && let Some((small_plan, small)) = strip_merge_scan(&join.right)
+                && !large.is_placeholder()
+                && !small.is_placeholder()
+            {
+                return Some((join.clone(), large_plan, large, small_plan, small));
+            }
+            for input in plan.inputs() {
+                if let Some(found) = find_materializable_small(input) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+
+        if !ctx
+            .query_ctx()
+            .configuration_parameter()
+            .experimental_dist_join()
         {
-            receiver_injector.maybe_inject(plan, query_ctx.clone())
+            return Ok(analyzed_plan.clone());
+        }
+        // The query level fallback of a failed broadcast materialization replans with the switch
+        // set, so its second plan is the frontend join instead of the same broadcast.
+        if ctx.query_ctx().disable_broadcast_materialize() {
+            return Ok(analyzed_plan.clone());
+        }
+        if contains_zero_limit(analyzed_plan) {
+            return Ok(analyzed_plan.clone());
+        }
+        let Some((original_join, large_plan, large, small_plan, small_scan)) =
+            find_materializable_small(analyzed_plan)
+        else {
+            return Ok(analyzed_plan.clone());
+        };
+        // The materialized payload is encoded from the remote plan, and Substrait/Arrow IPC can
+        // drop the JSON2 extension type that `JsonSchemaConcretizeRule` put on a boundary schema.
+        // A JSON2 column on either side therefore keeps the join on the frontend.
+        if has_json2_boundary_schema(large.schema())
+            || has_json2_boundary_schema(small_scan.schema())
+        {
+            return Ok(analyzed_plan.clone());
+        }
+        // Apply the same cost heuristic as the nested rewrite, trying both orientations:
+        // the join inputs may be swapped by earlier passes, so the small side is whichever
+        // side the heuristic actually favors as the broadcast build.
+        let Some(stats) = ctx
+            .state()
+            .config()
+            .options()
+            .extensions
+            .get::<DistJoinStats>()
+        else {
+            return Ok(analyzed_plan.clone());
+        };
+        let (Some(left_table), Some(right_table)) = (
+            side_base_table_id(large.input()),
+            side_base_table_id(small_scan.input()),
+        ) else {
+            return Ok(analyzed_plan.clone());
+        };
+        // `favors_right_build(probe, build)` = probe_regions * build_bytes < probe_bytes.
+        let materialize_right = stats.favors_right_build(left_table, right_table);
+        let materialize_left = stats.favors_right_build(right_table, left_table);
+        if materialize_right == materialize_left {
+            // Neither orientation favors a broadcast, or both do (degenerate equal stats):
+            // keep the plan unchanged.
+            return Ok(analyzed_plan.clone());
+        }
+        // The build side is materialized in the frontend's memory, so a build table above the
+        // planning bound keeps the frontend join. This is the only size decision of the
+        // rewrite: the materialization has no run-time limit, i.e. the amount of data the build
+        // side turns out to hold never fails the query.
+        let build_table = if materialize_right {
+            right_table
         } else {
-            plan
+            left_table
+        };
+        let Some(build_stats) = stats.tables.get(&build_table) else {
+            // The heuristic above already requires the build table, but without its statistics
+            // there is nothing to bound the broadcast with: keep the plan unchanged.
+            return Ok(analyzed_plan.clone());
+        };
+        if build_stats.total_bytes > MAX_BROADCAST_BUILD_BYTES {
+            return Ok(analyzed_plan.clone());
+        }
+        // From here on `large`/`small` mean the probe/build sides of the broadcast:
+        // swap them when the heuristic favors the original left side as the build.
+        let (large_plan, large, small_scan) = if materialize_left {
+            (small_plan, small_scan, large)
+        } else {
+            (large_plan, large, small_scan)
+        };
+        // The build side is evaluated once, on the frontend: `Materialize` is the local
+        // child of the broadcast merge stage, and the remote join reads its batches from
+        // a data slot that starts empty. The physical layer binds the data into the slot.
+        // The child is the build `MergeScan` itself: its inner input is a distributed
+        // table scan that only the merge stage can read.
+        let build_plan = small_scan.into_logical_plan();
+        let broadcast_slot = MaterializedInput::new(build_plan.schema().clone(), Vec::new());
+        let build_materialize = MaterializeLogicalPlan::new(build_plan).into_logical_plan();
+        // The materialized side becomes the join's left input so DataFusion hashes it as
+        // the build side. When the materialized side is the original right input, the
+        // join keys swap with it; when it is the original left input, they keep their
+        // order.
+        let swapped_join = Join::try_new(
+            Arc::new(broadcast_slot.into_logical_plan()),
+            Arc::new(large_plan),
+            if materialize_right {
+                original_join
+                    .on
+                    .iter()
+                    .map(|(left, right)| (right.clone(), left.clone()))
+                    .collect()
+            } else {
+                original_join.on.clone()
+            },
+            original_join.filter.clone(),
+            original_join.join_type,
+            original_join.join_constraint,
+            original_join.null_equality,
+            original_join.null_aware,
+        )?;
+        let restored_plan = if materialize_right {
+            restore_join_schema(swapped_join, original_join.schema.clone())
+        } else {
+            // The inputs keep their original order, so the join's natural schema already
+            // matches; only a no-op projection (or the join itself) is needed.
+            if swapped_join.schema.as_ref() == original_join.schema.as_ref() {
+                Some(LogicalPlan::Join(swapped_join))
+            } else {
+                restore_join_schema(swapped_join, original_join.schema.clone())
+            }
+        };
+        let Some(remote_input) = restored_plan else {
+            return Ok(analyzed_plan.clone());
+        };
+        // The regions run `remote_input`; its only table scan is the probe fragment, so the
+        // merge stage is routed to the probe regions. The frontend runs
+        // `Materialize(build)` and binds the batches into the data slot of `remote_input`.
+        let mut outer = MaterializeBroadcastJoin::new(remote_input, build_materialize);
+        if let Some(id) = large.remote_dyn_filter_producer_id() {
+            outer = outer.with_remote_dyn_filter_producer_id(id);
+        }
+
+        struct Replace {
+            original: Join,
+            replacement: LogicalPlan,
+        }
+        impl TreeNodeRewriter for Replace {
+            type Node = LogicalPlan;
+            fn f_up(
+                &mut self,
+                plan: LogicalPlan,
+            ) -> datafusion_common::Result<Transformed<LogicalPlan>> {
+                if let LogicalPlan::Join(join) = &plan
+                    && *join == self.original
+                {
+                    return Ok(Transformed::yes(self.replacement.clone()));
+                }
+                Ok(Transformed::no(plan))
+            }
+        }
+        Ok(analyzed_plan
+            .clone()
+            .rewrite(&mut Replace {
+                original: original_join,
+                replacement: outer.into_logical_plan(),
+            })?
+            .data)
+    }
+
+    async fn dist_join_stats(
+        &self,
+        ctx: &QueryEngineContext,
+        logical_plan: &LogicalPlan,
+    ) -> Option<DistJoinStats> {
+        if !ctx
+            .query_ctx()
+            .configuration_parameter()
+            .experimental_dist_join()
+        {
+            return None;
+        }
+
+        let candidates = candidate_joins(logical_plan);
+        if candidates.is_empty() {
+            return None;
+        }
+
+        let catalog_manager = self
+            .state
+            .catalog_manager()
+            .as_any()
+            .downcast_ref::<KvBackendCatalogManager>()?;
+        let partition_manager = catalog_manager.partition_manager();
+
+        // Resolve the routes before fetching the statistics: a table whose route does not
+        // describe the id the plan captured is not priced, and without one candidate pair whose
+        // two sides both have usable routes the statistics cannot decide the rewrite.
+        let mut routes = BTreeMap::new();
+        for table_id in candidates
+            .iter()
+            .flat_map(|candidate| [candidate.probe, candidate.build])
+            .collect::<BTreeSet<_>>()
+        {
+            let Ok((physical_table_id, route)) = partition_manager
+                .find_physical_table_route_with_id(table_id)
+                .await
+            else {
+                continue;
+            };
+            // A logical table resolves to the route of its physical table; pricing its regions
+            // under the captured id would describe another table.
+            if physical_table_id != table_id {
+                continue;
+            }
+            let Some(regions) = expected_region_ids(physical_table_id, &route.region_routes) else {
+                continue;
+            };
+
+            routes.insert(table_id, regions);
+        }
+        let has_usable_pair = candidates.iter().any(|candidate| {
+            routes.contains_key(&candidate.probe) && routes.contains_key(&candidate.build)
+        });
+        if !has_usable_pair {
+            return None;
+        }
+
+        let reports = match catalog_manager.information_extension().region_stats().await {
+            Ok(reports) => reports,
+            Err(err) => {
+                common_telemetry::debug!(
+                    err = %err,
+                    "Failed to fetch the region statistics of the nested broadcast join, keeping the existing plan"
+                );
+                return None;
+            }
         };
 
+        let mut stats = DistJoinStats {
+            ..Default::default()
+        };
+        for (table_id, regions) in routes {
+            let Some(table_stats) = aggregate_region_stats(&regions, &reports) else {
+                continue;
+            };
+
+            stats.tables.insert(table_id, table_stats);
+        }
+
+        (!stats.tables.is_empty()).then_some(stats)
+    }
+
+    /// Creates the physical plan of `plan` as this query executes it: the planning of the logical
+    /// plan, the physical optimization, the plugins and the query-wide bounds of the reads.
+    async fn plan_query(
+        &self,
+        ctx: &mut QueryEngineContext,
+        plan: &LogicalPlan,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
         // `create_physical_plan` will optimize logical plan internally
-        let physical_plan = self.create_physical_plan(&mut ctx, &plan).await?;
-        let physical_plan = self.optimize_physical_plan(&mut ctx, physical_plan)?;
+        let physical_plan = self.create_physical_plan(ctx, plan).await?;
+        let physical_plan = self.optimize_physical_plan(ctx, physical_plan)?;
         let physical_plan = if let Some(wrapper) = self.plugins.get::<PhysicalPlanWrapperRef>() {
-            wrapper.wrap(physical_plan, query_ctx)
+            wrapper.wrap(physical_plan, ctx.query_ctx())
         } else {
             physical_plan
         };
@@ -210,12 +594,63 @@ impl DatafusionQueryEngine {
                 .set_extension(Arc::new(RegionReadLimiter::new(target_partitions)));
         }
 
+        Ok(physical_plan)
+    }
+
+    /// Executes `plan` as a stream of record batches.
+    ///
+    /// `allow_broadcast_fallback` retries the query once with the original plan when the broadcast
+    /// materialization fails before it yields a batch: a client of a statement that way reads the
+    /// frontend join instead of a resource error. A statement that consumes the stream itself
+    /// (`INSERT`, `DELETE`: see [`Self::exec_dml_statement`]) must pass `false`, since nothing of it
+    /// can be replayed after it reported affected rows.
+    #[tracing::instrument(skip_all)]
+    async fn exec_query_plan(
+        &self,
+        plan: LogicalPlan,
+        query_ctx: QueryContextRef,
+        allow_broadcast_fallback: bool,
+    ) -> Result<Output> {
+        let mut ctx = self.engine_context(query_ctx)?;
+        let query_ctx = ctx.query_ctx();
+        let plan = if let Some(receiver_injector) =
+            self.plugins.get::<RemoteDynFilterReceiverInjectorRef>()
+        {
+            receiver_injector.maybe_inject(plan, query_ctx.clone())
+        } else {
+            plan
+        };
+
+        let physical_plan = self.plan_query(&mut ctx, &plan).await?;
         let stream = self.execute_stream(&ctx, &physical_plan)?;
+        let stream: SendableRecordBatchStream =
+            if needs_broadcast_fallback(&physical_plan, allow_broadcast_fallback) {
+                Box::pin(BroadcastFallbackStream::new(
+                    stream,
+                    self.broadcast_fallback(plan, query_ctx),
+                ))
+            } else {
+                stream
+            };
 
         Ok(Output::new(
             OutputData::Stream(stream),
             OutputMeta::new_with_plan(physical_plan),
         ))
+    }
+
+    /// The context with which [`Self::exec_query_plan`] replans a query whose broadcast
+    /// materialization failed.
+    fn broadcast_fallback(
+        &self,
+        plan: LogicalPlan,
+        query_ctx: QueryContextRef,
+    ) -> BroadcastFallback {
+        BroadcastFallback {
+            engine: DatafusionQueryEngine::new(self.state.clone(), self.plugins.clone()),
+            plan,
+            query_ctx,
+        }
     }
 
     #[tracing::instrument(skip_all)]
@@ -241,7 +676,9 @@ impl DatafusionQueryEngine {
         let table = self.find_table(&table_name, &query_ctx).await?;
 
         let Output { data, meta } = self
-            .exec_query_plan((*dml.input).clone(), query_ctx.clone())
+            // The statement consumes the stream itself and reports affected rows afterwards, so a
+            // failed broadcast materialization cannot be replayed here: no query level fallback.
+            .exec_query_plan((*dml.input).clone(), query_ctx.clone(), false)
             .await?;
         let mut stream = match data {
             OutputData::RecordBatches(batches) => batches.as_stream(),
@@ -437,12 +874,25 @@ impl DatafusionQueryEngine {
         };
 
         let _timer = metrics::CREATE_PHYSICAL_ELAPSED.start_timer();
-        let state = ctx.state();
 
         common_telemetry::debug!("Create physical plan, input plan: {logical_plan}");
 
-        // special handle EXPLAIN plan
-        if matches!(logical_plan, DfLogicalPlan::Explain(_)) {
+        // The broadcast join rewrite reads its statistics from a query-local config extension.
+        // A plain `EXPLAIN` returns below, before the rewrite, so the statistics only shape the
+        // execution path.
+        if let Some(stats) = self.dist_join_stats(ctx, logical_plan).await {
+            ctx.state_mut()
+                .config_mut()
+                .options_mut()
+                .extensions
+                .insert(stats);
+        }
+
+        let state = ctx.state();
+
+        // Plain `EXPLAIN` is planned by DataFusion from the logical plan as it is, so it
+        // shows the distributed plan without the broadcast materialization.
+        if let DfLogicalPlan::Explain(_) = logical_plan {
             return state
                 .create_physical_plan(logical_plan)
                 .await
@@ -455,6 +905,9 @@ impl DatafusionQueryEngine {
             state.config_options(),
             |_, _| {},
         )?;
+        let analyzed_plan = self
+            .maybe_materialize_volatile_broadcast(&analyzed_plan, ctx)
+            .await?;
 
         expr_depth::validate_plan(&analyzed_plan)?;
         logger.after_analyze = Some(analyzed_plan.clone());
@@ -539,6 +992,176 @@ impl DatafusionQueryEngine {
     }
 }
 
+/// The replanning of a query whose broadcast materialization failed, with the switch that turns
+/// the rewrite off: the second plan is the frontend join of the default planner, i.e. plan C of
+/// the distributed join rewrite is not taken again.
+struct BroadcastFallback {
+    engine: DatafusionQueryEngine,
+    plan: LogicalPlan,
+    query_ctx: QueryContextRef,
+}
+
+impl BroadcastFallback {
+    /// Plans and starts `plan` again without the broadcast materialization.
+    fn replan(&self) -> BoxFuture<'static, Result<SendableRecordBatchStream>> {
+        // The engine is cheap to clone: both of its fields are handles to the engine-wide state.
+        let engine =
+            DatafusionQueryEngine::new(self.engine.state.clone(), self.engine.plugins.clone());
+        let plan = self.plan.clone();
+        let mut query_ctx = (*self.query_ctx).clone();
+        query_ctx.set_disable_broadcast_materialize();
+        async move {
+            let mut ctx = engine.engine_context(Arc::new(query_ctx))?;
+            let physical_plan = engine.plan_query(&mut ctx, &plan).await?;
+            engine.execute_stream(&ctx, &physical_plan)
+        }
+        .boxed()
+    }
+}
+
+/// Whether the output stream of a query may be retried with the original plan.
+///
+/// A client of the statement sees the stream as it is produced, so a retry replays the query from
+/// its start: it is only possible while no batch has been yielded, and the original plan is tried
+/// at most once.
+#[derive(Debug, Default)]
+struct BroadcastFallbackPolicy {
+    /// Whether the original plan has already been run for this query.
+    retried: bool,
+    /// Batches of the current stream handed to the client.
+    yielded: usize,
+}
+
+impl BroadcastFallbackPolicy {
+    /// Whether the failure of the current stream falls back to the original plan.
+    ///
+    /// Only a broadcast materialization that fails before the stream produced anything is
+    /// retried: a later failure would make the client read a query twice, and any other failure
+    /// concerns the rest of the query, which the original plan would fail on as well.
+    fn allows_retry(&self, err: &common_recordbatch::error::Error) -> bool {
+        !self.retried && self.yielded == 0 && BroadcastMaterializeError::is_in_chain(err)
+    }
+}
+
+/// The stream of a query plan, replaced by the original plan when its broadcast materialization
+/// fails before the first batch.
+struct BroadcastFallbackStream {
+    fallback: BroadcastFallback,
+    policy: BroadcastFallbackPolicy,
+    current: FallbackStream,
+    /// The schema of the query, which both plans produce.
+    schema: SchemaRef,
+}
+
+/// The stream of the current plan, or the original plan being planned and started.
+enum FallbackStream {
+    Streaming(SendableRecordBatchStream),
+    Replanning(BoxFuture<'static, Result<SendableRecordBatchStream>>),
+    /// The original plan failed to start; the query has nothing left to yield.
+    Failed,
+}
+
+impl BroadcastFallbackStream {
+    fn new(stream: SendableRecordBatchStream, fallback: BroadcastFallback) -> Self {
+        let schema = stream.schema();
+        Self {
+            fallback,
+            policy: BroadcastFallbackPolicy::default(),
+            current: FallbackStream::Streaming(stream),
+            schema,
+        }
+    }
+}
+
+impl RecordBatchStream for BroadcastFallbackStream {
+    fn name(&self) -> &str {
+        match &self.current {
+            FallbackStream::Streaming(stream) => stream.name(),
+            _ => "BroadcastFallbackStream",
+        }
+    }
+
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+
+    fn output_ordering(&self) -> Option<&[OrderOption]> {
+        match &self.current {
+            FallbackStream::Streaming(stream) => stream.output_ordering(),
+            _ => None,
+        }
+    }
+
+    fn metrics(&self) -> Option<RecordBatchMetrics> {
+        match &self.current {
+            FallbackStream::Streaming(stream) => stream.metrics(),
+            _ => None,
+        }
+    }
+}
+
+impl Stream for BroadcastFallbackStream {
+    type Item = common_recordbatch::error::Result<common_recordbatch::RecordBatch>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        loop {
+            // The state is moved out so that a poll may replace it with the next one.
+            match std::mem::replace(&mut this.current, FallbackStream::Failed) {
+                FallbackStream::Streaming(mut stream) => {
+                    match Pin::new(&mut stream).poll_next(cx) {
+                        Poll::Pending => {
+                            this.current = FallbackStream::Streaming(stream);
+                            return Poll::Pending;
+                        }
+                        Poll::Ready(Some(Ok(batch))) => {
+                            this.policy.yielded += 1;
+                            this.current = FallbackStream::Streaming(stream);
+                            return Poll::Ready(Some(Ok(batch)));
+                        }
+                        Poll::Ready(Some(Err(err))) => {
+                            if !this.policy.allows_retry(&err) {
+                                this.current = FallbackStream::Streaming(stream);
+                                return Poll::Ready(Some(Err(err)));
+                            }
+                            this.policy.retried = true;
+                            common_telemetry::warn!(
+                                %err;
+                                "Broadcast materialization failed before the first batch, \
+                                 retrying the query with the original plan"
+                            );
+                            // The build side of the broadcast is evaluated before the query yields
+                            // anything, so the client has not seen the failed plan.
+                            this.current = FallbackStream::Replanning(this.fallback.replan());
+                        }
+                        Poll::Ready(None) => return Poll::Ready(None),
+                    }
+                }
+                FallbackStream::Replanning(mut replan) => match replan.as_mut().poll(cx) {
+                    Poll::Pending => {
+                        this.current = FallbackStream::Replanning(replan);
+                        return Poll::Pending;
+                    }
+                    Poll::Ready(Ok(stream)) => {
+                        this.schema = stream.schema();
+                        this.current = FallbackStream::Streaming(stream);
+                        // Poll the original plan in this poll, so the retry costs no wake-up.
+                    }
+                    Poll::Ready(Err(err)) => {
+                        common_telemetry::warn!(
+                            err;
+                            "Failed to execute the original plan of the broadcast fallback"
+                        );
+                        return Poll::Ready(Some(Err(common_recordbatch::error::ExternalSnafu
+                            .into_error(BoxedError::new(err)))));
+                    }
+                },
+                FallbackStream::Failed => return Poll::Ready(None),
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl QueryEngine for DatafusionQueryEngine {
     fn as_any(&self) -> &dyn Any {
@@ -564,7 +1187,7 @@ impl QueryEngine for DatafusionQueryEngine {
     async fn execute(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output> {
         match plan {
             LogicalPlan::Dml(dml) => self.exec_dml_statement(dml, query_ctx).await,
-            _ => self.exec_query_plan(plan, query_ctx).await,
+            _ => self.exec_query_plan(plan, query_ctx, true).await,
         }
     }
 
@@ -763,41 +1386,66 @@ impl QueryExecutor for DatafusionQueryEngine {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::fmt;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
     use api::v1::SemanticType;
-    use arrow::array::{ArrayRef, UInt64Array};
+    use arrow::array::{ArrayRef, StringArray, UInt64Array};
     use arrow_schema::SortOptions;
+    use arrow_schema::{DataType as ArrowDataType, Field};
     use async_trait::async_trait;
     use catalog::RegisterTableRequest;
+    use catalog::information_schema::{
+        DatanodeInspectRequest, InformationExtension, InformationExtensionRef,
+    };
+    use catalog::kvbackend::KvBackendCatalogManagerBuilder;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, NUMBERS_TABLE_ID};
     use common_error::ext::BoxedError;
+    use common_meta::cache::{
+        CacheRegistryBuilder, LayeredCacheRegistryBuilder, new_table_route_cache,
+    };
+    use common_meta::cluster::NodeInfo;
+    use common_meta::datanode::{RegionManifestInfo, RegionStat};
+    use common_meta::key::flow::flow_state::FlowStat;
+    use common_meta::key::table_route::{TableRouteManager, TableRouteValue};
+    use common_meta::kv_backend::TxnService;
+    use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_meta::rpc::router::{Region, RegionRoute};
+    use common_procedure::ProcedureInfo;
     use common_recordbatch::{
         EmptyRecordBatchStream, RecordBatch, SendableRecordBatchStream, util,
     };
+    use datafusion::datasource::DefaultTableSource;
     use datafusion::physical_plan::display::{DisplayAs, DisplayFormatType};
     use datafusion::physical_plan::expressions::PhysicalSortExpr;
     use datafusion::physical_plan::joins::{CrossJoinExec, HashJoinExec, JoinOn, PartitionMode};
     use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+    use datafusion::physical_plan::test::TestMemoryExec;
     use datafusion::physical_plan::{ExecutionPlan, PhysicalExpr};
     use datafusion::prelude::{col, lit};
-    use datafusion_common::{JoinType, NullEquality, ScalarValue};
+    use datafusion_common::{DataFusionError, JoinType, NullEquality, ScalarValue};
+    use datafusion_expr::LogicalPlanBuilder;
     use datafusion_physical_expr::expressions::Column;
+    use datatypes::extension::json::Json2ExtensionType;
     use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::{ColumnSchema, SchemaRef};
+    use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
     use datatypes::vectors::{Helper, UInt32Vector, VectorRef};
+    use partition::cache::new_partition_info_cache;
     use session::context::{QueryContext, QueryContextBuilder};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
     use store_api::region_engine::{
-        PartitionRange, PrepareRequest, QueryScanContext, RawLabelSource, RegionScanner,
-        ScannerProperties,
+        PartitionRange, PrepareRequest, QueryScanContext, RawLabelSource, RegionRole,
+        RegionScanner, ScannerProperties,
     };
     use store_api::storage::{RegionId, ScanRequest};
-    use table::metadata::{TableInfoBuilder, TableMetaBuilder};
+    use table::metadata::{TableId, TableInfoBuilder, TableMetaBuilder};
+    use table::table::adapter::DfTableProviderAdapter;
     use table::table::numbers::{NUMBERS_TABLE_NAME, NumbersTable};
     use table::table::scan::RegionScanExec;
+    use table::test_util::EmptyTable;
+    use table::test_util::table_info::test_table_info;
 
     use super::*;
     use crate::options::QueryOptions;
@@ -1851,5 +2499,1170 @@ mod tests {
                 value
             );
         }
+    }
+
+    /// The table ids of the two tables of the join of the automatic tests.
+    const PROBE_TABLE_ID: TableId = 1024;
+    const BUILD_TABLE_ID: TableId = 1025;
+
+    /// The physical table id a logical candidate table resolves to in the route gating test.
+    const LOGICAL_PHYSICAL_TABLE_ID: TableId = 1026;
+
+    /// The table id of the table an aliased self-join joins with itself.
+    const SELF_JOIN_TABLE_ID: TableId = 1027;
+
+    /// An information extension with fixed region statistics and a counter of its `region_stats`
+    /// calls.
+    #[derive(Debug)]
+    struct TestInformationExtension {
+        reports: Vec<RegionStat>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl InformationExtension for TestInformationExtension {
+        type Error = catalog::error::Error;
+
+        async fn nodes(&self) -> std::result::Result<Vec<NodeInfo>, Self::Error> {
+            Ok(vec![])
+        }
+
+        async fn procedures(
+            &self,
+        ) -> std::result::Result<Vec<(String, ProcedureInfo)>, Self::Error> {
+            Ok(vec![])
+        }
+
+        async fn region_stats(&self) -> std::result::Result<Vec<RegionStat>, Self::Error> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.reports.clone())
+        }
+
+        async fn flow_stats(&self) -> std::result::Result<Option<FlowStat>, Self::Error> {
+            Ok(None)
+        }
+
+        async fn inspect_datanode(
+            &self,
+            _request: DatanodeInspectRequest,
+        ) -> std::result::Result<SendableRecordBatchStream, Self::Error> {
+            Ok(common_recordbatch::RecordBatches::empty().as_stream())
+        }
+    }
+
+    /// A region report with `bytes` approximate disk bytes and `role`.
+    fn region_stat(region_id: RegionId, bytes: u64, role: RegionRole) -> RegionStat {
+        RegionStat {
+            id: region_id,
+            rcus: 0,
+            wcus: 0,
+            approximate_bytes: bytes,
+            engine: "mito".to_string(),
+            role,
+            num_rows: 0,
+            memtable_size: 0,
+            manifest_size: 0,
+            sst_size: 0,
+            sst_num: 0,
+            index_size: 0,
+            region_manifest: RegionManifestInfo::Mito {
+                manifest_version: 0,
+                flushed_entry_id: 0,
+                file_removed_cnt: 0,
+            },
+            written_bytes: 0,
+            ingested_parquet_bytes: 0,
+            query_cpu_time: 0,
+            query_scanned_bytes: 0,
+            data_topic_latest_entry_id: 0,
+            metadata_topic_latest_entry_id: 0,
+            min_timestamp: None,
+            max_timestamp: None,
+            has_pending_tails: false,
+        }
+    }
+
+    /// The region statistics of a complete query: the probe table has two regions of 4_000 and
+    /// 6_000 bytes, the build table one region of 1_000 bytes.
+    fn dist_join_reports() -> Vec<RegionStat> {
+        vec![
+            region_stat(RegionId::new(PROBE_TABLE_ID, 1), 4_000, RegionRole::Leader),
+            region_stat(RegionId::new(PROBE_TABLE_ID, 2), 6_000, RegionRole::Leader),
+            region_stat(RegionId::new(BUILD_TABLE_ID, 1), 1_000, RegionRole::Leader),
+        ]
+    }
+
+    /// Two-column schema (`number`, `host`) of the tables of the join of the tests.
+    fn dist_join_test_schema() -> SchemaRef {
+        let schema = SchemaBuilder::try_from_columns(vec![
+            ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
+        ])
+        .unwrap()
+        .build()
+        .unwrap();
+        Arc::new(schema)
+    }
+
+    /// Base table `name` with `table_id`, backed by an empty table provider.
+    fn dist_join_test_table(table_id: TableId, name: &str) -> table::TableRef {
+        let info = test_table_info(
+            table_id,
+            name,
+            DEFAULT_SCHEMA_NAME,
+            DEFAULT_CATALOG_NAME,
+            dist_join_test_schema(),
+        );
+        EmptyTable::from_table_info(&info)
+    }
+
+    /// A scan of one of the tables of the join of the tests.
+    fn dist_join_test_scan(alias: &str, table_id: TableId, name: &str) -> LogicalPlan {
+        let source = Arc::new(DefaultTableSource::new(Arc::new(
+            DfTableProviderAdapter::new(dist_join_test_table(table_id, name)),
+        )));
+        LogicalPlanBuilder::scan_with_filters(alias, source, None, vec![])
+            .unwrap()
+            .build()
+            .unwrap()
+    }
+
+    /// `probe INNER JOIN build ON probe.number = build.number`: the shape `DistPlannerAnalyzer`
+    /// wraps in `MergeScan` and `DistJoinPlanner` can then nest.
+    fn dist_join_test_plan() -> LogicalPlan {
+        LogicalPlanBuilder::from(dist_join_test_scan("probe", PROBE_TABLE_ID, "probe"))
+            .join_on(
+                dist_join_test_scan("build", BUILD_TABLE_ID, "build"),
+                JoinType::Inner,
+                vec![col("probe.number").eq(col("build.number"))],
+            )
+            .unwrap()
+            .build()
+            .unwrap()
+    }
+
+    /// The shape of [`dist_join_test_plan`] with the given tables under the aliases `a` and `b`:
+    /// an aliased self-join passes the same table id twice.
+    fn dist_join_aliased_test_plan(left: (TableId, &str), right: (TableId, &str)) -> LogicalPlan {
+        LogicalPlanBuilder::from(dist_join_test_scan("a", left.0, left.1))
+            .join_on(
+                dist_join_test_scan("b", right.0, right.1),
+                JoinType::Inner,
+                vec![col("a.number").eq(col("b.number"))],
+            )
+            .unwrap()
+            .build()
+            .unwrap()
+    }
+
+    /// The statistics the engine derives from [`dist_join_reports`] and [`dist_join_test_routes`]:
+    /// the probe table with 10_000 bytes in two regions and the build table with 1_000 bytes in
+    /// one.
+    fn dist_join_test_stats() -> BTreeMap<TableId, crate::dist_plan::DistJoinTableStats> {
+        BTreeMap::from([
+            (
+                PROBE_TABLE_ID,
+                crate::dist_plan::DistJoinTableStats {
+                    total_bytes: 10_000,
+                    region_count: 2,
+                },
+            ),
+            (
+                BUILD_TABLE_ID,
+                crate::dist_plan::DistJoinTableStats {
+                    total_bytes: 1_000,
+                    region_count: 1,
+                },
+            ),
+        ])
+    }
+
+    /// A query context with or without the session opt-in of the rewrite.
+    fn dist_join_query_ctx(opt_in: bool) -> QueryContextRef {
+        let query_ctx = QueryContextBuilder::default().build();
+        query_ctx
+            .configuration_parameter()
+            .set_experimental_dist_join(opt_in);
+        Arc::new(query_ctx)
+    }
+
+    /// The physical route of the table `table_id` with the given region numbers.
+    fn dist_join_physical_route(
+        table_id: TableId,
+        region_numbers: &[u32],
+    ) -> (TableId, TableRouteValue) {
+        let routes = region_numbers
+            .iter()
+            .map(|region_number| RegionRoute {
+                region: Region {
+                    id: RegionId::new(table_id, *region_number),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .collect();
+        (table_id, TableRouteValue::physical(routes))
+    }
+
+    /// The physical routes of the tables of the join of the tests: the probe table has the regions
+    /// 1 and 2, the build table the region 1.
+    fn dist_join_test_routes() -> Vec<(TableId, TableRouteValue)> {
+        vec![
+            dist_join_physical_route(PROBE_TABLE_ID, &[1, 2]),
+            dist_join_physical_route(BUILD_TABLE_ID, &[1]),
+        ]
+    }
+
+    /// A catalog manager whose KV backend holds the given table routes. Its region statistics are
+    /// the given reports.
+    async fn dist_join_catalog_manager(
+        routes: Vec<(TableId, TableRouteValue)>,
+        reports: Vec<RegionStat>,
+        calls: Arc<AtomicUsize>,
+    ) -> Arc<KvBackendCatalogManager> {
+        let kv_backend = Arc::new(MemoryKvBackend::default());
+        let table_route_manager = TableRouteManager::new(kv_backend.clone());
+        for (table_id, table_route) in routes {
+            let (txn, _) = table_route_manager
+                .table_route_storage()
+                .build_create_txn(table_id, &table_route)
+                .unwrap();
+            assert!(kv_backend.txn(txn).await.unwrap().succeeded);
+        }
+
+        let table_route_cache = Arc::new(new_table_route_cache(
+            "test_table_route".to_string(),
+            moka::future::Cache::new(16),
+            kv_backend.clone(),
+        ));
+        let partition_info_cache = Arc::new(new_partition_info_cache(
+            "test_partition_info".to_string(),
+            moka::future::Cache::new(16),
+            table_route_cache.clone(),
+        ));
+        let cache_registry = LayeredCacheRegistryBuilder::default()
+            .add_cache_registry(
+                CacheRegistryBuilder::default()
+                    .add_cache(table_route_cache)
+                    .add_cache(partition_info_cache)
+                    .build(),
+            )
+            .build();
+        let information_extension: InformationExtensionRef =
+            Arc::new(TestInformationExtension { reports, calls });
+
+        KvBackendCatalogManagerBuilder::new(
+            information_extension,
+            kv_backend,
+            Arc::new(cache_registry),
+        )
+        .build()
+    }
+
+    /// A query engine over the catalog manager of the tests, with the distributed rules when
+    /// `with_dist_planner` is set.
+    async fn dist_join_engine(
+        reports: Vec<RegionStat>,
+        calls: Arc<AtomicUsize>,
+        with_dist_planner: bool,
+    ) -> QueryEngineRef {
+        dist_join_engine_with_routes(dist_join_test_routes(), reports, calls, with_dist_planner)
+            .await
+    }
+
+    /// A query engine over a catalog manager with the given table `routes`.
+    async fn dist_join_engine_with_routes(
+        routes: Vec<(TableId, TableRouteValue)>,
+        reports: Vec<RegionStat>,
+        calls: Arc<AtomicUsize>,
+        with_dist_planner: bool,
+    ) -> QueryEngineRef {
+        let catalog_manager = dist_join_catalog_manager(routes, reports, calls).await;
+        QueryEngineFactory::new_with_plugins(
+            catalog_manager.clone(),
+            Some(catalog_manager.partition_manager()),
+            None,
+            None,
+            None,
+            None,
+            with_dist_planner,
+            Plugins::new(),
+            QueryOptions::default(),
+        )
+        .query_engine()
+    }
+
+    /// The optimized logical plan of the EXPLAIN output of `plan`, as the query engine produces
+    /// it: `DatafusionQueryEngine::create_physical_plan` handles EXPLAIN, whose input plan is
+    /// analyzed and optimized (i.e. the distributed rules including `DistJoinPlanner` run on it)
+    /// before its stages are printed.
+    async fn explain_logical_plan(
+        engine: &DatafusionQueryEngine,
+        ctx: &mut QueryEngineContext,
+        plan: &LogicalPlan,
+    ) -> String {
+        let explain_plan = LogicalPlanBuilder::from(plan.clone())
+            .explain(false, false)
+            .unwrap()
+            .build()
+            .unwrap();
+        let physical = engine
+            .create_physical_plan(ctx, &explain_plan)
+            .await
+            .unwrap();
+        let batches = datafusion::physical_plan::collect(physical, ctx.build_task_ctx())
+            .await
+            .unwrap();
+
+        for batch in &batches {
+            let plan_types = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let plans = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            for row in 0..batch.num_rows() {
+                if plan_types.value(row) == "logical_plan" {
+                    return plans.value(row).to_string();
+                }
+            }
+        }
+
+        panic!("the EXPLAIN output has no logical plan: {batches:?}");
+    }
+
+    /// Whether an EXPLAIN of a join shows the nested rewrite: the join sits inside a `MergeScan`,
+    /// so the enclosing boundary appears before the join in the plan text. The join of two
+    /// boundaries, i.e. the plan without the rewrite, shows the join first.
+    fn nests_join_in_merge_scan(plan: &str) -> bool {
+        match (plan.find("Join:"), plan.find("MergeScan")) {
+            (Some(join), Some(merge_scan)) => merge_scan < join,
+            _ => false,
+        }
+    }
+
+    /// The analyzed and materialized logical plan of `plan`, as the engine plans it for
+    /// execution: the distributed analyzer runs first, then the broadcast rewrite.
+    async fn materialized_logical_plan(
+        engine: &DatafusionQueryEngine,
+        ctx: &mut QueryEngineContext,
+        plan: &LogicalPlan,
+    ) -> String {
+        let stats = engine.dist_join_stats(ctx, plan).await.unwrap();
+        ctx.state_mut()
+            .config_mut()
+            .options_mut()
+            .extensions
+            .insert(stats);
+
+        let state = ctx.state();
+        let analyzed = state
+            .analyzer()
+            .execute_and_check(plan.clone(), state.config_options(), |_, _| {})
+            .unwrap();
+        let materialized = engine
+            .maybe_materialize_volatile_broadcast(&analyzed, ctx)
+            .await
+            .unwrap();
+        materialized.display_indent().to_string()
+    }
+
+    /// The automatic path of the statistics of the nested broadcast join rewrite: the engine
+    /// resolves the candidate tables to their physical routes, fetches the region statistics of
+    /// the query once, and the EXPLAIN of the same query then shows the nested rewrite.
+    #[tokio::test]
+    async fn test_dist_join_stats_from_physical_routes() {
+        common_telemetry::init_default_ut_logging();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let engine = dist_join_engine(dist_join_reports(), calls.clone(), true).await;
+        let query_engine = engine
+            .as_any()
+            .downcast_ref::<DatafusionQueryEngine>()
+            .unwrap();
+        let mut ctx = query_engine
+            .engine_context(dist_join_query_ctx(true))
+            .unwrap();
+        let plan = dist_join_test_plan();
+
+        let stats = query_engine.dist_join_stats(&ctx, &plan).await.unwrap();
+        assert_eq!(dist_join_test_stats(), stats.tables);
+        assert!(stats.favors_right_build(PROBE_TABLE_ID, BUILD_TABLE_ID));
+        assert_eq!(
+            1,
+            calls.load(Ordering::SeqCst),
+            "the statistics of one query must come from one region stats call"
+        );
+
+        // The engine plans the broadcast shape for execution: the remote join reads the
+        // build side from a data slot, which the local `Materialize` stage fills.
+        let materialized = materialized_logical_plan(query_engine, &mut ctx, &plan).await;
+        assert!(
+            materialized.contains("MaterializeBroadcastJoin [remote_input=["),
+            "the broadcast rewrite must wrap the remote join, got:\n{materialized}"
+        );
+        assert!(
+            materialized.contains("MaterializedInput rows=0"),
+            "the remote join must read an empty data slot, got:\n{materialized}"
+        );
+        assert!(
+            materialized.contains("\n  Materialize\n"),
+            "the build side must stay a local child, got:\n{materialized}"
+        );
+        assert_eq!(2, calls.load(Ordering::SeqCst));
+
+        // Plain EXPLAIN stays on the analyzed distributed plan: it must not evaluate the
+        // build side nor show the materialization.
+        let explained = explain_logical_plan(query_engine, &mut ctx, &plan).await;
+        assert!(
+            !nests_join_in_merge_scan(&explained),
+            "plain EXPLAIN must keep the two MergeScan boundaries, got:\n{explained}"
+        );
+        assert!(!explained.contains("MaterializeBroadcastJoin"));
+        assert_eq!(3, calls.load(Ordering::SeqCst));
+    }
+
+    /// The gating of the automatic path: without the session opt-in, without the distributed
+    /// rules or without a candidate join the engine does not fetch any statistics.
+    #[tokio::test]
+    async fn test_dist_join_stats_gating() {
+        common_telemetry::init_default_ut_logging();
+
+        // Without the session opt-in.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let engine = dist_join_engine(dist_join_reports(), calls.clone(), true).await;
+        let query_engine = engine
+            .as_any()
+            .downcast_ref::<DatafusionQueryEngine>()
+            .unwrap();
+        let plan = dist_join_test_plan();
+        let ctx = query_engine
+            .engine_context(dist_join_query_ctx(false))
+            .unwrap();
+        assert!(query_engine.dist_join_stats(&ctx, &plan).await.is_none());
+        assert_eq!(0, calls.load(Ordering::SeqCst));
+
+        // Without a candidate join.
+        let ctx = query_engine
+            .engine_context(dist_join_query_ctx(true))
+            .unwrap();
+        let scan_plan = dist_join_test_scan("probe", PROBE_TABLE_ID, "probe");
+        assert!(
+            query_engine
+                .dist_join_stats(&ctx, &scan_plan)
+                .await
+                .is_none()
+        );
+        assert_eq!(0, calls.load(Ordering::SeqCst));
+
+        // The same plan runs through the EXPLAIN path without the opt-in: the join keeps its two
+        // boundaries.
+        let mut ctx = query_engine
+            .engine_context(dist_join_query_ctx(false))
+            .unwrap();
+        let explained = explain_logical_plan(query_engine, &mut ctx, &plan).await;
+        assert!(
+            !nests_join_in_merge_scan(&explained),
+            "without the opt-in the join must keep its two MergeScan boundaries, got:\n{explained}"
+        );
+    }
+
+    /// An incomplete description of a candidate table (here a follower report instead of the
+    /// leader of the build table) leaves the table out of the statistics, so the EXPLAIN of the
+    /// same query keeps the existing plan.
+    #[tokio::test]
+    async fn test_dist_join_stats_missing_description_keeps_plan() {
+        common_telemetry::init_default_ut_logging();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut reports = dist_join_reports();
+        reports[2].role = RegionRole::Follower;
+        let engine = dist_join_engine(reports, calls.clone(), true).await;
+        let query_engine = engine
+            .as_any()
+            .downcast_ref::<DatafusionQueryEngine>()
+            .unwrap();
+        let mut ctx = query_engine
+            .engine_context(dist_join_query_ctx(true))
+            .unwrap();
+        let plan = dist_join_test_plan();
+
+        let stats = query_engine.dist_join_stats(&ctx, &plan).await.unwrap();
+        assert_eq!(1, stats.tables.len());
+        assert!(!stats.favors_right_build(PROBE_TABLE_ID, BUILD_TABLE_ID));
+
+        let explained = explain_logical_plan(query_engine, &mut ctx, &plan).await;
+        assert!(
+            !nests_join_in_merge_scan(&explained),
+            "an incomplete description must keep the existing plan, got:\n{explained}"
+        );
+        assert_eq!(2, calls.load(Ordering::SeqCst));
+    }
+
+    /// The broadcast build side is bounded while the plan is built: a build table at the bound is
+    /// still broadcast, a build table above it keeps the frontend join even though the cost
+    /// heuristic favors the broadcast. The build side is never measured at run time.
+    #[tokio::test]
+    async fn test_dist_join_stats_build_side_bounded_by_broadcast_limit() {
+        use crate::dist_plan::MAX_BROADCAST_BUILD_BYTES;
+
+        common_telemetry::init_default_ut_logging();
+
+        // Two probe regions of 70 MiB each favor the build side as the broadcast build in both
+        // cases: `2 * build_bytes < 140 MiB` holds at the bound and one byte above it.
+        let probe_bytes = 70 * 1024 * 1024;
+        let reports_of = |build_bytes: u64| {
+            vec![
+                region_stat(
+                    RegionId::new(PROBE_TABLE_ID, 1),
+                    probe_bytes,
+                    RegionRole::Leader,
+                ),
+                region_stat(
+                    RegionId::new(PROBE_TABLE_ID, 2),
+                    probe_bytes,
+                    RegionRole::Leader,
+                ),
+                region_stat(
+                    RegionId::new(BUILD_TABLE_ID, 1),
+                    build_bytes,
+                    RegionRole::Leader,
+                ),
+            ]
+        };
+
+        for (build_bytes, broadcast) in [
+            (MAX_BROADCAST_BUILD_BYTES, true),
+            (MAX_BROADCAST_BUILD_BYTES + 1, false),
+        ] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let engine = dist_join_engine(reports_of(build_bytes), calls, true).await;
+            let query_engine = engine
+                .as_any()
+                .downcast_ref::<DatafusionQueryEngine>()
+                .unwrap();
+            let mut ctx = query_engine
+                .engine_context(dist_join_query_ctx(true))
+                .unwrap();
+            let plan = dist_join_test_plan();
+
+            let stats = query_engine.dist_join_stats(&ctx, &plan).await.unwrap();
+            assert!(
+                stats.favors_right_build(PROBE_TABLE_ID, BUILD_TABLE_ID),
+                "{build_bytes} build bytes must favor the broadcast build"
+            );
+
+            let materialized = materialized_logical_plan(query_engine, &mut ctx, &plan).await;
+            assert_eq!(
+                broadcast,
+                materialized.contains("MaterializeBroadcastJoin"),
+                "{build_bytes} build bytes must {} the broadcast rewrite, got:\n{materialized}",
+                if broadcast { "keep" } else { "drop" }
+            );
+            if !broadcast {
+                assert!(
+                    !nests_join_in_merge_scan(&materialized),
+                    "an oversized build side must keep the frontend join, got:\n{materialized}"
+                );
+            }
+        }
+    }
+
+    /// A candidate table that resolves to another physical table id is not priced under the id the
+    /// plan captured: the engine keeps the existing plan without fetching any statistics.
+    #[tokio::test]
+    async fn test_dist_join_stats_logical_route_keeps_plan() {
+        common_telemetry::init_default_ut_logging();
+
+        // The probe table is logical and resolves to the physical table LOGICAL_PHYSICAL_TABLE_ID,
+        // whose regions the reports describe; the build table is a usable physical table. Pricing
+        // the resolved regions under the captured probe id would make the pair usable, so the
+        // engine must reject the resolution and fetch nothing.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let routes = vec![
+            (
+                PROBE_TABLE_ID,
+                TableRouteValue::logical(LOGICAL_PHYSICAL_TABLE_ID),
+            ),
+            dist_join_physical_route(LOGICAL_PHYSICAL_TABLE_ID, &[1, 2]),
+            dist_join_physical_route(BUILD_TABLE_ID, &[1]),
+        ];
+        let reports = vec![
+            region_stat(
+                RegionId::new(LOGICAL_PHYSICAL_TABLE_ID, 1),
+                4_000,
+                RegionRole::Leader,
+            ),
+            region_stat(
+                RegionId::new(LOGICAL_PHYSICAL_TABLE_ID, 2),
+                6_000,
+                RegionRole::Leader,
+            ),
+            region_stat(RegionId::new(BUILD_TABLE_ID, 1), 1_000, RegionRole::Leader),
+        ];
+        let engine = dist_join_engine_with_routes(routes, reports, calls.clone(), true).await;
+        let query_engine = engine
+            .as_any()
+            .downcast_ref::<DatafusionQueryEngine>()
+            .unwrap();
+        let ctx = query_engine
+            .engine_context(dist_join_query_ctx(true))
+            .unwrap();
+        let plan = dist_join_test_plan();
+
+        assert!(query_engine.dist_join_stats(&ctx, &plan).await.is_none());
+        assert_eq!(0, calls.load(Ordering::SeqCst));
+
+        // The logical probe is the only candidate table with a route: the pair is still unusable.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let routes = vec![
+            (
+                PROBE_TABLE_ID,
+                TableRouteValue::logical(LOGICAL_PHYSICAL_TABLE_ID),
+            ),
+            dist_join_physical_route(LOGICAL_PHYSICAL_TABLE_ID, &[1, 2]),
+        ];
+        let engine = dist_join_engine_with_routes(
+            routes,
+            vec![
+                region_stat(
+                    RegionId::new(LOGICAL_PHYSICAL_TABLE_ID, 1),
+                    4_000,
+                    RegionRole::Leader,
+                ),
+                region_stat(
+                    RegionId::new(LOGICAL_PHYSICAL_TABLE_ID, 2),
+                    6_000,
+                    RegionRole::Leader,
+                ),
+            ],
+            calls.clone(),
+            true,
+        )
+        .await;
+        let query_engine = engine
+            .as_any()
+            .downcast_ref::<DatafusionQueryEngine>()
+            .unwrap();
+
+        assert!(query_engine.dist_join_stats(&ctx, &plan).await.is_none());
+        assert_eq!(0, calls.load(Ordering::SeqCst));
+    }
+
+    /// A candidate pair with a missing or empty build route is left alone: the engine keeps the
+    /// existing plan without fetching any statistics.
+    #[tokio::test]
+    async fn test_dist_join_stats_unusable_route_keeps_plan() {
+        common_telemetry::init_default_ut_logging();
+
+        // The build table has no route.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let routes = vec![dist_join_physical_route(PROBE_TABLE_ID, &[1, 2])];
+        let engine =
+            dist_join_engine_with_routes(routes, dist_join_reports(), calls.clone(), true).await;
+        let query_engine = engine
+            .as_any()
+            .downcast_ref::<DatafusionQueryEngine>()
+            .unwrap();
+        let ctx = query_engine
+            .engine_context(dist_join_query_ctx(true))
+            .unwrap();
+        let plan = dist_join_test_plan();
+
+        assert!(query_engine.dist_join_stats(&ctx, &plan).await.is_none());
+        assert_eq!(0, calls.load(Ordering::SeqCst));
+
+        // The build table route has no region.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let routes = vec![
+            dist_join_physical_route(PROBE_TABLE_ID, &[1, 2]),
+            dist_join_physical_route(BUILD_TABLE_ID, &[]),
+        ];
+        let engine =
+            dist_join_engine_with_routes(routes, dist_join_reports(), calls.clone(), true).await;
+        let query_engine = engine
+            .as_any()
+            .downcast_ref::<DatafusionQueryEngine>()
+            .unwrap();
+        let ctx = query_engine
+            .engine_context(dist_join_query_ctx(true))
+            .unwrap();
+
+        assert!(query_engine.dist_join_stats(&ctx, &plan).await.is_none());
+        assert_eq!(0, calls.load(Ordering::SeqCst));
+    }
+
+    /// An aliased self-join prices one table against itself, which can never satisfy
+    /// `N * B < B`: the engine resolves no route and fetches no statistics for it, and the
+    /// EXPLAIN of the same query keeps the existing plan.
+    #[tokio::test]
+    async fn test_dist_join_stats_self_join_keeps_plan() {
+        common_telemetry::init_default_ut_logging();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let engine = dist_join_engine(dist_join_reports(), calls.clone(), true).await;
+        let query_engine = engine
+            .as_any()
+            .downcast_ref::<DatafusionQueryEngine>()
+            .unwrap();
+        let mut ctx = query_engine
+            .engine_context(dist_join_query_ctx(true))
+            .unwrap();
+        let plan =
+            dist_join_aliased_test_plan((PROBE_TABLE_ID, "probe"), (PROBE_TABLE_ID, "probe"));
+
+        assert!(query_engine.dist_join_stats(&ctx, &plan).await.is_none());
+        assert_eq!(
+            0,
+            calls.load(Ordering::SeqCst),
+            "a self-join must not fetch any statistics"
+        );
+
+        let explained = explain_logical_plan(query_engine, &mut ctx, &plan).await;
+        assert!(
+            !nests_join_in_merge_scan(&explained),
+            "the self-join must keep its two MergeScan boundaries, got:\n{explained}"
+        );
+        assert_eq!(0, calls.load(Ordering::SeqCst));
+    }
+
+    /// The aliases of the two sides do not change the candidate: the same shape over two tables is
+    /// priced, the heuristic favors the build side, and the EXPLAIN shows the nested rewrite.
+    #[tokio::test]
+    async fn test_dist_join_stats_aliased_tables_stay_candidates() {
+        common_telemetry::init_default_ut_logging();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let engine = dist_join_engine(dist_join_reports(), calls.clone(), true).await;
+        let query_engine = engine
+            .as_any()
+            .downcast_ref::<DatafusionQueryEngine>()
+            .unwrap();
+        let mut ctx = query_engine
+            .engine_context(dist_join_query_ctx(true))
+            .unwrap();
+        let plan =
+            dist_join_aliased_test_plan((PROBE_TABLE_ID, "probe"), (BUILD_TABLE_ID, "build"));
+
+        let stats = query_engine.dist_join_stats(&ctx, &plan).await.unwrap();
+        assert_eq!(dist_join_test_stats(), stats.tables);
+        assert!(stats.favors_right_build(PROBE_TABLE_ID, BUILD_TABLE_ID));
+        assert_eq!(1, calls.load(Ordering::SeqCst));
+
+        let materialized = materialized_logical_plan(query_engine, &mut ctx, &plan).await;
+        assert!(
+            materialized.contains("MaterializeBroadcastJoin"),
+            "aliased tables must stay materialization candidates, got:\n{materialized}"
+        );
+        assert_eq!(2, calls.load(Ordering::SeqCst));
+    }
+
+    /// A rejected self-join does not stop the traversal of the plan: the legitimate join next to
+    /// it is still priced, the self-join table gets no statistics, and the query still comes from
+    /// one `region_stats` call.
+    #[tokio::test]
+    async fn test_dist_join_stats_self_join_next_to_candidate() {
+        common_telemetry::init_default_ut_logging();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut routes = dist_join_test_routes();
+        routes.push(dist_join_physical_route(SELF_JOIN_TABLE_ID, &[1]));
+        let mut reports = dist_join_reports();
+        reports.push(region_stat(
+            RegionId::new(SELF_JOIN_TABLE_ID, 1),
+            2_000,
+            RegionRole::Leader,
+        ));
+        let engine = dist_join_engine_with_routes(routes, reports, calls.clone(), true).await;
+        let query_engine = engine
+            .as_any()
+            .downcast_ref::<DatafusionQueryEngine>()
+            .unwrap();
+        let ctx = query_engine
+            .engine_context(dist_join_query_ctx(true))
+            .unwrap();
+        let self_join =
+            dist_join_aliased_test_plan((SELF_JOIN_TABLE_ID, "logs"), (SELF_JOIN_TABLE_ID, "logs"));
+        let plan = LogicalPlanBuilder::from(self_join)
+            .join_on(
+                dist_join_test_plan(),
+                JoinType::Inner,
+                vec![col("a.number").eq(col("probe.number"))],
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let stats = query_engine.dist_join_stats(&ctx, &plan).await.unwrap();
+        assert_eq!(
+            dist_join_test_stats(),
+            stats.tables,
+            "the rejected self-join must not be priced"
+        );
+        assert_eq!(1, calls.load(Ordering::SeqCst));
+    }
+
+    /// A query engine over an empty catalog, enough to plan and execute a plan without tables.
+    fn broadcast_fallback_engine() -> DatafusionQueryEngine {
+        DatafusionQueryEngine::new(
+            Arc::new(QueryEngineState::new(
+                catalog::memory::new_memory_catalog_manager().unwrap(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+                Plugins::default(),
+                QueryOptions::default(),
+            )),
+            Plugins::default(),
+        )
+    }
+
+    /// `SELECT 1`, the plan the fallback of the tests runs.
+    fn one_row_plan() -> LogicalPlan {
+        LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("n")])
+            .unwrap()
+            .build()
+            .unwrap()
+    }
+
+    /// The error a broadcast materialization reports when the memory pool of the query refuses the
+    /// build side.
+    fn broadcast_materialize_error() -> DataFusionError {
+        let marker = BroadcastMaterializeError::ExceededMemoryPool { requested: 8 };
+        DataFusionError::Shared(Arc::new(DataFusionError::External(Box::new(marker))))
+    }
+
+    /// The output stream of a query whose first poll fails with `err`, as the record batch adapter
+    /// of the engine reports it.
+    fn failing_stream(err: DataFusionError) -> SendableRecordBatchStream {
+        let arrow_schema = Arc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+            "n",
+            arrow_schema::DataType::Int64,
+            false,
+        )]));
+        let df_stream = datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
+            arrow_schema,
+            futures::stream::iter(vec![Err::<
+                common_recordbatch::DfRecordBatch,
+                DataFusionError,
+            >(err)]),
+        );
+        let stream =
+            common_recordbatch::adapter::RecordBatchStreamAdapter::try_new(Box::pin(df_stream))
+                .unwrap();
+        Box::pin(stream)
+    }
+
+    /// The failure the stream reports on its first poll.
+    async fn first_error(stream: SendableRecordBatchStream) -> common_recordbatch::error::Error {
+        let mut stream = stream;
+        match stream.next().await {
+            Some(Err(err)) => err,
+            other => panic!("the stream must fail on its first poll, got {other:?}"),
+        }
+    }
+
+    /// The retry policy of the fallback: only a broadcast materialization that fails before the
+    /// stream produced a batch, and only once, replays the query.
+    #[tokio::test]
+    async fn test_broadcast_fallback_policy() {
+        let marker = first_error(failing_stream(broadcast_materialize_error())).await;
+        let resource = first_error(failing_stream(DataFusionError::ResourcesExhausted(
+            "the pool is full".to_string(),
+        )))
+        .await;
+
+        assert!(
+            BroadcastFallbackPolicy::default().allows_retry(&marker),
+            "a broadcast materialization failing before the first batch is retried"
+        );
+        assert!(
+            !BroadcastFallbackPolicy {
+                retried: true,
+                yielded: 0
+            }
+            .allows_retry(&marker),
+            "the original plan must not replace itself a second time"
+        );
+        assert!(
+            !BroadcastFallbackPolicy {
+                retried: false,
+                yielded: 1
+            }
+            .allows_retry(&marker),
+            "a query that already produced a batch cannot be replayed"
+        );
+        assert!(
+            !BroadcastFallbackPolicy::default().allows_retry(&resource),
+            "a resource failure of the rest of the query keeps its error"
+        );
+    }
+
+    /// The fallback replans and runs the query without the broadcast materialization, and the
+    /// client reads its batches instead of the failure of the materialization.
+    #[tokio::test]
+    async fn test_broadcast_fallback_runs_the_original_plan() {
+        common_telemetry::init_default_ut_logging();
+
+        let fallback = BroadcastFallback {
+            engine: broadcast_fallback_engine(),
+            plan: one_row_plan(),
+            query_ctx: QueryContext::arc(),
+        };
+        let mut stream =
+            BroadcastFallbackStream::new(failing_stream(broadcast_materialize_error()), fallback);
+
+        let batch = stream
+            .next()
+            .await
+            .expect("the original plan must produce the batch")
+            .unwrap();
+        assert_eq!(1, batch.num_rows());
+        assert!(stream.next().await.is_none(), "one batch and then the end");
+        assert!(stream.policy.retried, "the query must be replayed once");
+        assert_eq!(1, stream.policy.yielded);
+    }
+
+    /// Any other failure of the query, and a failure of the original plan itself, reach the client:
+    /// the fallback neither swallows an error nor loops.
+    #[tokio::test]
+    async fn test_broadcast_fallback_keeps_other_failures() {
+        let fallback = BroadcastFallback {
+            engine: broadcast_fallback_engine(),
+            plan: one_row_plan(),
+            query_ctx: QueryContext::arc(),
+        };
+        let resource = DataFusionError::ResourcesExhausted("the pool is full".to_string());
+        let mut stream = BroadcastFallbackStream::new(failing_stream(resource), fallback);
+
+        assert!(
+            stream.next().await.expect("the error is reported").is_err(),
+            "a failure of the rest of the query keeps its error"
+        );
+        assert!(!stream.policy.retried, "nothing is replayed for it");
+        assert!(stream.next().await.is_none());
+    }
+
+    /// The materialized logical plan of `plan`, as the engine executes it for `query_ctx`.
+    async fn materialized_plan(
+        engine: &DatafusionQueryEngine,
+        query_ctx: QueryContextRef,
+        plan: &LogicalPlan,
+    ) -> LogicalPlan {
+        let mut ctx = engine.engine_context(query_ctx).unwrap();
+        let stats = engine.dist_join_stats(&ctx, plan).await.unwrap();
+        ctx.state_mut()
+            .config_mut()
+            .options_mut()
+            .extensions
+            .insert(stats);
+
+        let state = ctx.state();
+        let analyzed = state
+            .analyzer()
+            .execute_and_check(plan.clone(), state.config_options(), |_, _| {})
+            .unwrap();
+        engine
+            .maybe_materialize_volatile_broadcast(&analyzed, &ctx)
+            .await
+            .unwrap()
+    }
+
+    /// The internal switch of the fallback keeps the frontend join: the second plan of a failed
+    /// broadcast materialization does not take the rewrite again, while the same query without the
+    /// switch materializes the build side.
+    #[tokio::test]
+    async fn test_disable_broadcast_materialize_keeps_the_frontend_join() {
+        common_telemetry::init_default_ut_logging();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let engine = dist_join_engine(dist_join_reports(), calls.clone(), true).await;
+        let query_engine = engine
+            .as_any()
+            .downcast_ref::<DatafusionQueryEngine>()
+            .unwrap();
+        let plan = dist_join_test_plan();
+
+        let materialized = materialized_plan(query_engine, dist_join_query_ctx(true), &plan).await;
+        assert!(
+            materialized
+                .display_indent()
+                .to_string()
+                .contains("MaterializeBroadcastJoin"),
+            "without the switch the build side of the join is materialized, got:\n{}",
+            materialized.display_indent()
+        );
+
+        // With the switch, as the fallback replans, the analyzed plan stays the frontend join.
+        let mut retry_ctx = (*dist_join_query_ctx(true)).clone();
+        retry_ctx.set_disable_broadcast_materialize();
+        let retry_ctx = Arc::new(retry_ctx);
+        assert!(
+            retry_ctx.disable_broadcast_materialize(),
+            "the switch is set on the query context of the retry"
+        );
+        let fallback = materialized_plan(query_engine, retry_ctx, &plan).await;
+        assert!(
+            !fallback
+                .display_indent()
+                .to_string()
+                .contains("MaterializeBroadcastJoin"),
+            "the switch must keep the frontend join, got:\n{}",
+            fallback.display_indent()
+        );
+    }
+
+    /// `schema` with a JSON2 column `j` appended, as `JsonSchemaConcretizeRule` leaves a boundary
+    /// schema: the concretized `large` (Binary) type behind the JSON2 extension marker.
+    fn json2_boundary_schema(schema: &DFSchemaRef) -> DFSchemaRef {
+        let qualifier = schema
+            .iter()
+            .next()
+            .and_then(|(qualifier, _)| qualifier.cloned());
+        let json2_column = Field::new("j", ArrowDataType::Binary, true)
+            .with_extension_type(Json2ExtensionType::default());
+        let mut fields = schema
+            .iter()
+            .map(|(qualifier, field)| (qualifier.cloned(), field.clone()))
+            .collect::<Vec<_>>();
+        fields.push((qualifier, Arc::new(json2_column)));
+
+        Arc::new(
+            datafusion_common::DFSchema::new_with_metadata(fields, schema.metadata().clone())
+                .unwrap(),
+        )
+    }
+
+    /// `probe INNER JOIN build ON probe.number = build.number` with both sides already under a
+    /// `MergeScan` boundary, i.e. the shape the broadcast rewrite captures. With `json2_side` set,
+    /// that side's boundary schema carries a concretized JSON2 column.
+    fn merge_scan_join_plan(json2_side: Option<&str>) -> LogicalPlan {
+        let boundary = |alias: &str, table_id: TableId, name: &str| {
+            let merge_scan =
+                MergeScanLogicalPlan::new(dist_join_test_scan(alias, table_id, name), false);
+            let merge_scan = if json2_side == Some(alias) {
+                let schema = json2_boundary_schema(merge_scan.schema());
+                merge_scan.with_output_schema(schema)
+            } else {
+                merge_scan
+            };
+            merge_scan.into_logical_plan()
+        };
+
+        // The equijoin must already be in `on`: the rewrite only captures a join whose
+        // `JoinConstraint` is `On` with a non-empty key list, and the analyzer is what moves the
+        // whole `ON` clause there for a SQL-planned join.
+        LogicalPlan::Join(
+            datafusion_expr::Join::try_new(
+                Arc::new(boundary("probe", PROBE_TABLE_ID, "probe")),
+                Arc::new(boundary("build", BUILD_TABLE_ID, "build")),
+                vec![(col("probe.number"), col("build.number"))],
+                None,
+                JoinType::Inner,
+                datafusion_expr::JoinConstraint::On,
+                NullEquality::NullEqualsNothing,
+                false,
+            )
+            .unwrap(),
+        )
+    }
+
+    /// A JSON2 column on either boundary of the candidate join keeps the frontend join: the
+    /// materialized payload is encoded through Substrait/Arrow IPC, which can drop the concretized
+    /// JSON2 extension type. Without one, the same plan is rewritten.
+    #[tokio::test]
+    async fn test_materialize_broadcast_keeps_json2_boundary() {
+        common_telemetry::init_default_ut_logging();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let engine = dist_join_engine(dist_join_reports(), calls, true).await;
+        let query_engine = engine
+            .as_any()
+            .downcast_ref::<DatafusionQueryEngine>()
+            .unwrap();
+
+        for (json2_side, rewritten_expected) in
+            [(Some("build"), false), (Some("probe"), false), (None, true)]
+        {
+            let plan = merge_scan_join_plan(json2_side);
+            let mut ctx = query_engine
+                .engine_context(dist_join_query_ctx(true))
+                .unwrap();
+            // The cost heuristic favors the build table (1 region of 1_000 bytes against 2
+            // regions of 4_000 and 6_000 bytes), so only the JSON2 boundary can keep the plan.
+            ctx.state_mut()
+                .config_mut()
+                .options_mut()
+                .extensions
+                .insert(DistJoinStats {
+                    tables: dist_join_test_stats(),
+                });
+
+            let original = plan.display_indent().to_string();
+            let materialized = query_engine
+                .maybe_materialize_volatile_broadcast(&plan, &ctx)
+                .await
+                .unwrap()
+                .display_indent()
+                .to_string();
+
+            assert_eq!(
+                rewritten_expected,
+                materialized.contains("MaterializeBroadcastJoin"),
+                "the JSON2 side {json2_side:?} must {} the broadcast rewrite, got:\n{materialized}",
+                if rewritten_expected { "keep" } else { "drop" }
+            );
+            if !rewritten_expected {
+                assert_eq!(
+                    original, materialized,
+                    "a JSON2 boundary must keep the plan as analyzed"
+                );
+                assert_eq!(
+                    2,
+                    materialized.matches("MergeScan [").count(),
+                    "the two boundaries must stay, got:\n{materialized}"
+                );
+            }
+        }
+    }
+
+    /// The fallback wraps the output stream of a plan that materializes a broadcast build side
+    /// only, and never for a statement that consumes the stream itself.
+    #[test]
+    fn test_needs_broadcast_fallback() {
+        let arrow_schema = Arc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+            "n",
+            arrow_schema::DataType::Int64,
+            false,
+        )]));
+        let batches = vec![common_recordbatch::DfRecordBatch::new_empty(
+            arrow_schema.clone(),
+        )];
+        let memory_exec = || -> Arc<dyn ExecutionPlan> {
+            Arc::new(
+                TestMemoryExec::try_new(std::slice::from_ref(&batches), arrow_schema.clone(), None)
+                    .unwrap(),
+            )
+        };
+
+        let materialized: Arc<dyn ExecutionPlan> = Arc::new(MaterializeExec::new(memory_exec()));
+        assert!(needs_broadcast_fallback(&materialized, true));
+        assert!(
+            !needs_broadcast_fallback(&materialized, false),
+            "a statement that consumes the stream itself must not replay it"
+        );
+
+        assert!(
+            !needs_broadcast_fallback(&memory_exec(), true),
+            "a plan without the stage has nothing to fall back from"
+        );
     }
 }

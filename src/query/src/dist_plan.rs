@@ -14,8 +14,13 @@
 
 mod analyzer;
 mod commutativity;
+mod dist_join_planner;
 mod dyn_filter_bridge;
 mod filter_id;
+mod materialize;
+mod materialize_broadcast_join;
+mod materialize_exec;
+mod materialized_input;
 mod merge_scan;
 mod merge_sort;
 mod planner;
@@ -28,7 +33,17 @@ pub use analyzer::{DistPlannerAnalyzer, DistPlannerOptions};
 pub(crate) use commutativity::region_local_node;
 #[cfg(test)]
 pub(crate) use commutativity::{Categorizer, Commutativity};
+#[cfg(test)]
+pub(crate) use dist_join_planner::DistJoinTableStats;
+pub(crate) use dist_join_planner::{
+    DistJoinStats, MAX_BROADCAST_BUILD_BYTES, aggregate_region_stats, candidate_joins,
+    expected_region_ids, restore_join_schema, side_base_table_id,
+};
 pub use filter_id::{FilterFingerprint, FilterId, ParseFilterIdError, RemoteDynFilterProducerId};
+pub(crate) use materialize::MaterializeLogicalPlan;
+pub(crate) use materialize_broadcast_join::MaterializeBroadcastJoin;
+pub(crate) use materialize_exec::{BroadcastMaterializeError, MaterializeExec, OnceAsync};
+pub(crate) use materialized_input::MaterializedInput;
 pub use merge_scan::{MergeScanExec, MergeScanLogicalPlan};
 pub(crate) use merge_sort::{MergeSortExec, MergeSortLogicalPlan};
 pub use planner::{DistExtensionPlanner, MergeSortExtensionPlanner};

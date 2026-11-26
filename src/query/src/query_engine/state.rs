@@ -240,6 +240,8 @@ impl QueryEngineState {
             analyzer
                 .rules
                 .push(Arc::new(DistPlannerAnalyzer::default()));
+            // Runs after `DistPlannerAnalyzer`, which wraps the remote scans in
+            // `MergeScan`: the nested broadcast join shape is only visible then.
             analyzer.rules.push(Arc::new(JsonSchemaConcretizeRule));
         }
         analyzer.rules.push(Arc::new(FixStateUdafOrderingAnalyzer));

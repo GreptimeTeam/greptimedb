@@ -20,7 +20,9 @@ use ahash::HashMap;
 use arrow_schema::SortOptions;
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
+use catalog::kvbackend::KvBackendCatalogManager;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_meta::datanode::RegionStat;
 use common_telemetry::debug;
 use datafusion::catalog::Session;
 use datafusion::common::Result;
@@ -38,14 +40,20 @@ use partition::expr::PartitionExpr;
 use partition::manager::{PartitionRuleManagerRef, create_partitions_from_region_routes};
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
+use store_api::region_engine::RegionRole;
 use store_api::storage::RegionId;
 use table::TableRef;
 use table::metadata::{TableInfo, TableType};
 use table::table::adapter::DfTableProviderAdapter;
 use table::table_name::TableName;
 
+use crate::dist_plan::MaterializedInput;
 use crate::dist_plan::PredicateExtractor;
-use crate::dist_plan::merge_scan::{MergeScanExec, MergeScanLogicalPlan};
+use crate::dist_plan::dist_join_planner::expected_region_ids;
+use crate::dist_plan::materialize::MaterializeLogicalPlan;
+use crate::dist_plan::materialize_broadcast_join::MaterializeBroadcastJoin;
+use crate::dist_plan::materialize_exec::MaterializeExec;
+use crate::dist_plan::merge_scan::{MergeScanBroadcast, MergeScanExec, MergeScanLogicalPlan};
 use crate::dist_plan::merge_sort::{MergeSortExec, MergeSortLogicalPlan};
 use crate::dist_plan::region_pruner::ConstraintPruner;
 use crate::error::{CatalogSnafu, PartitionRuleManagerSnafu, TableNotFoundSnafu};
@@ -172,10 +180,131 @@ impl ExtensionPlanner for DistExtensionPlanner {
         planner: &dyn PhysicalPlanner,
         node: &dyn UserDefinedLogicalNode,
         _logical_inputs: &[&LogicalPlan],
-        _physical_inputs: &[Arc<dyn ExecutionPlan>],
+        physical_inputs: &[Arc<dyn ExecutionPlan>],
         session: &dyn Session,
         _planning_ctx: &PhysicalPlanningContext,
     ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+        if let Some(materialized) = node.as_any().downcast_ref::<MaterializedInput>() {
+            use datafusion::physical_plan::memory::{LazyBatchGenerator, LazyMemoryExec};
+            use parking_lot::RwLock;
+            use std::fmt;
+
+            #[derive(Debug)]
+            struct VecBatchGenerator {
+                batches: Vec<arrow::array::RecordBatch>,
+                next: usize,
+            }
+            impl fmt::Display for VecBatchGenerator {
+                fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    write!(f, "VecBatchGenerator")
+                }
+            }
+            impl LazyBatchGenerator for VecBatchGenerator {
+                fn as_any(&self) -> &dyn std::any::Any {
+                    self
+                }
+                fn generate_next_batch(&mut self) -> Result<Option<arrow::array::RecordBatch>> {
+                    let batch = self.batches.get(self.next).cloned();
+                    self.next += usize::from(batch.is_some());
+                    Ok(batch)
+                }
+                fn reset_state(&self) -> Arc<RwLock<dyn LazyBatchGenerator>> {
+                    Arc::new(RwLock::new(Self {
+                        batches: self.batches.clone(),
+                        next: 0,
+                    }))
+                }
+            }
+
+            let schema = materialized
+                .batches()
+                .first()
+                .map(|batch| batch.schema())
+                .unwrap_or_else(|| materialized.arrow_schema());
+            let generator: Arc<RwLock<dyn LazyBatchGenerator>> =
+                Arc::new(RwLock::new(VecBatchGenerator {
+                    batches: materialized.batches().to_vec(),
+                    next: 0,
+                }));
+            return Ok(Some(Arc::new(LazyMemoryExec::try_new(
+                schema,
+                vec![generator],
+            )?)));
+        }
+        // The local stage of a broadcast merge: the build side is evaluated once by this
+        // node, and the merge stage owns it as its only child.
+        if node.as_any().is::<MaterializeLogicalPlan>() {
+            let build = physical_inputs.first().cloned().ok_or_else(|| {
+                DataFusionError::Internal(
+                    "Expect Materialize to have exactly one physical input".to_string(),
+                )
+            })?;
+            return Ok(Some(Arc::new(MaterializeExec::new(build)) as _));
+        }
+
+        // A broadcast merge stage is a `MergeScanExec` over the unmodified `remote_input`
+        // template: the merge stage itself binds the materialized batches into the data
+        // slot at execution time, encodes the bound join once and ships it to the regions.
+        if let Some(broadcast_join) = node.as_any().downcast_ref::<MaterializeBroadcastJoin>() {
+            let remote_input = broadcast_join.remote_input();
+            let Some(table_name) = Self::extract_full_table_name(remote_input)? else {
+                return Err(DataFusionError::Plan(
+                    "a materialized broadcast join has no region route table".to_string(),
+                ));
+            };
+            // `MaterializedInput` is a leaf, so the probe fragment is the only scan of the
+            // template and it selects the region route.
+            let (regions, series_disjoint) = self.get_regions(&table_name, remote_input).await?;
+
+            let session_state =
+                session
+                    .as_any()
+                    .downcast_ref::<SessionState>()
+                    .ok_or_else(|| {
+                        DataFusionError::Internal(
+                            "MergeScan requires a SessionState for physical planning".to_string(),
+                        )
+                    })?;
+            let query_ctx = session_state
+                .config()
+                .get_extension()
+                .unwrap_or_else(QueryContext::arc);
+
+            // The `Materialize` logical child is planned before this node, so the build side
+            // is evaluated by exactly one `MaterializeExec`. The fallback keeps the contract
+            // if a planner ever hands over no physical input.
+            let materialize = match physical_inputs.first() {
+                Some(input) => input
+                    .downcast_ref::<MaterializeExec>()
+                    .map(|exec| Arc::new(exec.clone()))
+                    .ok_or_else(|| {
+                        DataFusionError::Internal(format!(
+                            "Expect the input of a materialized broadcast join to be a MaterializeExec, found {}",
+                            input.name()
+                        ))
+                    })?,
+                None => Arc::new(MaterializeExec::new(
+                    session.create_physical_plan(broadcast_join.build_input()).await?,
+                )),
+            };
+
+            let merge_scan_plan = MergeScanExec::new(
+                session_state,
+                table_name,
+                regions,
+                remote_input.clone(),
+                remote_input.schema().as_arrow(),
+                self.region_query_handler.clone(),
+                query_ctx,
+                session.config().target_partitions(),
+                broadcast_join.remote_dyn_filter_producer_id(),
+                self.enable_per_region_metrics,
+            )?
+            .with_raw_series_disjoint(series_disjoint)?
+            .with_broadcast(MergeScanBroadcast::new(materialize));
+            return Ok(Some(Arc::new(merge_scan_plan) as _));
+        }
+
         let Some(merge_scan) = node.as_any().downcast_ref::<MergeScanLogicalPlan>() else {
             return Ok(None);
         };
@@ -197,7 +326,8 @@ impl ExtensionPlanner for DistExtensionPlanner {
         let optimized_plan = input_plan;
         let direct_raw = matches!(input_plan, LogicalPlan::Extension(extension)
             if extension.node.as_any().is::<promql::extension_plan::RawSeriesSource>());
-        let Some(table_name) = Self::extract_full_table_name(input_plan)? else {
+        let routing_plan = input_plan;
+        let Some(table_name) = Self::extract_full_table_name(routing_plan)? else {
             if direct_raw {
                 return Err(DataFusionError::Plan(
                     "raw series source has no region route table".into(),
@@ -207,7 +337,7 @@ impl ExtensionPlanner for DistExtensionPlanner {
             return fallback(optimized_plan).await;
         };
 
-        let (regions, series_disjoint) = match self.get_regions(&table_name, input_plan).await {
+        let (regions, series_disjoint) = match self.get_regions(&table_name, routing_plan).await {
             Ok(regions) => regions,
             Err(error) if direct_raw => {
                 return Err(error);
@@ -230,6 +360,13 @@ impl ExtensionPlanner for DistExtensionPlanner {
             .config()
             .get_extension()
             .unwrap_or_else(QueryContext::arc);
+        // Only estimate rows for the nested broadcast join; the default query path must not
+        // receive statistics that could flip JoinSelection (e.g. Partitioned → CollectLeft).
+        let row_estimate = if query_ctx.configuration_parameter().experimental_dist_join() {
+            self.ordinary_scan_row_estimate(input_plan, &regions).await
+        } else {
+            None
+        };
         let merge_scan_plan = MergeScanExec::new(
             session_state,
             table_name,
@@ -243,11 +380,107 @@ impl ExtensionPlanner for DistExtensionPlanner {
             self.enable_per_region_metrics,
         )?
         .with_raw_series_disjoint(series_disjoint)?;
+        let merge_scan_plan = match row_estimate {
+            Some(estimate) => merge_scan_plan.with_row_estimate(estimate),
+            None => merge_scan_plan,
+        };
         Ok(Some(Arc::new(merge_scan_plan) as _))
     }
 }
 
+/// Sums positive ordinary-leader row counts for exactly the selected regions.
+fn aggregate_region_rows(selected_regions: &[RegionId], reports: &[RegionStat]) -> Option<usize> {
+    let selected = selected_regions
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    if selected_regions.is_empty() || selected.len() != selected_regions.len() {
+        return None;
+    }
+
+    let mut rows = 0u64;
+    for region in selected_regions {
+        let mut leaders = reports
+            .iter()
+            .filter(|report| report.id == *region && report.role == RegionRole::Leader);
+        let report = leaders.next()?;
+        if leaders.next().is_some() || report.num_rows == 0 {
+            return None;
+        }
+        rows = rows.checked_add(report.num_rows)?;
+    }
+    usize::try_from(rows).ok()
+}
+
 impl DistExtensionPlanner {
+    /// Returns a row estimate only for a simple scan of the captured physical base table.
+    async fn ordinary_scan_row_estimate(
+        &self,
+        plan: &LogicalPlan,
+        selected_regions: &[RegionId],
+    ) -> Option<usize> {
+        fn captured_base_table_id(plan: &LogicalPlan) -> Option<u32> {
+            match plan {
+                LogicalPlan::TableScan(scan) => {
+                    let source = scan.source.downcast_ref::<DefaultTableSource>()?;
+                    let provider = source
+                        .table_provider
+                        .downcast_ref::<DfTableProviderAdapter>()?;
+                    (provider.table().table_type() == TableType::Base)
+                        .then(|| provider.table().table_info().table_id())
+                }
+                LogicalPlan::Filter(filter) => captured_base_table_id(&filter.input),
+                LogicalPlan::Projection(projection) => captured_base_table_id(&projection.input),
+                LogicalPlan::SubqueryAlias(alias) => captured_base_table_id(&alias.input),
+                _ => None,
+            }
+        }
+
+        let table_id = captured_base_table_id(plan)?;
+        if selected_regions.is_empty() {
+            return None;
+        }
+        let selected = selected_regions
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        if selected.len() != selected_regions.len()
+            || selected.iter().any(|region| region.table_id() != table_id)
+        {
+            return None;
+        }
+        let catalog_manager = self
+            .catalog_manager
+            .as_any()
+            .downcast_ref::<KvBackendCatalogManager>()?;
+        let (physical_table_id, route) = self
+            .partition_rule_manager
+            .find_physical_table_route_with_id(table_id)
+            .await
+            .ok()?;
+        if physical_table_id != table_id {
+            return None;
+        }
+        let routed_region_ids = expected_region_ids(physical_table_id, &route.region_routes)?;
+        let routed_regions = routed_region_ids
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        if routed_regions.is_empty()
+            || routed_regions.len() != routed_region_ids.len()
+            || !selected.is_subset(&routed_regions)
+        {
+            return None;
+        }
+
+        let reports = catalog_manager
+            .information_extension()
+            .region_stats()
+            .await
+            .ok()?;
+        aggregate_region_rows(selected_regions, &reports)
+    }
+
     /// Extract fully resolved table name from logical plan
     fn extract_full_table_name(plan: &LogicalPlan) -> Result<Option<TableName>> {
         let mut extractor = TableScanExtractor::default();
@@ -647,6 +880,7 @@ mod tests {
     use catalog::{CatalogManagerRef, RegisterTableRequest};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_meta::cache::new_table_route_cache;
+    use common_meta::datanode::RegionStat;
     use common_meta::key::TableMetadataManager;
     use common_meta::key::table_route::TableRouteValue;
     use common_meta::kv_backend::memory::MemoryKvBackend;
@@ -663,13 +897,14 @@ mod tests {
     use partition::expr::{PartitionExpr, col as partition_col};
     use partition::manager::PartitionRuleManager;
     use session::ReadPreference;
+    use store_api::region_engine::RegionRole;
     use store_api::storage::RegionId;
     use table::metadata::{TableInfo, TableInfoBuilder, TableMeta, TableType};
     use table::table::adapter::DfTableProviderAdapter;
     use table::table_name::TableName;
     use table::test_util::EmptyTable;
 
-    use super::{DistExtensionPlanner, physical_regions_disjoint};
+    use super::{DistExtensionPlanner, aggregate_region_rows, physical_regions_disjoint};
     use crate::region_query::{RegionQueryHandler, RegionQueryTarget};
 
     const LOGICAL_TABLE_ID: u32 = 1024;
@@ -987,6 +1222,125 @@ mod tests {
             .unwrap();
         assert_eq!(regions.len(), 3);
         assert!(!disjoint);
+    }
+
+    fn region_stat(id: RegionId, role: RegionRole, num_rows: u64) -> RegionStat {
+        RegionStat {
+            id,
+            rcus: 0,
+            wcus: 0,
+            approximate_bytes: 1,
+            engine: "mito".to_string(),
+            role,
+            num_rows,
+            memtable_size: 0,
+            manifest_size: 0,
+            sst_size: 1,
+            sst_num: 1,
+            index_size: 0,
+            region_manifest: common_meta::datanode::RegionManifestInfo::Mito {
+                manifest_version: 0,
+                flushed_entry_id: 0,
+                file_removed_cnt: 0,
+            },
+            written_bytes: 0,
+            ingested_parquet_bytes: 0,
+            query_cpu_time: 0,
+            query_scanned_bytes: 0,
+            data_topic_latest_entry_id: 0,
+            metadata_topic_latest_entry_id: 0,
+            min_timestamp: None,
+            max_timestamp: None,
+            has_pending_tails: false,
+        }
+    }
+
+    #[test]
+    fn aggregate_region_rows_requires_one_positive_ordinary_leader_per_selected_region() {
+        let first = RegionId::new(LOGICAL_TABLE_ID, 1);
+        let second = RegionId::new(LOGICAL_TABLE_ID, 2);
+        let unrelated = RegionId::new(LOGICAL_TABLE_ID, 3);
+
+        assert_eq!(
+            Some(30),
+            aggregate_region_rows(
+                &[first, second],
+                &[
+                    region_stat(first, RegionRole::Leader, 10),
+                    region_stat(second, RegionRole::Leader, 20),
+                    region_stat(unrelated, RegionRole::Leader, 999),
+                ],
+            )
+        );
+        assert_eq!(
+            Some(10),
+            aggregate_region_rows(
+                &[first],
+                &[
+                    region_stat(first, RegionRole::Leader, 10),
+                    region_stat(second, RegionRole::Leader, 20),
+                ],
+            ),
+            "pruned regions must not contribute to the selected scan estimate"
+        );
+        assert_eq!(
+            Some(10),
+            aggregate_region_rows(
+                &[first],
+                &[
+                    region_stat(first, RegionRole::Follower, 100),
+                    region_stat(first, RegionRole::Leader, 10),
+                ],
+            )
+        );
+
+        let invalid_cases = [
+            (
+                vec![first, second],
+                vec![region_stat(first, RegionRole::Leader, 10)],
+            ),
+            (vec![first], vec![region_stat(first, RegionRole::Leader, 0)]),
+            (
+                vec![first],
+                vec![
+                    region_stat(first, RegionRole::Leader, 10),
+                    region_stat(first, RegionRole::Leader, 0),
+                ],
+            ),
+            (
+                vec![first],
+                vec![region_stat(first, RegionRole::Follower, 10)],
+            ),
+            (
+                vec![first],
+                vec![region_stat(first, RegionRole::DowngradingLeader, 10)],
+            ),
+            (
+                vec![first, second],
+                vec![
+                    region_stat(first, RegionRole::Leader, u64::MAX),
+                    region_stat(second, RegionRole::Leader, 1),
+                ],
+            ),
+        ];
+        for (selected, reports) in invalid_cases {
+            assert_eq!(None, aggregate_region_rows(&selected, &reports));
+        }
+        assert_eq!(None, aggregate_region_rows(&[], &[]));
+        assert_eq!(
+            None,
+            aggregate_region_rows(
+                &[first, first],
+                &[region_stat(first, RegionRole::Leader, 10)]
+            )
+        );
+        assert_eq!(
+            None,
+            aggregate_region_rows(
+                &[first],
+                &[region_stat(RegionId::new(9999, 1), RegionRole::Leader, 10)]
+            )
+        );
     }
 
     fn assert_all_logical_regions(mut regions: Vec<RegionId>) {

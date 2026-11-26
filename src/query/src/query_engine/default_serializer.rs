@@ -30,7 +30,6 @@ use datafusion::execution::{FunctionRegistry, SessionStateBuilder};
 use datafusion::logical_expr::{Extension, LogicalPlan};
 use datafusion_expr::{Expr, UserDefinedLogicalNode};
 use greptime_proto::substrait_extension::MergeScan as PbMergeScan;
-use promql::functions::register_promql_functions;
 use prost::Message;
 use session::context::{QueryContext, QueryContextRef};
 use snafu::ResultExt;
@@ -42,7 +41,7 @@ use substrait::substrait_proto_df::proto::{
 };
 use substrait::{DFLogicalSubstraitConvertor, Extensions, SubstraitPlan};
 
-use crate::dist_plan::MergeScanLogicalPlan;
+use crate::dist_plan::{MaterializedInput, MergeScanLogicalPlan};
 use crate::query_engine::QueryEngineState;
 
 /// Extended [`substrait::extension_serializer::ExtensionSerializer`] but supports [`MergeScanLogicalPlan`] serialization.
@@ -51,7 +50,13 @@ pub struct DefaultSerializer;
 
 impl SerializerRegistry for DefaultSerializer {
     fn serialize_logical_plan(&self, node: &dyn UserDefinedLogicalNode) -> Result<Vec<u8>> {
-        if node.name() == MergeScanLogicalPlan::name() {
+        if node.name() == MaterializedInput::NAME {
+            let node = node
+                .as_any()
+                .downcast_ref::<MaterializedInput>()
+                .expect("Failed to downcast MaterializedInput");
+            node.encode_batches()
+        } else if node.name() == MergeScanLogicalPlan::name() {
             let merge_scan = node
                 .as_any()
                 .downcast_ref::<MergeScanLogicalPlan>()
@@ -196,6 +201,15 @@ impl SubstraitConsumer for MergeScanSubstraitConsumer<'_> {
         let Some(detail) = rel.detail.as_ref() else {
             return self.inner.consume_extension_leaf(rel).await;
         };
+        if detail.type_url == MaterializedInput::NAME {
+            let batches = MaterializedInput::decode_batches(detail.value.as_ref())?;
+            let schema = batches
+                .first()
+                .map(|b| b.schema())
+                .unwrap_or_else(|| Arc::new(arrow_schema::Schema::empty()));
+            let schema = DFSchema::try_from(schema.as_ref().clone())?;
+            return Ok(MaterializedInput::new(Arc::new(schema), batches).into_logical_plan());
+        }
         if detail.type_url != MergeScanLogicalPlan::name() {
             return self.inner.consume_extension_leaf(rel).await;
         }
@@ -319,7 +333,10 @@ fn register_greptime_functions(
             .context(RegisterUdfSnafu { name })?;
     }
 
-    register_promql_functions(session_state);
+    // The PromQL engine registers its UDFs/UDAFs (the `ieee_*` comparisons, the `prom_*`
+    // functions and `quantile_udaf`) through one shared helper: decoded plans must resolve
+    // exactly the functions the frontend registered when it produced them.
+    promql::functions::register_promql_functions(session_state);
 
     Ok(())
 }
@@ -359,7 +376,7 @@ mod tests {
     use std::any::Any;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use catalog::error::Result as CatalogResult;
+    use catalog::error::{QueryAccessDeniedSnafu, Result as CatalogResult};
     use catalog::{CatalogManager, RegisterTableRequest};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, NUMBERS_TABLE_ID};
     use common_function::aggrs::aggr_wrapper::StateWrapper;
@@ -382,8 +399,8 @@ mod tests {
     use futures::stream::BoxStream;
     use promql::extension_plan::{RangeManipulate, SeriesNormalize, UnionDistinctOn};
     use promql::functions::{
-        MixedRange, NativeHistogramAggAvg, NativeHistogramAggSum, NativeHistogramCount,
-        NativeHistogramDrop, PromqlFloatToString,
+        IeeeComparison, MixedRange, NativeHistogramAggAvg, NativeHistogramAggSum,
+        NativeHistogramCount, NativeHistogramDrop, PromqlFloatToString,
     };
     use session::context::QueryContext;
     use table::TableRef;
@@ -447,6 +464,59 @@ mod tests {
             "Filter: devices.k0 = Utf8(\"hello\")
   TableScan: devices",
             decode_plan.to_string(),
+        );
+    }
+
+    /// The decoder state carries the shared PromQL registration, so a request plan that encodes a
+    /// PromQL comparison (`prom_gt` of `IeeeComparison::all()`) or any other PromQL function
+    /// resolves on decode.
+    #[tokio::test]
+    async fn decoder_registers_promql_comparison_functions() {
+        let engine = QueryEngineFactory::new(
+            catalog::memory::new_memory_catalog_manager().unwrap(),
+            None,
+            None,
+            None,
+            None,
+            false,
+            QueryOptions::default(),
+        )
+        .query_engine();
+        let mut state = SessionStateBuilder::new_from_existing(
+            engine
+                .engine_context(QueryContext::arc())
+                .unwrap()
+                .state()
+                .clone(),
+        )
+        .with_serializer_registry(Arc::new(DefaultSerializer))
+        .build();
+        register_greptime_functions(&mut state, &QueryContext::arc()).unwrap();
+
+        for udf in IeeeComparison::all() {
+            assert!(
+                state.scalar_functions().contains_key(udf.name()),
+                "the decoder must register the PromQL comparison {}",
+                udf.name()
+            );
+        }
+        for name in [
+            "prom_sqrt",
+            "prom_idelta",
+            "prom_irate",
+            "prom_rate",
+            "prom_delta",
+            "prom_quantile_over_time",
+            "prom_holt_winters",
+        ] {
+            assert!(
+                state.scalar_functions().contains_key(name),
+                "the decoder must register {name}"
+            );
+        }
+        assert!(
+            state.aggregate_functions().contains_key("quantile"),
+            "the decoder must register the PromQL `quantile_udaf`"
         );
     }
 
@@ -1063,6 +1133,8 @@ mod tests {
 
     /// How [`InterceptingCatalogManager`] resolves payload tables.
     enum TableResolution {
+        /// Fails with the frontend's cross-catalog access error.
+        AccessDenied,
         /// Records catalog lookup and request context values.
         ObserveContext(Arc<std::sync::Mutex<Vec<[String; 5]>>>),
         /// Resolves once another task on the caller runtime signals.
@@ -1149,7 +1221,11 @@ mod tests {
                     ]);
                     Ok(Some(NumbersTable::table(NUMBERS_TABLE_ID)))
                 }
-
+                TableResolution::AccessDenied => QueryAccessDeniedSnafu {
+                    catalog: catalog.to_string(),
+                    schema: schema.to_string(),
+                }
+                .fail(),
                 TableResolution::AwaitSignal { notify, entered } => {
                     entered.store(true, Ordering::SeqCst);
                     notify.notified().await;
@@ -1233,33 +1309,41 @@ mod tests {
         assert_eq!(decoded.to_string(), plan.to_string());
     }
 
-    /// A missing engine-catalog table does not fall back to the usable request catalog.
+    /// Missing and denied payload tables do not fall back to the usable request catalog.
     #[tokio::test]
-    async fn test_serializer_decode_missing_engine_catalog_table() {
+    async fn test_serializer_decode_payload_negative_engine_catalog_resolution() {
         let missing_manager: CatalogManagerRef =
             catalog::memory::new_memory_catalog_manager().unwrap();
-        let engine = QueryEngineFactory::new(
-            missing_manager,
-            None,
-            None,
-            None,
-            None,
-            false,
-            QueryOptions::default(),
-        )
-        .query_engine();
+        let cases = [
+            (
+                QueryEngineFactory::new(
+                    missing_manager,
+                    None,
+                    None,
+                    None,
+                    None,
+                    false,
+                    QueryOptions::default(),
+                )
+                .query_engine(),
+                "Table not found: greptime.public.numbers",
+            ),
+            (
+                engine_with_intercepting_catalog(TableResolution::AccessDenied),
+                "Illegal access to catalog",
+            ),
+        ];
         let bytes = encode_plan(&merge_scan(numbers_scan(), false));
 
-        let err = plan_decoder(engine.as_ref())
-            .decode(bytes, request_catalog_list(), false)
-            .await
-            .unwrap_err();
+        for (engine, expected) in cases {
+            let err = plan_decoder(engine.as_ref())
+                .decode(bytes.clone(), request_catalog_list(), false)
+                .await
+                .unwrap_err();
 
-        let err = format!("{err:?}");
-        assert!(
-            err.contains("Table not found: greptime.public.numbers"),
-            "unexpected error: {err}"
-        );
+            let err = format!("{err:?}");
+            assert!(err.contains(expected), "expected {expected:?}, got: {err}");
+        }
     }
 
     /// Manual states use their own catalog and query-context defaults for payloads.

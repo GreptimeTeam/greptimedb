@@ -290,11 +290,7 @@ impl RegionServer {
         request: api::v1::region::QueryRequest,
         query_ctx: QueryContextRef,
     ) -> Result<SendableRecordBatchStream> {
-        let permit = if let Some(p) = &self.inner.parallelism {
-            Some(p.acquire().await?)
-        } else {
-            None
-        };
+        let (permit, query_ctx) = self.admit_read(&query_ctx).await?;
 
         let region_id = RegionId::from_u64(request.region_id);
         let engine_ctx = self
@@ -334,6 +330,7 @@ impl RegionServer {
                     header: request.header,
                     region_id,
                     plan,
+                    prepared_plan: None,
                 },
                 query_ctx.clone(),
             )
@@ -354,12 +351,6 @@ impl RegionServer {
     }
 
     async fn handle_read_inner(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
-        let permit = if let Some(p) = &self.inner.parallelism {
-            Some(p.acquire().await?)
-        } else {
-            None
-        };
-
         let ctx = request
             .header
             .as_ref()
@@ -372,6 +363,7 @@ impl RegionServer {
                 .build()
             })?;
         let query_ctx = Arc::new(ctx.unwrap_or_else(|| QueryContextBuilder::default().build()));
+        let (permit, query_ctx) = self.admit_read(&query_ctx).await?;
 
         let region_id = request.region_id;
         let injector_builder = NameAwareDataSourceInjectorBuilder::from_plan(&request.plan)
@@ -428,6 +420,18 @@ impl RegionServer {
                 (!reportable).then_some(region_id)
             })
             .collect()
+    }
+
+    /// Admits one read and returns its permit plus the query context to execute it with.
+    async fn admit_read(
+        &self,
+        query_ctx: &QueryContextRef,
+    ) -> Result<(Option<OwnedSemaphorePermit>, QueryContextRef)> {
+        let permit = match &self.inner.parallelism {
+            Some(parallelism) => Some(parallelism.acquire().await?),
+            None => None,
+        };
+        Ok((permit, query_ctx.clone()))
     }
 
     /// Returns all opened and reportable regions.
@@ -1411,8 +1415,13 @@ struct RegionServerInner {
     initial_remote_dyn_filter_registrations: RemoteDynFilterRegistry,
 }
 
+/// The concurrent read limiter of a datanode.
+///
+/// It bounds the number of reads the datanode executes at the same time with
+/// `max_concurrent_queries` permits, as a last line of defense against query
+/// overloading.
 struct RegionServerParallelism {
-    semaphore: Arc<Semaphore>,
+    permits: Arc<Semaphore>,
     timeout: Duration,
 }
 
@@ -1425,13 +1434,14 @@ impl RegionServerParallelism {
             return None;
         }
         Some(RegionServerParallelism {
-            semaphore: Arc::new(Semaphore::new(max_concurrent_queries)),
+            permits: Arc::new(Semaphore::new(max_concurrent_queries)),
             timeout: concurrent_query_limiter_timeout,
         })
     }
 
+    /// Acquires one permit under the configured timeout.
     pub async fn acquire(&self) -> Result<OwnedSemaphorePermit> {
-        timeout(self.timeout, self.semaphore.clone().acquire_owned())
+        timeout(self.timeout, self.permits.clone().acquire_owned())
             .await
             .context(ConcurrentQueryLimiterTimeoutSnafu)?
             .context(ConcurrentQueryLimiterClosedSnafu)
@@ -3544,26 +3554,6 @@ mod tests {
             assert(result);
         }
     }
-
-    #[tokio::test]
-    async fn test_region_server_parallelism() {
-        let p = RegionServerParallelism::from_opts(2, Duration::from_millis(1)).unwrap();
-        let first_query = p.acquire().await;
-        assert!(first_query.is_ok());
-        let second_query = p.acquire().await;
-        assert!(second_query.is_ok());
-        let third_query = p.acquire().await;
-        assert!(third_query.is_err());
-        let err = third_query.unwrap_err();
-        assert_eq!(
-            err.output_msg(),
-            "Failed to acquire permit under timeouts: deadline has elapsed".to_string()
-        );
-        drop(first_query);
-        let forth_query = p.acquire().await;
-        assert!(forth_query.is_ok());
-    }
-
     fn mock_region_metadata(region_id: RegionId) -> RegionMetadata {
         let mut metadata_builder = RegionMetadataBuilder::new(region_id);
         metadata_builder.push_column_metadata(ColumnMetadata {
@@ -3595,6 +3585,15 @@ mod tests {
         });
         metadata_builder.primary_key(vec![1]);
         metadata_builder.build().unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_region_server_parallelism_limits_concurrent_reads() {
+        let parallelism = RegionServerParallelism::from_opts(1, Duration::from_millis(1)).unwrap();
+        let first = parallelism.acquire().await.unwrap();
+        assert!(parallelism.acquire().await.is_err());
+        drop(first);
+        assert!(parallelism.acquire().await.is_ok());
     }
 
     #[tokio::test]

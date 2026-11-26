@@ -172,6 +172,7 @@ impl InformationExtension for StandaloneInformationExtension {
                 .context(catalog::error::DatafusionSnafu)?,
             region_id: RegionId::default(),
             header: None,
+            prepared_plan: None,
         };
 
         self.region_server
