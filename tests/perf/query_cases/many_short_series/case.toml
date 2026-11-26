@@ -303,13 +303,17 @@ iterations = 9
 [scenario.queries.thresholds]
 max_candidate_latency_regression_pct = 20
 
-# 12. Subquery: a ten-minute window at a one-minute step holds ten aligned inner
-# points per outer one (the window is left-open), so the outer grid is kept to
-# two points -- twenty inner evaluations -- instead of the five used elsewhere.
+# 12. Subquery: a ten-minute window at a thirty-second step holds twenty aligned
+# inner points per outer one (the window is left-open). A one-minute step would
+# leave the first outer evaluation with a single raw sample in its `rate` window
+# and the second folding one valid rate point, so the fold would barely be
+# exercised; at thirty seconds both outer points fold two valid rate points.
+# The outer grid is kept to two points -- forty inner evaluations -- instead of
+# the five used elsewhere.
 [[scenario.queries]]
 name = "max_over_time_rate_10m_1m"
 kind = "tql"
-query = "TQL ANALYZE VERBOSE FORMAT JSON (1704067245, 1704067305, '1m') max_over_time(rate(many_short_series[5m])[10m:1m])"
+query = "TQL ANALYZE VERBOSE FORMAT JSON (1704067245, 1704067305, '1m') max_over_time(rate(many_short_series[5m])[10m:30s])"
 require_native = true
 warmup = 3
 iterations = 9
