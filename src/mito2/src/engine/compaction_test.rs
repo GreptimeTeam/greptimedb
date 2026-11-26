@@ -35,7 +35,7 @@ use store_api::region_request::{
     RegionDeleteRequest, RegionFlushRequest, RegionOpenRequest, RegionRequest,
     RegionTruncateRequest, SetRegionOption, StagingPartitionDirective,
 };
-use store_api::storage::{RegionId, ScanRequest};
+use store_api::storage::{RegionId, ScanRequest, TimeSeriesRowSelector};
 use tokio::sync::{Notify, Semaphore};
 
 use crate::config::MitoConfig;
@@ -4353,4 +4353,31 @@ async fn test_scanner_time_range_fingerprint() {
     assert_eq!(None, fp(&scanner().await, 0, 10));
     crate::test_util::flush_region(&engine, region_id, None).await;
     assert_ne!(Some(reported), fp(&scanner().await, 0, 10));
+
+    // The last row of series "5" moves out of [0, 10) when a newer row is flushed into a
+    // file outside it, while the files overlapping [0, 10) stay the same.
+    let before = fp(&scanner().await, 0, 10);
+    assert!(before.is_some());
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: crate::test_util::build_rows_for_key("5", 30, 31, 0),
+        },
+    )
+    .await;
+    crate::test_util::flush_region(&engine, region_id, None).await;
+    let last_row = engine
+        .handle_query(
+            region_id,
+            ScanRequest {
+                series_row_selector: Some(TimeSeriesRowSelector::LastRow { after_merge: true }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(before, fp(&scanner().await, 0, 10));
+    assert_eq!(None, fp(&last_row, 0, 10));
 }
