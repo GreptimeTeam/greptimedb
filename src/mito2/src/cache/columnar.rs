@@ -20,7 +20,9 @@ use std::sync::Arc;
 use snafu::IntoError;
 use store_api::storage::FileId;
 
-use crate::cache::{CacheManagerRef, CacheStrategy, MetaValue, SstDecodedMetaKey};
+use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
+use crate::cache::write_cache::WriteCacheRef;
+use crate::cache::{CacheManagerRef, CacheStrategy, MetaValue, PrefilterKey, SstDecodedMetaKey};
 use crate::error::Result;
 use crate::metrics::{CACHE_HIT, CACHE_MISS};
 
@@ -44,7 +46,7 @@ pub(crate) struct DecodedValue {
 #[derive(Clone)]
 pub(crate) struct MetadataCache {
     memory: Option<CacheManagerRef>,
-    disk: Option<super::write_cache::WriteCacheRef>,
+    disk: Option<WriteCacheRef>,
     namespace: FileId,
     download_on_miss: bool,
 }
@@ -66,10 +68,7 @@ impl CacheStrategy {
 }
 
 impl MetadataCache {
-    pub(crate) fn maintenance(
-        disk: Option<&super::write_cache::WriteCacheRef>,
-        namespace: FileId,
-    ) -> Option<Self> {
+    pub(crate) fn maintenance(disk: Option<&WriteCacheRef>, namespace: FileId) -> Option<Self> {
         Some(Self {
             memory: None,
             disk: Some(disk?.clone()),
@@ -97,14 +96,14 @@ impl MetadataCache {
 #[derive(Clone)]
 pub(crate) struct ObjectReader {
     remote: object_store::Reader,
-    local: Option<(super::file_cache::FileCacheRef, super::file_cache::IndexKey)>,
+    local: Option<(FileCacheRef, IndexKey)>,
 }
 
 impl ObjectReader {
     pub(crate) async fn open(
         cache: Option<&MetadataCache>,
         file: Option<&crate::sst::file::FileHandle>,
-        kind: super::file_cache::FileType,
+        kind: FileType,
         store: &object_store::ObjectStore,
         path: &str,
         size: u64,
@@ -116,11 +115,7 @@ impl ObjectReader {
             .zip(file)
             .map(|(cache, file)| {
                 let disk = cache.file_cache();
-                let key = super::file_cache::IndexKey::new(
-                    file.region_id(),
-                    file.file_id().file_id(),
-                    kind,
-                );
+                let key = IndexKey::new(file.region_id(), file.file_id().file_id(), kind);
                 if download && !disk.contains_key(&key) {
                     disk.queue_download(
                         key,
@@ -133,7 +128,7 @@ impl ObjectReader {
                 (disk, key)
             });
         let gap = match kind {
-            super::file_cache::FileType::Series(_) => crate::sst::parquet::helper::MERGE_GAP,
+            FileType::Series(_) => crate::sst::parquet::helper::MERGE_GAP,
             _ => 0,
         };
         let remote = store
@@ -205,11 +200,11 @@ impl PartArea {
         &self,
         block_offset: u64,
         exprs: &smallvec::SmallVec<[String; 1]>,
-    ) -> Option<(&CacheManagerRef, super::PrefilterKey)> {
+    ) -> Option<(&CacheManagerRef, PrefilterKey)> {
         let context = self.cache.as_ref()?;
         let manager = context.memory.as_ref()?;
         manager.prefilter_result_cache.as_ref()?;
-        let mut key = super::PrefilterKey::new(context.namespace, 0, None, 0, exprs.clone());
+        let mut key = PrefilterKey::new(context.namespace, 0, None, 0, exprs.clone());
         key.mem_usage += self.path.len();
         key.native_block = Some((self.path.clone(), block_offset));
         Some((manager, key))
