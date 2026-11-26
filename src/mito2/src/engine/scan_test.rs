@@ -1474,6 +1474,82 @@ async fn test_compound_time_filters_before_last_row() {
 }
 
 #[tokio::test]
+async fn test_sparse_time_filters_before_last_row() -> WhateverResult<()> {
+    for format in ["flat", "narthex"] {
+        let mut env = TestEnv::new().await;
+        let engine = env.create_engine(MitoConfig::default()).await;
+        let region_id = RegionId::new(1024, 0);
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Create(sparse_metric_create_request(format)),
+            )
+            .await?;
+        let metadata = engine.get_region(region_id).unwrap().metadata();
+        let key = new_sparse_primary_key(&["series"], &metadata, 42, 7);
+        for ts in [0, 1, 2, 4] {
+            engine
+                .handle_request(
+                    region_id,
+                    test_util::sparse_metric_put(key.clone(), ts, Some(ts as f64)),
+                )
+                .await?;
+        }
+        let ts = |value| lit(ScalarValue::TimestampMillisecond(Some(value), None));
+        // Neither filter is a plain range: the newest row inside the derived
+        // time range is rejected, so LastRow must select an older matching row.
+        let cases = [
+            (col("ts").not_eq(ts(4)), 2),
+            (col("ts").eq(ts(1)).or(col("ts").eq(ts(3))), 1),
+        ];
+        for flushed in [false, true] {
+            if flushed {
+                test_util::flush_region(&engine, region_id, None).await;
+            }
+            for (filter, expected) in &cases {
+                for distribution in [None, Some(TimeSeriesDistribution::PerSeries)] {
+                    for selector in [
+                        TimeSeriesRowSelector::LastRow { after_merge: false },
+                        TimeSeriesRowSelector::LastRow { after_merge: true },
+                    ] {
+                        let stream = engine
+                            .scan_to_stream(
+                                region_id,
+                                ScanRequest {
+                                    filters: vec![filter.clone()],
+                                    distribution,
+                                    series_row_selector: Some(selector),
+                                    ..Default::default()
+                                },
+                            )
+                            .await?;
+                        let batches = RecordBatches::try_collect(stream).await?;
+                        let actual = batches
+                            .iter()
+                            .flat_map(|batch| {
+                                batch
+                                    .column_by_name("ts")
+                                    .unwrap()
+                                    .as_primitive::<TimestampMillisecondType>()
+                                    .values()
+                                    .to_vec()
+                            })
+                            .collect::<Vec<_>>();
+                        assert_eq!(
+                            actual,
+                            vec![*expected],
+                            "format={format}, flushed={flushed}, distribution={distribution:?}, selector={selector:?}, {filter}"
+                        );
+                    }
+                }
+            }
+        }
+        engine.stop().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_json_type_hint_pushdown_scanner_returns_batches() -> WhateverResult<()> {
     // Create a region with a JSON2 field whose physical Parquet representation is a nested struct.
     // The scan below will only ask for field_0.a.x.
