@@ -165,7 +165,7 @@ where
 
     /// Atomically admits an already-loaded value or returns the resident one.
     pub async fn get_or_insert(&self, key: K, value: V) -> V {
-        self.inner.entry(key).or_insert(value).await.into_value()
+        self.inner.get_with(key, std::future::ready(value)).await
     }
 
     /// Submits a completed value to the cache's admission and eviction policy.
