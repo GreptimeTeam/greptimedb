@@ -801,15 +801,29 @@ impl MitoRegion {
 
     /// Persists the metadata backfilled when the region was opened if the manifest lacks it.
     /// A catchup cannot do it for a region that [awaits its Leader
-    /// lease](ManifestContext::awaits_leader_lease), so the lease that ends the wait does.
-    pub(crate) async fn persist_backfilled_metadata(&self) {
+    /// lease](ManifestContext::awaits_leader_lease), so the worker does once the region is a
+    /// writable leader with its lease. Returns false if it found the region not a writable
+    /// leader with its Leader lease, so it could not tell whether the metadata needs persisting.
+    pub(crate) async fn persist_backfilled_metadata(&self) -> bool {
         let mut manager = self.manifest_ctx.manifest_manager.write().await;
-        let pending = self.persist_backfilled_metadata_locked(&mut manager).await;
+        if !self.may_finish_deferred_lease_work() {
+            return false;
+        }
+        // Checked once: a change the worker starts now cannot commit before the lock is dropped.
+        let pending = self.commit_backfilled_metadata_locked(&mut manager).await;
         // The hook may read the manifest.
         drop(manager);
         if let Some(pending) = pending {
             pending.fire().await;
         }
+        true
+    }
+
+    /// Returns whether the region is a writable leader with its Leader lease, which may run the
+    /// work due once it is one.
+    pub(crate) fn may_finish_deferred_lease_work(&self) -> bool {
+        self.state() == RegionRoleState::Leader(RegionLeaderState::Writable)
+            && !self.manifest_ctx.awaits_leader_lease()
     }
 
     /// Persists the backfilled metadata of a writable leader that may commit, under the
@@ -818,11 +832,18 @@ impl MitoRegion {
         &self,
         manager: &mut RwLockWriteGuard<'_, RegionManifestManager>,
     ) -> Option<PendingManifestHook> {
-        if self.state() != RegionRoleState::Leader(RegionLeaderState::Writable)
-            || self.manifest_ctx.awaits_leader_lease()
-        {
+        if !self.may_finish_deferred_lease_work() {
             return None;
         }
+        self.commit_backfilled_metadata_locked(manager).await
+    }
+
+    /// Commits the backfilled metadata if the manifest lacks it, under the caller's manifest lock,
+    /// without checking the state. Returns the hook to fire after the lock is dropped.
+    async fn commit_backfilled_metadata_locked(
+        &self,
+        manager: &mut RwLockWriteGuard<'_, RegionManifestManager>,
+    ) -> Option<PendingManifestHook> {
         // Persist backfilled metadata if manifest is missing fields (e.g., partition_expr).
         // Only the metadata and the format are kept, so the memtables of the version are not
         // pinned across the write below.
@@ -1457,6 +1478,16 @@ pub(crate) struct LeaderLeasePromotion {
     /// How long the region awaited its Leader lease, if this lease ended the wait, as
     /// [ManifestContext::record_leader_lease] returns it.
     pub(crate) ended_wait: Option<Duration>,
+    /// The state the promotion replaced, None if it left the state unchanged.
+    pub(crate) replaced: Option<RegionRoleState>,
+}
+
+/// What [ManifestContext::promote_unless_reload_pending] did.
+struct Promotion {
+    /// Whether it promoted the region; see the function.
+    promoted: bool,
+    /// The state the promotion replaced, as [ManifestContext::set_role] returns it.
+    replaced: Option<RegionRoleState>,
 }
 
 /// Context to update the region manifest.
@@ -1498,6 +1529,9 @@ pub(crate) struct ManifestContext {
     staging_partition_info: Mutex<Option<StagingPartitionInfo>>,
     /// Optional region hook for observing manifest mutations.
     hook: Option<RegionHookRef>,
+    /// Notifications that the region became writable sent to its worker.
+    #[cfg(test)]
+    pub(crate) writable_notifications: std::sync::atomic::AtomicUsize,
 }
 
 impl ManifestContext {
@@ -1522,6 +1556,8 @@ impl ManifestContext {
             node_lease,
             staging_partition_info: Mutex::new(None),
             hook,
+            #[cfg(test)]
+            writable_notifications: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -2337,6 +2373,7 @@ impl ManifestContext {
             return LeaderLeasePromotion {
                 promoted: true,
                 ended_wait: None,
+                replaced: None,
             };
         }
         let fence = self.promotion_fence.lock().unwrap();
@@ -2344,12 +2381,15 @@ impl ManifestContext {
             return LeaderLeasePromotion {
                 promoted: false,
                 ended_wait: None,
+                replaced: None,
             };
         }
         let ended_wait = self.record_leader_lease(issued_at);
+        let promotion = self.promote_unless_reload_pending(&fence, region_id, false);
         LeaderLeasePromotion {
-            promoted: self.promote_unless_reload_pending(&fence, region_id, false),
+            promoted: promotion.promoted,
             ended_wait,
+            replaced: promotion.replaced,
         }
     }
 
@@ -2359,6 +2399,7 @@ impl ManifestContext {
         let mut fence = self.promotion_fence.lock().unwrap();
         fence.catching_up = false;
         self.promote_unless_reload_pending(&fence, region_id, true)
+            .promoted
     }
 
     /// Returns whether the region was stopped, so no catchup promotes it.
@@ -2446,17 +2487,22 @@ impl ManifestContext {
         fence: &PromotionFence,
         region_id: RegionId,
         by_catchup: bool,
-    ) -> bool {
+    ) -> Promotion {
         if fence.reload_pending || fence.stopped {
-            return false;
+            return Promotion {
+                promoted: false,
+                replaced: None,
+            };
         }
         if by_catchup {
             // Before the role, so a lease that finds the region writable compares with it.
             self.catchup_promoted_at
                 .store(lease_nanos(Instant::now()).max(1), Ordering::Relaxed);
         }
-        self.set_role(RegionRole::Leader, region_id);
-        true
+        Promotion {
+            promoted: true,
+            replaced: self.set_role(RegionRole::Leader, region_id),
+        }
     }
 
     /// Counts an applied Leader lease (or StagingLeader lease, on a node whose writes need a lease)
@@ -3567,11 +3613,12 @@ mod tests {
             |r| r.manifest_ctx.demote_candidate(r.region_id),
             // What a catchup's promotion does under the lock.
             |fence| {
-                assert!(region.manifest_ctx.promote_unless_reload_pending(
-                    fence,
-                    region.region_id,
-                    true
-                ))
+                assert!(
+                    region
+                        .manifest_ctx
+                        .promote_unless_reload_pending(fence, region.region_id, true)
+                        .promoted
+                )
             },
         );
         assert_eq!(demoted, None);

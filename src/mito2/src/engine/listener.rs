@@ -46,6 +46,26 @@ pub trait EventListener: Send + Sync {
     /// metadata.
     fn on_persist_backfilled_metadata_begin(&self, _region_id: RegionId) {}
 
+    /// Notifies the listener in the spawned save of the region's backfilled metadata, before it
+    /// takes the manifest lock.
+    async fn on_persist_backfilled_metadata_lock_begin(&self, _region_id: RegionId) {}
+
+    /// Notifies the listener after the worker handled a notification that the region became
+    /// writable, before it runs the region's deferred work.
+    fn on_region_became_writable(&self, _region_id: RegionId) {}
+
+    /// Notifies the listener when the worker starts the work due once the region is a writable
+    /// leader with its Leader lease.
+    async fn on_deferred_lease_work_begin(&self, _region_id: RegionId) {}
+
+    /// Notifies the listener when an index build request passed the worker's checks of the
+    /// region's state, before it reads the manifest.
+    async fn on_rebuild_index_admitted(&self, _region_id: RegionId) {}
+
+    /// Notifies the listener when the worker receives a notification that a save of the region's
+    /// backfilled metadata was deferred.
+    fn on_backfill_deferred(&self, _region_id: RegionId) {}
+
     /// Notifies the listener before a tail replay commits its result.
     async fn on_tail_commit_begin(&self, _region_id: RegionId) {}
 

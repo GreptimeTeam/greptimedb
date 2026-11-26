@@ -253,6 +253,37 @@ impl object_store::layers::mock::Write for BlockingManifestWriter {
     }
 }
 
+/// Parks the first task that passes it once armed, until released.
+#[derive(Default)]
+pub(crate) struct Gate {
+    armed: AtomicBool,
+    entered: Notify,
+    release: Notify,
+}
+
+impl Gate {
+    pub(crate) fn arm(&self) {
+        self.armed.store(true, Ordering::Relaxed);
+    }
+
+    pub(crate) async fn pass(&self) {
+        if self.armed.swap(false, Ordering::Relaxed) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+    }
+
+    pub(crate) async fn wait_entered(&self) {
+        tokio::time::timeout(std::time::Duration::from_secs(10), self.entered.notified())
+            .await
+            .unwrap();
+    }
+
+    pub(crate) fn release(&self) {
+        self.release.notify_one();
+    }
+}
+
 /// Injects faults into the next manifest delta write of a mock object store.
 #[derive(Clone, Default)]
 pub struct DeltaFaults {
@@ -260,6 +291,8 @@ pub struct DeltaFaults {
     lose_response: Arc<AtomicBool>,
     /// Whether the next delta write fails without landing.
     fail_write: Arc<AtomicBool>,
+    /// Whether the next deletion of a staging path fails.
+    fail_staging_delete: Arc<AtomicBool>,
 }
 
 impl DeltaFaults {
@@ -272,9 +305,16 @@ impl DeltaFaults {
         self.fail_write.store(true, Ordering::Relaxed);
     }
 
+    /// Fails the next deletion of a staging path, such as the clearing of the staging manifest
+    /// that entering staging begins with.
+    pub(crate) fn fail_next_staging_delete(&self) {
+        self.fail_staging_delete.store(true, Ordering::Relaxed);
+    }
+
     /// Builds the object-store layer controlled by these faults.
     pub fn layer(&self) -> MockLayer {
         let faults = self.clone();
+        let fail_staging_delete = self.fail_staging_delete.clone();
         MockLayerBuilder::default()
             .writer_factory(Arc::new(move |path, _args, inner| {
                 if !is_delta_file(path.rsplit('/').next().unwrap_or_default()) {
@@ -288,8 +328,33 @@ impl DeltaFaults {
                     })
                 }
             }))
+            .deleter_factory(Arc::new(move |inner| {
+                Box::new(StagingDeleter {
+                    inner,
+                    fail: fail_staging_delete.clone(),
+                })
+            }))
             .build()
             .unwrap()
+    }
+}
+
+/// A deleter whose next deletion of a staging path fails once `fail` is set.
+struct StagingDeleter {
+    inner: Deleter,
+    fail: Arc<AtomicBool>,
+}
+
+impl object_store::layers::mock::Delete for StagingDeleter {
+    async fn delete(&mut self, path: &str, args: OpDelete) -> MockResult<()> {
+        if path.contains("staging") && self.fail.swap(false, Ordering::Relaxed) {
+            return Err(MockError::new(ErrorKind::Unexpected, "mock failed delete"));
+        }
+        self.inner.delete(path, args).await
+    }
+
+    async fn close(&mut self) -> MockResult<()> {
+        self.inner.close().await
     }
 }
 
