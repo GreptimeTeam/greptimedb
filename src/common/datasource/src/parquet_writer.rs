@@ -666,6 +666,7 @@ mod tests {
             &format!("{}/", directory.path().display()),
             &Default::default(),
             &access,
+            &crate::object_store::RemoteStorageAccess::unrestricted(),
         )
         .await
         .unwrap();

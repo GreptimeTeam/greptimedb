@@ -153,6 +153,12 @@ pub struct QueryOptions {
     /// a `true` default routes every query natively and a `false` one still lets one query or one
     /// session ask for it. Default: `false`.
     pub experimental_native_promql: bool,
+    /// Hosts that object stores built from SQL statements (`COPY`, `COPY DATABASE`,
+    /// `EXPORT/IMPORT DATABASE` and external tables) may connect to. Empty means no restriction.
+    pub remote_allowed_hosts: Vec<String>,
+    /// Whether such an object store without credentials in its connection options may use the
+    /// server's own credentials.
+    pub allow_server_credentials: bool,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -170,6 +176,8 @@ impl Default for QueryOptions {
             experimental_spill_compression: QuerySpillCompression::Uncompressed,
             experimental_memory_pool_policy: QueryMemoryPoolPolicy::Greedy,
             experimental_native_promql: false,
+            remote_allowed_hosts: Vec::new(),
+            allow_server_credentials: true,
         }
     }
 }

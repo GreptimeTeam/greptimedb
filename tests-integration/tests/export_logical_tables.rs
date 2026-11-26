@@ -1081,6 +1081,7 @@ async fn packed_copy_standalone_heterogeneous_streams() {
             &location,
             &connection,
             &common_datasource::object_store::LocalFileAccess::Disabled,
+            &common_datasource::object_store::RemoteStorageAccess::unrestricted(),
         )
         .await
         .unwrap();

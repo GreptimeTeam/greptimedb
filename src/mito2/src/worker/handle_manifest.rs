@@ -16,7 +16,7 @@
 //!
 //! It updates the manifest and applies the changes to the region in background.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::num::NonZeroU64;
 use std::sync::Arc;
 
@@ -465,50 +465,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Updates manifest in background.
         common_runtime::spawn_global(async move {
             let result = match kind {
-                RegionEditKind::Import => {
-                    // Removing one contributor invalidates the collective watermark.
-                    // Editing excludes new native publications while the import is committed.
-                    if !edit.series_indexes_to_remove.is_empty() {
-                        let manifest = region.manifest_ctx.manifest().await;
-                        let windows: std::collections::HashSet<_> = edit
-                            .series_indexes_to_remove
-                            .iter()
-                            .filter_map(|id| {
-                                manifest
-                                    .series_indexes
-                                    .get(&id.file_id())
-                                    .filter(|f| f.file_id() == *id)?
-                                    .series_window()
-                                    .map(|w| w.start)
-                            })
-                            .collect();
-                        if !windows.is_empty() {
-                            edit.series_indexes_to_remove.extend(
-                                manifest
-                                    .series_indexes
-                                    .values()
-                                    .filter(|f| {
-                                        f.series_window()
-                                            .is_some_and(|w| windows.contains(&w.start))
-                                    })
-                                    .map(|f| f.file_id()),
-                            );
-                            edit.series_indexes_to_remove
-                                .sort_unstable_by_key(|id| id.file_id());
-                            edit.series_indexes_to_remove.dedup();
-                        }
-                    }
-                    edit_region(
-                        &region,
-                        edit.clone(),
-                        cache_manager,
-                        listener,
-                        is_staging,
-                        preload_sst_cache,
-                    )
-                    .await
-                    .map(|()| RegionEditOutcome::Written)
-                }
+                RegionEditKind::Import => edit_region(
+                    &region,
+                    &mut edit,
+                    cache_manager,
+                    listener,
+                    is_staging,
+                    preload_sst_cache,
+                )
+                .await
+                .map(|()| RegionEditOutcome::Written),
                 #[cfg(feature = "enterprise")]
                 RegionEditKind::Compaction(context) => {
                     crate::worker::handle_table_compaction::publish(&region, &context, edit.clone())
@@ -1124,13 +1090,42 @@ fn prepare_region_edit(region: &MitoRegionRef, edit: &mut RegionEdit) -> Result<
 /// Checks the edit, writes and applies it.
 async fn edit_region(
     region: &MitoRegionRef,
-    edit: RegionEdit,
+    edit: &mut RegionEdit,
     cache_manager: CacheManagerRef,
     listener: WorkerListener,
     is_staging: bool,
     preload_sst_cache: bool,
 ) -> Result<()> {
     let region_id = region.region_id;
+    // Editing fences new native publications. Read the manifest after taking
+    // that fence so a retired input cannot silently acknowledge invalidation.
+    if !edit.series_indexes_to_remove.is_empty() {
+        let manifest = region.manifest_ctx.manifest().await;
+        let mut windows = HashSet::new();
+        for id in &edit.series_indexes_to_remove {
+            let file = manifest
+                .series_indexes
+                .get(&id.file_id())
+                .filter(|file| file.file_id() == *id)
+                .context(RegionBusySnafu { region_id })?;
+            if let Some(window) = file.series_window() {
+                windows.insert(window.start);
+            }
+        }
+        edit.series_indexes_to_remove.extend(
+            manifest
+                .series_indexes
+                .values()
+                .filter(|file| {
+                    file.series_window()
+                        .is_some_and(|w| windows.contains(&w.start))
+                })
+                .map(|file| file.file_id()),
+        );
+        edit.series_indexes_to_remove
+            .sort_unstable_by_key(|id| id.file_id());
+        edit.series_indexes_to_remove.dedup();
+    }
     let narthex_format =
         region.version().options.sst_format == Some(crate::sst::FormatType::Narthex);
     if narthex_format {
@@ -1222,7 +1217,7 @@ async fn edit_region(
         region_id, is_staging
     );
 
-    let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
+    let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
     let result = region
         .manifest_ctx
         .update_manifest(RegionLeaderState::Editing, action_list, is_staging)
@@ -1320,7 +1315,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let edit = if unsupported_level {
+        let mut edit = if unsupported_level {
             RegionEdit {
                 files_to_add: vec![file],
                 ..Default::default()
@@ -1335,7 +1330,7 @@ mod tests {
         // Exercise persistence-side rejection, not the earlier worker admission guard.
         let error = edit_region(
             &region,
-            edit,
+            &mut edit,
             engine.cache_manager(),
             WorkerListener::default(),
             false,

@@ -1636,15 +1636,6 @@ impl Error {
         matches!(self, Error::FillDefault { .. })
     }
 
-    /// Whether sample discovery or a rebuild can replace an unusable series index.
-    pub(crate) fn is_unusable_series_index(&self) -> bool {
-        self.is_object_not_found()
-            || matches!(
-                self,
-                Self::InvalidMeta { .. } | Self::UnsupportedOperation { .. }
-            )
-    }
-
     /// Returns true if the file is not found on the object store.
     pub(crate) fn is_object_not_found(&self) -> bool {
         match self {

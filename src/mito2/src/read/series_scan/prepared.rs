@@ -18,7 +18,7 @@ mod narthex;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::Instant;
@@ -68,6 +68,7 @@ use crate::series_index::format::{
 };
 use crate::series_index::identity::ExactSeriesKey;
 use crate::series_index::{MetricSeriesId, ROW_COUNT_COLUMN};
+use crate::sst::file::{FileTimeRange, WindowSequence};
 
 fn invalid(reason: impl Into<String>) -> Error {
     InvalidRecordBatchSnafu {
@@ -388,14 +389,19 @@ pub(crate) struct ColumnarPreparedSource {
     reservation: Arc<MemoryReservation>,
 }
 
+/// Only native index readers carry a coverage window. A failed index read can
+/// schedule discovery from the corresponding pinned samples once per scan.
+#[derive(Default)]
+pub(crate) struct SeriesDiscovery {
+    readers: VecDeque<(Box<dyn FormatReader>, Option<WindowSequence>)>,
+    covered_samples: Vec<(FileTimeRange, usize)>,
+}
+
 /// Opens sidecar readers after validating their complete source coverage.
 async fn open_sidecar_sources(
     context: &StreamContext,
     ranges: &[PartitionRange],
-) -> Result<(
-    Vec<Arc<dyn SamplesFormatReader>>,
-    Vec<Box<dyn FormatReader>>,
-)> {
+) -> Result<(Vec<Arc<dyn SamplesFormatReader>>, SeriesDiscovery)> {
     let input = &context.input;
     let metadata = input.region_metadata();
     let index = input
@@ -450,15 +456,18 @@ async fn open_sidecar_sources(
         format::validate_sample_schema(&reader.schema(), metadata)?;
         samples.push(Arc::new(reader));
     }
-    let mut series = Vec::<Box<dyn FormatReader>>::new();
+    let mut series = SeriesDiscovery::default();
     for id in indexes {
-        series.push(Box::new(
-            crate::series_index::columnar::reader::ColumnarReader::open_cached(
-                index.store.clone(),
-                index.version.series_indexes[&id].clone(),
-                cache.clone(),
-            )
-            .await?,
+        series.readers.push_back((
+            Box::new(
+                crate::series_index::columnar::reader::ColumnarReader::open_cached(
+                    index.store.clone(),
+                    index.version.series_indexes[&id].clone(),
+                    cache.clone(),
+                )
+                .await?,
+            ),
+            None,
         ));
     }
     Ok((samples, series))
@@ -473,36 +482,6 @@ impl ColumnarPreparedSource {
         metrics: PartitionMetrics,
         scan_pool: Arc<dyn MemoryPool>,
     ) -> Result<Self> {
-        let has_indexes = context.input.requires_narthex_preparation()
-            && !context.input.narthex_series_indexes.is_empty();
-        let attempt = |use_indexes| {
-            Self::prepare_from_snapshot(
-                context.clone(),
-                ranges.clone(),
-                labels.clone(),
-                raw.clone(),
-                metrics.clone(),
-                scan_pool.clone(),
-                use_indexes,
-            )
-        };
-        match attempt(has_indexes).await {
-            // Parts are opened lazily. Discard every candidate from the failed
-            // attempt before discovering keys from the same pinned sample snapshot.
-            Err(error) if has_indexes && error.is_unusable_series_index() => attempt(false).await,
-            result => result,
-        }
-    }
-
-    async fn prepare_from_snapshot(
-        context: Arc<StreamContext>,
-        ranges: Vec<PartitionRange>,
-        labels: RawLabelSource,
-        raw: RawScanPreparation,
-        metrics: PartitionMetrics,
-        scan_pool: Arc<dyn MemoryPool>,
-        use_indexes: bool,
-    ) -> Result<Self> {
         let _prepare_timer = crate::metrics::READ_STAGE_ELAPSED
             .with_label_values(&["columnar_prepare_wall"])
             .start_timer();
@@ -511,8 +490,8 @@ impl ColumnarPreparedSource {
         let started = Instant::now();
         let input = &context.input;
         let metadata = input.region_metadata();
-        let (samples, series) = if context.input.requires_narthex_preparation() {
-            narthex::open_sources(&context, &ranges, &scan_pool, use_indexes).await?
+        let (samples, mut series) = if context.input.requires_narthex_preparation() {
+            narthex::open_sources(&context, &ranges, &scan_pool).await?
         } else {
             open_sidecar_sources(&context, &ranges).await?
         };
@@ -522,7 +501,7 @@ impl ColumnarPreparedSource {
             .insert("prepare_sample_readers", samples.len() as u64);
         preparation_metrics
             .counts
-            .insert("prepare_series_indexes", series.len() as u64);
+            .insert("prepare_series_indexes", series.readers.len() as u64);
         let reservation = MemoryConsumer::new("ColumnarPreparedSource").register(&scan_pool);
         let started = Instant::now();
         let mut raw = raw;
@@ -557,7 +536,7 @@ impl ColumnarPreparedSource {
         let conjuncts = predicate_conjuncts(input.predicate_group().predicate());
         let mut retained_rows = 0_usize;
         let mut candidates = BTreeMap::<ExactSeriesKey, Candidate>::new();
-        for reader in series {
+        while let Some((reader, window)) = series.readers.pop_front() {
             let started = Instant::now();
             let schema = reader.schema();
             format::validate_series_schema(&schema, metadata)?;
@@ -612,8 +591,21 @@ impl ColumnarPreparedSource {
             let mut batches = reader.read(request)?;
             loop {
                 let timer = preparation_metrics.timer("columnar_prepare_discovery_wall");
-                let batch = batches.try_next().await?;
+                let batch = batches.try_next().await;
                 drop(timer);
+                let batch = match (batch, window) {
+                    (Ok(batch), _) => batch,
+                    (Err(error), Some(window)) => {
+                        common_telemetry::warn!(
+                            ?error,
+                            ?window,
+                            "Series index read failed, discovering keys from samples"
+                        );
+                        series.fallback_to_samples(window, &samples, metadata, &scan_pool)?;
+                        break;
+                    }
+                    (Err(error), None) => return Err(error),
+                };
                 let Some(mut batch) = batch else {
                     break;
                 };
