@@ -186,7 +186,9 @@ iteration from profiling.
 Stop the datanode that owns the region and back up its manifest before using
 `--confirm`. The command writes the replacement under a fresh file ID, then
 publishes one manifest edit that swaps the old ID for the new one. Readers of
-the previous manifest can still use the original object.
+the previous manifest can still use the original object. If publication fails
+after the upload, check the active manifest before cleaning up the reported
+replacement path.
 
 The target must be a locally owned, unshared Parquet SST. The replacement must
 belong to the same source region and time index and
