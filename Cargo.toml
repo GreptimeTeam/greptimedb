@@ -199,6 +199,8 @@ num_cpus = "1.16"
 # https://github.com/GreptimeTeam/greptimedb/issues/9240
 object_store_opendal = { git = "https://github.com/GreptimeTeam/opendal.git", rev = "c03e56802b47de3ccfc8fe028e59a459b278a0d2" }
 once_cell = "1.18"
+# Same version as `opendal` in src/object-store/Cargo.toml.
+opendal-service-azure-common = "0.59.4"
 opentelemetry-proto = { version = "0.32", features = [
     "gen-tonic",
     "metrics",

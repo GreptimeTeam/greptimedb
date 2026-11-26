@@ -175,6 +175,12 @@ pub struct QueryOptions {
     /// Default: `1h`.
     #[serde(with = "humantime_serde")]
     pub experimental_slice_agg_cache_idle_timeout: Duration,
+    /// Hosts that object stores built from SQL statements (`COPY`, `COPY DATABASE`,
+    /// `EXPORT/IMPORT DATABASE` and external tables) may connect to. Empty means no restriction.
+    pub remote_allowed_hosts: Vec<String>,
+    /// Whether such an object store without credentials in its connection options may use the
+    /// server's own credentials.
+    pub allow_server_credentials: bool,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -200,6 +206,8 @@ impl Default for QueryOptions {
             experimental_slice_agg_cache_max_collect_size: None,
             experimental_slice_agg_cache_slice_width: None,
             experimental_slice_agg_cache_idle_timeout: Duration::from_secs(3600),
+            remote_allowed_hosts: Vec::new(),
+            allow_server_credentials: true,
         }
     }
 }

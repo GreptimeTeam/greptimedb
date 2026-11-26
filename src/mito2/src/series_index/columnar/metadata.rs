@@ -293,6 +293,13 @@ pub(crate) enum Page {
     Internal(Vec<PageReference>),
 }
 impl Page {
+    pub(crate) fn blocks(&self) -> Result<&[Block]> {
+        match self {
+            Self::Leaf(blocks) => Ok(blocks),
+            Self::Internal(_) => Err(unsupported("expected a series metadata leaf")),
+        }
+    }
+
     pub(crate) fn retained_size(&self) -> usize {
         std::mem::size_of::<Self>()
             + match self {

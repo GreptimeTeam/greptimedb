@@ -31,7 +31,9 @@ use common_catalog::consts::{
 use common_catalog::format_full_table_name;
 use common_datasource::file_format::{FileFormat, Format, infer_schemas};
 use common_datasource::lister::{Lister, Source};
-use common_datasource::object_store::{LocalFileAccess, build_backend_with_path};
+use common_datasource::object_store::{
+    LocalFileAccess, RemoteStorageAccess, build_backend_with_path,
+};
 use common_error::ext::BoxedError;
 use common_meta::SchemaOptions;
 use common_meta::ddl::create_flow::{FlowType, effective_eval_schedule_from_flow_info};
@@ -1446,6 +1448,7 @@ fn describe_column_semantic_types(
 pub async fn prepare_file_table_files(
     options: &HashMap<String, String>,
     local_file_access: &LocalFileAccess,
+    remote_storage_access: &RemoteStorageAccess,
 ) -> Result<(ObjectStore, Vec<String>)> {
     let url = options
         .get(FILE_TABLE_LOCATION_KEY)
@@ -1458,7 +1461,7 @@ pub async fn prepare_file_table_files(
         .map(|x| Regex::new(x))
         .transpose()
         .context(error::BuildRegexSnafu)?;
-    let backend = build_backend_with_path(url, options, local_file_access)
+    let backend = build_backend_with_path(url, options, local_file_access, remote_storage_access)
         .await
         .context(error::BuildBackendSnafu)?;
     let source = if let Some(filename) = backend.object_path {

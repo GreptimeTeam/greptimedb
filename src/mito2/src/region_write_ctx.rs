@@ -325,8 +325,10 @@ impl RegionWriteCtx {
         }
 
         let mutable_memtable = self.version.memtables.mutable.clone();
-        let prev_memory_usage = if self.written_bytes.is_some() {
-            Some(mutable_memtable.memory_usage())
+        // Held bytes shrink when the memtable encodes parts, so count written data by the decoded
+        // bytes, which only grow with writes.
+        let prev_decoded_bytes = if self.written_bytes.is_some() {
+            Some(mutable_memtable.decoded_bytes())
         } else {
             None
         };
@@ -368,8 +370,8 @@ impl RegionWriteCtx {
         }
 
         if let Some(written_bytes) = &self.written_bytes {
-            let new_memory_usage = mutable_memtable.memory_usage();
-            let bytes = new_memory_usage.saturating_sub(prev_memory_usage.unwrap_or_default());
+            let new_decoded_bytes = mutable_memtable.decoded_bytes();
+            let bytes = new_decoded_bytes.saturating_sub(prev_decoded_bytes.unwrap_or_default());
             written_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
         }
     }
@@ -418,8 +420,10 @@ impl RegionWriteCtx {
             .start_timer();
 
         let mutable_memtable = &self.version.memtables.mutable;
-        let prev_memory_usage = if self.written_bytes.is_some() {
-            Some(mutable_memtable.memory_usage())
+        // Held bytes shrink when the memtable encodes parts, so count written data by the decoded
+        // bytes, which only grow with writes.
+        let prev_decoded_bytes = if self.written_bytes.is_some() {
+            Some(mutable_memtable.decoded_bytes())
         } else {
             None
         };
@@ -454,8 +458,8 @@ impl RegionWriteCtx {
         }
 
         if let Some(written_bytes) = &self.written_bytes {
-            let new_memory_usage = mutable_memtable.memory_usage();
-            let bytes = new_memory_usage.saturating_sub(prev_memory_usage.unwrap_or_default());
+            let new_decoded_bytes = mutable_memtable.decoded_bytes();
+            let bytes = new_decoded_bytes.saturating_sub(prev_decoded_bytes.unwrap_or_default());
             written_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
         }
     }

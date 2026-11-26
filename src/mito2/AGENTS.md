@@ -131,6 +131,8 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   publication. Readers and compaction select storage from region options, not
   by inspecting individual files. Parquet flat/primary-key layouts may coexist.
 
+- Native series-index maintenance and scans share fixed-window sequence watermarks over manifest-tracked index files. The coverage contract lives in `docs/formats/mito-series.md`. Keep the samples and series format specs focused on persisted layout, field semantics, and compatibility. Native index selection and scheduling policy lives in `series_index/task.rs`.
+
 - Parquet row groups have uniform row counts except for the final group
   (`sst/parquet/row_selection.rs`). Memory-pressure flushing must not create
   arbitrary partial groups: readers and index row IDs rely on this layout.
@@ -241,8 +243,9 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   read guard held by `handle_caught_up_again`. No flush or compaction trigger starts work for a
   waiting region except a downgrade's flush. The lease that ends the wait wakes the worker
   (`handle_leader_lease_wait_ended`) to schedule the flushes the wait deferred and, only if the
-  region is then a writable leader, start a compaction, build missing indexes, re-issue the
-  index build retries the wait refused and persist backfilled metadata. A catchup of a waiting
+  region is then a writable leader, start a compaction. The missing indexes, the refused index
+  build retries and the backfilled metadata wait in `deferred_lease_work`, which the worker
+  sweeps after each batch (`sweep_deferred_lease_work`). A catchup of a waiting
   region catches it up again into an unregistered replacement while the region stays registered,
   demoted unless it is in a transient leader state. The replacement replaces it only if the
   replay succeeds, the region took no write and made no commit meanwhile and, for a catchup that
@@ -254,7 +257,7 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   region alone (`ManifestContext::demote_candidate`); other Follower leases demote it.
 - The latest lease each region received (`GrantedLeases` in `lease.rs`) lives outside the
   region instance, so a reopen during catchup keeps it. Every path that removes a region from
-  a worker's region map must also remove its record and its kept index build retries:
+  a worker's region map must also remove its record and its deferred lease work:
   `RegionWorkerLoop::remove_region` (`worker/handle_close.rs`, also used after a close-time
   flush), `drop_region` (`worker/handle_drop.rs`) and `RegionWorkerLoop::clean` (`worker.rs`).
 

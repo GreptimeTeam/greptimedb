@@ -219,7 +219,7 @@ impl SeqScan {
             partition_ranges.len(),
             sources.len()
         );
-        let channel_size = compute_parallel_channel_size(DEFAULT_READ_BATCH_SIZE);
+        let channel_size = compaction_input_channel_size();
         let parallelism = stream_ctx.input.compaction_read_parallelism;
         if parallelism > 1 && sources.len() > 1 {
             // More permits than inputs cannot increase concurrency. Clamping also
@@ -749,6 +749,11 @@ impl fmt::Debug for SeqScan {
             .field("num_ranges", &self.stream_ctx.ranges.len())
             .finish()
     }
+}
+
+/// Channel capacity of each compaction input read in its own task.
+pub(crate) fn compaction_input_channel_size() -> usize {
+    compute_parallel_channel_size(DEFAULT_READ_BATCH_SIZE)
 }
 
 /// Builds flat sources for the partition range and push them to the `sources` vector.

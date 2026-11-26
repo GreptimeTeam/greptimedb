@@ -398,6 +398,23 @@ memory_pool_size = "50%"
 #+ experimental_slice_agg_cache_idle_timeout = "1h"
 # --- End slice aggregate cache ---
 
+## Hosts that object storage in SQL statements may connect to: `COPY`, `COPY DATABASE`,
+## `EXPORT/IMPORT DATABASE`, and external tables. Frontends check statements; datanodes check
+## external table scans. Unset or empty means no restriction.
+## Entries: `host`, `host:port`, `*.domain` (subdomains only), `*.domain:port`, or `[::1]:9000`.
+## An entry without a port matches any port.
+## Every request is checked, including credential requests, and redirects aren't followed.
+## GCS service account keys also need `oauth2.googleapis.com`; OSS needs `*.oss-<region>.aliyuncs.com`.
+## Credentials from instance metadata are unavailable while the list is set.
+## Don't list metadata services, such as `169.254.169.254`, or internal services: request paths
+## aren't restricted.
+## @toml2docs:none-default
+#+ remote_allowed_hosts = ["minio.internal:9000"]
+## Whether object storage in SQL statements may use the server's own credentials (environment
+## variables, credential files, or instance metadata) when no credentials are given. When false,
+## statements must provide credentials or use OSS `allow_anonymous`.
+allow_server_credentials = true
+
 ## The data storage options.
 [storage]
 ## The working home directory.
@@ -588,8 +605,8 @@ compress_manifest = false
 ## Under development. Select legacy Parquet indexes or paired columnar series and samples.
 #+ experimental_series_index_format = "legacy"
 
-## Approximate series and range index size limit in open regions, shared across workers.
-## Workers periodically refresh usage and skip maintenance when full. In-flight reconciliation
+## Approximate size limit for local series and range index sidecars in open regions, shared across workers.
+## Workers periodically refresh usage and defer sidecar builds when full. In-flight reconciliation
 ## can exceed the limit. Closed-region files, temporary output, catalogs, and old snapshots
 ## retained by readers are not counted.
 ## Minimum: 1KiB. Takes effect on restart.
@@ -602,9 +619,12 @@ compress_manifest = false
 ## Interval between series-index maintenance runs. Zero uses the default of 5 min.
 #+ experimental_series_index_maintenance_interval = "5m"
 
-## Requested minimum series-index bucket width (default: 5 days), rounded up to
-## an exact multiple of each region's compaction time window.
+## Series-index window width (default: 5 days). Native series indexes persist the
+## width on first build. Local series indexes round up to a compaction window multiple.
 #+ experimental_series_index_bucket_width = "5days"
+
+## Minimum uncovered live sample SSTs per native series index window. Zero uses the default of 4.
+#+ experimental_series_index_min_files = 4
 
 ## Max number of running background flush jobs (default: 1/2 of cpu cores).
 ## @toml2docs:none-default="Auto"

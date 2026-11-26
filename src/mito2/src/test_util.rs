@@ -253,6 +253,37 @@ impl object_store::layers::mock::Write for BlockingManifestWriter {
     }
 }
 
+/// Parks the first task that passes it once armed, until released.
+#[derive(Default)]
+pub(crate) struct Gate {
+    armed: AtomicBool,
+    entered: Notify,
+    release: Notify,
+}
+
+impl Gate {
+    pub(crate) fn arm(&self) {
+        self.armed.store(true, Ordering::Relaxed);
+    }
+
+    pub(crate) async fn pass(&self) {
+        if self.armed.swap(false, Ordering::Relaxed) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+    }
+
+    pub(crate) async fn wait_entered(&self) {
+        tokio::time::timeout(std::time::Duration::from_secs(10), self.entered.notified())
+            .await
+            .unwrap();
+    }
+
+    pub(crate) fn release(&self) {
+        self.release.notify_one();
+    }
+}
+
 /// Injects faults into the next manifest delta write of a mock object store.
 #[derive(Clone, Default)]
 pub struct DeltaFaults {
@@ -260,6 +291,8 @@ pub struct DeltaFaults {
     lose_response: Arc<AtomicBool>,
     /// Whether the next delta write fails without landing.
     fail_write: Arc<AtomicBool>,
+    /// Whether the next deletion of a staging path fails.
+    fail_staging_delete: Arc<AtomicBool>,
 }
 
 impl DeltaFaults {
@@ -272,9 +305,16 @@ impl DeltaFaults {
         self.fail_write.store(true, Ordering::Relaxed);
     }
 
+    /// Fails the next deletion of a staging path, such as the clearing of the staging manifest
+    /// that entering staging begins with.
+    pub(crate) fn fail_next_staging_delete(&self) {
+        self.fail_staging_delete.store(true, Ordering::Relaxed);
+    }
+
     /// Builds the object-store layer controlled by these faults.
     pub fn layer(&self) -> MockLayer {
         let faults = self.clone();
+        let fail_staging_delete = self.fail_staging_delete.clone();
         MockLayerBuilder::default()
             .writer_factory(Arc::new(move |path, _args, inner| {
                 if !is_delta_file(path.rsplit('/').next().unwrap_or_default()) {
@@ -288,8 +328,33 @@ impl DeltaFaults {
                     })
                 }
             }))
+            .deleter_factory(Arc::new(move |inner| {
+                Box::new(StagingDeleter {
+                    inner,
+                    fail: fail_staging_delete.clone(),
+                })
+            }))
             .build()
             .unwrap()
+    }
+}
+
+/// A deleter whose next deletion of a staging path fails once `fail` is set.
+struct StagingDeleter {
+    inner: Deleter,
+    fail: Arc<AtomicBool>,
+}
+
+impl object_store::layers::mock::Delete for StagingDeleter {
+    async fn delete(&mut self, path: &str, args: OpDelete) -> MockResult<()> {
+        if path.contains("staging") && self.fail.swap(false, Ordering::Relaxed) {
+            return Err(MockError::new(ErrorKind::Unexpected, "mock failed delete"));
+        }
+        self.inner.delete(path, args).await
+    }
+
+    async fn close(&mut self) -> MockResult<()> {
+        self.inner.close().await
     }
 }
 
@@ -1524,6 +1589,42 @@ pub fn delete_rows_schema(request: &RegionCreateRequest) -> Vec<api::v1::ColumnS
         .filter(|col| col.semantic_type != SemanticType::Field)
         .map(column_metadata_to_column_schema)
         .collect::<Vec<_>>()
+}
+
+pub(crate) fn sparse_metric_create_request(format: &str) -> RegionCreateRequest {
+    let mut request = CreateRequestBuilder::new()
+        .tag_num(1)
+        .field_num(1)
+        .insert_option("primary_key_encoding", "sparse")
+        .insert_option("sst_format", format)
+        .build();
+    if format == "narthex" {
+        for (key, value) in [
+            ("memtable.type", "bulk"),
+            ("memtable.bulk.merge_threshold", "2"),
+            ("memtable.bulk.encode_row_threshold", "1"),
+            ("memtable.bulk.encode_bytes_threshold", "1"),
+        ] {
+            request.options.insert(key.into(), value.into());
+        }
+    }
+    let reserved =
+        sst_util::sst_region_metadata_with_encoding(store_api::codec::PrimaryKeyEncoding::Sparse);
+    request
+        .column_metadatas
+        .extend(reserved.column_metadatas.into_iter().take(2));
+    request
+        .primary_key
+        .splice(0..0, reserved.primary_key.into_iter().take(2));
+    request
+}
+
+pub(crate) fn build_series_index_request() -> RegionRequest {
+    RegionRequest::BuildIndex(store_api::region_request::RegionBuildIndexRequest {
+        options: Some(api::v1::region::build_index_request::Options::SeriesIndex(
+            Default::default(),
+        )),
+    })
 }
 
 /// Builds an encoded sparse metric put, including an explicitly nullable field.
