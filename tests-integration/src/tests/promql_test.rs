@@ -2664,33 +2664,141 @@ fn assert_one_field_native_layout(batches: &common_recordbatch::RecordBatches, q
     );
 }
 
-/// A TQL flow created with the native route requested matches its sink table, which has the
-/// existing planner's columns and no metric-name column.
-#[tokio::test(flavor = "multi_thread")]
-async fn native_promql_tql_flow_matches_the_sink_table() {
+/// A TQL flow runs on the native route and writes the same sink table and rows as the existing
+/// route.
+///
+/// The flow creates its sink table from the columns its plan publishes, so a plan that published
+/// the native root's columns would create a different table (with a metric-name column) than the
+/// same flow planned by the existing route. Each statement is one shape the native planner places
+/// differently: one selector, and two occurrences of a selector.
+#[test]
+fn native_promql_tql_flow_matches_the_sink_table() {
+    // Flushing a flow overflows the default test stack in a debug build.
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .thread_stack_size(32 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(native_promql_tql_flow_matches_the_sink_table_impl())
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+async fn native_promql_tql_flow_matches_the_sink_table_impl() {
     common_telemetry::init_default_ut_logging();
-    let (standalone, _observer) =
+    let (standalone, observer) =
         native_test_instance(GreptimeDbStandaloneBuilder::new("native_promql_tql_flow")).await;
     let instance = standalone.fe_instance().clone();
     execute_all(
         &instance,
         "CREATE TABLE native_flow_src (`value` DOUBLE, ts TIMESTAMP TIME INDEX, \
              sensor STRING, loc STRING, PRIMARY KEY (sensor, loc)); \
-         CREATE TABLE native_flow_sink (`value` DOUBLE, ts TIMESTAMP TIME INDEX, \
-             sensor STRING, PRIMARY KEY (sensor))",
+         INSERT INTO native_flow_src VALUES \
+             (20, now() - '30s'::interval, 's1', 'A'), \
+             (30, now() - '30s'::interval, 's1', 'B'), \
+             (10, now() - '30s'::interval, 's2', 'A'); \
+         CREATE TABLE native_flow_part (`value` DOUBLE, ts TIMESTAMP TIME INDEX, \
+             sensor STRING, loc STRING, PRIMARY KEY (sensor, loc)) \
+             PARTITION ON COLUMNS (loc) (loc < 'B', loc >= 'B'); \
+         INSERT INTO native_flow_part SELECT * FROM native_flow_src",
         QueryContext::arc(),
     )
     .await;
 
-    // Creating the flow plans its query and matches the plan's columns to the sink table.
-    execute_all(
-        &instance,
-        "CREATE FLOW native_flow SINK TO native_flow_sink EVAL INTERVAL '1m' AS \
-         TQL EVAL (now() - '1m'::interval, now(), '1m') \
-         (sum by (sensor) (native_flow_src) / count by (sensor) (native_flow_src)) AS value",
-        native_query_context(true, 4),
-    )
-    .await;
+    let sql_output = |sql: String| {
+        let instance = instance.clone();
+        async move {
+            let output = instance
+                .do_query(&sql, QueryContext::arc())
+                .await
+                .remove(0)
+                .unwrap();
+            native_output_text(output).await
+        }
+    };
+    // Each flush evaluates at its own `now()`, so the rows are compared without the time index.
+    let rows_without_ts = |table: String| {
+        let instance = instance.clone();
+        async move {
+            let output = instance
+                .do_query(
+                    &format!("SELECT * FROM {table} ORDER BY sensor"),
+                    QueryContext::arc(),
+                )
+                .await
+                .remove(0)
+                .unwrap();
+            let batches = match output.data {
+                OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+                OutputData::RecordBatches(batches) => batches,
+                _ => unreachable!("a query returns record batches"),
+            };
+            let batches = batches
+                .iter()
+                .map(|batch| {
+                    let batch = batch.df_record_batch();
+                    let ts = batch.schema().index_of("ts").unwrap();
+                    let keep = (0..batch.num_columns())
+                        .filter(|index| *index != ts)
+                        .collect::<Vec<_>>();
+                    batch.project(&keep).unwrap()
+                })
+                .collect::<Vec<_>>();
+            datatypes::arrow::util::pretty::pretty_format_batches(&batches)
+                .unwrap()
+                .to_string()
+        }
+    };
+    for (name, query) in [
+        ("avg", "avg by (sensor) (native_flow_src)"),
+        (
+            "ratio",
+            "sum by (sensor) (native_flow_src) / count by (sensor) (native_flow_src)",
+        ),
+        ("partitioned", "avg by (sensor) (native_flow_part)"),
+    ] {
+        let mut sinks = Vec::new();
+        for native in [false, true] {
+            let flow = format!("native_flow_{name}_{native}");
+            execute_all(
+                &instance,
+                &format!(
+                    "CREATE FLOW {flow} SINK TO {flow}_sink EVAL INTERVAL '1m' AS \
+                     TQL EVAL (now() - '1m'::interval, now(), '1m') {query}"
+                ),
+                native_query_context(native, 4),
+            )
+            .await;
+            observer.clear();
+            execute_all(
+                &instance,
+                &format!("ADMIN FLUSH_FLOW('{flow}')"),
+                QueryContext::arc(),
+            )
+            .await;
+            assert_eq!(
+                native,
+                !cte_native_observed_fused(&observer).is_empty(),
+                "{flow} runs the fused plan exactly when the route is requested:\n{}",
+                cte_native_observed_plan_trees(&observer)
+            );
+            sinks.push((
+                sql_output(format!("DESC TABLE {flow}_sink")).await,
+                rows_without_ts(format!("{flow}_sink")).await,
+            ));
+        }
+        let rows = &sinks[0].1;
+        assert!(
+            rows.contains("| s1 ") && rows.contains("| 10.0 "),
+            "{name}: {rows}"
+        );
+        assert_eq!(sinks[0], sinks[1], "{name}");
+    }
 }
 
 /// A `__field__` selection that matches no metric table answers the empty vector.

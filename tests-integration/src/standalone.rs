@@ -385,6 +385,12 @@ impl GreptimeDbStandaloneBuilder {
             .await;
         procedure_manager.start().await.unwrap();
         wal_provider.start().await.unwrap();
+        // `ADMIN FLUSH_FLOW` syncs with this task, as in a started standalone.
+        flownode
+            .flow_engine()
+            .start_flow_consistent_check_task()
+            .await
+            .unwrap();
 
         test_util::prepare_another_catalog_and_schema(&instance).await;
 

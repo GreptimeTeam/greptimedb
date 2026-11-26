@@ -70,6 +70,15 @@ use crate::{DfContextProviderAdapter, QueryEngineContext};
 pub trait LogicalPlanner: Send + Sync {
     async fn plan(&self, stmt: &QueryStatement, query_ctx: QueryContextRef) -> Result<LogicalPlan>;
 
+    /// Plans a statement whose output columns are read by SQL rather than returned to a client, such
+    /// as a flow's sink rows. A PromQL statement may still run on the native route, but publishes the
+    /// existing planner's columns on either route, as a TQL CTE does.
+    async fn plan_relation(
+        &self,
+        stmt: &QueryStatement,
+        query_ctx: QueryContextRef,
+    ) -> Result<LogicalPlan>;
+
     async fn plan_logs_query(
         &self,
         query: LogQuery,
@@ -662,9 +671,9 @@ impl DfLogicalPlanner {
     /// Plans a PromQL statement, offering it to the native fused-series route when the statement
     /// may take it and the query options it is planned with ask for it.
     ///
-    /// `native_route_allowed` states whether the statement may take the route at all: a PromQL
-    /// statement embedded in a CTE may not (see [`Self::tql_to_logical_plan`]), every other one
-    /// may. Everything else the route depends on is read from the query options snapshot the
+    /// `native_route_allowed` states whether the statement may take the route at all: it is off
+    /// only when [`Self::plan_pql_relation`] plans the existing plan whose columns it publishes.
+    /// Everything else the route depends on is read from the query options snapshot the
     /// statement is planned with, where every option is already resolved as request > session
     /// `SET` > engine default.
     #[tracing::instrument(skip_all)]
@@ -847,6 +856,27 @@ impl DfLogicalPlanner {
         Ok(())
     }
 
+    /// Plans a PromQL statement whose output is read by SQL: a hybrid CTE or a flow's sink rows.
+    async fn plan_pql_relation(
+        &self,
+        eval: &EvalStmt,
+        query_ctx: QueryContextRef,
+    ) -> Result<LogicalPlan> {
+        let plan = self.plan_pql(eval, query_ctx.clone(), true).await?;
+        if !contains_native_fused(&plan) {
+            // The route was not taken - it is off for this query, or it declined this shape - so
+            // this is the existing plan, which already publishes the existing columns.
+            return Ok(plan);
+        }
+        // The relation's columns are SQL-visible, and this route names and orders its output its own
+        // way, so its own schema cannot stand in for the existing planner's: plan the statement for
+        // that schema and publish it over the native answer. A statement whose columns that
+        // projection cannot fill faithfully keeps the existing plan instead of changing the schema
+        // the relation exposes.
+        let existing = self.plan_pql(eval, query_ctx, false).await?;
+        Ok(publish_legacy_schema(plan, &existing).unwrap_or(existing))
+    }
+
     /// Convert TQL to LogicalPlan directly
     async fn tql_to_logical_plan(
         &self,
@@ -879,20 +909,7 @@ impl DfLogicalPlanner {
                 let QueryStatement::Promql(eval, _alias) = &stmt else {
                     unreachable!("a TQL eval parses to a PromQL statement");
                 };
-                let plan = self.plan_pql(eval, query_ctx.clone(), true).await?;
-                if !contains_native_fused(&plan) {
-                    // The route was not taken - it is off for this query, or it declined this
-                    // shape - so this is the existing plan, which already publishes what a CTE has
-                    // always published.
-                    return Ok(plan);
-                }
-                // What the CTE publishes is SQL-visible, and this route names and orders its output
-                // its own way, so its own schema cannot stand in for the existing planner's: plan
-                // the statement for that schema and publish it over the native answer. A statement
-                // whose columns that projection cannot fill faithfully keeps the existing plan
-                // instead of changing the schema the CTE exposes.
-                let existing = self.plan_pql(eval, query_ctx, false).await?;
-                Ok(publish_legacy_schema(plan, &existing).unwrap_or(existing))
+                self.plan_pql_relation(eval, query_ctx).await
             }
             Tql::Explain(_) => UnimplementedSnafu {
                 operation: "TQL EXPLAIN in CTEs",
@@ -1131,6 +1148,17 @@ impl LogicalPlanner for DfLogicalPlanner {
             QueryStatement::Sql(stmt) => self.plan_sql(stmt, query_ctx).await,
             // The statement's own plan is what a region receives, so the native route is offered.
             QueryStatement::Promql(stmt, _alias) => self.plan_pql(stmt, query_ctx, true).await,
+        }
+    }
+
+    async fn plan_relation(
+        &self,
+        stmt: &QueryStatement,
+        query_ctx: QueryContextRef,
+    ) -> Result<LogicalPlan> {
+        match stmt {
+            QueryStatement::Sql(stmt) => self.plan_sql(stmt, query_ctx).await,
+            QueryStatement::Promql(stmt, _alias) => self.plan_pql_relation(stmt, query_ctx).await,
         }
     }
 
