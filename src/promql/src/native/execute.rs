@@ -695,8 +695,11 @@ struct InstantRuntime {
     /// The bound selection: how far back it reads, the offset it reads at, and the grid its values
     /// are addressed on.
     selection: BoundInstant,
-    /// The layout the chunk it hands out is addressed on: its input's fields on that grid.
+    /// Its input's fields on that grid, which is how the selected samples are read and gathered.
     schema: Arc<SeriesSchema>,
+    /// The layout the chunk it hands out is addressed on: the node's own fields on that grid. A
+    /// timestamp over a multi-field input answers one field.
+    answer: Arc<SeriesSchema>,
     /// Where the rows the selection picked are gathered, one series at a time.
     output: GridSeriesBuilder,
     /// The chunks of the series being selected, in arrival order; empty while no series is open.
@@ -706,18 +709,24 @@ struct InstantRuntime {
 }
 
 impl InstantRuntime {
-    /// The run-time state of the instant selection `op`, reading the samples of `input`.
-    fn try_new(input: &SeriesSchema, op: &BoundInstant) -> Result<Self> {
+    /// The run-time state of the instant selection `op`, reading the samples of `input` and
+    /// answering the fields of `output`.
+    fn try_new(input: &SeriesSchema, output: &SeriesSchema, op: &BoundInstant) -> Result<Self> {
         // The chunk this node hands out is addressed on the selection's own grid, so the grid the
         // rows are gathered on is the binding's rather than a copy of it.
         let schema = Arc::new(SeriesSchema {
             fields: Arc::clone(&input.fields),
             eval_grid: Some(Arc::clone(&op.output_grid)),
         });
+        let answer = Arc::new(SeriesSchema {
+            fields: Arc::clone(&output.fields),
+            eval_grid: Some(Arc::clone(&op.output_grid)),
+        });
         Ok(Self {
             selection: op.clone(),
             output: GridSeriesBuilder::try_new(Arc::clone(&schema))?,
             schema,
+            answer,
             chunks: Vec::new(),
             held: 0,
         })
@@ -913,7 +922,7 @@ impl InstantRuntime {
             };
             let Some((selection_at, selection_lookback)) = timestamp_window else {
                 let metric = drop_metric_name(&metric)?;
-                return no_row_chunk(&self.schema, metric);
+                return no_row_chunk(&self.answer, metric);
             };
             let Some(index) = select_instant_at(
                 &time,
@@ -927,7 +936,7 @@ impl InstantRuntime {
                 },
             )?
             else {
-                return no_row_chunk(&self.schema, self.output_metric(&metric)?);
+                return no_row_chunk(&self.answer, self.output_metric(&metric)?);
             };
             let grid_len = usize::try_from(spec.len).unwrap_or(usize::MAX);
             if self.selection.value != InstantValue::Sample {
@@ -953,7 +962,7 @@ impl InstantRuntime {
             }
             return match self.output.finish(metric.clone())? {
                 Some(series) => EvaluatedChunk::try_new(series, true),
-                None => no_row_chunk(&self.schema, metric),
+                None => no_row_chunk(&self.answer, metric),
             };
         }
         let (indices, timestamps) = select_instants(
@@ -995,7 +1004,7 @@ impl InstantRuntime {
         // decided at once, so this one chunk closes it.
         match self.output.finish(metric.clone())? {
             Some(series) => EvaluatedChunk::try_new(series, true),
-            None => no_row_chunk(&self.schema, metric),
+            None => no_row_chunk(&self.answer, metric),
         }
     }
 
@@ -1018,10 +1027,10 @@ impl InstantRuntime {
     ) -> Result<EvaluatedChunk> {
         let projected = match self.selection.value {
             InstantValue::Timestamp => {
-                timestamp_of_selection(&self.schema, metric, time, fields, indices, timestamps)?
+                timestamp_of_selection(&self.answer, metric, time, fields, indices, timestamps)?
             }
             InstantValue::InfoTimestamp => {
-                info_sample_times(&self.schema, metric, time, fields, indices, timestamps)?
+                info_sample_times(&self.answer, metric, time, fields, indices, timestamps)?
             }
             InstantValue::Sample => {
                 return Err(DataFusionError::Internal(
@@ -1031,7 +1040,7 @@ impl InstantRuntime {
         };
         match projected {
             Some(series) => EvaluatedChunk::try_new(series, true),
-            None => no_row_chunk(&self.schema, self.output_metric(metric)?),
+            None => no_row_chunk(&self.answer, self.output_metric(metric)?),
         }
     }
 }
@@ -2970,9 +2979,14 @@ impl RuntimeNode {
                         "instant selection consumes non-sample input".to_string(),
                     )
                 })?;
+                let output_schema = node.output.samples().cloned().ok_or_else(|| {
+                    DataFusionError::Execution(
+                        "instant selection does not produce samples".to_string(),
+                    )
+                })?;
                 RuntimeOp::Instant {
                     input: Box::new(child),
-                    instant: InstantRuntime::try_new(&input_schema, op)?,
+                    instant: InstantRuntime::try_new(&input_schema, &output_schema, op)?,
                     state: {
                         NodeState::new(
                             format!("native.instant at {location}"),

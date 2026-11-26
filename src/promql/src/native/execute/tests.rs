@@ -7216,7 +7216,7 @@ fn instant_candidate_span_covers_native_selection_at_boundaries() {
             value: InstantValue::Sample,
             output_grid: Arc::clone(&out_grid),
         };
-        let mut runtime = InstantRuntime::try_new(&schema, &selection).unwrap();
+        let mut runtime = InstantRuntime::try_new(&schema, &schema, &selection).unwrap();
         let values: Vec<_> = case
             .times
             .iter()

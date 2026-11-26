@@ -13427,6 +13427,53 @@ async fn native_promql_declines_a_cast_over_an_integer_fold() {
     );
 }
 
+/// `timestamp()` over a multi-field table answers natively with the existing plan's one value
+/// column: a row is one sample, so the time is reported where any field holds a value.
+///
+/// A row whose fields are all `NULL` holds no sample and reports nothing, which is what keeps
+/// the `none` series out of every answer below.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_answers_timestamp_over_a_multi_field_table() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_timestamp_multi",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE timestamp_null (ts TIMESTAMP(3) TIME INDEX, host STRING PRIMARY KEY, a DOUBLE, b DOUBLE); \
+         INSERT INTO timestamp_null VALUES \
+         (0, 'none', NULL, NULL), (0, 'only_a', 1.0, NULL), (0, 'only_b', NULL, 2.0), \
+         (30000, 'only_a', 3.0, 4.0);",
+        QueryContext::arc(),
+    )
+    .await;
+
+    for query in [
+        "timestamp(timestamp_null)",
+        "timestamp(-timestamp_null)",
+        "timestamp(abs(timestamp_null))",
+        "timestamp(timestamp_null offset 30s)",
+    ] {
+        let sql = format!("TQL EVAL (0, 60, '30s') {query}");
+        observer.clear();
+        let native = native_answer(native_tql_output(&instance, &sql, true).await).await;
+        assert_eq!(
+            Some("FusedSeriesExec".to_string()),
+            observer.answering_node(),
+            "`{query}` must answer from the fused node, not the existing plan"
+        );
+        assert_eq!(
+            vec![DataType::Float64],
+            native.value_types,
+            "`{query}`: one value column, as the existing plan reports"
+        );
+        let legacy = native_answer(native_tql_output(&instance, &sql, false).await).await;
+        assert_eq!(native, legacy, "`{query}`");
+    }
+}
+
 /// A store configured for the columnar series format publishes samples for sparse metric regions
 /// only, and a plain table on such a store reads its rows from the ordinary scan - the reader the
 /// existing plan uses for the very same rows. So the raw series path serves the frame from there

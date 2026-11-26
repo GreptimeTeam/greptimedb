@@ -226,6 +226,9 @@ pub fn select_instants(
 /// the evaluation grid the timestamps lie on and one field per field of `fields`. A field without a
 /// sample in the selected row has no result there.
 ///
+/// A `schema` of one field over several `fields` reads a row as one sample: the result holds the
+/// row's time where any field has a sample, as the existing planner reports a multi-field table.
+///
 /// `timestamp(x @ t)` selects at `t` for every point, so its selection repeats one row. This
 /// kernel reports the sample the caller selected and does not decide the selector's time
 /// modifiers: the native Instant caller selects the sample under the intersection of the ordinary
@@ -282,7 +285,8 @@ pub fn info_sample_times(
 
 /// `timestamp(v)` over an evaluated `v`, such as `timestamp(abs(x))`: the evaluation time in
 /// seconds at each point a field of `series` holds a value. The metric name, `__type__` and
-/// `__unit__` are dropped.
+/// `__unit__` are dropped. A `schema` of one field over a multi-field `series` holds the time where
+/// any field holds a value.
 pub fn timestamp_of_evaluated(
     schema: &Arc<SeriesSchema>,
     series: &Series,
@@ -291,7 +295,7 @@ pub fn timestamp_of_evaluated(
         DataFusionError::Execution("timestamp requires an evaluation grid".into())
     })?;
     if series.time.grid().map(|grid| grid.spec()) != Some(grid.spec())
-        || series.fields.len() != schema.fields.len()
+        || !answers_fields(schema, series.fields.len())
     {
         return Err(DataFusionError::Execution(
             "timestamp input does not match its schema".into(),
@@ -310,9 +314,26 @@ pub fn timestamp_of_evaluated(
                 .expect("the axis and the fields are aligned");
             row.push((!matches!(sample, SampleRef::Missing)).then_some(seconds));
         }
-        builder.push(point, &row)?;
+        builder.push(point, collapsed(schema, &mut row))?;
     }
     builder.finish(drop_metric_name(&series.metric)?)
+}
+
+/// Whether `schema` answers an input of `fields` fields: one value per field, or one value for a
+/// multi-field row.
+fn answers_fields(schema: &SeriesSchema, fields: usize) -> bool {
+    schema.fields.len() == fields || (fields > 1 && schema.fields.len() == 1)
+}
+
+/// `row` as `schema` holds it. A one-field schema over a wider row takes the value any field holds:
+/// every field of a row reports the same time.
+fn collapsed<'a>(schema: &SeriesSchema, row: &'a mut Vec<Option<f64>>) -> &'a [Option<f64>] {
+    if schema.fields.len() == 1 && row.len() > 1 {
+        let value = row.iter().flatten().next().copied();
+        row.truncate(1);
+        row[0] = value;
+    }
+    row
 }
 
 /// One series over an instant selection, each field holding `value(sample, original time)` where
@@ -336,7 +357,7 @@ fn project_selection(
         DataFusionError::Execution("an instant selection requires an evaluation grid".into())
     })?;
     if indices.len() != evaluation_timestamps.len()
-        || fields.len() != schema.fields.len()
+        || !answers_fields(schema, fields.len())
         || fields.iter().any(|field| field.len() != time.len())
     {
         return Err(DataFusionError::Execution(
@@ -387,7 +408,7 @@ fn project_selection(
             }
         }
         last = Some((position, index));
-        builder.push(position as usize, &row)?;
+        builder.push(position as usize, collapsed(schema, &mut row))?;
     }
     builder.finish(metric)
 }
