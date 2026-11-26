@@ -187,7 +187,14 @@ async fn series_keys(
         &layer.build_region_dir(source.region_id()),
     )?;
     let mut reader = ColumnarReader::open(layer.object_store().clone(), handle).await?;
-    reader.adapt_tags(metadata)?;
+    // Schema validation runs on the input artifact. Surface incompatibility as
+    // unusable index metadata so the next maintenance pass can try another group.
+    reader.adapt_tags(metadata).map_err(|error| {
+        invalid(format!(
+            "incompatible tags in series index {}: {error}",
+            source.file_id()
+        ))
+    })?;
     let schema = reader.schema();
     let mut tags = schema
         .fields()

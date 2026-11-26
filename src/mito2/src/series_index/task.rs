@@ -962,8 +962,13 @@ mod tests {
         engine.stop().await.unwrap();
     }
 
+    #[rstest::rstest]
+    #[case::missing_part(false)]
+    #[case::incompatible_schema(true)]
     #[tokio::test]
-    async fn test_unreadable_merge_does_not_starve_another_window() {
+    async fn test_unreadable_merge_does_not_starve_another_window(
+        #[case] incompatible_schema: bool,
+    ) {
         let mut env = TestEnv::new().await;
         let engine = env
             .create_engine(MitoConfig {
@@ -1020,20 +1025,41 @@ mod tests {
             })
             .unwrap();
         let broken_window = cheapest.meta_ref().series_window().unwrap().start;
+        let suffix = if incompatible_schema {
+            "manifest.json"
+        } else {
+            ".series"
+        };
         let path = cheapest
             .meta_ref()
             .narthex_objects(&region.access_layer.build_region_dir(id))
             .unwrap()
             .into_iter()
-            .find(|o| o.path.ends_with(".series"))
+            .find(|o| o.path.ends_with(suffix))
             .unwrap()
             .path;
         let store = region.access_layer.object_store();
         let saved = store.read(&path).await.unwrap().to_bytes();
-        store.delete(&path).await.unwrap();
+        if incompatible_schema {
+            let mut manifest: crate::series_index::columnar::Manifest =
+                serde_json::from_slice(&saved).unwrap();
+            manifest.tags[0].column_id = 9;
+            assert!(metadata.column_by_id(9).is_none());
+            let incompatible = serde_json::to_vec(&manifest).unwrap();
+            assert_eq!(saved.len(), incompatible.len());
+            store.write(&path, incompatible).await.unwrap();
+        } else {
+            store.delete(&path).await.unwrap();
+        }
         drop(version);
         flush_windows(3).await;
-        assert!(reconcile().await.is_err());
+        let error = reconcile().await.unwrap_err();
+        if incompatible_schema {
+            assert!(
+                format!("{error:?}").contains("series tag absent from scan schema"),
+                "{error:?}"
+            );
+        }
         assert_eq!(region.version().ssts.series_indexes().len(), 8);
         reconcile().await.unwrap();
         let version = region.version();

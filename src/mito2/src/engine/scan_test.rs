@@ -660,6 +660,7 @@ async fn test_narthex_merge_existing_series_indexes() -> WhateverResult<()> {
         .find(|f| f.meta_ref().series_window().unwrap().start == 0)
         .unwrap();
     let open = |file: &FileHandle| SeriesIndexFileHandle::from_narthex(file.clone(), &dir);
+    let retired_id = old.file_id();
     let old_path = old.meta_ref().narthex_objects(&dir).unwrap()[0]
         .path
         .clone();
@@ -759,6 +760,41 @@ async fn test_narthex_merge_existing_series_indexes() -> WhateverResult<()> {
     assert_eq!(
         manifest.series_indexes[&merged.meta_ref().file_id].series_window(),
         Some(window)
+    );
+    assert_eq!(scan().await?, discovery);
+    let error = engine
+        .edit_region(
+            id,
+            RegionEdit {
+                series_indexes_to_remove: vec![neighbor.file_id(), retired_id],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.status_code(), StatusCode::RegionBusy);
+    let region = engine.get_region(id).unwrap();
+    let current = region.manifest_ctx.manifest().await;
+    assert_eq!(current.series_indexes, manifest.series_indexes);
+    let replacement = current
+        .series_indexes
+        .values()
+        .find(|f| f.series_window() == Some(window))
+        .unwrap();
+    engine
+        .edit_region(
+            id,
+            RegionEdit {
+                series_indexes_to_remove: vec![replacement.file_id()],
+                ..Default::default()
+            },
+        )
+        .await?;
+    let current = region.manifest_ctx.manifest().await;
+    assert_eq!(current.series_indexes.len(), 1);
+    assert_eq!(
+        current.series_indexes[&neighbor.file_id].series_window(),
+        neighbor.series_window()
     );
     assert_eq!(scan().await?, discovery);
     engine.stop().await?;
