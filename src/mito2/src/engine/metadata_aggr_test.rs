@@ -525,9 +525,23 @@ async fn test_metadata_aggr_statistics_follow_row_visibility() {
         assert_eq!(plan.add_dyn_filters_to_predicate(vec![filter]), vec![true]);
         assert_eq!(row_count(&plan), Precision::Absent);
 
+        let fence = engine
+            .get_region(region_id)
+            .unwrap()
+            .version()
+            .flushed_sequence;
+        test_util::put_rows(
+            &engine,
+            region_id,
+            api::v1::Rows {
+                schema: schema.clone(),
+                rows: test_util::build_rows_for_key("a", 3, 4, 0),
+            },
+        )
+        .await;
         for request in [
             ScanRequest {
-                memtable_max_sequence: Some(1),
+                memtable_max_sequence: Some(fence),
                 ..request.clone()
             },
             ScanRequest {
