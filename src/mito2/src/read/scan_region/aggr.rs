@@ -32,6 +32,7 @@ use mito_codec::row_converter::{PrimaryKeyCodec, build_primary_key_codec};
 use parquet::file::metadata::ParquetMetaData;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
+use store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME;
 use store_api::storage::ScanRequest;
 
 use crate::read::scan_region::aggr::overlap::{Extent, find_overlaps};
@@ -332,10 +333,12 @@ impl AggrFilters {
     }
 }
 
-/// The leftmost primary key column. Sparse keys are not supported yet.
+/// The column `PrimaryKeyCodec::decode_leftmost` decodes.
 fn leftmost_primary_key(metadata: &RegionMetadata) -> Option<&ColumnMetadata> {
     match metadata.primary_key_encoding {
-        PrimaryKeyEncoding::Sparse => None,
+        // Sparse keys always start with the metric engine table id, so the
+        // table-id filter of a logical region scan can be absorbed.
+        PrimaryKeyEncoding::Sparse => metadata.column_by_name(DATA_SCHEMA_TABLE_ID_COLUMN_NAME),
         PrimaryKeyEncoding::Dense => metadata.primary_key_columns().next(),
     }
 }
