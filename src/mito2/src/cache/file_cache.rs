@@ -497,8 +497,18 @@ impl FileCache {
         let file_path = self.inner.cache_file_path(key);
         // In most cases, it will use blocking read,
         // because FileCache is normally based on local file system, which supports blocking read.
-        let bytes_result =
-            fetch_byte_ranges(&file_path, self.inner.local_store.clone(), ranges).await;
+        // The samples reader coalesces and reserves its own I/O windows.
+        let bytes_result = if matches!(key.file_type, FileType::Samples(_)) {
+            crate::sst::parquet::helper::fetch_byte_ranges_with_gap(
+                &file_path,
+                self.inner.local_store.clone(),
+                ranges,
+                0,
+            )
+            .await
+        } else {
+            fetch_byte_ranges(&file_path, self.inner.local_store.clone(), ranges).await
+        };
         match bytes_result {
             Ok(bytes) => {
                 CACHE_HIT

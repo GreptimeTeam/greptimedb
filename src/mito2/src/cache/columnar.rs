@@ -114,11 +114,15 @@ impl ObjectReader {
                 }
                 (disk, key)
             });
+        let gap = match kind {
+            super::file_cache::FileType::Series(_) => crate::sst::parquet::helper::MERGE_GAP,
+            _ => 0,
+        };
         let remote = store
             .reader_with(path)
             .concurrent(8)
             .chunk(256 * 1024)
-            .gap(0)
+            .gap(gap)
             .await
             .context(crate::error::OpenDalSnafu)?;
         Ok(Self { remote, local })
