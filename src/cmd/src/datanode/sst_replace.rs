@@ -25,8 +25,6 @@ use mito2::sst::location::region_dir_from_table_dir;
 use mito2::sst::parquet::max_row_group_decoded_size;
 use mito2::sst::parquet::metadata::{extract_primary_key_range, extract_time_range};
 use object_store::{Buffer, ObjectStore};
-use parquet::file::FOOTER_SIZE;
-use parquet::file::metadata::{FooterTail, ParquetMetaDataReader};
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::record::RowAccessor;
 use parquet::record::reader::RowIter;
@@ -171,19 +169,29 @@ impl SstReplaceCommand {
             }
             .build()
         })?;
-        let replacement_bytes = load_replacement_bytes(&object_store, replacement).await?;
+        let replacement_bytes = load_replacement_bytes(&object_store, replacement)
+            .await?
+            .to_bytes();
         let new_file_size = replacement_bytes.len() as u64;
-        let parquet_meta = decode_parquet_metadata(&replacement_bytes).map_err(|e| {
-            error::IllegalConfigSnafu {
-                msg: format!("read replacement parquet metadata failed: {e}"),
-            }
-            .build()
-        })?;
-        let new_num_rows = parquet_meta.file_metadata().num_rows() as u64;
+        let replacement_reader =
+            SerializedFileReader::new(replacement_bytes.clone()).map_err(|e| {
+                error::IllegalConfigSnafu {
+                    msg: format!("read replacement parquet metadata failed: {e}"),
+                }
+                .build()
+            })?;
+        let parquet_meta = replacement_reader.metadata();
+        let new_num_rows =
+            u64::try_from(parquet_meta.file_metadata().num_rows()).map_err(|_| {
+                error::IllegalConfigSnafu {
+                    msg: "replacement has a negative row count".to_string(),
+                }
+                .build()
+            })?;
         let new_num_row_groups = parquet_meta.num_row_groups() as u64;
         validate_replacement(&old_file, new_num_rows, new_num_row_groups)?;
 
-        let source = extract_region_metadata("replacement SST", &parquet_meta)?;
+        let source = extract_region_metadata("replacement SST", parquet_meta)?;
         let time_index = source.time_index_column();
         let manifest = manifest_manager.manifest();
         if source.region_id != old_file.region_id
@@ -194,14 +202,15 @@ impl SstReplaceCommand {
             }
             .fail();
         }
-        let time_range = extract_time_range(&parquet_meta, time_index).ok_or_else(|| {
+        let time_range = extract_time_range(parquet_meta, time_index).ok_or_else(|| {
             error::IllegalConfigSnafu {
                 msg: "replacement has no exact time-index bounds".to_string(),
             }
             .build()
         })?;
-        let replacement_bytes = Buffer::from(replacement_bytes);
-        if old_file.sequence.is_some() || old_file.preserve_row_sequence {
+        if (old_file.sequence.is_some() || old_file.preserve_row_sequence)
+            && self.replacement_object.as_deref() != Some(target_path.as_str())
+        {
             // The edit retains the original sequence fence and per-row trust.
             let original = object_store.read(&target_path).await.map_err(|e| {
                 error::IllegalConfigSnafu {
@@ -209,7 +218,7 @@ impl SstReplaceCommand {
                 }
                 .build()
             })?;
-            validate_sequences(original, replacement_bytes.clone()).map_err(|e| {
+            validate_sequences(original, &replacement_reader).map_err(|e| {
                 error::IllegalConfigSnafu {
                     msg: format!("validate replacement sequences: {e}"),
                 }
@@ -217,7 +226,7 @@ impl SstReplaceCommand {
             })?;
         }
         let (primary_key_min, primary_key_max) =
-            extract_primary_key_range(&parquet_meta, &source).unzip();
+            extract_primary_key_range(parquet_meta, &source).unzip();
         // A new identity isolates data, index and footer caches, including on restart.
         // A replacement has no index sidecar, series count or proven partition scope.
         let new_file = FileMeta {
@@ -232,8 +241,8 @@ impl SstReplaceCommand {
             file_size: new_file_size,
             num_rows: new_num_rows,
             num_row_groups: new_num_row_groups,
-            max_row_group_uncompressed_size: max_row_group_uncompressed_size(&parquet_meta),
-            max_row_group_decoded_size: max_row_group_decoded_size(&parquet_meta),
+            max_row_group_uncompressed_size: max_row_group_uncompressed_size(parquet_meta),
+            max_row_group_decoded_size: max_row_group_decoded_size(parquet_meta),
             ..Default::default()
         };
         let replacement_path = new_file.file_path(&self.table_dir, path_type);
@@ -320,34 +329,30 @@ enum Replacement<'a> {
 async fn load_replacement_bytes(
     object_store: &ObjectStore,
     replacement: Replacement<'_>,
-) -> error::Result<Vec<u8>> {
+) -> error::Result<Buffer> {
     match replacement {
-        Replacement::Local(path) => tokio::fs::read(path).await.map_err(|e| {
+        Replacement::Local(path) => tokio::fs::read(path).await.map(Buffer::from).map_err(|e| {
             error::IllegalConfigSnafu {
                 msg: format!("read replacement file {} failed: {e}", path.display()),
             }
             .build()
         }),
-        Replacement::Object(path) => {
-            object_store
-                .read(path)
-                .await
-                .map(|b| b.to_vec())
-                .map_err(|e| {
-                    error::IllegalConfigSnafu {
-                        msg: format!("read replacement object {} failed: {e}", path),
-                    }
-                    .build()
-                })
-        }
+        Replacement::Object(path) => object_store.read(path).await.map_err(|e| {
+            error::IllegalConfigSnafu {
+                msg: format!("read replacement object {} failed: {e}", path),
+            }
+            .build()
+        }),
     }
 }
 
 // Compare only the sequence column. Physical row-group boundaries and encodings
 // may change in a layout rewrite without changing logical sequences.
-fn validate_sequences(original: Buffer, replacement: Buffer) -> parquet::errors::Result<()> {
-    fn sequences(bytes: Buffer) -> parquet::errors::Result<RowIter<'static>> {
-        let reader = SerializedFileReader::new(bytes.to_bytes())?;
+fn validate_sequences(
+    original: Buffer,
+    replacement: &dyn FileReader,
+) -> parquet::errors::Result<()> {
+    fn sequences(reader: &dyn FileReader) -> parquet::errors::Result<RowIter<'_>> {
         let schema = reader.metadata().file_metadata().schema();
         let column = schema
             .get_fields()
@@ -359,9 +364,10 @@ fn validate_sequences(original: Buffer, replacement: Buffer) -> parquet::errors:
         let projection = Type::group_type_builder(schema.name())
             .with_fields(vec![column.clone()])
             .build()?;
-        RowIter::from_file_into(Box::new(reader)).project(Some(projection))
+        reader.get_row_iter(Some(projection))
     }
-    let mut old = sequences(original)?;
+    let original = SerializedFileReader::new(original.to_bytes())?;
+    let mut old = sequences(&original)?;
     let mut new = sequences(replacement)?;
     loop {
         match (old.next().transpose()?, new.next().transpose()?) {
@@ -402,26 +408,6 @@ fn validate_replacement(
     Ok(())
 }
 
-fn decode_parquet_metadata(
-    data: &[u8],
-) -> Result<parquet::file::metadata::ParquetMetaData, Box<dyn std::error::Error + Send + Sync>> {
-    if data.len() < FOOTER_SIZE {
-        return Err("file too small".into());
-    }
-    let footer_start = data.len() - FOOTER_SIZE;
-    let mut footer = [0; FOOTER_SIZE];
-    footer.copy_from_slice(&data[footer_start..]);
-    let footer = FooterTail::try_new(&footer)?;
-    let metadata_len = footer.metadata_length();
-    if footer_start < metadata_len {
-        return Err("invalid footer/metadata length".into());
-    }
-    let metadata_start = footer_start - metadata_len;
-    Ok(ParquetMetaDataReader::decode_metadata(
-        &data[metadata_start..footer_start],
-    )?)
-}
-
 fn parse_optional_path_type(value: &str) -> error::Result<Option<PathType>> {
     match value.to_lowercase().as_str() {
         "auto" => Ok(None),
@@ -447,7 +433,16 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_replace_refreshes_bounds_and_cache_identity() {
+    async fn test_replace_refreshes_pruning_bounds() {
+        check_replacement(true).await;
+    }
+
+    #[tokio::test]
+    async fn test_replace_cached_delete_with_put_at_same_key_and_time() {
+        check_replacement(false).await;
+    }
+
+    async fn check_replacement(move_row: bool) {
         use datafusion::prelude::{col, lit};
         use datafusion_common::ScalarValue;
         use futures::TryStreamExt;
@@ -469,9 +464,13 @@ mod tests {
             ..Default::default()
         };
         // Two independent regions have the same schema and sequence. The target
-        // has a cached Delete and the replacement has one Put at a new key/time.
+        // has a cached Delete and the replacement has one Put.
         let mut paths = Vec::new();
-        for (env, key, second) in [(&mut target, "a", 1), (&mut donor, "b", 2)] {
+        let (new_key, new_second) = if move_row { ("b", 2) } else { ("a", 1) };
+        for (env, key, second, delete) in [
+            (&mut target, "a", 1, true),
+            (&mut donor, new_key, new_second, false),
+        ] {
             let engine = env.create_engine(config.clone()).await;
             engine
                 .handle_request(region_id, RegionRequest::Create(create.clone()))
@@ -481,7 +480,7 @@ mod tests {
                 schema: schema.clone(),
                 rows: test_util::build_rows_for_key(key, second, second + 1, 0),
             };
-            if key == "a" {
+            if delete {
                 test_util::delete_rows(&engine, region_id, rows).await;
             } else {
                 test_util::put_rows(&engine, region_id, rows).await;
@@ -540,14 +539,19 @@ mod tests {
             )
             .await
             .unwrap();
-        let cutoff = lit(ScalarValue::TimestampMillisecond(Some(1500), None));
-        for (filter, expected) in [
-            (col("ts").gt_eq(cutoff), 1),
-            (col("tag_0").eq(lit("a")), 0),
-            (col("tag_0").eq(lit("b")), 1),
-        ] {
+        let queries = if move_row {
+            let cutoff = lit(ScalarValue::TimestampMillisecond(Some(1500), None));
+            vec![
+                (vec![col("ts").gt_eq(cutoff)], 1),
+                (vec![col("tag_0").eq(lit("a"))], 0),
+                (vec![col("tag_0").eq(lit("b"))], 1),
+            ]
+        } else {
+            vec![(vec![], 1)]
+        };
+        for (filters, expected) in queries {
             let request = ScanRequest {
-                filters: vec![filter],
+                filters,
                 ..Default::default()
             };
             let scanned = engine
