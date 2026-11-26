@@ -160,7 +160,7 @@ Benefits:
 | Distinct users (`approx_distinct`) | 24 hours | 105.2 | 108.2 | 84.1 | 12.3 | 3.7 |
 | | 7 days | 675.5 | 682.3 | 523.6 | 17.6 | 11.3 |
 
-  The cache held between 0.4 MB and 19 MB of states per query. Cached and uncached results were identical except for `approx_percentile_cont`, whose result depends on the order in which states are merged: cached values differed from uncached ones by up to 4.3%, as much as two uncached runs differed.
+  The cache held between 0.4 MB and 19 MB of states per cached query. Cached and uncached results were identical except for `approx_percentile_cont`, whose result depends on the order in which states are merged: cached values differed from uncached ones by up to 4.3%, as much as two uncached runs differed.
 
   The same queries over 24 hours ran on a cluster of two datanodes, with 96 million rows in four regions on MinIO behind 10 ms of added latency. The datanodes restarted with empty local caches before each first run.
 
@@ -203,7 +203,7 @@ Drawbacks:
 2. **Plan identity.** The prototype identifies the plan by the debug form of its expressions plus the session settings. This relies on the debug form of every expression covering everything that affects its result. A stable serialization of physical expressions would remove that reliance.
 3. **Cost of a full hit.** A 30-day window with hourly slices still takes about 18 ms when every slice hits. Where that time goes has not been measured.
 4. **Sequence fence.** Bounding the memtable reads of rewritten scans by a sequence would make each query read exactly one version, at the cost of behaving differently from uncached scans.
-5. **Leaving experimental.** The cache stays off by default until there is evidence from real dashboards: the hit rate by query shape, the reasons queries are not rewritten, the bytes held by the cache, and the first-run overhead on multiple datanodes with object storage. Distributed mode has so far been tested for correctness only, with a table of two regions.
+5. **Leaving experimental.** The cache stays off by default until there is evidence from real dashboards: the hit rate by query shape, the reasons queries are not rewritten, the bytes held by the cache, and the first-run overhead on larger clusters with object storage. Distributed mode has so far been measured on two datanodes with a local MinIO only.
 
 # Future Work
 
