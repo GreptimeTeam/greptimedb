@@ -110,7 +110,13 @@ pub(crate) fn handle_multiple_results<'a>(results: &'a [Result<()>]) -> HandleMu
 /// A one-to-many split is exempt: every target receives only that source's files and no target
 /// combines copies, so the check is skipped unless two or more sources feed the same target.
 pub(crate) async fn validate_merge_sources(ctx: &Context) -> Result<()> {
-    if ctx.persistent_ctx.sources.len() < 2 {
+    // Only a target fed by two or more distinct sources can publish one object twice, so only the
+    // sources that feed such a target are checked. The remap-time guard exempts exactly the other
+    // shapes through the same predicate, so a repartition this check lets through cannot be
+    // refused after its routes are published.
+    let checked_sources =
+        store_api::region_engine::sources_sharing_a_target(&ctx.persistent_ctx.region_mapping);
+    if checked_sources.is_empty() {
         return Ok(());
     }
     let Some(prepare_result) = ctx.persistent_ctx.group_prepare_result.as_ref() else {
@@ -125,26 +131,16 @@ pub(crate) async fn validate_merge_sources(ctx: &Context) -> Result<()> {
             operation: "Validate merge sources",
         })?;
 
-    // A missing route would silently leave a source unchecked, so refuse to guess.
-    if prepare_result.source_routes.len() != ctx.persistent_ctx.sources.len() {
-        return error::UnexpectedSnafu {
-            violated: format!(
-                "Cannot validate the merge sources: {} source regions but {} source routes",
-                ctx.persistent_ctx.sources.len(),
-                prepare_result.source_routes.len()
-            ),
-        }
-        .fail();
-    }
-
-    let mut requests = Vec::with_capacity(ctx.persistent_ctx.sources.len());
-    for (source, route) in ctx
-        .persistent_ctx
-        .sources
-        .iter()
-        .zip(prepare_result.source_routes.iter())
-    {
-        let region_id = source.region_id();
+    let mut requests = Vec::with_capacity(checked_sources.len());
+    for &region_id in &checked_sources {
+        // A source without a route would silently go unchecked, so refuse to guess.
+        let route = prepare_result
+            .source_routes
+            .iter()
+            .find(|route| route.region.id == region_id)
+            .context(error::UnexpectedSnafu {
+                violated: format!("No source route for region: {region_id}"),
+            })?;
         let peer = route.leader_peer.clone().context(error::UnexpectedSnafu {
             violated: format!("Leader peer is not set for source region: {region_id}"),
         })?;
@@ -165,13 +161,7 @@ pub(crate) async fn validate_merge_sources(ctx: &Context) -> Result<()> {
     let results = futures::future::join_all(pending).await;
 
     let mut offenders = Vec::new();
-    for (region_id, result) in ctx
-        .persistent_ctx
-        .sources
-        .iter()
-        .map(|source| source.region_id())
-        .zip(results)
-    {
+    for (region_id, result) in checked_sources.into_iter().zip(results) {
         match result {
             Ok(()) => {}
             // A retryable failure - a mailbox timeout, a channel that closed, a region that is
@@ -220,17 +210,20 @@ fn build_validate_only_instruction(
             ))
         })
         .collect::<Result<HashMap<RegionId, String>>>()?;
+    // The mapping is the one the remap will use, so the datanode is asked about the exact shape
+    // it would be asked to publish; only `validate_only` keeps it from writing.
+    let targets = ctx
+        .persistent_ctx
+        .region_mapping
+        .get(&region_id)
+        .cloned()
+        .context(error::UnexpectedSnafu {
+            violated: format!("No target regions in the mapping for source region: {region_id}"),
+        })?;
     Ok(common_meta::instruction::RemapManifest {
         region_id,
         input_regions: vec![region_id],
-        region_mapping: HashMap::from([(
-            region_id,
-            ctx.persistent_ctx
-                .targets
-                .iter()
-                .map(|target| target.region_id)
-                .collect(),
-        )]),
+        region_mapping: HashMap::from([(region_id, targets)]),
         new_partition_exprs,
         validate_only: true,
     })
@@ -346,6 +339,14 @@ mod tests {
     const TABLE_ID: u32 = 1024;
 
     /// A merge of two source regions, each a leader on its own datanode, into one target.
+    /// The `region_mapping` production builds from the plan's `transition_map`
+    /// (`dispatch::build_region_mapping`): for each source, the targets whose domains it overlaps.
+    fn mapping(
+        pairs: &[(RegionId, Vec<RegionId>)],
+    ) -> std::collections::HashMap<RegionId, Vec<RegionId>> {
+        pairs.iter().cloned().collect()
+    }
+
     fn merge_sources() -> (
         Vec<SourceRegionDescriptor>,
         Vec<TargetRegionDescriptor>,
@@ -405,6 +406,10 @@ mod tests {
         let (sources, targets, prepare_result) = merge_sources();
         let mut persistent = new_persistent_context(TABLE_ID, sources, targets.clone());
         persistent.group_prepare_result = Some(prepare_result);
+        persistent.region_mapping = mapping(&[
+            (RegionId::new(TABLE_ID, 1), vec![targets[0].region_id]),
+            (RegionId::new(TABLE_ID, 2), vec![targets[0].region_id]),
+        ]);
         let ctx = env.create_context(persistent);
 
         let instruction =
@@ -426,6 +431,10 @@ mod tests {
         // accepts writes - has to be untouched, and the error has to name the offending region.
         let mut env = TestingEnv::new();
         let (sources, targets, prepare_result) = merge_sources();
+        let mapping = mapping(&[
+            (RegionId::new(TABLE_ID, 1), vec![RegionId::new(TABLE_ID, 3)]),
+            (RegionId::new(TABLE_ID, 2), vec![RegionId::new(TABLE_ID, 3)]),
+        ]);
         let old_routes = prepare_result.source_routes.clone();
         env.create_physical_table_metadata(TABLE_ID, old_routes.clone())
             .await;
@@ -441,6 +450,7 @@ mod tests {
 
         let mut persistent = new_persistent_context(TABLE_ID, sources, targets);
         persistent.group_prepare_result = Some(prepare_result);
+        persistent.region_mapping = mapping;
         let ctx = env.create_context(persistent);
         let mailbox = ctx.mailbox.clone();
 
@@ -510,6 +520,10 @@ mod tests {
 
         let mut persistent = new_persistent_context(TABLE_ID, sources, targets);
         persistent.group_prepare_result = Some(prepare_result);
+        persistent.region_mapping = mapping(&[
+            (RegionId::new(TABLE_ID, 1), vec![RegionId::new(TABLE_ID, 3)]),
+            (RegionId::new(TABLE_ID, 2), vec![RegionId::new(TABLE_ID, 3)]),
+        ]);
         let ctx = env.create_context(persistent);
         let mailbox = ctx.mailbox.clone();
 
@@ -540,31 +554,124 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_validate_merge_sources_skips_a_single_source() {
-        // A split has a single source and hands each child its own part of every file: the
-        // procedure does not ask, so no instruction is sent at all.
+    async fn test_validate_merge_sources_asks_each_source_of_a_shared_target_once() {
+        // A many-to-one group: both sources feed the same target, so both are asked - exactly
+        // once each - and a clean answer lets the group through.
         let mut env = TestingEnv::new();
-        let source = RegionId::new(TABLE_ID, 1);
-        let (_, _, prepare_result) = merge_sources();
-        let mut persistent = new_persistent_context(
-            TABLE_ID,
-            vec![SourceRegionDescriptor::partitioned(
-                source,
-                range_expr("x", 0, 100),
-            )],
-            vec![],
-        );
-        persistent.group_prepare_result = Some(GroupPrepareResult {
-            source_routes: prepare_result.source_routes[..1].to_vec(),
-            ..prepare_result
-        });
-        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        let (sources, targets, prepare_result) = merge_sources();
+        let (left_tx, mut left_rx) = tokio::sync::mpsc::channel(2);
         env.mailbox_ctx
-            .insert_heartbeat_response_receiver(Channel::Datanode(1), tx)
+            .insert_heartbeat_response_receiver(Channel::Datanode(1), left_tx)
             .await;
-        let ctx = env.create_context(persistent);
+        let (right_tx, mut right_rx) = tokio::sync::mpsc::channel(2);
+        env.mailbox_ctx
+            .insert_heartbeat_response_receiver(Channel::Datanode(2), right_tx)
+            .await;
 
-        validate_merge_sources(&ctx).await.unwrap();
-        assert!(rx.try_recv().is_err());
+        let mut persistent = new_persistent_context(TABLE_ID, sources, targets);
+        persistent.group_prepare_result = Some(prepare_result);
+        persistent.region_mapping = mapping(&[
+            (RegionId::new(TABLE_ID, 1), vec![RegionId::new(TABLE_ID, 3)]),
+            (RegionId::new(TABLE_ID, 2), vec![RegionId::new(TABLE_ID, 3)]),
+        ]);
+        let ctx = env.create_context(persistent);
+        let mailbox = ctx.mailbox.clone();
+
+        let datanodes = async {
+            let mut asked = Vec::new();
+            for rx in [&mut left_rx, &mut right_rx] {
+                let msg = rx.recv().await.unwrap().unwrap().mailbox_message.unwrap();
+                let Instruction::RemapManifest(instruction) =
+                    HeartbeatMailbox::json_instruction(&msg).unwrap()
+                else {
+                    panic!("expected a remap manifest instruction");
+                };
+                assert!(instruction.validate_only);
+                asked.push(instruction.region_id);
+                // The instruction carries the shape the remap would use: this source -> the
+                // shared target.
+                assert_eq!(
+                    instruction.region_mapping[&instruction.region_id],
+                    vec![RegionId::new(TABLE_ID, 3)]
+                );
+                let ack = remap_manifest_reply(msg.id, None);
+                mailbox.on_recv(msg.id, Ok(ack)).await.unwrap();
+            }
+            asked
+        };
+
+        let (result, asked) = tokio::join!(validate_merge_sources(&ctx), datanodes);
+        result.unwrap();
+        assert_eq!(
+            asked,
+            vec![RegionId::new(TABLE_ID, 1), RegionId::new(TABLE_ID, 2)],
+            "one request per source of the shared target"
+        );
+        // Nothing further is asked.
+        assert!(left_rx.try_recv().is_err());
+        assert!(right_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_validate_merge_sources_skips_shapes_no_target_combines() {
+        // A split (one source, several targets) and a one-to-one repartition (one source, one
+        // target, region id reused) both hand every target a single source's files: no target
+        // combines two file sets, so the procedure asks nothing. The remap guard exempts the same
+        // shapes through the same predicate, so neither can be refused after publication.
+        for shape in ["split", "one-to-one"] {
+            let mut env = TestingEnv::new();
+            let source = RegionId::new(TABLE_ID, 1);
+            let second = RegionId::new(TABLE_ID, 2);
+            let (_, _, prepare_result) = merge_sources();
+            let (targets, mapping) = if shape == "split" {
+                (
+                    vec![
+                        TargetRegionDescriptor {
+                            region_id: second,
+                            partition_expr: range_expr("x", 0, 50),
+                        },
+                        TargetRegionDescriptor {
+                            region_id: RegionId::new(TABLE_ID, 3),
+                            partition_expr: range_expr("x", 50, 100),
+                        },
+                    ],
+                    mapping(&[(source, vec![second, RegionId::new(TABLE_ID, 3)])]),
+                )
+            } else {
+                (
+                    vec![TargetRegionDescriptor {
+                        region_id: source,
+                        partition_expr: range_expr("x", 0, 100),
+                    }],
+                    mapping(&[(source, vec![source])]),
+                )
+            };
+            let mut persistent = new_persistent_context(
+                TABLE_ID,
+                vec![SourceRegionDescriptor::partitioned(
+                    source,
+                    range_expr("x", 0, 100),
+                )],
+                targets,
+            );
+            persistent.group_prepare_result = Some(GroupPrepareResult {
+                source_routes: prepare_result.source_routes[..1].to_vec(),
+                ..prepare_result
+            });
+            persistent.region_mapping = mapping;
+            let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+            env.mailbox_ctx
+                .insert_heartbeat_response_receiver(Channel::Datanode(1), tx)
+                .await;
+            let ctx = env.create_context(persistent);
+
+            validate_merge_sources(&ctx)
+                .await
+                .unwrap_or_else(|e| panic!("{shape} must not be checked: {e}"));
+            assert!(
+                rx.try_recv().is_err(),
+                "{shape} must not send an instruction"
+            );
+        }
     }
 }

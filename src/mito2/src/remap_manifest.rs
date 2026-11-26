@@ -122,14 +122,21 @@ impl RemapManifest {
         Ok(())
     }
 
-    /// Whether this remap splits one region into several: the shape that is exempt from
-    /// [`Self::ensure_regions_own_their_files`], because no target combines file sets.
+    /// Whether this remap publishes every target from at most one source: the shape that is
+    /// exempt from [`Self::ensure_regions_own_their_files`], because no target combines two
+    /// sources' file sets.
+    ///
+    /// The predicate is stated per target, not per source count, and the pre-publication check of
+    /// the repartition procedure reads it from the same place
+    /// ([`store_api::region_engine::sources_sharing_a_target`]), so the two stages agree on every
+    /// shape. One source feeding several targets (a split), one source feeding one target (a
+    /// one-to-one repartition, which may still hold a file an ancestor created) and several
+    /// sources feeding disjoint targets all hand each target a single source's files: the shared
+    /// object is then filtered by that target's own expression, never recombined with a copy of
+    /// itself. Only a target fed by two or more distinct sources can see both an inherited object
+    /// and a copy materialized from it, so only that shape is checked.
     fn is_split(&self) -> bool {
-        self.region_mapping.len() == 1
-            && self
-                .region_mapping
-                .values()
-                .all(|target_region_ids| target_region_ids.len() > 1)
+        store_api::region_engine::every_target_has_a_single_source(&self.region_mapping)
     }
 
     /// Initializes empty manifests for all new regions.
@@ -791,6 +798,85 @@ mod tests {
     }
 
     #[test]
+    fn test_one_to_one_repartition_is_exempt() {
+        // A one-to-one repartition reuses the region id and may still hold a file an ancestor
+        // created (a split installs the child's expression without rewriting the files it
+        // clones). No target receives files from two sources, so nothing is combined and the
+        // remap publishes the file under the region's own expression: the shape is exempt, which
+        // is what keeps the pre-publication check and this guard from disagreeing.
+        let old_region_id = RegionId::new(1, 1);
+        let own_expr = range_expr("x", 0, 50);
+        let ancestor_expr = range_expr("x", 0, 100);
+
+        let mut old_manifest = create_manifest(old_region_id, 1, Some(own_expr.clone()), 100, 200);
+        let file_id = *old_manifest.files.keys().next().unwrap();
+        old_manifest.files.insert(
+            file_id,
+            create_file_meta(old_region_id, file_id, Some(ancestor_expr)).into(),
+        );
+
+        let mut remapper = RemapManifest::new(
+            HashMap::from([(old_region_id, old_manifest)]),
+            HashMap::from([(old_region_id, own_expr)]),
+            HashMap::from([(old_region_id, vec![old_region_id])]),
+        );
+        let result = remapper.remap_manifests().unwrap();
+        assert_eq!(result.new_manifests[&old_region_id].files.len(), 1);
+        assert!(
+            result.new_manifests[&old_region_id]
+                .files
+                .contains_key(&file_id)
+        );
+    }
+
+    #[test]
+    fn test_target_fed_by_two_sources_is_still_checked() {
+        // The predicate is per target, not per source count: here each source feeds a target of
+        // its own *and* the shared one. The shared target combines both file sets, so the guard
+        // runs and reports the file the two sources would publish twice.
+        let left_region_id = RegionId::new(1, 1);
+        let right_region_id = RegionId::new(1, 2);
+        let shared_region_id = RegionId::new(1, 3);
+        let left_only_region_id = RegionId::new(1, 4);
+
+        let left_expr = range_expr("x", 0, 50);
+        let right_expr = range_expr("x", 50, 100);
+        let shared_expr = range_expr("x", 0, 100);
+
+        let mut left_manifest =
+            create_manifest(left_region_id, 1, Some(left_expr.clone()), 100, 200);
+        let left_file = *left_manifest.files.keys().next().unwrap();
+        left_manifest.files.insert(
+            left_file,
+            create_file_meta(left_region_id, left_file, Some(shared_expr.clone())).into(),
+        );
+        let right_manifest = create_manifest(right_region_id, 1, Some(right_expr), 100, 200);
+
+        let mut remapper = RemapManifest::new(
+            HashMap::from([
+                (left_region_id, left_manifest),
+                (right_region_id, right_manifest),
+            ]),
+            HashMap::from([
+                (shared_region_id, shared_expr),
+                (left_only_region_id, left_expr),
+            ]),
+            HashMap::from([
+                (left_region_id, vec![shared_region_id, left_only_region_id]),
+                (right_region_id, vec![shared_region_id]),
+            ]),
+        );
+        let err = remapper.remap_manifests().unwrap_err();
+        assert!(
+            matches!(&err, Error::ForeignFilePartitionExpr { .. }),
+            "unexpected error: {err:?}"
+        );
+        let message = err.to_string();
+        assert!(message.contains(&left_region_id.to_string()), "{message}");
+        assert!(message.contains(&left_file.to_string()), "{message}");
+    }
+
+    #[test]
     fn test_early_check_needs_no_staging_region() {
         // `handle_remap` runs this predicate when the instruction asks for validation only, i.e.
         // before any route is published and therefore before the region enters staging: it reads
@@ -820,9 +906,10 @@ mod tests {
 
     #[test]
     fn test_early_check_is_not_exempt_for_a_split_source() {
-        // The split exemption belongs to the repartition procedure: a split has a single source,
-        // so the procedure never asks for the early check, while the predicate itself — which
-        // serves the merge sources — reports such a file. Keeping the exemption out of this
+        // The shape exemption belongs to the repartition procedure, which asks only about the
+        // sources of a target that two sources feed: a split maps every target from that single
+        // source, so the procedure never asks, while the per-region predicate itself - the one a
+        // checked source is judged by - reports such a file. Keeping the exemption out of this
         // predicate is what makes the pre-publication check as strict as the remap-time guard.
         let old_region_id = RegionId::new(1, 1);
         let new_region_id_1 = RegionId::new(1, 2);
@@ -1015,7 +1102,9 @@ mod tests {
     fn test_refusal_message_lists_a_bounded_number_of_offenders() {
         // A merge can be refused by many files; the message keeps the per-file detail for the
         // first `MAX_LISTED_OFFENDERS` and only counts the rest, so it cannot grow without bound.
+        // The shape has to be one the guard runs on, i.e. a target fed by two sources.
         let old_region_id = RegionId::new(1, 1);
+        let sibling_region_id = RegionId::new(1, 3);
         let new_region_id = RegionId::new(1, 2);
         let offender_count = MAX_LISTED_OFFENDERS + 5;
 
@@ -1030,15 +1119,25 @@ mod tests {
             );
             file_ids.push(file_id);
         }
+        // The sibling holds only its own file, so every offender comes from the region above.
+        let sibling_manifest = create_manifest(
+            sibling_region_id,
+            1,
+            Some(range_expr("x", 50, 100)),
+            100,
+            200,
+        );
 
         let mut old_manifests = HashMap::new();
         old_manifests.insert(old_region_id, old_manifest);
+        old_manifests.insert(sibling_region_id, sibling_manifest);
 
         let mut new_partition_exprs = HashMap::new();
         new_partition_exprs.insert(new_region_id, range_expr("x", 0, 100));
 
         let mut region_mapping = HashMap::new();
         region_mapping.insert(old_region_id, vec![new_region_id]);
+        region_mapping.insert(sibling_region_id, vec![new_region_id]);
 
         let mut remapper = RemapManifest::new(old_manifests, new_partition_exprs, region_mapping);
         let message = remapper.remap_manifests().unwrap_err().to_string();
