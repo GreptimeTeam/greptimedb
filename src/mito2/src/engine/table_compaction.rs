@@ -53,7 +53,7 @@ pub enum PublicationOutcome {
     /// This attempt installed the replacement, or its nonempty outputs are still fully visible
     /// with all of its inputs absent.
     Applied,
-    /// The captured inputs/schema/options no longer match. Re-snapshot and replan.
+    /// The schema or file set no longer matches this publication. Re-snapshot and replan.
     StaleInputs,
 }
 
@@ -101,8 +101,6 @@ impl MitoEngine {
                 reason: "Publication requires this region's nonempty input snapshot"
             }
         );
-        // The public snapshot keeps JSON options; parse them once here so the
-        // worker compares typed options and reads typed flags without reparsing.
         let options = serde_json::from_value(snapshot.options).context(SerdeJsonSnafu)?;
         let edit = RegionEdit {
             files_to_remove: snapshot.inputs,

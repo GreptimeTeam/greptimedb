@@ -574,22 +574,13 @@ async fn test_invalid_results_preserve_inputs_and_reopen_can_replan() {
         snapshot.inputs,
         engine.table_compaction_snapshot(region_id).unwrap().inputs
     );
-    let mut stale = snapshot;
-    stale.options["append_mode"] = serde_json::json!(true);
-    assert_eq!(
-        PublicationOutcome::StaleInputs,
-        engine
-            .publish_table_compaction(region_id, stale, vec![output.clone()])
-            .await
-            .unwrap()
-    );
-    assert_eq!(version, region.manifest_ctx.manifest_version().await);
     reopen_region(&engine, region_id, "test".into(), true, Default::default()).await;
     // V1 refreshes the snapshot after restart instead of resuming a Prepared task.
     // The public snapshot contract is JSON, so a serde round trip must still publish.
     let fresh = engine.table_compaction_snapshot(region_id).unwrap();
-    let fresh: TableCompactionSnapshot =
+    let mut fresh: TableCompactionSnapshot =
         serde_json::from_value(serde_json::to_value(&fresh).unwrap()).unwrap();
+    fresh.options["append_mode"] = serde_json::json!(true);
     // Writers of older versions leave the decoded size unknown.
     assert!(output.max_row_group_decoded_size > 0);
     let legacy_output = FileMeta {
@@ -912,11 +903,7 @@ async fn test_uncertain_write_recovers_files_before_retry(#[case] persisted: boo
     let mut env = TestEnv::new().await.with_mock_layer(layer);
     let engine = env.create_engine(config()).await;
     let region_id = RegionId::new(1, 1);
-    let (_, output) = seed(&engine, region_id).await;
-    // Open materializes persisted region options. Capture those options so the
-    // two attempts have identical publication preconditions across recovery.
-    reopen_region(&engine, region_id, "test".into(), true, Default::default()).await;
-    let snapshot = engine.table_compaction_snapshot(region_id).unwrap();
+    let (snapshot, output) = seed(&engine, region_id).await;
     let access = engine.get_region(region_id).unwrap().access_layer.clone();
     armed.store(true, Ordering::SeqCst);
     assert!(
@@ -931,7 +918,6 @@ async fn test_uncertain_write_recovers_files_before_retry(#[case] persisted: boo
     assert!(access.object_store().exists(&path).await.unwrap());
     reopen_region(&engine, region_id, "test".into(), true, Default::default()).await;
     let fresh = engine.table_compaction_snapshot(region_id).unwrap();
-    assert_eq!(snapshot.options, fresh.options);
     assert_eq!(!persisted, !fresh.inputs.is_empty());
     let region = engine.get_region(region_id).unwrap();
     let version = region.manifest_ctx.manifest_version().await;

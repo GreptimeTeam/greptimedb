@@ -90,9 +90,7 @@ fn is_replay(
 ) -> Result<bool> {
     let region_id = region.region_id;
     ensure!(
-        context.metadata == manifest.metadata
-            && context.options == region.version_control.current().version.options
-            && !edit.files_to_remove.is_empty(),
+        context.metadata == manifest.metadata && !edit.files_to_remove.is_empty(),
         StaleCompactionExecutionSnafu { region_id }
     );
     let matches =

@@ -1575,6 +1575,7 @@ impl RegionEditRequest {
     }
 }
 
+/// Whether the worker needs to install the edit in the in-memory version.
 #[derive(Debug)]
 pub(crate) enum RegionEditOutcome {
     Written,

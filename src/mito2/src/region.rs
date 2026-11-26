@@ -2139,6 +2139,7 @@ impl ManifestContext {
         result
     }
 
+    /// Checks the leader deadline for a conditionally published manifest.
     pub(crate) fn ensure_commit_deadline(&self, manager: &RegionManifestManager) -> Result<()> {
         ensure!(
             !manager.is_conditional_publication() || !self.is_leader_lease_expired(),
