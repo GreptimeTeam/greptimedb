@@ -29,7 +29,7 @@ use datafusion_physical_expr::PhysicalSortExpr;
 use datafusion_physical_expr::expressions::Column;
 use datatypes::types::json_type::JsonNativeType;
 use snafu::ResultExt;
-use store_api::storage::{ScanRequest, SeriesSample, TimeSeriesDistribution};
+use store_api::storage::ScanRequest;
 
 use crate::error::TablesRecordBatchSnafu;
 use crate::table::{TableRef, TableType};
@@ -63,17 +63,6 @@ impl DfTableProviderAdapter {
 
     pub fn with_json_type_hint(&self, hint: std::collections::HashMap<String, JsonNativeType>) {
         self.scan_req.lock().unwrap().json_type_hint = hint;
-    }
-
-    /// Sets the series-sampling hint of the query to the provider.
-    ///
-    /// Sampling keeps a deterministic fraction of the series, so it is only
-    /// meaningful for a per-series scan: the request asks for that distribution
-    /// as well, which is what the metric engine needs to prune whole series.
-    pub fn with_series_sample(&self, sample: SeriesSample) {
-        let mut request = self.scan_req.lock().unwrap();
-        request.sample = Some(sample);
-        request.distribution = Some(TimeSeriesDistribution::PerSeries);
     }
 
     #[cfg(feature = "testing")]

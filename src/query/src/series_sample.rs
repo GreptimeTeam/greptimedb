@@ -12,11 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! SQL surface of series sampling: `FROM <metric table> SAMPLE SERIES (<fraction>)`.
+//! SQL surface of series sampling: `FROM <table> SAMPLE SERIES (<fraction>)`.
 //!
-//! Sampling keeps a deterministic fraction of the *series* of a metric-engine
-//! table. It is not row-level `TABLESAMPLE`: a kept series returns every one of
-//! its rows, a dropped series returns none.
+//! What the clause keeps depends on the engine of the table it names, see
+//! [`sample_method`]: a fraction of the *series* of a metric-engine table (a kept
+//! series returns every one of its rows, a dropped one returns none), or one
+//! contiguous range of the encoded primary key of a mito-engine table (the rows
+//! outside the range are pruned). It is not row-level `TABLESAMPLE` in either
+//! case.
 //!
 //! # Why the clause is decoded by hand
 //!
@@ -53,22 +56,34 @@
 //!
 //! # Where the fraction goes
 //!
-//! A metric table is read through a region query: the frontend plans the SQL,
-//! ships the region plan to the datanode, and the datanode builds the
-//! [`store_api::storage::ScanRequest`] per region. The only channel that rides
-//! along is the query context (it is part of the region request header), so the
-//! fraction is recorded there as one reserved extension key per table
-//! ([`session::hints::series_sample_extension_key`], value `"<num>/<den>"`) and
-//! read back where the scan request is built. A locally planned scan
-//! (`DfTableProviderAdapter`) gets the same hint on the provider itself.
+//! The fraction belongs to one scan, not to one table: a self-join samples the
+//! same table twice, possibly with different fractions, and a scan the optimizer
+//! derives from a sampled one must not inherit a fraction nobody asked for. It
+//! therefore rides in the plan, as a [`scan::SeriesSampleScan`] node over exactly
+//! the scan the clause was written on, and is lowered to the
+//! [`store_api::storage::ScanRequest`] of the region that runs that scan.
+//!
+//! The node carries the *method* too: [`sample_method`] picks
+//! [`scan::SampleMethod::Series`] for a metric-engine table and
+//! [`scan::SampleMethod::PrimaryKey`] for a mito-engine table, because those are
+//! the keys the region can prune on. The method is chosen while the table
+//! metadata is at hand, so nothing downstream has to guess the engine back from
+//! the plan.
+//!
+//! The node is an ordinary extension node, so it crosses the frontend-to-datanode
+//! region boundary with the rest of the region payload.
 
+pub mod scan;
+
+use std::collections::VecDeque;
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
+use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion::datasource::DefaultTableSource;
+use datafusion::logical_expr::LogicalPlan;
 use datafusion_common::{DataFusionError, TableReference};
 use datafusion_expr::TableSource;
-use session::context::QueryContext;
 use snafu::ResultExt;
 use sqlparser::ast::{
     BinaryOperator, Expr, FunctionArg, FunctionArgExpr, FunctionArguments, ObjectName, Statement,
@@ -79,6 +94,7 @@ use table::TableRef;
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::error::{PlanSqlSnafu, Result};
+use crate::series_sample::scan::{SampleMethod, SeriesSampleScan};
 
 /// The sample method word of `SAMPLE SERIES (<fraction>)`.
 pub const SERIES_METHOD: &str = "SERIES";
@@ -114,60 +130,118 @@ pub fn take_series_samples(statement: &mut Statement) -> Result<Vec<SeriesSample
     Ok(collector.samples)
 }
 
-/// Returns the series fraction recorded for `table_id` in `query_ctx`.
-pub fn series_sample_of(query_ctx: &QueryContext, table_id: u32) -> Option<SeriesSample> {
-    let key = session::hints::series_sample_extension_key(table_id);
-    let (num, den) = session::hints::parse_series_sample_fraction(query_ctx.extension(&key)?)?;
-    Some(SeriesSample { num, den })
-}
-
-/// Records `sample` as the series fraction of `table_id` in `query_ctx`.
+/// Attaches the decoded samples to the scans they name.
 ///
-/// Two different fractions for one table cannot both be honoured, so the second
-/// one is rejected instead of silently overriding the first.
-pub fn set_series_sample(
-    query_ctx: &mut QueryContext,
-    table: &str,
-    table_id: u32,
-    sample: SeriesSample,
-) -> Result<()> {
-    if let Some(existing) = series_sample_of(query_ctx, table_id)
-        && existing != sample
+/// The plan is built from the statement with the clauses already removed, so the
+/// scans are matched here by the name of the table they read. A query may sample
+/// one table more than once (a self-join), so the samples of one table are
+/// consumed in the order the clauses were written, which is the order
+/// DataFusion builds the table factors in.
+///
+/// The [`SampleMethod`] of each entry was chosen while the table metadata was at
+/// hand (see [`sample_method`]), so this function never looks at an engine.
+pub fn sample_scans(
+    plan: LogicalPlan,
+    samples: &[(TableReference, SampleMethod)],
+) -> Result<LogicalPlan> {
+    if samples.is_empty() {
+        return Ok(plan);
+    }
+
+    let mut remaining: Vec<(TableReference, VecDeque<SampleMethod>)> = Vec::new();
+    for (table, sample) in samples {
+        match remaining
+            .iter_mut()
+            .find(|(sampled, _)| sampled.resolved_eq(table))
+        {
+            Some((_, fractions)) => fractions.push_back(*sample),
+            None => remaining.push((table.clone(), VecDeque::from([*sample]))),
+        }
+    }
+
+    let mut rewriter = SampleScanRewriter { remaining };
+    let plan = plan.rewrite(&mut rewriter).context(PlanSqlSnafu)?.data;
+    // A clause that names no scan would sample nothing, which is exactly the
+    // silent no-op the node exists to avoid.
+    if let Some(table) = rewriter
+        .remaining
+        .iter()
+        .find(|(_, fractions)| !fractions.is_empty())
+        .map(|(table, _)| table.to_string())
     {
         return Err(plan_error(format!(
-            "conflicting series samples for table `{table}`: {existing} and {sample}; \
-             sample a table once per query"
+            "SAMPLE SERIES names table `{table}`, but the query does not scan it"
         )));
     }
-    query_ctx.set_extension(
-        session::hints::series_sample_extension_key(table_id),
-        sample.to_string(),
-    );
-    Ok(())
+    Ok(plan)
 }
 
-/// Rejects a table the metric-engine series scan cannot sample.
-///
-/// Series sampling prunes whole series by `tsid`, which only the metric engine
-/// keeps for its series index. Rejecting the other engines here means the user
-/// gets a planning error instead of a full scan that was asked to be sampled.
-pub fn ensure_series_sample_supported(table: &str, engine: &str) -> Result<()> {
-    if engine != common_catalog::consts::METRIC_ENGINE {
-        return Err(plan_error(format!(
-            "SAMPLE SERIES is not supported on table `{table}`: it uses the `{engine}` engine, \
-             but series sampling is only supported on metric-engine tables \
-             (the sample keeps series, not rows, so it needs the metric series index)"
-        )));
+/// Wraps the scan of a sampled table in [`SeriesSampleScan`].
+struct SampleScanRewriter {
+    /// The fractions of each sampled table that no scan has claimed yet.
+    remaining: Vec<(TableReference, VecDeque<SampleMethod>)>,
+}
+
+impl TreeNodeRewriter for SampleScanRewriter {
+    type Node = LogicalPlan;
+
+    fn f_down(&mut self, node: LogicalPlan) -> datafusion_common::Result<Transformed<LogicalPlan>> {
+        let LogicalPlan::TableScan(scan) = node else {
+            return Ok(Transformed::no(node));
+        };
+        let Some(fraction) = self
+            .remaining
+            .iter_mut()
+            .find(|(sampled, _)| sampled.resolved_eq(&scan.table_name))
+            .and_then(|(_, fractions)| fractions.pop_front())
+        else {
+            return Ok(Transformed::no(LogicalPlan::TableScan(scan)));
+        };
+        Ok(Transformed::yes(
+            SeriesSampleScan::new(LogicalPlan::TableScan(scan), fraction).into_logical_plan(),
+        ))
     }
-    Ok(())
+}
+
+/// Rejects a table whose storage cannot honour a sample.
+///
+/// Returns the method that samples `table`, which depends on what the region can
+/// prune: the series index of a metric-engine table (`tsid`), or the
+/// encoded-primary-key order of a mito-engine table. Every other engine keeps no
+/// ordered key a sample could restrict, so sampling it would read every row and
+/// keep a fraction of them - the opposite of the pruning the clause exists for.
+///
+/// Rejecting those engines here means the user gets a planning error instead of a
+/// full scan that was asked to be sampled.
+pub fn sample_method(table: &str, engine: &str, sample: SeriesSample) -> Result<SampleMethod> {
+    let method = match engine {
+        common_catalog::consts::METRIC_ENGINE => SampleMethod::Series {
+            num: sample.num,
+            den: sample.den,
+        },
+        common_catalog::consts::MITO_ENGINE => SampleMethod::PrimaryKey {
+            num: sample.num,
+            den: sample.den,
+        },
+        _ => {
+            return Err(plan_error(format!(
+                "SAMPLE SERIES is not supported on table `{table}`: it uses the `{engine}` \
+                 engine, but the clause samples by an ordered key, which only metric-engine \
+                 tables (pruned by series) and mito-engine tables (pruned by primary-key range) \
+                 keep; `{engine}` has no such key to prune, so the query would read every row"
+            )));
+        }
+    };
+    Ok(method)
 }
 
 /// Returns the table provider of `source`, rejecting relations that cannot be sampled.
 fn adapter_of_source(source: &Arc<dyn TableSource>) -> Result<&DfTableProviderAdapter> {
     let unsupported = || {
         plan_error(
-            "SAMPLE SERIES is not supported on this relation: only metric-engine base tables can \
-             be sampled",
+            "SAMPLE SERIES is not supported on this relation: it needs a base table of the \
+             metric engine or the mito engine, whose regions can prune by series or by \
+             primary-key range",
         )
     };
     let Some(source) = source.as_ref().downcast_ref::<DefaultTableSource>() else {
@@ -185,16 +259,6 @@ fn adapter_of_source(source: &Arc<dyn TableSource>) -> Result<&DfTableProviderAd
 /// Returns the table behind `source`.
 pub fn table_of_source(source: &Arc<dyn TableSource>) -> Result<TableRef> {
     Ok(adapter_of_source(source)?.table())
-}
-
-/// Records `sample` on the provider of a locally planned scan.
-///
-/// A region query gets the fraction from the query context, but a scan planned
-/// in this process (a datanode scanning its own table) reads its provider
-/// directly, so the hint is set there as well.
-pub fn apply_series_sample(source: &Arc<dyn TableSource>, sample: SeriesSample) -> Result<()> {
-    adapter_of_source(source)?.with_series_sample(sample);
-    Ok(())
 }
 
 /// The `SeriesSampleCollector` receives every table factor of a statement.
@@ -538,64 +602,33 @@ mod tests {
     }
 
     #[test]
-    fn test_non_metric_table_is_rejected() {
-        let error = ensure_series_sample_supported("classic", MITO_ENGINE)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains("SAMPLE SERIES is not supported on table `classic`"),
-            "{error}"
-        );
-        assert!(error.contains(MITO_ENGINE), "{error}");
-        ensure_series_sample_supported("metrics", METRIC_ENGINE).unwrap();
-    }
-
-    #[test]
-    fn test_query_context_roundtrip() {
-        let mut query_ctx = (*QueryContext::arc()).clone();
-        assert_eq!(None, series_sample_of(&query_ctx, 42));
-        set_series_sample(
-            &mut query_ctx,
-            "metrics",
-            42,
-            SeriesSample { num: 1, den: 16 },
-        )
-        .unwrap();
+    fn test_sample_method_follows_the_engine() {
+        // The metric engine prunes by series, the mito engine by primary-key range.
         assert_eq!(
-            Some(SeriesSample { num: 1, den: 16 }),
-            series_sample_of(&query_ctx, 42)
+            SampleMethod::Series { num: 1, den: 4 },
+            sample_method("metrics", METRIC_ENGINE, SeriesSample { num: 1, den: 4 }).unwrap()
         );
-        // Another table of the same query is untouched.
-        assert_eq!(None, series_sample_of(&query_ctx, 43));
-        // The recorded key survives query-option validation (i.e. is reserved).
-        query_ctx.effective_query_options().unwrap();
-        // And it rides the wire format of the region request header.
-        let wire: api::v1::QueryContext = (&query_ctx).into();
-        let decoded = QueryContext::try_from(wire).unwrap();
         assert_eq!(
-            Some(SeriesSample { num: 1, den: 16 }),
-            series_sample_of(&decoded, 42)
+            SampleMethod::PrimaryKey { num: 1, den: 4 },
+            sample_method("classic", MITO_ENGINE, SeriesSample { num: 1, den: 4 }).unwrap()
         );
-    }
 
-    #[test]
-    fn test_conflicting_samples_for_one_table_are_rejected() {
-        let mut query_ctx = (*QueryContext::arc()).clone();
-        set_series_sample(
-            &mut query_ctx,
-            "metrics",
-            42,
-            SeriesSample { num: 1, den: 16 },
-        )
-        .unwrap();
-        let error = set_series_sample(
-            &mut query_ctx,
-            "metrics",
-            42,
+        // An engine that keeps no ordered key to prune on is rejected, and the
+        // error names the table and the engine.
+        let error = sample_method(
+            "files",
+            common_catalog::consts::FILE_ENGINE,
             SeriesSample { num: 1, den: 4 },
         )
         .unwrap_err()
         .to_string();
-        assert!(error.contains("conflicting series samples"), "{error}");
+        assert!(
+            error.contains("SAMPLE SERIES is not supported on table `files`"),
+            "{error}"
+        );
+        assert!(
+            error.contains(common_catalog::consts::FILE_ENGINE),
+            "{error}"
+        );
     }
 }

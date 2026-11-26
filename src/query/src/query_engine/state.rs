@@ -102,6 +102,7 @@ use crate::query_engine::runtime::{
 };
 use crate::range_select::planner::RangeSelectPlanner;
 use crate::region_query::RegionQueryHandlerRef;
+use crate::series_sample::scan::SeriesSampleScanRule;
 
 /// Query engine global state
 #[derive(Clone)]
@@ -271,6 +272,10 @@ impl QueryEngineState {
             optimizer.rules.push(Arc::new(MergeScanProjection));
         }
         optimizer.rules.push(Arc::new(ScanHintRule));
+        // Lower a sample into the scan request of the region that runs the scan.
+        optimizer
+            .rules
+            .push(Arc::new(SeriesSampleScanRule::new(with_dist_planner)));
         optimizer.rules.push(Arc::new(JsonTypeConcretizeRule));
         optimizer.rules.push(Arc::new(FactorizedJoinAggRule));
 

@@ -1282,13 +1282,6 @@ impl DisplayAs for MergeScanExec {
             write!(f, "{}, ", region_id)?;
         }
         write!(f, "]")?;
-        // Show the series-sampling hint of this query where the user reads the
-        // plan: the datanode-side scan repeats it next to its own scan hints.
-        if let Some(sample) = self.regions.first().and_then(|region| {
-            crate::series_sample::series_sample_of(&self.query_ctx, region.table_id())
-        }) {
-            write!(f, ", series_sample={sample}")?;
-        }
 
         if matches!(t, DisplayFormatType::Verbose) {
             let partition_metrics = self.partition_metrics();

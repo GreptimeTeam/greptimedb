@@ -44,8 +44,16 @@ use substrait::{DFLogicalSubstraitConvertor, Extensions, SubstraitPlan};
 
 use crate::dist_plan::MergeScanLogicalPlan;
 use crate::query_engine::QueryEngineState;
+use crate::series_sample::scan::SeriesSampleScan;
 
-/// Extended [`substrait::extension_serializer::ExtensionSerializer`] but supports [`MergeScanLogicalPlan`] serialization.
+/// Extended [`substrait::extension_serializer::ExtensionSerializer`] but supports the nodes of this
+/// crate: [`MergeScanLogicalPlan`] and [`SeriesSampleScan`].
+///
+/// The extension nodes this crate owns cannot be serialized by the shared
+/// `ExtensionSerializer`: it lives below this crate, so it cannot name a type
+/// defined here. Every region payload is encoded and decoded with this registry
+/// (the frontend encodes with it and the region decoder installs it), so a node
+/// this crate defines is handled here and everything else is delegated.
 #[derive(Debug)]
 pub struct DefaultSerializer;
 
@@ -69,6 +77,13 @@ impl SerializerRegistry for DefaultSerializer {
                 input,
             }
             .encode_to_vec())
+        } else if node.name() == SeriesSampleScan::name() {
+            let sample = node
+                .as_any()
+                .downcast_ref::<SeriesSampleScan>()
+                .expect("Failed to downcast to SeriesSampleScan");
+            // The payload is JSON, so a new node needs no protobuf message.
+            Ok(sample.serialize())
         } else {
             ExtensionSerializer.serialize_logical_plan(node)
         }
@@ -84,6 +99,8 @@ impl SerializerRegistry for DefaultSerializer {
             Err(DataFusionError::Substrait(format!(
                 "Unsupported plan node: {name}"
             )))
+        } else if name == SeriesSampleScan::name() {
+            Ok(Arc::new(SeriesSampleScan::deserialize(bytes)?))
         } else {
             ExtensionSerializer.deserialize_logical_plan(name, bytes)
         }

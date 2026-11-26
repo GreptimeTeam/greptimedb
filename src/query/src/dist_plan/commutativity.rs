@@ -34,6 +34,7 @@ use crate::dist_plan::MergeScanLogicalPlan;
 use crate::dist_plan::analyzer::AliasMapping;
 use crate::dist_plan::merge_sort::{MergeSortLogicalPlan, merge_sort_transformer};
 use crate::promql::planner::native::{independent_scan_pair, pointwise_operand, same_table_scans};
+use crate::series_sample::scan::SeriesSampleScan;
 
 /// Whether `node` is a node the analyzer runs where the scan it reads is planned.
 ///
@@ -326,6 +327,16 @@ impl Categorizer {
                     Commutativity::NonCommutative
                 }
             }
+            // A sample describes the rows the scan it reads keeps, so it is only meaningful where
+            // that scan runs: over a bare table scan it belongs to the region, and anywhere else
+            // no region can honour it.
+            name if name == SeriesSampleScan::name() => {
+                if matches!(plan.inputs().as_slice(), [LogicalPlan::TableScan(_)]) {
+                    Commutativity::Commutative
+                } else {
+                    Commutativity::Unsupported
+                }
+            }
             name if name == SeriesNormalize::name()
                 || name == InstantManipulate::name()
                 || name == RangeManipulate::name() =>
@@ -487,6 +498,32 @@ mod tests {
 
         let commutativity = Categorizer::check_extension_plan(&series_divide, &partition_cols);
         assert!(matches!(commutativity, Commutativity::Commutative));
+    }
+
+    /// A sample describes the scan it reads, so it has to run where that scan runs: over a bare
+    /// table scan the analyzer pushes it into the region payload, and the payload encodes.
+    #[test]
+    fn series_sample_scan_lands_in_the_region() {
+        use crate::series_sample::scan::SampleMethod;
+
+        fn holds_sample(plan: &LogicalPlan) -> bool {
+            matches!(plan, LogicalPlan::Extension(extension) if extension.node.as_any().is::<SeriesSampleScan>())
+        }
+
+        let plan = SeriesSampleScan::new(table_scan_plan(), SampleMethod::series(1, 16))
+            .into_logical_plan();
+        assert!(
+            DFLogicalSubstraitConvertor
+                .encode(&plan, DefaultSerializer)
+                .is_ok(),
+            "a sample node encodes like any other extension node"
+        );
+
+        let analyzed = analyze(DistPlannerAnalyzer::default(), plan);
+        assert!(
+            any_remote_input_holds(&analyzed, holds_sample),
+            "the sampled scan runs in the region: {analyzed}"
+        );
     }
 
     #[test]
