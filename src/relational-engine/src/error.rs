@@ -190,6 +190,18 @@ pub enum Error {
         location: Location,
         source: datatypes::error::Error,
     },
+
+    #[snafu(display(
+        "Projection out of bounds, column_index: {}, bounds: {}",
+        column_index,
+        bounds
+    ))]
+    ProjectionOutOfBounds {
+        column_index: usize,
+        bounds: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -213,11 +225,12 @@ impl ErrorExt for Error {
             DecodeRow { .. }
             | InvalidRemoteTable { .. }
             | MissingRemoteSchema { .. }
-            | ProjectSchema { .. } => StatusCode::InvalidArguments,
+            | ProjectSchema { .. }
+            | ProjectionOutOfBounds { .. } => StatusCode::InvalidArguments,
 
-            ConnectRemote { .. } | FetchRows { .. } | MissingRemoteColumns { .. } => {
-                StatusCode::Internal
-            }
+            ConnectRemote { .. } | FetchRows { .. } => StatusCode::Internal,
+
+            MissingRemoteColumns { .. } => StatusCode::InvalidArguments,
 
             CheckObject { .. }
             | StoreRegionManifest { .. }

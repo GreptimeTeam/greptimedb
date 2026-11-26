@@ -23,13 +23,13 @@
 use common_error::ext::BoxedError;
 use common_recordbatch::error::{Error as RecordBatchError, Result as RecordBatchResult};
 use common_recordbatch::{RecordBatch, RecordBatchStreamWrapper, SendableRecordBatchStream};
-use datatypes::prelude::{MutableVector, Value};
+use datatypes::prelude::{ConcreteDataType, MutableVector, Value};
 use datatypes::schema::{ColumnSchema, SchemaRef};
 use mysql_async::prelude::Queryable;
 use snafu::{GenerateImplicitData, Location, ResultExt};
 use tokio::sync::mpsc;
 
-use crate::connection::box_foreign_error;
+use crate::connection::{box_foreign_error, box_timeout_error, CONNECT_TIMEOUT, QUERY_TIMEOUT};
 use crate::convert;
 use crate::error::{DecodeRowSnafu, Error};
 
@@ -46,7 +46,6 @@ pub(crate) fn create_stream(
     remote_table: String,
     sql: String,
     schema: SchemaRef,
-    column_schemas: Vec<ColumnSchema>,
     scan_to_remote: Vec<Option<usize>>,
 ) -> SendableRecordBatchStream {
     let (tx, rx) = mpsc::channel::<RecordBatchResult<RecordBatch>>(CHANNEL_CAPACITY);
@@ -59,7 +58,6 @@ pub(crate) fn create_stream(
             remote_table,
             sql,
             schema,
-            column_schemas,
             scan_to_remote,
             tx,
         )
@@ -80,21 +78,47 @@ fn external(error: Error) -> RecordBatchError {
     }
 }
 
+fn validate_remote_columns(
+    columns: &[mysql_async::Column],
+    column_schemas: &[ColumnSchema],
+    scan_to_remote: &[Option<usize>],
+) -> crate::error::Result<()> {
+    for (i, remote) in scan_to_remote.iter().enumerate() {
+        let Some(idx) = remote else { continue };
+        let column_schema = &column_schemas[i];
+        let column = columns.get(*idx).ok_or_else(|| {
+            DecodeRowSnafu {
+                column: column_schema.name.clone(),
+                reason: format!("remote result is missing column index {idx}"),
+            }
+            .build()
+        })?;
+        convert::validate_column(column, &column_schema.data_type, &column_schema.name)?;
+    }
+    Ok(())
+}
+
 /// Owns a single connection for the lifetime of this task. On any error or
 /// cancellation, the connection is disconnected and the task exits.
+///
+/// Cancellation is not yet complete: `disconnect()` drains the pending result
+/// before sending `COM_QUIT` (mysql_async 0.37), and the connect/exec/read
+/// phases do not observe `tx` closing until a batch send fails. A dropped
+/// consumer with a large remaining result can therefore still hold the
+/// connection while it is drained. Full cancellation is tracked in #9767.
 async fn stream_task(
     opts: mysql_async::Opts,
     connection: String,
     remote_table: String,
     sql: String,
     schema: SchemaRef,
-    column_schemas: Vec<ColumnSchema>,
     scan_to_remote: Vec<Option<usize>>,
     tx: mpsc::Sender<RecordBatchResult<RecordBatch>>,
 ) {
-    let mut conn = match mysql_async::Conn::new(opts).await {
-        Ok(conn) => conn,
-        Err(e) => {
+    let column_schemas = schema.column_schemas().to_vec();
+    let mut conn = match tokio::time::timeout(CONNECT_TIMEOUT, mysql_async::Conn::new(opts)).await {
+        Ok(Ok(conn)) => conn,
+        Ok(Err(e)) => {
             let _ = tx
                 .send(Err(external(Error::ConnectRemote {
                     connection: table::requests::redact_connection(&connection),
@@ -104,13 +128,39 @@ async fn stream_task(
                 .await;
             return;
         }
+        Err(_) => {
+            let _ = tx
+                .send(Err(external(Error::ConnectRemote {
+                    connection: table::requests::redact_connection(&connection),
+                    source: box_timeout_error("connecting to the remote database", CONNECT_TIMEOUT),
+                    location: Location::generate(),
+                })))
+                .await;
+            return;
+        }
     };
+
+    if let Err(e) = conn
+        .exec_drop("SET SESSION time_zone = '+00:00'", ())
+        .await
+    {
+        let _ = tx
+            .send(Err(external(Error::FetchRows {
+                remote_table: remote_table.clone(),
+                source: box_foreign_error(e, &connection),
+                location: Location::generate(),
+            })))
+            .await;
+        let _ = conn.disconnect().await;
+        return;
+    }
 
     // `QueryResult` borrows `conn`; its inherent `next()` yields
     // `Result<Option<Row>>` (no `StreamExt` / pinning needed).
-    let mut result = match conn.exec_iter(sql.as_str(), ()).await {
-        Ok(result) => result,
-        Err(e) => {
+    let mut result = match tokio::time::timeout(QUERY_TIMEOUT, conn.exec_iter(sql.as_str(), ())).await
+    {
+        Ok(Ok(result)) => result,
+        Ok(Err(e)) => {
             let _ = tx
                 .send(Err(external(Error::FetchRows {
                     remote_table: remote_table.clone(),
@@ -121,7 +171,26 @@ async fn stream_task(
             let _ = conn.disconnect().await;
             return;
         }
+        Err(_) => {
+            let _ = tx
+                .send(Err(external(Error::FetchRows {
+                    remote_table: remote_table.clone(),
+                    source: box_timeout_error("querying the remote database", QUERY_TIMEOUT),
+                    location: Location::generate(),
+                })))
+                .await;
+            let _ = conn.disconnect().await;
+            return;
+        }
     };
+
+    let validation = validate_remote_columns(result.columns_ref(), &column_schemas, &scan_to_remote);
+    if let Err(e) = validation {
+        let _ = tx.send(Err(external(e))).await;
+        drop(result);
+        let _ = conn.disconnect().await;
+        return;
+    }
 
     let mut builder = BatchBuilder::new(schema, column_schemas, scan_to_remote);
 
@@ -226,12 +295,40 @@ impl BatchBuilder {
             };
             let vector = self.mutable_vectors[i].as_mut().unwrap();
             match row.as_ref(remote_idx) {
-                // `Row::as_ref` returns `None` for SQL NULL; a `Value::NULL`
-                // variant (which result rows do not produce) also maps to null.
-                None | Some(mysql_async::Value::NULL) => vector.push_null(),
+                // `as_ref` returns `None` only for an out-of-bounds or
+                // already-consumed index; a SQL NULL is `Some(Value::NULL)`.
+                // A missing slot is a bug in our column mapping, so surface it
+                // as a decode error instead of silently emitting a null.
+                None => {
+                    return Err(external(
+                        DecodeRowSnafu {
+                            column: column_schema.name.clone(),
+                            reason: format!("remote row is missing column index {remote_idx}"),
+                        }
+                        .build(),
+                    ));
+                }
+                Some(mysql_async::Value::NULL) => {
+                    // A declared NOT NULL column receiving a SQL NULL must fail
+                    // here, with the column name, rather than at Arrow batch
+                    // construction time.
+                    if !column_schema.is_nullable() {
+                        return Err(external(
+                            DecodeRowSnafu {
+                                column: column_schema.name.clone(),
+                                reason: "non-nullable column received NULL from the remote table"
+                                    .to_string(),
+                            }
+                            .build(),
+                        ));
+                    }
+                    self.num_bytes += estimated_size(&column_schema.data_type, None);
+                    vector.push_null();
+                }
                 Some(value) => {
                     let decoded = convert::decode_value(value, &column_schema.data_type, &column_schema.name)
                         .map_err(external)?;
+                    self.num_bytes += estimated_size(&column_schema.data_type, Some(&decoded));
                     let value_ref = decoded.as_value_ref();
                     vector
                         .try_push_value_ref(&value_ref)
@@ -242,7 +339,6 @@ impl BatchBuilder {
                             }
                             .build())
                         })?;
-                    self.num_bytes += estimated_size(&decoded);
                 }
             }
         }
@@ -276,7 +372,11 @@ impl BatchBuilder {
             columns.push(vector);
         }
 
-        let batch = RecordBatch::new(self.schema.clone(), columns)?;
+        let batch = if columns.is_empty() {
+            RecordBatch::new_with_count(self.schema.clone(), self.num_rows)?
+        } else {
+            RecordBatch::new(self.schema.clone(), columns)?
+        };
 
         // Reset buffers for the next batch.
         for (i, remote) in self.scan_to_remote.iter().enumerate() {
@@ -300,12 +400,29 @@ impl BatchBuilder {
     }
 }
 
-/// A coarse per-value byte estimate for the batch-size threshold. String and
-/// binary use their actual byte length; everything else counts a fixed slot.
-fn estimated_size(value: &Value) -> usize {
-    match value {
-        Value::String(s) => s.as_utf8().len(),
-        Value::Binary(b) => b.len(),
-        _ => std::mem::size_of::<Value>(),
+fn estimated_size(data_type: &ConcreteDataType, value: Option<&Value>) -> usize {
+    const VALIDITY_BIT: usize = 1;
+    match fixed_width(data_type) {
+        Some(width) => width + VALIDITY_BIT,
+        None => match value {
+            Some(Value::String(s)) => s.as_utf8().len() + VALIDITY_BIT,
+            Some(Value::Binary(b)) => b.len() + VALIDITY_BIT,
+            _ => VALIDITY_BIT,
+        },
+    }
+}
+
+fn fixed_width(data_type: &ConcreteDataType) -> Option<usize> {
+    use ConcreteDataType::{
+        Boolean, Date, Decimal128, Float32, Float64, Int16, Int32, Int64, Int8, Timestamp, UInt16,
+        UInt32, UInt64, UInt8,
+    };
+    match data_type {
+        Boolean(_) | Int8(_) | UInt8(_) => Some(1),
+        Int16(_) | UInt16(_) => Some(2),
+        Int32(_) | UInt32(_) | Float32(_) | Date(_) => Some(4),
+        Int64(_) | UInt64(_) | Float64(_) | Timestamp(_) => Some(8),
+        Decimal128(_) => Some(16),
+        _ => None,
     }
 }

@@ -34,6 +34,7 @@ use crate::error::{
 /// Connect + handshake timeout for the scan; a silently dropping host would
 /// otherwise hang the query until the OS timeout.
 pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Parses `host` as a literal IP address, stripping the URL-level brackets that
 /// wrap an IPv6 literal (e.g. `[::1]` → `::1`). Returns `None` when `host` is a
@@ -127,7 +128,7 @@ pub(crate) fn box_foreign_error(
     BoxedError::new(PlainError::new(message, StatusCode::Internal))
 }
 
-fn box_timeout_error(what: &str, timeout: Duration) -> BoxedError {
+pub(crate) fn box_timeout_error(what: &str, timeout: Duration) -> BoxedError {
     BoxedError::new(PlainError::new(
         format!("{what} timed out after {timeout:?}"),
         StatusCode::DeadlineExceeded,

@@ -126,9 +126,8 @@ impl RelationalRegion {
         let encoded = self
             .options
             .get(RELATIONAL_META_KEY)
-            .cloned()
             .context(MissingRequiredFieldSnafu { name: RELATIONAL_META_KEY })?;
-        serde_json::from_str(&encoded).context(DecodeJsonSnafu)
+        serde_json::from_str(encoded).context(DecodeJsonSnafu)
     }
 
     /// Validates an idempotent `Create` against the already-open region, mirroring

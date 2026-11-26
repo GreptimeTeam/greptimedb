@@ -214,7 +214,7 @@ impl TableProvider for DummyTableProvider {
         // synthetic `greptime_timestamp` time index is always `Timestamp(0)`, so
         // a `Tag`/`Timestamp` simple predicate must not be declared `Exact` —
         // that would let DataFusion drop the residual filter while the engine
-        // returns unfiltered rows (see PR3 §6).
+        // returns unfiltered rows.
         if self.is_relational_engine() {
             return Ok(vec![TableProviderFilterPushDown::Inexact; filters.len()]);
         }
