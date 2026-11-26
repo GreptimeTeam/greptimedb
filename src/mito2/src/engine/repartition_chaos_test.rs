@@ -2969,7 +2969,7 @@ async fn abort_split_with_compaction(model: &mut StorageModel, choice: usize) ->
             Some((region_id, _)) => region_id,
             None => {
                 return OpOutcome::clean(
-                    format!("publication race (no live region can be cut)"),
+                    "publication race (no live region can be cut)".to_string(),
                     "compaction concurrent with a split publication (no cut)".to_string(),
                 );
             }
@@ -3589,175 +3589,166 @@ fn distinct_rows(rng: &mut Rng, count: usize) -> Vec<PlannedRow> {
 }
 
 fn scenarios() -> Vec<Scenario> {
-    let mut all = Vec::new();
-
-    // L1: the object store fails, then recovers.
-    all.push(Scenario {
-        name: "chaos-upload-faults",
-        seed: 0xC4A0_0001,
-        ops: vec![
-            ChaosOp::Base(Op::Write {
-                rows: rows_for(0xC4A0_0001, 3),
-            }),
-            ChaosOp::UploadFault { times: 2 },
-            ChaosOp::Base(Op::Write {
-                rows: mixed_rows(0xC4A0_0001, 2),
-            }),
-            ChaosOp::CompactionFault {
-                times: 1,
-                choice: 0,
-            },
-            ChaosOp::Base(Op::Import { choice: 0 }),
-            ChaosOp::Base(Op::TableCompaction { choice: 0 }),
-            ChaosOp::AbortSplit {
-                abort: SplitAbort::AfterRemap,
-            },
-        ],
-    });
-
-    all.push(Scenario {
-        name: "chaos-read-faults",
-        seed: 0xC4A0_0002,
-        ops: vec![
-            ChaosOp::Base(Op::Write {
-                rows: rows_for(0xC4A0_0002, 3),
-            }),
-            ChaosOp::Base(Op::Flush),
-            ChaosOp::Base(Op::Write {
-                rows: mixed_rows(0xC4A0_0002, 2),
-            }),
-            ChaosOp::Base(Op::Flush),
-            ChaosOp::ReadFault { times: 2 },
-            ChaosOp::CompactionFault {
-                times: 1,
-                choice: 0,
-            },
-            ChaosOp::RecoverRegions,
-        ],
-    });
-
-    all.push(Scenario {
-        name: "chaos-delete-faults",
-        seed: 0xC4A0_0003,
-        ops: vec![
-            ChaosOp::Base(Op::Write {
-                rows: rows_for(0xC4A0_0003, 2),
-            }),
-            ChaosOp::DeleteFault { times: 2 },
-            ChaosOp::Base(Op::Flush),
-            ChaosOp::RecoverEngine,
-        ],
-    });
-
-    // L2: a compaction stops between reading and publishing.
-    all.push(Scenario {
-        name: "chaos-cancel-compaction-early",
-        seed: 0xC4A0_0004,
-        ops: vec![
-            ChaosOp::Base(Op::Write {
-                rows: rows_for(0xC4A0_0004, 3),
-            }),
-            ChaosOp::Base(Op::Flush),
-            ChaosOp::Base(Op::Write {
-                rows: mixed_rows(0xC4A0_0004, 2),
-            }),
-            ChaosOp::CancelCompaction {
-                point: CancelPoint::AfterRead,
-            },
-            ChaosOp::RecoverRegions,
-            ChaosOp::Base(Op::Compact { choice: 0 }),
-        ],
-    });
-
-    all.push(Scenario {
-        name: "chaos-cancel-compaction-too-late",
-        seed: 0xC4A0_0005,
-        ops: vec![
-            ChaosOp::Base(Op::Write {
-                rows: rows_for(0xC4A0_0005, 3),
-            }),
-            ChaosOp::Base(Op::Flush),
-            ChaosOp::Base(Op::Write {
-                rows: mixed_rows(0xC4A0_0005, 2),
-            }),
-            ChaosOp::CancelCompaction {
-                point: CancelPoint::InCommit,
-            },
-            ChaosOp::RecoverEngine,
-        ],
-    });
-
-    // L2: a split publication stops between the remap and the apply.
-    all.push(Scenario {
-        name: "chaos-abort-split",
-        seed: 0xC4A0_0006,
-        ops: vec![
-            ChaosOp::Base(Op::Write {
-                rows: rows_for(0xC4A0_0006, 4),
-            }),
-            ChaosOp::Base(Op::Flush),
-            ChaosOp::AbortSplit {
-                abort: SplitAbort::AfterRemap,
-            },
-            ChaosOp::Base(Op::Split { choice: 0 }),
-            ChaosOp::AbortSplit {
-                abort: SplitAbort::AfterLeftApply,
-            },
-            ChaosOp::AbortSplit {
-                abort: SplitAbort::RemapWriteFault { times: 2 },
-            },
-            ChaosOp::StagingReadFault { times: 2 },
-            ChaosOp::Base(Op::Split { choice: 1 }),
-            ChaosOp::Base(Op::Merge),
-            ChaosOp::RecoverRegions,
-        ],
-    });
-
-    // L3: two requests touch one region at once.
-    all.push(Scenario {
-        name: "chaos-concurrency",
-        seed: 0xC4A0_0007,
-        ops: vec![
-            ChaosOp::Base(Op::Write {
-                rows: rows_for(0xC4A0_0007, 3),
-            }),
-            ChaosOp::Base(Op::Flush),
-            ChaosOp::Base(Op::Write {
-                rows: mixed_rows(0xC4A0_0007, 2),
-            }),
-            ChaosOp::ConcurrentCompactions { choice: 0 },
-            ChaosOp::CompactionWithScan { choice: 0 },
-            ChaosOp::Base(Op::Split { choice: 0 }),
-            ChaosOp::CompactionWithSplit { choice: 0 },
-            ChaosOp::Base(Op::Merge),
-            ChaosOp::RecoverEngine,
-        ],
-    });
-
-    // L3 + L4: a compaction racing a merge publication, and a slow upload.
-    all.push(Scenario {
-        name: "chaos-publication-race",
-        seed: 0xC4A0_0008,
-        ops: vec![
-            ChaosOp::Base(Op::Write {
-                rows: rows_for(0xC4A0_0008, 4),
-            }),
-            ChaosOp::Base(Op::Flush),
-            ChaosOp::Base(Op::Split { choice: 0 }),
-            ChaosOp::Base(Op::Write {
-                rows: mixed_rows(0xC4A0_0008, 2),
-            }),
-            ChaosOp::CompactionWithMerge,
-            ChaosOp::Base(Op::Write {
-                rows: rows_for(0xC4A0_0008, 2),
-            }),
-            ChaosOp::UploadDelay { ms: 20 },
-            ChaosOp::RecoverRegions,
-            ChaosOp::Base(Op::Merge),
-        ],
-    });
-
-    all
+    vec![
+        // L1: the object store fails, then recovers.
+        Scenario {
+            name: "chaos-upload-faults",
+            seed: 0xC4A0_0001,
+            ops: vec![
+                ChaosOp::Base(Op::Write {
+                    rows: rows_for(0xC4A0_0001, 3),
+                }),
+                ChaosOp::UploadFault { times: 2 },
+                ChaosOp::Base(Op::Write {
+                    rows: mixed_rows(0xC4A0_0001, 2),
+                }),
+                ChaosOp::CompactionFault {
+                    times: 1,
+                    choice: 0,
+                },
+                ChaosOp::Base(Op::Import { choice: 0 }),
+                ChaosOp::Base(Op::TableCompaction { choice: 0 }),
+                ChaosOp::AbortSplit {
+                    abort: SplitAbort::AfterRemap,
+                },
+            ],
+        },
+        Scenario {
+            name: "chaos-read-faults",
+            seed: 0xC4A0_0002,
+            ops: vec![
+                ChaosOp::Base(Op::Write {
+                    rows: rows_for(0xC4A0_0002, 3),
+                }),
+                ChaosOp::Base(Op::Flush),
+                ChaosOp::Base(Op::Write {
+                    rows: mixed_rows(0xC4A0_0002, 2),
+                }),
+                ChaosOp::Base(Op::Flush),
+                ChaosOp::ReadFault { times: 2 },
+                ChaosOp::CompactionFault {
+                    times: 1,
+                    choice: 0,
+                },
+                ChaosOp::RecoverRegions,
+            ],
+        },
+        Scenario {
+            name: "chaos-delete-faults",
+            seed: 0xC4A0_0003,
+            ops: vec![
+                ChaosOp::Base(Op::Write {
+                    rows: rows_for(0xC4A0_0003, 2),
+                }),
+                ChaosOp::DeleteFault { times: 2 },
+                ChaosOp::Base(Op::Flush),
+                ChaosOp::RecoverEngine,
+            ],
+        },
+        // L2: a compaction stops between reading and publishing.
+        Scenario {
+            name: "chaos-cancel-compaction-early",
+            seed: 0xC4A0_0004,
+            ops: vec![
+                ChaosOp::Base(Op::Write {
+                    rows: rows_for(0xC4A0_0004, 3),
+                }),
+                ChaosOp::Base(Op::Flush),
+                ChaosOp::Base(Op::Write {
+                    rows: mixed_rows(0xC4A0_0004, 2),
+                }),
+                ChaosOp::CancelCompaction {
+                    point: CancelPoint::AfterRead,
+                },
+                ChaosOp::RecoverRegions,
+                ChaosOp::Base(Op::Compact { choice: 0 }),
+            ],
+        },
+        Scenario {
+            name: "chaos-cancel-compaction-too-late",
+            seed: 0xC4A0_0005,
+            ops: vec![
+                ChaosOp::Base(Op::Write {
+                    rows: rows_for(0xC4A0_0005, 3),
+                }),
+                ChaosOp::Base(Op::Flush),
+                ChaosOp::Base(Op::Write {
+                    rows: mixed_rows(0xC4A0_0005, 2),
+                }),
+                ChaosOp::CancelCompaction {
+                    point: CancelPoint::InCommit,
+                },
+                ChaosOp::RecoverEngine,
+            ],
+        },
+        // L2: a split publication stops between the remap and the apply.
+        Scenario {
+            name: "chaos-abort-split",
+            seed: 0xC4A0_0006,
+            ops: vec![
+                ChaosOp::Base(Op::Write {
+                    rows: rows_for(0xC4A0_0006, 4),
+                }),
+                ChaosOp::Base(Op::Flush),
+                ChaosOp::AbortSplit {
+                    abort: SplitAbort::AfterRemap,
+                },
+                ChaosOp::Base(Op::Split { choice: 0 }),
+                ChaosOp::AbortSplit {
+                    abort: SplitAbort::AfterLeftApply,
+                },
+                ChaosOp::AbortSplit {
+                    abort: SplitAbort::RemapWriteFault { times: 2 },
+                },
+                ChaosOp::StagingReadFault { times: 2 },
+                ChaosOp::Base(Op::Split { choice: 1 }),
+                ChaosOp::Base(Op::Merge),
+                ChaosOp::RecoverRegions,
+            ],
+        },
+        // L3: two requests touch one region at once.
+        Scenario {
+            name: "chaos-concurrency",
+            seed: 0xC4A0_0007,
+            ops: vec![
+                ChaosOp::Base(Op::Write {
+                    rows: rows_for(0xC4A0_0007, 3),
+                }),
+                ChaosOp::Base(Op::Flush),
+                ChaosOp::Base(Op::Write {
+                    rows: mixed_rows(0xC4A0_0007, 2),
+                }),
+                ChaosOp::ConcurrentCompactions { choice: 0 },
+                ChaosOp::CompactionWithScan { choice: 0 },
+                ChaosOp::Base(Op::Split { choice: 0 }),
+                ChaosOp::CompactionWithSplit { choice: 0 },
+                ChaosOp::Base(Op::Merge),
+                ChaosOp::RecoverEngine,
+            ],
+        },
+        // L3 + L4: a compaction racing a merge publication, and a slow upload.
+        Scenario {
+            name: "chaos-publication-race",
+            seed: 0xC4A0_0008,
+            ops: vec![
+                ChaosOp::Base(Op::Write {
+                    rows: rows_for(0xC4A0_0008, 4),
+                }),
+                ChaosOp::Base(Op::Flush),
+                ChaosOp::Base(Op::Split { choice: 0 }),
+                ChaosOp::Base(Op::Write {
+                    rows: mixed_rows(0xC4A0_0008, 2),
+                }),
+                ChaosOp::CompactionWithMerge,
+                ChaosOp::Base(Op::Write {
+                    rows: rows_for(0xC4A0_0008, 2),
+                }),
+                ChaosOp::UploadDelay { ms: 20 },
+                ChaosOp::RecoverRegions,
+                ChaosOp::Base(Op::Merge),
+            ],
+        },
+    ]
 }
 
 /// Replays a scenario on a fresh engine and checks every step.
@@ -3855,18 +3846,20 @@ async fn run_named(name: &'static str) -> Report {
         .collect::<BTreeSet<&'static str>>()
         .into_iter()
         .collect();
-    println!("[{name}] levers: {levers:?}");
+    // The verdict of every scenario is data: it is collected here and attached to the
+    // assertion that decides the scenario, so a failure shows it and a pass stays silent.
+    let mut summary = format!("[{name}] levers: {levers:?}\n");
     let report = run_scenario(&scenario, &scenario.ops).await;
-    let verdict = report.verdict();
+    summary.push_str(&format!("[{name}] {}\n", report.verdict()));
     let observations = report.observations_summary();
-    // The verdict of every scenario is data, so it is printed even when it passes.
-    println!("[{name}] {verdict}");
     if !observations.is_empty() {
-        println!("[{name}] non-fatal observations: {observations}");
+        summary.push_str(&format!(
+            "[{name}] non-fatal observations: {observations}\n"
+        ));
     }
     if let Some(failure) = &report.failure {
-        let report = shrink(&scenario, failure).await;
-        panic!("{report}");
+        let shrunk = shrink(&scenario, failure).await;
+        panic!("{summary}{shrunk}");
     }
     report
 }

@@ -961,15 +961,15 @@ impl StorageModel {
             .unwrap_or_default()
     }
 
-    /// Records one step of a case: prints the prediction next to the observation and the
-    /// judgement, keeps the rendered text in `report`, and returns the whole step so the case
-    /// can assert on it.
+    /// Records one step of a case: keeps the prediction, the observation and the judgement in
+    /// `report`, and returns the whole step so the case can assert on it.
+    ///
+    /// The rendered step is not swallowed: the case attaches `report` to its deciding
+    /// assertion, so a divergence shows every step that led to it.
     async fn record_step(&mut self, case: &str, step: &str, report: &mut Vec<String>) -> CaseStep {
         self.step += 1;
         let observed = self.observe(case, step).await;
         let text = observed.render();
-        // Printed, not swallowed: a divergence and every judgement are the product of a case.
-        println!("{text}");
         common_telemetry::info!("[mbt-case] {text}");
         report.push(text);
         observed
@@ -1501,9 +1501,8 @@ impl StorageModel {
         self.closed.insert(region_id);
         let line =
             format!("close region {region_id} (flush_on_close); references before close: {before}");
-        // Printed, not only recorded: the file inventory a close leaves behind is the evidence
-        // of what the reopen has to reload, so it must be visible when the case passes.
-        println!("{line}");
+        // Returned, not only recorded: the file inventory a close leaves behind is the evidence
+        // of what the reopen has to reload, so the case keeps it in its report.
         common_telemetry::info!("[mbt-case] {line}");
         line
     }
@@ -1538,9 +1537,8 @@ impl StorageModel {
             self.engine.role(region_id),
             self.describe_references(region_id)
         );
-        // Printed for the same reason: the role the engine assigns on open is what bounds what
+        // Returned for the same reason: the role the engine assigns on open is what bounds what
         // a chaos case may do next, so it is reported instead of assumed.
-        println!("{line}");
         common_telemetry::info!("[mbt-case] {line}");
         line
     }
@@ -1597,8 +1595,8 @@ impl StorageModel {
     /// the worker, so the role is waited for with a bound instead of being assumed. A region that
     /// stays read-only fails loudly here rather than turning into a compaction error.
     async fn ensure_writable(&mut self, region_id: RegionId) {
-        if !self.is_writable(region_id) {
-            if let Err(err) = self
+        if !self.is_writable(region_id)
+            && let Err(err) = self
                 .engine
                 .handle_request(
                     region_id,
@@ -1610,12 +1608,11 @@ impl StorageModel {
                     }),
                 )
                 .await
-            {
-                // The wait below is the authority: it reports the role a region is stuck in.
-                common_telemetry::warn!(
-                    "[mbt-case] catchup of {region_id} before its compaction returned {err:?}"
-                );
-            }
+        {
+            // The wait below is the authority: it reports the role a region is stuck in.
+            common_telemetry::warn!(
+                "[mbt-case] catchup of {region_id} before its compaction returned {err:?}"
+            );
         }
         for _ in 0..WRITABLE_WAIT_ATTEMPTS {
             if self.is_writable(region_id) {

@@ -422,6 +422,15 @@ pub(crate) fn render_multiset(counts: &BTreeMap<i64, u64>) -> String {
 /// The observed views themselves (routing, holder views, applied state, physical objects)
 /// stay with the driver that collected them: only what has to remember a previous step lives
 /// here. Nothing in this type is derived from the specification.
+/// The identity of one physical object: the file and the region that holds it.
+type ObjectKey = (RegionId, FileId);
+
+/// The set of live regions that reference one object.
+type HolderSet = BTreeSet<RegionId>;
+
+/// The step at which an object stopped being referenced, with the holder set before and after.
+type DropRecord = (usize, HolderSet, HolderSet);
+
 #[derive(Debug, Default)]
 pub(crate) struct Oracle {
     /// The highest committed and last-allocated sequences observed per region (sequence
@@ -429,10 +438,10 @@ pub(crate) struct Oracle {
     /// committing writes legitimately starts with `last_sequence` above `committed_sequence`.
     seq_high_water: BTreeMap<RegionId, SequenceHighWater>,
     /// The live-holder set of every object at the previous step.
-    prev_objects: BTreeMap<(RegionId, FileId), BTreeSet<RegionId>>,
+    prev_objects: BTreeMap<ObjectKey, HolderSet>,
     /// The step at which an object stopped being referenced by a live holder, with the
     /// holder set before and after.
-    dropped_at: BTreeMap<(RegionId, FileId), (usize, BTreeSet<RegionId>, BTreeSet<RegionId>)>,
+    dropped_at: BTreeMap<ObjectKey, DropRecord>,
 }
 
 impl Oracle {
@@ -698,8 +707,7 @@ impl Oracle {
         ctx: &str,
         violations: &mut Vec<Violation>,
     ) {
-        for region_id in routing.keys().copied() {
-            let holder_domain = routing[&region_id];
+        for (&region_id, holder_domain) in routing {
             let Some(view) = holders.get(&region_id) else {
                 continue;
             };
@@ -730,7 +738,7 @@ impl Oracle {
                 let holders = physical
                     .holders_of
                     .get(file_id)
-                    .map(|holders| holders.iter().copied().collect::<Vec<_>>())
+                    .cloned()
                     .unwrap_or_default();
                 violations.push(Violation {
                     category: Category::ReferenceBounds,
@@ -831,7 +839,7 @@ impl Oracle {
         ctx: &str,
         violations: &mut Vec<Violation>,
     ) {
-        let mut objects: BTreeMap<(RegionId, FileId), BTreeSet<RegionId>> = BTreeMap::new();
+        let mut objects: BTreeMap<ObjectKey, HolderSet> = BTreeMap::new();
         for region_id in live.iter().copied() {
             let Some(view) = holders.get(&region_id) else {
                 continue;

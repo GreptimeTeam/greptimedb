@@ -2753,12 +2753,13 @@ async fn run_group(group: Group) {
         reports.join("\n\n")
     );
     common_telemetry::info!("[merge-matrix] {summary}");
-    println!("[merge-matrix] {summary}");
+    // The whole run is the evidence, so it is attached to the assertion that decides the group:
+    // a failing group shows every cell, its shrunk prefix and the axes it covered.
     assert_eq!(
         0,
         failed,
         "the merge matrix reported {failed} of {} cells failing in group {} (full diffs are \
-         printed above):\n  failing invariants: {category_counts:?}\n  {}\n  {headlines}",
+         below):\n  failing invariants: {category_counts:?}\n  {}\n  {headlines}\n\n{summary}",
         cells.len(),
         group.name(),
         table_summary(&all),
@@ -3070,12 +3071,11 @@ async fn test_union_range_shape_bounded_growth() {
         ));
     }
     common_telemetry::info!("[merge-matrix] range shape over {GROWTH_CYCLES} cycles:\n{report}");
-    println!("[merge-matrix] range shape over {GROWTH_CYCLES} cycles:\n{report}");
 
     for observation in &observations {
         assert!(
             observation.round_trip.is_ok(),
-            "cycle {}: the persisted manifest must still decode: {}",
+            "cycle {}: the persisted manifest must still decode: {}\n{report}",
             observation.cycle,
             observation.round_trip.clone().err().unwrap_or_default()
         );
