@@ -40,7 +40,7 @@ pub(crate) struct DecodedValue {
     pub(super) weight: u32,
 }
 /// Contains no artifact handle or live object-store reader. Loads run independently;
-/// admission uses a synchronous, atomic cache entry after loading.
+/// the cache atomically admits a completed value after loading.
 #[derive(Clone)]
 pub(crate) struct MetadataCache {
     memory: Option<CacheManagerRef>,
