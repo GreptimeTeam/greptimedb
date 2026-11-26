@@ -2846,6 +2846,15 @@ async fn native_promql_delta_temporality_corpus_matches_legacy() {
             "TQL EVAL (180, 180, '1m') sum by (series) (rate(delta_temporality[3m]))",
             ReportedName::Nothing,
         ),
+        // The window moves with `offset` and `@`; the sum reads whatever it then holds.
+        (
+            "TQL EVAL (240, 240, '1m') increase(delta_temporality[2m] offset 1m)",
+            ReportedName::Nothing,
+        ),
+        (
+            "TQL EVAL (120, 180, '1m') rate(delta_temporality[2m] @ 150)",
+            ReportedName::Nothing,
+        ),
     ] {
         observer.clear();
         let output = native_tql_output(&instance, sql, true).await;

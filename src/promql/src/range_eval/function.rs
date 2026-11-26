@@ -117,7 +117,6 @@ impl RangeFunction {
         }
     }
 
-    /// Returns the kernel computing this function over windows read with `offset_ms`.
     /// The kernel of this function over a series of OTLP delta increments, as the existing plan
     /// computes it: `increase` sums the window's samples and `rate` divides that sum by the range in
     /// seconds. `None` for a function that reads a delta series like any other.
@@ -132,6 +131,7 @@ impl RangeFunction {
         }
     }
 
+    /// Returns the kernel computing this function over windows read with `offset_ms`.
     pub(crate) fn kernel(self, offset_ms: i64) -> WindowKernel {
         match self {
             Self::Rate => Box::new(extrapolated_rate::<true, true>),

@@ -2230,7 +2230,7 @@ fn epoch_millis(millis: i64) -> Option<SystemTime> {
     }
 }
 
-/// Finds a subquery at the statement root, treating parentheses as transparent.
+/// Finds a range selector at the statement root, treating parentheses as transparent.
 fn root_matrix_selector(expr: &PromExpr) -> Option<&MatrixSelector> {
     match expr {
         PromExpr::MatrixSelector(selector) => Some(selector),
@@ -2239,6 +2239,7 @@ fn root_matrix_selector(expr: &PromExpr) -> Option<&MatrixSelector> {
     }
 }
 
+/// Finds a subquery at the statement root, treating parentheses as transparent.
 fn root_subquery(expr: &PromExpr) -> Option<&SubqueryExpr> {
     match expr {
         PromExpr::Subquery(subquery) => Some(subquery),
