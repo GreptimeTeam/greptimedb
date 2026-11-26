@@ -5,22 +5,17 @@ for Prometheus-style metric data. It separates series identities and string tags
 from timestamped numeric samples.
 
 The format has two artifact roles: `NarthexSamples` owns sample data, and
-`NarthexSeriesIndex` indexes series and references the samples it covers.
+`NarthexSeriesIndex` indexes exact series identities.
 Region manifests serialize these roles as `narthex_samples` and
 `narthex_series_index`.
 
-## Authoritative storage and derived sidecars
+## Region manifest
 
-With `sst_format = 'narthex'`, samples are authoritative SSTs. Each artifact owns
-`<region_dir>/<file_id>/manifest.json` and its `part-<n>.samples` or
-`part-<n>.series` objects. The region manifest records the manifest size and a `parts` array in part-ID order.
-Each part record contains its encoded `file_size` in bytes. Series indexes reference region-qualified sample file IDs without owning those
-samples. Both artifact types use ordinary SST lifetimes and reclamation.
-
-The same codecs also support rebuildable sidecars over Parquet SSTs. The catalog
-paths, source-SST coverage, daily consolidation, and local-cache rollout described
-below apply to that sidecar mode. They do not make authoritative Narthex samples
-rebuildable or subject them to local-cache eviction.
+With `sst_format = 'narthex'`, a samples SST owns
+`<region_dir>/<file_id>/manifest.json` and its `part-<n>.samples` objects.
+The region manifest records the manifest size and a `parts` array in part-ID
+order. Each part record contains its encoded `file_size` in bytes. The
+[series index specification](mito-series.md#region-manifest) defines coverage.
 
 ## Wire specification
 

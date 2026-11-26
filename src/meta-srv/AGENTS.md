@@ -62,6 +62,9 @@ abstraction, election, key encoding, and the DDL manager live in `common-meta`;
   wait for procedure recovery and share admission control in `procedure/drain_datanode/manager.rs`; retain both
   the recovered-procedure and concurrent-submission tests when changing this boundary.
 - **Leader election**: via `common-meta`'s election; transitions in `state.rs`.
+  Node registration cleanup follows leadership when election is enabled and the
+  metasrv lifecycle otherwise. The builder sets role-specific idle limits on
+  the shared `NodeExpiryListener`.
 
 ## Public surface
 

@@ -1,0 +1,53 @@
+{
+  "actions": [
+    {
+      "Edit": {
+        "files_to_add": [],
+        "files_to_remove": [],
+        "compaction_time_window": null,
+        "series_indexes_to_add": [
+          {
+            "region_id": 98784247841,
+            "file_id": "4b220a70-2b03-4641-9687-b65d94641205",
+            "time_range": [
+              {
+                "value": 0,
+                "unit": "Millisecond"
+              },
+              {
+                "value": 10,
+                "unit": "Millisecond"
+              }
+            ],
+            "level": 0,
+            "file_size": 40,
+            "num_rows": 0,
+            "num_series": 1,
+            "sequence": 7,
+            "format": {
+              "narthex_series_index": {
+                "manifest_size": 10,
+                "parts": [
+                  {
+                    "file_size": 30
+                  }
+                ],
+                "window": {
+                  "start": 0,
+                  "end": 10,
+                  "max_sequence": 90
+                }
+              }
+            }
+          }
+        ],
+        "series_indexes_to_remove": [
+          {
+            "region_id": 98784247841,
+            "file_id": "4b220a70-2b03-4641-9687-b65d94641203"
+          }
+        ]
+      }
+    }
+  ]
+}

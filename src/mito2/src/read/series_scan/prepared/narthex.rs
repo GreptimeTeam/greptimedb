@@ -14,7 +14,7 @@
 
 //! Authoritative narthex inputs for scanner-wide series preparation.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use datatypes::arrow::array::{ArrayRef, StringArray, UInt32Array, UInt64Array};
@@ -82,6 +82,7 @@ pub(crate) async fn open_sources(
     context: &StreamContext,
     ranges: &[PartitionRange],
     pool: &Arc<dyn datafusion::execution::memory_pool::MemoryPool>,
+    use_indexes: bool,
 ) -> Result<(
     Vec<Arc<dyn SamplesFormatReader>>,
     Vec<Box<dyn FormatReader>>,
@@ -89,26 +90,26 @@ pub(crate) async fn open_sources(
     let mut samples = Vec::<Arc<dyn SamplesFormatReader>>::new();
     let mut series = Vec::<Box<dyn FormatReader>>::new();
     let indices = file_indices(context, ranges)?;
-    let mut covered = std::collections::HashSet::new();
-    for file in &context.input.narthex_series_indexes {
+    let mut windows = BTreeMap::new();
+    let mut unavailable = BTreeSet::new();
+    let indexes = if use_indexes {
+        context.input.narthex_series_indexes.as_slice()
+    } else {
+        &[]
+    };
+    for file in indexes {
         let FileFormat::NarthexSeriesIndex(index) = &file.meta_ref().format else {
             continue;
         };
-        // Never borrow candidates from an index whose source coverage is outside this
-        // snapshot. Uncovered samples remain prepared through metadata discovery.
-        if !index.sources.iter().all(|source| {
-            context
-                .input
-                .files
+        let window = index.window;
+        if file.region_id() != context.input.region_metadata().region_id
+            || !indices
                 .iter()
-                .any(|file| file.file_id() == *source)
-        }) || !indices
-            .iter()
-            .any(|i| index.sources.contains(&context.input.files[*i].file_id()))
+                .any(|i| window.intersects(context.input.files[*i].time_range()))
         {
             continue;
         }
-        let reader = crate::series_index::columnar::reader::ColumnarReader::open_cached(
+        let mut reader = match crate::series_index::columnar::reader::ColumnarReader::open_cached(
             context.input.access_layer.object_store().clone(),
             crate::series_index::SeriesIndexFileHandle::from_narthex(
                 file.clone(),
@@ -122,20 +123,24 @@ pub(crate) async fn open_sources(
                 .cache_strategy
                 .columnar_metadata(file.meta_ref().file_id),
         )
-        .await?;
-        // Indexes built before a schema extension need sample-key discovery until
-        // they can supply the current tag schema, including newly nullable tags.
-        if crate::series_index::format::validate_series_schema(
-            &reader.schema(),
-            context.input.region_metadata(),
-        )
-        .is_err()
+        .await
         {
+            Ok(reader) => reader,
+            Err(error) if error.is_unusable_series_index() => {
+                unavailable.insert(window.start);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        if reader.adapt_tags(context.input.region_metadata()).is_err() {
+            unavailable.insert(window.start);
             continue;
         }
-        covered.extend(index.sources.iter().copied());
+        let current = windows.entry(window.start).or_insert(window);
+        current.max_sequence = current.max_sequence.max(window.max_sequence);
         series.push(Box::new(reader));
     }
+    windows.retain(|start, _| !unavailable.contains(start));
     for i in indices {
         let file = &context.input.files[i];
         let namespace = file.meta_ref().file_id;
@@ -161,7 +166,7 @@ pub(crate) async fn open_sources(
         };
         let reader: Arc<dyn SamplesFormatReader> =
             Arc::new(NarthexSamplesReader { reader, sequence });
-        if !covered.contains(&file.file_id()) {
+        if !crate::sst::file::series_windows_cover(&windows, file.meta_ref()) {
             series.push(Box::new(NarthexSeriesReader::new(
                 context.input.region_metadata().clone(),
                 reader.clone(),

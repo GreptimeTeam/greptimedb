@@ -28,13 +28,13 @@ use crate::series_index::purger::{IndexFilePurger, PurgeRequest};
 use crate::sst::file::RegionFileId;
 
 /// Legacy codec coverage descriptor derived from immutable narthex metadata.
-/// Narthex admission and scan selection use the region-qualified `sources` instead.
+/// The region manifest carries logical coverage separately from this descriptor.
 pub(crate) fn narthex_series_entry(
     file: &crate::sst::file::FileMeta,
     region_dir: &str,
 ) -> crate::error::Result<SeriesIndexEntry> {
     use crate::series_index::artifact::{ArtifactFormat, ArtifactMetadata};
-    let crate::sst::file::FileFormat::NarthexSeriesIndex(index) = &file.format else {
+    let crate::sst::file::FileFormat::NarthexSeriesIndex(_) = &file.format else {
         return Err(crate::series_index::columnar::invalid(
             "expected narthex series metadata",
         ));
@@ -52,11 +52,7 @@ pub(crate) fn narthex_series_entry(
         index_uuid: file.file_id,
         bucket_start: file.time_range.0,
         bucket_end: file.time_range.1,
-        source_file_ids: index
-            .sources
-            .iter()
-            .map(|source| source.file_id())
-            .collect(),
+        source_file_ids: None,
         min_file_sequence: 0,
         max_file_sequence: 0,
         compaction_window_secs: 0,

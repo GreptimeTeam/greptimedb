@@ -117,6 +117,8 @@ impl RegionEditQueue {
             // be noticed for editing region.
             edit.files_to_add.iter().all(|f| f.sequence.is_none())
                 && edit.files_to_remove.is_empty()
+                && edit.series_indexes_to_add.is_empty()
+                && edit.series_indexes_to_remove.is_empty()
                 && edit.timestamp_ms.is_none()
                 && edit.compaction_time_window.is_none()
                 && edit.flushed_entry_id.is_none()
@@ -464,6 +466,38 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         common_runtime::spawn_global(async move {
             let result = match kind {
                 RegionEditKind::Import => {
+                    // Removing one contributor invalidates the collective watermark.
+                    // Editing excludes new native publications while the import is committed.
+                    if !edit.series_indexes_to_remove.is_empty() {
+                        let manifest = region.manifest_ctx.manifest().await;
+                        let windows: std::collections::HashSet<_> = edit
+                            .series_indexes_to_remove
+                            .iter()
+                            .filter_map(|id| {
+                                manifest
+                                    .series_indexes
+                                    .get(&id.file_id())
+                                    .filter(|f| f.file_id() == *id)?
+                                    .series_window()
+                                    .map(|w| w.start)
+                            })
+                            .collect();
+                        if !windows.is_empty() {
+                            edit.series_indexes_to_remove.extend(
+                                manifest
+                                    .series_indexes
+                                    .values()
+                                    .filter(|f| {
+                                        f.series_window()
+                                            .is_some_and(|w| windows.contains(&w.start))
+                                    })
+                                    .map(|f| f.file_id()),
+                            );
+                            edit.series_indexes_to_remove
+                                .sort_unstable_by_key(|id| id.file_id());
+                            edit.series_indexes_to_remove.dedup();
+                        }
+                    }
                     edit_region(
                         &region,
                         edit.clone(),
@@ -581,12 +615,29 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
             // Only apply the edit if the result is ok and region is not in staging state.
             if edit_result.result.is_ok() {
-                // Applies the edit to the region.
-                region.version_control.apply_edit(
-                    Some(edit_result.edit),
-                    &[],
-                    region.file_purger.clone(),
-                );
+                let mut edit = edit_result.edit;
+                // A background publication can be superseded before its notification arrives.
+                let guard = if !edit_result.update_region_state {
+                    Some(region.manifest_ctx.manifest_manager.read().await)
+                } else {
+                    None
+                };
+                if let Some(manager) = &guard {
+                    let manifest = manager.manifest();
+                    edit.series_indexes_to_add.retain_mut(|file| {
+                        if let Some(current) = manifest.series_indexes.get(&file.file_id) {
+                            *file = current.as_ref().clone();
+                            true
+                        } else {
+                            false
+                        }
+                    });
+                    edit.series_indexes_to_remove
+                        .retain(|id| !manifest.series_indexes.contains_key(&id.file_id()));
+                }
+                region
+                    .version_control
+                    .apply_edit(Some(edit), &[], region.file_purger.clone());
             }
             if edit_result.update_region_state {
                 region.switch_state_to_writable(RegionLeaderState::Editing);
@@ -983,6 +1034,13 @@ fn prepare_region_edit(region: &MitoRegionRef, edit: &mut RegionEdit) -> Result<
         &edit.files_to_add,
         &edit.series_indexes_to_add,
     )?;
+    snafu::ensure!(
+        edit.series_indexes_to_add.is_empty(),
+        crate::error::InvalidRequestSnafu {
+            region_id,
+            reason: "only a pinned native maintenance build can publish sequence coverage",
+        }
+    );
     edit.validate_shared_reclassification(region_id)?;
     let current = region.version_control.current();
     let shared = &current.version.ssts.levels()[file::SHARED_LEVEL_SLOT].files;
