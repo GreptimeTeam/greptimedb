@@ -1366,8 +1366,8 @@ impl StorageModel {
     ///
     /// This is the rule the remap itself applies, read straight from the engine so the refusal
     /// can be checked against the engine's real `FileId`s — the model mints its own, opaque
-    /// ones. A file that records no creator cannot be called foreign (the remap treats it as
-    /// the region's own), so it is skipped for the same reason.
+    /// ones. A file that records no creator is foreign too: its provenance is unproven, and the
+    /// remap refuses it exactly like a stamp another region wrote (#10646).
     async fn engine_foreign_files(&self, inputs: &[RegionId]) -> Vec<(RegionId, FileId)> {
         let mut foreign = Vec::new();
         for region_id in inputs {
@@ -1380,10 +1380,9 @@ impl StorageModel {
                 crate::region::parse_partition_expr(manifest.metadata.partition_expr.as_deref())
                     .expect("the harness reads a region's persisted partition expr");
             for (file_id, meta) in &manifest.files {
-                let Some(creator) = meta.partition_expr.as_deref() else {
-                    continue;
-                };
-                if Some(creator) != holder_expr.as_ref() {
+                // Exact match, so an unstamped file counts as foreign: it may hold the rows of
+                // both children of an earlier split.
+                if meta.partition_expr.as_deref() != holder_expr.as_ref() {
                     foreign.push((*region_id, *file_id));
                 }
             }
@@ -3347,18 +3346,17 @@ async fn test_mbt_case_same_key_and_timestamp() {
     );
 }
 
-/// Case 6: a file whose creator was never recorded (the legacy state #10646 admits).
+/// Case 6: a file whose creator was never recorded (the legacy state #10646 refuses on merge).
 ///
 /// A region's own flushed SST is re-registered under a new `FileId` with
 /// `partition_expr == None`, which is the state a file written before the creating expression
-/// was persisted is in. #10646 says such a file is the region's own — the remap cannot compare
-/// an unrecorded creator with anything, so it must not refuse a merge for it — and the read path
-/// keeps narrowing it by the region's expression (`should_skip_region_partition` only skips the
-/// region predicate when the file's expression *is* the region's, which `None` never is).
+/// was persisted is in. The unrecorded creator proves nothing, so a merge refuses it: if both
+/// children of an earlier split inherit the object and only one of them compacts, the merged
+/// region would hold that child's rows under two file ids and an append-only scan would return
+/// them twice.
 ///
-/// So after the split both halves still hold that one creator-less file, each reads only the
-/// rows its own domain owns, and the merge **proceeds** (no refusal, no compaction) and leaves
-/// the single reference, so each row is still read exactly once.
+/// The case drives exactly that: split, compact the left half, expect the refusal, compact the
+/// right half, and only then let the merge through — with every event read once at every step.
 #[tokio::test]
 async fn test_mbt_case_legacy_file_without_creator() {
     common_telemetry::init_default_ut_logging();
@@ -3421,6 +3419,7 @@ async fn test_mbt_case_legacy_file_without_creator() {
         "the published reference has to record no creator at all"
     );
 
+    // Both children inherit the creator-less object: that is what makes it dangerous.
     let (left, right) = model.split(source, 5).await;
     let step = model
         .record_step(CASE, "after the split of the legacy file", &mut report)
@@ -3442,19 +3441,115 @@ async fn test_mbt_case_legacy_file_without_creator() {
         "a split hands both halves the same reference"
     );
 
-    // #10646: a file with no recorded creator is the region's own, so this merge is *allowed* —
-    // scheme B refuses only a file another region demonstrably created.
+    // One child materialises into a file it stamped itself; the other still holds the legacy
+    // object, so the merge has to be refused — and it has to name the legacy object, not the
+    // materialized one.
+    model.compact(left).await;
+    let step = model
+        .record_step(
+            CASE,
+            "after compacting the left half into its own file",
+            &mut report,
+        )
+        .await;
+    agreed &= step.mismatched().is_empty();
+    assert!(
+        !model.holder_files(left).contains(&file_id),
+        "the compaction consumed the creator-less reference from the left half"
+    );
+    let materialized = *model
+        .holder_files(left)
+        .iter()
+        .next()
+        .expect("the left half's compaction output");
+    assert_ne!(
+        materialized, file_id,
+        "the output is a new file id, not the inherited object"
+    );
+    assert_eq!(
+        BTreeMap::from([(ids[0], 1)]),
+        model.spec.predict_counts(left),
+        "the left half still reads exactly its own row"
+    );
+    assert_eq!(
+        BTreeMap::from([(ids[1], 1)]),
+        model.spec.predict_counts(right),
+        "the right half still reads exactly its own row"
+    );
     let verdict = model.spec.merge_verdict(&[left, right]);
     assert!(
-        verdict.is_allowed(),
-        "a creator-less file must not block the merge: {}",
+        !verdict.is_allowed(),
+        "a creator-less file must block the merge: {}",
         verdict.describe()
+    );
+    let refusal = model.probe_merge_refusal(&[left, right]).await;
+    let err = match refusal {
+        Ok(probe) => panic!(
+            "SCHEME B DIVERGES FROM THE ENGINE: {} for inputs [{left}, {right}], but the remap \
+             into staging region {probe} was accepted. A creator-less file can hold the rows of \
+             both children of an earlier split",
+            verdict.describe()
+        ),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(
+            err.as_any().downcast_ref::<crate::error::Error>(),
+            Some(crate::error::Error::ForeignFilePartitionExpr { .. })
+        ),
+        "the refusal must be the scheme B variant: {err:?}"
+    );
+    let message = err.to_string();
+    assert!(
+        message.contains(&right.to_string()),
+        "the refusal must name the region that still holds the legacy object: {message}"
+    );
+    assert!(
+        message.contains(&file_id.to_string()),
+        "the refusal must name the creator-less file: {message}"
+    );
+    assert!(
+        !message.contains(&materialized.to_string()),
+        "the self-stamped output of the compacted half is not an offender: {message}"
+    );
+    let step = model
+        .record_step(
+            CASE,
+            "after the refused merge of the legacy file",
+            &mut report,
+        )
+        .await;
+    agreed &= step.mismatched().is_empty();
+    assert_eq!(
+        BTreeMap::from([(ids[0], 1)]),
+        model.spec.predict_counts(left),
+        "the refusal changes nothing: the left half still reads its row once"
+    );
+    assert_eq!(
+        BTreeMap::from([(ids[1], 1)]),
+        model.spec.predict_counts(right),
+        "the refusal changes nothing: the right half still reads its row once"
+    );
+
+    // The second child materialises too, so both participants now hold their own files.
+    model.compact(right).await;
+    let step = model
+        .record_step(
+            CASE,
+            "after compacting the right half into its own file",
+            &mut report,
+        )
+        .await;
+    agreed &= step.mismatched().is_empty();
+    assert!(
+        model.spec.merge_verdict(&[left, right]).is_allowed(),
+        "both halves hold files they stamped themselves, so the retry is allowed"
     );
     let survivor = model.merge_all().await;
     let step = model
         .record_step(
             CASE,
-            "after merging both holders of the legacy file",
+            "after merging both holders of the materialized files",
             &mut report,
         )
         .await;
@@ -3462,16 +3557,23 @@ async fn test_mbt_case_legacy_file_without_creator() {
     assert_eq!(
         BTreeMap::from([(ids[0], 1), (ids[1], 1)]),
         model.spec.predict_counts(survivor),
-        "the merge republishes the single creator-less reference, so each row is still read once"
+        "the survivor holds one materialized file per half, so each event is read exactly once"
     );
     assert_eq!(
-        BTreeSet::from([file_id]),
+        BTreeSet::from([
+            materialized,
+            *model.holder_files(right).iter().next().unwrap()
+        ]),
         model.holder_files(survivor),
-        "the survivor holds exactly the one legacy object the halves shared"
+        "the survivor holds exactly the two materialized files"
+    );
+    assert!(
+        !model.holder_files(survivor).contains(&file_id),
+        "the creator-less object left both halves when they compacted"
     );
     assert!(
         !step.oracle_fired(),
-        "no row was lost, duplicated or misplaced while merging a creator-less file"
+        "no row was lost, duplicated or misplaced while settling the creator-less file"
     );
     assert!(
         agreed,

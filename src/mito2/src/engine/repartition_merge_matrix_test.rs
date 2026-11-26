@@ -407,7 +407,11 @@ struct SstRef {
     ///
     /// This branch has no per-reference row range (`FileMeta::owned_range`), so this is also the
     /// range a reference authorizes: a reader bounds the object only by its holder's domain.
-    creator: KeySet,
+    ///
+    /// [`None`] is a legacy file whose creator was never recorded. It is *not* "created by the
+    /// whole table": nothing proves the holder produced it, so a merge refuses it like any other
+    /// foreign stamp (#10646) and it realizes no domain relation.
+    creator: Option<KeySet>,
 }
 
 /// One region's persisted manifest view of a reference.
@@ -941,7 +945,7 @@ impl Model {
     /// B's reference carries no per-reference range, so the only thing that decides whether a
     /// merge may consume a participant is whether all of its files carry its own domain as their
     /// creator domain.
-    fn foreign_refs(&self, inputs: &[RegionId]) -> Vec<(RegionId, FileId, KeySet)> {
+    fn foreign_refs(&self, inputs: &[RegionId]) -> Vec<(RegionId, FileId, Option<KeySet>)> {
         let mut offenders = Vec::new();
         for region_id in inputs {
             let Some(files) = self.files.get(region_id) else {
@@ -949,7 +953,7 @@ impl Model {
             };
             let domain = self.domain_of(*region_id);
             for (file_id, sst) in files {
-                if sst.creator != domain.keys() {
+                if sst.creator.as_ref() != Some(&domain.keys()) {
                     offenders.push((*region_id, *file_id, sst.creator.clone()));
                 }
             }
@@ -978,7 +982,10 @@ impl Model {
             .map(|(region_id, file_id, creator)| {
                 format!(
                     "region {region_id} holds {file_id:?} created by {}",
-                    keys_label(creator)
+                    creator
+                        .as_ref()
+                        .map(keys_label)
+                        .unwrap_or_else(|| "no recorded creator".to_string())
                 )
             })
             .collect();
@@ -1053,7 +1060,10 @@ impl Model {
                     .iter()
                     .map(|(region_id, file_id, creator)| format!(
                         "region {region_id} holds {file_id:?} created by {}",
-                        keys_label(creator)
+                        creator
+                            .as_ref()
+                            .map(keys_label)
+                            .unwrap_or_else(|| "no recorded creator".to_string())
                     ))
                     .collect::<Vec<_>>()
             ));
@@ -1144,7 +1154,10 @@ impl Model {
                             slot_level: level.level,
                             num_rows: meta.num_rows,
                             sequence: meta.sequence.map(|sequence| sequence.get()),
-                            creator: range_keys(meta.partition_expr.as_deref()),
+                            creator: meta
+                                .partition_expr
+                                .as_deref()
+                                .map(|expr| range_keys(Some(expr))),
                         },
                     );
                 }
@@ -1268,32 +1281,34 @@ impl Model {
             return Ok(Vec::new());
         }
 
-        let references: Vec<String> = self
-            .tracked
-            .iter()
-            .map(|region_id| {
-                let files: Vec<String> = self
-                    .files
-                    .get(region_id)
-                    .map(|files| {
-                        files
-                            .values()
-                            .map(|sst| {
-                                format!(
-                                    "{:?}(creator={}, L{}, rows={}, authorized={})",
-                                    sst.file_id,
-                                    sst.owner,
-                                    sst.level,
-                                    sst.num_rows,
-                                    keys_label(&sst.creator)
-                                )
+        let references: Vec<String> =
+            self.tracked
+                .iter()
+                .map(|region_id| {
+                    let files: Vec<String> =
+                        self.files
+                            .get(region_id)
+                            .map(|files| {
+                                files
+                                    .values()
+                                    .map(|sst| {
+                                        format!(
+                                            "{:?}(creator={}, L{}, rows={}, authorized={})",
+                                            sst.file_id,
+                                            sst.owner,
+                                            sst.level,
+                                            sst.num_rows,
+                                            sst.creator.as_ref().map(keys_label).unwrap_or_else(
+                                                || "no recorded creator".to_string()
+                                            )
+                                        )
+                                    })
+                                    .collect()
                             })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                format!("region {region_id} -> [{files:?}]")
-            })
-            .collect();
+                            .unwrap_or_default();
+                    format!("region {region_id} -> [{files:?}]")
+                })
+                .collect();
 
         Ok(vec![Violation {
             category: Category::Visibility,
@@ -1430,7 +1445,7 @@ impl Model {
                 continue;
             };
             for (file_id, sst) in files {
-                if sst.creator.is_subset(&holder) {
+                if sst.creator.as_ref().is_some_and(|c| c.is_subset(&holder)) {
                     continue;
                 }
                 violations.push(Violation {
@@ -1440,7 +1455,10 @@ impl Model {
                          range {} (creator domain, owner {}, L{}, sequence {:?}) leaves the \
                          holder's domain",
                         keys_label(&holder),
-                        keys_label(&sst.creator),
+                        sst.creator
+                            .as_ref()
+                            .map(keys_label)
+                            .unwrap_or_else(|| "no recorded creator".to_string()),
                         sst.owner,
                         sst.level,
                         sst.sequence
@@ -2546,9 +2564,20 @@ impl Model {
         let mut references = Vec::new();
         for (file_id, sst) in self.files.get(&merged).cloned().unwrap_or_default() {
             *observed
-                .entry(relation_label(&target, &sst.creator))
+                .entry(
+                    sst.creator
+                        .as_ref()
+                        .map(|creator| relation_label(&target, creator))
+                        .unwrap_or("no recorded creator"),
+                )
                 .or_default() += 1;
-            references.push(format!("{file_id:?}(creator {})", keys_label(&sst.creator)));
+            references.push(format!(
+                "{file_id:?}(creator {})",
+                sst.creator
+                    .as_ref()
+                    .map(keys_label)
+                    .unwrap_or_else(|| "no recorded creator".to_string())
+            ));
         }
         let wanted: &[&str] = match scenario.relation {
             Relation::NestedSuperset => &["superset"],
@@ -2920,7 +2949,12 @@ async fn growth() -> Vec<CycleObservation> {
             .files
             .get(&merged)
             .and_then(|files| files.get(&shared))
-            .map(|sst| keys_label(&sst.creator))
+            .map(|sst| {
+                sst.creator
+                    .as_ref()
+                    .map(keys_label)
+                    .unwrap_or_else(|| "no recorded creator".to_string())
+            })
             .unwrap_or_else(|| "absent".to_string());
         let round_trip = round_trip_manifest(&model, merged).await;
         observations.push(CycleObservation {

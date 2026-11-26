@@ -1118,8 +1118,8 @@ impl StorageModel {
     ///
     /// This is the rule the remap itself applies, read straight from the engine so the refusal
     /// can be checked against the engine's real `FileId`s — the model mints its own, opaque
-    /// ones. A file that records no creator cannot be called foreign (the remap treats it as
-    /// the region's own), so it is skipped for the same reason.
+    /// ones. A file that records no creator is foreign too: its provenance is unproven, and the
+    /// remap refuses it exactly like a stamp another region wrote (#10646).
     async fn engine_foreign_files(&self, inputs: &[RegionId]) -> Vec<(RegionId, FileId)> {
         let mut foreign = Vec::new();
         for region_id in inputs {
@@ -1132,10 +1132,9 @@ impl StorageModel {
                 crate::region::parse_partition_expr(manifest.metadata.partition_expr.as_deref())
                     .expect("the harness reads a region's persisted partition expr");
             for (file_id, meta) in &manifest.files {
-                let Some(creator) = meta.partition_expr.as_deref() else {
-                    continue;
-                };
-                if Some(creator) != holder_expr.as_ref() {
+                // Exact match, so an unstamped file counts as foreign: it may hold the rows of
+                // both children of an earlier split.
+                if meta.partition_expr.as_deref() != holder_expr.as_ref() {
                     foreign.push((*region_id, *file_id));
                 }
             }

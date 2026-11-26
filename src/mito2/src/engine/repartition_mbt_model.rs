@@ -43,9 +43,9 @@
 //!   every offending `(region, file, creator)`. On success the survivor holds the union of the
 //!   inputs' references, deduplicated by file id.
 //! - A **legacy** file records no creator at all (`FileMeta::partition_expr == None`, a file
-//!   written before the expression was persisted). Nothing can be compared with a region's
-//!   domain, so a merge does not call such a reference foreign — the remap admits it as the
-//!   region's own for the same reason (#10646) — while a scan still narrows it by the holder's
+//!   written before the expression was persisted). That proves nothing about provenance — it can
+//!   hold the rows of both children of an earlier split — so a merge refuses it exactly like a
+//!   file stamped by another region (#10646), while a scan still narrows it by the holder's
 //!   domain, because the region predicate is only dropped when the file's expression *is* the
 //!   region's. [`RefModel::forget_creator`] is the transition that reaches that state.
 //! - Visibility: a reference contributes the rows whose key lies in the **region's domain**,
@@ -202,9 +202,9 @@ pub(crate) struct PhysicalFile {
     /// established at all.
     ///
     /// `None` is not "created by the whole table": nothing can be compared with a region's
-    /// domain, so [`RefModel::merge_verdict`] does not call such a reference foreign (the
-    /// remap treats it as the region's own for the same reason), while the read path still
-    /// narrows it by the region's expression — the region predicate is only dropped when the
+    /// domain, so [`RefModel::merge_verdict`] calls such a reference foreign — a merge needs
+    /// proof that the region created the file, and an unrecorded stamp is no proof. The read path
+    /// still narrows it by the region's expression: the region predicate is only dropped when the
     /// file's expression *is* the region's, which an unrecorded stamp never is.
     pub(crate) creator: Option<Domain>,
     /// Event id -> the row's physical presence in this file.
@@ -257,18 +257,27 @@ impl SpecRegion {
 pub(crate) struct ForeignRef<R> {
     pub(crate) region: R,
     pub(crate) file: u64,
-    pub(crate) creator: Domain,
+    /// The creator's domain, or [`None`] for a legacy file whose creator was never recorded. It
+    /// is still an offender: a merge needs proof that *this* region created the file, and an
+    /// unrecorded creator is no proof.
+    pub(crate) creator: Option<Domain>,
 }
 
 impl<R: RegionKey> ForeignRef<R> {
     /// The `(region, file, creator)` tuple a refusal has to name.
     pub(crate) fn describe(&self) -> String {
-        format!(
-            "region {} holds f{} created by {}",
-            self.region,
-            self.file,
-            self.creator.label()
-        )
+        match self.creator {
+            Some(creator) => format!(
+                "region {} holds f{} created by {}",
+                self.region,
+                self.file,
+                creator.label()
+            ),
+            None => format!(
+                "region {} holds f{} with no recorded creator",
+                self.region, self.file
+            ),
+        }
     }
 }
 
@@ -581,16 +590,15 @@ impl<R: RegionKey> RefModel<R> {
                 let Some(physical) = self.files.get(file) else {
                     continue;
                 };
-                // A legacy file records no creator, so the merge cannot call it foreign: the
-                // remap treats it as the region's own for exactly that reason (#10646).
-                let Some(creator) = physical.creator else {
-                    continue;
-                };
-                if creator != state.domain {
+                // A region may merge only the files it created itself, so the recorded creator
+                // has to be exactly the region's domain. A legacy file records none, which proves
+                // nothing: it can hold the rows of both children of an earlier split, so it is an
+                // offender like any other foreign stamp.
+                if physical.creator != Some(state.domain) {
                     offenders.push(ForeignRef {
                         region: *input,
                         file: *file,
-                        creator,
+                        creator: physical.creator,
                     });
                 }
             }
@@ -763,10 +771,10 @@ impl<R: RegionKey> RefModel<R> {
     /// the creator left unrecorded — the state a file written before the expression was
     /// persisted is in, which the remap admits (#10646).
     ///
-    /// The rows and the level stay; only the stamp is gone. Nothing can be compared with a
-    /// region's domain afterwards, so a merge cannot call the reference foreign
-    /// ([`RefModel::merge_verdict`]) and a compaction filters all of its rows by the region's
-    /// domain, exactly as the read path does. The new physical id is returned so a case can
+    /// The rows and the level stay; only the stamp is gone. A merge afterwards refuses the
+    /// reference ([`RefModel::merge_verdict`]), because an unrecorded creator does not prove the
+    /// region produced the file; a compaction filters all of its rows by the region's domain,
+    /// exactly as the read path does, and stamps its output with that domain. The new physical id is returned so a case can
     /// name the reference it created.
     pub(crate) fn forget_creator(&mut self, region: R) -> Option<u64> {
         let file = self.regions.get(&region)?.refs.keys().next().copied()?;
@@ -917,7 +925,7 @@ mod tests {
     }
 
     #[test]
-    fn a_legacy_reference_blocks_no_merge_and_is_still_narrowed_by_the_domain() {
+    fn a_legacy_reference_blocks_the_merge_and_is_still_narrowed_by_the_domain() {
         let mut spec = one_shared_file();
         // A file written before its creator was recorded: the stamp is unknown, the rows stay.
         let legacy = spec
@@ -930,22 +938,47 @@ mod tests {
             "an unknown stamp still leaves the region's domain as the only gate"
         );
         spec.split(1, 2, Domain::new(0, 5), 3, Domain::new(5, 10));
-        // Nothing can be called foreign when no creator was recorded, so the merge proceeds.
+        // An unrecorded creator proves nothing, so the merge is refused until both halves have
+        // materialized their own rows.
+        let verdict = spec.merge_verdict(&[2, 3]);
+        assert_eq!(
+            MergeVerdict::Refused(vec![
+                ForeignRef {
+                    region: 2,
+                    file: legacy,
+                    creator: None,
+                },
+                ForeignRef {
+                    region: 3,
+                    file: legacy,
+                    creator: None,
+                },
+            ]),
+            verdict,
+            "the refusal has to name both holders of the creator-less file"
+        );
         assert!(
-            spec.merge_verdict(&[2, 3]).is_allowed(),
-            "a file with no recorded creator is the region's own, so it blocks no merge"
+            verdict
+                .describe()
+                .contains("region 2 holds f1 with no recorded creator"),
+            "the refusal has to say the creator is unrecorded: {}",
+            verdict.describe()
         );
         // Each half still reads only the rows inside its own domain.
         assert_eq!(BTreeMap::from([(0, 1)]), spec.predict_counts(2));
         assert_eq!(BTreeMap::from([(1, 1)]), spec.predict_counts(3));
+        spec.compact(2);
+        spec.compact(3);
+        assert!(
+            spec.merge_verdict(&[2, 3]).is_allowed(),
+            "after both halves compacted, each holds a file it stamped itself"
+        );
         spec.merge(&[2, 3], 4);
         assert_eq!(
             BTreeMap::from([(0, 1), (1, 1)]),
             spec.predict_counts(4),
-            "a merge of two holders of one legacy file republishes the single reference, so each \
-             row is still read once"
+            "the survivor holds one materialized file per half, so each row is read once"
         );
-        assert_eq!(BTreeSet::from([4]), spec.holders_of(legacy));
 
         // Compacting a legacy reference takes the rows its own domain holds and stamps the
         // output with that domain, the same way a foreign stamp is handled.
@@ -1020,7 +1053,7 @@ mod tests {
             MergeVerdict::Refused(vec![ForeignRef {
                 region: 2,
                 file: 0,
-                creator: Domain::FULL,
+                creator: Some(Domain::FULL),
             }]),
             verdict,
             "the refusal has to name the (region, file, creator) that blocks the merge"

@@ -704,9 +704,24 @@ impl Oracle {
                 continue;
             };
             for (file_id, sst) in &view.files {
-                // A legacy object records no creator, so it states no bound: the region
-                // predicate still narrows it, but nothing here says which keys it holds.
+                // A legacy object records no creator, which proves nothing about what it
+                // authorizes: the region predicate still narrows it, but nothing here says which
+                // keys it holds, so it is reported like any stamp outside the holder's domain
+                // instead of being waved through (#10646).
                 let Some(creator_domain) = sst.creator_domain else {
+                    violations.push(Violation {
+                        category: Category::ReferenceBounds,
+                        detail: format!(
+                            "[{ctx}] region {region_id} (domain [{}, {})) references {file_id:?} \
+                             with no recorded creator (owner {}, L{}, sequence {:?}); nothing \
+                             proves which keys it holds",
+                            key_name(holder_domain.lo),
+                            key_name(holder_domain.hi),
+                            sst.owner,
+                            sst.level,
+                            sst.sequence
+                        ),
+                    });
                     continue;
                 };
                 if holder_domain.contains_domain(&creator_domain) {
