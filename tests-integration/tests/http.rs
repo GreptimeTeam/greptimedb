@@ -2518,6 +2518,38 @@ pub async fn test_prometheus_native_promql_route(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     assert!(res.text().await.contains("range vector"));
 
+    // A range selector root answers the window's samples at their own timestamps, and both routes
+    // encode the same matrix.
+    let mut answers = Vec::new();
+    for native in [false, true] {
+        let res = client
+            .get("/v1/prometheus/api/v1/query?query=native_route[5m]&time=1")
+            .header(
+                native_hint.0,
+                if native {
+                    "query.experimental_native_promql=true"
+                } else {
+                    "query.experimental_native_promql=false"
+                },
+            )
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK, "native={native}");
+        let body = serde_json::from_str::<PrometheusJsonResponse>(&res.text().await).unwrap();
+        assert_eq!(
+            executes_fused_series(&observer.take_plan()),
+            native,
+            "native={native}"
+        );
+        answers.push(serde_json::to_value(&body.data).unwrap());
+    }
+    assert_eq!(answers[0], answers[1]);
+    assert_eq!(answers[1]["resultType"], "matrix");
+    assert_eq!(
+        answers[1]["result"][0]["values"],
+        json!([[0.0, "1.0"], [1.0, "2.0"]])
+    );
+
     // The same expression over a range: a matrix carries every grid point of every series, with the
     // last sample carried forward, and both routes answer it with the same one.
     let query = encode("native_route * 100");

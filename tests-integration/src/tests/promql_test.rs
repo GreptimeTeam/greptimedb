@@ -2831,6 +2831,8 @@ async fn native_promql_range_selector_root_answers_like_legacy() {
     .await;
     for sql in [
         "TQL EVAL (30, 30, '1s') range_root[20s]",
+        // `b` holds no sample in (25s, 30s] and is omitted.
+        "TQL EVAL (30, 30, '1s') range_root[5s]",
         "TQL EVAL (30, 30, '1s') range_root[20s] offset 10s",
         "TQL EVAL (30, 30, '1s') range_root[15s] @ 20",
         "TQL EVAL (30, 30, '1s') (range_root{host=\"a\"}[1h])",
