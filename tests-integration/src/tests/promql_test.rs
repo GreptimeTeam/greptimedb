@@ -18246,3 +18246,204 @@ async fn native_promql_matrix_root_matches_legacy() {
     let legacy = run(&instance, &observer, sql, false).await;
     assert_eq!(native, legacy);
 }
+
+/// Creates `split_a` and `split_b` in `db` on one physical metric table. With `narthex`, the
+/// physical table uses narthex storage and is partitioned on the time index at 300s, so every
+/// series is split across two regions; otherwise it is a default-storage, unpartitioned
+/// reference. The rows are flushed twice and the last sample stays in the memtable.
+async fn setup_time_split_database(instance: &Arc<Instance>, db: &str, narthex: bool) {
+    execute_all(
+        instance,
+        &format!("CREATE DATABASE {db}"),
+        QueryContext::arc(),
+    )
+    .await;
+    let ctx = Arc::new(QueryContext::with_db_name(Some(db)));
+    let (partition, storage) = if narthex {
+        (
+            "PARTITION ON COLUMNS (ts) (ts < '1970-01-01 00:05:00', ts >= '1970-01-01 00:05:00') ",
+            ", 'sst_format'='narthex'",
+        )
+    } else {
+        ("", "")
+    };
+    execute_all(
+        instance,
+        &format!(
+            "CREATE TABLE phy (job STRING, instance STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, \
+             PRIMARY KEY(job, instance)) {partition}ENGINE=metric \
+             WITH ('physical_metric_table'='true'{storage})"
+        ),
+        ctx.clone(),
+    )
+    .await;
+    for metric in ["split_a", "split_b"] {
+        execute_all(
+            instance,
+            &format!(
+                "CREATE TABLE {metric} (job STRING, instance STRING, ts TIMESTAMP TIME INDEX, \
+                 val DOUBLE, PRIMARY KEY(job, instance)) ENGINE=metric \
+                 WITH ('on_physical_table'='phy')"
+            ),
+            ctx.clone(),
+        )
+        .await;
+    }
+    // Counters growing by `k` per 30s step (`2k` for `split_b`); `db/1` resets at 330s.
+    for (times, flush) in [(0..=300, true), (330..=570, true), (600..=600, false)] {
+        for (metric, scale) in [("split_a", 1), ("split_b", 2)] {
+            let rows = [("api", "0"), ("api", "1"), ("db", "0"), ("db", "1")]
+                .into_iter()
+                .zip(1u32..)
+                .flat_map(|((job, instance), k)| {
+                    times.clone().step_by(30).map(move |t: u32| {
+                        let steps = if (job, instance) == ("db", "1") && t >= 330 {
+                            (t - 330) / 30
+                        } else {
+                            t / 30
+                        };
+                        format!(
+                            "('{job}', '{instance}', {}, {})",
+                            u64::from(t) * 1000,
+                            scale * k * steps + 1
+                        )
+                    })
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            execute_all(
+                instance,
+                &format!("INSERT INTO {metric} (job, instance, ts, val) VALUES {rows}"),
+                ctx.clone(),
+            )
+            .await;
+        }
+        if flush {
+            execute_all(instance, "ADMIN FLUSH_TABLE('phy')", ctx.clone()).await;
+        }
+    }
+}
+
+/// `(time, labels without __name__, value)` of `query` over `[60s, 600s]` in `db`, and whether
+/// the plan ran on the native route.
+async fn time_split_rows(
+    instance: &Arc<Instance>,
+    db: &str,
+    native: bool,
+    query: &str,
+) -> (
+    Vec<(i64, std::collections::BTreeMap<String, String>, f64)>,
+    bool,
+) {
+    let mut ctx = QueryContext::with_db_name(Some(db));
+    ctx.set_extension(QUERY_PARALLELISM_HINT, "4".to_string());
+    ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, native.to_string());
+    let query = PromQuery {
+        query: query.to_string(),
+        start: "60".to_string(),
+        end: "600".to_string(),
+        step: "60s".to_string(),
+        ..PromQuery::default()
+    };
+    let output = instance
+        .do_promql_query(&query, Arc::new(ctx))
+        .await
+        .remove(0)
+        .unwrap_or_else(|error| panic!("{}: {error:?}", query.query));
+    let ran_natively = output.meta.plan.as_ref().is_some_and(|plan| {
+        native_plan_nodes(plan)
+            .iter()
+            .any(|node| node.name() == "FusedSeriesExec")
+    });
+    let (_, mut rows) = native_labelled_rows(output).await;
+    for (_, labels, _) in &mut rows {
+        labels.remove("__name__");
+    }
+    rows.sort_by(|left, right| (&left.1, left.0).cmp(&(&right.1, right.0)));
+    (rows, ran_natively)
+}
+
+/// Native PromQL and SQL over a narthex table partitioned on the time index answer like the same
+/// rows held whole in one default-storage region.
+///
+/// Such a partition splits every series across regions. Reading it needs the region's partition
+/// rule applied to sample rows, since series rows have no time index, and the fragments of a
+/// series from both regions must carry one identity so the frontend merges them.
+async fn assert_time_split_narthex_matches_reference(instance: &Arc<Instance>) {
+    setup_time_split_database(instance, "narthex_split", true).await;
+    setup_time_split_database(instance, "narthex_ref", false).await;
+
+    let sql = "SELECT job, instance, ts, val FROM split_a ORDER BY job, instance, ts";
+    let mut answers = Vec::new();
+    for db in ["narthex_split", "narthex_ref"] {
+        let ctx = Arc::new(QueryContext::with_db_name(Some(db)));
+        let output = instance.do_query(sql, ctx).await.remove(0).unwrap();
+        answers.push(native_output_text(output).await);
+    }
+    assert_eq!(answers[0], answers[1], "{sql}");
+
+    for query in [
+        "split_a",
+        "rate(split_a[2m])",
+        "increase(split_a[3m])",
+        "resets(split_a[5m])",
+        "sum_over_time(split_a[2m])",
+        "max_over_time(split_a[2m])",
+        "count_over_time(split_a[2m])",
+        "quantile_over_time(0.5, split_a[3m])",
+        "sum by (job) (rate(split_a[2m]))",
+        "topk(2, split_a)",
+        "split_a + on(job, instance) split_b",
+        "split_a / ignoring(instance) group_left sum by (job) (split_b)",
+        "split_a{job=\"api\"} or split_b",
+        "split_a unless on(job) split_b{job=\"api\"}",
+        "max_over_time(rate(split_a[2m])[5m:1m])",
+        "rate(split_a[2m] offset 2m)",
+        "split_a @ 300",
+        "label_replace(split_a, \"svc\", \"$1\", \"job\", \"(.*)\")",
+    ] {
+        let (expected, _) = time_split_rows(instance, "narthex_ref", false, query).await;
+        assert!(
+            !expected.is_empty(),
+            "{query}: the reference answered nothing"
+        );
+        let (rows, ran_natively) = time_split_rows(instance, "narthex_split", true, query).await;
+        assert!(ran_natively, "{query}: the native route must run");
+        assert_eq!(rows.len(), expected.len(), "{query}: {rows:?}");
+        for (actual, expected) in rows.iter().zip(&expected) {
+            assert_eq!((actual.0, &actual.1), (expected.0, &expected.1), "{query}");
+            assert!(
+                (actual.2 - expected.2).abs() <= 1e-9 * actual.2.abs().max(expected.2.abs()),
+                "{query}: {actual:?} != {expected:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_over_a_time_partitioned_narthex_table_matches_reference() {
+    common_telemetry::init_default_ut_logging();
+    let standalone = GreptimeDbStandaloneBuilder::new("native_promql_narthex_time_split")
+        .with_query_options(QueryOptions {
+            experimental_native_promql: true,
+            ..Default::default()
+        })
+        .build()
+        .await;
+    assert_time_split_narthex_matches_reference(standalone.fe_instance()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn distributed_native_promql_over_a_time_partitioned_narthex_table_matches_reference() {
+    common_telemetry::init_default_ut_logging();
+    let cluster = GreptimeDbClusterBuilder::new("distributed_native_promql_narthex_time_split")
+        .await
+        .with_datanodes(2)
+        .with_query_options(QueryOptions {
+            experimental_native_promql: true,
+            ..Default::default()
+        })
+        .build(false)
+        .await;
+    assert_time_split_narthex_matches_reference(cluster.fe_instance()).await;
+}
