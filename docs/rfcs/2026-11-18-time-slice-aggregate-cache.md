@@ -31,7 +31,7 @@ Observability and analytics systems differ in what they cache and in how they ke
 | System | What is cached | Freshness |
 |---|---|---|
 | VictoriaMetrics | Result series of a query expression, extended as the range moves | Data newer than `-search.cacheTimestampOffset` (5 minutes) is not cached. A single-node instance resets the whole cache when it ingests a sample older than that offset. Otherwise, an API call resets the cache. |
-| Grafana Mimir | Query-frontend results, split by `-query-frontend.split-queries-by-interval` (24 hours) | Results newer than `-query-frontend.max-cache-freshness` (10 minutes) are not cached. Entries expire after a TTL: 1 week, or 10 minutes inside the out-of-order window. |
+| Grafana Mimir | Query-frontend results, split by `-query-frontend.split-queries-by-interval` (24 hours). The experimental range-vector splitting caches per-series intermediate states in 2-hour blocks and skips partial blocks at the edges. | Results newer than `-query-frontend.max-cache-freshness` (10 minutes) are not cached. Entries expire after a TTL: 1 week, or 10 minutes inside the out-of-order window. |
 | ClickHouse | Final result of a `SELECT` | Entries expire after `query_cache_ttl` (60 seconds). Inserts do not invalidate them. |
 | OpenObserve | Merged partial aggregation states per time partition | Windows that end within `ZO_CACHE_DELAY_SECS` (300 seconds) of the current time are not reused. Later data for a cached window is not reflected until the entry is evicted or cleared. |
 | Elasticsearch | Aggregation results per shard, for requests with `size=0` | Entries are invalidated whenever the shard refreshes. |
@@ -67,7 +67,7 @@ AggregateExec (Final)                     (unchanged)
             └─ RegionScanExec             the original scan; cached slices are pruned
 ```
 
-A physical optimizer rule looks for a `Partial` aggregation that reads a region scan through row-wise operators only (filter and projection), where the scan request bounds the time index on both ends. The rule splits the time range into slices aligned to a fixed width and places `SliceAggregateExec` above the partial aggregation.
+A physical optimizer rule looks for a `Partial` aggregation that reads a region scan through row-wise operators only (filter and projection), where the scan request bounds the time index on both ends. The rule splits the time range into slices aligned to a width chosen from the window span (see [Slice width](#slice-width)) and places `SliceAggregateExec` above the partial aggregation.
 
 If the aggregation already groups by a time bucket that lies within one slice, the slice of each group follows from its bucket. Otherwise, the rule adds the slice of each row as an extra grouping key.
 
@@ -123,6 +123,23 @@ SST files are immutable. Every operation that changes the persisted rows of a ra
 - Capacity: one cache per node, bounded in bytes. Entries unused for an idle timeout are evicted. The states an aggregation collects count against the query memory limit, and an aggregation whose states exceed a per-aggregation bound caches nothing. The bound is per aggregation because it identifies plans whose states are too large to be worth caching; total memory is bounded by the query memory limit.
 - The cache is experimental and off by default, with a node-level switch that a single query can override.
 
+## Slice width
+
+The width trades two costs. The partial slices at both edges of a window are recomputed on every run, so wide slices recompute more. Each slice adds a cache entry, a fingerprint check and its own copy of every group's states, so narrow slices hold more state and take longer to emit. Windows that are mostly unflushed gain nothing at any width.
+
+The rule picks the width from the span of the window:
+
+| Window span | Width |
+|---|---|
+| Shorter than 1 hour | Not rewritten |
+| 1 hour to 6 hours | 5 minutes |
+| 6 hours to 3 days | 15 minutes |
+| 3 days or longer | 30 minutes |
+
+These widths were the fastest of 1 minute to 6 hours on sliding windows of 1 hour, 6 hours, 24 hours, and 7 days, with the newest 10 minutes unflushed and one minute of new rows per slide. Windows of 10 and 30 minutes were within 7% of uncached runs at every width. Mimir's range-vector splitting uses a fixed 2-hour block, and OpenObserve picks 5 minutes to 1 day from the span.
+
+If the aggregation groups by a bucket whose stride does not divide the width, the rule uses the first wider width that is a multiple of the stride and still fits four times in the window, so the slice still follows from the bucket. Otherwise it adds the slice key. The width is part of the plan digest, so entries of different widths never mix. A configuration option fixes the width for all plans.
+
 ## Worked example
 
 A dashboard panel refreshes every 5 minutes:
@@ -134,11 +151,11 @@ WHERE ts >= now() - INTERVAL '24 hours' AND ts < now()
 GROUP BY b, service;
 ```
 
-At 12:37, the range `[12:37 yesterday, 12:37 today)` splits into 25 one-hour slices: a partial slice `[12:37, 13:00)` yesterday, 23 whole hours, and a partial slice `[12:00, 12:37)` today. The first run computes all 25 slices in one scan and caches the 23 whole hours that have no unflushed data. The two partial slices are not cached: their bounds change as the window slides, so their entries would never be read again. In this example, only the current hour has unflushed data.
+At 12:37, the 24-hour range `[12:37 yesterday, 12:37 today)` splits into 15-minute slices: a partial slice `[12:37, 12:45)` yesterday, 95 whole slices, and a partial slice `[12:30, 12:37)` today. The first run computes all 97 slices in one scan and caches the whole slices that have no unflushed data. The two partial slices are not cached: their bounds change as the window slides, so their entries would never be read again. In this example, only rows after 12:30 are unflushed.
 
-At 12:42, the range is `[12:42 yesterday, 12:42 today)`. The 23 whole hours from 13:00 yesterday to 12:00 today keep their keys and fingerprints, so they come from the cache. The scan skips them and computes only the two edge slices: `[12:42, 13:00)` yesterday and `[12:00, 12:42)` today.
+At 12:42, the range is `[12:42 yesterday, 12:42 today)`. The 95 whole slices from 12:45 yesterday to 12:30 today keep their keys and fingerprints, so they come from the cache. The scan skips them and computes only the two edge slices: `[12:42, 12:45)` yesterday and `[12:30, 12:42)` today.
 
-Suppose a late row for 03:10 today arrives between the two runs. The row lands in the memtable of today's time partition, which now spans 03:10 to 12:42. Every slice from 03:00 to 12:00 then returns `None` and is recomputed until the memtable is flushed. After the flush, the file sets of those slices include the new file, so their fingerprints differ from the cached ones. The slices are recomputed once more and cached again.
+Suppose a late row for 03:10 today arrives between the two runs. The row lands in the memtable of today's time partition, which now spans 03:10 to 12:42. Every slice from 03:00 to 12:30 then returns `None` and is recomputed until the memtable is flushed. After the flush, the file sets of those slices include the new file, so their fingerprints differ from the cached ones. The slices are recomputed once more and cached again.
 
 # Benefits and Drawbacks
 
@@ -199,7 +216,7 @@ Drawbacks:
 
 # Open Questions
 
-1. **Slice width.** A fixed one-hour width is simple. Deriving the width from the region's compaction window or from the query's bucket width could raise the hit rate.
+1. **Slice width.** The span tiers were measured on one standalone dataset and windows up to 7 days. Group cardinality also matters: P99 states over 24 hours took about 110 MB at every width, while counts took a few MB.
 2. **Plan identity.** The prototype identifies the plan by the debug form of its expressions plus the session settings. This relies on the debug form of every expression covering everything that affects its result. A stable serialization of physical expressions would remove that reliance.
 3. **Cost of a full hit.** A 30-day window with hourly slices still takes about 18 ms when every slice hits. Where that time goes has not been measured.
 4. **Sequence fence.** Bounding the memtable reads of rewritten scans by a sequence would make each query read exactly one version, at the cost of behaving differently from uncached scans.
