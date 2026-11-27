@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -3511,6 +3512,333 @@ async fn authoritative_copy_preserves_source_order(#[case] delete: bool) {
                 )
                 .await
                 .is_err()
+        );
+    }
+    engine.stop().await.unwrap();
+}
+
+/// Creates an empty sparse Narthex region over the fixture schema.
+///
+/// Reserving the internal id columns is what lets a test hold two distinct series under one table
+/// id; the memtable stays implicit because sparse encoding already selects the bulk memtable that
+/// the Narthex readers understand.
+async fn narthex_region(
+    name: &str,
+    region_id: store_api::storage::RegionId,
+    append: bool,
+) -> (TestEnv, MitoEngine, MitoRegionRef) {
+    let mut env = TestEnv::with_prefix(name).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            // Flushes and edits are asserted right away, so no background work may race them.
+            schedule_compaction_after_edit: false,
+            min_compaction_interval: Duration::from_secs(3600),
+            ..Default::default()
+        })
+        .await;
+    let mut metadata = sst_region_metadata_with_encoding(PrimaryKeyEncoding::Sparse);
+    metadata
+        .column_metadatas
+        .iter_mut()
+        .find(|column| column.column_id == 2)
+        .unwrap()
+        .column_schema
+        .data_type = ConcreteDataType::float64_datatype();
+    let mut create = crate::test_util::CreateRequestBuilder::new()
+        .insert_option("primary_key_encoding", "sparse")
+        .insert_option("sst_format", "narthex")
+        .insert_option("append_mode", if append { "true" } else { "false" })
+        .build();
+    create.column_metadatas = metadata.column_metadatas;
+    create.primary_key = metadata.primary_key;
+    engine
+        .handle_request(region_id, RegionRequest::Create(create))
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    (env, engine, region)
+}
+
+/// Publishes one Narthex series index over every flushed samples file, so preparation discovers
+/// series from the artifact instead of from sample payloads.
+///
+/// The index records keys only; row semantics stay with the sample readers, which is why the flat
+/// source is built with append semantics and no time range.
+async fn build_narthex_index(engine: &MitoEngine, region: &MitoRegionRef) {
+    let sources: Vec<_> = region
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files())
+        .cloned()
+        .collect();
+    assert!(!sources.is_empty(), "a Narthex index needs flushed samples");
+    let flat = crate::compaction::CompactionSstReaderBuilder {
+        narthex_format: true,
+        metadata: region.metadata(),
+        sst_layer: region.access_layer.clone(),
+        cache: engine.cache_manager(),
+        inputs: &sources,
+        append_mode: true,
+        filter_deleted: false,
+        time_range: None,
+        merge_mode: crate::region::options::MergeMode::LastRow,
+        read_parallelism: 1,
+    }
+    .build_flat_sst_reader()
+    .await
+    .unwrap();
+    let index =
+        crate::sst::narthex::write_series(&region.access_layer, region.metadata(), &sources, flat)
+            .await
+            .unwrap();
+    engine
+        .edit_region(
+            region.region_id,
+            crate::manifest::action::RegionEdit {
+                series_indexes_to_add: vec![index],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    // The scan input carries the region version's indexes, so that is what must hold the artifact.
+    assert!(
+        !engine
+            .get_region(region.region_id)
+            .unwrap()
+            .version()
+            .ssts
+            .series_indexes()
+            .is_empty(),
+        "a published Narthex series index must be visible to preparation"
+    );
+}
+
+/// Reads every series of `region_id` through the bound-label prepared path and returns the chunks
+/// in the order the stream yields them.
+async fn prepared_raw_chunks(
+    engine: &MitoEngine,
+    region_id: store_api::storage::RegionId,
+) -> Vec<RawSeriesChunk> {
+    let scan = engine
+        .handle_query(
+            region_id,
+            ScanRequest {
+                distribution: Some(TimeSeriesDistribution::PerSeries),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let binding = labels(scan.metadata());
+    let prepared = scan
+        .prepare_series(
+            &QueryScanContext::default(),
+            &ExecutionPlanMetricsSet::new(),
+            &binding,
+        )
+        .await
+        .unwrap()
+        .expect("Narthex reads prepare without sidecars");
+    prepared
+        .read_series(0..prepared.num_series())
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap()
+}
+
+/// Flattens chunks into `(identity bytes, timestamp, value)` rows in stream order.
+fn keyed_rows(chunks: &[RawSeriesChunk]) -> Vec<(Vec<u8>, i64, f64)> {
+    chunks
+        .iter()
+        .flat_map(|chunk| {
+            (0..chunk.time.len()).map(move |i| {
+                let SampleRef::Float(value) = chunk.fields.get(0).unwrap().sample(i) else {
+                    panic!("expected float");
+                };
+                (
+                    chunk.primary_key.to_vec(),
+                    chunk.time.timestamp(i).unwrap(),
+                    value,
+                )
+            })
+        })
+        .collect()
+}
+
+/// Prepared Narthex raw reads must close every series exactly once, and at its last chunk.
+///
+/// A regression that places the flag where the key changes but on the chunk that *opens* the next
+/// series, or that closes a series at every batch boundary, still passes a samples-only assertion:
+/// the values are untouched, only finality moves. The fixture therefore splits one series across
+/// chunks, which is what makes a misplaced flag observable, and puts the second series' rows in the
+/// same final part as the first series' last row, so the last chunk of the stream is not the only
+/// one that can be right by accident.
+#[tokio::test]
+async fn narthex_prepared_raw_closes_each_series_at_its_last_chunk() {
+    let (_env, engine, region) = narthex_region(
+        "narthex-finality",
+        store_api::storage::RegionId::new(91, 0),
+        false,
+    )
+    .await;
+    write(&engine, &region, 7, 1000, Some(1.0)).await;
+    write(&engine, &region, 7, 2000, Some(2.0)).await;
+    flush_region(&engine, region.region_id, None).await;
+    // One series is written twice, so the merge emits it as more than one chunk: the first part
+    // holds its head, this part holds its tail. The second series lives here entirely.
+    write(&engine, &region, 7, 3000, Some(3.0)).await;
+    write(&engine, &region, 7, 4000, Some(4.0)).await;
+    write_with_tags(&engine, &region, 8, 2500, Some(5.0), &["b", "x"]).await;
+    write_with_tags(&engine, &region, 8, 3500, Some(6.0), &["b", "x"]).await;
+    flush_region(&engine, region.region_id, None).await;
+    build_narthex_index(&engine, &region).await;
+
+    let chunks = prepared_raw_chunks(&engine, region.region_id).await;
+    let mut series = BTreeMap::<Vec<u8>, Vec<usize>>::new();
+    for (index, chunk) in chunks.iter().enumerate() {
+        series
+            .entry(chunk.primary_key.to_vec())
+            .or_default()
+            .push(index);
+    }
+    assert_eq!(2, series.len(), "two series are written");
+    assert!(
+        chunks.len() > series.len(),
+        "the fixture must split a series across chunks, otherwise a misplaced flag is invisible: \
+         {} chunks for {} series",
+        chunks.len(),
+        series.len()
+    );
+    for (key, positions) in &series {
+        let closed: Vec<usize> = positions
+            .iter()
+            .copied()
+            .filter(|index| chunks[*index].is_last)
+            .collect();
+        assert_eq!(
+            vec![*positions.last().unwrap()],
+            closed,
+            "the series of {} bytes occupying chunks {:?} must be closed once, by its last chunk",
+            key.len(),
+            positions
+        );
+    }
+    assert_eq!(
+        series.len(),
+        chunks.iter().filter(|chunk| chunk.is_last).count(),
+        "each series contributes exactly one final chunk"
+    );
+    engine.stop().await.unwrap();
+}
+
+/// Prepared Narthex raw reads must keep `(key, time)` increasing across parts.
+///
+/// PromQL's merge rejects any run that does not move forward ("merge input runs are not
+/// increasing"), yet nothing proved a Narthex prepared read keeps that promise: the timestamp
+/// `1500` is written to two SSTs and a reader that concatenates parts instead of merging them
+/// emits it again after `2000`.
+#[tokio::test]
+async fn narthex_prepared_raw_orders_same_timestamp_across_parts() {
+    let (_env, engine, region) = narthex_region(
+        "narthex-order",
+        store_api::storage::RegionId::new(92, 0),
+        false,
+    )
+    .await;
+    write(&engine, &region, 7, 1000, Some(1.0)).await;
+    write(&engine, &region, 7, 1500, Some(1.5)).await;
+    write(&engine, &region, 7, 2000, Some(2.0)).await;
+    write_with_tags(&engine, &region, 8, 1000, Some(8.0), &["b", "x"]).await;
+    flush_region(&engine, region.region_id, None).await;
+    // `1500` exists in both parts, and the remaining rows sort before the first part's tail.
+    write(&engine, &region, 7, 1500, Some(9.0)).await;
+    write(&engine, &region, 7, 2500, Some(2.5)).await;
+    write(&engine, &region, 7, 3000, Some(3.0)).await;
+    write_with_tags(&engine, &region, 8, 1500, Some(8.5), &["b", "x"]).await;
+    flush_region(&engine, region.region_id, None).await;
+    build_narthex_index(&engine, &region).await;
+
+    let rows = keyed_rows(&prepared_raw_chunks(&engine, region.region_id).await);
+    for pair in rows.windows(2) {
+        let ((previous_key, previous_time, _), (key, time, _)) = (&pair[0], &pair[1]);
+        assert!(
+            previous_key < key || (previous_key == key && previous_time < time),
+            "prepared Narthex raw rows must increase by key and then by time: {} bytes at {} \
+             followed by {} bytes at {}",
+            previous_key.len(),
+            previous_time,
+            key.len(),
+            time
+        );
+    }
+    // The duplicate keeps the newest write, which is what a single increasing run requires.
+    assert_eq!(
+        vec![
+            (1000, 1.0),
+            (1500, 9.0),
+            (2000, 2.0),
+            (2500, 2.5),
+            (3000, 3.0),
+            (1000, 8.0),
+            (1500, 8.5),
+        ],
+        rows.iter()
+            .map(|(_, time, value)| (*time, *value))
+            .collect::<Vec<_>>()
+    );
+    engine.stop().await.unwrap();
+}
+
+/// Append-mode Narthex raw reads must keep one row per `(key, timestamp)`, with the newest write.
+///
+/// Append mode skips deduplication in the merge reader and relies on the raw path to deduplicate
+/// again; a regression there reports both the flushed `1.0` and the in-memory `2.0`, which no
+/// samples-only assertion over a single write can see.
+#[tokio::test]
+async fn narthex_appended_raw_read_keeps_the_last_write_across_memtable() {
+    let (_env, engine, region) = narthex_region(
+        "narthex-append-dedup",
+        store_api::storage::RegionId::new(93, 0),
+        true,
+    )
+    .await;
+    write(&engine, &region, 7, 1000, Some(1.0)).await;
+    write_with_tags(&engine, &region, 8, 1000, Some(1.0), &["b", "x"]).await;
+    flush_region(&engine, region.region_id, None).await;
+    // Neither row is flushed: the newer writes stay in the memtable, so deduplication has to
+    // look across the memory and persisted sources.
+    write(&engine, &region, 7, 1000, Some(2.0)).await;
+    write_with_tags(&engine, &region, 8, 1000, Some(2.0), &["b", "x"]).await;
+
+    let rows = keyed_rows(&prepared_raw_chunks(&engine, region.region_id).await);
+    assert_eq!(
+        2,
+        rows.len(),
+        "one row per series and timestamp, not one per write: {:?}",
+        rows.iter()
+            .map(|(_, time, value)| (*time, *value))
+            .collect::<Vec<_>>()
+    );
+    assert_ne!(
+        rows[0].0, rows[1].0,
+        "the two retained rows belong to distinct series"
+    );
+    for (key, time, value) in &rows {
+        assert_eq!(
+            1000,
+            *time,
+            "the series of {} bytes lost its timestamp",
+            key.len()
+        );
+        assert_eq!(
+            2.0,
+            *value,
+            "the newest write must win for the series of {} bytes",
+            key.len()
         );
     }
     engine.stop().await.unwrap();
