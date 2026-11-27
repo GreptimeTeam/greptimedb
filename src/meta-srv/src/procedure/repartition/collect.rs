@@ -44,6 +44,10 @@ pub struct Collect {
     pub succeeded_procedures: Vec<ProcedureMeta>,
     /// Sub-procedures that have failed.
     pub failed_procedures: Vec<ProcedureMeta>,
+    /// The errors the failed sub-procedures reported, so that a caller of the parent procedure
+    /// learns why a group failed - for instance which region holds a file it did not create.
+    #[serde(default)]
+    pub failed_procedure_errors: Vec<String>,
     /// Sub-procedures whose state could not be determined.
     pub unknown_procedures: Vec<ProcedureMeta>,
 }
@@ -54,6 +58,7 @@ impl Collect {
             inflight_procedures,
             succeeded_procedures: Vec::new(),
             failed_procedures: Vec::new(),
+            failed_procedure_errors: Vec::new(),
             unknown_procedures: Vec::new(),
         }
     }
@@ -90,6 +95,8 @@ impl State for Collect {
                 Err(e) => {
                     error!(e; "failed to wait for repartition subprocedure, procedure_id: {}, group_id: {}", procedure_id, group_id);
                     self.failed_procedures.push(*procedure_meta);
+                    self.failed_procedure_errors
+                        .push(format!("group {group_id}: {}", describe_cause(&e)));
                 }
             }
         }
@@ -111,8 +118,11 @@ impl State for Collect {
                 .extend(self.unknown_procedures.iter());
             return crate::error::UnexpectedSnafu {
                 violated: format!(
-                    "Repartition groups failed or became unknown, table_id: {}, failed: {}, unknown: {}",
-                    table_id, failed, unknown
+                    "Repartition groups failed or became unknown, table_id: {}, failed: {}, unknown: {}{}",
+                    table_id,
+                    failed,
+                    unknown,
+                    describe_failed_groups(&self.failed_procedure_errors)
                 ),
             }
             .fail();
@@ -130,18 +140,54 @@ impl State for Collect {
     }
 }
 
+/// Renders `error` together with every cause it wraps.
+///
+/// [`watcher::wait`] reports a child failure as `ProcedureExec`, whose own message is only
+/// "Failed to execute procedure": the reason a group failed - which region holds a file it did
+/// not create - lives in the wrapped error. Walking the source chain keeps it, so the parent
+/// error a SQL caller sees still names the region and the file.
+fn describe_cause(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut message = error.to_string();
+    let mut cause = error.source();
+    while let Some(error) = cause {
+        let text = error.to_string();
+        if !message.contains(&text) {
+            message.push_str(": ");
+            message.push_str(&text);
+        }
+        cause = error.source();
+    }
+    message
+}
+
+/// Appends the errors of the failed groups, bounded so an error message stays readable.
+fn describe_failed_groups(errors: &[String]) -> String {
+    const MAX_REPORTED: usize = 4;
+    if errors.is_empty() {
+        return String::new();
+    }
+    let mut details = errors
+        .iter()
+        .take(MAX_REPORTED)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("; ");
+    if errors.len() > MAX_REPORTED {
+        details.push_str(&format!("; and {} more", errors.len() - MAX_REPORTED));
+    }
+    format!(": {details}")
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use common_error::mock::MockError;
-    use common_error::status_code::StatusCode;
     use common_meta::test_util::MockDatanodeManager;
     use common_procedure::{
-        Context as ProcedureContext, ContextProvider, Error as ProcedureError, ProcedureId,
-        ProcedureState,
+        Context as ProcedureContext, ContextProvider, ProcedureId, ProcedureState,
     };
     use common_procedure_test::MockContextProvider;
+    use store_api::storage::RegionId;
     use tokio::sync::watch;
 
     use super::*;
@@ -204,6 +250,7 @@ mod tests {
             inflight_procedures: vec![],
             succeeded_procedures: vec![],
             failed_procedures: vec![],
+            failed_procedure_errors: vec![],
             unknown_procedures: vec![ProcedureMeta {
                 plan_index: 0,
                 group_id: uuid::Uuid::new_v4(),
@@ -234,12 +281,22 @@ mod tests {
             env.server_addr.clone(),
             persistent_ctx,
         );
+        // The group fails the way a refused merge does: the child error names the region that
+        // holds a file it did not create, and the file. The parent error has to keep both, so
+        // the fixture fixes them here and the assertions below look for these very values.
+        let refused_region = RegionId::new(1024, 1);
+        let refused_file = "018f3b1e-0000-7000-8000-0000000000aa";
+        let child_error = common_procedure::error::UnexpectedSnafu {
+            err_msg: format!(
+                "region {refused_region} holds file {refused_file} which another region created; \
+                 compact it and retry"
+            ),
+        }
+        .build();
         let procedure_id = common_procedure::ProcedureId::random();
         let (tx, rx) = watch::channel(ProcedureState::Running);
-        tx.send(ProcedureState::failed(Arc::new(ProcedureError::external(
-            MockError::new(StatusCode::Internal),
-        ))))
-        .unwrap();
+        tx.send(ProcedureState::failed(Arc::new(child_error)))
+            .unwrap();
         let procedure_ctx = ProcedureContext {
             procedure_id: ProcedureId::random(),
             provider: Arc::new(FailedProcedureContextProvider {
@@ -256,6 +313,7 @@ mod tests {
             }],
             succeeded_procedures: vec![],
             failed_procedures: vec![],
+            failed_procedure_errors: vec![],
             unknown_procedures: vec![],
         };
 
@@ -264,5 +322,22 @@ mod tests {
         assert_eq!(state.failed_procedures.len(), 1);
         assert_eq!(state.unknown_procedures.len(), 0);
         assert!(!err.is_retryable());
+        // The reason the group failed is kept, not only the count: `watcher::wait` wraps the
+        // child failure in "Failed to execute procedure", and formatting that wrapper alone
+        // would drop the region and the file.
+        assert_eq!(state.failed_procedure_errors.len(), 1);
+        let message = err.to_string();
+        assert!(
+            message.contains(&refused_region.to_string()),
+            "the parent error must name the offending region: {message}"
+        );
+        assert!(
+            message.contains(refused_file),
+            "the parent error must name the offending file: {message}"
+        );
+        assert!(
+            message.contains(&state.failed_procedure_errors[0]),
+            "{message}"
+        );
     }
 }

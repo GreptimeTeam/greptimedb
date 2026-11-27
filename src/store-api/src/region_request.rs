@@ -2043,6 +2043,8 @@ pub struct RegionCatchupRequest {
     pub metadata_entry_id: Option<entry::Id>,
     /// Replay checkpoint.
     pub checkpoint: Option<ReplayCheckpoint>,
+    /// Id of the datanode that led the region before and reported `entry_id`.
+    pub source_node_id: Option<u64>,
 }
 
 #[derive(Debug, Clone)]

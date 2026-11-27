@@ -30,7 +30,9 @@ use arrow::compute::{cast, take};
 use arrow::datatypes::{DataType, SchemaRef};
 use arrow::downcast_dictionary_array;
 use arrow::record_batch::RecordBatch;
-use common_datasource::object_store::{LocalFileAccess, build_backend_for_write};
+use common_datasource::object_store::{
+    LocalFileAccess, RemoteStorageAccess, build_backend_for_write,
+};
 use common_datasource::packed_writer::{PackedTableWriter, PackedWriterRef};
 use common_datasource::parquet_writer::{
     ParquetCreationPolicy, ParquetFileWriter, ParquetWriterLimits,
@@ -357,7 +359,7 @@ impl StatementExecutor {
             _ = cancellation.cancelled() => return error::LogicalTableExportCancelledSnafu.fail(),
             result = async {
                 unit.validate_table_routes(self.table_metadata_manager.table_route_manager()).await?;
-                let destination = LogicalExportDestination::new(directory, connection, &self.local_file_access, packed).await?;
+                let destination = LogicalExportDestination::new(directory, connection, &self.local_file_access, &self.remote_storage_access, packed).await?;
                 let output = self.query_engine.execute(unit.build_plan(time_range)?, query_ctx)
                     .await.context(error::ExecLogicalPlanSnafu)?;
                 let stream = match output.data {
@@ -383,6 +385,7 @@ impl LogicalExportDestination {
         directory: &str,
         connection: &HashMap<String, String>,
         local_file_access: &LocalFileAccess,
+        remote_storage_access: &RemoteStorageAccess,
         packed: Option<PackedWriterRef>,
     ) -> Result<Self> {
         if let Some(packed) = packed {
@@ -392,6 +395,7 @@ impl LogicalExportDestination {
             &format!("{}/", directory.trim_end_matches('/')),
             connection,
             local_file_access,
+            remote_storage_access,
         )
         .await
         .context(error::BuildBackendSnafu)?;

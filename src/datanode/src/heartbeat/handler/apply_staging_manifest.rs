@@ -246,6 +246,7 @@ mod tests {
             .handle(
                 &handler_context,
                 RemapManifest {
+                    validate_only: false,
                     region_id,
                     input_regions: vec![region_id, region_id2],
                     region_mapping: HashMap::from([

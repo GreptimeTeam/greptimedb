@@ -24,6 +24,7 @@ use common_telemetry::{info, warn};
 use itertools::Itertools;
 use object_store::ObjectStore;
 use snafu::ensure;
+use store_api::storage::{FileId, RegionId};
 use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedReceiver};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -36,7 +37,8 @@ use crate::metrics::{
 use crate::read::series_candidate::is_sparse_metric_metadata;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionMapRef, RegionRoleState};
 use crate::request::{
-    BackgroundNotify, RegionEditResult, Waiters, WorkerRequest, WorkerRequestWithTime,
+    BackgroundNotify, RegionEditOutcome, RegionEditResult, Waiters, WorkerRequest,
+    WorkerRequestWithTime,
 };
 
 use crate::series_index::maintenance::{ReconcileStats, reconcile_series_indexes_with_mode};
@@ -154,6 +156,7 @@ pub(crate) fn spawn_series_index_tasks(
             disk_usage,
             max_size,
             reported_usage: 0,
+            failed_merge: HashMap::new(),
             state,
             receiver,
             interval,
@@ -176,12 +179,90 @@ struct SeriesIndexTask {
     disk_usage: Arc<AtomicU64>,
     max_size: u64,
     reported_usage: u64,
+    /// Resume after a failed merge write on the next pass. Holds no reader pins.
+    failed_merge: HashMap<RegionId, MergeRank>,
     worker_id: u32,
     state: Arc<SeriesIndexTaskState>,
     receiver: Receiver<SeriesIndexCommand>,
     interval: Duration,
     time_provider: TimeProviderRef,
     enable_range_index: bool,
+}
+
+const MERGE_FAN_IN: usize = 4;
+
+/// Default selection order across sequence-adjacent groups.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct MergeRank {
+    total_bytes: u128,
+    window_start: i64,
+    file_ids: [FileId; MERGE_FAN_IN],
+}
+
+struct IndexMerge {
+    rank: MergeRank,
+    inputs: [FileHandle; MERGE_FAN_IN],
+    window: WindowSequence,
+    expected_watermark: u64,
+}
+
+/// Select the cheapest balanced run across all persisted windows.
+fn pick_index_merge<'a>(
+    files: impl Iterator<Item = &'a FileHandle>,
+    after: Option<MergeRank>,
+) -> Option<IndexMerge> {
+    // A permanently unreadable group must not monopolize every pass. Visit
+    // later eligible groups first, then wrap around so repaired inputs retry.
+    let priority = |rank: MergeRank| (after.is_some_and(|last| rank <= last), rank);
+    let mut windows = HashMap::new();
+    for file in files {
+        if let Some(window) = file.meta_ref().series_window() {
+            windows
+                .entry((window.start, window.end))
+                .or_insert_with(Vec::new)
+                .push((file, window.max_sequence));
+        }
+    }
+    let mut best: Option<IndexMerge> = None;
+    for ((start, end), mut files) in windows {
+        let expected_watermark = files.iter().map(|(_, seq)| *seq).max().unwrap_or_default();
+        files.sort_unstable_by_key(|(f, seq)| (*seq, f.meta_ref().file_id));
+        for group in files.windows(MERGE_FAN_IN) {
+            let total = group
+                .iter()
+                .map(|(f, _)| u128::from(f.meta_ref().file_size))
+                .sum();
+            let largest = group
+                .iter()
+                .map(|(f, _)| f.meta_ref().file_size)
+                .max()
+                .unwrap_or_default();
+            if !crate::compaction::bytes_balanced(largest.into(), total) {
+                continue;
+            }
+            let rank = MergeRank {
+                total_bytes: total,
+                window_start: start,
+                file_ids: std::array::from_fn(|i| group[i].0.meta_ref().file_id),
+            };
+            if best
+                .as_ref()
+                .is_none_or(|previous| priority(rank) < priority(previous.rank))
+            {
+                best = Some(IndexMerge {
+                    rank,
+                    inputs: std::array::from_fn(|i| group[i].0.clone()),
+                    window: WindowSequence {
+                        start,
+                        end,
+                        max_sequence: group[MERGE_FAN_IN - 1].1,
+                    },
+                    expected_watermark,
+                });
+            }
+        }
+    }
+    best
 }
 
 impl SeriesIndexTask {
@@ -256,12 +337,12 @@ impl SeriesIndexTask {
         result
     }
 
-    async fn reconcile_region(&self, region: MitoRegionRef) -> Result<ReconcileStats> {
+    async fn reconcile_region(&mut self, region: MitoRegionRef) -> Result<ReconcileStats> {
         self.reconcile_region_with_mode(region, false).await
     }
 
     async fn reconcile_region_with_mode(
-        &self,
+        &mut self,
         region: MitoRegionRef,
         manual: bool,
     ) -> Result<ReconcileStats> {
@@ -297,8 +378,55 @@ impl SeriesIndexTask {
     }
 
     async fn reconcile_native(
-        &self,
+        &mut self,
         region: MitoRegionRef,
+        manual: bool,
+    ) -> Result<ReconcileStats> {
+        let mut stats = self.build_and_expire_native(&region, manual).await?;
+        let version = region.version();
+        if !version.pending_tails.is_empty() || !self.state.is_running() {
+            return Ok(stats);
+        }
+        let after = self.failed_merge.remove(&region.region_id);
+        if let Some(IndexMerge {
+            rank,
+            inputs,
+            window,
+            expected_watermark,
+        }) = pick_index_merge(version.ssts.series_indexes().values(), after)
+        {
+            let truncated = version.truncated_entry_id;
+            let metadata = version.metadata.clone();
+            drop(version);
+            let output =
+                crate::sst::narthex::write_series(&region.access_layer, metadata, &inputs, window)
+                    .await
+                    .inspect_err(|_| {
+                        self.failed_merge.insert(region.region_id, rank);
+                    })?;
+            let handle = FileHandle::new(output.clone(), region.file_purger.clone());
+            let edit = crate::manifest::action::RegionEdit {
+                series_indexes_to_add: vec![output],
+                series_indexes_to_remove: inputs.iter().map(FileHandle::file_id).collect(),
+                ..Default::default()
+            };
+            self.publish_native(
+                &region,
+                edit,
+                &[handle],
+                truncated,
+                &HashMap::from([(window.start, expected_watermark)]),
+            )
+            .await?;
+            stats.built_series += 1;
+            stats.removed_series += inputs.len();
+        }
+        Ok(stats)
+    }
+
+    async fn build_and_expire_native(
+        &self,
+        region: &MitoRegionRef,
         manual: bool,
     ) -> Result<ReconcileStats> {
         let mut stats = ReconcileStats::default();
@@ -381,11 +509,6 @@ impl SeriesIndexTask {
                 edit.series_indexes_to_remove.push(file.file_id());
             }
         }
-        let worker = self
-            .state
-            .worker
-            .as_ref()
-            .ok_or_else(|| WorkerStoppedSnafu { id: self.worker_id }.build())?;
         let mut handles: Vec<FileHandle> = Vec::new();
         // Merge the ordered window starts lazily. One wide SST can span many windows,
         // and a periodic pass only needs the first buildable one.
@@ -449,25 +572,42 @@ impl SeriesIndexTask {
         }
         stats.built_series = handles.len();
         stats.removed_series = edit.series_indexes_to_remove.len();
-        if stats.built_series + stats.removed_series == 0 {
-            return Ok(stats);
+        if stats.built_series + stats.removed_series > 0 {
+            self.publish_native(region, edit, &handles, truncated_entry_id, &watermarks)
+                .await?;
         }
-        if !self.state.is_running() {
-            for handle in &handles {
+        Ok(stats)
+    }
+
+    async fn publish_native(
+        &self,
+        region: &MitoRegionRef,
+        edit: crate::manifest::action::RegionEdit,
+        handles: &[FileHandle],
+        truncated_entry_id: Option<crate::wal::EntryId>,
+        watermarks: &HashMap<i64, u64>,
+    ) -> Result<()> {
+        let Some(worker) = self
+            .state
+            .worker
+            .as_ref()
+            .filter(|_| self.state.is_running())
+        else {
+            for handle in handles {
                 handle.mark_deleted();
             }
             return WorkerStoppedSnafu { id: self.worker_id }.fail();
-        }
+        };
         let (tx, rx) = oneshot::channel();
         let result = region
             .manifest_ctx
-            .publish_series_indexes(&edit, truncated_entry_id, &watermarks)
+            .publish_series_indexes(&edit, truncated_entry_id, watermarks)
             .await;
         if let Err(error) = &result
             && (matches!(error, crate::error::Error::RegionBusy { .. })
                 || !error.may_have_persisted_manifest_update())
         {
-            for handle in &handles {
+            for handle in handles {
                 handle.mark_deleted();
             }
         }
@@ -477,7 +617,9 @@ impl SeriesIndexTask {
                 region_id: region.region_id,
                 origin: region.clone(),
                 edit,
-                result: result.map_err(Arc::new),
+                result: result
+                    .map(|()| RegionEditOutcome::Written)
+                    .map_err(Arc::new),
                 waiters: Waiters::one(tx),
                 is_staging: false,
                 update_region_state: false,
@@ -489,7 +631,7 @@ impl SeriesIndexTask {
             .map_err(|_| WorkerStoppedSnafu { id: self.worker_id }.build())?;
         rx.await
             .map_err(|_| WorkerStoppedSnafu { id: self.worker_id }.build())??;
-        Ok(stats)
+        Ok(())
     }
 
     /// Each worker contributes only its open regions, refreshed at maintenance boundaries.
@@ -518,6 +660,8 @@ impl SeriesIndexTask {
 
     /// Runs periodic maintenance independently of incoming deletion requests.
     async fn maintain(&mut self) {
+        self.failed_merge
+            .retain(|id, _| self.regions.get_region(*id).is_some());
         self.refresh_usage();
         for region in self.regions.list_regions() {
             if !self.state.is_running() {
@@ -612,6 +756,7 @@ mod tests {
                 disk_usage: Arc::default(),
                 max_size: u64::MAX,
                 reported_usage: 0,
+                failed_merge: HashMap::new(),
                 worker_id: 0,
                 state: Arc::new(state),
                 receiver,
@@ -816,6 +961,198 @@ mod tests {
             );
         }
         engine.stop().await.unwrap();
+    }
+
+    #[derive(Clone, Copy)]
+    enum BrokenIndex {
+        MissingPart,
+        TruncatedPart,
+        IncompatibleSchema,
+    }
+
+    #[rstest::rstest]
+    #[case::missing_part(BrokenIndex::MissingPart)]
+    #[case::truncated_part(BrokenIndex::TruncatedPart)]
+    #[case::incompatible_schema(BrokenIndex::IncompatibleSchema)]
+    #[tokio::test]
+    async fn test_unreadable_merge_does_not_starve_another_window(#[case] broken: BrokenIndex) {
+        let mut env = TestEnv::new().await;
+        let engine = env
+            .create_engine(MitoConfig {
+                experimental_enable_series_index: true,
+                experimental_series_index_min_files: 1,
+                experimental_series_index_bucket_width: Duration::from_secs(10),
+                ..Default::default()
+            })
+            .await;
+        let id = RegionId::new(1, 0);
+        engine
+            .handle_request(
+                id,
+                RegionRequest::Create(sparse_metric_create_request("narthex")),
+            )
+            .await
+            .unwrap();
+        let region = engine.get_region(id).unwrap();
+        let _pause = engine.pause_compaction(id).await.unwrap();
+        let metadata = region.metadata();
+        let short = new_sparse_primary_key(&["a"], &metadata, 42, 1);
+        let long = new_sparse_primary_key(&[&"b".repeat(256)], &metadata, 42, 2);
+        let flush_windows = async |offset: i64| {
+            for (ts, key) in [
+                (1_000 + offset, short.clone()),
+                (11_000 + offset, long.clone()),
+            ] {
+                engine
+                    .handle_request(id, sparse_metric_put(key, ts, Some(1.0)))
+                    .await
+                    .unwrap();
+                flush_region(&engine, id, None).await;
+            }
+        };
+        let reconcile = async || {
+            engine
+                .handle_request(id, build_series_index_request())
+                .await
+        };
+        for offset in 0..3 {
+            flush_windows(offset).await;
+            reconcile().await.unwrap();
+        }
+        let version = region.version();
+        let cheapest = version
+            .ssts
+            .series_indexes()
+            .values()
+            .min_by_key(|f| {
+                (
+                    f.meta_ref().file_size,
+                    f.meta_ref().series_window().unwrap().start,
+                )
+            })
+            .unwrap();
+        let broken_window = cheapest.meta_ref().series_window().unwrap().start;
+        let suffix = match broken {
+            BrokenIndex::IncompatibleSchema => "manifest.json",
+            BrokenIndex::MissingPart | BrokenIndex::TruncatedPart => ".series",
+        };
+        let path = cheapest
+            .meta_ref()
+            .narthex_objects(&region.access_layer.build_region_dir(id))
+            .unwrap()
+            .into_iter()
+            .find(|o| o.path.ends_with(suffix))
+            .unwrap()
+            .path;
+        let store = region.access_layer.object_store();
+        let saved = store.read(&path).await.unwrap().to_bytes();
+        match broken {
+            BrokenIndex::MissingPart => store.delete(&path).await.unwrap(),
+            BrokenIndex::TruncatedPart => {
+                store.write(&path, saved.slice(..1)).await.unwrap();
+            }
+            BrokenIndex::IncompatibleSchema => {
+                let mut manifest: crate::series_index::columnar::Manifest =
+                    serde_json::from_slice(&saved).unwrap();
+                manifest.tags[0].column_id = 9;
+                assert!(metadata.column_by_id(9).is_none());
+                let incompatible = serde_json::to_vec(&manifest).unwrap();
+                assert_eq!(saved.len(), incompatible.len());
+                store.write(&path, incompatible).await.unwrap();
+            }
+        }
+        drop(version);
+        flush_windows(3).await;
+        let error = reconcile().await.unwrap_err();
+        if matches!(broken, BrokenIndex::IncompatibleSchema) {
+            assert!(
+                format!("{error:?}").contains("series tag absent from scan schema"),
+                "{error:?}"
+            );
+        }
+        assert_eq!(region.version().ssts.series_indexes().len(), 8);
+        reconcile().await.unwrap();
+        let version = region.version();
+        assert_eq!(version.ssts.series_indexes().len(), 5);
+        assert_eq!(
+            version
+                .ssts
+                .series_indexes()
+                .values()
+                .filter(|f| f.meta_ref().series_window().unwrap().start == broken_window)
+                .count(),
+            4
+        );
+        store.write(&path, saved).await.unwrap();
+        reconcile().await.unwrap();
+        assert_eq!(region.version().ssts.series_indexes().len(), 2);
+        engine.stop().await.unwrap();
+    }
+
+    #[test]
+    fn test_pick_index_merge() {
+        use crate::sst::file::{FileFormat, FileMeta, NarthexSeriesIndexMeta};
+        use store_api::storage::FileId;
+
+        let file = |id, mib, start| {
+            FileHandle::new(
+                FileMeta {
+                    file_id: FileId::from_bytes([id; 16]),
+                    file_size: mib * (1u64 << 20),
+                    format: FileFormat::NarthexSeriesIndex(Box::new(NarthexSeriesIndexMeta {
+                        manifest_size: 0,
+                        parts: Default::default(),
+                        window: WindowSequence {
+                            start,
+                            end: start + 10,
+                            max_sequence: u64::from(id) * 10,
+                        },
+                    })),
+                    ..Default::default()
+                },
+                crate::test_util::new_noop_file_purger(),
+            )
+        };
+        // The 100 MiB file lies between the small files in watermark order.
+        let separated = [
+            file(1, 1, 0),
+            file(2, 100, 0),
+            file(3, 1, 0),
+            file(4, 1, 0),
+            file(5, 1, 0),
+        ];
+        assert!(pick_index_merge(separated.iter(), None).is_none());
+        let mut files = vec![
+            file(0, 100, 0),
+            file(1, 1, 0),
+            file(2, 1, 0),
+            file(3, 1, 0),
+            file(5, 1, 10),
+        ];
+        assert!(pick_index_merge(files.iter(), None).is_none());
+        files.push(file(4, 1, 0));
+        let picked = |files: &[FileHandle]| {
+            pick_index_merge(files.iter(), None)
+                .unwrap()
+                .inputs
+                .map(|f| f.meta_ref().file_id.as_bytes()[0])
+        };
+        assert_eq!(picked(&files), [1, 2, 3, 4]);
+        files.extend([
+            file(6, 1, 10),
+            file(7, 1, 10),
+            file(8, 1, 10),
+            file(9, 1, 0),
+        ]);
+        files.reverse();
+        assert_eq!(picked(&files), [1, 2, 3, 4]);
+        files.extend([
+            file(10, 0, 20),
+            file(11, 0, 20),
+            file(12, 0, 20),
+            file(13, 0, 20),
+        ]);
+        assert_eq!(picked(&files), [10, 11, 12, 13]);
     }
 
     #[test]
@@ -1131,6 +1468,7 @@ mod tests {
             disk_usage: Arc::default(),
             max_size: u64::MAX,
             reported_usage: 0,
+            failed_merge: HashMap::new(),
             worker_id: 0,
             state: Arc::new(state),
             receiver,
@@ -1217,6 +1555,7 @@ mod tests {
             disk_usage: usage.clone(),
             max_size: u64::MAX,
             reported_usage: 0,
+            failed_merge: HashMap::new(),
             worker_id: 0,
             state: Arc::new(state),
             receiver: command_receiver,
@@ -1356,6 +1695,7 @@ mod tests {
                 disk_usage: usage.clone(),
                 max_size: 1024,
                 reported_usage: 0,
+                failed_merge: HashMap::new(),
                 worker_id: 0,
                 state: Arc::new(state),
                 receiver: command_receiver,

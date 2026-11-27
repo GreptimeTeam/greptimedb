@@ -34,7 +34,7 @@ use crate::request::{BackgroundNotify, BuildIndexRequest, OptionOutputTx, Worker
 use crate::schedule::CancellableTaskState;
 use crate::sst::index::IndexBuildType;
 use crate::tail_replay::{
-    TailReplayTask, notify_worker, release_wal_after_tails_edit, should_replay_tails,
+    TailReplayTask, notify_worker, release_wal_to_replay_start, should_replay_tails,
 };
 use crate::worker::RegionWorkerLoop;
 use crate::worker::handle_reload::notify_if_fenced;
@@ -159,7 +159,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         sender,
                     };
                     notify_worker(&request_sender, region_id, notify).await;
-                    release_wal_after_tails_edit(&region, &wal, local_node_id).await;
+                    release_wal_to_replay_start(&region, &wal, local_node_id).await;
                     listener.on_discarded_tails_wal_released(region_id);
                 }
                 Ok(TailPublication::Busy) => {

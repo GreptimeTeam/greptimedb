@@ -15,11 +15,13 @@
 use std::collections::HashMap;
 
 use object_store::ObjectStore;
+use object_store::remote_access::RemoteStorageAccess;
 use object_store::services::Oss;
-use object_store::util::{with_instrument_layers, with_retry_layers};
-use snafu::ResultExt;
 
 use crate::error::{self, Result};
+use crate::object_store::{
+    connection_value, ensure_server_credentials_allowed, finish_remote_backend,
+};
 
 const BUCKET: &str = "bucket";
 const ENDPOINT: &str = "endpoint";
@@ -48,6 +50,7 @@ pub fn build_oss_backend(
     bucket: &str,
     root: &str,
     connection: &HashMap<String, String>,
+    remote_storage_access: &RemoteStorageAccess,
 ) -> Result<ObjectStore> {
     let mut builder = Oss::default().bucket(bucket).root(root);
 
@@ -55,14 +58,7 @@ pub fn build_oss_backend(
         builder = builder.endpoint(endpoint);
     }
 
-    if let Some(access_key_id) = connection.get(ACCESS_KEY_ID) {
-        builder = builder.access_key_id(access_key_id);
-    }
-
-    if let Some(access_key_secret) = connection.get(ACCESS_KEY_SECRET) {
-        builder = builder.access_key_secret(access_key_secret);
-    }
-
+    let mut skip_signature = false;
     if let Some((key, value)) = connection
         .get(SKIP_SIGNATURE)
         .map(|value| (SKIP_SIGNATURE, value))
@@ -72,7 +68,7 @@ pub fn build_oss_backend(
                 .map(|value| (ALLOW_ANONYMOUS, value))
         })
     {
-        let skip_signature = value.as_str().parse::<bool>().map_err(|e| {
+        skip_signature = value.as_str().parse::<bool>().map_err(|e| {
             error::InvalidConnectionSnafu {
                 msg: format!("failed to parse the option {}={}, {}", key, value, e),
             }
@@ -83,11 +79,27 @@ pub fn build_oss_backend(
         }
     }
 
-    let object_store = ObjectStore::new(builder).context(error::BuildBackendSnafu)?;
-    Ok(with_instrument_layers(
-        with_retry_layers(object_store),
-        true,
-    ))
+    if !skip_signature {
+        match (
+            connection_value(connection, ACCESS_KEY_ID),
+            connection_value(connection, ACCESS_KEY_SECRET),
+        ) {
+            (Some(access_key_id), Some(access_key_secret)) => {
+                builder = builder
+                    .access_key_id(access_key_id)
+                    .access_key_secret(access_key_secret);
+            }
+            (None, None) => ensure_server_credentials_allowed(remote_storage_access, "OSS")?,
+            _ => {
+                return error::InvalidConnectionSnafu {
+                    msg: format!("{ACCESS_KEY_ID} and {ACCESS_KEY_SECRET} must be set together"),
+                }
+                .fail();
+            }
+        }
+    }
+
+    finish_remote_backend(builder, remote_storage_access)
 }
 
 #[cfg(test)]
@@ -118,7 +130,12 @@ mod tests {
         connection.insert(ACCESS_KEY_SECRET.to_string(), "key_secret".to_string());
         connection.insert(ALLOW_ANONYMOUS.to_string(), "true".to_string());
 
-        let result = build_oss_backend("my-bucket", "my-root", &connection);
+        let result = build_oss_backend(
+            "my-bucket",
+            "my-root",
+            &connection,
+            &RemoteStorageAccess::unrestricted(),
+        );
         assert!(result.is_ok());
     }
 }

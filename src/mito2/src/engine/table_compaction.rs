@@ -17,7 +17,7 @@ mod tests;
 
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
-use store_api::metadata::RegionMetadataRef;
+use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::RegionId;
 use tokio::sync::oneshot;
 
@@ -50,9 +50,23 @@ pub(crate) struct PublicationContext {
 /// A result for this publication attempt, not a durable task receipt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PublicationOutcome {
+    /// This attempt installed the replacement, or its nonempty outputs are still fully visible
+    /// with all of its inputs absent.
     Applied,
-    /// The captured inputs/schema/options no longer match. Re-snapshot and replan.
+    /// The schema or file set no longer matches this publication. Re-snapshot and replan.
     StaleInputs,
+}
+
+/// Returns whether both snapshots describe the same table-compaction target range.
+/// ALTER may change the schema while compaction runs. Publication verifies the
+/// output footer against the captured schema and checks the input files separately.
+pub fn is_table_compaction_metadata_compatible(
+    captured: &RegionMetadata,
+    current: &RegionMetadata,
+) -> bool {
+    captured.region_id == current.region_id
+        && captured.partition_expr_version == current.partition_expr_version
+        && captured.partition_expr == current.partition_expr
 }
 
 impl MitoEngine {
@@ -99,8 +113,6 @@ impl MitoEngine {
                 reason: "Publication requires this region's nonempty input snapshot"
             }
         );
-        // The public snapshot keeps JSON options; parse them once here so the
-        // worker compares typed options and reads typed flags without reparsing.
         let options = serde_json::from_value(snapshot.options).context(SerdeJsonSnafu)?;
         let edit = RegionEdit {
             files_to_remove: snapshot.inputs,

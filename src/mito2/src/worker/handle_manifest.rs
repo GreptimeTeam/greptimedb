@@ -16,7 +16,7 @@
 //!
 //! It updates the manifest and applies the changes to the region in background.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::num::NonZeroU64;
 use std::sync::Arc;
 
@@ -46,8 +46,8 @@ use crate::region::version::VersionControlRef;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::request::{
     BackgroundNotify, BuildIndexRequest, DdlRequest, DiscardUnflushedResult, OptionOutputTx,
-    RegionChangeResult, RegionEditKind, RegionEditRequest, RegionEditResult, RegionSyncRequest,
-    SenderDdlRequest, TruncateResult, WorkerRequest, WorkerRequestWithTime,
+    RegionChangeResult, RegionEditKind, RegionEditOutcome, RegionEditRequest, RegionEditResult,
+    RegionSyncRequest, SenderDdlRequest, TruncateResult, WorkerRequest, WorkerRequestWithTime,
 };
 use crate::sst::index::IndexBuildType;
 use crate::sst::{file, location};
@@ -245,6 +245,22 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) async fn handle_region_sync(&mut self, request: RegionSyncRequest) {
         let region_id = request.region_id;
         let sender = request.sender;
+        // A catchup replays the WAL into the memtable outside the worker, which the empty memtable
+        // a sync installs would drop, and a handover commits after the manifest it read before it
+        // handed the WAL over. A fenced region is refused while the worker holds a catchup or
+        // reload registration for it, as an option change is (see `is_catching_up_or_reloading`).
+        // Checked before the role: a catchup promotes the region as it clears its flag, and only
+        // the worker begins a catchup, so a region not catching up here is not promoted by a
+        // catchup before the role check. A fence marks the region before it makes it a Follower,
+        // so a sync that reads the fenced region as a Follower sees the mark in the check after
+        // the role; one that still reads it as a Leader gets the error a sync of any leader gets.
+        if let Some(region) = self.regions.get_region(region_id)
+            && self.is_catching_up_or_reloading(&region)
+        {
+            warn!("Region {region_id} is in a catchup or reload, refusing to sync its manifest");
+            let _ = sender.send(Err(RegionBusySnafu { region_id }.build()));
+            return;
+        }
         let region = match self.regions.follower_region(region_id) {
             Ok(region) => region,
             Err(e) => {
@@ -254,8 +270,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         };
         // A region that awaits its Leader lease keeps its memtable for that lease or for a
         // catchup again.
-        if region.manifest_ctx.awaits_leader_lease() {
-            warn!("Region {region_id} awaits its Leader lease, refusing to sync its manifest");
+        if region.manifest_ctx.awaits_leader_lease() || self.is_catching_up_or_reloading(&region) {
+            warn!(
+                "Region {region_id} awaits its Leader lease or is in a catchup or reload, refusing to sync its manifest"
+            );
             let _ = sender.send(Err(RegionBusySnafu { region_id }.build()));
             return;
         }
@@ -465,49 +483,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Updates manifest in background.
         common_runtime::spawn_global(async move {
             let result = match kind {
-                RegionEditKind::Import => {
-                    // Removing one contributor invalidates the collective watermark.
-                    // Editing excludes new native publications while the import is committed.
-                    if !edit.series_indexes_to_remove.is_empty() {
-                        let manifest = region.manifest_ctx.manifest().await;
-                        let windows: std::collections::HashSet<_> = edit
-                            .series_indexes_to_remove
-                            .iter()
-                            .filter_map(|id| {
-                                manifest
-                                    .series_indexes
-                                    .get(&id.file_id())
-                                    .filter(|f| f.file_id() == *id)?
-                                    .series_window()
-                                    .map(|w| w.start)
-                            })
-                            .collect();
-                        if !windows.is_empty() {
-                            edit.series_indexes_to_remove.extend(
-                                manifest
-                                    .series_indexes
-                                    .values()
-                                    .filter(|f| {
-                                        f.series_window()
-                                            .is_some_and(|w| windows.contains(&w.start))
-                                    })
-                                    .map(|f| f.file_id()),
-                            );
-                            edit.series_indexes_to_remove
-                                .sort_unstable_by_key(|id| id.file_id());
-                            edit.series_indexes_to_remove.dedup();
-                        }
-                    }
-                    edit_region(
-                        &region,
-                        edit.clone(),
-                        cache_manager,
-                        listener,
-                        is_staging,
-                        preload_sst_cache,
-                    )
-                    .await
-                }
+                RegionEditKind::Import => edit_region(
+                    &region,
+                    &mut edit,
+                    cache_manager,
+                    listener,
+                    is_staging,
+                    preload_sst_cache,
+                )
+                .await
+                .map(|()| RegionEditOutcome::Written),
                 #[cfg(feature = "enterprise")]
                 RegionEditKind::Compaction(context) => {
                     crate::worker::handle_table_compaction::publish(&region, &context, edit.clone())
@@ -605,16 +590,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
             false
         } else {
+            let written = matches!(edit_result.result, Ok(RegionEditOutcome::Written));
             let need_compaction = self.config.schedule_compaction_after_edit
-                && edit_result.result.is_ok()
+                && written
                 && edit_result
                     .edit
                     .files_to_add
                     .iter()
                     .any(|file| file.level < file::LEVEL_SHARED);
 
-            // Only apply the edit if the result is ok and region is not in staging state.
-            if edit_result.result.is_ok() {
+            if written {
                 let mut edit = edit_result.edit;
                 // A background publication can be superseded before its notification arrives.
                 let guard = if !edit_result.update_region_state {
@@ -649,7 +634,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         edit_result
             .waiters
             .reply_with(|| match &edit_result.result {
-                Ok(()) => Ok(()),
+                Ok(_) => Ok(()),
                 Err(e) => Err(e.clone()).context(EditRegionSnafu {
                     region_id: edit_result.region_id,
                 }),
@@ -1123,13 +1108,42 @@ fn prepare_region_edit(region: &MitoRegionRef, edit: &mut RegionEdit) -> Result<
 /// Checks the edit, writes and applies it.
 async fn edit_region(
     region: &MitoRegionRef,
-    edit: RegionEdit,
+    edit: &mut RegionEdit,
     cache_manager: CacheManagerRef,
     listener: WorkerListener,
     is_staging: bool,
     preload_sst_cache: bool,
 ) -> Result<()> {
     let region_id = region.region_id;
+    // Editing fences new native publications. Read the manifest after taking
+    // that fence so a retired input cannot silently acknowledge invalidation.
+    if !edit.series_indexes_to_remove.is_empty() {
+        let manifest = region.manifest_ctx.manifest().await;
+        let mut windows = HashSet::new();
+        for id in &edit.series_indexes_to_remove {
+            let file = manifest
+                .series_indexes
+                .get(&id.file_id())
+                .filter(|file| file.file_id() == *id)
+                .context(RegionBusySnafu { region_id })?;
+            if let Some(window) = file.series_window() {
+                windows.insert(window.start);
+            }
+        }
+        edit.series_indexes_to_remove.extend(
+            manifest
+                .series_indexes
+                .values()
+                .filter(|file| {
+                    file.series_window()
+                        .is_some_and(|w| windows.contains(&w.start))
+                })
+                .map(|file| file.file_id()),
+        );
+        edit.series_indexes_to_remove
+            .sort_unstable_by_key(|id| id.file_id());
+        edit.series_indexes_to_remove.dedup();
+    }
     let narthex_format =
         region.version().options.sst_format == Some(crate::sst::FormatType::Narthex);
     if narthex_format {
@@ -1221,7 +1235,7 @@ async fn edit_region(
         region_id, is_staging
     );
 
-    let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
+    let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
     let result = region
         .manifest_ctx
         .update_manifest(RegionLeaderState::Editing, action_list, is_staging)
@@ -1319,7 +1333,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let edit = if unsupported_level {
+        let mut edit = if unsupported_level {
             RegionEdit {
                 files_to_add: vec![file],
                 ..Default::default()
@@ -1334,7 +1348,7 @@ mod tests {
         // Exercise persistence-side rejection, not the earlier worker admission guard.
         let error = edit_region(
             &region,
-            edit,
+            &mut edit,
             engine.cache_manager(),
             WorkerListener::default(),
             false,

@@ -173,3 +173,8 @@ pub(crate) fn format_panic_reason(payload: &(dyn Any + Send + 'static)) -> Strin
         "unknown panic".to_string()
     }
 }
+
+/// A rewrite is balanced when the peers contribute at least the largest input size.
+pub(crate) fn bytes_balanced(largest: u128, total: u128) -> bool {
+    largest <= total - largest
+}

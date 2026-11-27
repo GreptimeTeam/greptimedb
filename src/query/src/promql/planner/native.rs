@@ -492,10 +492,6 @@ impl PromPlanner {
         // that do not cast, so a float here is only the same answer where the statement's own shape says
         // the existing plan reports `Float64` too; [`read_field_type`] states that per field.
         //
-        // `Float64` fields are answered by the columnar series-index reader when a region prepares one. A
-        // histogram field is not, since the logical plan cannot tell which reader a region will prepare, so
-        // such a selection falls back to the ordinary scan.
-        //
         // A numeric field whose statement publishes the field's own type keeps the existing plan. Naming
         // that refusal here keeps it apart from a selection whose fields genuinely disagree, and it is the
         // refusal a reader can act on: the expression needs an operator that casts - an arithmetic one, a
@@ -2561,19 +2557,15 @@ fn plan_split_aggregate(
             .context(DataFusionPlanningSnafu);
         }
     };
-    // The row layout this split publishes is the statement's, so its value columns carry the kind
-    // the statement's own root answers - a histogram where the operator keeps histograms, the empty
-    // float layout where it pairs none - and what the state says is how many of them there are:
-    // `sum(h)` declares the histogram its state exports, and `avg(h) + 1`, which pairs a histogram
-    // with a float and so answers no sample at all, declares the float layout the existing plan
-    // declares for it. Counting value columns rather than columns of the state's own type is what
-    // keeps the two apart; a count that disagrees with the state is still refused below.
+    // The value columns carry the kind the statement's root answers, which need not be the state's:
+    // `histogram_count` or `histogram_quantile` above the cut turns a merged histogram state into
+    // floats. The layout declares one kind for all of them, so either value type identifies them.
+    let histogram_type = native_histogram_value_type().as_arrow_type();
     let values = value_schema
         .fields()
         .iter()
         .filter(|field| {
-            field.data_type() == &ArrowDataType::Float64
-                || field.data_type() == &native_histogram_value_type().as_arrow_type()
+            field.data_type() == &ArrowDataType::Float64 || field.data_type() == &histogram_type
         })
         .count();
     if values != state_accumulators {

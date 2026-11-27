@@ -72,13 +72,17 @@
 //!   all staged manifest actions (including the SST file additions) into the live manifest.
 //!   The intermediate staging `RegionEdit` is staged in memory and does not
 //!   fire the hook — its file list is included in the promote notification.
-//! ³ Only under conditional manifest publication: the catchup commits an empty `RegionEdit`
-//!   while the region is still a Follower.
+//! ³ Only under conditional manifest publication: the catchup commits a `RegionEdit` while the
+//!   region is still a Follower. The edit is empty for a catchup that is not a handover and for a
+//!   handover of a region that skips the WAL. A handover's edit records only this node's handoff
+//!   floor if the manifest already covers the source's reported entry, and otherwise also the
+//!   region's pending tails with the source's new tail appended, and the raised committed
+//!   sequence.
 //!
 //! The following paths do **not** trigger any hook:
 //! - Follower region sync, and a catchup that does not make the region writable (manifest
 //!   read-only; followers don't author changes). A catchup that makes the region writable
-//!   under conditional manifest publication commits an empty edit and fires
+//!   under conditional manifest publication commits an edit (³) and fires
 //!   `on_manifest_updated` for it.
 //! - GC / checkpoint / remap (internal bookkeeping, not logical state changes)
 //!
@@ -137,8 +141,8 @@
 //! receipt in one go. The role-state backfill and the table-compaction publication
 //! call `update_locked` directly under their own held guard; a replay of pending
 //! tails makes the same write without the Leader lease check, the end of
-//! staging builds its receipt in `commit_staged_locked`, and the empty edit of a
-//! catchup builds its receipt in [`ManifestContext::commit_catchup`].
+//! staging builds its receipt in `commit_staged_locked`, and the edit of a catchup
+//! builds its receipt in [`ManifestContext::commit_catchup_locked`].
 //!
 //! Non-logical writes (GC, staging bookkeeping) call the manager's own methods
 //! directly and intentionally do not fire the hook.
@@ -163,7 +167,7 @@
 //! [`RegionManifestManager::update_with_verification`]: crate::manifest::manager::RegionManifestManager::update_with_verification
 //! [`ManifestContext::update_locked`]: crate::region::ManifestContext::update_locked
 //! [`ManifestContext::update_manifest`]: crate::region::ManifestContext::update_manifest
-//! [`ManifestContext::commit_catchup`]: crate::region::ManifestContext::commit_catchup
+//! [`ManifestContext::commit_catchup_locked`]: crate::region::ManifestContext::commit_catchup_locked
 
 use std::collections::HashSet;
 use std::fmt::Debug;
@@ -358,8 +362,9 @@ pub trait RegionHook: Send + Sync + Debug {
     ///
     /// Fires for: flush, compaction, region edit, copy region, alter, truncate,
     /// async index build, apply-staging promote, and a catchup that makes the
-    /// region writable under conditional manifest publication (an empty
-    /// `RegionEdit`, committed while the region is still a Follower). Does **not**
+    /// region writable under conditional manifest publication (a `RegionEdit`
+    /// committed while the region is still a Follower, whose contents the module
+    /// docs list). Does **not**
     /// fire for actions staged in memory (enter staging, operations during staging,
     /// the intermediate apply-staging edit) — those are suppressed because their
     /// effects are accumulated and delivered in a single promote notification.

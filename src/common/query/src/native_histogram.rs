@@ -597,28 +597,14 @@ impl NativeHistogram {
         }
     }
 
-    fn detect_start_timestamp_reset(
-        &self,
-        previous: &Self,
-        previous_ts: i64,
-        current_ts: i64,
-    ) -> bool {
-        let current_start = self.start_timestamp.unwrap_or_default();
-        if current_start == 0 || current_start >= current_ts || current_start < previous_ts {
-            return false;
-        }
-        if current_start > previous_ts {
-            return true;
-        }
-
-        let previous_start = previous.start_timestamp.unwrap_or_default();
-        previous_start <= previous_ts && previous_start != 0 && previous_start != previous_ts
-    }
-
     /// Detects a counter reset using start timestamps, hints, and payload values.
     pub fn detect_counter_reset(&self, previous: &Self, previous_ts: i64, current_ts: i64) -> bool {
-        self.detect_start_timestamp_reset(previous, previous_ts, current_ts)
-            || self.detect_reset(previous)
+        is_start_timestamp_reset(
+            previous.start_timestamp.unwrap_or_default(),
+            previous_ts,
+            self.start_timestamp.unwrap_or_default(),
+            current_ts,
+        ) || self.detect_reset(previous)
     }
 
     fn all_buckets(&self) -> Option<Vec<Bucket>> {
@@ -830,6 +816,32 @@ impl NativeHistogram {
             _ => None,
         }
     }
+}
+
+/// Whether a pair of start timestamps witnesses a counter reset, as Prometheus
+/// `isStartTimestampReset` decides it. A start timestamp of `0` means none was stated.
+pub fn is_start_timestamp_reset(
+    previous_start: i64,
+    previous_ts: i64,
+    current_start: i64,
+    current_ts: i64,
+) -> bool {
+    // An unchanged start never restarted, even when it is later than the previous sample.
+    if previous_start == current_start
+        || current_start == 0
+        || current_start >= current_ts
+        || current_start < previous_ts
+    {
+        return false;
+    }
+    if current_start > previous_ts {
+        return true;
+    }
+
+    // The current start points at the previous sample: a reset for a delta series, but not for
+    // a cumulative one whose start is unknown, which is what an unset or invalid previous start
+    // (later than its own sample) says.
+    previous_start <= previous_ts && previous_start != 0 && previous_start != previous_ts
 }
 
 fn reconcile_exponential(

@@ -22,8 +22,10 @@ use common_recordbatch::filter::SimpleFilterEvaluator;
 use datatypes::arrow::array::{ArrayRef, StringArray, UInt32Array, UInt64Array};
 use datatypes::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datatypes::arrow::record_batch::{RecordBatch, RecordBatchOptions};
-use datatypes::value::Value;
+use datatypes::value::{Value, ValueRef};
+use futures::TryStreamExt;
 use futures::stream::BoxStream;
+use mito_codec::row_converter::{SparseOffsetsCache, SparsePrimaryKeyCodec};
 use object_store::ObjectStore;
 use snafu::ResultExt;
 
@@ -37,7 +39,7 @@ use crate::series_index::columnar::{
     MANIFEST_LIMIT, Manifest, VERSION, invalid, require, unsupported,
 };
 use crate::series_index::format::{FormatReader, SeriesReadRequest};
-use crate::series_index::identity::IdentityEncoding;
+use crate::series_index::identity::{ExactSeriesKey, IdentityEncoding};
 use crate::series_index::{
     MetricSeriesId, ROW_COUNT_COLUMN, SeriesIndexFileHandle, TABLE_ID_COLUMN, TSID_COLUMN,
 };
@@ -263,6 +265,88 @@ impl FormatReader for ColumnarReader {
                 .project(&projection)
                 .map_err(|e| invalid(format!("series projection: {e}")))?,
         );
+        let request = Arc::new(request);
+        let mut pages = self.leaf_pages(request.clone());
+        let store = self.store.clone();
+        Ok(Box::pin(async_stream::try_stream! {
+            let mut metrics = ColumnarReadMetrics::default();
+            while let Some((path, page)) = pages.try_next().await? {
+                for block in page.blocks()? {
+                    if !matches_range(block.first_id(), block.last_id(), &request)
+                        || !matches_statistics(block, &request.filters)
+                    {
+                        continue;
+                    }
+                    *metrics.counts.entry("series_blocks_read").or_default() += 1;
+                    *metrics.counts.entry("series_rows_examined").or_default() += u64::from(block.rows);
+                    if let Some(mut output) = read_block(&store, &path, block, &request, projected.clone(), &mut metrics).await? {
+                        loop {
+                            let started = Instant::now();
+                            let batch = output.next_batch()?;
+                            metrics.add_elapsed("columnar_series_materialize", started.elapsed());
+                            let Some(batch) = batch else { break; };
+                            *metrics.counts.entry("series_rows_output").or_default() += batch.num_rows() as u64;
+                            yield batch;
+                        }
+                    }
+                }
+            }
+        }))
+    }
+}
+
+impl ColumnarReader {
+    /// Stream every exact sparse key and its stored row count in file order.
+    pub(crate) fn read_full_keys(&self) -> BoxStream<'static, Result<(ExactSeriesKey, u64)>> {
+        let mut pages = self.leaf_pages(Default::default());
+        let store = self.store.clone();
+        let manifest = self.manifest.clone();
+        Box::pin(async_stream::try_stream! {
+            let tag_ids: HashMap<_, _> = manifest.tags.iter()
+                .map(|tag| (tag.name.as_str(), tag.column_id))
+                .collect();
+            let mut metrics = ColumnarReadMetrics::default();
+            let codec = SparsePrimaryKeyCodec::schemaless();
+            let mut offsets = SparseOffsetsCache::new();
+            let mut encoded = Vec::new();
+            while let Some((path, page)) = pages.try_next().await? {
+                for block in page.blocks()? {
+                    let tsids = read_integers(&store, &path, block, TSID_COLUMN, &mut metrics).await?;
+                    let counts = read_integers(&store, &path, block, ROW_COUNT_COLUMN, &mut metrics).await?;
+                    // Block metadata lists only physically present tag chunks.
+                    let mut tags = Vec::new();
+                    for column in &block.columns {
+                        if let Some(&id) = tag_ids.get(column.name.as_str()) {
+                            let decoded = load_column_chunk(&store, &path, column, block, &mut metrics).await?;
+                            let Decoded::Strings(dictionary) = decoded else {
+                                Err(invalid("expected a series tag dictionary"))?
+                            };
+                            tags.push((column.name.as_str(), id, dictionary));
+                        }
+                    }
+                    tags.sort_unstable_by_key(|(name, _, _)| *name);
+                    for (row, (tsid, count)) in tsids.into_iter().zip(counts).enumerate() {
+                        encoded.clear();
+                        codec.encode_internal(block.table_id, tsid, &mut encoded)
+                            .map_err(|error| invalid(error.to_string()))?;
+                        let labels = tags.iter().filter_map(|(_, id, dict)| {
+                            let value = dict.values[dict.codes[row] as usize].as_deref()?;
+                            Some((*id, ValueRef::String(value)))
+                        });
+                        codec.encode_to_vec(labels, &mut encoded)
+                            .map_err(|error| invalid(error.to_string()))?;
+                        yield (ExactSeriesKey::from_sparse_key(&encoded, &mut offsets)?, count);
+                    }
+                }
+            }
+        })
+    }
+
+    /// Traverse pinned, validated metadata pages in SST order for both readers.
+    fn leaf_pages(
+        &self,
+        request: Arc<SeriesReadRequest>,
+    ) -> BoxStream<'static, Result<(Arc<str>, Arc<Page>)>> {
         let cache = self.cache.clone();
         let manifest = self.manifest.clone();
         let store = self.store.clone();
@@ -272,7 +356,7 @@ impl FormatReader for ColumnarReader {
             .map(str::to_owned)
             .chain(manifest.tags.iter().map(|tag| tag.name.clone()))
             .collect();
-        Ok(Box::pin(async_stream::try_stream! {
+        Box::pin(async_stream::try_stream! {
             // Retained across every yield, even after the reader object is dropped.
             let _handle = handle;
             let mut metrics = ColumnarReadMetrics::default();
@@ -280,7 +364,7 @@ impl FormatReader for ColumnarReader {
                 if !matches_range(part.first, part.last, &request) { continue; }
                 *metrics.counts.entry("series_parts").or_default() += 1;
                 let timer = metrics.timer("columnar_series_metadata_wall");
-                let path = manifest.part_path(part.part_id);
+                let path: Arc<str> = manifest.part_path(part.part_id).into();
                 let size = part.file_size;
                 let trailer = metadata_cache::load(cache.as_ref(), format!("{path}/{size}/framing"), |_| std::mem::size_of::<Trailer>(), async {
                 let framing = fetch_byte_ranges(&path, store.clone(), &[0..metadata::HEADER_SIZE, size-metadata::TRAILER_SIZE..size]).await.context(OpenDalSnafu)?;
@@ -313,34 +397,21 @@ impl FormatReader for ColumnarReader {
                         drop(timer);
                         page
                     };
-                    let blocks = match page.as_ref() { Page::Leaf(blocks) => blocks, Page::Internal(_) => Err(unsupported("internal child in depth-two series index"))? };
-                    for block in blocks {
+                    for block in page.blocks()? {
                         *metrics.counts.entry("series_blocks_considered").or_default() += 1;
                         observed_rows = observed_rows.checked_add(u64::from(block.rows)).ok_or_else(|| invalid("series part row count overflow"))?;
                         for column in &block.columns {
                             column.payload.validate(previous_payload_end, trailer.payload_end, false)?;
                             previous_payload_end = column.payload.end()?;
                         }
-                        if !matches_range(block.first_id(), block.last_id(), &request) || !matches_statistics(block, &request.filters) { continue; }
-                        *metrics.counts.entry("series_blocks_read").or_default() += 1;
-                        *metrics.counts.entry("series_rows_examined").or_default() += u64::from(block.rows);
-                        if let Some(mut output) = read_block(&store, &path, block, &request, projected.clone(), &mut metrics).await? {
-                            loop {
-                                let started = Instant::now();
-                                let batch = output.next_batch()?;
-                                metrics.add_elapsed("columnar_series_materialize", started.elapsed());
-                                let Some(batch) = batch else { break; };
-                                *metrics.counts.entry("series_rows_output").or_default() += batch.num_rows() as u64;
-                                yield batch;
-                            }
-                        }
                     }
+                    yield (path.clone(), page);
                 }
                 if request.ids.is_none() && request.table_id.is_none() {
                     require(observed_rows == part.num_series, "series part row count mismatch")?;
                 }
             }
-        }))
+        })
     }
 }
 
@@ -563,6 +634,19 @@ async fn load_column_chunk(
     };
     metrics.add_elapsed("columnar_series_decode", started.elapsed());
     result
+}
+
+async fn read_integers(
+    store: &ObjectStore,
+    path: &str,
+    block: &Block,
+    name: &str,
+    metrics: &mut ColumnarReadMetrics,
+) -> Result<Vec<u64>> {
+    match get_column(store, path, block, name, metrics).await? {
+        Decoded::Integers(values) => Ok(values),
+        _ => Err(invalid(format!("missing integer column {name}"))),
+    }
 }
 
 async fn get_column(

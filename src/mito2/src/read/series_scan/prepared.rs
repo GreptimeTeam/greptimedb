@@ -18,7 +18,7 @@ mod narthex;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::Instant;
@@ -68,6 +68,7 @@ use crate::series_index::format::{
 };
 use crate::series_index::identity::ExactSeriesKey;
 use crate::series_index::{MetricSeriesId, ROW_COUNT_COLUMN};
+use crate::sst::file::{FileTimeRange, WindowSequence};
 
 fn invalid(reason: impl Into<String>) -> Error {
     InvalidRecordBatchSnafu {
@@ -362,12 +363,11 @@ fn predicate_conjuncts(predicate: Option<&Predicate>) -> Vec<&Expr> {
 struct Candidate {
     /// Coarse prefix of the exact key; only a hash, never identity.
     id: MetricSeriesId,
-    /// The one owned key allocation: the region-qualified exact key.
+    /// The canonical sparse key: the identity every comparison, sample attribution and output
+    /// chunk uses. It must not be qualified by region: every region holding a fragment of one
+    /// series has to report the same identity, or the fragments never meet in one owner above
+    /// the regions.
     key: Buffer,
-    /// The canonical sparse key, a view of `key`'s bytes. This is the identity every
-    /// comparison and sample attribution uses, so it is stored once rather than once per
-    /// representation.
-    merge_key: Buffer,
     tags: HashMap<u32, Option<String>>,
     metric: Option<SeriesLabels>,
 }
@@ -380,6 +380,7 @@ pub(crate) struct ColumnarPreparedSource {
     merge_field_start: usize,
     // Append-mode Narthex raw reads still require one row per series/timestamp.
     dedup_append_raw: bool,
+    sample_partition: Option<Arc<SamplePartitionFilter>>,
     candidates: Arc<Vec<Candidate>>,
     samples: Arc<Vec<Arc<dyn SamplesFormatReader>>>,
     metrics: PartitionMetrics,
@@ -388,14 +389,19 @@ pub(crate) struct ColumnarPreparedSource {
     reservation: Arc<MemoryReservation>,
 }
 
+/// Only native index readers carry a coverage window. A failed index read can
+/// schedule discovery from the corresponding pinned samples once per scan.
+#[derive(Default)]
+pub(crate) struct SeriesDiscovery {
+    readers: VecDeque<(Box<dyn FormatReader>, Option<WindowSequence>)>,
+    covered_samples: Vec<(FileTimeRange, usize)>,
+}
+
 /// Opens sidecar readers after validating their complete source coverage.
 async fn open_sidecar_sources(
     context: &StreamContext,
     ranges: &[PartitionRange],
-) -> Result<(
-    Vec<Arc<dyn SamplesFormatReader>>,
-    Vec<Box<dyn FormatReader>>,
-)> {
+) -> Result<(Vec<Arc<dyn SamplesFormatReader>>, SeriesDiscovery)> {
     let input = &context.input;
     let metadata = input.region_metadata();
     let index = input
@@ -450,15 +456,18 @@ async fn open_sidecar_sources(
         format::validate_sample_schema(&reader.schema(), metadata)?;
         samples.push(Arc::new(reader));
     }
-    let mut series = Vec::<Box<dyn FormatReader>>::new();
+    let mut series = SeriesDiscovery::default();
     for id in indexes {
-        series.push(Box::new(
-            crate::series_index::columnar::reader::ColumnarReader::open_cached(
-                index.store.clone(),
-                index.version.series_indexes[&id].clone(),
-                cache.clone(),
-            )
-            .await?,
+        series.readers.push_back((
+            Box::new(
+                crate::series_index::columnar::reader::ColumnarReader::open_cached(
+                    index.store.clone(),
+                    index.version.series_indexes[&id].clone(),
+                    cache.clone(),
+                )
+                .await?,
+            ),
+            None,
         ));
     }
     Ok((samples, series))
@@ -473,36 +482,6 @@ impl ColumnarPreparedSource {
         metrics: PartitionMetrics,
         scan_pool: Arc<dyn MemoryPool>,
     ) -> Result<Self> {
-        let has_indexes = context.input.requires_narthex_preparation()
-            && !context.input.narthex_series_indexes.is_empty();
-        let attempt = |use_indexes| {
-            Self::prepare_from_snapshot(
-                context.clone(),
-                ranges.clone(),
-                labels.clone(),
-                raw.clone(),
-                metrics.clone(),
-                scan_pool.clone(),
-                use_indexes,
-            )
-        };
-        match attempt(has_indexes).await {
-            // Parts are opened lazily. Discard every candidate from the failed
-            // attempt before discovering keys from the same pinned sample snapshot.
-            Err(error) if has_indexes && error.is_unusable_series_index() => attempt(false).await,
-            result => result,
-        }
-    }
-
-    async fn prepare_from_snapshot(
-        context: Arc<StreamContext>,
-        ranges: Vec<PartitionRange>,
-        labels: RawLabelSource,
-        raw: RawScanPreparation,
-        metrics: PartitionMetrics,
-        scan_pool: Arc<dyn MemoryPool>,
-        use_indexes: bool,
-    ) -> Result<Self> {
         let _prepare_timer = crate::metrics::READ_STAGE_ELAPSED
             .with_label_values(&["columnar_prepare_wall"])
             .start_timer();
@@ -511,8 +490,8 @@ impl ColumnarPreparedSource {
         let started = Instant::now();
         let input = &context.input;
         let metadata = input.region_metadata();
-        let (samples, series) = if context.input.requires_narthex_preparation() {
-            narthex::open_sources(&context, &ranges, &scan_pool, use_indexes).await?
+        let (samples, mut series) = if context.input.requires_narthex_preparation() {
+            narthex::open_sources(&context, &ranges, &scan_pool).await?
         } else {
             open_sidecar_sources(&context, &ranges).await?
         };
@@ -522,7 +501,7 @@ impl ColumnarPreparedSource {
             .insert("prepare_sample_readers", samples.len() as u64);
         preparation_metrics
             .counts
-            .insert("prepare_series_indexes", series.len() as u64);
+            .insert("prepare_series_indexes", series.readers.len() as u64);
         let reservation = MemoryConsumer::new("ColumnarPreparedSource").register(&scan_pool);
         let started = Instant::now();
         let mut raw = raw;
@@ -555,9 +534,21 @@ impl ColumnarPreparedSource {
         preparation_metrics.counts.insert("prepare_batch_series", 0);
         let direct_labels = !batch_output && sample_schema.is_some();
         let conjuncts = predicate_conjuncts(input.predicate_group().predicate());
+        let partition = if input.requires_narthex_preparation() {
+            narthex_partition_filter(metadata.partition_expr.as_deref(), None)?
+        } else {
+            None
+        };
+        // Series rows carry tags only, so a rule over any other column, such as the time index,
+        // filters sample rows instead.
+        let (series_partition, sample_partition) = match partition {
+            Some(rule) if partition_on_tags_only(&rule, metadata) => (Some(rule), None),
+            Some(rule) => (None, Some(SamplePartitionFilter::try_new(&rule, metadata)?)),
+            None => (None, None),
+        };
         let mut retained_rows = 0_usize;
         let mut candidates = BTreeMap::<ExactSeriesKey, Candidate>::new();
-        for reader in series {
+        while let Some((reader, window)) = series.readers.pop_front() {
             let started = Instant::now();
             let schema = reader.schema();
             format::validate_series_schema(&schema, metadata)?;
@@ -598,10 +589,7 @@ impl ColumnarPreparedSource {
                         .map_err(|e| invalid(e.to_string()))?,
                 );
             }
-            if context.input.requires_narthex_preparation()
-                && let Some(partition) =
-                    narthex_partition_filter(metadata.partition_expr.as_deref(), None)?
-            {
+            if let Some(partition) = &series_partition {
                 filters.push(
                     partition
                         .try_as_physical_expr(&projected_schema)
@@ -612,8 +600,21 @@ impl ColumnarPreparedSource {
             let mut batches = reader.read(request)?;
             loop {
                 let timer = preparation_metrics.timer("columnar_prepare_discovery_wall");
-                let batch = batches.try_next().await?;
+                let batch = batches.try_next().await;
                 drop(timer);
+                let batch = match (batch, window) {
+                    (Ok(batch), _) => batch,
+                    (Err(error), Some(window)) => {
+                        common_telemetry::warn!(
+                            ?error,
+                            ?window,
+                            "Series index read failed, discovering keys from samples"
+                        );
+                        series.fallback_to_samples(window, &samples, metadata, &scan_pool)?;
+                        break;
+                    }
+                    (Err(error), None) => return Err(error),
+                };
                 let Some(mut batch) = batch else {
                     break;
                 };
@@ -760,26 +761,21 @@ impl ColumnarPreparedSource {
                                 (!strings.is_null(row)).then(|| strings.value(row).to_owned()),
                             );
                         }
+                    } else if let Some(filter) = &sample_partition {
+                        for column_id in filter.tag_ids() {
+                            let (_, strings) =
+                                tag_arrays
+                                    .iter()
+                                    .find(|(id, _)| *id == column_id)
+                                    .ok_or_else(|| invalid("missing partition tag column"))?;
+                            values.insert(
+                                column_id,
+                                (!strings.is_null(row)).then(|| strings.value(row).to_owned()),
+                            );
+                        }
                     }
                     tag_values += values.len() as u64;
-                    // `merge_key` is always the exact key bytes. Explicit-label chunks keep
-                    // the region-qualified form as their `key`, so `primary_key` stays
-                    // region-scoped while identity and ordering stay exact.
-                    let key = if direct_labels {
-                        let mut buffer = Vec::with_capacity(8 + exact.bytes().len());
-                        buffer.extend_from_slice(&metadata.region_id.as_u64().to_be_bytes());
-                        buffer.extend_from_slice(exact.bytes());
-                        Buffer::from(buffer)
-                    } else {
-                        Buffer::from(exact.bytes().to_vec())
-                    };
-                    let merge_key = if direct_labels {
-                        key.slice_with_length(8, exact.bytes().len())
-                    } else {
-                        key.clone()
-                    };
-                    // The exact key is stored once: `merge_key` is a view of `key`, so the
-                    // reservation charges the single key allocation the candidate retains.
+                    let key = Buffer::from(exact.bytes().to_vec());
                     let bytes = key.len()
                         + values.values().flatten().map(String::len).sum::<usize>()
                         + values.capacity() * (std::mem::size_of::<(u32, Option<String>)>() + 16)
@@ -810,7 +806,6 @@ impl ColumnarPreparedSource {
                         Candidate {
                             id,
                             key,
-                            merge_key,
                             tags: values,
                             metric,
                         },
@@ -852,6 +847,7 @@ impl ColumnarPreparedSource {
             sample_schema,
             merge_field_start,
             dedup_append_raw,
+            sample_partition: sample_partition.map(Arc::new),
             candidates: Arc::new(candidates),
             samples: Arc::new(samples),
             metrics,
@@ -875,21 +871,38 @@ impl ColumnarPreparedSource {
         let scan_pool = self.scan_pool.clone();
         let field_column_start = self.merge_field_start;
         let dedup_append_raw = self.dedup_append_raw;
-        let filters =
-            if matches!(self.labels, RawLabelSource::Explicit) && !context.input.compaction {
-                predicate_conjuncts(context.input.predicate_group().predicate())
-                    .into_iter()
-                    .map(|expr| {
-                        Predicate::to_physical_expr(
-                            expr,
-                            &context.input.mapper.input_arrow_schema(false),
-                        )
-                        .map_err(|error| invalid(error.to_string()))
-                    })
-                    .collect::<Result<Vec<_>>>()?
-            } else {
-                Vec::new()
-            };
+        let sample_partition = self.sample_partition.clone();
+        // Time-only conjuncts drop every version of a (series, time) key alike, so they
+        // commute with dedup and must run before the merge: a row selector inside the
+        // merge would otherwise pick a row they reject. Other conjuncts may depend on
+        // which version dedup keeps and stay after the merge. Volatile conjuncts never get
+        // here: DataFusion's `PushDownFilter` keeps them in the `Filter` above the scan.
+        let mut time_filters = Vec::new();
+        let mut filters = Vec::new();
+        if matches!(self.labels, RawLabelSource::Explicit) && !context.input.compaction {
+            // Batch output keeps this schema before and after the merge.
+            let schema = context.input.mapper.input_arrow_schema(false);
+            let time_index = &context
+                .input
+                .region_metadata()
+                .time_index_column()
+                .column_schema
+                .name;
+            for expr in predicate_conjuncts(context.input.predicate_group().predicate()) {
+                let filter = Predicate::to_physical_expr(expr, &schema)
+                    .map_err(|error| invalid(error.to_string()))?;
+                if expr
+                    .column_refs()
+                    .iter()
+                    .all(|column| &column.name == time_index)
+                {
+                    time_filters.push(filter);
+                } else {
+                    filters.push(filter);
+                }
+            }
+        }
+        let time_filters = Arc::new(time_filters);
         let stream = async_stream::try_stream! {
             let _reservation = reservation;
             if range.is_empty() { return; }
@@ -901,6 +914,8 @@ impl ColumnarPreparedSource {
                 let reader = reader.clone();
                 let sample_schema = sample_schema.clone();
                 let scan_pool = scan_pool.clone();
+                let sample_partition = sample_partition.clone();
+                let time_filters = time_filters.clone();
                 sources.push(Box::pin(async_stream::try_stream! {
                     let reservation = MemoryConsumer::new("ColumnarSamplesRead").register(&scan_pool);
                     // Account for the selection retained by the samples reader, including
@@ -911,7 +926,7 @@ impl ColumnarPreparedSource {
                         .iter()
                         .map(|candidate| {
                             std::mem::size_of::<ExactSeriesKey>()
-                                + candidate.merge_key.len()
+                                + candidate.key.len()
                                 + std::mem::size_of::<MetricSeriesId>()
                                 + 64
                         })
@@ -926,7 +941,7 @@ impl ColumnarPreparedSource {
                     let mut offsets = mito_codec::row_converter::SparseOffsetsCache::new();
                     let keys = candidates[range.clone()]
                         .iter()
-                        .map(|c| ExactSeriesKey::from_sparse_key(c.merge_key.as_slice(), &mut offsets))
+                        .map(|c| ExactSeriesKey::from_sparse_key(c.key.as_slice(), &mut offsets))
                         .collect::<Result<BTreeSet<_>>>()?;
                     let mut stage_metrics = crate::metrics::ColumnarReadMetrics::default();
                     let schema = reader.schema();
@@ -954,13 +969,21 @@ impl ColumnarPreparedSource {
                         let SamplesBatch { batch, key } = samples;
                         let ordinal = candidates[range.clone()]
                             .binary_search_by(|candidate| {
-                                candidate.merge_key.as_slice().cmp(key.bytes())
+                                candidate.key.as_slice().cmp(key.bytes())
                             })
                             .map_err(|_| invalid("sample contains an unselected series"))?
                             + range.start;
                         let started = std::time::Instant::now();
                         let flat = sample_to_flat(batch, &candidates[ordinal], &context, sample_schema.as_ref())?;
-                        let flat = filter_visibility(flat, &context)?;
+                        let flat = match &sample_partition {
+                            Some(filter) => filter.filter(flat, &candidates[ordinal])?,
+                            None => flat,
+                        };
+                        let mut flat = filter_visibility(flat, &context)?;
+                        for filter in time_filters.iter() {
+                            flat = common_recordbatch::filter::batch_filter(&flat, filter)
+                                .map_err(|error| invalid(error.to_string()))?;
+                        }
                         stage_metrics.add_elapsed("columnar_sample_adapt", started.elapsed());
                         if flat.num_rows() == 0 { continue; }
                         let bytes = flat.get_array_memory_size();
@@ -1044,7 +1067,7 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
             // The resolver can outlive the exhausted sample stream.
             let _reservation = &reservation;
             let ordinal = candidates
-                .binary_search_by(|candidate| candidate.merge_key.as_slice().cmp(key.as_slice()))
+                .binary_search_by(|candidate| candidate.key.as_slice().cmp(key.as_slice()))
                 .map_err(|_| BoxedError::new(invalid("unknown merged series identity")))?;
             Ok((
                 candidates[ordinal].key.clone(),
@@ -1126,11 +1149,7 @@ fn sample_to_flat(
     let schema = sample_schema
         .cloned()
         .unwrap_or_else(|| context.input.mapper.input_arrow_schema(false));
-    let key = if sample_schema.is_some() {
-        &candidate.merge_key
-    } else {
-        &candidate.key
-    };
+    let key = &candidate.key;
     let metadata = context.input.region_metadata();
     let mut arrays = Vec::<ArrayRef>::new();
     for field in schema.fields() {
@@ -1326,6 +1345,137 @@ fn narthex_partition_filter(
         .transpose()?
         .flatten()
         .filter(|partition| file_partition != Some(partition)))
+}
+
+fn partition_on_tags_only(
+    rule: &partition::expr::PartitionExpr,
+    metadata: &store_api::metadata::RegionMetadata,
+) -> bool {
+    let mut columns = HashSet::new();
+    rule.collect_column_names(&mut columns);
+    columns.iter().all(|name| {
+        metadata
+            .column_by_name(name)
+            .is_some_and(|column| column.semantic_type == SemanticType::Tag)
+    })
+}
+
+/// A region partition rule that references a column other than a tag, applied to sample rows.
+///
+/// Files shared after repartition can hold rows of other partitions, so the rule has to drop them
+/// row by row; a series may own rows on both sides of the rule.
+struct SamplePartitionFilter {
+    /// The columns the rule references, typed as the region declares them.
+    schema: SchemaRef,
+    /// Where each schema field's values come from.
+    inputs: Vec<PartitionInput>,
+    expr: Arc<dyn datafusion::physical_plan::PhysicalExpr>,
+}
+
+enum PartitionInput {
+    /// Logical table ID of the series. Repartitioning a metric table may route on it, and the
+    /// series index keeps it outside the tag columns.
+    TableId,
+    /// A tag column, by column ID, valued from the series.
+    Tag(u32),
+    /// A column the sample rows carry.
+    Sample,
+}
+
+impl SamplePartitionFilter {
+    fn try_new(
+        rule: &partition::expr::PartitionExpr,
+        metadata: &store_api::metadata::RegionMetadata,
+    ) -> Result<Self> {
+        let mut names = HashSet::new();
+        rule.collect_column_names(&mut names);
+        let mut names = names.into_iter().collect::<Vec<_>>();
+        names.sort_unstable();
+        let mut fields = Vec::with_capacity(names.len());
+        let mut inputs = Vec::with_capacity(names.len());
+        for name in names {
+            let column = metadata
+                .column_by_name(&name)
+                .ok_or_else(|| invalid(format!("unknown partition column {name}")))?;
+            fields.push(datatypes::arrow::datatypes::Field::new(
+                name,
+                datatypes::data_type::DataType::as_arrow_type(&column.column_schema.data_type),
+                true,
+            ));
+            inputs.push(if column.column_id == ReservedColumnId::table_id() {
+                PartitionInput::TableId
+            } else if column.semantic_type == SemanticType::Tag {
+                PartitionInput::Tag(column.column_id)
+            } else {
+                PartitionInput::Sample
+            });
+        }
+        let schema = Arc::new(Schema::new(fields));
+        let expr = rule
+            .try_as_physical_expr(&schema)
+            .map_err(|error| invalid(error.to_string()))?;
+        Ok(Self {
+            schema,
+            inputs,
+            expr,
+        })
+    }
+
+    fn tag_ids(&self) -> impl Iterator<Item = u32> + '_ {
+        self.inputs.iter().filter_map(|input| match input {
+            PartitionInput::Tag(column_id) => Some(*column_id),
+            _ => None,
+        })
+    }
+
+    /// Keeps the rows of `flat`, all of `candidate`, that the rule assigns to this region.
+    fn filter(&self, flat: RecordBatch, candidate: &Candidate) -> Result<RecordBatch> {
+        let rows = flat.num_rows();
+        let columns = self
+            .schema
+            .fields()
+            .iter()
+            .zip(&self.inputs)
+            .map(|(field, input)| match input {
+                PartitionInput::TableId => {
+                    Ok(Arc::new(UInt32Array::from(vec![candidate.id.table_id; rows])) as ArrayRef)
+                }
+                PartitionInput::Tag(column_id) => {
+                    let value = candidate
+                        .tags
+                        .get(column_id)
+                        .ok_or_else(|| invalid("missing partition tag"))?;
+                    Ok(Arc::new(StringArray::from(vec![value.as_deref(); rows])) as ArrayRef)
+                }
+                PartitionInput::Sample => {
+                    let array = flat
+                        .column_by_name(field.name())
+                        .ok_or_else(|| invalid("missing partition column in samples"))?;
+                    if array.data_type() == field.data_type() {
+                        Ok(array.clone())
+                    } else {
+                        cast(array, field.data_type()).context(ComputeArrowSnafu)
+                    }
+                }
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let columns = RecordBatch::try_new_with_options(
+            self.schema.clone(),
+            columns,
+            &datatypes::arrow::record_batch::RecordBatchOptions::new().with_row_count(Some(rows)),
+        )
+        .context(NewRecordBatchSnafu)?;
+        let mask = self
+            .expr
+            .evaluate(&columns)
+            .and_then(|value| value.into_array(rows))
+            .map_err(|error| invalid(error.to_string()))?;
+        let mask = mask
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .ok_or_else(|| invalid("partition rule must evaluate to booleans"))?;
+        filter_record_batch(&flat, mask).context(ComputeArrowSnafu)
+    }
 }
 
 /// Shares narthex discovery across partitions and assigns disjoint exact-series ranges.

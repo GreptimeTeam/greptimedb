@@ -28,7 +28,9 @@ use common_datasource::file_format::json::{JsonFormat, json_text_stream};
 use common_datasource::file_format::orc::{ReaderAdapter, infer_orc_schema, new_orc_stream_reader};
 use common_datasource::file_format::{FileFormat, Format, file_to_stream};
 use common_datasource::lister::{Lister, Source};
-use common_datasource::object_store::{LocalFileAccess, build_backend_with_path};
+use common_datasource::object_store::{
+    LocalFileAccess, RemoteStorageAccess, build_backend_with_path,
+};
 use common_query::{OutputCost, OutputRows};
 use common_recordbatch::DfSendableRecordBatchStream;
 use common_recordbatch::adapter::RecordBatchStreamTypeAdapter;
@@ -96,10 +98,16 @@ impl FileMetadata {
 async fn list_copy_from_paths(
     req: &CopyTableRequest,
     local_file_access: &LocalFileAccess,
+    remote_storage_access: &RemoteStorageAccess,
 ) -> Result<(ObjectStore, Vec<String>)> {
-    let backend = build_backend_with_path(&req.location, &req.connection, local_file_access)
-        .await
-        .context(error::BuildBackendSnafu)?;
+    let backend = build_backend_with_path(
+        &req.location,
+        &req.connection,
+        local_file_access,
+        remote_storage_access,
+    )
+    .await
+    .context(error::BuildBackendSnafu)?;
     let regex = req
         .pattern
         .as_ref()
@@ -513,7 +521,9 @@ impl StatementExecutor {
         };
         let table = self.get_table(&table_ref).await?;
         let format = Format::try_from(&req.with).context(error::ParseFileFormatSnafu)?;
-        let (object_store, paths) = list_copy_from_paths(&req, &self.local_file_access).await?;
+        let (object_store, paths) =
+            list_copy_from_paths(&req, &self.local_file_access, &self.remote_storage_access)
+                .await?;
         let mut files = Vec::with_capacity(paths.len());
         let table_schema = table.schema().arrow_schema().clone();
         let filters = table
@@ -1069,21 +1079,29 @@ mod tests {
         ] {
             // PATTERN applies to directories, not an explicitly selected file.
             let req = copy_from_request(&location, Some("does-not-match"));
-            let (store, paths) = list_copy_from_paths(&req, &access).await.unwrap();
+            let (store, paths) =
+                list_copy_from_paths(&req, &access, &RemoteStorageAccess::unrestricted())
+                    .await
+                    .unwrap();
             assert_eq!(paths, ["data file.parquet"]);
             assert_eq!(store.read(&paths[0]).await.unwrap().to_vec(), b"data");
         }
 
         let req = copy_from_request("nested/", Some("^data"));
-        let (_, paths) = list_copy_from_paths(&req, &access).await.unwrap();
+        let (_, paths) = list_copy_from_paths(&req, &access, &RemoteStorageAccess::unrestricted())
+            .await
+            .unwrap();
         assert_eq!(paths, ["data file.parquet"]);
         let req = copy_from_request("nested/", None);
-        let (_, mut paths) = list_copy_from_paths(&req, &access).await.unwrap();
+        let (_, mut paths) =
+            list_copy_from_paths(&req, &access, &RemoteStorageAccess::unrestricted())
+                .await
+                .unwrap();
         paths.sort();
         assert_eq!(paths, ["data file.parquet", "other.csv"]);
         let req = copy_from_request("nested/data.dir", None);
         assert!(
-            list_copy_from_paths(&req, &access)
+            list_copy_from_paths(&req, &access, &RemoteStorageAccess::unrestricted())
                 .await
                 .unwrap()
                 .1
@@ -1091,7 +1109,7 @@ mod tests {
         );
         let req = copy_from_request("nested/", Some("does-not-match"));
         assert!(
-            list_copy_from_paths(&req, &access)
+            list_copy_from_paths(&req, &access, &RemoteStorageAccess::unrestricted())
                 .await
                 .unwrap()
                 .1
@@ -1100,19 +1118,24 @@ mod tests {
 
         let req = copy_from_request("nested/missing.parquet", None);
         assert!(matches!(
-            list_copy_from_paths(&req, &access).await,
+            list_copy_from_paths(&req, &access, &RemoteStorageAccess::unrestricted()).await,
             Err(error::Error::ListObjects {
                 source: common_datasource::error::Error::ListObjects { error, .. }, ..
             }) if error.kind() == object_store::ErrorKind::NotFound
         ));
         let req = copy_from_request("nested/data file.parquet", Some("["));
         assert!(matches!(
-            list_copy_from_paths(&req, &access).await,
+            list_copy_from_paths(&req, &access, &RemoteStorageAccess::unrestricted()).await,
             Err(error::Error::BuildRegex { .. })
         ));
         let req = copy_from_request("nested/data file.parquet", None);
         assert!(matches!(
-            list_copy_from_paths(&req, &LocalFileAccess::Disabled).await,
+            list_copy_from_paths(
+                &req,
+                &LocalFileAccess::Disabled,
+                &RemoteStorageAccess::unrestricted()
+            )
+            .await,
             Err(error::Error::BuildBackend {
                 source: common_datasource::error::Error::LocalFileAccessDisabled { .. },
                 ..
@@ -1120,7 +1143,7 @@ mod tests {
         ));
         let req = copy_from_request("../outside.parquet", None);
         assert!(matches!(
-            list_copy_from_paths(&req, &access).await,
+            list_copy_from_paths(&req, &access, &RemoteStorageAccess::unrestricted()).await,
             Err(error::Error::BuildBackend {
                 source: common_datasource::error::Error::LocalFileAccessDenied { .. },
                 ..
@@ -1141,18 +1164,20 @@ mod tests {
 
         let req = copy_from_request("link.parquet", None);
         assert!(
-            list_copy_from_paths(&req, &access)
+            list_copy_from_paths(&req, &access, &RemoteStorageAccess::unrestricted())
                 .await
                 .unwrap()
                 .1
                 .is_empty()
         );
         let req = copy_from_request("./", None);
-        let (_, paths) = list_copy_from_paths(&req, &access).await.unwrap();
+        let (_, paths) = list_copy_from_paths(&req, &access, &RemoteStorageAccess::unrestricted())
+            .await
+            .unwrap();
         assert_eq!(paths, ["data.parquet"]);
         let req = copy_from_request("dangling.parquet", None);
         assert!(matches!(
-            list_copy_from_paths(&req, &access).await,
+            list_copy_from_paths(&req, &access, &RemoteStorageAccess::unrestricted()).await,
             Err(error::Error::ListObjects {
                 source: common_datasource::error::Error::ListObjects { error, .. }, ..
             }) if error.kind() == object_store::ErrorKind::NotFound
@@ -1217,9 +1242,13 @@ mod tests {
                 Some("does-not-match"),
             );
             req.connection = connection.clone();
-            let (_, paths) = list_copy_from_paths(&req, &LocalFileAccess::Disabled)
-                .await
-                .unwrap();
+            let (_, paths) = list_copy_from_paths(
+                &req,
+                &LocalFileAccess::Disabled,
+                &RemoteStorageAccess::unrestricted(),
+            )
+            .await
+            .unwrap();
             assert_eq!(paths, [filename]);
         }
         {
@@ -1230,9 +1259,13 @@ mod tests {
         }
         let mut req = copy_from_request("s3://bucket/backup/schema/1/", Some(r"^data\."));
         req.connection = connection.clone();
-        let (_, mut paths) = list_copy_from_paths(&req, &LocalFileAccess::Disabled)
-            .await
-            .unwrap();
+        let (_, mut paths) = list_copy_from_paths(
+            &req,
+            &LocalFileAccess::Disabled,
+            &RemoteStorageAccess::unrestricted(),
+        )
+        .await
+        .unwrap();
         paths.sort();
         let mut expected = (0..16)
             .map(|i| format!("data.{i}.parquet"))
@@ -1257,7 +1290,7 @@ mod tests {
                 copy_from_request(&format!("s3://bucket/backup/schema/1/{name}.parquet"), None);
             req.connection = connection.clone();
             assert!(matches!(
-                list_copy_from_paths(&req, &LocalFileAccess::Disabled).await,
+                list_copy_from_paths(&req, &LocalFileAccess::Disabled, &RemoteStorageAccess::unrestricted()).await,
                 Err(error::Error::ListObjects {
                     source: common_datasource::error::Error::ListObjects { error, .. }, ..
                 }) if error.kind() == kind
