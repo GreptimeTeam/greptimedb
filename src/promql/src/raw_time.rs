@@ -89,6 +89,12 @@ impl RawTimeUnit {
         )
     }
 
+    /// Whether `tick` is exactly the millisecond `millis`, which a window time cannot tell for a
+    /// sample just before it.
+    pub fn is_at(self, tick: i64, millis: i128) -> bool {
+        i128::from(tick) * self.nanos_per_tick() == millis * NANOS_PER_MILLI
+    }
+
     /// The payload of `tick` shifted by `offset_ms`: the millisecond a kernel reads.
     pub fn payload_ms(self, tick: i64, offset_ms: i64) -> Result<i64> {
         let nanos =

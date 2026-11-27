@@ -2851,6 +2851,14 @@ async fn native_promql_non_millisecond_time_index_answers_like_legacy() {
             ReportedName::Nothing,
         ),
         (
+            "TQL EVAL (1, 1, '1s', '0') native_us",
+            ReportedName::Metric("native_us"),
+        ),
+        (
+            "TQL EVAL (1, 1, '1s', '0') native_us @ 1",
+            ReportedName::Metric("native_us"),
+        ),
+        (
             "TQL EVAL (1, 2, '1s') count_over_time(native_us[1s])",
             ReportedName::Nothing,
         ),
