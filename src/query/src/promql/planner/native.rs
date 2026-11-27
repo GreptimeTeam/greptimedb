@@ -73,7 +73,6 @@ use promql::native::segment::{
 pub(crate) use promql::native::segment::{
     independent_scan_pair, is_empty_discovered_input, pointwise_operand,
 };
-use promql::range_eval::RangeFunction;
 use promql_parser::label::{METRIC_NAME, MatchOp, Matcher, Matchers};
 use promql_parser::parser::token;
 use promql_parser::parser::value::ValueType;
@@ -1424,24 +1423,6 @@ impl PromPlanner {
                     .into(),
             ))
             .context(DataFusionPlanningSnafu);
-        }
-        // The per-series delta math is the float windows' own, and a native histogram ignores the
-        // marker on both routes. A range modifier over a float series that may carry the marker
-        // keeps the existing plan.
-        let marked = |source: usize| {
-            prepared.get(source).is_some_and(|(_, _, _, _, tags, ..)| {
-                tags.iter()
-                    .any(|tag| tag == OTLP_AGGREGATION_TEMPORALITY_LABEL)
-            })
-        };
-        if compiled.tree.root().any(&|node| {
-            matches!(&node.expr, NativeExpr::Window { input, op }
-                if matches!(op.function, RangeFunction::Rate | RangeFunction::Increase)
-                    && statement_kind != Some(FieldKind::Histogram)
-                    && op.window.modifier.is_some()
-                    && matches!(&input.expr, NativeExpr::Input(input) if marked(input.source_index)))
-        }) {
-            return Ok(declined("delta_temporality_under_rate_or_increase"));
         }
         for (index, (compiled_input, (scan, _, _, time, _, _, _, _))) in
             compiled.inputs.iter().zip(prepared.iter_mut()).enumerate()

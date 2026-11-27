@@ -5270,8 +5270,8 @@ async fn native_fused_delta_temporality_rates_run_natively() {
 /// `rate` and `increase` over native histograms marked as delta temporality run natively.
 ///
 /// The existing plan picks the delta math only for float samples and rates a native histogram as a
-/// counter whatever its marker says, so the native window does not need the marker either - not
-/// even through a subquery or under a range modifier.
+/// counter whatever its marker says, so a native histogram window ignores the marker too, even
+/// through a subquery.
 #[tokio::test]
 async fn native_fused_delta_temporality_histogram_rates_run_natively() {
     for query in [
