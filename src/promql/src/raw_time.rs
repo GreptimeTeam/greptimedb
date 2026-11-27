@@ -77,6 +77,18 @@ impl RawTimeUnit {
         narrow(ceil + i128::from(offset_ms), tick, offset_ms)
     }
 
+    /// `tick` shifted by `offset_ms` and rounded down to a millisecond: once a sample at `tick` has
+    /// been read, the last bound no later sample can reach. A later sample in the same millisecond
+    /// shares its window time.
+    pub fn floor_ms(self, tick: i64, offset_ms: i64) -> Result<i64> {
+        let nanos = i128::from(tick) * self.nanos_per_tick();
+        narrow(
+            nanos.div_euclid(NANOS_PER_MILLI) + i128::from(offset_ms),
+            tick,
+            offset_ms,
+        )
+    }
+
     /// The payload of `tick` shifted by `offset_ms`: the millisecond a kernel reads.
     pub fn payload_ms(self, tick: i64, offset_ms: i64) -> Result<i64> {
         let nanos =

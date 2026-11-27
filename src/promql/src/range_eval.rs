@@ -892,7 +892,7 @@ impl RangeEvaluator {
         }
         self.check_chunk(chunk)?;
         let ticks = chunk.time.as_buffer();
-        let last_window = if self.raw_time_unit == RawTimeUnit::Millisecond {
+        let read_through = if self.raw_time_unit == RawTimeUnit::Millisecond {
             self.ingest(ticks, None, self.window.offset_ms, &chunk.fields, true)?;
             i128::from(ticks[ticks.len() - 1]) + i128::from(self.window.offset_ms)
         } else {
@@ -903,14 +903,16 @@ impl RangeEvaluator {
                 .and_then(|()| {
                     let windows = (!self.raw_time_unit.is_whole_millis()).then_some(&windows[..]);
                     self.ingest(&payloads, windows, 0, &chunk.fields, true)?;
-                    Ok(windows.unwrap_or(&payloads[..])[ticks.len() - 1])
+                    self.raw_time_unit
+                        .floor_ms(ticks[ticks.len() - 1], self.window.offset_ms)
                 });
             self.converted = (payloads, windows);
             i128::from(ingested?)
         };
         if !chunk.is_last {
-            // Later chunks only hold samples after this one's last.
-            self.evaluate(Some(last_window))?;
+            // Later chunks only hold samples after this one's last, but one in the same
+            // millisecond shares its window time, so only the millisecond before it is settled.
+            self.evaluate(Some(read_through))?;
             return self.emit();
         }
         self.close_series()
