@@ -103,6 +103,12 @@ impl RoutedBatch {
     }
 }
 
+/// Encoding changes need expanded tag columns to translate the primary key.
+struct MigrationScan {
+    input: ScanInput,
+    projection: Vec<usize>,
+}
+
 pub(crate) struct SharedSource {
     sources: Vec<FileMeta>,
     legacy_overrides: Vec<bool>,
@@ -110,6 +116,8 @@ pub(crate) struct SharedSource {
     targets: BTreeMap<RegionId, MultiRegionTarget>,
     metadata: RegionMetadataRef,
     scan_input: ScanInput,
+    encoding_changes: Vec<bool>,
+    migration_scan: Option<MigrationScan>,
     primary_key_codec: Arc<dyn PrimaryKeyCodec>,
     schema: SchemaRef,
     merge_schema: SchemaRef,
@@ -139,6 +147,7 @@ impl SharedSource {
         let metadata = Arc::new(common);
         let cache = CacheStrategy::Compaction(context.cache.clone());
         let mut footers = Vec::with_capacity(plan.sources.len());
+        let mut encoding_changes = Vec::with_capacity(plan.sources.len());
         let mut footer_bytes = 0usize;
         for file in &plan.sources {
             ensure!(
@@ -161,6 +170,8 @@ impl SharedSource {
                     PageIndexPolicy::Skip,
                 )
                 .await?;
+            encoding_changes
+                .push(sst.region_metadata().primary_key_encoding != metadata.primary_key_encoding);
             let footer = sst.parquet_metadata();
             footer_bytes = footer_bytes.saturating_add(footer.memory_size());
             ensure!(
@@ -185,25 +196,45 @@ impl SharedSource {
         let input_size = decoded_input_size(footers.iter().map(Arc::as_ref));
         let layouts = collect_json2_rewrite_plans_from_parquet(&metadata, &footers)?;
         let json2_targets = crate::compaction::reader::json2_rewrite_targets(&metadata, &layouts)?;
-        let mapper = FlatProjectionMapper::new_with_json2_rewrite_targets(
-            &metadata,
-            (0..metadata.column_metadatas.len()).collect(),
-            ReadColumns::new(
-                metadata
-                    .column_metadatas
-                    .iter()
-                    .map(|column| column.column_id),
-            ),
-            &json2_targets,
-        )?;
+        let make_mapper = || {
+            FlatProjectionMapper::new_with_json2_rewrite_targets(
+                &metadata,
+                (0..metadata.column_metadatas.len()).collect(),
+                ReadColumns::new(
+                    metadata
+                        .column_metadatas
+                        .iter()
+                        .map(|column| column.column_id),
+                ),
+                &json2_targets,
+            )
+        };
+        let make_input = |mapper, compaction| {
+            ScanInput::builder(context.access_layer.clone(), mapper)
+                .with_compaction(compaction)
+                .with_page_index_policy(PageIndexPolicy::Skip)
+                .with_batch_size(super::tuning().batch_rows)
+                .with_cache(cache.clone())
+                .with_json2_rewrite_targets(json2_targets.clone())
+                .build()
+        };
+        let mapper = make_mapper()?;
         let schema = mapper.input_arrow_schema(true);
-        let scan_input = ScanInput::builder(context.access_layer.clone(), mapper)
-            .with_compaction(true)
-            .with_page_index_policy(PageIndexPolicy::Skip)
-            .with_batch_size(super::tuning().batch_rows)
-            .with_cache(cache.clone())
-            .with_json2_rewrite_targets(json2_targets.clone())
-            .build();
+        let migration_scan = if encoding_changes.contains(&true) {
+            let expanded = mapper.input_arrow_schema(false);
+            let projection = schema
+                .fields()
+                .iter()
+                .map(|field| expanded.index_of(field.name()).context(ComputeArrowSnafu))
+                .collect::<Result<_>>()?;
+            Some(MigrationScan {
+                input: make_input(make_mapper()?, false),
+                projection,
+            })
+        } else {
+            None
+        };
+        let scan_input = make_input(mapper, true);
         let mut limits = MemoryLimits::new(plan, &schema, upload)?;
         let mut inverted = context.config.inverted_index.clone();
         inverted.mem_threshold_on_create =
@@ -264,6 +295,8 @@ impl SharedSource {
             primary_key_codec: build_primary_key_codec(&metadata),
             metadata,
             scan_input,
+            encoding_changes,
+            migration_scan,
             schema,
             merge_schema,
             partition_rule: plan.partition_rule.clone(),
@@ -361,7 +394,11 @@ impl SharedSource {
             raw_meta.sequence = None;
             raw_meta.preserve_row_sequence = true;
             let handle = FileHandle::new(raw_meta, Arc::new(NoopFilePurger));
-            let input = self.scan_input.prune_file(
+            let (scan_input, projection) = match &self.migration_scan {
+                Some(scan) if self.encoding_changes[index] => (&scan.input, Some(&scan.projection)),
+                _ => (&self.scan_input, None),
+            };
+            let input = scan_input.prune_file(
                 &handle, PreFilterMode::All, &mut ReaderMetrics::default(),
             ).await?;
             let mut ranges = smallvec::SmallVec::new();
@@ -386,6 +423,10 @@ impl SharedSource {
                     if read_batches.is_multiple_of(64) {
                         self.report_store_bytes(&fetch_metrics, &mut reported_bytes)?;
                     }
+                    let batch = match projection {
+                        Some(indices) => batch.project(indices).context(ComputeArrowSnafu)?,
+                        None => batch,
+                    };
                     let preparing = self.clone();
                     let (batch, previous) = spawn_preparation(self.memory_admission.clone(), move || {
                         let _stage = StageGuard::start("prepare_batch");

@@ -96,6 +96,7 @@ async fn test_delayed_series_index_notification_after_removal() -> WhateverResul
                 region_id,
                 notify: crate::request::BackgroundNotify::RegionEdit(
                     crate::request::RegionEditResult {
+                        ingested_parquet_bytes: 0,
                         region_id,
                         origin: region.clone(),
                         edit: RegionEdit {
