@@ -70,7 +70,6 @@ use datatypes::vectors::{
 use futures::TryStreamExt;
 use futures::stream::BoxStream;
 use mito_codec::row_converter::{CompositeValues, DensePrimaryKeyCodec, PrimaryKeyCodec};
-use partition::expr::PartitionExpr;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, SequenceNumber, SequenceRange};
@@ -79,7 +78,9 @@ use crate::error::{
     ComputeArrowSnafu, ComputeVectorSnafu, ConvertVectorSnafu, DecodeSnafu,
     EvalPartitionFilterSnafu, InvalidBatchSnafu, Result, SequenceRangeUnsupportedSnafu,
 };
-use crate::memtable::BoxedRecordBatchIterator;
+use crate::memtable::{
+    BoxedRecordBatchIterator, CreatorSliceCursor, creator_slice_sequence_range, least_slice_until,
+};
 
 pub(crate) fn timestamp_array_to_i64_slice(arr: &ArrayRef) -> &[i64] {
     use datatypes::arrow::array::{
@@ -163,11 +164,11 @@ struct DensePkCache {
 /// caller then applies [`Batch::unresolved_creator_cursor`] to the candidate cursors.
 fn creator_slice_probe_batch(
     metadata: &RegionMetadataRef,
-    slices: &[(PartitionExpr, SequenceNumber)],
+    slices: &[CreatorSliceCursor],
     pk_values: &CompositeValues,
 ) -> Option<RecordBatch> {
     let mut referenced = HashSet::new();
-    for (expr, _) in slices {
+    for (expr, ..) in slices {
         expr.collect_column_names(&mut referenced);
     }
 
@@ -209,20 +210,31 @@ fn creator_slice_probe_batch(
 ///
 /// Equal bounds mean every candidate carries the same cursor value — the only case in which
 /// the least advanced cursor is exact for a piece that cannot be resolved.
-fn creator_cursor_range(
-    slices: &[(PartitionExpr, SequenceNumber)],
-) -> (SequenceNumber, SequenceNumber) {
+fn creator_cursor_range(slices: &[CreatorSliceCursor]) -> (SequenceNumber, SequenceNumber) {
     let min = slices
         .iter()
-        .map(|(_, cursor)| *cursor)
+        .map(|(_, cursor, _)| *cursor)
         .min()
         .unwrap_or_default();
     let max = slices
         .iter()
-        .map(|(_, cursor)| *cursor)
+        .map(|(_, cursor, _)| *cursor)
         .max()
         .unwrap_or(min);
     (min, max)
+}
+
+/// The least of two slices' upper bounds: a slice that states none is unbounded above, so it
+/// never narrows the pair, and two slices that state none stay unbounded.
+fn least_until(
+    left: Option<SequenceNumber>,
+    right: Option<SequenceNumber>,
+) -> Option<SequenceNumber> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(bound), None) | (None, Some(bound)) => Some(bound),
+        (None, None) => None,
+    }
 }
 
 /// Evaluates a partition expression against the single row of a probe batch, treating a
@@ -530,57 +542,65 @@ impl Batch {
     /// One [`Batch`] of a time-series memtable holds one series, so every row of it belongs
     /// to the same piece and the piece is resolved once for the whole batch: the partition
     /// expression of each candidate slice is evaluated against the batch's primary-key (tag)
-    /// values, and the rows are kept when their own sequence is above that slice's cursor.
-    /// This is the memtable counterpart of the per-row slice selection of a physical-
-    /// sequence read of an SST: a region whose pieces advanced independently delivers
-    /// neither a row a more advanced piece consumed again nor drops a row a less advanced
-    /// one still holds.
+    /// values, and the rows are kept when their own sequence is above that slice's cursor and
+    /// at or below `min(read_fence, until)`, where `read_fence` is the upper end of the read's
+    /// own sequence range ([`Self::filter_by_sequence`]) and `until` is the last sequence the
+    /// piece's delta covers. This is the memtable counterpart of the per-row slice selection
+    /// of a physical-sequence read of an SST: a region whose pieces advanced independently
+    /// delivers neither a row a more advanced piece consumed again nor drops a row a less
+    /// advanced one still holds, and a row numbered above its own piece's bound is left to the
+    /// delta that covers it.
     ///
     /// A batch whose piece **cannot be resolved** is decided by
     /// [`Self::unresolved_creator_cursor`]: the least advanced cursor is exact when every
     /// candidate carries it, and the read fails otherwise, because that floor re-delivers
     /// the rows a more advanced piece has already consumed.
     ///
-    /// `None` or an empty set applies no filter, and a set whose cursors all carry one value
-    /// needs no evaluation at all — that value is the region's floor and the outcome is
-    /// exactly [`Self::filter_by_sequence`] with that floor.
+    /// `None` or an empty set applies no filter, and a set whose cursors and bounds all agree
+    /// needs no evaluation at all — they are the region's floor and ceiling, and the outcome is
+    /// exactly [`Self::filter_by_sequence`] with them.
     pub fn filter_by_creator_slices(
         &mut self,
-        slices: Option<&[(PartitionExpr, SequenceNumber)]>,
+        slices: Option<&[CreatorSliceCursor]>,
+        read_fence: Option<SequenceNumber>,
         metadata: &RegionMetadataRef,
         codec: Option<&dyn PrimaryKeyCodec>,
     ) -> Result<()> {
         let Some(slices) = slices.filter(|slices| !slices.is_empty()) else {
             return Ok(());
         };
-        let Some(&(_, first)) = slices.first() else {
+        let Some(&(_, first, first_until)) = slices.first() else {
             return Ok(());
         };
-        // A single cursor value is the floor of the region: which piece a row belongs to
-        // cannot change the outcome, so the batch needs no evaluation.
-        let cursor = if slices.iter().all(|(_, seq)| *seq == first) {
-            first
+        // One cursor value and one bound for every piece is the rule of the region: which
+        // piece a row belongs to cannot change the outcome, so the batch needs no evaluation.
+        let (cursor, until) = if slices
+            .iter()
+            .all(|(_, seq, until)| *seq == first && *until == first_until)
+        {
+            (first, first_until)
         } else {
             self.creator_slice_cursor(slices, metadata, codec)?
         };
 
-        self.filter_by_sequence_range(SequenceRange::Gt { min: cursor })
+        self.filter_by_sequence_range(creator_slice_sequence_range(cursor, until, read_fence))
     }
 
-    /// Returns the cursor of the piece the rows of `self` belong to, or the floor the batch
-    /// must be bounded by when the piece cannot be resolved
+    /// Returns the cursor and the upper bound of the piece the rows of `self` belong to, or
+    /// the floor the batch must be bounded by when the piece cannot be resolved
     /// ([`Self::unresolved_creator_cursor`]).
     ///
     /// The candidate expressions are the pieces a row may belong to; they are disjoint, so
     /// at most one of them selects a series. If more than one does (a domain that was not
-    /// split cleanly), the least advanced cursor among them is used, which never drops a row
-    /// a conservatively bounded read would have delivered.
+    /// split cleanly), the least advanced cursor among them is used — it never drops a row a
+    /// conservatively bounded read would have delivered — together with the least upper bound
+    /// among them, the only bound every one of the matching pieces proves.
     fn creator_slice_cursor(
         &self,
-        slices: &[(PartitionExpr, SequenceNumber)],
+        slices: &[CreatorSliceCursor],
         metadata: &RegionMetadataRef,
         codec: Option<&dyn PrimaryKeyCodec>,
-    ) -> Result<SequenceNumber> {
+    ) -> Result<(SequenceNumber, Option<SequenceNumber>)> {
         let Some(codec) = codec else {
             // Without a primary key the pieces cannot be told apart.
             return Self::unresolved_creator_cursor(
@@ -612,8 +632,8 @@ impl Batch {
             );
         };
 
-        let mut matched: Option<SequenceNumber> = None;
-        for (expr, cursor) in slices {
+        let mut matched: Option<(SequenceNumber, Option<SequenceNumber>)> = None;
+        for (expr, cursor, until) in slices {
             let selected = match expr.try_as_physical_expr(&probe.schema()) {
                 Ok(filter) => match evaluate_partition_filter(filter.as_ref(), &probe) {
                     Ok(selected) => selected,
@@ -635,9 +655,13 @@ impl Batch {
             };
             if selected {
                 // Disjoint expressions match at most once; a domain that was not split
-                // cleanly is bounded by its least advanced piece.
-                matched =
-                    Some(matched.map_or(*cursor, |current: SequenceNumber| current.min(*cursor)));
+                // cleanly is bounded by its least advanced piece, in both ends.
+                matched = Some(match matched {
+                    None => (*cursor, *until),
+                    Some((cursor_now, until_now)) => {
+                        (cursor_now.min(*cursor), least_until(until_now, *until))
+                    }
+                });
             }
         }
 
@@ -656,23 +680,26 @@ impl Batch {
     /// One rule decides every such case. When the candidate slices of the region all carry
     /// the **same** cursor value, that value is the least advanced one and bounding the batch
     /// by it delivers exactly the rows the per-piece rule delivers: the floor stays, silent
-    /// and without any evaluation of its own. When they carry several values, the least
+    /// and without any evaluation of its own. The upper end is then the least bound the
+    /// candidates state, the only one every candidate proves — a candidate that states none is
+    /// unbounded above and narrows nothing. When they carry several cursor values, the least
     /// advanced one is not exact — it delivers the rows a more advanced piece has already
     /// consumed, so the batch would be *duplicated*, not merely replayed — and an exact read
     /// must not degrade that way without saying so, so the read fails with
     /// [`crate::error::Error::SequenceRangeUnsupported`].
     fn unresolved_creator_cursor(
         metadata: &RegionMetadataRef,
-        slices: &[(PartitionExpr, SequenceNumber)],
+        slices: &[CreatorSliceCursor],
         detail: &str,
-    ) -> Result<SequenceNumber> {
+    ) -> Result<(SequenceNumber, Option<SequenceNumber>)> {
         let (min, max) = creator_cursor_range(slices);
+        let until = least_slice_until(slices.iter().map(|(_, _, until)| until));
         debug!(
             "Cannot resolve the creator cursor slice of a batch of region {} (candidate cursors {}..={}), detail: {}",
             metadata.region_id, min, max, detail
         );
         if min == max {
-            return Ok(min);
+            return Ok((min, until));
         }
         SequenceRangeUnsupportedSnafu {
             region_id: metadata.region_id,

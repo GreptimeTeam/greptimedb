@@ -38,7 +38,6 @@ use datatypes::vectors::{
 };
 use mito_codec::key_values::KeyValue;
 use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodec, PrimaryKeyCodecExt};
-use partition::expr::PartitionExpr;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, SequenceNumber, SequenceRange};
@@ -54,9 +53,9 @@ use crate::memtable::simple_bulk_memtable::SimpleBulkMemtable;
 use crate::memtable::stats::WriteMetrics;
 use crate::memtable::{
     AllocTracker, BatchToRecordBatchContext, BoxedBatchIterator, BoxedRecordBatchIterator,
-    IterBuilder, KeyValues, MemScanMetrics, Memtable, MemtableBuilder, MemtableId, MemtableRange,
-    MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats, RangesOptions,
-    read_column_ids_from_projection,
+    CreatorSliceCursor, CreatorSliceCursors, IterBuilder, KeyValues, MemScanMetrics, Memtable,
+    MemtableBuilder, MemtableId, MemtableRange, MemtableRangeContext, MemtableRanges, MemtableRef,
+    MemtableStats, RangesOptions, read_column_ids_from_projection, sequence_range_upper,
 };
 use crate::metrics::{
     MEMTABLE_ACTIVE_FIELD_BUILDER_COUNT, MEMTABLE_ACTIVE_SERIES_COUNT, READ_ROWS_TOTAL,
@@ -557,7 +556,7 @@ impl SeriesSet {
         dedup: bool,
         merge_mode: MergeMode,
         sequence: Option<SequenceRange>,
-        creator_slices: Option<Arc<Vec<(PartitionExpr, SequenceNumber)>>>,
+        creator_slices: Option<CreatorSliceCursors>,
         mem_scan_metrics: Option<MemScanMetrics>,
     ) -> Result<Iter> {
         let primary_key_schema = primary_key_schema(&self.region_metadata);
@@ -631,7 +630,7 @@ struct Iter {
     sequence: Option<SequenceRange>,
     /// The cursor of each piece a row may belong to, when this read states them
     /// ([`RangesOptions::creator_slices`]).
-    creator_slices: Option<Arc<Vec<(PartitionExpr, SequenceNumber)>>>,
+    creator_slices: Option<CreatorSliceCursors>,
     metrics: Metrics,
     mem_scan_metrics: Option<MemScanMetrics>,
 }
@@ -649,7 +648,7 @@ impl Iter {
         dedup: bool,
         merge_mode: MergeMode,
         sequence: Option<SequenceRange>,
-        creator_slices: Option<Arc<Vec<(PartitionExpr, SequenceNumber)>>>,
+        creator_slices: Option<CreatorSliceCursors>,
         mem_scan_metrics: Option<MemScanMetrics>,
     ) -> Result<Self> {
         let predicate = predicate
@@ -1248,7 +1247,7 @@ impl Values {
         metadata: &RegionMetadataRef,
         projection: &HashSet<ColumnId>,
         sequence: Option<SequenceRange>,
-        creator_slices: Option<&[(PartitionExpr, SequenceNumber)]>,
+        creator_slices: Option<&[CreatorSliceCursor]>,
         codec: Option<&dyn PrimaryKeyCodec>,
         dedup: bool,
         merge_mode: MergeMode,
@@ -1278,8 +1277,10 @@ impl Values {
         batch.filter_by_sequence(sequence)?;
         // The cursor of the piece this series belongs to replaces the single floor of
         // `sequence`: the floor is the least advanced piece of the region, so it cannot tell
-        // a row of a more advanced piece from a consumed one.
-        batch.filter_by_creator_slices(creator_slices, metadata, codec)?;
+        // a row of a more advanced piece from a consumed one. The piece's own upper bound
+        // narrows the read's fence, which is the upper end `sequence` states.
+        let read_fence = sequence_range_upper(sequence.as_ref());
+        batch.filter_by_creator_slices(creator_slices, read_fence, metadata, codec)?;
 
         match (dedup, merge_mode) {
             // append-only, keep duplicate rows.
@@ -1386,7 +1387,7 @@ struct TimeSeriesIterBuilder {
     sequence: Option<SequenceRange>,
     /// The cursor of each piece a row may belong to
     /// ([`RangesOptions::creator_slices`]).
-    creator_slices: Option<Arc<Vec<(PartitionExpr, SequenceNumber)>>>,
+    creator_slices: Option<CreatorSliceCursors>,
     merge_mode: MergeMode,
     batch_to_record_batch: Arc<BatchToRecordBatchContext>,
 }
@@ -2087,7 +2088,11 @@ mod tests {
         write_row("a", 1, 4);
         write_row("z", 2, 6);
 
-        let read = |slices: Vec<(partition::expr::PartitionExpr, SequenceNumber)>| {
+        let read = |slices: Vec<(
+            partition::expr::PartitionExpr,
+            SequenceNumber,
+            Option<SequenceNumber>,
+        )>| {
             let options = RangesOptions::default()
                 .with_sequence(Some(SequenceRange::GtLtEq { min: 2, max: 100 }))
                 .with_creator_slices(Some(Arc::new(slices)));
@@ -2116,7 +2121,7 @@ mod tests {
         // delivered.
         assert_eq!(
             vec![(2, 6)],
-            read(vec![(slice_lt(), 5), (slice_ge(), 2)]),
+            read(vec![(slice_lt(), 5, None), (slice_ge(), 2, None)]),
             "the rows at 3 and 4 belong to the piece consumed up to 5 and are not delivered \
              again, the row at 6 belongs to the piece consumed up to 2 and is"
         );
@@ -2125,7 +2130,7 @@ mod tests {
         // exactly the rows above the floor, whatever piece they belong to.
         assert_eq!(
             vec![(0, 3), (1, 4), (2, 6)],
-            read(vec![(slice_lt(), 2), (slice_ge(), 2)]),
+            read(vec![(slice_lt(), 2, None), (slice_ge(), 2, None)]),
             "with one cursor value the rows are exactly the rows above the region floor"
         );
 
@@ -2135,10 +2140,15 @@ mod tests {
         let options = RangesOptions::default()
             .with_sequence(Some(SequenceRange::GtLtEq { min: 2, max: 100 }))
             .with_creator_slices(Some(Arc::new(vec![
-                (col("k0").lt(Operand::Value(Value::String("a".into()))), 5),
+                (
+                    col("k0").lt(Operand::Value(Value::String("a".into()))),
+                    5,
+                    None,
+                ),
                 (
                     col("k0").gt_eq(Operand::Value(Value::String("z".into()))),
                     2,
+                    None,
                 ),
             ])));
         let mut iter = memtable.ranges(None, options).unwrap().build(None).unwrap();
@@ -2204,8 +2214,8 @@ mod tests {
         // Two candidate pieces over a column the batch states no value for.
         let slices = |left: u64, right: u64| {
             vec![
-                (col("v0").gt_eq(Operand::Value(Value::Int64(0))), left),
-                (col("v0").lt(Operand::Value(Value::Int64(0))), right),
+                (col("v0").gt_eq(Operand::Value(Value::Int64(0))), left, None),
+                (col("v0").lt(Operand::Value(Value::Int64(0))), right, None),
             ]
         };
         let options = |pieces| {
@@ -2261,6 +2271,116 @@ mod tests {
             vec![(0, 3), (1, 4), (2, 6)],
             rows,
             "one cursor value for every piece keeps the batch-level floor of the whole region"
+        );
+    }
+
+    /// A row numbered above the upper bound of its own slice belongs to a later delta: the
+    /// piece's bound narrows the read's fence, so the memtable does not deliver it. A slice
+    /// that states no bound keeps the fence alone, exactly as before the bound existed.
+    #[test]
+    fn test_memtable_does_not_deliver_rows_above_the_creator_slice_upper_bound() {
+        use partition::expr::{Operand, col};
+
+        let schema = schema_for_test();
+        let memtable = TimeSeriesMemtable::new(schema.clone(), 1, None, false, MergeMode::LastRow);
+
+        let column_schema = schema
+            .column_metadatas
+            .iter()
+            .map(|c| api::v1::ColumnSchema {
+                column_name: c.column_schema.name.clone(),
+                datatype: ColumnDataTypeWrapper::try_from(c.column_schema.data_type.clone())
+                    .unwrap()
+                    .datatype() as i32,
+                semantic_type: c.semantic_type as i32,
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        let write_row = |k0: &str, ts: i64, sequence: u64| {
+            let mutation = Mutation {
+                op_type: 1,
+                sequence,
+                rows: Some(Rows {
+                    schema: column_schema.clone(),
+                    rows: vec![row(vec![
+                        ValueData::StringValue(k0.to_string()),
+                        ValueData::I64Value(0),
+                        ValueData::TimestampMillisecondValue(ts),
+                        ValueData::I64Value(ts),
+                        ValueData::F64Value(0.0),
+                    ])],
+                }),
+                write_hint: None,
+            };
+            let kvs = KeyValues::new(schema.as_ref(), mutation).unwrap();
+            memtable.write(&kvs).unwrap();
+        };
+
+        // `k0 < "m"` is the piece consumed up to 4, `k0 >= "m"` the one consumed up to 5.
+        write_row("a", 0, 3);
+        write_row("a", 1, 4);
+        write_row("a", 2, 6);
+        write_row("z", 3, 7);
+
+        let slice_lt = || col("k0").lt(Operand::Value(Value::String("m".into())));
+        let slice_ge = || col("k0").gt_eq(Operand::Value(Value::String("m".into())));
+        let read = |slices: Vec<(
+            partition::expr::PartitionExpr,
+            SequenceNumber,
+            Option<SequenceNumber>,
+        )>| {
+            // The read's own fence is 10: it admits every row of the memtable, so only the
+            // per-piece rule can hold the row at 7 back.
+            let options = RangesOptions::default()
+                .with_sequence(Some(SequenceRange::GtLtEq { min: 4, max: 10 }))
+                .with_creator_slices(Some(Arc::new(slices)));
+            let mut iter = memtable.ranges(None, options).unwrap().build(None).unwrap();
+            let mut rows = Vec::new();
+            for batch in iter.by_ref() {
+                let batch = batch.unwrap();
+                let timestamps = batch.timestamps().to_arrow_array();
+                let timestamps = timestamps
+                    .as_any()
+                    .downcast_ref::<datatypes::arrow::array::TimestampMillisecondArray>()
+                    .unwrap();
+                for (idx, sequence) in batch.sequences().iter_data().enumerate() {
+                    rows.push((timestamps.value(idx), sequence.unwrap()));
+                }
+            }
+            rows.sort_unstable();
+            rows
+        };
+
+        // Both slices state the same delta end, 6. The row at 6 belongs to the piece consumed
+        // up to 4 and is owed; the row at 7 belongs to the other piece, whose bound it is
+        // above, so it is left to the delta that covers it.
+        assert_eq!(
+            vec![(2, 6)],
+            read(vec![(slice_lt(), 4, Some(6)), (slice_ge(), 5, Some(6)),]),
+            "a row above its piece's upper bound is not part of this delta"
+        );
+
+        // The same rows with the bounds the defect report states: a piece already consumed up
+        // to 9 whose delta ends at 6 still cannot deliver the row at 7.
+        assert_eq!(
+            vec![(2, 6)],
+            read(vec![(slice_lt(), 4, Some(6)), (slice_ge(), 9, Some(6)),]),
+            "a bound below the piece's cursor states no window at all, and delivers nothing"
+        );
+
+        // Without a stated bound the fence is the whole rule, as it always was: the row at 7
+        // is above the cursor of its piece (5) and at or below the fence, so it is delivered.
+        assert_eq!(
+            vec![(2, 6), (3, 7)],
+            read(vec![(slice_lt(), 4, None), (slice_ge(), 5, None)]),
+            "without a bound every row above the piece's cursor is still owed"
+        );
+
+        // A bound at or above the fence changes nothing: the fence is the tighter end.
+        assert_eq!(
+            vec![(2, 6), (3, 7)],
+            read(vec![(slice_lt(), 4, Some(10)), (slice_ge(), 5, Some(10)),]),
+            "the bound narrows the fence, it never widens it"
         );
     }
 

@@ -96,6 +96,16 @@ pub(crate) fn group_by_sequence<T>(
 /// Should be unique under the same region.
 pub type MemtableId = u32;
 
+/// The cursor of one piece a memtable row may belong to, as
+/// [`RangesOptions::creator_slices`] takes it: the partition expression selecting the piece,
+/// the last sequence consumed inside it, and — when the producer states one — the last
+/// sequence the delta of the piece covers.
+pub type CreatorSliceCursor = (PartitionExpr, SequenceNumber, Option<SequenceNumber>);
+
+/// The cursor of each piece a memtable row may belong to
+/// ([`RangesOptions::creator_slices`]).
+pub type CreatorSliceCursors = Arc<Vec<CreatorSliceCursor>>;
+
 /// Options for querying ranges from a memtable.
 #[derive(Clone)]
 pub struct RangesOptions {
@@ -108,15 +118,19 @@ pub struct RangesOptions {
     /// Sequence range to filter the data.
     pub sequence: Option<SequenceRange>,
     /// The cursor of each piece a row of this memtable may belong to, as
-    /// `(partition expression, last consumed sequence)` pairs.
+    /// [`CreatorSliceCursor`] triples: `(partition expression, last consumed sequence, last
+    /// sequence the piece's delta covers)`.
     ///
-    /// When present, a row is delivered only when `seq > cursor(piece of the row)`: the
-    /// cursor of the piece replaces the single floor [`Self::sequence`] states, which is the
-    /// minimum of the pieces and therefore cannot tell a row of a more advanced piece from a
-    /// consumed one. The maximum of [`Self::sequence`] still bounds every row.
+    /// When present, a row is delivered only when its own sequence is above the cursor of
+    /// the piece it belongs to: the cursor of the piece replaces the single floor
+    /// [`Self::sequence`] states, which is the minimum of the pieces and therefore cannot
+    /// tell a row of a more advanced piece from a consumed one. The piece's `until` narrows
+    /// the upper end [`Self::sequence`] states, so a row numbered above the piece's delta is
+    /// not delivered by a read of this one; a piece that states no `until` keeps that end
+    /// alone.
     ///
     /// `None` (or an empty vector) keeps the region-level floor as the whole rule.
-    pub creator_slices: Option<Arc<Vec<(PartitionExpr, SequenceNumber)>>>,
+    pub creator_slices: Option<CreatorSliceCursors>,
     /// Maximum number of rows readers should produce in one batch.
     pub batch_size: usize,
 }
@@ -171,12 +185,10 @@ impl RangesOptions {
     /// Sets the cursor of each piece a row may belong to.
     ///
     /// See [`Self::creator_slices`]: the cursor of the piece a row belongs to replaces the
-    /// single floor of [`Self::sequence`], the maximum of it still applies.
+    /// single floor of [`Self::sequence`], and the `until` of that piece narrows the upper
+    /// end of it.
     #[must_use]
-    pub fn with_creator_slices(
-        mut self,
-        creator_slices: Option<Arc<Vec<(PartitionExpr, SequenceNumber)>>>,
-    ) -> Self {
+    pub fn with_creator_slices(mut self, creator_slices: Option<CreatorSliceCursors>) -> Self {
         self.creator_slices = creator_slices;
         self
     }
@@ -187,6 +199,55 @@ impl RangesOptions {
         self.batch_size = batch_size.clamp(1, crate::sst::parquet::DEFAULT_READ_BATCH_SIZE);
         self
     }
+}
+
+/// Returns the inclusive upper end `range` states, when it states one.
+pub(crate) fn sequence_range_upper(range: Option<&SequenceRange>) -> Option<SequenceNumber> {
+    match range {
+        Some(SequenceRange::LtEq { max } | SequenceRange::GtLtEq { max, .. }) => Some(*max),
+        _ => None,
+    }
+}
+
+/// The sequence range the rows of one creator cursor slice are read with: above the slice's
+/// cursor and at or below `min(read_fence, until)`.
+///
+/// `until` is the last sequence the slice's delta covers ([`CreatorSliceCursor`]);
+/// `read_fence` is the upper end the read's own sequence range states. The slice's bound
+/// narrows the fence and never widens it — the fence is what the snapshot allows — while a
+/// slice that states no bound keeps the fence alone, exactly as before the bound existed.
+pub(crate) fn creator_slice_sequence_range(
+    cursor: SequenceNumber,
+    until: Option<SequenceNumber>,
+    read_fence: Option<SequenceNumber>,
+) -> SequenceRange {
+    match (read_fence, until) {
+        (Some(fence), Some(until)) => SequenceRange::GtLtEq {
+            min: cursor,
+            max: fence.min(until),
+        },
+        (Some(fence), None) => SequenceRange::GtLtEq {
+            min: cursor,
+            max: fence,
+        },
+        (None, Some(until)) => SequenceRange::GtLtEq {
+            min: cursor,
+            max: until,
+        },
+        (None, None) => SequenceRange::Gt { min: cursor },
+    }
+}
+
+/// The **least** inclusive upper bound a set of candidate slices states, or `None` when none
+/// of them states one.
+///
+/// A slice that states no bound is unbounded above and never narrows the set; a row whose
+/// piece is one of several candidates is bounded by the least bound among them, the only
+/// bound every candidate proves.
+pub(crate) fn least_slice_until<'a>(
+    untils: impl Iterator<Item = &'a Option<SequenceNumber>>,
+) -> Option<SequenceNumber> {
+    untils.filter_map(|until| *until).min()
 }
 
 #[derive(Debug, Default, Clone)]

@@ -51,7 +51,6 @@ use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::metadata::ParquetMetaData;
 use parquet::file::properties::WriterProperties;
-use partition::expr::PartitionExpr;
 use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
@@ -69,7 +68,9 @@ use crate::error::{
 use crate::memtable::bulk::context::{BulkIterContext, BulkIterContextRef};
 use crate::memtable::bulk::part_reader::EncodedBulkPartIter;
 use crate::memtable::time_series::{ValueBuilder, Values};
-use crate::memtable::{BoxedRecordBatchIterator, MemScanMetrics, MemtableStats};
+use crate::memtable::{
+    BoxedRecordBatchIterator, CreatorSliceCursors, MemScanMetrics, MemtableStats,
+};
 use crate::sst::SeriesEstimator;
 use crate::sst::index::IndexOutput;
 use crate::sst::parquet::flat_format::primary_key_column_index;
@@ -1344,7 +1345,7 @@ impl EncodedBulkPart {
         &self,
         context: BulkIterContextRef,
         sequence: Option<SequenceRange>,
-        creator_slices: Option<Arc<Vec<(PartitionExpr, SequenceNumber)>>>,
+        creator_slices: Option<CreatorSliceCursors>,
         mem_scan_metrics: Option<MemScanMetrics>,
     ) -> Result<Option<BoxedRecordBatchIterator>> {
         // Compute skip_fields for row group pruning from the configured pre-filter mode.
@@ -1921,7 +1922,7 @@ impl MultiBulkPart {
         &self,
         context: BulkIterContextRef,
         sequence: Option<SequenceRange>,
-        creator_slices: Option<Arc<Vec<(PartitionExpr, SequenceNumber)>>>,
+        creator_slices: Option<CreatorSliceCursors>,
         mem_scan_metrics: Option<MemScanMetrics>,
     ) -> Result<Option<BoxedRecordBatchIterator>> {
         if self.batches.is_empty() {

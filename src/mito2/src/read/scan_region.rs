@@ -100,9 +100,9 @@ use crate::sst::parquet::reader::ReaderMetrics;
 use crate::sst::primary_key::PrimaryKeyRangeMapper;
 
 /// The cursor of each piece a row of this region's own data may belong to, as the read
-/// compiles them: `(partition expression, last consumed sequence)` pairs
-/// (`RangesOptions::creator_slices`).
-type RegionCreatorSlices = Arc<Vec<(PartitionExpr, SequenceNumber)>>;
+/// compiles them: `(partition expression, last consumed sequence, last sequence the piece's
+/// delta covers)` triples (`RangesOptions::creator_slices`).
+type RegionCreatorSlices = crate::memtable::CreatorSliceCursors;
 
 /// A scanner scans a region and returns a [SendableRecordBatchStream].
 pub(crate) enum Scanner {
@@ -586,6 +586,10 @@ impl ScanRegion {
     /// of the piece its tag values fall into instead of against the single floor of the
     /// region, which is only the least advanced piece.
     ///
+    /// Each slice carries the last sequence its delta covers ([`CursorShard::until`]) along
+    /// with its cursor, so the memtable bounds the rows of a piece from above as well: a row
+    /// numbered above that bound belongs to a later delta and is not delivered by this one.
+    ///
     /// `Ok(None)` when there is no per-piece rule to state: the scan is not a
     /// physical-sequence read, it may cross an invalid boundary (which applies no lower bound
     /// at all), the region states one whole-domain cursor, or a stated expression cannot be
@@ -638,7 +642,7 @@ impl ScanRegion {
                 )?;
                 return Ok(None);
             };
-            slices.push((expr, shard.seq));
+            slices.push((expr, shard.seq, shard.until));
         }
         if slices.is_empty() {
             return Ok(None);
@@ -727,7 +731,8 @@ impl ScanRegion {
             self.request.memtable_min_sequence
         };
         // The per-piece cursors of this region's own slices: they replace the single floor
-        // `memtable_min_sequence` states (the least advanced piece) while the maximum stays.
+        // `memtable_min_sequence` states (the least advanced piece), and the bound a slice
+        // states narrows the read's maximum for the rows of that piece.
         let memtable_creator_slices = self.memtable_creator_slices()?;
 
         for m in memtables {

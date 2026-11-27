@@ -576,7 +576,9 @@ fn parse_expression_keyed_shards(
 
 /// Parses one `{"expr": <partition expr json> | null, "seq": N, "until": N?}` slice.
 ///
-/// `until` is optional and read whenever it is stated: a bound is a bound.
+/// `until` is optional and read whenever it is stated: a bound is a bound. A bound below
+/// the slice's own `seq` states an empty delta (a slice covers `seq < number <= until`) and
+/// is refused instead of being clamped or swapped.
 fn parse_cursor_shard(region_id: u64, shard: &serde_json::Value) -> Result<CursorShard> {
     let serde_json::Value::Object(fields) = shard else {
         return Err(invalid_query_context_extension(format!(
@@ -617,6 +619,24 @@ fn parse_cursor_shard(region_id: u64, shard: &serde_json::Value) -> Result<Curso
         None | Some(serde_json::Value::Null) => None,
         Some(raw) => Some(parse_cursor_seq(region_id, raw)?),
     };
+
+    // A slice covers `seq < number <= until`, so an `until` below its own `seq` states an
+    // empty window. Refusing it is the only reading that keeps the producer's statement
+    // intact: clamping or swapping would silently deliver a delta it never asked for. A
+    // lower bound is also worse than a no-op downstream — a read bounds a file with
+    // `GtLtEq { min, max }` and `max < min` selects no row at all, while a file several
+    // slices match can still admit rows through another slice's smaller minimum, so the
+    // read would answer with a plain wrong result instead of failing.
+    if let Some(until) = until
+        && until < seq
+    {
+        return Err(invalid_query_context_extension(format!(
+            "Invalid cursor slice in {} for region {}: the upper bound {} is below the slice's \
+             own consumed sequence {} (a slice covers seq < number <= until, so its until must \
+             be at least its seq)",
+            FLOW_INCREMENTAL_AFTER_SEQS, region_id, until, seq
+        )));
+    }
 
     Ok(match until {
         Some(until) => CursorShard::new(partition_expr, seq).with_until(until),
@@ -1288,6 +1308,76 @@ mod flow_extension_tests {
                 "{value}: {err}"
             );
         }
+    }
+
+    /// A slice covers `seq < number <= until`, so an `until` below its own `seq` states an
+    /// empty delta and is refused at the boundary instead of being clamped or swapped: a read
+    /// bounds a file with `GtLtEq { min, max }` and `max < min` selects no row at all, while a
+    /// file several slices match can still admit rows through another slice's smaller minimum,
+    /// so the wrong slice would look like a plausible but wrong answer instead of a failure.
+    #[test]
+    fn test_parse_flow_extensions_after_seqs_rejects_upper_bound_below_cursor() {
+        let exts = HashMap::from([(
+            FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+            r#"{"7":{"version":3,"shards":[{"expr":null,"seq":10,"until":9}]}}"#.to_string(),
+        )]);
+        let err = FlowQueryExtensions::parse_flow_extensions(&exts).unwrap_err();
+        let message = format!("{err}");
+        assert!(
+            message.contains("region 7"),
+            "the failure names the region: {message}"
+        );
+        assert!(
+            message.contains("upper bound 9"),
+            "the failure names the stated bound: {message}"
+        );
+        assert!(
+            message.contains("consumed sequence 10"),
+            "the failure names the slice's own cursor: {message}"
+        );
+        assert!(
+            message.contains("at least its seq"),
+            "the failure names the ordering rule: {message}"
+        );
+
+        // The bound is refused under either version, and whatever the distance is.
+        for (value, region) in [
+            (
+                r#"{"8":{"version":2,"shards":[{"expr":null,"seq":10,"until":9}]}}"#,
+                "region 8",
+            ),
+            (
+                r#"{"9":{"version":3,"shards":[{"expr":null,"seq":5,"until":0}]}}"#,
+                "region 9",
+            ),
+        ] {
+            let exts =
+                HashMap::from([(FLOW_INCREMENTAL_AFTER_SEQS.to_string(), value.to_string())]);
+            let err = FlowQueryExtensions::parse_flow_extensions(&exts).unwrap_err();
+            let message = format!("{err}");
+            assert!(
+                message.contains(region) && message.contains("at least its seq"),
+                "{value}: {message}"
+            );
+        }
+
+        // `until == seq` is the boundary the rule allows: the slice states the bound it
+        // covers, and no row of it is above the cursor.
+        let exts = HashMap::from([(
+            FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+            r#"{"7":{"version":3,"shards":[{"expr":null,"seq":10,"until":10}]}}"#.to_string(),
+        )]);
+        let parsed = FlowQueryExtensions::parse_flow_extensions(&exts)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            parsed.incremental_after_seqs,
+            Some(HashMap::from([(
+                7,
+                vec![CursorShard::whole_domain(10).with_until(10)]
+            )])),
+            "a bound equal to the cursor states an empty window and is not a contradiction"
+        );
     }
 
     /// An expression this build cannot read back is rejected at the boundary rather than
