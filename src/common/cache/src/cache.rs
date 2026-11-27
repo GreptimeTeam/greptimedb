@@ -17,6 +17,8 @@ use std::hash::Hash;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::FutureExt;
+
 use crate::metrics::{CacheMetrics, CacheSizeMetric, CacheSizeRegistration};
 
 /// Reason for releasing an entry from the cache.
@@ -164,8 +166,21 @@ where
     }
 
     /// Atomically admits an already-loaded value or returns the resident one.
+    /// Pending admission runs on the current Tokio runtime so other readers
+    /// can finish while this caller is paused.
     pub async fn get_or_insert(&self, key: K, value: V) -> V {
-        self.inner.get_with(key, std::future::ready(value)).await
+        let cache = self.inner.clone();
+        let mut admission =
+            Box::pin(async move { cache.get_with(key, std::future::ready(value)).await });
+        if let Some(resident) = admission.as_mut().now_or_never() {
+            return resident;
+        }
+
+        // Moka can yield while holding its per-key waiter. Drive the rest of
+        // admission even if downstream stops polling this reader.
+        let (task, result) = admission.remote_handle();
+        tokio::spawn(task);
+        result.await
     }
 
     /// Submits a completed value to the cache's admission and eviction policy.
@@ -245,6 +260,44 @@ mod tests {
         let future: futures::future::BoxFuture<'_, Option<Arc<String>>> =
             Box::pin(send_lookup(&cache, "key"));
         assert_eq!(future.await.as_deref().map(String::as_str), Some("value"));
+    }
+
+    #[tokio::test]
+    async fn paused_admission_does_not_block_same_key_caller() {
+        let release = Arc::new(Notify::new());
+        let gate = release.clone();
+        let inner = moka::future::Cache::builder()
+            .max_capacity(1024)
+            .async_eviction_listener(move |_, _, _| gate.clone().notified_owned().boxed())
+            .build();
+        let cache = Cache {
+            inner,
+            capacity: 1024,
+            size_registration: None,
+            metrics: None,
+        };
+        cache.insert("key", Arc::new(0)).await;
+
+        // Invalidation removes the entry but holds Moka's per-key write lock
+        // until its listener finishes. Both callers will miss the lookup.
+        let mut removal = Box::pin(cache.invalidate("key"));
+        assert!(futures::poll!(&mut removal).is_pending());
+        assert!(cache.get("key").await.is_none());
+        let value = Arc::new(1);
+        let mut first = Box::pin(cache.get_or_insert("key", value.clone()));
+        assert!(futures::poll!(&mut first).is_pending());
+        let mut second = Box::pin(cache.get_or_insert("key", Arc::new(2)));
+        assert!(futures::poll!(&mut second).is_pending());
+
+        release.notify_one();
+        removal.await;
+        // Poll only the second caller until it has the first caller's value.
+        let other = tokio::time::timeout(Duration::from_secs(5), second)
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&value, &other));
+        assert!(Arc::ptr_eq(&value, &first.await));
+        assert!(Arc::ptr_eq(&value, &cache.get("key").await.unwrap()));
     }
 
     #[tokio::test]

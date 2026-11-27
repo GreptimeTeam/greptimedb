@@ -13,7 +13,7 @@ common-base.workspace = true
 futures.workspace = true
 moka = { workspace = true, features = ["future", "sync"] }
 prometheus.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
-tokio = { workspace = true, features = ["macros", "rt", "sync"] }
