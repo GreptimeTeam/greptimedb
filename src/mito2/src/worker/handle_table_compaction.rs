@@ -15,7 +15,9 @@ use std::collections::HashSet;
 
 use snafu::ensure;
 
-use crate::engine::table_compaction::{PublicationContext, output};
+use crate::engine::table_compaction::{
+    PublicationContext, is_table_compaction_metadata_compatible, output,
+};
 use crate::error::{InvalidRequestSnafu, RegionBusySnafu, Result, StaleCompactionExecutionSnafu};
 use crate::manifest::action::{RegionEdit, RegionManifest, RegionMetaAction, RegionMetaActionList};
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
@@ -112,7 +114,8 @@ fn is_replay(
 ) -> Result<bool> {
     let region_id = region.region_id;
     ensure!(
-        context.metadata == manifest.metadata && !edit.files_to_remove.is_empty(),
+        is_table_compaction_metadata_compatible(&context.metadata, &manifest.metadata)
+            && !edit.files_to_remove.is_empty(),
         StaleCompactionExecutionSnafu { region_id }
     );
     let matches =
