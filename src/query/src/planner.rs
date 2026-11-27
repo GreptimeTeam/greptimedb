@@ -218,12 +218,6 @@ fn strips_only_tsid(plan: &LogicalPlan, inner: &LogicalPlan) -> bool {
 
 /// The error a statement that asked for the native route is answered with when the route does not
 /// answer its shape.
-///
-/// The cause it names is the one the refusal recorded (see
-/// [`take_decline_reason`](crate::promql::planner::native::take_decline_reason)), so the answer
-/// says which shape of this statement the route does not serve rather than leaving the reader to
-/// infer it from a different plan. Planning reports it as a plan failure, like every other error it
-/// raises while planning.
 fn native_declined() -> crate::error::Error {
     let declined = NativeRouteDeclinedSnafu {
         reason: take_decline_reason().to_string(),
@@ -725,8 +719,7 @@ impl DfLogicalPlanner {
     /// `native_route_allowed` states whether the statement may take the route at all, and the rest
     /// of what the route depends on is read from the query options snapshot the statement is
     /// planned with, where every option is already resolved as request > session `SET` > engine
-    /// default. See [`Self::plan_pql_with_route`] for the same plan beside whether the route had
-    /// its say.
+    /// default.
     async fn plan_pql(
         &self,
         stmt: &EvalStmt,
@@ -739,12 +732,7 @@ impl DfLogicalPlanner {
     }
 
     /// Plans a PromQL statement and answers whether it was offered to the native fused-series
-    /// route.
-    ///
-    /// A caller that publishes this plan as something else - a hybrid CTE registers it as a table
-    /// the outer SQL query reads - needs that second answer: a route that was not offered is not a
-    /// route that refused, so a plan this statement did not get from the native route is only a
-    /// failure when the query asked for that route.
+    /// route. A plan the route was not offered is not a refusal.
     #[tracing::instrument(skip_all)]
     async fn plan_pql_with_route(
         &self,
@@ -962,24 +950,15 @@ impl DfLogicalPlanner {
                     .plan_pql_with_route(eval, query_ctx.clone(), true)
                     .await?;
                 if !native_offered {
-                    // This query did not ask for the native route, so the route never had this
-                    // statement to refuse: this is the existing plan, which already publishes what
-                    // a CTE has always published.
                     return Ok(plan);
                 }
                 if !contains_native_fused(&plan) {
-                    // The query asked for the route and this answer is not the route's: report the
-                    // reason it recorded instead of publishing a different plan under the CTE's
-                    // name. A plan the route did answer carries its node, so an answer without one
-                    // is a statement this CTE cannot be given by the route at all.
                     return Err(native_declined());
                 }
                 // What the CTE publishes is SQL-visible, and this route names and orders its output
                 // its own way, so its own schema cannot stand in for the existing planner's: plan
                 // the statement for that schema and publish it over the native answer. The existing
-                // plan is read for its columns only - it is not an answer for this statement - so a
-                // statement whose columns that projection cannot fill faithfully is reported
-                // instead of being replaced by it.
+                // plan is read for its columns only.
                 let existing = self.plan_pql(eval, query_ctx, false).await?;
                 match publish_legacy_schema(plan, &existing) {
                     Some(published) => Ok(published),

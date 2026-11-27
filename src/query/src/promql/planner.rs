@@ -352,19 +352,13 @@ pub struct PromPlanner {
     /// An offer compiles a whole tree, so it is made where it covers the most: the statement root,
     /// and the topmost binary below a node this route does not answer. Once a binary node has spent
     /// the offer, the operands below it are planned by the existing path without offering
-    /// themselves again: a refused offer is reported, so a chain of n operators never reaches the
-    /// O(n^2) passes that re-offering every operand would cost.
+    /// themselves again, which would cost O(n^2) passes over a chain of n operators.
     native_binary_offer: bool,
 }
 
 type BinaryFieldPair<'a> = (&'a String, &'a String);
 
 /// The answer to a statement the native route was asked to plan and does not answer.
-///
-/// A query that asks for the native route gets that route or the cause of its refusal: the existing
-/// planner's answer for the same statement is a different plan, so it is not a quiet substitute for
-/// one. The cause is the one the refusal recorded (see
-/// [`native::take_decline_reason`](crate::promql::planner::native::take_decline_reason)).
 fn native_declined() -> Error {
     NativeRouteDeclinedSnafu {
         reason: native::take_decline_reason().to_string(),
@@ -409,11 +403,6 @@ impl PromPlanner {
         // The whole statement is offered to the native compiler first, because that compiler folds
         // a range function and the math functions over it into one tree: offered any later, the
         // expression has already been split into the nodes those functions would have shared.
-        //
-        // A root wrapper - `EXPLAIN`, `ANALYZE`, an alias - is not a shape of its own: what it wraps
-        // is the expression this route answers, and `prom_ext_expr_to_plan` offers that one instead
-        // of the wrapper. Offering the wrapper here would refuse the statement for a cause that is
-        // not the query's, so those roots go straight to the walk that dispatches them.
         if !matches!(stmt.expr, PromExpr::Extension(_)) {
             if let Some(plan) = planner
                 .try_plan_native_fused(&stmt.expr, query_engine_state)
@@ -421,8 +410,6 @@ impl PromPlanner {
             {
                 return planner.strip_tsid_column(plan);
             }
-            // The query asked for this route and the route does not answer this shape: the cause of
-            // that refusal is the answer, not the existing planner's plan for the same statement.
             if planner.native_fused {
                 return Err(native_declined());
             }
@@ -1335,8 +1322,6 @@ impl PromPlanner {
                 .await;
             self.ctx = saved;
             let Some(plan) = native? else {
-                // The query asked for this route and the route does not answer this binary: the
-                // cause of that refusal is the answer, not a plan from the existing path below.
                 return Err(native_declined());
             };
             let mut fields = plan.schema().fields().iter();
@@ -2628,8 +2613,6 @@ impl PromPlanner {
         // let promql_parser::parser::ast::Extension { expr } = ext_expr;
         let expr = &ext_expr.expr;
         let children = expr.children();
-        // `EXPLAIN` and `ANALYZE` publish a plan of the expression they wrap, so the expression is
-        // what this route is offered: every other wrapper is the existing planner's to answer.
         let publishes_a_plan = matches!(
             expr.name(),
             ANALYZE_NODE_NAME
@@ -2646,9 +2629,6 @@ impl PromPlanner {
         let plan = match native_plan {
             Some(plan) => plan,
             None => {
-                // The query asked for this route and the route does not answer what the wrapper
-                // publishes: the cause of that refusal is the answer, not a plan of the existing
-                // path published under the same `EXPLAIN`/`ANALYZE`.
                 if publishes_a_plan && self.native_fused {
                     return Err(native_declined());
                 }
