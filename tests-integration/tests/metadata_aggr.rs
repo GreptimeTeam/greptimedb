@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::time::Duration;
+
 use common_base::readable_size::ReadableSize;
 use common_query::{Output, OutputData};
 use common_recordbatch::RecordBatches;
@@ -201,7 +203,7 @@ async fn test_metadata_count_logical_metric_skips_other_table_footers() {
     execute_sql(frontend, "ADMIN FLUSH_TABLE('physical_count')").await;
     execute_sql(
         frontend,
-        "INSERT INTO logical_b VALUES (1000, 1, 'b'), (1500, 2, 'b'), (2000, 3, 'b')",
+        "INSERT INTO logical_b VALUES (1000, 1, 'b'), (1250, 2, 'b'), (1500, 3, 'b'), (2000, 4, 'b')",
     )
     .await;
     execute_sql(frontend, "ADMIN FLUSH_TABLE('physical_count')").await;
@@ -220,11 +222,24 @@ async fn test_metadata_count_logical_metric_skips_other_table_footers() {
     };
     assert_eq!(a.region_id, b.region_id);
     assert_eq!((a.min_ts, a.max_ts), (b.min_ts, b.max_ts));
-    assert_eq!((a.num_rows, b.num_rows), (2, 3));
+    assert_eq!((a.num_rows, b.num_rows), (2, 4));
     let target = RegionFileId::new(a.origin_region_id, a.file_id.parse().unwrap());
     let unrelated = RegionFileId::new(b.origin_region_id, b.file_id.parse().unwrap());
     let cache = standalone.mito_engine.cache_manager();
     for file in [target, unrelated] {
+        // Flush prewarms the cache asynchronously. Evict after that task has
+        // inserted both the compact and decoded entries.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while cache
+                .get_parquet_meta_data_from_mem_cache(file)
+                .await
+                .is_none()
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("flush did not cache metadata for {file}"));
         cache.remove_parquet_meta_data(file).await;
         assert!(
             cache
@@ -254,7 +269,7 @@ async fn test_metadata_count_logical_metric_skips_other_table_footers() {
             .await
             .is_none()
     );
-    assert_count(frontend, "SELECT count(*) FROM logical_b", 3).await;
+    assert_count(frontend, "SELECT count(*) FROM logical_b", 4).await;
     assert!(
         cache
             .get_parquet_meta_data_from_mem_cache(unrelated)
