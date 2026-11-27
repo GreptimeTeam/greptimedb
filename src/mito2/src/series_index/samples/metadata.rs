@@ -17,12 +17,12 @@
 use crate::error::Result;
 use crate::series_index::samples::codec::{self, Cursor, put_u32, put_u64};
 use crate::series_index::samples::{
-    MetricSeriesId, SamplesMetadata, invalid, require, unsupported, valid_rows,
+    MetricSeriesId, SamplesMetadata, histogram, invalid, require, unsupported, valid_rows,
 };
 
 pub(super) const PAGE_LIMIT: usize = 65536;
 /// Largest decoded block payload, and therefore the largest frame a decoder has to decompress.
-const CHUNK_LIMIT: usize = 1024 * 1024;
+pub(super) const CHUNK_LIMIT: usize = 1024 * 1024;
 /// Fixed part of a block descriptor, before its 44-byte column descriptors.
 ///
 /// The exact series key is not part of it. A descriptor keeps a fixed-size [`KeyRef`] into
@@ -520,13 +520,21 @@ impl Block {
                     .ok_or_else(|| invalid("unknown or unordered sample field"))?
                     + next_field;
                 next_field = position + 1;
+                // A known value encoding must be the one its field's type is stored with, so a
+                // chunk is never decoded as another kind of value.
+                if payload.encoding <= histogram::ENCODING {
+                    require(
+                        payload.encoding == manifest.fields[position].encoding()?,
+                        "sample field codec does not match its field type",
+                    )?;
+                }
             }
-            if payload.encoding <= 7 {
+            if payload.encoding <= histogram::ENCODING {
                 let valid = match role {
                     1 => matches!(payload.encoding, 1 | 2),
                     2 => matches!(payload.encoding, 3 | 4),
                     3 => matches!(payload.encoding, 6 | 7),
-                    4 => payload.encoding == 5,
+                    4 => matches!(payload.encoding, 5 | histogram::ENCODING),
                     _ => false,
                 };
                 require(valid, "sample codec role mismatch")?;

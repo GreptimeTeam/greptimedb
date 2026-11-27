@@ -51,6 +51,9 @@ once each. Readers can skip unknown entries by length.
 | `schema` | Timestamp column (ID, name, unit) and ordered value fields (ID, name, type, nullable). |
 | `parts` | Ordered list of part IDs, encoded sizes, row/block counts, first/last coarse IDs, and inclusive timestamp bounds. |
 
+Fields are ordered as in the region schema and have type `float64` or
+`native_histogram`. Both are nullable. Tags are encoded in the exact series key.
+
 The whole block uses metadata encoding 1 and the raw or zstd compression ID in
 its reference. Readers open the file with a bounded suffix read, fetching the
 metadata separately if it extends beyond the suffix.
@@ -92,7 +95,7 @@ and referenced by the block descriptor. The key is the SST's own encoding of
 `(table_id, tsid)` is only its order-preserving prefix. Two distinct series may
 share a prefix. Timestamp, sequence, operation type, and each present value field
 are independent chunks; their references are in the metadata, not inline headers.
-Emit chunks in that order, with value fields following manifest order.
+Emit chunks in that order, with value fields following schema order.
 
 Rows preserve delete markers, duplicate timestamps, and equal-key ties, including
 conflicting values at the same sequence. The format does not encode a deduplicated
@@ -113,7 +116,7 @@ are checked for byte order and continuation.
 Blocks split on an identity change or before the next row would exceed a packing
 limit. There is no hourly split and no padding of short blocks. The default row
 limit is 8,192, also the version-2 reader maximum; a writer may choose a smaller
-positive limit without changing the version. With `F` manifest fields and `N`
+positive limit without changing the version. With `F` schema fields and `N`
 rows, the decoded accounting size is:
 
 ```text
@@ -121,9 +124,18 @@ N * (8 timestamp + 8 sequence + 1 operation + 8 * F values)
     + F * ceil(N / 8) validity bytes
 ```
 
-Require this to be at most 262,144 bytes. Count all manifest fields, including
-omitted/all-null fields, and reserve validity bytes even for all-valid fields.
-This is a bound on decoded column buffers, not total allocator usage or RSS.
+Require this to be at most 262,144 bytes. A native histogram field counts as one
+8-byte value per row here, so the formula does not bound its decoded buffers: its
+18 struct children and bucket lists are bounded only by its chunk, and the reader
+reserves memory for them from the chunk header (see encoding 8). A
+writer also ends a block before a histogram chunk's encoded size bound would exceed
+the 1 MiB chunk limit: 1 byte plus 11 bytes per struct child and per list item for
+each row, and 16 bytes plus 64 bytes per child and the validity bytes for the
+chunk. A sample that exceeds the limit on its own is rejected when it is written
+to a Narthex region. Count all schema fields, including omitted/all-null
+fields, and reserve validity bytes even for all-valid fields.
+Without histogram fields, this is a bound on decoded column buffers, not total
+allocator usage or RSS.
 The effective row cap is the largest integer satisfying both limits: 8,192 for
 one field and 31 for 1,024 fields. Encoded buffers and metadata have separate
 bounds below. Increasing the reader maximum requires an explicit compatibility
@@ -165,6 +177,7 @@ namespaces as well. Never reuse an assigned ID with a different meaning.
 | Column encoding | 5 | Nullable Float64 XOR |
 | Column encoding | 6 | Constant operation type |
 | Column encoding | 7 | Raw operation types |
+| Column encoding | 8 | Native histogram struct, column by child |
 | Metadata encoding | 1 | Descriptor leaf or SST metadata, according to its reference |
 | Compression | 0 | Raw encoded bytes |
 | Compression | 1 | Zstd frame |
@@ -227,6 +240,61 @@ reset that previous value. Decode exactly `row_count - null_count` values and
 scatter according to validity. Preserve all bits, including signed zero, NaN
 payloads, infinities, and subnormals. Null and NaN are distinct. The unspecified
 value-buffer bits behind nulls are not part of the logical preservation contract.
+
+### Native histogram encoding 8
+
+```text
+child_count <u8>
+child_kinds <u8 x child_count>      # 1 Float64, 2 Int32, 3 Int64, 4 Timestamp(ms);
+                                    # 0x10 | kind for a list
+list_items <uvarint>                # items of all valid lists in the chunk
+validity <ceil(row_count/8) bytes>  # only when the descriptor null count is nonzero
+per child, in struct order:
+  scalar: section(row_count values)
+  list:   section(row_count lengths, null for a null list), then
+          section(list item values) unless the child has no items
+section(n):
+  null_count <uvarint>
+  unless null_count == n:
+    byte_length <uvarint>
+    body <byte_length bytes>        # encoding 5 over the n values
+```
+
+The struct order is fixed. The header records only child kinds, so children of the
+same kind, such as `zero_threshold` and `sum`, are told apart by position alone:
+
+| # | Child | Kind |
+| --- | --- | --- |
+| 0 | `schema` | Int32 |
+| 1 | `zero_threshold` | Float64 |
+| 2 | `sum` | Float64 |
+| 3 | `reset_hint` | Int32 |
+| 4 | `start_timestamp` | Timestamp(ms) |
+| 5 | `custom_values` | List of Float64 |
+| 6 | `positive_span_offsets` | List of Int32 |
+| 7 | `positive_span_lengths` | List of Int32 |
+| 8 | `negative_span_offsets` | List of Int32 |
+| 9 | `negative_span_lengths` | List of Int32 |
+| 10 | `count_i64` | Int64 |
+| 11 | `zero_count_i64` | Int64 |
+| 12 | `positive_buckets_i64` | List of Int64 |
+| 13 | `negative_buckets_i64` | List of Int64 |
+| 14 | `count_f64` | Float64 |
+| 15 | `zero_count_f64` | Float64 |
+| 16 | `positive_buckets_f64` | List of Float64 |
+| 17 | `negative_buckets_f64` | List of Float64 |
+
+A chunk holds every row of the block, null rows included, one child after another.
+Values map to u64 before encoding 5: Float64 keeps its bit pattern; integers and
+timestamps are ZigZag-mapped. A null list has no items; the item section holds the
+items of the valid lists in row order. The descriptor's null count is the struct's
+own null count, and the validity bitmap follows the rules of encoding 5.
+
+Child count and kinds must match the schema field's struct type exactly, so a
+chunk is never decoded as another type. `list_items` must equal the lengths read and
+must not exceed 1,048,576. The reader reserves memory from `row_count`, the child
+count and `list_items` before it decodes a chunk. All-null fields have no descriptor
+or payload, as for Float64.
 
 ### Operation encodings 6 and 7
 
