@@ -38,8 +38,9 @@ use crate::series_index::samples::metadata::{
     self, Block, Column, KeyRef, Page, PageReference, Trailer, pack,
 };
 use crate::series_index::samples::{
-    ColumnarSamplesFormat, MANIFEST_LIMIT, Manifest, MetricSeriesId, Part, TimestampColumn,
-    TimestampUnit, VERSION, ValueColumn, invalid, require, valid_rows,
+    ColumnarSamplesFormat, MANIFEST_LIMIT, MANIFEST_VERSION, MANIFEST_VERSION_DEEP, Manifest,
+    MetricSeriesId, Part, TimestampColumn, TimestampUnit, ValueColumn, invalid, require,
+    valid_rows,
 };
 
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
@@ -221,7 +222,7 @@ impl SamplesWriter {
         let manifest = Manifest {
             prefix: Some(prefix.to_string()),
             format: ArtifactFormat::ColumnarSamples,
-            version: VERSION,
+            version: MANIFEST_VERSION,
             identity_encoding: IdentityEncoding::CURRENT_SAMPLES,
             region_id: metadata.region_id.as_u64(),
             source_file_id,
@@ -424,9 +425,13 @@ impl SamplesWriter {
             size + 12 <= self.options.page_bytes,
             "sample descriptor exceeds leaf limit",
         )?;
+        // A part of any height is representable while one page holds at least two references:
+        // folding a level halves it, so it always reaches one root. A fanout of one cannot fold
+        // anything, so such a part holds a single leaf - that is a property of the page, not a
+        // budget on the tree, and it is the only leaf count that finishes a part here.
         if !self.leaves.is_empty()
             && self.leaf_bytes + size > self.options.page_bytes
-            && self.leaves.len() == self.options.root_capacity
+            && self.options.root_capacity < 2
         {
             self.finish_part().await?;
         }
@@ -509,12 +514,34 @@ impl SamplesWriter {
         for leaf in leaves {
             children.push(self.write_page(Page::Leaf(leaf)).await?);
         }
-        let depth = if children.len() == 1 { 1 } else { 2 };
-        let root = if depth == 1 {
-            children.remove(0)
+        // The tree is as tall as the leaf count needs and no taller. One leaf is its own root;
+        // otherwise each level's consecutive child references are partitioned into pages of at
+        // most `root_capacity` until one page holds the whole level and becomes the root. Every
+        // page is one bounded page, so `root_capacity` is a page's fanout, never a bound on the
+        // tree: the depth is whatever that folding took, and a leaf is never wrapped alone.
+        let capacity = self.options.root_capacity;
+        let (depth, root) = if children.len() == 1 {
+            (1, children.remove(0))
         } else {
-            self.write_page(Page::Internal(children)).await?
+            let mut level = children;
+            let mut depth = 2;
+            loop {
+                if level.len() <= capacity {
+                    break (depth, self.write_page(Page::Internal(level)).await?);
+                }
+                let mut parents = Vec::with_capacity(level.len().div_ceil(capacity));
+                for group in level.chunks(capacity) {
+                    parents.push(self.write_page(Page::Internal(group.to_vec())).await?);
+                }
+                level = parents;
+                depth += 1;
+            }
         };
+        if depth > 2 {
+            // The manifest's tree version never goes back: an artifact with one deeper part
+            // stays version 2 for every part, and a shallow artifact stays version 1.
+            self.manifest.version = MANIFEST_VERSION_DEEP;
+        }
         let bounds = root.bounds;
         let file_length = self
             .position

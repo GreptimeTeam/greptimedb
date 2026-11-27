@@ -41,7 +41,8 @@ use crate::series_index::samples::metadata::{
     self, Areas, Block, BlockOrder, Bounds, Column, Page, PageReference, Trailer,
 };
 use crate::series_index::samples::{
-    MANIFEST_LIMIT, Manifest, MetricSeriesId, TimestampUnit, VERSION, invalid, require, unsupported,
+    MANIFEST_LIMIT, MANIFEST_VERSION, MANIFEST_VERSION_DEEP, Manifest, MetricSeriesId,
+    TimestampUnit, invalid, require, unsupported,
 };
 use crate::sst::parquet::helper::fetch_byte_ranges;
 
@@ -135,7 +136,10 @@ impl SamplesReader {
                 .ok_or_else(|| invalid("invalid narthex manifest path"))?
                 .to_string(),
         );
-        if manifest.version != VERSION {
+        // A manifest of any other tree version predates this reader or is corrupt; either way
+        // it must never be reused. The version is decided here, before any part is read, so an
+        // older reader that knows only version 1 refuses a version-2 artifact at open.
+        if !matches!(manifest.version, MANIFEST_VERSION | MANIFEST_VERSION_DEEP) {
             return Err(unsupported("samples manifest version"));
         }
         // Old artifacts can be structurally valid and perfectly ordered, so identity
@@ -311,10 +315,25 @@ impl SamplesFormatReader for SamplesReader {
                     Ok(trailer)
                 }).await?;
                 require(trailer.root.bounds == bounds, "sample root/part bounds mismatch")?;
+                // A version-1 manifest promises at most two levels, so a deeper trailer under
+                // it is malformed instead of merely unsupported.
+                require(trailer.depth <= manifest.max_depth(), "sample trailer depth exceeds manifest version")?;
                 let root = load_metadata_page(cache.as_ref(), reader, (&path, size), &trailer.root, trailer.depth, trailer.areas(), &manifest).await?;
                 metrics.add_elapsed("columnar_metadata_wall", metadata_started.elapsed());
-                let (mut active, children) = match root.as_ref() { Page::Leaf(_) => (Some(root.clone()), Vec::new()), Page::Internal(children) => (None, children.clone()) };
-                let mut children = children.into_iter(); let mut row_count = 0u64; let mut block_count = 0u64;
+                // Depth-first walk. Each frame is a decoded internal page, the index of its next
+                // child, and the depth of those children, taken from the trailer for the root and
+                // decremented per level, so the walk is generic in tree height. Only one page per
+                // level stays decoded along the current path, and a pruned child - a leaf or a
+                // whole subtree - costs no I/O.
+                let mut stack: Vec<(Arc<Page>, usize, u32)> = Vec::new();
+                let mut active = match root.as_ref() {
+                    Page::Leaf(_) => Some(root.clone()),
+                    Page::Internal(_) => {
+                        stack.push((root.clone(), 0, trailer.depth - 1));
+                        None
+                    }
+                };
+                let mut row_count = 0u64; let mut block_count = 0u64;
                 let mut payload_position = metadata::HEADER_SIZE;
                 // Exact keys live in the part's key area, outside every metadata page. Every
                 // block of one series references the same copy, so one load serves them all.
@@ -325,15 +344,37 @@ impl SamplesFormatReader for SamplesReader {
                 let mut part_keys = HashMap::<(u64, u32), ExactSeriesKey>::new();
                 let mut key_offsets = mito_codec::row_converter::SparseOffsetsCache::new();
                 loop {
-                    let page = if let Some(page) = active.take() { page } else {
-                        let Some(child) = children.next() else { break; };
+                    // Descend to the next leaf whose bounds intersect the request. An internal
+                    // level is entered without touching the traversal or key state carried
+                    // across leaves, so a series that spans a level boundary keeps its ordinals.
+                    let leaf = loop {
+                        if let Some(page) = active.take() { break Some(page); }
+                        let Some(top) = stack.last_mut() else { break None; };
+                        // Only internal pages are ever pushed onto the stack.
+                        let children = match top.0.as_ref() {
+                            Page::Internal(children) => children,
+                            Page::Leaf(_) => Err(unsupported("internal child in sample metadata tree"))?,
+                        };
+                        let Some(child) = children.get(top.1).cloned() else {
+                            // Every child of this page has been visited: return up one level.
+                            stack.pop();
+                            continue;
+                        };
+                        top.1 += 1;
+                        let depth = top.2;
                         if !matches(child.bounds, &request, ids.as_ref()) { adjacent = false; continue; }
                         let started = Instant::now();
-                        let page = load_metadata_page(cache.as_ref(), reader, (&path, size), &child, 1, trailer.areas(), &manifest).await?;
+                        let page = load_metadata_page(cache.as_ref(), reader, (&path, size), &child, depth, trailer.areas(), &manifest).await?;
                         metrics.add_elapsed("columnar_metadata_wall", started.elapsed());
-                        page
+                        match page.as_ref() {
+                            Page::Leaf(_) => break Some(page),
+                            Page::Internal(_) => {
+                                stack.push((page, 0, depth - 1));
+                            }
+                        }
                     };
-                    let blocks = match page.as_ref() { Page::Leaf(blocks) => blocks, Page::Internal(_) => Err(unsupported("internal child in sample depth-two tree"))? };
+                    let Some(page) = leaf else { break; };
+                    let blocks = match page.as_ref() { Page::Leaf(blocks) => blocks, Page::Internal(_) => Err(unsupported("internal child in sample metadata leaf"))? };
                     // One merged read for the keys of this page's selected blocks: a page can
                     // hold hundreds of short series, and one read per series would multiply
                     // this scan's I/O by the number of series it touches.

@@ -66,7 +66,14 @@ pub(crate) fn validate_narthex_metadata(
     Ok(())
 }
 
+/// Framing revision of the part header and trailer. It stays 1: the tree depth a reader may
+/// meet is recorded in the manifest instead, so a deeper tree does not need a new frame.
 const VERSION: u32 = 1;
+/// Manifest tree version of a shallow artifact: at most two metadata levels.
+const MANIFEST_VERSION: u32 = 1;
+/// Manifest tree version of an artifact whose tree height is not fixed: a part may be deeper
+/// than two levels, so `ROOT_CAPACITY` is a page's fanout rather than a bound on the tree.
+const MANIFEST_VERSION_DEEP: u32 = 2;
 const MANIFEST_LIMIT: usize = 64 * 1024 * 1024;
 const MAX_ROWS: usize = 8192;
 const MAX_FIELDS: usize = 1024;
@@ -184,6 +191,8 @@ struct Manifest {
     #[serde(skip)]
     prefix: Option<String>,
     format: ArtifactFormat,
+    /// Tree version: 1 while every part is at most two levels deep, 2 once any part is deeper
+    /// than that. It never goes back within one artifact, so a mixed artifact is 2.
     version: u32,
     /// Mandatory discriminator; see [`IdentityEncoding`]. Never defaulted on read.
     identity_encoding: IdentityEncoding,
@@ -276,6 +285,19 @@ impl Manifest {
     /// Index of the exact series key column in [`Self::schema`].
     fn primary_key_index(&self) -> usize {
         5 + self.fields.len()
+    }
+
+    /// The deepest metadata tree this manifest's version admits.
+    ///
+    /// Version 1 parts keep their leaf references in one root page: two levels. Version 2 has
+    /// no height bound - the writer adds a level instead of splitting the part, so the only
+    /// limit is how many pages the part actually holds. Opening a manifest admits no other
+    /// version, so any other value is read as the shallowest tree.
+    fn max_depth(&self) -> u32 {
+        match self.version {
+            MANIFEST_VERSION_DEEP => u32::MAX,
+            _ => 2,
+        }
     }
 }
 

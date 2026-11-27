@@ -20,9 +20,10 @@ order. Each part record contains its encoded `file_size` in bytes. The
 ## Wire specification
 
 This document specifies the version 1 on-disk layout, encodings, ordering rules,
-and validation limits for samples artifacts. The version number stays 1: the
+and validation limits for samples artifacts. The framing version stays 1: the
 exact-identity change is enforced by the mandatory `identity_encoding` manifest
-discriminator, not by a version bump.
+discriminator, and a deeper metadata tree by the manifest's tree version, not by a
+version bump.
 
 Every block names the exact series identity (the canonical sparse primary key), which
 the part stores once per series in its [key area](#key-area), followed by that copy's
@@ -43,9 +44,19 @@ in single-series blocks bounded by rows and decoded bytes.
 
 ## Artifact manifest
 
-The catalog identifier is `columnar-samples`. Its file and manifest version is 1,
-independent of the series format's version and both formats' codec identifiers.
-Existing `parquet` and `columnar-series` identifiers keep their meaning.
+The catalog identifier is `columnar-samples`. Its file version is 1, independent
+of the series format's version and both formats' codec identifiers. Existing
+`parquet` and `columnar-series` identifiers keep their meaning.
+
+The manifest carries a separate **tree version** that records whether the parts of
+this artifact may be deeper than two metadata levels: version 1 keeps every tree at
+depth 1 or 2, and version 2 has no height bound at all. A writer starts at 1 and
+switches to 2 as soon as one part finishes deeper than two levels; it never goes
+back, so an artifact with both shallow and deep parts is version 2 and an entirely
+shallow artifact stays version 1. A reader admits exactly versions 1 and 2 and
+applies the depth matrix below. Because the version is in the manifest, an older
+reader that knows only version 1 refuses a version-2 artifact while opening the
+manifest, before it reads a single part byte.
 
 An artifact is derived either from one immutable source SST (legacy) or from
 a bounded group of snapshot SSTs contributing to one UTC day. It owns
@@ -84,7 +95,7 @@ generation is unique for each build. A manifest contains:
 | Field | Meaning |
 | --- | --- |
 | `format` | String `columnar-samples` |
-| `version` | Integer 1 |
+| `version` | Tree version: integer 1 or 2, defined above |
 | `identity_encoding` | String `exact-sparse-key-area`; required, never defaulted. It names the identity *and* the layout that stores it, so `exact-sparse-key` (keys inline in the block descriptors) is different and not readable |
 | `region_id` | Physical region ID, u64 |
 | `source_file_id` | Artifact owner ID matching `SamplesEntry.file_id`; the SST ID for legacy artifacts, or the generation ID for daily artifacts |
@@ -152,8 +163,10 @@ the manifest.
 │ Key area: one exact series key per series,   │
 │   back to back, not page bounded             │
 ├──────────────────────────────────────────────┤ ← key_end
-│ Leaf pages (one is the root at depth 1)       │
-│ Optional internal root (depth 2)              │
+│ Leaf pages (one is the root at depth 1)      │
+│ Internal pages, one level per line, until    │
+│   exactly one page of that level is the root │
+│   (depth 2 or deeper)                        │
 ├──────────────────────────────────────────────┤
 │ Trailer                            120 bytes │
 └──────────────────────────────────────────────┘
@@ -291,9 +304,18 @@ new series at ordinal zero, so no ordering between the two series' ordinals is r
 
 ### Metadata pages
 
-A leaf describes blocks. An internal page references leaves. The root is either
-the only leaf (depth 1) or an internal page (depth 2). Other depths are unsupported
-in version 1; roll parts before a third level would be needed.
+A leaf describes blocks and an internal page references the level below it. The
+root is the only leaf (depth 1) or an internal page of any height. The trailer
+records the depth it wrote, and the manifest's tree version bounds it:
+
+| Manifest version | Admitted trailer depths |
+| --- | --- |
+| 1 | 1 or 2 |
+| 2 | any depth of at least 1 |
+
+A version-1 manifest with a deeper trailer is malformed, not merely unsupported:
+version 1 promises a tree of at most two levels. Within version 2 the height is a
+consequence of the leaf count and of the page fanout, not a fixed shape.
 
 As in the series format, the entire page, including its kind and count, is encoded
 and independently compressed. The reference in the parent or trailer supplies
@@ -390,14 +412,34 @@ would skip their payloads.
 Child pages follow block order. Their identifier bounds may touch at a shared
 series, just like part bounds. Do not require strict disjointness or use an
 exclusive next-child lower bound. Validate each loaded page's derived identifier
-and time bounds against its reference. At depth 2 all children must be leaves;
-reject an internal child. Child byte ranges are ordered, disjoint, within the
+and time bounds against its reference. A page's kind must match the depth its parent
+promised: depth 1 is a leaf, and every depth of 2 or more is an internal page whose
+children sit one level lower. Child byte ranges are ordered, disjoint, within the
 metadata area, and precede the parent. The root ends immediately before the trailer.
 
-An internal root has `12 + 72 * N` decoded bytes, so it holds at most
-`floor((65536 - 12) / 72) = 910` leaf references. The writer must account for the
-next descriptor's leaf placement before writing its block. If the descriptor
-would require a 911th leaf, finish this part and start the block in a new part.
+Any internal page has `12 + 72 * N` decoded bytes, so it holds at most
+`floor((65536 - 12) / 72) = 910` references. That bound is structural and it is a
+**fanout**, not a limit on the part: no page changes size, no page kind is added, and
+a level that needs more than 910 references simply gets another level. The writer
+therefore produces, for a part with `L` leaves:
+
+```text
+L = 1        depth 1: the leaf is the root
+L <= 910     depth 2: one internal root over the L leaves
+otherwise    depth d >= 3: each level's consecutive child references are partitioned
+             into pages of at most 910, repeatedly, until exactly one root remains
+```
+
+Each level's children are **consecutive**, so pages follow block order and the last
+page of a level may be a singleton. A level is written after the level below it and
+before the level above, and every page's bounds are the aggregate of its descendants;
+the root's bounds must equal the part descriptor's bounds.
+
+Nothing about the tree rolls a part: there is no leaf-count ceiling, and a part of
+any height stays bounded by `part_bytes` and `metadata_bytes` like before. What
+bounds a part is bytes and descriptors, never the number of leaves. The one
+configuration that cannot fold is a fanout of one, where folding halves nothing; such
+a part holds a single leaf. Production writes `floor((65536 - 12) / 72) = 910`.
 
 #### Navigation and equal-timestamp example
 
@@ -446,7 +488,7 @@ The series-index format has no sample timestamps or time bounds.
 | Field | Bytes | Meaning |
 | --- | ---: | --- |
 | Root page reference | 72 | Inclusive ID/time bounds and payload reference |
-| Index depth | 4 | 1 or 2 |
+| Index depth | 4 | 1 or more, as the manifest's tree version admits |
 | File version | 4 | 1 |
 | File length | 8 | Includes header and trailer |
 | `payload_end` | 8 | End of column area, start of key area |
@@ -567,9 +609,11 @@ invalid metadata, even for an unprojected column. Unknown fields or malformed
 references must not be interpreted as omitted all-null columns.
 
 New column encodings or compression methods receive new IDs. Structural changes,
-changed field meanings, or incompatible limits require a new version. Deeper
-metadata trees require an explicit reader-support and rollout decision; an
-unchanged layout alone does not make them readable by version-1 implementations.
+changed field meanings, or incompatible limits require a new version. A deeper
+metadata tree is announced by the manifest's tree version, which a reader checks
+while opening the manifest: an unchanged page layout alone does not make version-2
+parts readable by version-1 implementations, and they refuse them before any part
+read.
 
 The local cache root contains a layout-version marker. Startup clears the entire
 series-index cache when this marker is absent or incompatible, then rebuilds

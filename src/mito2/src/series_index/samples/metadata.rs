@@ -601,7 +601,7 @@ impl Page {
         }
         out
     }
-    /// Decodes one metadata page.
+    /// Decodes one metadata page of a tree `depth` levels high.
     ///
     /// `areas` bounds what the page may reference: column payloads end where the key area
     /// starts, keys live in their own area, and the page area starts at `areas.metadata_start`
@@ -614,6 +614,9 @@ impl Page {
         manifest: &Manifest,
     ) -> Result<Self> {
         require(bytes.len() <= PAGE_LIMIT, "sample page exceeds limit")?;
+        // Every level is decoded with the depth its parent promised it, so a page claiming a
+        // depth the manifest's tree version does not admit is malformed rather than unknown.
+        require(depth <= manifest.max_depth(), "sample page depth")?;
         let mut c = Cursor::new(bytes);
         let kind = c.u32()?;
         let count = c.length()?;
@@ -635,10 +638,12 @@ impl Page {
                 }
                 Self::Leaf(blocks)
             }
-            (1, 2) => {
+            // An internal page holds at most `ROOT_CAPACITY` references at any height: 910 is
+            // a page's fanout, so a level wider than that becomes another level, not more page.
+            (1, 2..) => {
                 require(
                     count <= ROOT_CAPACITY && count <= c.remaining() / 72,
-                    "sample root exceeds capacity",
+                    "sample page exceeds capacity",
                 )?;
                 let mut children: Vec<PageReference> = Vec::with_capacity(count);
                 let mut end = areas.metadata_start;
@@ -715,7 +720,9 @@ impl Trailer {
         let root = PageReference::decode(&mut c)?;
         let depth = c.u32()?;
         let version = c.u32()?;
-        if !(1..=2).contains(&depth) || version != VERSION {
+        // The frame admits a tree of any height; how deep this artifact may be is decided
+        // against the manifest's tree version, not here.
+        if depth == 0 || version != VERSION {
             return Err(unsupported("sample trailer version/depth"));
         }
         let length = c.u64()?;

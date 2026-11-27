@@ -114,7 +114,7 @@ fn wide_batch(meta: &RegionMetadataRef, key: &[u8], times: &[i64]) -> RecordBatc
 /// Replaces the part and manifest of `handle` with `bytes` and their recorded sizes.
 ///
 /// Everything else stays valid, so a test can isolate one rewritten descriptor.
-async fn rewrite_part(
+pub(super) async fn rewrite_part(
     store: &ObjectStore,
     handle: SamplesFileHandle,
     mut manifest: Manifest,
@@ -1567,4 +1567,87 @@ async fn pruned_block_does_not_hide_the_boundary_key() {
             .contains("unordered sample exact series keys"),
         "unexpected error: {error}"
     );
+}
+
+/// One series' ordinals continue across an internal group boundary.
+///
+/// The walk enters an internal page between two blocks of the same series, so nothing it
+/// carries between blocks may be reset there: the second block's ordinal continues the first
+/// even though a page level separates them, and a complete read demands exactly that of the
+/// first block it meets after the new level.
+#[tokio::test]
+async fn ordinals_continue_across_a_group_boundary() {
+    let store = store();
+    let meta = super::metadata();
+    let format = ColumnarSamplesFormat {
+        block_rows: 1,
+        page_bytes: 288,
+        root_capacity: 2,
+        ..Default::default()
+    };
+    // Distinct coarse identifiers make the shared boundary an identifier the two groups name.
+    let first = new_sparse_primary_key(&["aa", "z"], &meta, 1, 1);
+    let middle = new_sparse_primary_key(&["bb", "z"], &meta, 1, 2);
+    let last = new_sparse_primary_key(&["cc", "z"], &meta, 1, 3);
+    // One block per leaf, so the shared series holds the last leaf of the first group and the
+    // first leaf of the second.
+    let handle = build(
+        &format,
+        &store,
+        meta.clone(),
+        &[keyed_batch(
+            &meta,
+            &[first, middle.clone(), middle.clone(), last],
+            &[10, 20, 30, 40],
+            false,
+        )],
+    )
+    .await;
+    let manifest = super::manifest(&store, &handle).await;
+    assert_eq!(1, manifest.files.len());
+    assert_eq!(2, manifest.version, "the fixture is a depth-three part");
+    let bytes = store.read(&manifest.part_path(0)).await.unwrap().to_bytes();
+    let trailer = Trailer::decode(
+        &bytes[bytes.len() - TRAILER_SIZE as usize..],
+        bytes.len() as u64,
+    )
+    .unwrap();
+    assert_eq!(3, trailer.depth);
+    let root = trailer
+        .root
+        .payload
+        .unpack(
+            &bytes[trailer.root.payload.offset as usize
+                ..trailer.root.payload.end().unwrap() as usize],
+        )
+        .unwrap();
+    let Page::Internal(groups) =
+        Page::decode(&root, &trailer.root, 3, trailer.areas(), &manifest).unwrap()
+    else {
+        panic!("a depth-three tree has an internal root")
+    };
+    assert_eq!(2, groups.len());
+    assert_eq!(
+        groups[0].bounds.last, groups[1].bounds.first,
+        "the shared series sits on both sides of the group boundary"
+    );
+
+    // A complete read visits every block, so the block after the group boundary is checked
+    // against the block before it instead of starting a new part of the walk.
+    let reader = format.reader(store, handle).await.unwrap();
+    let batches = reader
+        .read(super::full_request())
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(
+        vec![(1, 1, 10), (1, 2, 20), (1, 2, 30), (1, 3, 40)],
+        collect_times(&batches)
+    );
+    // Both blocks of the spanning series report the same exact key, in ordinal order.
+    let keys = exact_keys(&batches);
+    assert_eq!(4, keys.len(), "one batch per block");
+    assert_eq!(keys[1], keys[2]);
+    assert_eq!(middle, keys[1].bytes());
 }

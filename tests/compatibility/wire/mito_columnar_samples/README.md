@@ -59,3 +59,21 @@ listed source set and become ineligible if any source disappears.
 `sparse-daily-catalog-entry.json` freezes explicit populated-day coverage per source.
 Older daily catalogs decode with empty coverage and are rebuilt before reuse.
 The source Parquet files and sample payload encoding are unchanged.
+
+## Version 2: depth-three tree
+
+`v3-depth-three/` freezes the first version-2 artifact. It was written with the
+packing options a test can configure — one block per leaf and two leaves per
+internal page — so its 4 leaves exceed what one internal page holds and are
+written as two groups under a third level. Version 2 does not fix the height: a
+deeper tree simply adds levels the same way. The shape and the depth rules are the
+production ones; only the configured fanout is small enough to stay a readable
+fixture. It is exercised by its own Mito Rust test:
+
+```shell
+cargo nextest run -p mito2 frozen_depth_three_fixture_reads
+```
+
+Its manifest records version 2 while its header and trailer stay at framing
+version 1, so an older reader refuses it while opening the manifest, before any
+part byte is read. See that directory's README for the recorded layout and rows.

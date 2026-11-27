@@ -32,7 +32,8 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::FileId;
 
 use super::metadata::{
-    Bounds, HEADER_SIZE, KEY_CHECKSUM_BYTES, Page, PayloadReference, TRAILER_SIZE, Trailer,
+    Bounds, HEADER_SIZE, KEY_CHECKSUM_BYTES, Page, PageReference, PayloadReference, TRAILER_SIZE,
+    Trailer,
 };
 use super::*;
 use crate::series_index::artifact::{SamplesEntry, SamplesFileHandle};
@@ -449,7 +450,10 @@ async fn equal_timestamps_cross_leaves_and_parts() {
         block_rows: 1,
         // One block descriptor plus header; a block now also stores its exact series key.
         page_bytes: 288,
-        root_capacity: 2,
+        // Two descriptors fill this metadata budget, so a part holds two leaves however many
+        // leaves its tree could address. The tree stays depth two here; depth three is what
+        // keeps a larger part in one piece.
+        metadata_bytes: 300,
         ..Default::default()
     };
     let rows: Vec<_> = (0..7)
@@ -1531,6 +1535,95 @@ async fn frozen_v1_samples_fixture_is_rejected() {
     assert!(message.contains("rebuild"), "{message}");
 }
 
+/// Installs the frozen version-2 manifest and its depth-three part.
+async fn frozen_depth_three_handle(store: &ObjectStore) -> SamplesFileHandle {
+    let bytes = include_str!(
+        "../../../../../tests/compatibility/wire/mito_columnar_samples/v3-depth-three/part.hex"
+    )
+    .split_whitespace()
+    .collect::<String>();
+    let bytes = (0..bytes.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&bytes[i..i + 2], 16).unwrap())
+        .collect::<Vec<_>>();
+    let json = include_str!(
+        "../../../../../tests/compatibility/wire/mito_columnar_samples/v3-depth-three/manifest.json"
+    );
+    let frozen: Manifest = serde_json::from_str(json).unwrap();
+    let prefix = crate::series_index::samples::samples_prefix(frozen.region_id, frozen.generation);
+    let manifest_path = format!("{prefix}manifest.json");
+    let part_path = format!("{prefix}part-0.samples");
+    store.write(&part_path, bytes.clone()).await.unwrap();
+    store.write(&manifest_path, json).await.unwrap();
+    let objects = vec![
+        crate::series_index::artifact::ArtifactObject {
+            path: manifest_path,
+            file_size: json.len() as u64,
+        },
+        crate::series_index::artifact::ArtifactObject {
+            path: part_path,
+            file_size: bytes.len() as u64,
+        },
+    ];
+    let artifact = crate::series_index::artifact::ArtifactMetadata {
+        format: ArtifactFormat::ColumnarSamples,
+        generation: frozen.generation,
+        file_size: (json.len() + bytes.len()) as u64,
+        objects,
+    };
+    let (purger, _) = series_index_channel(store.clone());
+    SamplesFileHandle::new(
+        RegionFileId::new(
+            store_api::storage::RegionId::from_u64(frozen.region_id),
+            frozen.source_file_id,
+        ),
+        SamplesEntry {
+            source_file_ids: Vec::new(),
+            window: None,
+            source_windows: Default::default(),
+            file_id: frozen.source_file_id,
+            artifact,
+        },
+        purger,
+    )
+}
+
+/// The frozen version-2 artifact is a real depth-three part: one series spans the group
+/// boundary, and every row reads back in order.
+#[tokio::test]
+async fn frozen_depth_three_fixture_reads() {
+    let store = store();
+    let handle = frozen_depth_three_handle(&store).await;
+    let format = ColumnarSamplesFormat::default();
+    // The fixture's own recorded shape: two groups of two leaves under a depth-three root.
+    let manifest = manifest(&store, &handle).await;
+    assert_eq!(MANIFEST_VERSION_DEEP, manifest.version);
+    let bytes = store.read(&manifest.part_path(0)).await.unwrap().to_bytes();
+    let trailer = Trailer::decode(
+        &bytes[bytes.len() - TRAILER_SIZE as usize..],
+        bytes.len() as u64,
+    )
+    .unwrap();
+    assert_eq!(3, trailer.depth);
+    assert_eq!(vec![2, 2], groups_of(&bytes, &trailer, &manifest));
+    let reader = format.reader(store, handle).await.unwrap();
+    let batches = reader
+        .read(full_request())
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(
+        vec![
+            (1, 1, 10, 1, 1, Some(0)),
+            (1, 2, 20, 1, 1, Some(0)),
+            (1, 2, 30, 1, 1, Some(0)),
+            (1, 3, 40, 1, 1, Some(0)),
+        ],
+        collect_rows(&batches)
+    );
+}
+
 /// Rewrites the stored root page so every field column carries an unknown codec, and returns a
 /// handle whose descriptor sizes match the rewritten bytes. Everything else stays valid.
 async fn unknown_field_codec(store: &ObjectStore, handle: SamplesFileHandle) -> SamplesFileHandle {
@@ -2157,6 +2250,776 @@ async fn series_read_windows_are_bounded_and_gap_rows_are_not_returned() {
         drop(stream);
         assert_eq!(0, pool.reserved());
     }
+}
+
+/// Decodes one stored metadata page of a part at `depth`.
+fn stored_page(
+    bytes: &[u8],
+    trailer: &Trailer,
+    manifest: &Manifest,
+    reference: &PageReference,
+    depth: u32,
+) -> Page {
+    let start = reference.payload.offset as usize;
+    let stored = &bytes[start..start + reference.payload.stored as usize];
+    Page::decode(
+        &reference.payload.unpack(stored).unwrap(),
+        reference,
+        depth,
+        trailer.areas(),
+        manifest,
+    )
+    .unwrap()
+}
+
+/// Every page of a part's metadata tree as `(depth, decoded bytes)`, walked depth first.
+fn page_sizes(bytes: &[u8], trailer: &Trailer, manifest: &Manifest) -> Vec<(u32, usize)> {
+    let mut pages = Vec::new();
+    let mut pending = vec![(trailer.root.clone(), trailer.depth)];
+    while let Some((reference, depth)) = pending.pop() {
+        pages.push((depth, reference.payload.decoded as usize));
+        if let Page::Internal(children) = stored_page(bytes, trailer, manifest, &reference, depth) {
+            pending.extend(children.into_iter().map(|child| (child, depth - 1)));
+        }
+    }
+    pages
+}
+
+/// The stored byte range of every page of a part's metadata tree as `(depth, range)`, root
+/// first and then each level in child order.
+fn page_ranges(
+    bytes: &[u8],
+    trailer: &Trailer,
+    manifest: &Manifest,
+) -> Vec<(u32, std::ops::Range<u64>)> {
+    fn walk(
+        pages: &mut Vec<(u32, std::ops::Range<u64>)>,
+        bytes: &[u8],
+        trailer: &Trailer,
+        manifest: &Manifest,
+        reference: &PageReference,
+        depth: u32,
+    ) {
+        pages.push((
+            depth,
+            reference.payload.offset..reference.payload.end().unwrap(),
+        ));
+        if let Page::Internal(children) = stored_page(bytes, trailer, manifest, reference, depth) {
+            for child in &children {
+                walk(pages, bytes, trailer, manifest, child, depth - 1);
+            }
+        }
+    }
+    let mut pages = Vec::new();
+    walk(
+        &mut pages,
+        bytes,
+        trailer,
+        manifest,
+        &trailer.root,
+        trailer.depth,
+    );
+    pages
+}
+
+/// The leaf count of every group under a depth-three root.
+fn groups_of(bytes: &[u8], trailer: &Trailer, manifest: &Manifest) -> Vec<usize> {
+    let Page::Internal(groups) =
+        stored_page(bytes, trailer, manifest, &trailer.root, trailer.depth)
+    else {
+        panic!("a depth-three tree has an internal root")
+    };
+    groups
+        .iter()
+        .map(
+            |group| match stored_page(bytes, trailer, manifest, group, trailer.depth - 1) {
+                Page::Internal(leaves) => leaves.len(),
+                Page::Leaf(_) => panic!("a depth-three root's children are internal"),
+            },
+        )
+        .collect()
+}
+
+/// One leaf past the depth-two root still fits one part.
+///
+/// A depth-two root holds `ROOT_CAPACITY` leaf references, so this part used to finish at the
+/// 910th leaf and start a second part for the 911th block. Version 2 grows the tree one level
+/// instead: two groups, `[910, 1]`, under a depth-three root.
+#[tokio::test]
+async fn nine_hundred_eleven_leaves_stay_one_part() {
+    let store = store();
+    let m = metadata();
+    // One descriptor (232 bytes) plus the leaf prefix fits this page and two do not, so every
+    // block gets a leaf of its own.
+    let format = ColumnarSamplesFormat {
+        block_rows: 1,
+        page_bytes: 288,
+        ..Default::default()
+    };
+    let rows: Vec<_> = (0..911)
+        .map(|i| (1u32, 1u64, i as i64, 1u64, 1u8, Some(0u64)))
+        .collect();
+    let handle = build(&format, &store, m.clone(), &[batch(&m, &rows, false)]).await;
+    let manifest = manifest(&store, &handle).await;
+    assert_eq!(
+        1,
+        manifest.files.len(),
+        "911 leaves must stay one part, not roll over to a second"
+    );
+    assert_eq!(
+        2, manifest.version,
+        "a depth-three part needs tree version 2"
+    );
+    let bytes = store.read(&manifest.part_path(0)).await.unwrap().to_bytes();
+    let trailer = Trailer::decode(
+        &bytes[bytes.len() - TRAILER_SIZE as usize..],
+        bytes.len() as u64,
+    )
+    .unwrap();
+    assert_eq!(3, trailer.depth);
+    assert_eq!(
+        vec![910, 1],
+        groups_of(&bytes, &trailer, &manifest),
+        "one full group and its final singleton"
+    );
+    // Every page of every level stays inside the page limit.
+    for (depth, decoded) in page_sizes(&bytes, &trailer, &manifest) {
+        assert!(
+            decoded <= metadata::PAGE_LIMIT,
+            "depth {depth} page decodes to {decoded} bytes"
+        );
+    }
+    let reader = format.reader(store, handle).await.unwrap();
+    let out = reader
+        .read(full_request())
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(rows, collect_rows(&out));
+}
+
+/// Exactly the depth-two root's capacity still produces the shallow shape, byte for byte.
+///
+/// 910 leaves are what one internal root page holds, so the tree gains no group level, the
+/// manifest keeps tree version 1, and the only internal page is the root.
+#[tokio::test]
+async fn nine_hundred_ten_leaves_keep_the_depth_two_shape() {
+    let store = store();
+    let m = metadata();
+    let format = ColumnarSamplesFormat {
+        block_rows: 1,
+        page_bytes: 288,
+        ..Default::default()
+    };
+    let rows: Vec<_> = (0..910)
+        .map(|i| (1u32, 1u64, i as i64, 1u64, 1u8, Some(0u64)))
+        .collect();
+    let handle = build(&format, &store, m.clone(), &[batch(&m, &rows, false)]).await;
+    let manifest = manifest(&store, &handle).await;
+    assert_eq!(1, manifest.files.len());
+    assert_eq!(
+        MANIFEST_VERSION, manifest.version,
+        "a two-level artifact keeps tree version 1"
+    );
+    let bytes = store.read(&manifest.part_path(0)).await.unwrap().to_bytes();
+    let trailer = Trailer::decode(
+        &bytes[bytes.len() - TRAILER_SIZE as usize..],
+        bytes.len() as u64,
+    )
+    .unwrap();
+    assert_eq!(2, trailer.depth);
+    let Page::Internal(leaves) = stored_page(&bytes, &trailer, &manifest, &trailer.root, 2) else {
+        panic!("910 leaves fit one internal root")
+    };
+    assert_eq!(metadata::ROOT_CAPACITY, leaves.len());
+    // The root is one bounded page: its leaf prefix plus one reference per leaf, and nothing
+    // else was added to it.
+    assert_eq!(12 + 72 * 910, trailer.root.payload.decoded as usize);
+    let pages = page_sizes(&bytes, &trailer, &manifest);
+    assert_eq!(911, pages.len(), "910 leaves and one root");
+    assert_eq!(
+        1,
+        pages.iter().filter(|(depth, _)| *depth == 2).count(),
+        "no group level is written at the depth-two capacity"
+    );
+    let reader = format.reader(store, handle).await.unwrap();
+    let out = reader
+        .read(full_request())
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(rows, collect_rows(&out));
+}
+
+/// One leaf is its own root: depth 1 and tree version 1.
+#[tokio::test]
+async fn one_leaf_stays_a_depth_one_root() {
+    let store = store();
+    let m = metadata();
+    let format = ColumnarSamplesFormat::default();
+    let handle = build(
+        &format,
+        &store,
+        m.clone(),
+        &[batch(&m, &[(1, 1, 100, 1, 1, Some(7))], false)],
+    )
+    .await;
+    let manifest = manifest(&store, &handle).await;
+    assert_eq!(MANIFEST_VERSION, manifest.version);
+    let (_, trailer, page, _) = root_page(&store, &handle).await;
+    assert_eq!(1, trailer.depth);
+    assert!(matches!(page, Page::Leaf(_)));
+}
+
+/// Runs one query through a recording store and reports the metadata pages it read, in order.
+async fn recorded_walk(
+    reader: &dyn SamplesFormatReader,
+    reads: &Mutex<Vec<(String, mock::BytesRange)>>,
+    pages: &[(u32, std::ops::Range<u64>)],
+    query: SamplesReadRequest,
+) -> (Vec<std::ops::Range<u64>>, Vec<Sample>) {
+    reads.lock().unwrap().clear();
+    let batches = reader
+        .read(query)
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    let read = reads
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|(_, range)| {
+            let start = range.offset();
+            let range = start..start + range.size()?;
+            pages
+                .iter()
+                .any(|(_, page)| *page == range)
+                .then_some(range)
+        })
+        .collect();
+    (read, collect_rows(&batches))
+}
+
+/// A depth-three walk decodes only the pages on the path to the selected series.
+///
+/// `root_capacity: 2` makes the shape explicit: four leaves in two groups of two, with one
+/// series spanning the group boundary and one series alone at the end of the second group.
+#[tokio::test]
+async fn depth_three_walks_only_the_intersecting_path() {
+    let store = store();
+    let m = metadata();
+    let format = ColumnarSamplesFormat {
+        block_rows: 1,
+        page_bytes: 288,
+        root_capacity: 2,
+        ..Default::default()
+    };
+    // Distinct coarse identifiers, so pruning can tell the groups apart as well.
+    let first = new_sparse_primary_key(&["aa", "z"], &m, 1, 1);
+    let middle = new_sparse_primary_key(&["bb", "z"], &m, 1, 2);
+    let last = new_sparse_primary_key(&["cc", "z"], &m, 1, 3);
+    assert!(
+        first < middle && middle < last,
+        "the fixture needs key order"
+    );
+    let handle = build(
+        &format,
+        &store,
+        m.clone(),
+        &[sample_batch(
+            &m,
+            &[first.clone(), middle.clone(), middle.clone(), last.clone()],
+            vec![10, 20, 30, 40],
+            vec![1; 4],
+            vec![1; 4],
+            vec![Some(0.0); 4],
+            false,
+        )],
+    )
+    .await;
+    let manifest = manifest(&store, &handle).await;
+    assert_eq!(1, manifest.files.len());
+    assert_eq!(MANIFEST_VERSION_DEEP, manifest.version);
+    let bytes = store.read(&manifest.part_path(0)).await.unwrap().to_bytes();
+    let trailer = Trailer::decode(
+        &bytes[bytes.len() - TRAILER_SIZE as usize..],
+        bytes.len() as u64,
+    )
+    .unwrap();
+    assert_eq!(3, trailer.depth);
+    let pages = page_ranges(&bytes, &trailer, &manifest);
+    let at = |depth: u32| {
+        pages
+            .iter()
+            .filter(|(level, _)| *level == depth)
+            .map(|(_, range)| range.clone())
+            .collect::<Vec<_>>()
+    };
+    let (roots, groups, leaves) = (at(3), at(2), at(1));
+    assert_eq!((1, 2, 4), (roots.len(), groups.len(), leaves.len()));
+    let (root, group) = (roots[0].clone(), groups.clone());
+
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    let observed = reads.clone();
+    let layer = MockLayerBuilder::default()
+        .reader_factory(Arc::new(move |path, _, inner| {
+            Box::new(RecordingRead {
+                inner,
+                path: path.into(),
+                reads: observed.clone(),
+            })
+        }))
+        .build()
+        .unwrap();
+    let reader = format
+        .reader(store.clone().layer(layer), handle.clone())
+        .await
+        .unwrap();
+
+    // A point on the last leaf: the root, the second group and that leaf, in that order. The
+    // first group is pruned by its bounds, so neither of its leaves is read.
+    let mut query = full_request();
+    query.keys = Some(BTreeSet::from([exact(&m, &["cc", "z"], 1, 3)]));
+    query.start = Some(40);
+    query.end = Some(41);
+    let (read, rows) = recorded_walk(reader.as_ref(), &reads, &pages, query).await;
+    assert_eq!(
+        vec![root.clone(), group[1].clone(), leaves[3].clone()],
+        read,
+        "one path through a depth-three tree"
+    );
+    assert_eq!(vec![(1, 3, 40, 1, 1, Some(0))], rows);
+    // The pruned group's leaves were never read: a skip costs no descendant I/O.
+    for pruned in [&leaves[0], &leaves[1]] {
+        assert!(!read.contains(pruned), "read a pruned group's leaf");
+    }
+
+    // The same series on both sides of the group boundary reads both groups and both leaves.
+    let mut query = full_request();
+    query.keys = Some(BTreeSet::from([exact(&m, &["bb", "z"], 1, 2)]));
+    let (read, rows) = recorded_walk(reader.as_ref(), &reads, &pages, query).await;
+    assert_eq!(
+        vec![
+            root.clone(),
+            group[0].clone(),
+            leaves[1].clone(),
+            group[1].clone(),
+            leaves[2].clone(),
+        ],
+        read
+    );
+    assert_eq!(
+        vec![(1, 2, 20, 1, 1, Some(0)), (1, 2, 30, 1, 1, Some(0))],
+        rows,
+        "a series spanning the boundary keeps its row order"
+    );
+
+    // A complete walk visits every page once, and the block after the group boundary keeps
+    // its ordinal: the walk carries its traversal state across the level it enters.
+    let (read, rows) = recorded_walk(reader.as_ref(), &reads, &pages, full_request()).await;
+    assert_eq!(
+        vec![
+            root.clone(),
+            group[0].clone(),
+            leaves[0].clone(),
+            leaves[1].clone(),
+            group[1].clone(),
+            leaves[2].clone(),
+            leaves[3].clone(),
+        ],
+        read
+    );
+    assert_eq!(
+        vec![
+            (1, 1, 10, 1, 1, Some(0)),
+            (1, 2, 20, 1, 1, Some(0)),
+            (1, 2, 30, 1, 1, Some(0)),
+            (1, 3, 40, 1, 1, Some(0)),
+        ],
+        rows
+    );
+}
+
+/// A reduced fanout forces more levels than one page can cover, and the part still holds.
+///
+/// Two references per page turn five leaves into four levels: `[leaf leaf] [leaf leaf]` and
+/// `[leaf]` at depth 2, then those three pages into two, then one root. A fixed depth would
+/// have to split the part here; the tree just gets taller.
+#[tokio::test]
+async fn deeper_trees_stay_one_part_and_readable() {
+    let store = store();
+    let m = metadata();
+    let format = ColumnarSamplesFormat {
+        block_rows: 1,
+        page_bytes: 288,
+        root_capacity: 2,
+        ..Default::default()
+    };
+    // One block per leaf, five distinct series, so the leaves are five and the tree is deep.
+    let keys: Vec<_> = (1..=5)
+        .map(|tsid| new_sparse_primary_key(&["kk", "z"], &m, 1, tsid))
+        .collect();
+    let rows: Vec<_> = (1..=5)
+        .map(|tsid| (1u32, tsid, tsid as i64 * 10, 1u64, 1u8, Some(0u64)))
+        .collect();
+    let handle = build(
+        &format,
+        &store,
+        m.clone(),
+        &[sample_batch(
+            &m,
+            &keys,
+            (1..=5).map(|tsid| tsid as i64 * 10).collect(),
+            vec![1; 5],
+            vec![1; 5],
+            vec![Some(0.0); 5],
+            false,
+        )],
+    )
+    .await;
+    let manifest = manifest(&store, &handle).await;
+    assert_eq!(1, manifest.files.len(), "a tall tree keeps one part");
+    assert_eq!(MANIFEST_VERSION_DEEP, manifest.version);
+    let bytes = store.read(&manifest.part_path(0)).await.unwrap().to_bytes();
+    let trailer = Trailer::decode(
+        &bytes[bytes.len() - TRAILER_SIZE as usize..],
+        bytes.len() as u64,
+    )
+    .unwrap();
+    assert_eq!(
+        4, trailer.depth,
+        "five leaves at fanout two need four levels"
+    );
+    // Leaves, then three pages, then two, then the root.
+    let mut per_level = [0usize; 5];
+    for (depth, decoded) in page_sizes(&bytes, &trailer, &manifest) {
+        assert!(
+            decoded <= metadata::PAGE_LIMIT,
+            "depth {depth} page decodes to {decoded} bytes"
+        );
+        per_level[depth as usize] += 1;
+    }
+    assert_eq!([0, 5, 3, 2, 1], per_level);
+
+    let reader = format.reader(store.clone(), handle.clone()).await.unwrap();
+    let out = reader
+        .read(full_request())
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(rows, collect_rows(&out));
+
+    // A point on the deepest leaf: the walk decodes one page per level and nothing else.
+    let pages = page_ranges(&bytes, &trailer, &manifest);
+    assert_eq!(11, pages.len());
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    let observed = reads.clone();
+    let layer = MockLayerBuilder::default()
+        .reader_factory(Arc::new(move |path, _, inner| {
+            Box::new(RecordingRead {
+                inner,
+                path: path.into(),
+                reads: observed.clone(),
+            })
+        }))
+        .build()
+        .unwrap();
+    let reader = format
+        .reader(store.clone().layer(layer), handle)
+        .await
+        .unwrap();
+    let mut query = full_request();
+    query.keys = Some(BTreeSet::from([exact(&m, &["kk", "z"], 1, 5)]));
+    let (read, rows) = recorded_walk(reader.as_ref(), &reads, &pages, query).await;
+    // `page_ranges` walks depth first in child order, so the root is first and the path to the
+    // last leaf is the root, the second page of level three, that page's only child, and the
+    // leaf itself - one page per level, and no page of the pruned subtree.
+    assert_eq!(
+        vec![
+            pages[0].1.clone(),
+            pages[8].1.clone(),
+            pages[9].1.clone(),
+            pages[10].1.clone(),
+        ],
+        read,
+        "one page per level on the path to the deepest leaf"
+    );
+    assert_eq!(vec![(1, 5, 50, 1, 1, Some(0))], rows);
+}
+
+/// The artifact's tree version is decided when the manifest is opened, before any part byte.
+///
+/// An older reader admits only version 1, so this is the gate that keeps its parts unread: the
+/// version is part of the manifest, which open reads before it can reach a part.
+#[tokio::test]
+async fn tree_version_is_decided_before_any_part_read() {
+    let store = store();
+    let m = metadata();
+    let format = ColumnarSamplesFormat {
+        block_rows: 1,
+        page_bytes: 288,
+        root_capacity: 2,
+        ..Default::default()
+    };
+    let handle = build(
+        &format,
+        &store,
+        m.clone(),
+        &[batch(
+            &m,
+            &[
+                (1, 1, 10, 1, 1, Some(0)),
+                (1, 2, 20, 1, 1, Some(0)),
+                (1, 3, 30, 1, 1, Some(0)),
+                (1, 4, 40, 1, 1, Some(0)),
+            ],
+            false,
+        )],
+    )
+    .await;
+    let manifest = manifest(&store, &handle).await;
+    // The tree version is 2 while the framing version stays 1, so a reader whose gate is one
+    // shared version rejects this artifact at open.
+    assert_eq!(MANIFEST_VERSION_DEEP, manifest.version);
+    assert_eq!(1, VERSION);
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    let observed = reads.clone();
+    let layer = MockLayerBuilder::default()
+        .reader_factory(Arc::new(move |path, _, inner| {
+            Box::new(RecordingRead {
+                inner,
+                path: path.into(),
+                reads: observed.clone(),
+            })
+        }))
+        .build()
+        .unwrap();
+    let reader = format
+        .reader(store.clone().layer(layer), handle.clone())
+        .await
+        .unwrap();
+    // Opening a version-2 artifact read its manifest and no part byte.
+    let opened = reads.lock().unwrap().clone();
+    assert!(
+        !opened.is_empty()
+            && opened
+                .iter()
+                .all(|(path, _)| path.ends_with("manifest.json")),
+        "opening read a part: {opened:?}"
+    );
+    // Dropping the reader without reading proves the gate, not a lazy part access.
+    drop(reader);
+
+    // An unknown tree version is refused at open with the same property: no part is read.
+    let bytes = store.read(&manifest.part_path(0)).await.unwrap().to_vec();
+    let mut newer = manifest.clone();
+    newer.version = 3;
+    let newer = keys::rewrite_part(&store, handle, newer, bytes).await;
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    let observed = reads.clone();
+    let layer = MockLayerBuilder::default()
+        .reader_factory(Arc::new(move |path, _, inner| {
+            Box::new(RecordingRead {
+                inner,
+                path: path.into(),
+                reads: observed.clone(),
+            })
+        }))
+        .build()
+        .unwrap();
+    let error = format
+        .reader(store.clone().layer(layer), newer)
+        .await
+        .err()
+        .expect("an unknown tree version must be refused at open");
+    assert!(error.to_string().contains("manifest version"), "{error}");
+    let refused = reads.lock().unwrap().clone();
+    assert!(
+        !refused.is_empty()
+            && refused
+                .iter()
+                .all(|(path, _)| path.ends_with("manifest.json")),
+        "an unsupported version read a part: {refused:?}"
+    );
+}
+
+/// A depth-three tree is validated level by level rather than trusted because its root decoded.
+#[tokio::test]
+async fn malformed_depth_three_trees_are_rejected() {
+    let store = store();
+    let m = metadata();
+    let format = ColumnarSamplesFormat {
+        block_rows: 1,
+        page_bytes: 288,
+        root_capacity: 2,
+        ..Default::default()
+    };
+    let handle = build(
+        &format,
+        &store,
+        m.clone(),
+        // Distinct coarse identifiers, so two children's bounds can disagree in order.
+        &[batch(
+            &m,
+            &[
+                (1, 1, 10, 1, 1, Some(0)),
+                (1, 2, 20, 1, 1, Some(0)),
+                (1, 3, 30, 1, 1, Some(0)),
+                (1, 4, 40, 1, 1, Some(0)),
+            ],
+            false,
+        )],
+    )
+    .await;
+    let manifest = manifest(&store, &handle).await;
+    let bytes = store.read(&manifest.part_path(0)).await.unwrap().to_vec();
+    let trailer = Trailer::decode(
+        &bytes[bytes.len() - TRAILER_SIZE as usize..],
+        bytes.len() as u64,
+    )
+    .unwrap();
+    let areas = trailer.areas();
+    let Page::Internal(groups) = stored_page(&bytes, &trailer, &manifest, &trailer.root, 3) else {
+        panic!("the fixture is a depth-three tree")
+    };
+    assert_eq!(2, groups.len());
+    let Page::Internal(leaves) = stored_page(&bytes, &trailer, &manifest, &groups[0], 2) else {
+        panic!("a depth-three root's children are internal pages")
+    };
+    assert_eq!(2, leaves.len());
+    let leaf = stored_page(&bytes, &trailer, &manifest, &leaves[0], 1);
+
+    // A corrupted stored page fails its checksum before it is decompressed or decoded. This
+    // runs first: it reads through a handle whose manifest is still the frozen one.
+    let mut bad = bytes.clone();
+    bad[trailer.root.payload.offset as usize] ^= 1;
+    store.write(&manifest.part_path(0), bad).await.unwrap();
+    let error = format
+        .reader(store.clone(), handle.clone())
+        .await
+        .unwrap()
+        .read(full_request())
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("checksum"), "{error}");
+    store
+        .write(&manifest.part_path(0), bytes.clone())
+        .await
+        .unwrap();
+
+    // A version-1 manifest promises at most two levels, so a depth-three trailer under it is
+    // malformed, and it is refused before the root page is decoded.
+    let mut shallow = manifest.clone();
+    shallow.version = MANIFEST_VERSION;
+    let shallow = keys::rewrite_part(&store, handle.clone(), shallow, bytes.clone()).await;
+    let error = format
+        .reader(store.clone(), shallow)
+        .await
+        .unwrap()
+        .read(full_request())
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("depth"), "{error}");
+
+    // A page whose kind disagrees with the depth its parent promised: a leaf claimed as an
+    // internal page, a leaf past the last level, and a group claimed as a leaf.
+    let group = stored_page(&bytes, &trailer, &manifest, &groups[0], 2);
+    for (page, reference, depth) in [
+        (&leaf, &leaves[0], 2),
+        (&leaf, &leaves[0], 3),
+        (&group, &groups[0], 1),
+    ] {
+        let error = Page::decode(&page.encode(), reference, depth, areas, &manifest).unwrap_err();
+        assert!(error.to_string().contains("kind/depth"), "{error}");
+    }
+    // A page whose depth the manifest's tree version does not admit.
+    let root = stored_page(&bytes, &trailer, &manifest, &trailer.root, 3);
+    let error = Page::decode(
+        &root.encode(),
+        &trailer.root,
+        3,
+        areas,
+        &shallow_manifest(&manifest),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("page depth"), "{error}");
+
+    // Zero and oversized child counts are rejected before the children are allocated.
+    let mut encoded = match &group {
+        Page::Internal(children) => Page::Internal(children.clone()).encode(),
+        Page::Leaf(_) => panic!("the fixture's group is internal"),
+    };
+    for count in [0u64, metadata::ROOT_CAPACITY as u64 + 1] {
+        encoded[4..12].copy_from_slice(&count.to_le_bytes());
+        assert!(
+            Page::decode(&encoded, &groups[0], 2, areas, &manifest).is_err(),
+            "count {count} was accepted"
+        );
+    }
+    // Every truncation of a page is rejected rather than decoded short.
+    let encoded = match &group {
+        Page::Internal(children) => Page::Internal(children.clone()).encode(),
+        Page::Leaf(_) => panic!("the fixture's group is internal"),
+    };
+    for length in 1..encoded.len() {
+        assert!(
+            Page::decode(&encoded[..length], &groups[0], 2, areas, &manifest).is_err(),
+            "{length} bytes of a page were accepted"
+        );
+    }
+    // Children whose bounds go backwards are rejected even though their ranges are ordered.
+    let Page::Internal(mut children) = stored_page(&bytes, &trailer, &manifest, &trailer.root, 3)
+    else {
+        panic!("the fixture is a depth-three tree")
+    };
+    let bounds = children[0].bounds;
+    children[0].bounds = children[1].bounds;
+    children[1].bounds = bounds;
+    let error = Page::decode(
+        &Page::Internal(children).encode(),
+        &trailer.root,
+        3,
+        areas,
+        &manifest,
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("unordered sample child ranges"),
+        "{error}"
+    );
+    // A child reference outside the metadata area is rejected.
+    let Page::Internal(mut children) = stored_page(&bytes, &trailer, &manifest, &trailer.root, 3)
+    else {
+        panic!("the fixture is a depth-three tree")
+    };
+    children[0].payload.offset = 0;
+    let error = Page::decode(
+        &Page::Internal(children).encode(),
+        &trailer.root,
+        3,
+        areas,
+        &manifest,
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("payload outside area"),
+        "{error}"
+    );
+}
+
+/// The manifest as a version-1 artifact would describe the same part.
+fn shallow_manifest(manifest: &Manifest) -> Manifest {
+    let mut shallow = manifest.clone();
+    shallow.version = MANIFEST_VERSION;
+    shallow
 }
 
 /// Keys live in the part's key area, not in the metadata pages: a page keeps a fixed-size
