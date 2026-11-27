@@ -53,6 +53,10 @@ HEAVY_CASES = [
     # run). Keep them in the heavy set so they only run on demand.
     "tests/perf/query_cases/promql_constant_tag_concat_ms_10k/case.toml",
     "tests/perf/query_cases/promql_constant_tag_concat_ms_100k/case.toml",
+    # 100,000 short series x 8 samples across 8 SSTs: the per-series setup
+    # dominates, and the fixture is as large as the high-cardinality cases
+    # above, so it stays on demand.
+    "tests/perf/query_cases/many_short_series/case.toml",
 ]
 
 CASE_GROUPS = {
