@@ -1526,6 +1526,42 @@ pub fn delete_rows_schema(request: &RegionCreateRequest) -> Vec<api::v1::ColumnS
         .collect::<Vec<_>>()
 }
 
+pub(crate) fn sparse_metric_create_request(format: &str) -> RegionCreateRequest {
+    let mut request = CreateRequestBuilder::new()
+        .tag_num(1)
+        .field_num(1)
+        .insert_option("primary_key_encoding", "sparse")
+        .insert_option("sst_format", format)
+        .build();
+    if format == "narthex" {
+        for (key, value) in [
+            ("memtable.type", "bulk"),
+            ("memtable.bulk.merge_threshold", "2"),
+            ("memtable.bulk.encode_row_threshold", "1"),
+            ("memtable.bulk.encode_bytes_threshold", "1"),
+        ] {
+            request.options.insert(key.into(), value.into());
+        }
+    }
+    let reserved =
+        sst_util::sst_region_metadata_with_encoding(store_api::codec::PrimaryKeyEncoding::Sparse);
+    request
+        .column_metadatas
+        .extend(reserved.column_metadatas.into_iter().take(2));
+    request
+        .primary_key
+        .splice(0..0, reserved.primary_key.into_iter().take(2));
+    request
+}
+
+pub(crate) fn build_series_index_request() -> RegionRequest {
+    RegionRequest::BuildIndex(store_api::region_request::RegionBuildIndexRequest {
+        options: Some(api::v1::region::build_index_request::Options::SeriesIndex(
+            Default::default(),
+        )),
+    })
+}
+
 /// Builds an encoded sparse metric put, including an explicitly nullable field.
 pub fn sparse_metric_put(key: Vec<u8>, ts: i64, value: Option<f64>) -> RegionRequest {
     use api::v1::ColumnDataType;

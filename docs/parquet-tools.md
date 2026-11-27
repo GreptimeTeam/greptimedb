@@ -113,9 +113,10 @@ dump path must not be exactly the same path as the input, even with
 `--overwrite`. This check does not resolve symbolic links, hard links, or other
 spellings of the same path.
 
-The rewrite decodes and writes the Arrow record batches and copies the Parquet
-key-value metadata, but it creates a new physical Parquet layout. Inspect and
-validate the result before using it as an SST:
+The rewrite decodes and writes the Arrow record batches into a new physical
+layout. It copies region metadata, recomputes decoded value sizes when present,
+and drops the `greptimedb.deduped` marker. Inspect the result before using it
+as an SST:
 
 ```bash
 $GREPTIME datanode parquet-meta \
@@ -194,7 +195,8 @@ The target must be a locally owned, unshared Parquet SST. The replacement must
 belong to the same source region and time index and
 match the manifest row and row-group counts when those counts are known.
 Its footer must provide exact time bounds. Missing primary-key bounds remain
-unknown. Index sidecars belong to the original file ID. When the manifest has
+unknown. Use `parquet-rewrite` first if the replacement carries
+`greptimedb.deduped`. Index sidecars belong to the original file ID. When the manifest has
 a sequence fence or preserves per-row sequences, the command compares the
 sequence column of both files before retaining those guarantees. Allow memory
 for both SSTs during validation.
@@ -244,8 +246,8 @@ $GREPTIME datanode sst-replace \
 The confirmed operation prints the new SST path and manifest version. Restart
 the datanode and validate queries against the region before removing the
 backup. To repair bounds or stale cache entries left by an older in-place
-replacement, use its current object-store path as `--replacement-object` and
-its current manifest ID as `--file-id`.
+replacement, use its current manifest ID as `--file-id`. If the current object
+has no deduplication marker, it can be passed directly as `--replacement-object`.
 
 ## Recommended rewrite and replacement workflow
 

@@ -20,7 +20,7 @@ use std::time::Instant;
 
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use datatypes::arrow::array::{ArrayRef, StringArray, UInt32Array, UInt64Array};
-use datatypes::arrow::datatypes::SchemaRef;
+use datatypes::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datatypes::arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use datatypes::value::Value;
 use futures::stream::BoxStream;
@@ -51,6 +51,34 @@ pub(crate) struct ColumnarReader {
     handle: SeriesIndexFileHandle,
 }
 impl ColumnarReader {
+    /// Present newly added labels as absent. Block descriptors still use the on-disk schema.
+    pub(crate) fn adapt_tags(
+        &mut self,
+        metadata: &store_api::metadata::RegionMetadata,
+    ) -> Result<()> {
+        let mut fields = self.schema.fields().to_vec();
+        for column in metadata.primary_key_columns().skip(2) {
+            if self
+                .schema
+                .field_with_name(&column.column_schema.name)
+                .is_ok()
+            {
+                continue;
+            }
+            require(
+                column.column_schema.is_nullable()
+                    && column.column_schema.default_constraint().is_none(),
+                "missing series tag must be nullable without a default",
+            )?;
+            fields.push(Arc::new(crate::sst::with_field_id(
+                Field::new(&column.column_schema.name, DataType::Utf8, true),
+                column.column_id,
+            )));
+        }
+        self.schema = Arc::new(Schema::new(fields));
+        crate::series_index::format::validate_series_schema(&self.schema, metadata)
+    }
+
     pub(crate) async fn open_cached(
         store: ObjectStore,
         handle: SeriesIndexFileHandle,
@@ -239,11 +267,10 @@ impl FormatReader for ColumnarReader {
         let manifest = self.manifest.clone();
         let store = self.store.clone();
         let handle = self.handle.clone();
-        let names: Vec<_> = schema
-            .fields()
-            .iter()
-            .skip(1)
-            .map(|f| f.name().clone())
+        let names: Vec<_> = [TSID_COLUMN, ROW_COUNT_COLUMN]
+            .into_iter()
+            .map(str::to_owned)
+            .chain(manifest.tags.iter().map(|tag| tag.name.clone()))
             .collect();
         Ok(Box::pin(async_stream::try_stream! {
             // Retained across every yield, even after the reader object is dropped.
