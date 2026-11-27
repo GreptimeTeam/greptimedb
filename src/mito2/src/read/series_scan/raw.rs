@@ -366,8 +366,6 @@ pub(crate) fn make_stream(
         let mut incoming: VecDeque<IncomingRecord> = VecDeque::new();
         let mut held: Option<IncomingRecord> = None;
         let mut exhausted = false;
-        // The last row kept from an append-mode series, so a tie split across two records collapses
-        // into the one sample a chunk can carry.
         let mut last_kept: LastKeptRow = None;
         // An upstream error is reported only after the records buffered before it are processed,
         // so the chunks that precede it are still yielded first.
@@ -497,9 +495,8 @@ pub(crate) fn make_stream(
                     break;
                 }
             }
-            // An append-mode region keeps one row per write, so a series can hold several rows for
-            // one timestamp. Predicates are applied first, so the row kept here is the first row of
-            // the tie the answer is read from, exactly as the existing PromQL plan reads it.
+            // Predicates are applied first, so the row kept here is the first row of the tie the
+            // answer is read from, exactly as the existing PromQL plan reads it.
             if append_mode {
                 record = match collapse_repeated_samples(record, &mut last_kept) {
                     Ok(record) => record,
