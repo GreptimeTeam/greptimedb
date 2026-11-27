@@ -651,6 +651,18 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "CSV header in path: {} matches no column of the table, header columns: {:?}. If the first row is data rather than column names, set HEADERS='false'",
+        path,
+        header_columns
+    ))]
+    CsvHeaderNoMatchingColumns {
+        path: String,
+        header_columns: Vec<String>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to project schema"))]
     ProjectSchema {
         #[snafu(source)]
@@ -1060,6 +1072,7 @@ impl ErrorExt for Error {
             | Error::BuildRegex { .. }
             | Error::InvalidSchema { .. }
             | Error::CsvHeaderMismatch { .. }
+            | Error::CsvHeaderNoMatchingColumns { .. }
             | Error::ProjectSchema { .. }
             | Error::UnsupportedFormat { .. }
             | Error::ColumnNoneDefaultValue { .. }
