@@ -40,7 +40,7 @@ use parquet::arrow::AsyncArrowWriter;
 use parquet::arrow::async_writer::AsyncFileWriter;
 use parquet::basic::{Compression, Encoding, ZstdLevel};
 use parquet::errors::ParquetError;
-use parquet::file::metadata::{FileMetaData, KeyValue, ParquetMetaData};
+use parquet::file::metadata::{FileMetaData, KeyValue, ParquetMetaData, RowGroupMetaData};
 use parquet::file::properties::WriterProperties;
 use smallvec::smallvec;
 use snafu::{IntoError, OptionExt, ResultExt, ensure};
@@ -55,12 +55,14 @@ use crate::error::{
     WriteParquetSnafu,
 };
 use crate::read::FlatSource;
+use crate::region::options::MergeMode;
 use crate::sst::file::RegionFileId;
 use crate::sst::index::{Indexer, IndexerBuilder};
 use crate::sst::parquet::flat_format::{
     FlatWriteFormat, primary_key_column_index, time_index_column_index,
 };
 use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyWriteFormat};
+use crate::sst::parquet::metadata::deduped_sst_marker;
 use crate::sst::parquet::parallel_writer::ParallelArrowWriter;
 use crate::sst::parquet::{
     COLUMN_INDEX_TRUNCATE_LENGTH, PARQUET_METADATA_KEY, RowGroupValueBytes, SstInfo, WriteOptions,
@@ -187,6 +189,13 @@ impl<W: AsyncFileWriter> SstArrowWriter<W> {
         match self {
             SstArrowWriter::Serial(writer) => writer.append_key_value_metadata(kv),
             SstArrowWriter::Parallel(writer) => writer.append_key_value_metadata(kv),
+        }
+    }
+
+    fn flushed_row_groups(&self) -> &[RowGroupMetaData] {
+        match self {
+            SstArrowWriter::Serial(writer) => writer.flushed_row_groups(),
+            SstArrowWriter::Parallel(writer) => writer.flushed_row_groups(),
         }
     }
 
@@ -598,6 +607,7 @@ where
         &mut self,
         ssts: &mut SstInfoArray,
         stats: &mut SourceStats,
+        dedup_mode: Option<MergeMode>,
     ) -> Result<()> {
         self.check_cancelled()?;
         // maybe_init_writer will re-create a new file.
@@ -638,6 +648,9 @@ where
                 .unwrap_or_default()
             {
                 writer.append_key_value_metadata(kv);
+            }
+            if let Some(marker) = deduped_sst_marker(dedup_mode, writer.flushed_row_groups()) {
+                writer.append_key_value_metadata(marker);
             }
             let parquet_metadata = writer.finish().await.map_err(map_write_error)?;
             self.writer.take();
@@ -753,6 +766,7 @@ where
     ) -> Result<SstInfoArray> {
         let mut results = smallvec![];
         let mut stats = SourceStats::default();
+        let dedup_mode = source.dedup_mode();
 
         loop {
             let start = Instant::now();
@@ -780,7 +794,8 @@ where
                 self.append_flat_batch(&batch, converter, opts, &mut stats)
                     .await?;
                 if self.exceeds_max_file_size(opts) {
-                    self.finish_current_file(&mut results, &mut stats).await?;
+                    self.finish_current_file(&mut results, &mut stats, dedup_mode)
+                        .await?;
                 }
             } else if self.exceeds_max_file_size(opts)
                 && let Some(current_primary_key) = stats.last_primary_key.as_deref()
@@ -805,7 +820,8 @@ where
                             self.append_flat_batch(&tail, converter, opts, &mut stats)
                                 .await?;
                         }
-                        self.finish_current_file(&mut results, &mut stats).await?;
+                        self.finish_current_file(&mut results, &mut stats, dedup_mode)
+                            .await?;
                         self.append_flat_batch(&next_file_head, converter, opts, &mut stats)
                             .await?;
                     }
@@ -816,7 +832,8 @@ where
             }
         }
 
-        self.finish_current_file(&mut results, &mut stats).await?;
+        self.finish_current_file(&mut results, &mut stats, dedup_mode)
+            .await?;
 
         // object_store.write will make sure all bytes are written or an error is raised.
         Ok(results)

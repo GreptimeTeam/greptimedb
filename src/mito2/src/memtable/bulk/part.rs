@@ -69,10 +69,12 @@ use crate::memtable::bulk::context::{BulkIterContext, BulkIterContextRef};
 use crate::memtable::bulk::part_reader::ParquetBulkPartIter;
 use crate::memtable::time_series::{ValueBuilder, Values};
 use crate::memtable::{BoxedRecordBatchIterator, MemScanMetrics, MemtableStats};
+use crate::region::options::MergeMode;
 use crate::sst::SeriesEstimator;
 use crate::sst::index::IndexOutput;
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyArrayBuilder};
+use crate::sst::parquet::metadata::deduped_sst_marker;
 use crate::sst::parquet::{
     COLUMN_INDEX_TRUNCATE_LENGTH, PARQUET_METADATA_KEY, RowGroupValueBytes, SstInfo,
     apply_column_compression, apply_float_field_encoding, apply_internal_column_encoding,
@@ -1484,6 +1486,7 @@ pub struct BulkPartEncoder {
     metadata: RegionMetadataRef,
     writer_props: Option<WriterProperties>,
     narthex_format: bool,
+    dedup_mode: Option<MergeMode>,
 }
 
 impl BulkPartEncoder {
@@ -1517,11 +1520,17 @@ impl BulkPartEncoder {
             metadata,
             writer_props,
             narthex_format: false,
+            dedup_mode: None,
         })
     }
 }
 
 impl BulkPartEncoder {
+    pub(crate) fn with_dedup_mode(mut self, mode: Option<MergeMode>) -> Self {
+        self.dedup_mode = mode;
+        self
+    }
+
     pub(crate) fn with_narthex_format(mut self, narthex_format: bool) -> Self {
         self.narthex_format = narthex_format;
         self
@@ -1640,6 +1649,13 @@ impl BulkPartEncoder {
         let close_start = Instant::now();
         for kv in row_group_value_bytes.into_key_values() {
             writer.append_key_value_metadata(kv);
+        }
+        if self.dedup_mode == Some(MergeMode::LastNonNull) {
+            // The final row group must also participate in the delete check.
+            writer.flush().context(EncodeMemtableSnafu)?;
+        }
+        if let Some(marker) = deduped_sst_marker(self.dedup_mode, writer.flushed_row_groups()) {
+            writer.append_key_value_metadata(marker);
         }
         let file_metadata = writer.close().context(EncodeMemtableSnafu)?;
         metrics.write_cost += close_start.elapsed();

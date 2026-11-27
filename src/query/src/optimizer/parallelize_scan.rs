@@ -163,12 +163,12 @@ fn assign_partition_ranges_by_time(
         ranges.sort_by(|a, b| a.start.cmp(&b.start).then_with(|| a.end.cmp(&b.end)));
     }
     let mut partition_ranges = vec![vec![]; expected_partition_num];
-    let mut partition_rows = vec![0; expected_partition_num];
+    let mut partition_rows = vec![0usize; expected_partition_num];
     for range in ranges {
         let target = (0..expected_partition_num)
             .min_by_key(|&i| (partition_rows[i], partition_ranges[i].len(), i))
             .unwrap();
-        partition_rows[target] += range.num_rows;
+        partition_rows[target] = partition_rows[target].saturating_add(range.num_rows);
         partition_ranges[target].push(range);
     }
     partition_ranges

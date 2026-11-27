@@ -1,0 +1,8 @@
+name = "metadata_count_sst_footer"
+reason = "Read non-append SSTs across versions with and without the deduplication footer marker."
+introduced_by = "PR #9891"
+topologies = ["standalone", "distributed"]
+from_range = ["*"]
+to_range = ["*"]
+features = ["sst", "metadata"]
+owner = "storage"

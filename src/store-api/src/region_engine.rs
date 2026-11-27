@@ -335,6 +335,10 @@ pub struct ScannerProperties {
     /// Whether total_rows is exact before applying query predicates.
     total_rows_is_exact: bool,
 
+    /// Exact rows after static query predicates, prepared against the scanner's
+    /// read view. Unknown unless an engine has proved all visibility conditions.
+    exact_num_rows: Option<usize>,
+
     /// Whether to yield an empty batch to distinguish partition ranges.
     pub distinguish_partition_range: bool,
 
@@ -370,6 +374,22 @@ impl ScannerProperties {
         self
     }
 
+    /// Sets an exact count for the complete scan, including static predicates.
+    pub fn with_exact_num_rows(mut self, rows: Option<usize>) -> Self {
+        self.exact_num_rows = rows;
+        self
+    }
+
+    /// Returns the prepared exact count after all static scan predicates.
+    pub fn exact_num_rows(&self) -> Option<usize> {
+        self.exact_num_rows
+    }
+
+    /// Invalidates prepared statistics when the scan gains a dynamic predicate.
+    pub fn clear_exact_num_rows(&mut self) {
+        self.exact_num_rows = None;
+    }
+
     /// Creates a new [`ScannerProperties`] with the given partitioning.
     pub fn new(partitions: Vec<Vec<PartitionRange>>, append_mode: bool, total_rows: usize) -> Self {
         Self {
@@ -377,6 +397,7 @@ impl ScannerProperties {
             append_mode,
             total_rows,
             total_rows_is_exact: false,
+            exact_num_rows: None,
             distinguish_partition_range: false,
             target_partitions: 0,
             logical_region: false,
@@ -388,6 +409,12 @@ impl ScannerProperties {
     /// Updates the properties with the given [PrepareRequest].
     pub fn prepare(&mut self, request: PrepareRequest) {
         if let Some(ranges) = request.ranges {
+            if (self.exact_num_rows.is_some() || self.total_rows_is_exact)
+                && !same_partition_ranges(&self.partitions, &ranges)
+            {
+                self.exact_num_rows = None;
+                self.total_rows_is_exact = false;
+            }
             self.partitions = ranges;
         }
         if let Some(distinguish_partition_range) = request.distinguish_partition_range {
@@ -457,10 +484,24 @@ impl ScannerProperties {
     }
 }
 
+/// Checks that range assignment only reordered or regrouped the original ranges.
+fn same_partition_ranges(left: &[Vec<PartitionRange>], right: &[Vec<PartitionRange>]) -> bool {
+    let mut left: Vec<_> = left.iter().flatten().collect();
+    let mut right: Vec<_> = right.iter().flatten().collect();
+    if left.len() != right.len() {
+        return false;
+    }
+    let key = |range: &&PartitionRange| (range.identifier, range.start, range.end, range.num_rows);
+    left.sort_unstable_by_key(key);
+    right.sort_unstable_by_key(key);
+    left == right
+}
+
 /// Request to override the scanner properties.
 #[derive(Default)]
 pub struct PrepareRequest {
-    /// Assigned partition ranges.
+    /// Range assignment may reorder and regroup existing ranges. Exact row
+    /// counts require preserving each range unchanged with its original multiplicity.
     pub ranges: Option<Vec<Vec<PartitionRange>>>,
     /// Distringuishes partition range by empty batches.
     pub distinguish_partition_range: Option<bool>,
@@ -1025,6 +1066,45 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn test_metadata_aggr_partition_range_assignment() {
+        let range = PartitionRange {
+            start: Timestamp::new_millisecond(0),
+            end: Timestamp::new_millisecond(1),
+            num_rows: 5,
+            identifier: 0,
+        };
+        let later = PartitionRange {
+            start: range.end,
+            end: Timestamp::new_millisecond(2),
+            identifier: 1,
+            ..range
+        };
+        let original = vec![vec![range, later]];
+        for (replacement, exact) in [
+            (vec![vec![later], vec![range]], true),
+            (vec![vec![later]], false),
+            (vec![vec![range, range]], false),
+            (
+                vec![vec![
+                    PartitionRange {
+                        num_rows: 4,
+                        ..range
+                    },
+                    later,
+                ]],
+                false,
+            ),
+        ] {
+            let mut properties = ScannerProperties::new(original.clone(), true, 10)
+                .with_exact_num_rows(Some(10))
+                .with_total_rows_is_exact(true);
+            properties.prepare(PrepareRequest::default().with_ranges(replacement));
+            assert_eq!(properties.exact_num_rows(), exact.then_some(10));
+            assert_eq!(properties.total_rows_is_exact(), exact);
+        }
+    }
 
     #[tokio::test]
     async fn single_partition_scanner_raw_scan_panics_and_preserves_legacy_read() {

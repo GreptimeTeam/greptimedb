@@ -1,0 +1,698 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Answers aggregates of a scan from manifest and SST statistics instead of
+//! scanning SST rows. The preparation result, an exact answer or a split into
+//! exact and residual sources, does not depend on the aggregate; scalar COUNT
+//! is the only aggregate served so far.
+
+pub mod overlap;
+
+use std::sync::Arc;
+
+use common_telemetry::debug;
+use common_time::range::TimestampRange;
+use datafusion_common::ScalarValue;
+use datafusion_expr::{Expr, Operator};
+use datatypes::data_type::DataType;
+use datatypes::value::Value;
+use futures::future::BoxFuture;
+use futures::{FutureExt, StreamExt, TryStreamExt};
+use mito_codec::row_converter::{PrimaryKeyCodec, build_primary_key_codec};
+use parquet::file::metadata::ParquetMetaData;
+use store_api::codec::PrimaryKeyEncoding;
+use store_api::metadata::{ColumnMetadata, RegionMetadata};
+use store_api::storage::{ColumnId, ScanRequest};
+
+use crate::cache::CachedSstMeta;
+use crate::read::scan_region::aggr::overlap::{Extent, find_overlaps};
+use crate::read::scan_region::{ScanInput, request_preserves_rows};
+use crate::sst::file::FileHandle;
+use crate::sst::parquet::metadata::{
+    extract_primary_key_range, extract_time_range, has_deduped_sst_marker, has_only_puts,
+};
+
+/// Returns the exact number of rows the scan yields, or `None` if it cannot
+/// be proven. Non-append candidates use cached Parquet footers to prove
+/// file-local uniqueness and the absence of deletes.
+pub(crate) async fn prepare(input: &ScanInput, request: &ScanRequest) -> Option<usize> {
+    let classification = classify(input, request)?;
+    if input.append_mode && request.filters.is_empty() {
+        return Some(classification.exact_rows);
+    }
+    let check_keys =
+        classification.key_filter || (!input.append_mode && classification.exact.len() > 1);
+    let check_rows = !input.append_mode;
+    futures::stream::iter(classification.exact)
+        .map(|index| file_evidence(input, input.files[index].clone(), check_keys, check_rows))
+        .buffer_unordered(input.max_concurrent_scan_files.max(1))
+        .try_collect::<()>()
+        .await
+        .ok()?;
+    Some(classification.exact_rows)
+}
+
+fn time_bounds_match(file: &FileHandle, sst: &CachedSstMeta, time_id: ColumnId) -> bool {
+    let region = sst.region_metadata();
+    let time_index = region.time_index_column();
+    let (start, end) = file.time_range();
+    time_index.column_id == time_id
+        && extract_time_range(&sst.parquet_metadata(), time_index).is_some_and(|(min, max)| {
+            start.unit() == min.unit() && end.unit() == max.unit() && (start, end) == (min, max)
+        })
+}
+
+/// Proves the bounds and visible rows required for this exact candidate.
+fn file_evidence(
+    input: &ScanInput,
+    file: FileHandle,
+    check_keys: bool,
+    check_rows: bool,
+) -> BoxFuture<'static, Result<(), ()>> {
+    let time_id = input.region_metadata().time_index_column().column_id;
+    let reader = input
+        .access_layer
+        .read_sst(file.clone())
+        .cache(input.cache_strategy.clone());
+    async move {
+        let sst = reader.read_statistics().await.map_err(|e| {
+            debug!(
+                "Metadata count could not read footer of {}: {e:?}",
+                file.file_id()
+            );
+        })?;
+        let metadata = sst.parquet_metadata();
+        if !time_bounds_match(&file, &sst, time_id) {
+            return Err(());
+        }
+        if check_keys
+            && let Some(range) = file.raw_primary_key_range()
+            && extract_primary_key_range(&metadata, &sst.region_metadata()) != Some(range)
+        {
+            return Err(());
+        }
+        (!check_rows || footer_proves_visible_rows(&metadata, file.num_rows()))
+            .then_some(())
+            .ok_or(())
+    }
+    .boxed()
+}
+
+/// The footer and manifest must agree. Without the writer's uniqueness claim,
+/// only a single physical row is independently known to be unique.
+fn footer_proves_visible_rows(metadata: &ParquetMetaData, manifest_rows: usize) -> bool {
+    let footer = metadata.file_metadata();
+    let unique = manifest_rows == 1 || has_deduped_sst_marker(metadata);
+    unique
+        && usize::try_from(footer.num_rows()) == Ok(manifest_rows)
+        && metadata
+            .row_groups()
+            .iter()
+            .try_fold(0usize, |total, group| {
+                total.checked_add(usize::try_from(group.num_rows()).ok()?)
+            })
+            == Some(manifest_rows)
+        && has_only_puts(metadata.row_groups())
+}
+
+/// Files of one scan classified against its pinned read view.
+struct Classification {
+    /// Indexes into `ScanInput::files` whose rows are all yielded exactly once.
+    exact: Vec<usize>,
+    /// Sum of the manifest row counts of `exact`.
+    exact_rows: usize,
+    /// Whether the filter proof depends on key bounds.
+    key_filter: bool,
+}
+
+/// A file is an exact candidate if all of the following hold:
+/// - The query time range covers it and every other static filter holds for
+///   all of its rows (see [`AggrFilters`]).
+/// - Its manifest row count is known.
+/// - In a deduplicating region, no other file or memtable may hold a row with
+///   the same primary key and timestamp. The footer must still prove
+///   uniqueness within the file and that it holds only puts.
+///
+/// Returns `None` for scans whose visible rows can differ from the sources'
+/// rows for reasons other than the files themselves.
+fn classify(input: &ScanInput, request: &ScanRequest) -> Option<Classification> {
+    if !input.memtables.is_empty()
+        || !input.allows_exact_row_count()
+        || !request_preserves_rows(request)
+    {
+        return None;
+    }
+    let filters = AggrFilters::new(input.region_metadata(), &request.filters)?;
+    let range = input.time_range.as_ref()?;
+
+    let mut intersecting = Vec::new();
+    for (index, file) in input.files.iter().enumerate() {
+        let (start, end) = file.time_range();
+        if start > end {
+            return None;
+        }
+        if !range.intersects(&TimestampRange::new_inclusive(Some(start), Some(end))) {
+            continue;
+        }
+        let candidate = range.contains(&start)
+            && range.contains(&end)
+            // Zero is unknown in legacy manifests.
+            && file.num_rows() > 0
+            && input.file_time_bounds_fit(file)
+            && (input.region_partition_expr.is_none() || input.should_skip_region_partition(file))
+            && filters.covers(file);
+        if !candidate {
+            return None;
+        }
+        intersecting.push(index);
+    }
+    if !input.append_mode && intersecting.len() > 1 {
+        let mapper = input.primary_key_mapper();
+        let extents: Vec<_> = intersecting
+            .iter()
+            .map(|&index| {
+                let file = &input.files[index];
+                Extent {
+                    time: file.time_range(),
+                    key: file.primary_key_range(mapper),
+                }
+            })
+            .collect();
+        if find_overlaps(&extents).contains(&true) {
+            return None;
+        }
+    }
+    let exact_rows = intersecting.iter().try_fold(0usize, |rows, &index| {
+        rows.checked_add(input.files[index].num_rows())
+    })?;
+    i64::try_from(exact_rows).ok()?;
+    Some(Classification {
+        exact: intersecting,
+        exact_rows,
+        key_filter: filters.codec.is_some(),
+    })
+}
+
+/// Static scan predicates a metadata count can absorb.
+struct AggrFilters {
+    /// Values the leftmost primary key column must equal.
+    leftmost_values: Vec<Value>,
+    codec: Option<Arc<dyn PrimaryKeyCodec>>,
+}
+
+impl AggrFilters {
+    /// Returns `None` if any conjunct is neither a time-index comparison nor an
+    /// equality between the leftmost primary key column and a literal.
+    fn new(metadata: &RegionMetadata, filters: &[Expr]) -> Option<Self> {
+        let time_index = &metadata.time_index_column().column_schema;
+        let time_type = time_index.data_type.as_arrow_type();
+        let mut conjuncts = Vec::new();
+        for expr in filters {
+            split_and(expr, &mut conjuncts);
+        }
+        let mut leftmost_values = Vec::new();
+        for expr in conjuncts {
+            if time_filter(expr, &time_index.name, &time_type) {
+                continue;
+            }
+            let column = &leftmost_primary_key(metadata)?.column_schema;
+            let value = eq_literal(expr, &column.name, &column.data_type.as_arrow_type())?;
+            leftmost_values.push(Value::try_from(value.clone()).ok()?);
+        }
+        let codec = (!leftmost_values.is_empty()).then(|| build_primary_key_codec(metadata));
+        Some(Self {
+            leftmost_values,
+            codec,
+        })
+    }
+
+    /// Whether the leftmost key equalities hold for every row of the file.
+    /// Keys are sorted memcomparable bytes, so when both bounds decode to the
+    /// same leftmost value, every key between them shares it.
+    fn covers(&self, file: &FileHandle) -> bool {
+        let Some(codec) = &self.codec else {
+            return true;
+        };
+        let Some((min, max)) = file.raw_primary_key_range() else {
+            return false;
+        };
+        match (codec.decode_leftmost(&min), codec.decode_leftmost(&max)) {
+            (Ok(Some(low)), Ok(Some(high))) => {
+                low == high && self.leftmost_values.iter().all(|value| *value == low)
+            }
+            _ => false,
+        }
+    }
+}
+
+/// The leftmost primary key column. Sparse keys are not supported yet.
+fn leftmost_primary_key(metadata: &RegionMetadata) -> Option<&ColumnMetadata> {
+    match metadata.primary_key_encoding {
+        PrimaryKeyEncoding::Sparse => None,
+        PrimaryKeyEncoding::Dense => metadata.primary_key_columns().next(),
+    }
+}
+
+fn split_and<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
+    match expr {
+        Expr::BinaryExpr(binary) if binary.op == Operator::And => {
+            split_and(&binary.left, out);
+            split_and(&binary.right, out);
+        }
+        _ => out.push(expr),
+    }
+}
+
+/// Returns the literal of a non-null, same-type `column = literal` equality.
+fn eq_literal<'a>(
+    expr: &'a Expr,
+    name: &str,
+    data_type: &datatypes::arrow::datatypes::DataType,
+) -> Option<&'a ScalarValue> {
+    let Expr::BinaryExpr(binary) = expr else {
+        return None;
+    };
+    if binary.op != Operator::Eq {
+        return None;
+    }
+    let (column, value) = match (binary.left.as_ref(), binary.right.as_ref()) {
+        (Expr::Column(column), Expr::Literal(value, _))
+        | (Expr::Literal(value, _), Expr::Column(column)) => (column, value),
+        _ => return None,
+    };
+    // Arrow uses total ordering for floats. Decoded Values equate NaNs and
+    // both signs of zero, so those equalities cannot prove Arrow coverage.
+    if match value {
+        ScalarValue::Float32(Some(value)) => value.is_nan() || *value == 0.0,
+        ScalarValue::Float64(Some(value)) => value.is_nan() || *value == 0.0,
+        _ => false,
+    } {
+        return None;
+    }
+    (column.name == name && !value.is_null() && &value.data_type() == data_type).then_some(value)
+}
+
+fn time_filter(expr: &Expr, name: &str, data_type: &datatypes::arrow::datatypes::DataType) -> bool {
+    let Expr::BinaryExpr(binary) = expr else {
+        return false;
+    };
+    if binary.op == Operator::And {
+        return time_filter(&binary.left, name, data_type)
+            && time_filter(&binary.right, name, data_type);
+    }
+    if !matches!(
+        binary.op,
+        Operator::Eq | Operator::Lt | Operator::LtEq | Operator::Gt | Operator::GtEq
+    ) {
+        return false;
+    }
+    let (column, value) = match (binary.left.as_ref(), binary.right.as_ref()) {
+        (Expr::Column(column), Expr::Literal(value, _))
+        | (Expr::Literal(value, _), Expr::Column(column)) => (column, value),
+        _ => return false,
+    };
+    column.name == name && !value.is_null() && &value.data_type() == data_type
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+    use std::sync::{Arc, LazyLock, Mutex};
+
+    use bytes::Bytes;
+    use common_time::Timestamp;
+    use common_time::timestamp::TimeUnit;
+    use datafusion_expr::{col, lit};
+    use datatypes::value::ValueRef;
+    use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
+    use store_api::storage::{FileId, RegionId};
+    use table::predicate::build_time_range_predicate;
+
+    use super::*;
+    use crate::read::flat_projection::FlatProjectionMapper;
+    use crate::read::scan_region::PredicateGroup;
+    use crate::sst::file::FileMeta;
+    use crate::test_util::memtable_util::metadata_with_primary_key;
+    use crate::test_util::new_noop_file_purger;
+    use crate::test_util::scheduler_util::SchedulerEnv;
+
+    /// Files whose `__op_type` statistics would show deletions. Unit tests
+    /// have no Parquet files; engine tests cover reading the statistics.
+    static WITH_DELETES: LazyLock<Mutex<HashSet<FileId>>> = LazyLock::new(Default::default);
+
+    fn file(start: i64, end: i64, rows: u64, no_deletes: bool) -> FileHandle {
+        let file_id = FileId::random();
+        if !no_deletes {
+            WITH_DELETES.lock().unwrap().insert(file_id);
+        }
+        FileHandle::new(
+            FileMeta {
+                region_id: RegionId::new(123, 456),
+                file_id,
+                num_rows: rows,
+                time_range: (
+                    Timestamp::new_millisecond(start),
+                    Timestamp::new_millisecond(end),
+                ),
+                ..Default::default()
+            },
+            new_noop_file_purger(),
+        )
+    }
+
+    /// A file without deletions whose primary keys span `min..=max` over `(k0, k1)`.
+    fn keyed_file(
+        start: i64,
+        end: i64,
+        rows: u64,
+        min: (&str, u32),
+        max: (&str, u32),
+    ) -> FileHandle {
+        let codec = DensePrimaryKeyCodec::new(&metadata_with_primary_key(vec![0, 1], false));
+        let encode = |(k0, k1): (&str, u32)| {
+            Bytes::from(
+                codec
+                    .encode([ValueRef::String(k0), ValueRef::UInt32(k1)].into_iter())
+                    .unwrap(),
+            )
+        };
+        FileHandle::new(
+            FileMeta {
+                region_id: RegionId::new(123, 456),
+                file_id: FileId::random(),
+                num_rows: rows,
+                time_range: (
+                    Timestamp::new_millisecond(start),
+                    Timestamp::new_millisecond(end),
+                ),
+                primary_key_min: Some(encode(min)),
+                primary_key_max: Some(encode(max)),
+                ..Default::default()
+            },
+            new_noop_file_purger(),
+        )
+    }
+
+    fn exact_count(input: &ScanInput, request: &ScanRequest) -> Option<usize> {
+        let classification = classify(input, request)?;
+        let deletes = WITH_DELETES.lock().unwrap();
+        classification
+            .exact
+            .iter()
+            .all(|&i| input.append_mode || !deletes.contains(&input.files[i].meta_ref().file_id))
+            .then_some(classification.exact_rows)
+    }
+
+    async fn input(files: Vec<FileHandle>, filters: &[Expr]) -> ScanInput {
+        let env = SchedulerEnv::new().await;
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
+        ScanInput::builder(env.access_layer.clone(), mapper)
+            .with_files(files)
+            .with_predicate(PredicateGroup::new(&metadata, filters).unwrap())
+            .with_time_range(Some(build_time_range_predicate(
+                "ts",
+                TimeUnit::Millisecond,
+                filters,
+            )))
+            .build()
+    }
+
+    #[tokio::test]
+    async fn test_metadata_aggr_coverage_and_overlap() {
+        let ts = |v| lit(ScalarValue::TimestampMillisecond(Some(v), None));
+        for (filters, expected) in [
+            (vec![], Some(5)),
+            (vec![col("ts").lt(ts(20))], Some(3)),
+            (vec![col("ts").gt_eq(ts(20))], Some(2)),
+            (vec![col("ts").lt(ts(5))], None),
+            (vec![col("ts").gt(ts(30))], Some(0)),
+            (vec![col("ts").eq(ts(0)).or(col("ts").eq(ts(30)))], None),
+            (vec![col("ts").not_eq(ts(5))], None),
+            (vec![col("k0").eq(lit("x"))], None),
+        ] {
+            let input = input(vec![file(0, 10, 3, true), file(20, 30, 2, true)], &filters).await;
+            let request = ScanRequest {
+                filters,
+                metadata_aggr_hint: true,
+                ..Default::default()
+            };
+            // Deletion evidence comes from the test, see `WITH_DELETES`.
+            assert_eq!(exact_count(&input, &request), expected, "{request:?}");
+        }
+        for files in [
+            vec![file(0, 10, 3, true), file(10, 20, 2, true)],
+            vec![file(0, 10, 3, true), file(5, 8, 2, true)],
+            vec![file(0, 10, 3, false)],
+            vec![file(0, 10, 0, false)],
+        ] {
+            assert_eq!(
+                exact_count(&input(files, &[]).await, &ScanRequest::default()),
+                None
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_metadata_aggr_leftmost_key_filter() {
+        let ts = |v| lit(ScalarValue::TimestampMillisecond(Some(v), None));
+        let x = |start, end, rows| keyed_file(start, end, rows, ("x", 1), ("x", 9));
+        let mixed = || keyed_file(20, 30, 2, ("x", 1), ("y", 1));
+        let k0 = |v: &str| col("k0").eq(lit(v));
+        for (files, filters, expected) in [
+            // Both bounds prove the equality, so it holds for every row.
+            (
+                vec![x(0, 10, 3), x(20, 30, 2)],
+                vec![col("ts").gt_eq(ts(0)).and(col("ts").lt(ts(40))), k0("x")],
+                Some(5),
+            ),
+            (
+                vec![x(0, 10, 3), x(20, 30, 2)],
+                vec![lit("x").eq(col("k0"))],
+                Some(5),
+            ),
+            // A file spanning several leftmost values may hold other rows.
+            (vec![x(0, 10, 3), mixed()], vec![k0("x")], None),
+            // A disproved equality is not used to exclude files.
+            (vec![x(0, 10, 3)], vec![k0("y")], None),
+            // Only the leftmost column is decodable from the bounds.
+            (vec![x(0, 10, 3)], vec![col("k1").eq(lit(1u32))], None),
+            (vec![x(0, 10, 3)], vec![col("k0").not_eq(lit("y"))], None),
+            // Missing key statistics cannot prove anything.
+            (vec![file(0, 10, 3, true)], vec![k0("x")], None),
+        ] {
+            let input = input(files, &filters).await;
+            let request = ScanRequest {
+                filters,
+                metadata_aggr_hint: true,
+                ..Default::default()
+            };
+            assert_eq!(exact_count(&input, &request), expected, "{request:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_metadata_aggr_fences_and_limits() {
+        let input = input(vec![file(0, 10, 3, true)], &[]).await;
+        for request in [
+            ScanRequest {
+                limit: Some(1),
+                ..Default::default()
+            },
+            ScanRequest {
+                memtable_max_sequence: Some(10),
+                ..Default::default()
+            },
+            ScanRequest {
+                memtable_min_sequence: Some(10),
+                ..Default::default()
+            },
+            ScanRequest {
+                snapshot_on_scan: true,
+                ..Default::default()
+            },
+            ScanRequest {
+                sst_min_sequence: Some(10),
+                ..Default::default()
+            },
+            ScanRequest {
+                exact_sequence_range: true,
+                ..Default::default()
+            },
+            ScanRequest {
+                skip_sst_files: true,
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(exact_count(&input, &request), None);
+        }
+        let mut input = input;
+        input.files.clear();
+        assert_eq!(exact_count(&input, &ScanRequest::default()), Some(0));
+    }
+
+    #[tokio::test]
+    async fn test_metadata_aggr_unknown_manifest_count_falls_back() {
+        let mut input = input(vec![file(0, 10, 0, true)], &[]).await;
+        assert_eq!(exact_count(&input, &ScanRequest::default()), None);
+        input.append_mode = true;
+        assert_eq!(exact_count(&input, &ScanRequest::default()), None);
+    }
+    #[test]
+    fn test_metadata_aggr_reads_op_type_statistics() {
+        use api::v1::OpType;
+        use datatypes::arrow::array::{ArrayRef, StructArray, UInt8Array};
+        use datatypes::arrow::datatypes::{DataType as ArrowType, Field};
+        use datatypes::arrow::record_batch::RecordBatch;
+        use parquet::arrow::ArrowWriter;
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        use parquet::file::metadata::KeyValue;
+        use parquet::file::properties::{EnabledStatistics, WriterProperties};
+        use store_api::storage::consts::OP_TYPE_COLUMN_NAME;
+
+        use crate::sst::parquet::metadata::DEDUPED_SST_KEY;
+
+        let put = OpType::Put as u8;
+        let del = OpType::Delete as u8;
+        let metadata = |name: &str, ops: Vec<Option<u8>>, stats, marker: bool| {
+            let nested = StructArray::from(vec![(
+                Arc::new(Field::new(OP_TYPE_COLUMN_NAME, ArrowType::UInt8, false)),
+                Arc::new(UInt8Array::from_value(put, ops.len())) as ArrayRef,
+            )]);
+            let batch = RecordBatch::try_from_iter([
+                ("payload", Arc::new(nested) as ArrayRef),
+                (name, Arc::new(UInt8Array::from(ops)) as ArrayRef),
+            ])
+            .unwrap();
+            let mut buffer = Vec::new();
+            // Two rows per row group, so a delete in a later row group counts.
+            let props = WriterProperties::builder()
+                .set_max_row_group_row_count(Some(2))
+                .set_statistics_enabled(stats)
+                .set_key_value_metadata(
+                    marker.then(|| vec![KeyValue::new(DEDUPED_SST_KEY.to_owned(), None)]),
+                )
+                .build();
+            let mut writer =
+                ArrowWriter::try_new(&mut buffer, batch.schema(), Some(props)).unwrap();
+            writer.write(&batch).unwrap();
+            writer.close().unwrap();
+            ParquetRecordBatchReaderBuilder::try_new(Bytes::from(buffer))
+                .unwrap()
+                .metadata()
+                .clone()
+        };
+        let ops = vec![Some(put); 4];
+        let stats = EnabledStatistics::Page;
+        for (name, ops, statistics, certified, expected) in [
+            (OP_TYPE_COLUMN_NAME, ops.clone(), stats, true, true),
+            (OP_TYPE_COLUMN_NAME, ops.clone(), stats, false, false),
+            (OP_TYPE_COLUMN_NAME, vec![Some(put)], stats, false, true),
+            ("other", ops.clone(), stats, true, false),
+            (
+                OP_TYPE_COLUMN_NAME,
+                ops,
+                EnabledStatistics::None,
+                true,
+                false,
+            ),
+            (OP_TYPE_COLUMN_NAME, vec![None; 4], stats, true, false),
+            (
+                OP_TYPE_COLUMN_NAME,
+                vec![Some(put), None],
+                stats,
+                true,
+                false,
+            ),
+            (
+                OP_TYPE_COLUMN_NAME,
+                vec![Some(put), Some(put), Some(put), Some(del)],
+                stats,
+                true,
+                false,
+            ),
+        ] {
+            let rows = ops.len();
+            let footer = metadata(name, ops, statistics, certified);
+            assert_eq!(
+                footer_proves_visible_rows(&footer, rows),
+                expected,
+                "{footer:?}"
+            );
+            assert!(!footer_proves_visible_rows(&footer, rows + 1));
+        }
+    }
+
+    #[test]
+    fn test_metadata_aggr_rejects_non_arrow_float_equalities() {
+        use datatypes::arrow::datatypes::DataType as ArrowType;
+
+        for (value, data_type) in [
+            (
+                ScalarValue::Float32(Some(f32::from_bits(0x7fc0_0001))),
+                ArrowType::Float32,
+            ),
+            (
+                ScalarValue::Float64(Some(f64::from_bits(0x7ff8_0000_0000_0001))),
+                ArrowType::Float64,
+            ),
+            (ScalarValue::Float64(Some(-0.0)), ArrowType::Float64),
+        ] {
+            let filter = col("k0").eq(lit(value));
+            assert!(eq_literal(&filter, "k0", &data_type).is_none());
+        }
+        let ordinary = col("k0").eq(lit(1.5f64));
+        assert!(eq_literal(&ordinary, "k0", &ArrowType::Float64).is_some());
+    }
+
+    #[tokio::test]
+    async fn test_metadata_aggr_narrowed_partition_falls_back() {
+        use partition::expr::col as partition_col;
+
+        let original_scope = partition_col("k0").gt_eq(Value::String("a".into()));
+        let file = FileHandle::new(
+            FileMeta {
+                partition_expr: Some(original_scope.clone().into()),
+                ..file(0, 10, 3, true).meta_ref().clone()
+            },
+            new_noop_file_purger(),
+        );
+        let mut input = input(vec![file], &[]).await;
+        input.region_partition_expr = Some(original_scope);
+        assert_eq!(exact_count(&input, &ScanRequest::default()), Some(3));
+        input.region_partition_expr = Some(partition_col("k0").gt_eq(Value::String("x".into())));
+        assert_eq!(exact_count(&input, &ScanRequest::default()), None);
+    }
+
+    #[tokio::test]
+    async fn test_metadata_aggr_file_timestamp_unit_overflow() {
+        for (start, end) in [(i64::MIN / 1000 - 1, 0), (0, i64::MAX / 1000 + 1), (-1, 1)] {
+            let file = FileHandle::new(
+                FileMeta {
+                    time_range: (Timestamp::new_second(start), Timestamp::new_second(end)),
+                    ..file(0, 0, 2, true).meta_ref().clone()
+                },
+                new_noop_file_purger(),
+            );
+            let mut input = input(vec![file], &[]).await;
+            let fits = start == -1;
+            assert_eq!(
+                exact_count(&input, &ScanRequest::default()),
+                fits.then_some(2),
+            );
+            input.append_mode = true;
+            assert_eq!(input.scanner_properties().total_rows_is_exact(), fits);
+        }
+    }
+}

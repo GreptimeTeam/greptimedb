@@ -171,7 +171,7 @@ impl RangeMeta {
         );
         self.indices.append(&mut other.indices);
         self.row_group_indices.append(&mut other.row_group_indices);
-        self.num_rows += other.num_rows;
+        self.num_rows = self.num_rows.saturating_add(other.num_rows);
     }
 
     /// Returns true if we can split the range into multiple smaller ranges and

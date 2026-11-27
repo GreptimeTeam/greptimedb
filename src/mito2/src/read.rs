@@ -73,6 +73,7 @@ use crate::error::{
     Result,
 };
 use crate::memtable::BoxedRecordBatchIterator;
+use crate::region::options::MergeMode;
 
 pub(crate) fn timestamp_array_to_i64_slice(arr: &ArrayRef) -> &[i64] {
     use datatypes::arrow::array::{
@@ -986,6 +987,7 @@ impl From<Batch> for BatchBuilder {
 pub struct FlatSource {
     schema: SchemaRef,
     inner: FlatSourceInner,
+    dedup_mode: Option<MergeMode>,
 }
 
 impl FlatSource {
@@ -994,6 +996,7 @@ impl FlatSource {
         Self {
             schema,
             inner: FlatSourceInner::Iter(iter),
+            dedup_mode: None,
         }
     }
 
@@ -1002,7 +1005,18 @@ impl FlatSource {
         Self {
             schema,
             inner: FlatSourceInner::Stream(stream),
+            dedup_mode: None,
         }
+    }
+
+    /// Records the merge mode used to fold versions in this source.
+    pub(crate) fn with_dedup_mode(mut self, mode: Option<MergeMode>) -> Self {
+        self.dedup_mode = mode;
+        self
+    }
+
+    pub(crate) fn dedup_mode(&self) -> Option<MergeMode> {
+        self.dedup_mode
     }
 
     pub(crate) fn schema(&self) -> &SchemaRef {

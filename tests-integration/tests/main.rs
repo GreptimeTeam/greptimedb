@@ -28,6 +28,7 @@ mod flow_ddl_event;
 mod gc_event;
 mod json2;
 mod jsonbench;
+mod metadata_aggr;
 #[macro_use]
 mod sql;
 #[macro_use]

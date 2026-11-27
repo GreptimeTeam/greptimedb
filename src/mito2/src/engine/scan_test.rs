@@ -7319,7 +7319,7 @@ async fn test_two_phase_raw_stream_stays_key_ordered_across_disjoint_partition_a
         );
         assert_eq!(
             round_rows.iter().sum::<usize>(),
-            input.total_rows(),
+            input.scanner_properties().total_rows(),
             "the sources must add up to every written row"
         );
     }

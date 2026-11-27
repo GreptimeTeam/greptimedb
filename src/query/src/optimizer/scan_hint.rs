@@ -16,7 +16,7 @@ use std::collections::HashSet;
 
 use api::v1::SemanticType;
 use arrow_schema::SortOptions;
-use common_function::aggrs::aggr_wrapper::aggr_state_func_name;
+use common_function::aggrs::aggr_wrapper::{aggr_state_func_name, is_builtin_count_or_state};
 use common_recordbatch::OrderOption;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use datafusion::datasource::DefaultTableSource;
@@ -68,6 +68,61 @@ impl ScanHintRule {
         // rewrite, so this is one scoped recursive walk (subquery expressions
         // are included by the dedicated API as well).
         plan.rewrite_with_subqueries(&mut rewriter)
+    }
+
+    /// Limits metadata preparation to an ungrouped COUNT directly over a scan.
+    /// The cloned provider keeps the hint local to this use-site. Residual
+    /// filters, joins, limits and computed projections are deliberately excluded.
+    fn set_metadata_aggr_hint(plan: LogicalPlan) -> Result<Transformed<LogicalPlan>> {
+        let LogicalPlan::Aggregate(mut aggregate) = plan else {
+            return Ok(Transformed::no(plan));
+        };
+        let LogicalPlan::TableScan(scan) = aggregate.input.as_ref() else {
+            return Ok(Transformed::no(LogicalPlan::Aggregate(aggregate)));
+        };
+        if !aggregate.group_expr.is_empty()
+            || aggregate.aggr_expr.len() != 1
+            || scan.fetch.is_some()
+        {
+            return Ok(Transformed::no(LogicalPlan::Aggregate(aggregate)));
+        }
+        let Some(source) = scan.source.downcast_ref::<DefaultTableSource>() else {
+            return Ok(Transformed::no(LogicalPlan::Aggregate(aggregate)));
+        };
+        let Some(provider) = source.table_provider.downcast_ref::<DummyTableProvider>() else {
+            return Ok(Transformed::no(LogicalPlan::Aggregate(aggregate)));
+        };
+        if !provider.needs_metadata_aggr_hint() {
+            return Ok(Transformed::no(LogicalPlan::Aggregate(aggregate)));
+        }
+        let expr = match &aggregate.aggr_expr[0] {
+            Expr::Alias(alias) => alias.expr.as_ref(),
+            expr => expr,
+        };
+        let Expr::AggregateFunction(function) = expr else {
+            return Ok(Transformed::no(LogicalPlan::Aggregate(aggregate)));
+        };
+        let metadata = provider.region_metadata();
+        let time_index = &metadata.time_index_column().column_schema.name;
+        let count_all_rows = match function.params.args.as_slice() {
+            [Expr::Column(column)] => &column.name == time_index,
+            [Expr::Literal(value, _)] => !value.is_null(),
+            _ => false,
+        };
+        if !is_builtin_count_or_state(&function.func)
+            || function.params.distinct
+            || function.params.filter.is_some()
+            || !function.params.order_by.is_empty()
+            || !count_all_rows
+        {
+            return Ok(Transformed::no(LogicalPlan::Aggregate(aggregate)));
+        }
+        let provider = provider.clone_for_scan();
+        provider.with_metadata_aggr_hint();
+        let mut scan = scan.clone();
+        scan.source = std::sync::Arc::new(DefaultTableSource::new(std::sync::Arc::new(provider)));
+        aggregate.input = std::sync::Arc::new(LogicalPlan::TableScan(scan));
+        Ok(Transformed::yes(LogicalPlan::Aggregate(aggregate)))
     }
 
     fn set_hints(
@@ -357,7 +412,13 @@ impl TreeNodeRewriter for ScanHintRewriter {
             }
         }
 
-        ScanHintRule::set_hints(node, self, fused_series_input)
+        let counted = ScanHintRule::set_metadata_aggr_hint(node)?;
+        let hinted = ScanHintRule::set_hints(counted.data, self, fused_series_input)?;
+        Ok(Transformed::new(
+            hinted.data,
+            counted.transformed || hinted.transformed,
+            hinted.tnr,
+        ))
     }
 
     fn f_up(&mut self, node: LogicalPlan) -> Result<Transformed<LogicalPlan>> {
@@ -737,6 +798,71 @@ mod test {
     use crate::optimizer::test_util::{
         MetaRegionEngine, mock_table_provider, mock_table_provider_with_tsid,
     };
+
+    #[test]
+    fn metadata_aggr_hint_is_scoped_and_restricted() {
+        use common_function::aggrs::aggr_wrapper::StateWrapper;
+        use datafusion::functions_aggregate::count::count_udaf;
+        use datafusion::functions_aggregate::expr_fn::{count, count_distinct};
+        use datafusion_expr::{AggregateUDF, Volatility, create_udaf};
+
+        let region_id = RegionId::new(1, 1);
+        let metadata = mock_table_provider(region_id).region_metadata();
+        let provider = Arc::new(DummyTableProvider::new(
+            region_id,
+            Arc::new(MetaRegionEngine::with_metadata(metadata.clone()).with_engine_name("mito")),
+            metadata,
+        ));
+        let user_count = create_udaf(
+            "count",
+            vec![DataType::Int64],
+            Arc::new(DataType::Int64),
+            Volatility::Immutable,
+            Arc::new(|_| unreachable!("a logical hint does not instantiate the function")),
+            Arc::new(vec![DataType::Int64]),
+        );
+        let builtin_state =
+            AggregateUDF::from(StateWrapper::new(count_udaf().as_ref().clone()).unwrap());
+        let user_state = AggregateUDF::from(StateWrapper::new(user_count.clone()).unwrap());
+        for (groups, function, expected) in [
+            (vec![], count(col("ts")), true),
+            (vec![], count(lit(1i64)), true),
+            (vec![], count(col("v0")), false),
+            (vec![], count_distinct(col("ts")), false),
+            (vec![col("k0")], count(col("ts")), false),
+            (vec![], builtin_state.call(vec![lit(1i64)]), true),
+            (vec![], user_count.call(vec![lit(2i64)]), false),
+            (vec![], user_state.call(vec![lit(2i64)]), false),
+        ] {
+            let plan = LogicalPlanBuilder::from(scan_plan(provider.clone(), "t"))
+                .aggregate(groups, vec![function])
+                .unwrap()
+                .build()
+                .unwrap();
+            let rewritten = ScanHintRule::optimize(plan).unwrap().data;
+            assert_eq!(scan_requests(&rewritten)[0].metadata_aggr_hint, expected);
+            assert!(!provider.scan_request().metadata_aggr_hint);
+            assert!(!ScanHintRule::optimize(rewritten).unwrap().transformed);
+        }
+        let plan = LogicalPlanBuilder::from(scan_plan(provider.clone(), "t"))
+            .limit(0, Some(1))
+            .unwrap()
+            .aggregate(Vec::<Expr>::new(), vec![count(col("ts"))])
+            .unwrap()
+            .build()
+            .unwrap();
+        let rewritten = ScanHintRule::optimize(plan).unwrap().data;
+        assert!(!scan_requests(&rewritten)[0].metadata_aggr_hint);
+        let plan = LogicalPlanBuilder::from(scan_plan(provider, "t"))
+            .filter(col("v0").gt(lit(1.0)))
+            .unwrap()
+            .aggregate(Vec::<Expr>::new(), vec![count(col("ts"))])
+            .unwrap()
+            .build()
+            .unwrap();
+        let rewritten = ScanHintRule::optimize(plan).unwrap().data;
+        assert!(!scan_requests(&rewritten)[0].metadata_aggr_hint);
+    }
 
     #[test]
     fn single_evaluation_sets_last_row_on_the_rewritten_scan() {

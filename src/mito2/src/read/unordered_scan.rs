@@ -63,13 +63,7 @@ impl UnorderedScan {
     /// Creates a new [UnorderedScan].
     pub(crate) fn new(stream_ctx: StreamContext) -> Self {
         let input = &stream_ctx.input;
-        let mut properties = ScannerProperties::default()
-            .with_append_mode(input.append_mode)
-            .with_total_rows(input.total_rows())
-            .with_total_rows_is_exact(input.append_mode && input.total_rows_is_exact());
-        if let Some(counters) = input.query_stat_counters.clone() {
-            properties.set_query_stat_counters(counters);
-        }
+        let mut properties = input.scanner_properties();
         let stream_ctx = Arc::new(stream_ctx);
         properties.partitions = vec![stream_ctx.partition_ranges()];
 
@@ -364,6 +358,7 @@ impl RegionScanner for UnorderedScan {
         &mut self,
         filter_exprs: Vec<Arc<dyn datafusion::physical_plan::PhysicalExpr>>,
     ) -> Vec<bool> {
+        self.properties.clear_exact_num_rows();
         self.stream_ctx.add_dyn_filter_to_predicate(filter_exprs)
     }
 

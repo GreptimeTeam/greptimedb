@@ -8,7 +8,7 @@ rewriting, benchmarking, and replacing Parquet SST files:
   properties.
 - `parquetbench`: benchmark reads from a local GreptimeDB SST or an SST in a
   configured object store.
-- `sst-replace`: replace an existing Mito SST object and update its manifest
+- `sst-replace`: install a replacement Mito SST and update its manifest
   metadata.
 
 These are development and recovery tools, not stable user-facing interfaces.
@@ -113,9 +113,10 @@ dump path must not be exactly the same path as the input, even with
 `--overwrite`. This check does not resolve symbolic links, hard links, or other
 spellings of the same path.
 
-The rewrite decodes and writes the Arrow record batches and copies the Parquet
-key-value metadata, but it creates a new physical Parquet layout. Inspect and
-validate the result before using it as an SST:
+The rewrite decodes and writes the Arrow record batches into a new physical
+layout. It copies region metadata, recomputes decoded value sizes when present,
+and drops the `greptimedb.deduped` marker. Inspect the result before using it
+as an SST:
 
 ```bash
 $GREPTIME datanode parquet-meta \
@@ -183,17 +184,22 @@ iteration from profiling.
 
 ## Replace an existing region SST
 
-> **Warning:** `sst-replace` mutates both an SST object and its region manifest.
-> Stop the datanode that owns the region and back up the target SST and manifest
-> before using `--confirm`. The SST write happens before the manifest update, so
-> an interrupted or failed operation may require restoring the backup.
+Stop the datanode that owns the region and back up its manifest before using
+`--confirm`. The command writes the replacement under a fresh file ID, then
+publishes one manifest edit that swaps the old ID for the new one. Readers of
+the previous manifest can still use the original object. If publication fails
+after the upload, check the active manifest before cleaning up the reported
+replacement path.
 
-`sst-replace` replaces the contents of an existing SST file ID. It does not add
-a new file ID to a region. The command requires the replacement to have the same
-row count and row-group count recorded in the manifest when those manifest
-values are nonzero. It does not validate schema or row contents. The replacement
-is loaded into memory in full, so ensure the machine has enough memory for the
-SST.
+The target must be a locally owned, unshared Parquet SST. The replacement must
+belong to the same source region and time index and
+match the manifest row and row-group counts when those counts are known.
+Its footer must provide exact time bounds. Missing primary-key bounds remain
+unknown. Use `parquet-rewrite` first if the replacement carries
+`greptimedb.deduped`. Index sidecars belong to the original file ID. When the manifest has
+a sequence fence or preserves per-row sequences, the command compares the
+sequence column of both files before retaining those guarantees. Allow memory
+for both SSTs during validation.
 
 Start with the default dry run using a local replacement file:
 
@@ -237,10 +243,11 @@ $GREPTIME datanode sst-replace \
   --confirm
 ```
 
-The confirmed operation overwrites the existing SST object, recalculates file
-size and row-group statistics, and appends a manifest edit for the existing file
-ID. Restart the datanode and validate queries against the region before removing
-the backup.
+The confirmed operation prints the new SST path and manifest version. Restart
+the datanode and validate queries against the region before removing the
+backup. To repair bounds or stale cache entries left by an older in-place
+replacement, use its current manifest ID as `--file-id`. If the current object
+has no deduplication marker, it can be passed directly as `--replacement-object`.
 
 ## Recommended rewrite and replacement workflow
 
