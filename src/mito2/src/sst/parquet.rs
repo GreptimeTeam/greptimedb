@@ -23,13 +23,8 @@ use datatypes::arrow::array::{AsArray, OffsetSizeTrait};
 use datatypes::arrow::datatypes::DataType;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::json::JsonSettings;
-<<<<<<< HEAD
-use parquet::basic::{Compression, Encoding};
-=======
-use datatypes::schema::ColumnEncoding;
 use parquet::arrow::parquet_to_arrow_schema;
-use parquet::basic::{Compression, Encoding, ZstdLevel};
->>>>>>> 0813fc3527 (fix(mito2): size old SSTs from size statistics and move the downgrade target to v1.2.0 (#10585))
+use parquet::basic::{Compression, Encoding};
 use parquet::file::metadata::{KeyValue, ParquetMetaData};
 use parquet::file::properties::{EnabledStatistics, WriterPropertiesBuilder};
 use parquet::schema::types::ColumnPath;

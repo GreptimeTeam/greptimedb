@@ -58,13 +58,9 @@ impl State for SyncRegion {
         _procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
         Self::flush_central_region(ctx).await?;
-<<<<<<< HEAD
         self.sync_regions(ctx).await?;
-=======
-        self.sync_with_paused_source(ctx).await?;
-        // The other edge into `UpdateMetadata::ApplyStaging`, still before publication.
+        // Check ownership before publishing target routes.
         validate_merge_sources(ctx).await?;
->>>>>>> 0127d63865 (fix(mito2): require a region to own its files before a remap (#10646))
 
         Ok((
             Box::new(UpdateMetadata::ApplyStaging),

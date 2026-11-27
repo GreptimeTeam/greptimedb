@@ -11,10 +11,5 @@ ORDER BY ts, host;
 SELECT ts, msg FROM t_fulltext_bloom_v2_downgrade WHERE msg @@ 'hello_world' ORDER BY ts;
 
 SELECT ts, msg FROM t_fulltext_bloom_v2_downgrade WHERE msg @@ '错误error日志' ORDER BY ts;
-<<<<<<< HEAD
-=======
-
-SELECT ts, span_id, ts_end FROM t_column_encoding_downgrade ORDER BY ts;
 
 SELECT ts, label FROM t_inverted_segment_downgrade WHERE label = 'hit' ORDER BY ts;
->>>>>>> 0813fc3527 (fix(mito2): size old SSTs from size statistics and move the downgrade target to v1.2.0 (#10585))
