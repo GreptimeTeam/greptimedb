@@ -65,9 +65,14 @@ impl StatementExecutor {
     ) -> error::Result<Output> {
         validate_database_export_layout(&req.with)?;
         validate_database_directory(&req.location)?;
-        build_backend_for_write(&req.location, &req.connection, &self.local_file_access)
-            .await
-            .context(error::BuildBackendSnafu)?;
+        build_backend_for_write(
+            &req.location,
+            &req.connection,
+            &self.local_file_access,
+            &self.remote_storage_access,
+        )
+        .await
+        .context(error::BuildBackendSnafu)?;
 
         let parallelism = parse_parallelism_from_option_map(&req.with);
         info!(
