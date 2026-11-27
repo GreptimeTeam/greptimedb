@@ -4526,9 +4526,7 @@ impl RuntimeNode {
     }
 }
 
-/// Planner facts about each input: its complete label set and, for a single-table statement, its
-/// one metric name. [`unifies_its_own_contributions`] reads them to decide which nodes must collect
-/// and merge, as the canonical pass did; with no facts every node collects conservatively.
+/// Input label sets and metric names used to decide when series must be merged.
 #[derive(Clone, Debug, Default)]
 pub struct SourceFacts {
     /// The complete label set of each input, indexed by leaf `source_index`.

@@ -2315,6 +2315,7 @@ fn a_bare_sum_groups_by_no_label() {
 #[test]
 fn a_sum_by_keeps_the_labels_it_names() {
     let cases = [
+        ("sum by() (x)", &[][..]),
         ("sum by(job)(x)", &["job"][..]),
         ("sum by(job, instance)(x)", &["job", "instance"][..]),
         ("sum(x) by (job)", &["job"][..]),

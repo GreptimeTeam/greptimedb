@@ -48,7 +48,7 @@ use crate::functions::{
 use crate::grid_series::reference::{
     Dense, GoldenCase, Labels, OwnedHistogram, Points, assert_histogram_close, assert_pieces_eq,
     assert_series_eq, assert_series_eq_any_nan, close, expand, golden_cases, labels_of, metric_of,
-    mixed_series, random_dense, sparse_series, special_value,
+    mixed_series, random_dense, series_of, sparse_series, special_value,
 };
 use crate::grid_series::{GridSample, GridSeriesBuilder};
 use crate::histogram_eval::float_histogram::FloatHistogram;
@@ -3716,6 +3716,60 @@ fn an_empty_delivery_closes_only_when_it_is_last() {
         output_metric(RangeFunction::SumOverTime, 0)
     );
     evaluator.finish().unwrap();
+}
+
+/// A valued prefix followed by an empty closing chunk gives the same result as the same data
+/// delivered in one piece: composing streams must not change the answer.
+#[test]
+fn a_valued_prefix_composes_with_an_empty_closing_chunk() {
+    let outer = grid(0, 1_000, 6);
+    let schema = evaluated_schema(&outer);
+    let window = RangeWindow {
+        range_ms: 2_000,
+        offset_ms: 0,
+        anchor_ms: None,
+        modifier: None,
+    };
+    let points = Points::from([
+        (0, f64::to_bits(1.0)),
+        (1, f64::to_bits(2.0)),
+        (3, f64::to_bits(4.0)),
+    ]);
+    let labels = Labels::from([("job".to_string(), "x".to_string())]);
+    let valued = series_of(&schema, &labels, &points).expect("three rows");
+
+    // One piece: the whole series closes on its own delivery.
+    let mut whole =
+        RangeEvaluator::try_new(&schema, outer.clone(), window, RangeFunction::SumOverTime)
+            .unwrap();
+    let one_piece = evaluate_series(&mut whole, &valued);
+    let expected = fold_chunks(&one_piece, whole.output_schema()).expect("the series completed");
+    whole.finish().unwrap();
+
+    // Composed: the valued rows as a prefix, then the empty chunk that closes the series.
+    let mut composed =
+        RangeEvaluator::try_new(&schema, outer.clone(), window, RangeFunction::SumOverTime)
+            .unwrap();
+    let mut chunks = Vec::new();
+    chunks.extend(composed.push_series(&valued, false).unwrap());
+    assert!(
+        total_rows(&chunks) > 0,
+        "the valued prefix already decided some points"
+    );
+    assert!(
+        !chunks.last().expect("a chunk").is_last,
+        "the prefix does not close the series"
+    );
+    // The empty close keeps the identity of the series it closes.
+    let empty = empty_series(&schema, &outer, metric_of(&labels), 6);
+    chunks.extend(composed.push_series(&empty, true).unwrap());
+    let actual = fold_chunks(&chunks, composed.output_schema()).expect("the series completed");
+    composed.finish().unwrap();
+    assert_eq!(
+        expand(&actual),
+        expand(&expected),
+        "the composed pipeline disagrees with one piece"
+    );
 }
 
 /// A window of one step over a grid of `step_ms`: the point at `t` reads the sample sitting
