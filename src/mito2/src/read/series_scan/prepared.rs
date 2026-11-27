@@ -311,8 +311,7 @@ impl ColumnarPreparedSource {
         let started = Instant::now();
         let mut raw = raw;
         let batch_output = matches!(labels, RawLabelSource::Explicit);
-        let dedup_append_raw =
-            input.requires_narthex_preparation() && input.append_mode && !batch_output;
+        let dedup_append_raw = input.append_mode && !batch_output;
         let sample_schema = if batch_output {
             Some(input.mapper.input_arrow_schema(input.compaction))
         } else {
@@ -382,9 +381,8 @@ impl ColumnarPreparedSource {
                         .map_err(|e| invalid(e.to_string()))?,
                 );
             }
-            if context.input.requires_narthex_preparation()
-                && let Some(partition) =
-                    narthex_partition_filter(metadata.partition_expr.as_deref(), None)?
+            if let Some(partition) =
+                narthex_partition_filter(metadata.partition_expr.as_deref(), None)?
             {
                 filters.push(
                     partition

@@ -13475,18 +13475,10 @@ async fn native_promql_declines_a_cast_over_an_integer_fold() {
     );
 }
 
-/// A store configured for the columnar series format publishes samples for sparse metric regions
-/// only, and a plain table on such a store reads its rows from the ordinary scan - the reader the
-/// existing plan uses for the very same rows. So the raw series path serves the frame from there
-/// instead of refusing it: a refusal here is a planning error no caller can turn into a fallback,
-/// because the logical plan above the leaf is already the fused node when the region is asked.
-///
-/// The answer is therefore the existing plan's answer, on either route. Both value kinds are here
-/// because the limit is the reader's and not the field's: an integer field is cast to the float the
-/// fused node publishes, and a `Double` one is a float already. `sum_over_time` folds the window and
-/// `avg_over_time` folds it and divides - two answers that would look alike if one of them were 0.
+/// Enabling Narthex index maintenance must preserve the ordinary Parquet raw scan.
+/// Compare integer and float fields through native and legacy PromQL.
 #[tokio::test(flavor = "multi_thread")]
-async fn native_promql_columnar_config_answers_from_the_ordinary_scan() {
+async fn native_promql_columnar_config_preserves_parquet_raw_scan() {
     common_telemetry::init_default_ut_logging();
     const INTEGER: &str = "native_columnar_int";
     const FLOAT: &str = "native_columnar_float";

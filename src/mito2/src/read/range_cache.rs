@@ -1820,6 +1820,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(retry.try_next().await.unwrap().unwrap(), expected);
+        assert!(retry.try_next().await.unwrap().is_none());
         assert_eq!(
             existing.try_next().await.unwrap().unwrap(),
             make_batch(&[7])
