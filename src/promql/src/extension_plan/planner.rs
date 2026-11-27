@@ -214,7 +214,7 @@ fn plan_raw_series_source(
         source.fields(),
         target_partitions,
     )?;
-    source.to_per_series_execution_plan(series_scan)
+    source.merged_by_label_set(source.to_per_series_execution_plan(series_scan)?)
 }
 
 /// The raw-series leaf of a region scan bound to one metric.

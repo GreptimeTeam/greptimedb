@@ -66,6 +66,12 @@ scan per selector, each carrying a `RawSeriesSource` that answers explicit-label
 The frame schema is compared exactly at the merge scan, so its declaration and
 the region's output change together.
 
+A `RawSeriesSource` over a metric-engine physical table merges stored series
+that share a label set (`SeriesRouting::RawLabelSet`). The flag is frontend-only
+and not serialized; the router is added where the source's frames arrive:
+`plan_raw_series_source` without a distributed planner, and the dist planner's
+`MergeScanExec` for a direct raw source.
+
 ## Gotchas
 
 A series closes exactly once per input series, on the chunk that says so—not

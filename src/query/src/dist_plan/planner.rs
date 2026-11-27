@@ -248,7 +248,18 @@ impl ExtensionPlanner for DistExtensionPlanner {
             self.enable_per_region_metrics,
         )?
         .with_raw_series_disjoint(series_disjoint)?;
-        Ok(Some(Arc::new(merge_scan_plan) as _))
+        let merge_scan_plan = Arc::new(merge_scan_plan) as Arc<dyn ExecutionPlan>;
+        // Regions answer their own stored series; a source that merges label sets does so here,
+        // where every region's answer arrives.
+        if let LogicalPlan::Extension(extension) = input_plan
+            && let Some(source) = extension
+                .node
+                .as_any()
+                .downcast_ref::<promql::extension_plan::RawSeriesSource>()
+        {
+            return source.merged_by_label_set(merge_scan_plan).map(Some);
+        }
+        Ok(Some(merge_scan_plan))
     }
 }
 

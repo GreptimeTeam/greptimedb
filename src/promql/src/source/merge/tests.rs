@@ -21,7 +21,7 @@ use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{Samples, SeriesFields, SeriesSchema};
 use datatypes::series::{Label, SeriesLabels};
 
-use super::merge_raw_identity_charging;
+use super::{merge_raw_identity_charging, merge_raw_label_set_charging};
 
 /// The same merge, with accounting the tests do not measure.
 fn merge_raw_identity(
@@ -699,4 +699,57 @@ fn merge_releases_transient_row_workspace() {
     let retained = reserved - shrunk;
     assert!(retained < reserved);
     assert!(retained >= result.time.len() * std::mem::size_of::<i64>());
+}
+
+/// Stored series of one label set chain into one series; a timestamp several of them hold keeps
+/// the sample of the smallest key whatever order the pieces arrived in, while two pieces of one
+/// key still have to agree.
+#[test]
+fn label_set_merge_keeps_the_smallest_key_at_a_shared_timestamp() {
+    let schema = schema(1);
+    let merge = |chunks: &mut Vec<RawSeriesChunk>| {
+        merge_raw_label_set_charging(&schema, chunks, &mut |_| Ok(()), &mut |_| {})
+    };
+    let pieces = || {
+        vec![
+            chunk(
+                b"b",
+                "x",
+                vec![1, 3, 4],
+                vec![vec![Some(20.0), Some(40.0), Some(50.0)]],
+            ),
+            chunk(b"a", "x", vec![1, 2], vec![vec![Some(1.0), Some(2.0)]]),
+        ]
+    };
+    for mut chunks in [pieces(), pieces().into_iter().rev().collect()] {
+        let merged = merge(&mut chunks).unwrap();
+        assert_eq!(merged.primary_key.as_slice(), b"a");
+        assert_eq!(merged.time.as_buffer().as_ref(), &[1, 2, 3, 4]);
+        assert_eq!(
+            merged
+                .fields
+                .get(0)
+                .unwrap()
+                .iter()
+                .map(|s| match s {
+                    datatypes::series::samples::SampleRef::Float(v) => v,
+                    _ => f64::NAN,
+                })
+                .collect::<Vec<_>>(),
+            vec![1., 2., 40., 50.]
+        );
+    }
+
+    let mut conflicting = vec![
+        chunk(b"a", "x", vec![1], vec![vec![Some(1.0)]]),
+        chunk(b"b", "x", vec![1], vec![vec![Some(9.0)]]),
+        chunk(b"a", "x", vec![1], vec![vec![Some(2.0)]]),
+    ];
+    assert!(merge(&mut conflicting).is_err());
+
+    let mut other_labels = vec![
+        chunk(b"a", "x", vec![1], vec![vec![Some(1.0)]]),
+        chunk(b"b", "y", vec![2], vec![vec![Some(2.0)]]),
+    ];
+    assert!(merge(&mut other_labels).is_err());
 }

@@ -15,12 +15,15 @@
 #[cfg(test)]
 mod tests;
 
-use datafusion::arrow::buffer::ScalarBuffer;
+use datafusion::arrow::buffer::{Buffer, ScalarBuffer};
 use datafusion_common::DataFusionError;
 use datatypes::error::InvalidSeriesSnafu;
+use datatypes::series::SeriesLabels;
 use datatypes::series::histogram::HistogramView;
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{SampleRef, Samples, SeriesFields, SeriesSchema};
+
+use crate::grid_series::label_set;
 
 /// Rebuilds one raw series from every piece of one complete physical identity, reporting each
 /// allocation before it happens.
@@ -34,20 +37,9 @@ pub(crate) fn merge_raw_identity_charging(
     reserve: &mut dyn FnMut(usize) -> std::result::Result<(), DataFusionError>,
     shrink: &mut dyn FnMut(usize),
 ) -> std::result::Result<RawSeriesChunk, DataFusionError> {
-    let invalid = |reason: &str| {
-        DataFusionError::External(Box::new(
-            InvalidSeriesSnafu {
-                reason: reason.to_string(),
-            }
-            .build(),
-        ))
-    };
     let Some(first) = chunks.first() else {
         return Err(invalid("cannot merge an empty raw identity"));
     };
-    if schema.eval_grid.is_some() {
-        return Err(invalid("raw series schema cannot have an evaluation grid"));
-    }
     let key = first.primary_key.clone();
     let labels = first
         .metric
@@ -63,6 +55,78 @@ pub(crate) fn merge_raw_identity_charging(
                 "raw identity chunks have different or missing labels",
             ));
         }
+    }
+    merge_raw_chunks(schema, chunks, key, labels, reserve, shrink)
+}
+
+/// Rebuilds one series from the pieces of every stored series whose labels make the same
+/// Prometheus label set, the way Prometheus chains series with identical labels
+/// (`storage.ChainedSeriesMerge`): samples in timestamp order, one per timestamp.
+///
+/// Prometheus keeps an arbitrary one of the samples several series hold at one timestamp. Here the
+/// sample of the series whose stored primary key sorts first wins, so the answer does not depend on
+/// which region or partition delivered a piece first. The merged series is published under that
+/// key and that series' labels. Pieces of one stored series still have to agree at a shared
+/// timestamp, exactly as [`merge_raw_identity_charging`] requires.
+pub(crate) fn merge_raw_label_set_charging(
+    schema: &SeriesSchema,
+    chunks: &mut [RawSeriesChunk],
+    reserve: &mut dyn FnMut(usize) -> std::result::Result<(), DataFusionError>,
+    shrink: &mut dyn FnMut(usize),
+) -> std::result::Result<RawSeriesChunk, DataFusionError> {
+    // Stable, so the pieces of one stored series keep the order they arrived in.
+    chunks.sort_by(|left, right| {
+        left.primary_key
+            .as_slice()
+            .cmp(right.primary_key.as_slice())
+    });
+    let Some(first) = chunks.first() else {
+        return Err(invalid("cannot merge an empty raw label set"));
+    };
+    let key = first.primary_key.clone();
+    let labels = first
+        .metric
+        .as_ref()
+        .ok_or_else(|| invalid("raw label set chunk has no explicit labels"))?
+        .clone();
+    let expected = label_set(&labels);
+    for chunk in chunks.iter() {
+        if chunk
+            .metric
+            .as_ref()
+            .is_none_or(|metric| label_set(metric) != expected)
+        {
+            return Err(invalid(
+                "raw label set chunks have different or missing labels",
+            ));
+        }
+    }
+    merge_raw_chunks(schema, chunks, key, labels, reserve, shrink)
+}
+
+fn invalid(reason: &str) -> DataFusionError {
+    DataFusionError::External(Box::new(
+        InvalidSeriesSnafu {
+            reason: reason.to_string(),
+        }
+        .build(),
+    ))
+}
+
+/// Chains `chunks` by timestamp. At a timestamp several chunks hold, the earliest chunk in `chunks`
+/// wins; a later chunk of the same primary key has to hold the same sample there.
+fn merge_raw_chunks(
+    schema: &SeriesSchema,
+    chunks: &[RawSeriesChunk],
+    key: Buffer,
+    labels: SeriesLabels,
+    reserve: &mut dyn FnMut(usize) -> std::result::Result<(), DataFusionError>,
+    shrink: &mut dyn FnMut(usize),
+) -> std::result::Result<RawSeriesChunk, DataFusionError> {
+    if schema.eval_grid.is_some() {
+        return Err(invalid("raw series schema cannot have an evaluation grid"));
+    }
+    for chunk in chunks {
         if chunk.fields.len() != schema.fields.len()
             || chunk
                 .fields
@@ -138,6 +202,9 @@ pub(crate) fn merge_raw_identity_charging(
                 end += 1;
             }
             for duplicate in &rows[index + 1..end] {
+                if chunks[duplicate.1].primary_key != chunks[rows[index].1].primary_key {
+                    continue;
+                }
                 for field_index in 0..schema.fields.len() {
                     if !samples_equal(
                         chunks[rows[index].1]

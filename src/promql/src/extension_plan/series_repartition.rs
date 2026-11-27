@@ -157,10 +157,10 @@ use crate::extension_plan::series_execution::{
     HandedSeriesChunk, SendableSeriesStream, SeriesCharge, SeriesChunk, SeriesExecutionPlan,
     checked_series_stream, series_execution_plan,
 };
-use crate::grid_series::{label_set, merge_same_labelset};
+use crate::grid_series::{LabelSet, label_set, merge_same_labelset};
 use crate::native::execute::{field_segments, merge_workspace_bytes, operand_chunk_bytes};
 use crate::native::state::{StateChunk, state_bytes, state_row_of};
-use crate::source::merge_raw_identity_charging;
+use crate::source::{merge_raw_identity_charging, merge_raw_label_set_charging};
 use datatypes::series::samples::DenseSamplesRef;
 
 /// Selects the key used to route a series to an output partition.
@@ -174,6 +174,14 @@ pub enum SeriesRouting {
     Matching(crate::vector_match::MatchingLabels),
     /// Route raw frames by their complete stored primary key.
     RawPrimaryKey,
+    /// Route raw frames by their Prometheus label set and merge every stored series that shares
+    /// one into a single series, as Prometheus does with series of identical labels. Used where
+    /// stored keys carry identity the labels do not: a metric-engine physical table keys each
+    /// logical table's series by `__table_id` and `__tsid`, neither of which is a label.
+    ///
+    /// A label set can recur on any input until every input ends, so an owner publishes nothing
+    /// before every input's EOF.
+    RawLabelSet,
 }
 
 /// The seed behind every routing decision.
@@ -541,9 +549,12 @@ impl SeriesRepartitionExec {
             })?;
         let content = declaration.content();
         match (content, &routing_policy) {
-            (FrameContent::Evaluated, SeriesRouting::RawPrimaryKey) => {
+            (
+                FrameContent::Evaluated,
+                SeriesRouting::RawPrimaryKey | SeriesRouting::RawLabelSet,
+            ) => {
                 return Err(DataFusionError::Plan(
-                    "SeriesRepartition evaluated frames cannot use RawPrimaryKey routing".into(),
+                    "SeriesRepartition evaluated frames cannot use raw routing".into(),
                 ));
             }
             (
@@ -556,7 +567,9 @@ impl SeriesRepartitionExec {
             }
             (
                 FrameContent::AggregateState,
-                SeriesRouting::RawPrimaryKey | SeriesRouting::Matching(_),
+                SeriesRouting::RawPrimaryKey
+                | SeriesRouting::RawLabelSet
+                | SeriesRouting::Matching(_),
             ) => {
                 return Err(DataFusionError::Plan(
                     "SeriesRepartition aggregate-state frames require canonical-label routing"
@@ -572,14 +585,17 @@ impl SeriesRepartitionExec {
             SeriesOrdering::Contiguous
         };
         if content == FrameContent::Raw
-            && ordering == SeriesOrdering::Interleaved
+            && (ordering == SeriesOrdering::Interleaved
+                || routing_policy == SeriesRouting::RawLabelSet)
             && identity_completion == IdentityCompletion::CompleteDisjoint
         {
             return Err(DataFusionError::Plan(
                 "SeriesRepartition cannot use CompleteDisjoint with interleaved raw input".into(),
             ));
         }
-        let output_ordering = if ordering == SeriesOrdering::Interleaved {
+        let output_ordering = if ordering == SeriesOrdering::Interleaved
+            || routing_policy == SeriesRouting::RawLabelSet
+        {
             SeriesOrdering::Contiguous
         } else {
             ordering
@@ -619,6 +635,13 @@ impl SeriesRepartitionExec {
                     .to_string(),
             ));
         }
+        // Whatever order the child keeps per stored key, one label set may span several keys
+        // anywhere in it, which is exactly what an interleaved owner waits out.
+        let ordering = if routing_policy == SeriesRouting::RawLabelSet {
+            SeriesOrdering::Interleaved
+        } else {
+            ordering
+        };
         let properties = PlanProperties::new(
             EquivalenceProperties::new(declared),
             Partitioning::UnknownPartitioning(outputs),
@@ -733,6 +756,7 @@ impl SeriesRepartitionExec {
             self.input.properties().partitioning.partition_count(),
             self.ordering,
             self.identity_completion,
+            self.routing_policy == SeriesRouting::RawLabelSet,
         )
     }
 
@@ -792,7 +816,11 @@ impl DisplayAs for SeriesRepartitionExec {
             "SeriesRepartitionExec: outputs={}, input_partitions={}",
             self.outputs(),
             self.input.properties().partitioning.partition_count()
-        )
+        )?;
+        if self.routing_policy == SeriesRouting::RawLabelSet {
+            write!(f, ", identity=label_set")?;
+        }
+        Ok(())
     }
 }
 
@@ -2314,10 +2342,10 @@ async fn read_raw_chains(
                         Some(output) => output,
                         None => {
                             let output = match &routing.policy {
-                                SeriesRouting::Matching(_) => {
+                                SeriesRouting::Matching(_) | SeriesRouting::RawLabelSet => {
                                     let Some(labels) = chunk.metric.as_ref() else {
                                         return Stop::Failed(Arc::new(DataFusionError::Execution(
-                                            "a matching-routed raw chain carries no labels".into(),
+                                            "a label-routed raw chain carries no labels".into(),
                                         )));
                                     };
                                     routing.output_labels(labels)
@@ -2636,10 +2664,25 @@ impl RawSeriesStream for RawOutputStream {
 enum OwnerKey {
     Evaluated(ExactIdentity),
     Raw(Vec<u8>),
+    /// The Prometheus label set every stored series of one [`SeriesRouting::RawLabelSet`] owner
+    /// shares.
+    RawLabelSet(LabelSet),
 }
 
-fn raw_identity(chunk: &RawSeriesChunk) -> OwnerKey {
-    OwnerKey::Raw(chunk.primary_key.as_slice().to_vec())
+impl OwnerKey {
+    fn is_raw(&self) -> bool {
+        matches!(self, OwnerKey::Raw(_) | OwnerKey::RawLabelSet(_))
+    }
+}
+
+fn raw_identity(chunk: &RawSeriesChunk, by_label_set: bool) -> DataFusionResult<OwnerKey> {
+    if by_label_set {
+        let labels = chunk.metric.as_ref().ok_or_else(|| {
+            DataFusionError::Execution("a label-routed raw chain carries no labels".into())
+        })?;
+        return Ok(OwnerKey::RawLabelSet(label_set(labels)));
+    }
+    Ok(OwnerKey::Raw(chunk.primary_key.as_slice().to_vec()))
 }
 
 /// The raw identity of one chunk: its complete stored primary key and nothing else.
@@ -2728,7 +2771,7 @@ fn group_ready(
     completion: IdentityCompletion,
     key: &OwnerKey,
 ) -> bool {
-    if ordering == SeriesOrdering::Interleaved && matches!(key, OwnerKey::Raw(_)) {
+    if ordering == SeriesOrdering::Interleaved && key.is_raw() {
         return eof.iter().all(|eof| *eof);
     }
     if ordering == SeriesOrdering::KeyThenTime {
@@ -2875,6 +2918,9 @@ struct RepartitionStream {
     /// The input's ordering and identity completion guarantee.
     ordering: SeriesOrdering,
     identity_completion: IdentityCompletion,
+    /// Whether raw chains are grouped by label set ([`SeriesRouting::RawLabelSet`]) rather than
+    /// by stored key.
+    by_label_set: bool,
     groups: BTreeMap<OwnerKey, PendingGroup>,
     eof: Vec<bool>,
     last_key_from: Vec<Option<Vec<u8>>>,
@@ -2942,6 +2988,7 @@ impl Stream for PackedHandoffStream {
 }
 
 impl RepartitionStream {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         receiver: mpsc::UnboundedReceiver<Queued>,
         lease: OutputLease,
@@ -2950,6 +2997,7 @@ impl RepartitionStream {
         inputs: usize,
         ordering: SeriesOrdering,
         identity_completion: IdentityCompletion,
+        by_label_set: bool,
     ) -> Self {
         Self {
             receiver,
@@ -2957,6 +3005,7 @@ impl RepartitionStream {
             schema,
             ordering,
             identity_completion,
+            by_label_set,
             pool: Arc::clone(pool),
             groups: BTreeMap::new(),
             eof: Vec::new(),
@@ -2990,8 +3039,10 @@ impl RepartitionStream {
         let Some(group) = self.groups.remove(key) else {
             return Ok(());
         };
-        if matches!(key, OwnerKey::Raw(_)) {
-            return self.finish_raw_group(group);
+        match key {
+            OwnerKey::Raw(_) => return self.finish_raw_group(group),
+            OwnerKey::RawLabelSet(_) => return self.finish_raw_label_set(group),
+            OwnerKey::Evaluated(_) => {}
         }
         let workspace = if group.fragments.len() > 1 {
             let rows = group.fragments.iter().fold(0usize, |rows, series| {
@@ -3078,6 +3129,32 @@ impl RepartitionStream {
         let chunk = merge_raw_identity_charging(
             &self.schema,
             &group.raw_chunks,
+            &mut reserve,
+            &mut shrink,
+        )?;
+        self.output.push_back(ReadySeries {
+            series: ReadyOutput::Raw(chunk),
+            charge: SeriesCharge::new(group.charges, group.metadata, Some(workspace)),
+        });
+        Ok(())
+    }
+
+    /// Publishes the stored series of one label set as one series; see
+    /// [`merge_raw_label_set_charging`] for which sample a shared timestamp keeps.
+    fn finish_raw_label_set(&mut self, mut group: PendingGroup) -> DataFusionResult<()> {
+        let workspace = MemoryConsumer::new("SeriesRepartitionRawOwner").register(&self.pool);
+        let mut reserve = |bytes: usize| workspace.try_grow(bytes);
+        let mut shrink = |bytes: usize| {
+            let result = workspace.try_shrink(bytes);
+            debug_assert!(
+                result.is_ok(),
+                "raw merge workspace shrink failed: {result:?}"
+            );
+            let _ = result;
+        };
+        let chunk = merge_raw_label_set_charging(
+            &self.schema,
+            &mut group.raw_chunks,
             &mut reserve,
             &mut shrink,
         )?;
@@ -3246,7 +3323,13 @@ impl Stream for RepartitionStream {
                             let Some(first) = chain.first() else {
                                 continue;
                             };
-                            let key = raw_identity(&first.0);
+                            let key = match raw_identity(&first.0, this.by_label_set) {
+                                Ok(key) => key,
+                                Err(error) => {
+                                    this.lease.fail(Arc::new(error));
+                                    continue;
+                                }
+                            };
                             if let OwnerKey::Raw(raw_key) = &key
                                 && this.ordering == SeriesOrdering::KeyThenTime
                             {
@@ -3276,6 +3359,15 @@ impl Stream for RepartitionStream {
                                         )
                                 }
                                 OwnerKey::Raw(key) => key.capacity(),
+                                OwnerKey::RawLabelSet(labels) => labels
+                                    .capacity()
+                                    .saturating_mul(std::mem::size_of::<(Arc<str>, Arc<str>)>())
+                                    .saturating_add(
+                                        labels
+                                            .iter()
+                                            .map(|(n, v)| n.len().saturating_add(v.len()))
+                                            .sum::<usize>(),
+                                    ),
                             };
                         let bytes = std::mem::size_of::<PendingGroup>()
                             .saturating_add(std::mem::size_of::<OwnerKey>())
@@ -3304,8 +3396,7 @@ impl Stream for RepartitionStream {
                     };
                     if input >= group.received.len()
                         || (group.received[input]
-                            && !(this.ordering == SeriesOrdering::Interleaved
-                                && matches!(&key, OwnerKey::Raw(_))))
+                            && !(this.ordering == SeriesOrdering::Interleaved && key.is_raw()))
                     {
                         this.lease.fail(Arc::new(DataFusionError::Execution(
                             "input repeated an exact series identity".into(),
@@ -3428,7 +3519,9 @@ impl Routing {
     fn output_labels(&self, metric: &SeriesLabels) -> usize {
         let mut hasher = XxHash64::with_seed(self.seed);
         match &self.policy {
-            SeriesRouting::CanonicalLabels => label_set(metric).hash(&mut hasher),
+            SeriesRouting::CanonicalLabels | SeriesRouting::RawLabelSet => {
+                label_set(metric).hash(&mut hasher)
+            }
             SeriesRouting::CanonicalLabelsExcept(excluded) => {
                 let mut labels = label_set(metric);
                 labels.retain(|(name, _)| !excluded.contains(name));

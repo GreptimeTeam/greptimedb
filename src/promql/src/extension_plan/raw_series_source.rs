@@ -67,6 +67,7 @@ use table::table::scan::SeriesScanExec;
 use crate::extension_plan::series_execution::{
     HandedSeriesChunk, SendableSeriesStream, SeriesChunk, SeriesExecutionPlan,
 };
+use crate::extension_plan::series_repartition::{SeriesRepartitionExec, SeriesRouting};
 use crate::source::materialize_raw_labels;
 
 /// The ordering every frame of this node declares.
@@ -86,6 +87,12 @@ pub struct RawSeriesSource {
     tags: Vec<String>,
     /// The field columns each frame carries, in the order the tree reading them was compiled with.
     fields: Vec<String>,
+    /// Whether stored series that share a label set are answered as one series; see
+    /// [`Self::with_label_set_merge`].
+    ///
+    /// Not part of the wire binding: a region answers its own stored series either way, and the
+    /// merge runs where every region's answer arrives, which is never a region.
+    merges_label_sets: bool,
     input: LogicalPlan,
     schema: DFSchemaRef,
 }
@@ -106,9 +113,41 @@ impl RawSeriesSource {
             metric_name,
             tags,
             fields,
+            merges_label_sets: false,
             input,
             schema,
         })
+    }
+
+    /// Answers every stored series that shares a label set as one series, samples chained by
+    /// timestamp, for a table whose storage keys carry identity its labels do not. A metric-engine
+    /// physical table is that table: each logical table keys its series by `__table_id` and
+    /// `__tsid`, so two logical tables with equal labels store two series Prometheus would see as
+    /// one.
+    pub fn with_label_set_merge(mut self) -> Self {
+        self.merges_label_sets = true;
+        self
+    }
+
+    pub fn merges_label_sets(&self) -> bool {
+        self.merges_label_sets
+    }
+
+    /// `frames` - the physical plan delivering this source's frames from every region it reads -
+    /// with the label-set merge this source asks for above it.
+    pub fn merged_by_label_set(
+        &self,
+        frames: Arc<dyn ExecutionPlan>,
+    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        if !self.merges_label_sets {
+            return Ok(frames);
+        }
+        let outputs = frames.properties().partitioning.partition_count().max(1);
+        Ok(Arc::new(SeriesRepartitionExec::try_new_with_routing(
+            frames,
+            outputs,
+            SeriesRouting::RawLabelSet,
+        )?))
     }
 
     pub fn metric_name(&self) -> &str {
@@ -195,8 +234,18 @@ fn frame_schema(fields: &[String]) -> DataFusionResult<SchemaRef> {
 impl PartialOrd for RawSeriesSource {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         // The schema is derived from the fields, so it adds nothing to the order.
-        (&self.metric_name, &self.tags, &self.fields)
-            .partial_cmp(&(&other.metric_name, &other.tags, &other.fields))
+        (
+            &self.metric_name,
+            &self.tags,
+            &self.fields,
+            self.merges_label_sets,
+        )
+            .partial_cmp(&(
+                &other.metric_name,
+                &other.tags,
+                &other.fields,
+                other.merges_label_sets,
+            ))
             .and_then(|ordering| match ordering {
                 std::cmp::Ordering::Equal => self.input.partial_cmp(&other.input),
                 ordering => Some(ordering),
@@ -228,7 +277,11 @@ impl UserDefinedLogicalNodeCore for RawSeriesSource {
             self.metric_name,
             self.tags.join(", "),
             self.fields.join(", ")
-        )
+        )?;
+        if self.merges_label_sets {
+            write!(f, ", identity=label_set")?;
+        }
+        Ok(())
     }
 
     fn with_exprs_and_inputs(
@@ -245,6 +298,7 @@ impl UserDefinedLogicalNodeCore for RawSeriesSource {
             metric_name: Arc::clone(&self.metric_name),
             tags: self.tags.clone(),
             fields: self.fields.clone(),
+            merges_label_sets: self.merges_label_sets,
             input: inputs.swap_remove(0),
             schema: Arc::clone(&self.schema),
         })
