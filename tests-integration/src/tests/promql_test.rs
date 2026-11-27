@@ -2694,6 +2694,12 @@ async fn native_promql_tql_flow_matches_the_sink_table_impl() {
     common_telemetry::init_default_ut_logging();
     let (standalone, observer) =
         native_test_instance(GreptimeDbStandaloneBuilder::new("native_promql_tql_flow")).await;
+    // `ADMIN FLUSH_FLOW` syncs with this task.
+    standalone
+        .flow_engine
+        .start_flow_consistent_check_task()
+        .await
+        .unwrap();
     let instance = standalone.fe_instance().clone();
     execute_all(
         &instance,
@@ -2819,6 +2825,11 @@ async fn native_promql_tql_flow_matches_the_sink_table_impl() {
         }
         assert_eq!(sinks[0], sinks[1], "{name}");
     }
+    standalone
+        .flow_engine
+        .stop_flow_consistent_check_task()
+        .await
+        .unwrap();
 }
 
 /// A `__field__` selection that matches no metric table answers the empty vector.
