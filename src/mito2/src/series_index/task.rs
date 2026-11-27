@@ -614,6 +614,7 @@ impl SeriesIndexTask {
         let notification = WorkerRequest::Background {
             region_id: region.region_id,
             notify: BackgroundNotify::RegionEdit(RegionEditResult {
+                ingested_parquet_bytes: 0,
                 region_id: region.region_id,
                 origin: region.clone(),
                 edit,
