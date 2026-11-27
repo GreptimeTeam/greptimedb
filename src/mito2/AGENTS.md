@@ -105,6 +105,7 @@ pending. DDL cancellation retains its existing scheduling fence and priority.
   schema and required artifacts before skipping sample keys. Samples and live memtables
   determine visibility. The series and sample wire formats are documented in
   `docs/formats/mito-series.md` and `docs/formats/mito-samples.md`.
+  Partition rules on non-tag columns apply to sample rows. Tag-only rules apply during series discovery.
 - **Request types** (`request.rs`): usually tied to proto definitions consumed by `datanode`.
 - **WAL/memtable encoding** (`wal/`, `memtable/`): breaks replay if changed incompatibly.
 
