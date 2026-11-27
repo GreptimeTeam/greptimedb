@@ -547,7 +547,7 @@ async fn test_narthex_index_counts_rows_across_flushes() -> WhateverResult<()> {
     let strategy = crate::cache::CacheStrategy::EnableAll(engine.cache_manager());
     let reader = crate::series_index::columnar::reader::ColumnarReader::open_cached(
         region.access_layer.object_store().clone(),
-        handle,
+        handle.clone(),
         strategy.columnar_metadata(file.meta_ref().file_id),
     )
     .await?;
@@ -558,10 +558,22 @@ async fn test_narthex_index_counts_rows_across_flushes() -> WhateverResult<()> {
         ],
         ..Default::default()
     };
-    // The first query must recover the poisoned page. A second scan reuses healthy bytes.
+    // A damaged cached payload surfaces its checksum error without evicting the file.
     let mut stream = reader.read(request.clone())?;
-    assert!(stream.try_next().await?.is_some());
-    assert!(!disk.contains_key(&part));
+    let error = stream.try_next().await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("series payload checksum mismatch"),
+        "{error}"
+    );
+    assert!(disk.contains_key(&part));
+    // Read the authoritative series index to verify its stored row counts.
+    let reader = crate::series_index::columnar::reader::ColumnarReader::open(
+        region.access_layer.object_store().clone(),
+        handle,
+    )
+    .await?;
     let mut stream = reader.read(request)?;
     let batch = stream.try_next().await?.unwrap();
     let counts = batch

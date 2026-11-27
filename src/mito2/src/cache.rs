@@ -613,7 +613,7 @@ impl From<&RowSelector> for PrefilterRowSelector {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct NarthexPrefilterBlock {
-    path: Arc<str>,
+    part_id: u32,
     offset: u64,
 }
 

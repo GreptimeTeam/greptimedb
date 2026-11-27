@@ -29,7 +29,7 @@ use crate::cache::{
 use crate::error::Result;
 use crate::metrics::{CACHE_HIT, CACHE_MISS};
 
-pub(super) const COLUMNAR_META: &str = "columnar_metadata";
+pub(crate) const COLUMNAR_META: &str = "columnar_metadata";
 
 /// Identity of one immutable Narthex reader structure.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -42,7 +42,7 @@ pub(crate) struct DecodedKey {
 #[derive(Clone)]
 pub(crate) struct DecodedValue {
     value: Arc<dyn Any + Send + Sync>,
-    pub(super) weight: u32,
+    pub(crate) weight: u32,
 }
 /// Cache context for immutable Narthex objects.
 #[derive(Clone)]
@@ -240,7 +240,8 @@ impl ObjectReader {
 pub(crate) struct PartArea {
     pub(crate) reader: ObjectReader,
     cache: Option<MetadataCache>,
-    path: Arc<str>,
+    generation: FileId,
+    part_id: u32,
     bounds: std::ops::Range<u64>,
     pool: Option<Arc<dyn datafusion::execution::memory_pool::MemoryPool>>,
 }
@@ -249,14 +250,16 @@ impl PartArea {
     pub(crate) fn new(
         reader: ObjectReader,
         cache: Option<MetadataCache>,
-        path: Arc<str>,
+        generation: FileId,
+        part_id: u32,
         bounds: std::ops::Range<u64>,
         pool: Option<Arc<dyn datafusion::execution::memory_pool::MemoryPool>>,
     ) -> Self {
         Self {
             reader,
             cache,
-            path,
+            generation,
+            part_id,
             bounds,
             pool,
         }
@@ -270,52 +273,21 @@ impl PartArea {
         let context = self.cache.as_ref()?;
         let manager = context.memory.as_ref()?;
         manager.prefilter_result_cache.as_ref()?;
-        let mut key = PrefilterKey::new(context.namespace, 0, None, 0, exprs.clone());
-        key.mem_usage += self.path.len();
+        let mut key = PrefilterKey::new(self.generation, 0, None, 0, exprs.clone());
         key.narthex_block = Some(NarthexPrefilterBlock {
-            path: self.path.clone(),
+            part_id: self.part_id,
             offset: block_offset,
         });
         Some((manager, key))
-    }
-
-    /// Re-read a damaged payload directly. Evict its disk copy and any pages
-    /// already admitted from that object, including adjacent cached areas.
-    pub(crate) async fn recover<T>(
-        &self,
-        range: std::ops::Range<u64>,
-        bytes: bytes::Bytes,
-        mut decode: impl FnMut(&bytes::Bytes) -> Result<T>,
-    ) -> Result<T> {
-        use snafu::ResultExt;
-        let result = decode(&bytes);
-        let (Err(_), Some((disk, key))) = (&result, &self.reader.local) else {
-            return result;
-        };
-        drop(bytes);
-        disk.remove(*key).await;
-        if let Some(context) = &self.cache
-            && let Some(pages) = context.memory.as_ref().and_then(|c| c.page_cache.as_ref())
-        {
-            pages.invalidate_narthex(context.namespace, self.path.clone());
-        }
-        let bytes = self
-            .reader
-            .remote
-            .read(range)
-            .await
-            .context(crate::error::OpenDalSnafu)?
-            .to_bytes();
-        decode(&bytes)
     }
 
     pub(crate) async fn cached_ranges(
         &self,
         ranges: &[std::ops::Range<u64>],
     ) -> Result<Option<(Vec<bytes::Bytes>, common_cache::paged::PageFetchStats)>> {
-        let Some((context, manager, pages)) = self.cache.as_ref().and_then(|c| {
+        let Some((manager, pages)) = self.cache.as_ref().and_then(|c| {
             let manager = c.memory.as_ref()?;
-            Some((c, manager, manager.page_cache.as_ref()?))
+            Some((manager, manager.page_cache.as_ref()?))
         }) else {
             return Ok(None);
         };
@@ -349,8 +321,8 @@ impl PartArea {
         pages
             .fetch_narthex(
                 manager.narthex_load_pool(),
-                context.namespace,
-                self.path.clone(),
+                self.generation,
+                self.part_id,
                 self.bounds.clone(),
                 &relative,
                 reader.clone(),

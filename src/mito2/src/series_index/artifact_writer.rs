@@ -51,7 +51,7 @@ pub(super) struct Outputs {
     pub(super) active: Option<LiveFile>,
     pub(super) paths: Vec<String>,
     pub(super) committed: bool,
-    pub(super) upload: Option<NarthexUpload>,
+    pub(crate) upload: Option<NarthexUpload>,
 }
 impl Outputs {
     pub(super) async fn open(&mut self, path: String) -> Result<()> {
@@ -112,7 +112,7 @@ impl Outputs {
         self.active = None;
         Ok(())
     }
-    pub(super) async fn commit(&mut self) {
+    pub(crate) async fn commit(&mut self) {
         if self.upload.is_some()
             && let Some(dir) = self
                 .paths

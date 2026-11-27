@@ -388,7 +388,7 @@ impl ColumnarReader {
                 if !matches_range(part.first, part.last, &request) { continue; }
                 *metrics.counts.entry("series_parts").or_default() += 1;
                 let timer = metrics.timer("columnar_series_metadata_wall");
-                let path: Arc<str> = manifest.part_path(part.part_id).into();
+                let path = manifest.part_path(part.part_id);
                 let size = part.file_size;
                 let reader = ObjectReader::open(cache.as_ref(), _handle.narthex_file(), crate::cache::file_cache::FileType::Series(Some(part.part_id)), &store, &path, size).await?;
                 let framing_reader = reader.clone();
@@ -407,7 +407,7 @@ impl ColumnarReader {
                         Ok(trailer)
                     }).await
                 }).await?;
-                let area = PartArea::new(reader.clone(), cache.clone(), path.clone(), metadata::HEADER_SIZE..trailer.payload_end, None);
+                let area = PartArea::new(reader.clone(), cache.clone(), manifest.generation, part.part_id, metadata::HEADER_SIZE..trailer.payload_end, None);
                 let root = load_metadata_page(cache.as_ref(), &reader, (&path, size), &trailer.root, trailer.depth, trailer.payload_end, &names).await?;
                 drop(timer);
                 let (mut active, children) = match root.as_ref() {
@@ -619,13 +619,7 @@ async fn load_column_chunk(
     let rows = block.rows as usize;
     let first = block.first;
     let last = block.last;
-    let bytes = area
-        .recover(
-            column.payload.offset..column.payload.end()?,
-            bytes,
-            |bytes| column.payload.unpack(bytes),
-        )
-        .await?;
+    let bytes = column.payload.unpack(&bytes)?;
     let result = if integer {
         let values = codec::decode_integers(&bytes, rows)?;
         if column.name == TSID_COLUMN {

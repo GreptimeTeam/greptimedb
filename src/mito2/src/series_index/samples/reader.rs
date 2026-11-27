@@ -338,10 +338,9 @@ impl SamplesFormatReader for SamplesReader {
                         Ok(trailer)
                     }).await
                 }).await?;
-                let part_path: Arc<str> = path.as_str().into();
-                let payload = PartArea::new(reader.clone(), cache.clone(), part_path.clone(), metadata::HEADER_SIZE..trailer.payload_end, request.memory_pool.clone());
+                let payload = PartArea::new(reader.clone(), cache.clone(), manifest.generation, part.part_id, metadata::HEADER_SIZE..trailer.payload_end, request.memory_pool.clone());
                 let key_area = trailer.areas().keys;
-                let keys = PartArea::new(reader.clone(), cache.clone(), part_path, key_area.start..key_area.end, request.memory_pool.clone());
+                let keys = PartArea::new(reader.clone(), cache.clone(), manifest.generation, part.part_id, key_area.start..key_area.end, request.memory_pool.clone());
                 let root = load_metadata_page(cache.as_ref(), reader, (&path, size), &trailer.root, trailer.depth, trailer.areas(), &manifest).await?;
                 metrics.add_elapsed("columnar_metadata_wall", metadata_started.elapsed());
                 let (mut active, children) = match root.as_ref() { Page::Leaf(_) => (Some(root.clone()), Vec::new()), Page::Internal(children) => (None, children.clone()) };
@@ -657,32 +656,20 @@ async fn load_block_key(
     let entry = fetched
         .pop()
         .ok_or_else(|| invalid("missing sample key response"))?;
-    decode_block_key(reader, block, entry, offsets).await
+    decode_block_key(block, &entry, offsets)
 }
 
-async fn decode_block_key(
-    reader: &PartArea,
+fn decode_block_key(
     block: &Block,
-    entry: bytes::Bytes,
+    entry: &[u8],
     offsets: &mut mito_codec::row_converter::SparseOffsetsCache,
 ) -> Result<ExactSeriesKey> {
-    reader
-        .recover(
-            block.key.offset..block.key.checksum_end()?,
-            entry,
-            |bytes| {
-                let key = ExactSeriesKey::from_sparse_key(
-                    verified_key(bytes, block.key.length)?,
-                    offsets,
-                )?;
-                require(
-                    key.id() == block.id,
-                    "sample block series key disagrees with its identifier",
-                )?;
-                Ok(key)
-            },
-        )
-        .await
+    let key = ExactSeriesKey::from_sparse_key(verified_key(entry, block.key.length)?, offsets)?;
+    require(
+        key.id() == block.id,
+        "sample block series key disagrees with its identifier",
+    )?;
+    Ok(key)
 }
 
 /// Peak bytes [`fetch_ranges`] can hold at once while serving `ranges`.
@@ -770,7 +757,7 @@ async fn load_page_keys(
     };
     let fetched = fetch_ranges(reader, &ranges, metrics).await?;
     for (block, entry) in wanted.iter().take(window).zip(fetched) {
-        let key = decode_block_key(reader, block, entry, offsets).await?;
+        let key = decode_block_key(block, &entry, offsets)?;
         keys.insert((block.key.offset, block.key.length), key);
     }
     Ok(())
@@ -1182,16 +1169,7 @@ async fn fetch_columns(
         .collect::<Result<Vec<_>>>()?;
     let fetched = fetch_ranges(reader, &ranges, metrics).await?;
     for (column, bytes) in columns.iter().zip(fetched) {
-        let bytes = reader
-            .recover(
-                column.payload.offset..column.payload.end()?,
-                bytes,
-                |bytes| {
-                    column.payload.validate_payload(bytes)?;
-                    Ok(bytes.clone())
-                },
-            )
-            .await?;
+        column.payload.validate_payload(&bytes)?;
         buffers.insert(column.payload.offset, bytes);
     }
     Ok(())

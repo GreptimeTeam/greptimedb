@@ -99,7 +99,7 @@ impl PayloadReference {
         require(c.u32()? == 0, "nonzero sample payload reserved field")?;
         Ok(result)
     }
-    pub(super) fn validate_payload(&self, bytes: &[u8]) -> Result<()> {
+    pub(crate) fn validate_payload(&self, bytes: &[u8]) -> Result<()> {
         require(
             bytes.len() == self.stored as usize && codec::checksum(bytes) == self.checksum,
             "sample checksum mismatch",
