@@ -1625,6 +1625,14 @@ fn state_routing(root: &NativeNode) -> Option<(StateGroup, SeriesRouting)> {
             // A fold that is not this one reads the values of the rows below it and folds whole
             // groups together, so what it reads has to be in one place.
             NativeExpr::Aggregate { input, .. } => find(input, histogram, true),
+            // A ranking keeps the series it selected, but which ones those are depends on every
+            // series of the vector at that point, so it reads across groups exactly as its per-point
+            // `k` form does below: ranking one owner's groups would answer a union of per-owner
+            // rankings instead of the whole vector's. The state is gathered for it.
+            NativeExpr::Vector {
+                input,
+                op: crate::native::plan::BoundVectorOp::TopK { .. },
+            } => find(input, histogram, true),
             NativeExpr::Vector { input, op } => find(
                 input,
                 histogram || matches!(op, crate::native::plan::BoundVectorOp::Histogram(_)),

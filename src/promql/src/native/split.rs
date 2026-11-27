@@ -69,8 +69,12 @@ pub(crate) fn histogram_group_is_single(group: &Grouping) -> bool {
 /// partitioned histogram when it cannot change a label in the cut's routing key; a rewrite above the
 /// function renames the answer it already folded and is admitted either way. A single-owner
 /// histogram needs no such restriction. A histogram parameter is answered above the cut, so it has
-/// to read no series: one that does would be silently replaced by the merged values. `topk`, a
-/// second aggregate and vector-vector matching still need a whole-vector boundary.
+/// to read no series: one that does would be silently replaced by the merged values. A ranking
+/// (`topk`/`bottomk`) is admitted because it reads the cut's answer as a whole: `topk(k, A ∪ B)` is
+/// `topk(k, topk(k, A) ∪ topk(k, B))`, so ranking the merged groups once answers the same series as
+/// ranking the whole vector would. Its own boundary is the state router's: the suffix ranks where
+/// every group's state arrives, so no group is ranked apart. A second aggregate and vector-vector
+/// matching still need a whole-vector boundary of their own.
 ///
 /// An instant selection or a window over raw samples above the cut cannot be applied to the merged
 /// values under the tree's current binding: the cut output is evaluated, whereas these nodes consume
@@ -230,11 +234,59 @@ pub(crate) fn split(
             };
             Ok(Some(inner))
         }
-        // TopK ranks the whole vector, not one histogram or aggregation group at a time.
+        // `topk`/`bottomk` ranks the whole vector, and the suffix is exactly where the whole vector
+        // exists: the merged groups are the cut's answer, so the ranking runs once above every
+        // partition's state and sees the vector the query wrote. Ranking is associative over a
+        // union - the k largest of a union of groups are the k largest of the k largest of each -
+        // so asking one owner to rank the merged answer is the global ranking, not one ranking per
+        // partition. Which owner that is, is the state router's decision: [`state_routing`] records
+        // a ranking as reading across groups, so it gathers the state rather than splitting it.
+        //
+        // [`state_routing`]: crate::extension_plan::fused_series::state_routing
         NativeExpr::Vector {
-            op: BoundVectorOp::TopK { .. },
-            ..
-        } => Err(declined("a whole-vector operation above a split aggregate")),
+            input,
+            op: ranking @ BoundVectorOp::TopK { .. },
+        } => {
+            let Some(mut inner) = split(input, fields, time_index)? else {
+                return Ok(None);
+            };
+            inner.suffix = NativeNode {
+                expr: NativeExpr::Vector {
+                    input: Box::new(inner.suffix),
+                    op: ranking.clone(),
+                },
+                output: node.output.clone(),
+            };
+            Ok(Some(inner))
+        }
+        // The same ranking with a `k` evaluated at every grid point. Its parameter is answered on
+        // the statement's grid, which the suffix runs on, so it means the same thing above the
+        // merged values - provided it reads no series: a `k` read from the series the prefix would
+        // have read has no source above the cut, and applying the parameter there would silently
+        // answer it from the merged state instead. This is the rule a histogram parameter follows.
+        NativeExpr::ParameterizedTopK {
+            input,
+            op,
+            parameter,
+        } => {
+            let Some(mut inner) = split(input, fields, time_index)? else {
+                return Ok(None);
+            };
+            if !suffix_carries(parameter) {
+                return Err(declined(
+                    "a ranking parameter that reads the series the split reads",
+                ));
+            }
+            inner.suffix = NativeNode {
+                expr: NativeExpr::ParameterizedTopK {
+                    input: Box::new(inner.suffix),
+                    op: op.clone(),
+                    parameter: parameter.clone(),
+                },
+                output: node.output.clone(),
+            };
+            Ok(Some(inner))
+        }
         // A per-point `φ` does not make the fold splittable: `check_cut` declines every `quantile`,
         // whose state is its group's samples however its argument is read. A `ParameterizedAggregate`
         // is only ever that fold, so there is nothing here to admit.
@@ -279,17 +331,14 @@ pub(crate) fn split(
         }
         // These read values the merged state does not answer: an instant selection or window reads
         // raw samples, `scalar`/`vector` answers one value or one series instead of the vector, and a
-        // parameterized map reads the whole vector at a point. `ParameterizedTopK` declines here
-        // exactly like the literal `topk` above does: a per-point `k` ranks the whole vector just as
-        // a bound one does, so it needs the same whole-vector boundary. Admitting the one and
-        // refusing the other would be an inconsistency rather than a capability.
+        // parameterized map reads the whole vector at a point. The ranking forms are admitted
+        // above, where the whole vector the suffix reads is what they rank.
         NativeExpr::Instant { input, .. }
         | NativeExpr::Timestamp { input }
         | NativeExpr::Vector { input, .. }
         | NativeExpr::VectorOf { input }
         | NativeExpr::ScalarOf { input }
-        | NativeExpr::ParameterizedMap { input, .. }
-        | NativeExpr::ParameterizedTopK { input, .. } => match split(input, fields, time_index)? {
+        | NativeExpr::ParameterizedMap { input, .. } => match split(input, fields, time_index)? {
             Some(_) => Err(declined(
                 "an aggregate under an operation that reads evaluated values",
             )),
@@ -569,9 +618,13 @@ impl Split {
 
 /// Puts `merged` at the cut and returns the suffix above it.
 ///
-/// A suffix is the spine of point-wise maps, constant-sided binaries, evaluated-input windows and at
-/// most one histogram operation between the cut and the root, with scalar constants and the
-/// evaluation time preserved. Other whole-vector operations are refused by `split`.
+/// A suffix is the spine of point-wise maps, constant-sided binaries, evaluated-input windows, at
+/// most one histogram operation and any ranking between the cut and the root, with scalar constants
+/// and the evaluation time preserved. Other whole-vector operations are refused by `split`.
+///
+/// A ranking is rebuilt over the merged values with its `k` - bound or per-point - carried as the
+/// query wrote it: the rank is the same function of the same whole vector, so nothing about `k` has
+/// to be re-derived above the cut.
 fn enter_suffix(node: NativeNode, merged: &NativeNode) -> DfResult<NativeNode> {
     let NativeNode { expr, output } = node;
     let rejected = || {
@@ -600,6 +653,28 @@ fn enter_suffix(node: NativeNode, merged: &NativeNode) -> DfResult<NativeNode> {
         } => NativeExpr::Vector {
             input: Box::new(enter_suffix(*input, merged)?),
             op,
+        },
+        // A ranking above the cut is rebuilt over the merged values: it ranks the whole vector, and
+        // the merged groups are that vector. Its bound `k` is carried unchanged - it is the query's
+        // own constant - so the ranking that runs above the state is the one the query wrote, run
+        // once instead of once per partition.
+        NativeExpr::Vector {
+            input,
+            op: op @ BoundVectorOp::TopK { .. },
+        } => NativeExpr::Vector {
+            input: Box::new(enter_suffix(*input, merged)?),
+            op,
+        },
+        // The same ranking with a per-point `k`: `split` admits it only when its parameter carries
+        // above the cut, so the parameter is handed over untouched and only the input is rebuilt.
+        NativeExpr::ParameterizedTopK {
+            input,
+            op,
+            parameter,
+        } => NativeExpr::ParameterizedTopK {
+            input: Box::new(enter_suffix(*input, merged)?),
+            op,
+            parameter,
         },
         // The parameters are per-point scalars that read no series - `split` refuses the split
         // otherwise - so they mean the same above the merged values and are handed over untouched

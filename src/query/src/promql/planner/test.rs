@@ -7617,26 +7617,74 @@ async fn native_fused_whole_vector_nodes_over_a_bare_scan_stay_native() {
     }
 }
 
-/// `topk` over a split aggregate needs a whole-vector boundary whether its `k` is bound or answered
-/// per point, so the two forms take the same route: native, and not split.
+/// `topk`/`bottomk` over a split aggregate ranks the merged vector, so the split is taken in every
+/// form of `k`: the producer folds the raw series into a `Partial` state per partition and the
+/// ranking runs once above the `Final` fold, over the state every partition exported.
+///
+/// A ranking is admitted above the cut because it composes over a union of groups: the `k` largest
+/// of the union are the `k` largest of the `k` largest of each, so one ranking of the merged answer
+/// is the query's own ranking rather than one ranking per partition. Putting every group's state on
+/// the one owner that ranks is the state router's work, not the split's
+/// (`a_fold_across_groups_gathers_the_state_it_reads` pins the same gathering in `promql`).
 #[tokio::test]
-async fn native_fused_topk_above_aggregate_declines_the_split_in_every_form() {
-    for query in [
-        // The literal `k` binds a constant `TopK` op, which `split` refuses above the cut.
-        "topk(3, sum(some_metric))",
-        // A per-point `k` ranks the same whole vector, so it refuses for the same reason rather
-        // than becoming the one admitted form.
-        "topk(time() / 1000, sum(some_metric))",
+async fn native_fused_topk_above_aggregate_splits_in_every_form() {
+    for (query, per_point) in [
+        // The literal `k` binds a constant `TopK` op, which the split carries above the cut.
+        ("topk(3, sum(some_metric))", false),
+        ("bottomk(2, avg(some_metric))", false),
+        // A per-point `k` that reads no series means the same above the merged values, so it is
+        // carried too rather than being the one form the ranking is refused in.
+        ("topk(time() / 1000, sum(some_metric))", true),
     ] {
         let plan = build_native_fused_plan(query, true).await;
         let display = plan.display_indent().to_string();
+        let final_node = find_final_split(&plan)
+            .unwrap_or_else(|| panic!("`{query}` must split into Partial and Final: {display}"));
+        // The ranking is the Final node's own root and the fold is its input: it reads the merged
+        // answer whole, with nothing below it re-read.
+        let ranking_reads_final = match &final_node.tree().root().expr {
+            NativeExpr::Vector {
+                input,
+                op: BoundVectorOp::TopK { top, group, .. },
+            } if !per_point => {
+                assert_eq!(
+                    query.starts_with("bottomk"),
+                    !*top,
+                    "`{query}`: the ranking keeps the direction the query wrote: {display}"
+                );
+                assert!(
+                    matches!(group, Grouping::By(labels) if labels.is_empty()),
+                    "`{query}`: the ranking keeps the grouping the query wrote: {display}"
+                );
+                matches!(
+                    &input.expr,
+                    NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Final
+                )
+            }
+            NativeExpr::ParameterizedTopK { input, .. } if per_point => matches!(
+                &input.expr,
+                NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Final
+            ),
+            root => panic!("`{query}`: the ranking must run above the Final, got {root:?}: {display}"),
+        };
         assert!(
-            find_fused_series(&plan).is_some(),
-            "`{query}` must stay native: {display}"
+            ranking_reads_final,
+            "`{query}`: the ranking must read the Final fold: {display}"
         );
+        let partial = partial_below(final_node)
+            .unwrap_or_else(|| panic!("`{query}`: Final must read a Partial producer: {display}"));
         assert!(
-            find_final_split(&plan).is_none(),
-            "`{query}` must not split: {display}"
+            matches!(&partial.tree().root().expr, NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Partial),
+            "`{query}`: the producer must export Partial state: {display}"
+        );
+        // The state the ranking ranks is folded from the raw series, one partition at a time.
+        assert!(
+            !partial.tree().root().inputs().is_empty()
+                && partial.tree().root().inputs().iter().all(|input| input
+                    .output
+                    .samples()
+                    .is_some_and(|schema| schema.eval_grid.is_none())),
+            "`{query}`: the producer must read the raw series: {display}"
         );
     }
 }
@@ -7644,17 +7692,21 @@ async fn native_fused_topk_above_aggregate_declines_the_split_in_every_form() {
 /// A whole-vector operator standing on an evaluated aggregate is the shape it is over a bare scan:
 /// it reads the whole vector at a point, so it runs in the one node above the cut and the fold
 /// below it is that node's own input rather than a split boundary.
+///
+/// The ranking pair is the exception, and it is pinned by
+/// `native_fused_topk_above_aggregate_splits_in_every_form`: a `topk`/`bottomk` composes over the
+/// groups the fold merged, while the operators here need the whole evaluated vector inside one
+/// node - `limitk` keeps the first `k` series in input order, `limit_ratio` keeps those a label hash
+/// selects, and a sort answers in an order only an instant result shows.
 #[tokio::test]
 async fn native_fused_whole_vector_operators_over_an_aggregate_stay_native() {
     for query in [
-        "topk(1, sum(some_metric))",
-        "bottomk(2, avg(some_metric))",
         // The two rankings the existing planner cannot answer at all are admitted here too: the
         // shape is the operator, not the ranking it computes.
         "limitk(2, sum(some_metric))",
         "limit_ratio(0.5, sum(some_metric))",
         "sort(sum by (tag_0) (some_metric))",
-        // The same ranking over a bare scan, which was never the refused shape.
+        // A ranking over a bare scan holds no aggregate, so there is no cut for it to sit above.
         "topk(1, some_metric)",
     ] {
         let plan = build_native_fused_plan(query, true).await;
@@ -9013,25 +9065,37 @@ async fn native_fused_aggregate_above_an_independent_selector_is_admitted() {
 
 /// Suffixes whose answers need the whole vector cannot fuse into a partition-local `Final`, so
 /// the split declines them: it neither exports aggregate state nor runs a `Final` aggregate.
-/// Ranking (`topk`) and a second aggregate cannot be answered from a partition's groups alone.
-/// Classic histogram functions, by contrast, route all buckets of a histogram to the same owner.
+/// A second aggregate cannot be answered from a partition's groups alone.
+///
+/// The ranking pair is no longer among them - `topk`/`bottomk` compose over the merged groups and
+/// are pinned by `native_fused_topk_above_aggregate_splits_in_every_form` - while a selection
+/// whose answer is an order or a first-`k` of the whole evaluated vector still is. Classic
+/// histogram functions, by contrast, route all buckets of a histogram to the same owner.
 ///
 /// What they fall back to is not asserted: the segmentation route answers some of them, and the
 /// point is only that none of them becomes a split.
 #[tokio::test]
 async fn native_fused_split_declines_a_whole_vector_suffix() {
     for (suffix, declined, splits) in [
-        // Ranks the whole vector: the winner may be in a group this partition does not own.
-        (
-            "topk",
-            "topk(1, sum by (tag_0) (some_metric))",
-            "sum by (tag_0) (some_metric)",
-        ),
         // A second fold over the merged values would have to become its own state split.
         (
             "a second aggregate",
             "sum(avg(some_metric) by (tag_0))",
             "avg(some_metric) by (tag_0)",
+        ),
+        // `limitk` keeps the first `k` series of each group in the order its input arrives, so one
+        // owner's share of the merged groups is not the whole vector's first `k`.
+        (
+            "limitk",
+            "limitk(1, sum by (tag_0) (some_metric))",
+            "sum by (tag_0) (some_metric)",
+        ),
+        // A sort answers the vector in another order, which only an instant result shows: the
+        // suffix would have to re-order everything the merge answered at once.
+        (
+            "sort",
+            "sort(sum by (tag_0) (some_metric))",
+            "sum by (tag_0) (some_metric)",
         ),
     ] {
         // The control first: the same fold without the suffix is a split, so the refusal below is
@@ -18283,9 +18347,12 @@ async fn native_composed_binary_restores_the_context_after_a_refused_operand() {
 ///
 /// Segmentation answers a group by folding each segment's samples and appending the pieces, so a
 /// histogram point whose contributions are spread over partitions would be folded once per segment:
-/// a sum would merge histograms that never met, and an average would average averages. Neither an
-/// aggregate above another aggregate nor a whole-vector ranking is a shape the split can move across
-/// the boundary, so the whole statement falls back rather than being cut.
+/// a sum would merge histograms that never met, and an average would average averages. An aggregate
+/// above another aggregate is such a shape - the second one folds the merged values of every group,
+/// which no partition owns on its own, so it would have to be replanned as its own `Partial`/`Final`
+/// pair above the first one's answer - and the whole statement falls back rather than being cut.
+/// A ranking above the fold is not one of these: it reads the cut's answer as a whole, and
+/// `a_ranking_above_a_histogram_fold_splits_without_ranking_a_histogram` pins the split it takes.
 #[tokio::test]
 async fn a_histogram_aggregate_the_split_declines_keeps_the_existing_plan() {
     for query in [
@@ -18293,7 +18360,6 @@ async fn a_histogram_aggregate_the_split_declines_keeps_the_existing_plan() {
         "count(sum(some_metric))",
         "min(sum(some_metric))",
         "avg(sum(some_metric))",
-        "topk(1, sum(some_metric))",
     ] {
         let table_provider = build_test_native_histogram_table_provider("some_metric").await;
         let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
@@ -18308,6 +18374,91 @@ async fn a_histogram_aggregate_the_split_declines_keeps_the_existing_plan() {
             "{query} was segmented instead of kept: {display}"
         );
     }
+}
+
+/// A ranking above a histogram fold splits, and ranks no histogram while doing it.
+///
+/// `topk(1, sum(some_metric))` ranks a vector of native histograms, and a ranking compares values:
+/// the kernel ranks the float samples of a series and skips the histogram ones, which is what
+/// Prometheus does here ("histogram samples are not ranked"). The answer is therefore the empty
+/// vector however the state was folded, so the one ranking above the `Final` and one ranking per
+/// partition cannot differ - neither ranks anything. That is why the ranking is admitted above a
+/// histogram cut as it is above a float one, and why the split's own reason for admitting it - one
+/// ranking of the merged answer is the query's ranking - holds here without ranking any partition's
+/// share.
+///
+/// What this pins is that the route builds exactly that plan rather than keeping the existing one:
+/// the ranking is the `Final` node's root over the histogram `Final` fold, the producer exports
+/// histogram `Partial` state folded from the raw series of one partition, the `k` and the grouping
+/// are the query's own, and the column the ranking reads is the histogram struct - not a float the
+/// route converted to have something to compare.
+#[tokio::test]
+async fn a_ranking_above_a_histogram_fold_splits_without_ranking_a_histogram() {
+    let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+    let plan =
+        build_native_fused_plan_with_provider("topk(1, sum(some_metric))", true, table_provider)
+            .await;
+    let display = plan.display_indent().to_string();
+    let finalize = find_final_split(&plan)
+        .unwrap_or_else(|| panic!("the ranking must split into a Partial and a Final: {display}"));
+    // The ranking is the Final node's own root, and the fold of the merged state is its input.
+    let NativeExpr::Vector {
+        input,
+        op: BoundVectorOp::TopK { k, top, group },
+    } = &finalize.tree().root().expr
+    else {
+        panic!("the Final node's root must be the ranking: {display}");
+    };
+    assert_eq!(
+        (1.0, true),
+        (*k, *top),
+        "the ranking keeps the query's own `k` and direction: {display}"
+    );
+    assert!(
+        matches!(group, Grouping::By(labels) if labels.is_empty()),
+        "the ranking keeps the grouping the query wrote: {display}"
+    );
+    assert!(
+        matches!(
+            &input.expr,
+            NativeExpr::Aggregate { op, .. }
+                if op.stage == AggregateStage::Final
+                    && op.field_kind == FieldKind::Histogram
+        ),
+        "the ranking must read the Final fold of a histogram state: {display}"
+    );
+    // The state it reads is folded the same way, one partition at a time over the raw series.
+    let partial = partial_below(finalize)
+        .unwrap_or_else(|| panic!("the Final must read a Partial producer: {display}"));
+    let NativeExpr::Aggregate { input, op } = &partial.tree().root().expr else {
+        panic!("the producer must be the fold of the state: {display}");
+    };
+    assert_eq!(
+        (AggregateStage::Partial, FieldKind::Histogram),
+        (op.stage, op.field_kind),
+        "the producer must export Partial histogram state: {display}"
+    );
+    assert!(
+        !input.inputs().is_empty()
+            && input
+                .inputs()
+                .iter()
+                .all(|input| input
+                    .output
+                    .samples()
+                    .is_some_and(|schema| schema.eval_grid.is_none())),
+        "the producer must fold the raw series it read: {display}"
+    );
+    // The ranking's own column is a histogram: the samples it would rank were never converted to
+    // floats, which is why it selects none of them.
+    assert_eq!(
+        Some(FieldKind::Histogram),
+        finalize
+            .tree()
+            .root()
+            .output_field_kind(Some(FieldKind::Histogram)),
+        "the ranking hands on the histogram column it read: {display}"
+    );
 }
 
 /// The gates that admit a histogram fold do not admit the shapes whose histogram state has no

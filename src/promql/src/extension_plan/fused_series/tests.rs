@@ -9372,6 +9372,76 @@ fn a_fold_across_groups_gathers_the_state_it_reads() {
     );
 }
 
+/// A ranking above the `Final` reads the whole vector it ranks, so it gathers the state too.
+///
+/// `topk(10, sum by (job) (…))` keeps the ten largest series of the groups the fold merged, and
+/// which ten those are is a property of the whole vector: asked once per owner, the ranking answers
+/// the union of one ranking per owner, which holds more series than the query selected and can hold
+/// a series the whole vector's ten do not. Ranking is associative over a union - the ten largest of
+/// a union are the ten largest of each part's ten largest - so the split admits the ranking rather
+/// than refusing it, and this router is where its boundary comes from: the ranking reads across
+/// groups, so every group's state arrives at the one owner that ranks it.
+#[test]
+fn a_ranking_above_the_final_gathers_the_state_it_ranks() {
+    let out = grid();
+    let samples = NativeType::Samples(Arc::new(SeriesSchema {
+        fields: raw_schema().fields.clone(),
+        eval_grid: Some(Arc::clone(&out)),
+    }));
+    let state = Arc::new(AggregateStateSchema {
+        group: Grouping::By(Arc::new([Arc::from(JOB)])),
+        kind: AggregateStateKind::Sum,
+        components: Arc::from([StateComponent::Value, StateComponent::Compensation]),
+        accumulators: raw_schema().fields.clone(),
+        grid: Arc::clone(&out),
+    });
+    // `sum by (job) (…)` at the end of its fold: one row per group and point.
+    let final_over_state = NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(NativeNode {
+                expr: NativeExpr::Input(BoundInput {
+                    output: NativeType::AggregateState(Arc::clone(&state)),
+                    source_index: 0,
+                    ordering: SeriesOrdering::Contiguous,
+                }),
+                output: NativeType::AggregateState(Arc::clone(&state)),
+            }),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group: Grouping::By(Arc::new([Arc::from(JOB)])),
+                stage: AggregateStage::Final,
+                field_kind: FieldKind::Float,
+            },
+        },
+        output: samples.clone(),
+    };
+    // The fold that is the whole read splits its groups across owners, which is the routing a
+    // ranking above it must not inherit.
+    assert_eq!(
+        Some((super::StateGroup::Grouped, SeriesRouting::CanonicalLabels)),
+        super::state_routing(&final_over_state),
+        "a fold nothing above reads across groups keeps its groups apart"
+    );
+    // `topk(10, sum by (job) (…))`: the ranking reads every group the fold merged.
+    let ranking = NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Vector {
+            input: Box::new(final_over_state),
+            op: BoundVectorOp::TopK {
+                k: 10.0,
+                top: true,
+                group: Grouping::By(Arc::from([])),
+            },
+        },
+        output: samples,
+    })
+    .expect("a ranking over the fold of a state is a legal tree");
+    assert_eq!(
+        Some((super::StateGroup::Single, SeriesRouting::CanonicalLabels)),
+        super::state_routing(ranking.root()),
+        "a ranking above the Final must read every group on one owner"
+    );
+}
+
 #[test]
 fn histogram_final_replaces_incompatible_state_router() {
     for (group, old_width, target_width, required_width, old_policy, reuse) in [
