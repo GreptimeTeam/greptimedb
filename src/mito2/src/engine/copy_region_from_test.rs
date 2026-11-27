@@ -763,6 +763,10 @@ async fn test_narthex_copy_and_remap(
     let source_dir = owner.access_layer.build_region_dir(source);
     let before = owner.manifest_ctx.manifest().await;
     assert_eq!(before.series_indexes.len(), usize::from(with_index));
+    // A copy never installs the source's series indexes; a background build may still add an
+    // index of the target's own after a reopen, so assert on the copied ids rather than on an
+    // empty set.
+    let source_index_ids: Vec<_> = before.series_indexes.keys().cloned().collect();
     if fail_copy {
         let missing = before
             .files
@@ -985,18 +989,25 @@ async fn test_narthex_copy_and_remap(
     let text = batches.pretty_print().unwrap();
     assert!(text.contains("api"));
     assert_eq!(text.contains("worker"), !remap);
+    let installed = engine.get_region(target).unwrap();
     assert!(
-        engine
-            .get_region(target)
-            .unwrap()
+        source_index_ids.iter().all(|id| !installed
             .version()
             .ssts
             .series_indexes()
-            .is_empty()
+            .contains_key(id)),
+        "a copy must not install the source's series index"
     );
     crate::engine::compaction_test::compact(&engine, target).await;
     let compacted = engine.get_region(target).unwrap();
-    assert!(compacted.version().ssts.series_indexes().is_empty());
+    assert!(
+        source_index_ids.iter().all(|id| !compacted
+            .version()
+            .ssts
+            .series_indexes()
+            .contains_key(id)),
+        "a copy must not install the source's series index"
+    );
     assert!(
         compacted
             .version()
