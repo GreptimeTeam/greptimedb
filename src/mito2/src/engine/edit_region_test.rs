@@ -105,6 +105,7 @@ async fn test_delayed_series_index_notification_after_removal() -> WhateverResul
                         waiters: crate::request::Waiters::one(tx),
                         result: Ok(crate::request::RegionEditOutcome::Written),
                         is_staging: false,
+                        preload_sst_cache: false,
                         update_region_state: false,
                     },
                 ),
@@ -421,6 +422,94 @@ async fn test_edit_region_fill_cache(
         );
     } else {
         assert!(!file_cache.local_store().exists(&path).await.unwrap());
+    }
+}
+
+#[tokio::test]
+async fn narthex_import_preloads_all_parts_from_the_physical_owner() {
+    struct Listener(Mutex<Option<oneshot::Sender<FileId>>>);
+    impl EventListener for Listener {
+        fn on_file_cache_filled(&self, id: FileId) {
+            self.0.lock().unwrap().take().unwrap().send(id).unwrap();
+        }
+    }
+    let mut env = TestEnv::new().await;
+    let (tx, rx) = oneshot::channel();
+    let engine = env
+        .create_engine_with(
+            MitoConfig {
+                enable_write_cache: true,
+                schedule_compaction_after_edit: false,
+                ..Default::default()
+            },
+            None,
+            Some(Arc::new(Listener(Mutex::new(Some(tx))))),
+            None,
+        )
+        .await;
+    let target = RegionId::new(1024, 2);
+    engine
+        .handle_request(
+            target,
+            RegionRequest::Create(crate::test_util::sparse_metric_create_request("narthex")),
+        )
+        .await
+        .unwrap();
+    let region = engine.get_region(target).unwrap();
+    let owner = RegionId::new(1024, 1);
+    let file = FileMeta {
+        region_id: owner,
+        file_id: FileId::random(),
+        file_size: 10,
+        format: crate::sst::file::FileFormat::NarthexSamples(Box::new(
+            crate::sst::file::NarthexSamplesMeta {
+                manifest_size: 5,
+                parts: [2, 3]
+                    .into_iter()
+                    .map(|file_size| crate::sst::file::NarthexPartMeta { file_size })
+                    .collect(),
+            },
+        )),
+        ..Default::default()
+    };
+    let inventory = IndexKey::narthex_objects(&file, &region.access_layer.build_region_dir(owner));
+    for (_, object) in &inventory {
+        region
+            .access_layer
+            .object_store()
+            .write(
+                &object.path,
+                vec![object.file_size as u8; object.file_size as usize],
+            )
+            .await
+            .unwrap();
+    }
+    let id = file.file_id;
+    engine
+        .edit_region(
+            target,
+            RegionEdit {
+                files_to_add: vec![file],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(9), rx)
+            .await
+            .unwrap()
+            .unwrap(),
+        id
+    );
+    let disk = engine.cache_manager().write_cache().unwrap().file_cache();
+    for (key, object) in inventory {
+        let bytes = disk.read_ranges(key, &[0..object.file_size]).await.unwrap();
+        assert_eq!(
+            bytes[0].as_ref(),
+            vec![object.file_size as u8; object.file_size as usize]
+        );
+        assert!(!disk.contains_key(&IndexKey::new(target, id, key.file_type)));
     }
 }
 

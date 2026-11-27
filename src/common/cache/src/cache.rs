@@ -14,10 +14,91 @@
 
 use std::borrow::Borrow;
 use std::hash::Hash;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::FutureExt;
+use futures::future::BoxFuture;
+use tokio::sync::{Mutex, Notify, mpsc};
+
 use crate::metrics::{CacheMetrics, CacheSizeMetric, CacheSizeRegistration};
+
+/// Bounded workers that drive cache misses independently of downstream readers.
+pub struct LoadPool {
+    jobs: mpsc::Sender<BoxFuture<'static, ()>>,
+    space: Arc<Notify>,
+}
+
+impl LoadPool {
+    /// Starts a fixed number of workers and buffers up to one job per worker.
+    /// Dropping the pool closes the queue and lets the workers exit.
+    pub fn new(
+        workers: NonZeroUsize,
+        mut spawn: impl FnMut(BoxFuture<'static, ()>) -> tokio::task::JoinHandle<()>,
+    ) -> Self {
+        let (jobs, receiver) = mpsc::channel::<BoxFuture<'static, ()>>(workers.get());
+        let receiver = Arc::new(Mutex::new(receiver));
+        let space = Arc::new(Notify::new());
+        for _ in 0..workers.get() {
+            let space = space.clone();
+            let receiver = receiver.clone();
+            spawn(Box::pin(async move {
+                loop {
+                    let job = receiver.lock().await.recv().await;
+                    let Some(job) = job else { break };
+                    space.notify_waiters();
+                    job.await;
+                }
+            }));
+        }
+        Self { jobs, space }
+    }
+
+    /// Drives a load until it returns or its caller is dropped. A closed queue
+    /// or lost worker reply lets the caller retry directly from storage.
+    pub async fn run<T: Send + 'static>(
+        &self,
+        job: impl Future<Output = T> + Send + 'static,
+    ) -> Option<T> {
+        let slot = self.reserve().await?;
+        let (mut reply, result) = tokio::sync::oneshot::channel();
+        slot.send(
+            async move {
+                tokio::select! {
+                    biased;
+                    _ = reply.closed() => {}
+                    output = std::panic::AssertUnwindSafe(job).catch_unwind() => {
+                        if let Ok(value) = output {
+                            let _ = reply.send(value);
+                        }
+                    }
+                }
+            }
+            .boxed(),
+        );
+        result.await.ok()
+    }
+
+    async fn reserve(&self) -> Option<mpsc::Permit<'_, BoxFuture<'static, ()>>> {
+        loop {
+            // Subscribe before checking capacity so a concurrent dequeue wakes us.
+            // An async channel reservation could grant the only free slot to a
+            // paused reader. Reserve only in the poll that actually submits the job.
+            let space = self.space.notified();
+            match self.jobs.try_reserve() {
+                Ok(slot) => return Some(slot),
+                Err(mpsc::error::TrySendError::Closed(_)) => return None,
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    tokio::select! {
+                        _ = space => (),
+                        _ = self.jobs.closed() => return None,
+                    }
+                }
+            }
+        }
+    }
+}
 
 /// Reason for releasing an entry from the cache.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,6 +244,15 @@ where
         result
     }
 
+    /// Shares a load whose caller tracks its own metrics and admission outcomes.
+    pub async fn try_get_with_unobserved<E: Send + Sync + 'static>(
+        &self,
+        key: K,
+        load: impl Future<Output = Result<V, E>>,
+    ) -> Result<V, Arc<E>> {
+        self.inner.try_get_with(key, load).await
+    }
+
     /// Submits a completed value to the cache's admission and eviction policy.
     pub async fn insert(&self, key: K, value: V) {
         self.inner.insert(key, value).await;
@@ -214,8 +304,6 @@ where
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use tokio::sync::Notify;
-
     use super::*;
 
     // This is also a compile-time contract for generic callers crossing async-trait boundaries.
@@ -240,6 +328,33 @@ mod tests {
         let future: futures::future::BoxFuture<'_, Option<Arc<String>>> =
             Box::pin(send_lookup(&cache, "key"));
         assert_eq!(future.await.as_deref().map(String::as_str), Some("value"));
+    }
+
+    #[tokio::test]
+    async fn parked_sender_cannot_reserve_the_next_load_slot() {
+        let pool = LoadPool::new(NonZeroUsize::MIN, tokio::spawn);
+        let (started, running) = tokio::sync::oneshot::channel();
+        let (release, wait) = tokio::sync::oneshot::channel();
+        let mut first = Box::pin(pool.run(async move {
+            started.send(()).unwrap();
+            wait.await.unwrap();
+        }));
+        assert!(futures::poll!(&mut first).is_pending());
+        running.await.unwrap();
+        let mut queued = Box::pin(pool.run(async { 2 }));
+        assert!(futures::poll!(&mut queued).is_pending());
+        assert_eq!(pool.jobs.capacity(), 0);
+        let mut parked = Box::pin(pool.run(async { 3 }));
+        assert!(futures::poll!(&mut parked).is_pending());
+
+        release.send(()).unwrap();
+        assert_eq!(queued.await, Some(2));
+        // Neither the original caller nor the waiting sender is polled here.
+        let later = tokio::time::timeout(Duration::from_secs(5), pool.run(async { 4 }))
+            .await
+            .unwrap();
+        assert_eq!(later, Some(4));
+        assert_eq!(first.await, Some(()));
     }
 
     #[tokio::test]

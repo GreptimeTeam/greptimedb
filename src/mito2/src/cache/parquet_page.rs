@@ -52,13 +52,23 @@ fn parse_page_size(value: Option<&str>) -> u64 {
 
 /// Largest block whose bytes and entry overhead fit the cache's u32 weight.
 pub(crate) const MAX_PAGE_SIZE: u64 = u32::MAX as u64
-    - (mem::size_of::<(RegionFileId, u64)>() + mem::size_of::<Bytes>() + mem::size_of::<u64>())
-        as u64;
+    - (mem::size_of::<(PageFile, u64)>() + mem::size_of::<Bytes>() + mem::size_of::<u64>()) as u64;
 
 /// Caches immutable Parquet file bytes in fixed-size blocks shared across row groups.
+#[derive(Clone, Hash, PartialEq, Eq)]
+enum PageFile {
+    Parquet(RegionFileId),
+    Narthex {
+        generation: store_api::storage::FileId,
+        part_id: u32,
+        start: u64,
+        end: u64,
+    },
+}
+
 pub(crate) struct ParquetPageCache {
     page_size: u64,
-    cache: PagedCache<RegionFileId>,
+    cache: Arc<PagedCache<PageFile>>,
 }
 
 impl ParquetPageCache {
@@ -76,21 +86,23 @@ impl ParquetPageCache {
     fn with_ttl(capacity: u64, page_size: u64, ttl: Duration) -> Arc<Self> {
         Arc::new(Self {
             page_size,
-            cache: PagedCache::new_with_ttl(
+            cache: Arc::new(PagedCache::new_with_ttl(
                 "parquet_pages",
                 capacity,
                 page_size,
-                |_: &(RegionFileId, u64), bytes: &Bytes| {
-                    (mem::size_of::<(RegionFileId, u64)>()
+                |_: &(PageFile, u64), bytes: &Bytes| {
+                    (mem::size_of::<(PageFile, u64)>()
                         + mem::size_of::<Bytes>()
                         + mem::size_of::<u64>()
-                        + bytes.len()) as u32
+                        + bytes.len())
+                    .try_into()
+                    .unwrap_or(u32::MAX)
                 },
                 metrics::cache_page_observer("page", "page", |hits, misses| {
                     (usize::from(hits > 0), usize::from(misses > 0))
                 }),
                 Some(ttl),
-            ),
+            )),
         })
     }
 
@@ -100,7 +112,9 @@ impl ParquetPageCache {
         file: RegionFileId,
         ranges: &[Range<u64>],
     ) -> Option<u64> {
-        self.cache.known_file_size(&file, ranges).await
+        self.cache
+            .known_file_size(&PageFile::Parquet(file), ranges)
+            .await
     }
 
     /// Fetches ranges in input order, sharing missing blocks and returning [`PageFetchStats`].
@@ -122,7 +136,38 @@ impl ParquetPageCache {
                 ),
             )));
         }
-        let result = self.cache.fetch(file, file_size, ranges, reader).await?;
+        let result = self
+            .cache
+            .fetch(PageFile::Parquet(file), file_size, ranges, reader)
+            .await?;
+        metrics::cache_page_fetch_metrics("page", &result.1);
+        Ok(result)
+    }
+
+    pub(crate) fn page_size(&self) -> u64 {
+        self.page_size
+    }
+
+    pub(crate) async fn fetch_narthex<R: RangeReader + 'static>(
+        &self,
+        pool: &common_cache::LoadPool,
+        generation: store_api::storage::FileId,
+        part_id: u32,
+        area: Range<u64>,
+        ranges: &[Range<u64>],
+        reader: Arc<R>,
+    ) -> Result<(Vec<Bytes>, PageFetchStats), Arc<io::Error>> {
+        let size = area.end - area.start;
+        let key = PageFile::Narthex {
+            generation,
+            part_id,
+            start: area.start,
+            end: area.end,
+        };
+        let result = self
+            .cache
+            .fetch_in_pool(pool, key, size, ranges, reader)
+            .await?;
         metrics::cache_page_fetch_metrics("page", &result.1);
         Ok(result)
     }
@@ -130,7 +175,7 @@ impl ParquetPageCache {
     /// Checks whether a completed block is available without recording a lookup event.
     #[cfg(test)]
     pub(crate) async fn contains(&self, file: RegionFileId, page_id: u64) -> bool {
-        self.cache.contains(&file, page_id).await
+        self.cache.contains(&PageFile::Parquet(file), page_id).await
     }
 }
 
@@ -218,6 +263,35 @@ mod tests {
         assert_eq!(reader.0.lock().unwrap().len(), 2);
         assert!(cache.contains(first, 0).await);
         assert!(cache.contains(second, 0).await);
+    }
+
+    #[tokio::test]
+    async fn narthex_pages_are_shared_only_within_the_same_generation_part_and_area() {
+        let cache = ParquetPageCache::new(1024 * 1024, PAGE_SIZE);
+        let pool = common_cache::LoadPool::new(std::num::NonZeroUsize::MIN, tokio::spawn);
+        let reader = Arc::new(Reader::default());
+        let generation = FileId::random();
+        for (id, part, area, misses) in [
+            (generation, 0, 4..12, 1),
+            (generation, 0, 4..12, 0),
+            (FileId::random(), 0, 4..12, 1),
+            (generation, 1, 4..12, 1),
+            (generation, 0, 12..20, 1),
+            (generation, 0, 4..16, 1),
+        ] {
+            let (_, stats) = cache
+                .fetch_narthex(
+                    &pool,
+                    id,
+                    part,
+                    area,
+                    std::slice::from_ref(&(0..2)),
+                    reader.clone(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(stats.cache_miss, misses);
+        }
     }
 
     #[tokio::test]

@@ -31,13 +31,22 @@ pub async fn fetch_byte_ranges(
     object_store: ObjectStore,
     ranges: &[Range<u64>],
 ) -> object_store::Result<Vec<Bytes>> {
+    fetch_byte_ranges_with_gap(file_path, object_store, ranges, MERGE_GAP).await
+}
+
+pub(crate) async fn fetch_byte_ranges_with_gap(
+    file_path: &str,
+    object_store: ObjectStore,
+    ranges: &[Range<u64>],
+    gap: usize,
+) -> object_store::Result<Vec<Bytes>> {
     let total_size = ranges.iter().map(|r| r.end - r.start).sum::<u64>();
     let start = Instant::now();
 
     let result = object_store
         .reader_with(file_path)
         .concurrent(FETCH_PARALLELISM)
-        .gap(MERGE_GAP)
+        .gap(gap)
         .await?
         .fetch(ranges.to_vec())
         .await?

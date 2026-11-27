@@ -29,7 +29,9 @@ use mito_codec::row_converter::{SparseOffsetsCache, SparsePrimaryKeyCodec};
 use object_store::ObjectStore;
 use snafu::ResultExt;
 
-use crate::cache::columnar::{self as metadata_cache, MetadataCache};
+use crate::cache::columnar::{
+    self as metadata_cache, MetadataCache, MetadataIdentity, MetadataPart, ObjectReader, PartArea,
+};
 use crate::error::{NewRecordBatchSnafu, OpenDalSnafu, RecordBatchSnafu, Result};
 use crate::metrics::ColumnarReadMetrics;
 use crate::series_index::artifact::ArtifactFormat;
@@ -43,7 +45,6 @@ use crate::series_index::identity::{ExactSeriesKey, IdentityEncoding};
 use crate::series_index::{
     MetricSeriesId, ROW_COUNT_COLUMN, SeriesIndexFileHandle, TABLE_ID_COLUMN, TSID_COLUMN,
 };
-use crate::sst::parquet::helper::fetch_byte_ranges;
 
 pub(crate) struct ColumnarReader {
     store: ObjectStore,
@@ -86,7 +87,10 @@ impl ColumnarReader {
         handle: SeriesIndexFileHandle,
         cache: Option<MetadataCache>,
     ) -> Result<Self> {
-        let identity = format!("{:?}/{:?}", handle.file_id(), handle.entry());
+        let identity = MetadataIdentity::SeriesManifest(handle.entry().index_uuid);
+        let loader_store = store.clone();
+        let loader_handle = handle.clone();
+        let loader_cache = cache.clone();
         let descriptor = metadata_cache::load(
             cache.as_ref(),
             identity,
@@ -100,8 +104,10 @@ impl ColumnarReader {
                         .map(|field| field.size() + std::mem::size_of::<usize>())
                         .sum::<usize>()
             },
-            async {
-                let reader = Self::open(store.clone(), handle.clone()).await?;
+            move || async move {
+                let reader =
+                    Self::open_descriptor(loader_store, loader_handle, loader_cache.as_ref())
+                        .await?;
                 Ok((reader.manifest, reader.schema))
             },
         )
@@ -116,6 +122,14 @@ impl ColumnarReader {
     }
 
     pub(crate) async fn open(store: ObjectStore, handle: SeriesIndexFileHandle) -> Result<Self> {
+        Self::open_descriptor(store, handle, None).await
+    }
+
+    async fn open_descriptor(
+        store: ObjectStore,
+        handle: SeriesIndexFileHandle,
+        cache: Option<&MetadataCache>,
+    ) -> Result<Self> {
         let entry = handle.entry();
         let artifact = entry
             .artifact
@@ -144,7 +158,16 @@ impl ColumnarReader {
             length <= MANIFEST_LIMIT as u64,
             "series manifest exceeds size limit",
         )?;
-        let bytes = read_range(&store, &path, 0, length).await?;
+        let object = ObjectReader::open(
+            cache,
+            handle.narthex_file(),
+            crate::cache::file_cache::FileType::Series(None),
+            &store,
+            &path,
+            length,
+        )
+        .await?;
+        let bytes = object.read(0..length).await.context(OpenDalSnafu)?;
         // A manifest that the current format cannot read predates exact identity or is
         // corrupt; either way it must never be reused.
         let mut manifest: Manifest = serde_json::from_slice(&bytes).map_err(|error| {
@@ -192,7 +215,7 @@ impl ColumnarReader {
                 "duplicate series tag name/id",
             )?;
         }
-        let mut paths = HashSet::from([path]);
+        let mut paths = HashSet::from([path.clone()]);
         let mut file_size = length;
         let mut previous = None;
         for (index, part) in manifest.files.iter().enumerate() {
@@ -267,10 +290,9 @@ impl FormatReader for ColumnarReader {
         );
         let request = Arc::new(request);
         let mut pages = self.leaf_pages(request.clone());
-        let store = self.store.clone();
         Ok(Box::pin(async_stream::try_stream! {
             let mut metrics = ColumnarReadMetrics::default();
-            while let Some((path, page)) = pages.try_next().await? {
+            while let Some((area, page)) = pages.try_next().await? {
                 for block in page.blocks()? {
                     if !matches_range(block.first_id(), block.last_id(), &request)
                         || !matches_statistics(block, &request.filters)
@@ -279,7 +301,7 @@ impl FormatReader for ColumnarReader {
                     }
                     *metrics.counts.entry("series_blocks_read").or_default() += 1;
                     *metrics.counts.entry("series_rows_examined").or_default() += u64::from(block.rows);
-                    if let Some(mut output) = read_block(&store, &path, block, &request, projected.clone(), &mut metrics).await? {
+                    if let Some(mut output) = read_block(&area, block, &request, projected.clone(), &mut metrics).await? {
                         loop {
                             let started = Instant::now();
                             let batch = output.next_batch()?;
@@ -299,7 +321,6 @@ impl ColumnarReader {
     /// Stream every exact sparse key and its stored row count in file order.
     pub(crate) fn read_full_keys(&self) -> BoxStream<'static, Result<(ExactSeriesKey, u64)>> {
         let mut pages = self.leaf_pages(Default::default());
-        let store = self.store.clone();
         let manifest = self.manifest.clone();
         Box::pin(async_stream::try_stream! {
             let tag_ids: HashMap<_, _> = manifest.tags.iter()
@@ -309,15 +330,15 @@ impl ColumnarReader {
             let codec = SparsePrimaryKeyCodec::schemaless();
             let mut offsets = SparseOffsetsCache::new();
             let mut encoded = Vec::new();
-            while let Some((path, page)) = pages.try_next().await? {
+            while let Some((area, page)) = pages.try_next().await? {
                 for block in page.blocks()? {
-                    let tsids = read_integers(&store, &path, block, TSID_COLUMN, &mut metrics).await?;
-                    let counts = read_integers(&store, &path, block, ROW_COUNT_COLUMN, &mut metrics).await?;
+                    let tsids = read_integers(&area, block, TSID_COLUMN, &mut metrics).await?;
+                    let counts = read_integers(&area, block, ROW_COUNT_COLUMN, &mut metrics).await?;
                     // Block metadata lists only physically present tag chunks.
                     let mut tags = Vec::new();
                     for column in &block.columns {
                         if let Some(&id) = tag_ids.get(column.name.as_str()) {
-                            let decoded = load_column_chunk(&store, &path, column, block, &mut metrics).await?;
+                            let decoded = load_column_chunk(&area, column, block, &mut metrics).await?;
                             let Decoded::Strings(dictionary) = decoded else {
                                 Err(invalid("expected a series tag dictionary"))?
                             };
@@ -346,40 +367,46 @@ impl ColumnarReader {
     fn leaf_pages(
         &self,
         request: Arc<SeriesReadRequest>,
-    ) -> BoxStream<'static, Result<(Arc<str>, Arc<Page>)>> {
+    ) -> BoxStream<'static, Result<(PartArea, Arc<Page>)>> {
         let cache = self.cache.clone();
         let manifest = self.manifest.clone();
         let store = self.store.clone();
         let handle = self.handle.clone();
-        let names: Vec<_> = [TSID_COLUMN, ROW_COUNT_COLUMN]
+        let names: Arc<[String]> = [TSID_COLUMN, ROW_COUNT_COLUMN]
             .into_iter()
             .map(str::to_owned)
             .chain(manifest.tags.iter().map(|tag| tag.name.clone()))
             .collect();
         Box::pin(async_stream::try_stream! {
-            // Retained across every yield, even after the reader object is dropped.
-            let _handle = handle;
             let mut metrics = ColumnarReadMetrics::default();
+            // Resolve this handle's location even when the descriptor was cached from another store.
+            let manifest_path = handle.manifest_path();
+            let prefix = manifest_path.strip_suffix("manifest.json").ok_or_else(|| invalid("invalid manifest path"))?;
             for part in &manifest.files {
                 if !matches_range(part.first, part.last, &request) { continue; }
                 *metrics.counts.entry("series_parts").or_default() += 1;
                 let timer = metrics.timer("columnar_series_metadata_wall");
-                let path: Arc<str> = manifest.part_path(part.part_id).into();
+                let path = Manifest::part_path_in(prefix, part.part_id);
                 let size = part.file_size;
-                let trailer = metadata_cache::load(cache.as_ref(), format!("{path}/{size}/framing"), |_| std::mem::size_of::<Trailer>(), async {
-                let framing = fetch_byte_ranges(&path, store.clone(), &[0..metadata::HEADER_SIZE, size-metadata::TRAILER_SIZE..size]).await.context(OpenDalSnafu)?;
-                require(
-                    framing.len() == 2
-                        && framing[0].len() as u64 == metadata::HEADER_SIZE
-                        && framing[1].len() as u64 == metadata::TRAILER_SIZE,
-                    "series framing length mismatch",
-                )?;
-                metadata::validate_header(&framing[0])?;
-                let trailer = Trailer::decode(&framing[1], size)?;
+                let object = MetadataPart { generation: manifest.generation, part_id: part.part_id };
+                let reader = ObjectReader::open(cache.as_ref(), handle.narthex_file(), crate::cache::file_cache::FileType::Series(Some(part.part_id)), &store, &path, size).await?;
+                let framing_reader = reader.clone();
+                let expected = (part.first, part.last);
+                let trailer = metadata_cache::load(cache.as_ref(), MetadataIdentity::SeriesTrailer(object), |_| std::mem::size_of::<Trailer>(), move || async move {
+                    let framing = framing_reader.fetch(vec![0..metadata::HEADER_SIZE, size-metadata::TRAILER_SIZE..size]).await.context(OpenDalSnafu)?;
+                    require(
+                        framing.len() == 2
+                            && framing[0].len() as u64 == metadata::HEADER_SIZE
+                            && framing[1].len() as u64 == metadata::TRAILER_SIZE,
+                        "series framing length mismatch",
+                    )?;
+                    metadata::validate_header(&framing[0])?;
+                    let trailer = Trailer::decode(&framing[1], size)?;
+                    require((trailer.root.first, trailer.root.last) == expected, "series part/root bounds mismatch")?;
                     Ok(trailer)
                 }).await?;
-                require(trailer.root.first == part.first && trailer.root.last == part.last, "series part/root bounds mismatch")?;
-                let root = load_metadata_page(cache.as_ref(), &store, (&path, size), &trailer.root, trailer.depth, trailer.payload_end, &names).await?;
+                let area = PartArea::new(reader.clone(), cache.clone(), manifest.generation, part.part_id, metadata::HEADER_SIZE..trailer.payload_end);
+                let root = load_metadata_page(cache.as_ref(), &reader, object, &trailer.root, trailer.depth, trailer.payload_end, &names).await?;
                 drop(timer);
                 let (mut active, children) = match root.as_ref() {
                     Page::Leaf(_) => (Some(root.clone()), Vec::new()),
@@ -393,7 +420,7 @@ impl ColumnarReader {
                         let Some(child) = child_iter.next() else { break; };
                         if !matches_range(child.first, child.last, &request) { continue; }
                         let timer = metrics.timer("columnar_series_metadata_wall");
-                        let page = load_metadata_page(cache.as_ref(), &store, (&path, size), &child, 1, trailer.payload_end, &names).await?;
+                        let page = load_metadata_page(cache.as_ref(), &reader, object, &child, 1, trailer.payload_end, &names).await?;
                         drop(timer);
                         page
                     };
@@ -405,7 +432,7 @@ impl ColumnarReader {
                             previous_payload_end = column.payload.end()?;
                         }
                     }
-                    yield (path.clone(), page);
+                    yield (area.clone(), page);
                 }
                 if request.ids.is_none() && request.table_id.is_none() {
                     require(observed_rows == part.num_series, "series part row count mismatch")?;
@@ -455,53 +482,40 @@ fn matches_statistics(block: &Block, filters: &[SimpleFilterEvaluator]) -> bool 
     true
 }
 
-async fn read_range(store: &ObjectStore, path: &str, start: u64, end: u64) -> Result<bytes::Bytes> {
-    let mut buffers = fetch_byte_ranges(path, store.clone(), std::slice::from_ref(&(start..end)))
-        .await
-        .context(OpenDalSnafu)?;
-    let bytes = buffers
-        .pop()
-        .ok_or_else(|| invalid("missing series range response"))?;
-    require(
-        bytes.len() as u64 == end - start,
-        "series range length mismatch",
-    )?;
-    Ok(bytes)
-}
-
 /// Reuses validated immutable metadata; traversal remains local to each stream.
 async fn load_metadata_page(
     cache: Option<&MetadataCache>,
-    store: &ObjectStore,
-    object: (&str, u64),
+    reader: &ObjectReader,
+    part: MetadataPart,
     reference: &PageReference,
     depth: u32,
     payload_end: u64,
-    names: &[String],
+    names: &Arc<[String]>,
 ) -> Result<Arc<Page>> {
-    let (path, size) = object;
+    let reader = reader.clone();
+    let reference = *reference;
+    let names = names.clone();
     metadata_cache::load(
         cache,
-        format!("{path}/{size}/{reference:?}/{depth}/{payload_end}"),
+        MetadataIdentity::SeriesPage {
+            part,
+            reference,
+            depth,
+        },
         Page::retained_size,
-        async {
+        move || async move {
             if reference.payload.encoding != 1 {
                 return Err(unsupported(format!(
                     "series metadata encoding {}",
                     reference.payload.encoding
                 )));
             }
-            let bytes = read_range(
-                store,
-                path,
-                reference.payload.offset,
-                reference.payload.end()?,
-            )
-            .await?;
-            // TODO: benchmark inline versus offloaded codecs for latency, throughput,
-            // and async-worker responsiveness before adding scheduling overhead.
+            let bytes = reader
+                .read(reference.payload.offset..reference.payload.end()?)
+                .await
+                .context(OpenDalSnafu)?;
             let decoded = reference.payload.unpack(&bytes)?;
-            Page::decode(&decoded, reference, depth, payload_end, names)
+            Page::decode(&decoded, &reference, depth, payload_end, &names)
         },
     )
     .await
@@ -564,10 +578,8 @@ impl Decoded {
     }
 }
 
-/// TODO: share decoded chunks through the existing Mito cache, not a new cache framework.
 async fn load_column_chunk(
-    store: &ObjectStore,
-    path: &str,
+    area: &PartArea,
     column: &Column,
     block: &Block,
     metrics: &mut ColumnarReadMetrics,
@@ -585,10 +597,24 @@ async fn load_column_chunk(
         )));
     }
     let timer = metrics.timer("columnar_series_fetch_wall");
-    let bytes = read_range(store, path, column.payload.offset, column.payload.end()?).await?;
+    let range = column.payload.offset..column.payload.end()?;
+    let (bytes, reads, fetched) = if let Some((mut bytes, stats)) = area
+        .cached_ranges(std::slice::from_ref(&range), None)
+        .await?
+    {
+        (
+            bytes.pop().unwrap(),
+            u64::from(stats.loaded_bytes > 0),
+            stats.loaded_bytes,
+        )
+    } else {
+        let bytes = area.reader.read(range).await.context(OpenDalSnafu)?;
+        let fetched = bytes.len() as u64;
+        (bytes, 1, fetched)
+    };
     drop(timer);
-    *metrics.counts.entry("series_column_reads").or_default() += 1;
-    *metrics.bytes.entry("series_payload_fetched").or_default() += bytes.len() as u64;
+    *metrics.counts.entry("series_column_reads").or_default() += reads;
+    *metrics.bytes.entry("series_payload_fetched").or_default() += fetched;
     let started = Instant::now();
     let rows = block.rows as usize;
     let first = block.first;
@@ -637,21 +663,19 @@ async fn load_column_chunk(
 }
 
 async fn read_integers(
-    store: &ObjectStore,
-    path: &str,
+    area: &PartArea,
     block: &Block,
     name: &str,
     metrics: &mut ColumnarReadMetrics,
 ) -> Result<Vec<u64>> {
-    match get_column(store, path, block, name, metrics).await? {
+    match get_column(area, block, name, metrics).await? {
         Decoded::Integers(values) => Ok(values),
         _ => Err(invalid(format!("missing integer column {name}"))),
     }
 }
 
 async fn get_column(
-    store: &ObjectStore,
-    path: &str,
+    area: &PartArea,
     block: &Block,
     name: &str,
     metrics: &mut ColumnarReadMetrics,
@@ -660,14 +684,13 @@ async fn get_column(
         return Ok(Decoded::Table(block.table_id, block.rows as usize));
     }
     match block.columns.iter().find(|c| c.name == name) {
-        Some(column) => load_column_chunk(store, path, column, block, metrics).await,
+        Some(column) => load_column_chunk(area, column, block, metrics).await,
         None => Ok(Decoded::Null(block.rows as usize)),
     }
 }
 
 async fn read_block(
-    store: &ObjectStore,
-    path: &str,
+    area: &PartArea,
     block: &Block,
     request: &SeriesReadRequest,
     schema: SchemaRef,
@@ -676,7 +699,7 @@ async fn read_block(
     let mut decoded = HashMap::new();
     let mut selected: Vec<_> = (0..block.rows as usize).collect();
     if let Some(ids) = &request.ids {
-        let column = get_column(store, path, block, TSID_COLUMN, metrics).await?;
+        let column = get_column(area, block, TSID_COLUMN, metrics).await?;
         if let Decoded::Integers(values) = &column {
             selected.retain(|&i| {
                 ids.contains(&MetricSeriesId {
@@ -687,24 +710,51 @@ async fn read_block(
         }
         decoded.insert(TSID_COLUMN.to_owned(), Arc::new(column));
     }
-    for filter in &request.filters {
-        if selected.is_empty() {
-            return Ok(None);
+    // A complete block mask can be reused without hashing an arbitrary ID selection.
+    let prefilter = if request.ids.is_none()
+        && !request.filters.is_empty()
+        && request.filters.len() == request.filter_exprs.len()
+    {
+        block
+            .columns
+            .first()
+            .and_then(|column| area.prefilter(column.payload.offset, &request.filter_exprs))
+    } else {
+        None
+    };
+    if let Some(mask) = prefilter
+        .as_ref()
+        .and_then(|(cache, key)| cache.get_prefilter_result(key))
+    {
+        selected.retain(|&row| mask.value(row));
+    } else {
+        for filter in &request.filters {
+            if selected.is_empty() {
+                break;
+            }
+            let name = filter.column_name();
+            if !decoded.contains_key(name) {
+                *metrics.counts.entry("series_filter_columns").or_default() += 1;
+                decoded.insert(
+                    name.to_owned(),
+                    Arc::new(get_column(area, block, name, metrics).await?),
+                );
+            }
+            let started = Instant::now();
+            decoded
+                .get(name)
+                .ok_or_else(|| invalid("missing decoded filter column"))?
+                .filter(filter, &mut selected)?;
+            metrics.add_elapsed("columnar_series_filter", started.elapsed());
         }
-        let name = filter.column_name();
-        if !decoded.contains_key(name) {
-            *metrics.counts.entry("series_filter_columns").or_default() += 1;
-            decoded.insert(
-                name.to_owned(),
-                Arc::new(get_column(store, path, block, name, metrics).await?),
-            );
+        if let Some((cache, key)) = prefilter {
+            let mut mask = datatypes::arrow::array::BooleanBufferBuilder::new(block.rows as usize);
+            mask.append_n(block.rows as usize, false);
+            for &row in &selected {
+                mask.set_bit(row, true);
+            }
+            cache.put_prefilter_result(key, Arc::new(mask.finish()));
         }
-        let started = Instant::now();
-        decoded
-            .get(name)
-            .ok_or_else(|| invalid("missing decoded filter column"))?
-            .filter(filter, &mut selected)?;
-        metrics.add_elapsed("columnar_series_filter", started.elapsed());
     }
     if selected.is_empty() {
         return Ok(None);
@@ -718,7 +768,7 @@ async fn read_block(
                 .or_default() += 1;
             decoded.insert(
                 name.clone(),
-                Arc::new(get_column(store, path, block, name, metrics).await?),
+                Arc::new(get_column(area, block, name, metrics).await?),
             );
         }
         columns.push(

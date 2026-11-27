@@ -123,6 +123,7 @@ impl SeriesIndexTaskState {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_series_index_tasks(
     worker_id: u32,
+    write_cache: Option<crate::cache::write_cache::WriteCacheRef>,
     schema_manager: SchemaMetadataManagerRef,
     store: ObjectStore,
     regions: RegionMapRef,
@@ -146,6 +147,7 @@ pub(crate) fn spawn_series_index_tasks(
     ));
     common_runtime::spawn_compact(async move {
         SeriesIndexTask {
+            write_cache,
             schema_manager,
             worker_id,
             store,
@@ -170,6 +172,7 @@ pub(crate) fn spawn_series_index_tasks(
 
 /// Periodic series-index maintenance for one region worker.
 struct SeriesIndexTask {
+    write_cache: Option<crate::cache::write_cache::WriteCacheRef>,
     schema_manager: SchemaMetadataManagerRef,
     store: ObjectStore,
     regions: RegionMapRef,
@@ -350,7 +353,7 @@ impl SeriesIndexTask {
             if region.state() != RegionRoleState::Leader(RegionLeaderState::Writable) {
                 return Ok(ReconcileStats::default());
             }
-            return self.reconcile_native(region, manual).await;
+            return self.reconcile_narthex(region, manual).await;
         }
         // Full capacity defers builds, but cleanup must still reclaim published usage.
         let allow_builds = self.disk_usage.load(Ordering::Relaxed) < self.max_size;
@@ -377,12 +380,12 @@ impl SeriesIndexTask {
         result
     }
 
-    async fn reconcile_native(
+    async fn reconcile_narthex(
         &mut self,
         region: MitoRegionRef,
         manual: bool,
     ) -> Result<ReconcileStats> {
-        let mut stats = self.build_and_expire_native(&region, manual).await?;
+        let mut stats = self.build_and_expire_narthex(&region, manual).await?;
         let version = region.version();
         if !version.pending_tails.is_empty() || !self.state.is_running() {
             return Ok(stats);
@@ -398,19 +401,24 @@ impl SeriesIndexTask {
             let truncated = version.truncated_entry_id;
             let metadata = version.metadata.clone();
             drop(version);
-            let output =
-                crate::sst::narthex::write_series(&region.access_layer, metadata, &inputs, window)
-                    .await
-                    .inspect_err(|_| {
-                        self.failed_merge.insert(region.region_id, rank);
-                    })?;
+            let output = crate::sst::narthex::write_series(
+                &region.access_layer,
+                self.write_cache.as_ref(),
+                metadata,
+                &inputs,
+                window,
+            )
+            .await
+            .inspect_err(|_| {
+                self.failed_merge.insert(region.region_id, rank);
+            })?;
             let handle = FileHandle::new(output.clone(), region.file_purger.clone());
             let edit = crate::manifest::action::RegionEdit {
                 series_indexes_to_add: vec![output],
                 series_indexes_to_remove: inputs.iter().map(FileHandle::file_id).collect(),
                 ..Default::default()
             };
-            self.publish_native(
+            self.publish_narthex(
                 &region,
                 edit,
                 &[handle],
@@ -424,7 +432,7 @@ impl SeriesIndexTask {
         Ok(stats)
     }
 
-    async fn build_and_expire_native(
+    async fn build_and_expire_narthex(
         &self,
         region: &MitoRegionRef,
         manual: bool,
@@ -549,6 +557,7 @@ impl SeriesIndexTask {
             };
             let output = match crate::sst::narthex::write_series(
                 &region.access_layer,
+                self.write_cache.as_ref(),
                 metadata.clone(),
                 &sources,
                 window,
@@ -573,13 +582,13 @@ impl SeriesIndexTask {
         stats.built_series = handles.len();
         stats.removed_series = edit.series_indexes_to_remove.len();
         if stats.built_series + stats.removed_series > 0 {
-            self.publish_native(region, edit, &handles, truncated_entry_id, &watermarks)
+            self.publish_narthex(region, edit, &handles, truncated_entry_id, &watermarks)
                 .await?;
         }
         Ok(stats)
     }
 
-    async fn publish_native(
+    async fn publish_narthex(
         &self,
         region: &MitoRegionRef,
         edit: crate::manifest::action::RegionEdit,
@@ -622,6 +631,7 @@ impl SeriesIndexTask {
                     .map_err(Arc::new),
                 waiters: Waiters::one(tx),
                 is_staging: false,
+                preload_sst_cache: false,
                 update_region_state: false,
             }),
         };
@@ -747,6 +757,7 @@ mod tests {
         let (state, receiver) = SeriesIndexTaskState::new(0, 1);
         (
             SeriesIndexTask {
+                write_cache: None,
                 schema_manager: crate::test_util::mock_schema_metadata_manager().0,
                 store,
                 regions,
@@ -772,7 +783,7 @@ mod tests {
     #[case(false)]
     #[case(true)]
     #[tokio::test]
-    async fn test_native_index_build_releases_flushed_memtables(#[case] truncate: bool) {
+    async fn test_narthex_index_build_releases_flushed_memtables(#[case] truncate: bool) {
         let entered = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
         let writer_entered = entered.clone();
@@ -867,7 +878,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_native_import_frontier_and_index_ttl() {
+    async fn test_narthex_import_frontier_and_index_ttl() {
         let mut env = TestEnv::new().await;
         let clock = Arc::new(crate::time_provider::mock::MockTimeProvider::new(2000));
         let engine = env
@@ -1459,6 +1470,7 @@ mod tests {
         regions.insert_region(region.clone());
         let (state, receiver) = SeriesIndexTaskState::new(0, 2);
         let mut task = SeriesIndexTask {
+            write_cache: None,
             schema_manager: crate::test_util::mock_schema_metadata_manager().0,
             store: store.clone(),
             regions,
@@ -1546,6 +1558,7 @@ mod tests {
         let usage = Arc::new(AtomicU64::new(0));
         let (state, command_receiver) = SeriesIndexTaskState::new(0, 1);
         let mut task = SeriesIndexTask {
+            write_cache: None,
             schema_manager: crate::test_util::mock_schema_metadata_manager().0,
             store: store.clone(),
             regions,
@@ -1686,6 +1699,7 @@ mod tests {
         let make_task = || {
             let (state, command_receiver) = SeriesIndexTaskState::new(0, 1);
             SeriesIndexTask {
+                write_cache: None,
                 schema_manager: crate::test_util::mock_schema_metadata_manager().0,
                 store: store.clone(),
                 regions: Arc::new(RegionMap::default()),

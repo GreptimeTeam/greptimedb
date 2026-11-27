@@ -20,10 +20,11 @@ mod histogram;
 mod metadata;
 #[cfg(test)]
 pub(crate) use histogram::tests::{TestHistogram, histogram_array};
+pub(crate) use metadata::PageReference;
 pub(crate) mod reader;
 #[cfg(test)]
 mod tests;
-mod writer;
+pub(crate) mod writer;
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -313,7 +314,10 @@ impl Manifest {
         format!("{}manifest.json", self.prefix())
     }
     fn part_path(&self, id: u32) -> String {
-        format!("{}part-{id}.samples", self.prefix())
+        Self::part_path_in(&self.prefix(), id)
+    }
+    fn part_path_in(prefix: &str, id: u32) -> String {
+        format!("{prefix}part-{id}.samples")
     }
     fn validate_schema(&self) -> Result<()> {
         require(

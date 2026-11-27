@@ -456,28 +456,11 @@ impl WriteCache {
             .await
     }
 
-    /// Downloads the target file into write cache only when it is not cached.
-    ///
-    /// Returns `Ok(true)` if this call performs a download, or `Ok(false)` if the
-    /// file is already present in write cache and download is skipped.
-    pub(crate) async fn download_if_absent(
-        &self,
-        index_key: IndexKey,
-        remote_path: &str,
-        remote_store: &ObjectStore,
-        file_size: u64,
-    ) -> Result<bool> {
-        if self.file_cache.contains_key(&index_key) {
-            debug!(
-                "Skip downloading file already in write cache, region: {}, file: {}",
-                index_key.region_id, index_key.file_id
-            );
-            return Ok(false);
-        }
+    pub(crate) const NARTHEX_STAGE: &'static str = "cache/staging/narthex/";
 
-        self.download(index_key, remote_path, remote_store, file_size)
-            .await?;
-        Ok(true)
+    /// Staging is distinct from authoritative paths even if both stores share an FS root.
+    pub(crate) fn narthex_stage(path: &str) -> String {
+        format!("{}{path}", Self::NARTHEX_STAGE)
     }
 
     /// Uploads a Parquet file or a Puffin file to the remote object store.
@@ -600,6 +583,84 @@ impl WriteCache {
     /// If the receiver has been dropped, the error is ignored.
     pub(crate) fn load_region_cache(&self, task: RegionLoadCacheTask) {
         let _ = self.task_sender.send(task);
+    }
+}
+
+/// The writer owns a fresh physical file ID until the complete upload returns.
+pub(crate) struct NarthexUpload {
+    cache: WriteCacheRef,
+    remote: ObjectStore,
+    artifact_dir: String,
+    manifest_key: IndexKey,
+    op_type: OperationType,
+    cancellation: Option<CancellationToken>,
+    uploaded: Vec<IndexKey>,
+}
+
+impl NarthexUpload {
+    pub(crate) fn new(
+        cache: &WriteCacheRef,
+        remote: &ObjectStore,
+        artifact_dir: String,
+        manifest_key: IndexKey,
+        op_type: OperationType,
+        cancellation: Option<CancellationToken>,
+    ) -> Self {
+        Self {
+            cache: cache.clone(),
+            remote: remote.clone(),
+            artifact_dir,
+            manifest_key,
+            op_type,
+            cancellation,
+            uploaded: Vec::new(),
+        }
+    }
+
+    /// Each codec closes parts in ID order and closes the manifest last.
+    pub(crate) async fn upload_closed(&mut self, path: &str) -> Result<()> {
+        let mut key = self.manifest_key;
+        if !path.ends_with("/manifest.json") {
+            let part = Some(self.uploaded.len() as u32);
+            key.file_type = match key.file_type {
+                FileType::Samples(_) => FileType::Samples(part),
+                FileType::Series(_) => FileType::Series(part),
+                _ => unreachable!(),
+            };
+        }
+        self.uploaded.push(key);
+        let disk = self.cache.file_cache();
+        disk.local_store()
+            .rename(&WriteCache::narthex_stage(path), &disk.cache_file_path(key))
+            .await
+            .context(error::OpenDalSnafu)?;
+        self.cache
+            .upload_with_cancellation(
+                key,
+                path,
+                &self.remote,
+                UploadOptions {
+                    op_type: self.op_type,
+                    write_buffer_size: DEFAULT_WRITE_BUFFER_SIZE,
+                },
+                self.cancellation.as_ref(),
+            )
+            .await
+    }
+
+    pub(crate) async fn clean(&mut self) {
+        for &key in &self.uploaded {
+            self.cache.remove(key).await;
+        }
+        self.uploaded.clear();
+        if let Err(error) = self
+            .remote
+            .delete_with(&self.artifact_dir)
+            .recursive(true)
+            .await
+        {
+            common_telemetry::warn!(error; "Failed to remove unpublished Narthex artifact {}", self.artifact_dir);
+        }
     }
 }
 
@@ -914,6 +975,110 @@ mod tests {
         );
         assert_eq!(1, observations.abort_calls);
         assert_eq!(usize::from(fail_close), observations.close_calls);
+    }
+
+    #[rstest::rstest]
+    #[case::failed_manifest(false)]
+    #[case::cancelled_manifest(true)]
+    #[tokio::test]
+    async fn narthex_upload_cleans_staged_and_uploaded_parts(#[case] cancel: bool) {
+        use crate::series_index::artifact::ArtifactObject;
+        use object_store::layers::mock::MockLayerBuilder;
+        let env = TestEnv::new().await;
+        let root = create_temp_dir("narthex-upload");
+        let cache = env
+            .create_write_cache_from_path(root.path().to_str().unwrap(), ReadableSize::mb(8))
+            .await;
+        let local = cache.file_cache().local_store();
+        let signal = CancellationToken::new();
+        let on_manifest = signal.clone();
+        let layer = MockLayerBuilder::default()
+            .writer_factory(Arc::new(move |path, _, inner| {
+                if path.ends_with("manifest.json") {
+                    if cancel {
+                        on_manifest.cancel();
+                    }
+                    return Box::new(FailingUploadWriter {
+                        inner,
+                        fail_close: true,
+                        fail_abort: false,
+                        successful_writes: 0,
+                    });
+                }
+                inner
+            }))
+            .build()
+            .unwrap();
+        let remote_root = create_temp_dir("narthex-remote");
+        let remote = new_fs_store(remote_root.path().to_str().unwrap()).layer(layer);
+        let owner = RegionId::new(1, 1);
+        let id = FileId::random();
+        let artifact_dir = crate::sst::location::narthex_file_dir("region", id);
+        let mut inventory = Vec::new();
+        for (part, name) in [
+            (Some(0), "part-0.series"),
+            (Some(1), "part-1.series"),
+            (None, "manifest.json"),
+        ] {
+            let path = format!("{artifact_dir}{name}");
+            local
+                .write(&WriteCache::narthex_stage(&path), vec![42; 16])
+                .await
+                .unwrap();
+            inventory.push((
+                IndexKey::new(owner, id, FileType::Series(part)),
+                ArtifactObject {
+                    path,
+                    file_size: 16,
+                },
+            ));
+        }
+        let mut upload = NarthexUpload::new(
+            &cache,
+            &remote,
+            artifact_dir.clone(),
+            IndexKey::new(owner, id, FileType::Series(None)),
+            OperationType::Compact,
+            Some(signal),
+        );
+        for (_, object) in &inventory[..2] {
+            upload.upload_closed(&object.path).await.unwrap();
+            assert!(remote.exists(&object.path).await.unwrap());
+            assert!(
+                !local
+                    .exists(&WriteCache::narthex_stage(&object.path))
+                    .await
+                    .unwrap()
+            );
+        }
+        let error = upload
+            .upload_closed(&inventory[2].1.path)
+            .await
+            .unwrap_err();
+        let directory = remote_root.path().join(&artifact_dir);
+        assert!(directory.is_dir());
+        upload.clean().await;
+        assert!(!directory.try_exists().unwrap());
+        assert_eq!(
+            matches!(error, error::Error::SstWriteCancelled { .. }),
+            cancel
+        );
+        for (key, object) in inventory {
+            assert!(!remote.exists(&object.path).await.unwrap());
+            assert!(
+                !local
+                    .exists(&WriteCache::narthex_stage(&object.path))
+                    .await
+                    .unwrap()
+            );
+            assert!(
+                !local
+                    .exists(&cache.file_cache.cache_file_path(key))
+                    .await
+                    .unwrap()
+            );
+            assert!(!cache.file_cache.contains_key(&key));
+        }
     }
 
     #[tokio::test]
@@ -1346,6 +1511,7 @@ mod tests {
             .await;
 
         let downloaded = write_cache
+            .file_cache()
             .download_if_absent(key, "missing/path.parquet", &remote_store, 1)
             .await
             .unwrap();
@@ -1375,6 +1541,7 @@ mod tests {
             .unwrap();
 
         let downloaded = write_cache
+            .file_cache()
             .download_if_absent(key, &remote_path, &remote_store, remote_data.len() as u64)
             .await
             .unwrap();

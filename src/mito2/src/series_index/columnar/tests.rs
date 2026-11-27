@@ -36,7 +36,7 @@ use super::codec::{self, Compression};
 use super::metadata::{self, PayloadReference, Trailer};
 use super::{ColumnarSeriesFormat, Manifest};
 use crate::series_index::catalog::SeriesIndexEntry;
-use crate::series_index::format::{SeriesIndexFormat, SeriesReadRequest};
+use crate::series_index::format::{FormatReader, SeriesIndexFormat, SeriesReadRequest};
 use crate::series_index::{
     MetricSeriesId, ROW_COUNT_COLUMN, SeriesIndexFileHandle, TABLE_ID_COLUMN, TSID_COLUMN,
     series_index_channel,
@@ -955,10 +955,8 @@ async fn selective_io_and_pinned_stream_retirement() {
         }))
         .build()
         .unwrap();
-    let reader = format
-        .reader(store.layer(layer), handle.clone())
-        .await
-        .unwrap();
+    let store = store.layer(layer);
+    let reader = format.reader(store.clone(), handle.clone()).await.unwrap();
     let all = reader
         .read(request(&[
             TABLE_ID_COLUMN,
@@ -1008,6 +1006,30 @@ async fn selective_io_and_pinned_stream_retirement() {
         "é"
     );
     assert_eq!(all[0].column(4).null_count(), 0);
+    let strategy = crate::cache::CacheStrategy::EnableAll(Arc::new(
+        crate::cache::CacheManager::builder()
+            .page_cache_size(1024 * 1024)
+            .sst_meta_cache_size(1024 * 1024)
+            .build(),
+    ));
+    for warm in [false, true] {
+        reads.lock().unwrap().clear();
+        let cached = super::reader::ColumnarReader::open_cached(
+            store.clone(),
+            handle.clone(),
+            strategy.columnar_metadata(),
+        )
+        .await
+        .unwrap();
+        let batches = cached
+            .read(request(&["tag_0"]))
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(batches.len(), all.len());
+        assert_eq!(reads.lock().unwrap().is_empty(), warm);
+    }
     reads.lock().unwrap().clear();
     let mut req = request(&["tag_0"]);
     req.table_id = Some(9);

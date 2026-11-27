@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Native Narthex sample and series-index writers.
+//! Narthex sample and series-index writers.
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -27,13 +27,15 @@ use snafu::ResultExt;
 use store_api::metadata::RegionMetadata;
 use store_api::storage::FileId;
 
-use crate::access_layer::SstInfoArray;
 use crate::access_layer::{AccessLayer, SstWriteRequest};
+use crate::access_layer::{OperationType, SstInfoArray};
+use crate::cache::file_cache::{FileType, IndexKey};
+use crate::cache::write_cache::{NarthexUpload, WriteCacheRef};
 use crate::error::{ComputeArrowSnafu, InvalidRecordBatchSnafu, Result};
 use crate::series_index::artifact::SamplesFileHandle;
 use crate::series_index::columnar::reader::ColumnarReader;
 use crate::series_index::columnar::{ColumnarSeriesFormat, invalid, require};
-use crate::series_index::format::{FormatWriter, SamplesFormat, SamplesFormatReader};
+use crate::series_index::format::{FormatWriter, SamplesFormatReader};
 use crate::series_index::identity::ExactSeriesKey;
 use crate::series_index::samples::ColumnarSamplesFormat;
 use crate::series_index::samples::reader::SamplesReader;
@@ -60,23 +62,51 @@ pub(crate) async fn write_samples(
             .await?;
     }
     let prefix = location::narthex_file_dir(&layer.build_region_dir(region_id), id);
-    let mut writer = ColumnarSamplesFormat::default()
-        .writer(
-            request.metadata.clone(),
-            layer.object_store().clone(),
-            &prefix,
-            id,
-            id,
-        )
-        .await?;
+    let cache = request.cache_manager.write_cache();
+    let store = cache.map_or_else(
+        || layer.object_store().clone(),
+        |cache| cache.file_cache().local_store(),
+    );
+    let mut writer = Box::new(crate::series_index::samples::writer::SamplesWriter::new(
+        ColumnarSamplesFormat::default(),
+        request.metadata.clone(),
+        store,
+        &prefix,
+        id,
+        id,
+    )?);
+    if let Some(cache) = cache {
+        writer.set_upload(NarthexUpload::new(
+            cache,
+            layer.object_store(),
+            prefix,
+            IndexKey::new(region_id, id, FileType::Samples(None)),
+            request.op_type,
+            cancellation.clone(),
+        ));
+    }
     let mut rows = 0;
     let mut series = 0;
     let mut previous_key = Vec::new();
     let mut lower = i64::MAX;
     let mut upper = i64::MIN;
     let timestamp = &request.metadata.time_index_column().column_schema.name;
-    let write_batches = async {
-        while let Some(batch) = request.source.next_batch().await? {
+    let write_result: Result<()> = async {
+        loop {
+            let next = request.source.next_batch();
+            let batch = if let Some(signal) = &cancellation {
+                tokio::select! {
+                    biased;
+                    _ = signal.cancelled() => return crate::error::CompactionCancelledSnafu.fail(),
+                    batch = next => batch?,
+                }
+            } else {
+                next.await?
+            };
+            let Some(batch) = batch else {
+                break;
+            };
+
             if batch.num_rows() == 0 {
                 continue;
             }
@@ -120,16 +150,8 @@ pub(crate) async fn write_samples(
             writer.write(&batch).await?;
         }
         Ok(())
-    };
-    let write_result: Result<()> = if let Some(signal) = cancellation {
-        tokio::select! {
-            biased;
-            _ = signal.cancelled() => crate::error::CompactionCancelledSnafu.fail(),
-            result = write_batches => result,
-        }
-    } else {
-        write_batches.await
-    };
+    }
+    .await;
     if let Err(error) = write_result {
         return Err(abort_narthex_write(writer, error).await);
     }
@@ -146,11 +168,11 @@ pub(crate) async fn write_samples(
         .build()
     })?;
     let unit = request.metadata.time_index_type().unit();
-    Ok(smallvec::smallvec![SstInfo {
+    let info = SstInfo {
         file_id: id,
         time_range: (
             common_time::Timestamp::new(lower, unit),
-            common_time::Timestamp::new(upper, unit)
+            common_time::Timestamp::new(upper, unit),
         ),
         file_size: artifact.file_size,
         num_rows: rows,
@@ -165,16 +187,18 @@ pub(crate) async fn write_samples(
             parts: parts
                 .iter()
                 .map(|part| NarthexPartMeta {
-                    file_size: part.file_size
+                    file_size: part.file_size,
                 })
-                .collect()
+                .collect(),
         })),
-    }])
+    };
+    Ok(smallvec::smallvec![info])
 }
 
-/// Reconstruct the canonical sparse key from a native series row, in SST order.
+/// Reconstruct the canonical sparse key from a Narthex series row, in SST order.
 async fn series_keys(
     layer: &AccessLayer,
+    cache: Option<&WriteCacheRef>,
     source: &FileHandle,
     metadata: &RegionMetadata,
 ) -> Result<BoxStream<'static, Result<(ExactSeriesKey, u64)>>> {
@@ -182,7 +206,9 @@ async fn series_keys(
         source.clone(),
         &layer.build_region_dir(source.region_id()),
     )?;
-    let mut reader = ColumnarReader::open(layer.object_store().clone(), handle).await?;
+    let context = crate::cache::columnar::MetadataCache::maintenance(cache);
+    let mut reader =
+        ColumnarReader::open_cached(layer.object_store().clone(), handle, context).await?;
     reader.adapt_tags(metadata)?;
     Ok(reader.read_full_keys())
 }
@@ -190,6 +216,7 @@ async fn series_keys(
 /// Merge sorted sample keys or stored index rows. A separate manifest edit publishes the index.
 pub(crate) async fn write_series(
     layer: &AccessLayer,
+    cache: Option<&WriteCacheRef>,
     metadata: store_api::metadata::RegionMetadataRef,
     sources: &[FileHandle],
     window: crate::sst::file::WindowSequence,
@@ -220,29 +247,45 @@ pub(crate) async fn write_series(
     )?;
     let mut writer = ColumnarSeriesFormat::default().narthex_writer(
         metadata.clone(),
-        layer.object_store().clone(),
+        cache.map_or_else(
+            || layer.object_store().clone(),
+            |cache| cache.file_cache().local_store(),
+        ),
         &entry,
-        prefix,
+        prefix.clone(),
     )?;
+    if let Some(cache) = cache {
+        writer.set_upload(NarthexUpload::new(
+            cache,
+            layer.object_store(),
+            prefix,
+            IndexKey::new(metadata.region_id, id, FileType::Series(None)),
+            OperationType::Compact,
+            None,
+        ));
+    }
     let write_result: Result<()> = async {
         let mut streams = Vec::with_capacity(sources.len());
         let mut heads = BinaryHeap::new();
         for source in sources {
             let mut stream = match &source.meta_ref().format {
-                FileFormat::NarthexSeriesIndex(_) => series_keys(layer, source, &metadata).await?,
+                FileFormat::NarthexSeriesIndex(_) => {
+                    series_keys(layer, cache, source, &metadata).await?
+                }
                 FileFormat::NarthexSamples(_) => {
                     let handle = SamplesFileHandle::from_narthex(
                         source.clone(),
                         &layer.build_region_dir(source.region_id()),
                     )?;
-                    SamplesReader::open(layer.object_store().clone(), handle)
+                    let context = crate::cache::columnar::MetadataCache::maintenance(cache);
+                    SamplesReader::open_cached(layer.object_store().clone(), handle, context)
                         .await?
                         .read(Default::default())?
                         .map_ok(|block| (block.key, block.batch.num_rows() as u64))
                         .boxed()
                 }
                 FileFormat::Parquet => {
-                    return Err(invalid("expected native series or samples"));
+                    return Err(invalid("expected Narthex series or samples"));
                 }
             };
             if let Some((key, rows)) = stream.try_next().await? {

@@ -69,6 +69,10 @@ pub(crate) struct ColumnarWriter {
     failed: bool,
 }
 impl ColumnarWriter {
+    pub(crate) fn set_upload(&mut self, upload: crate::cache::write_cache::NarthexUpload) {
+        self.outputs.upload = Some(upload);
+    }
+
     pub(crate) fn with_prefix(mut self, prefix: String) -> Result<Self> {
         require(
             prefix.ends_with('/') && !prefix.split('/').any(|part| part == ".."),
@@ -122,6 +126,7 @@ impl ColumnarWriter {
                 active: None,
                 paths: Vec::new(),
                 committed: false,
+                upload: None,
             },
             tags,
             offsets: SparseOffsetsCache::new(),
@@ -398,7 +403,7 @@ impl ColumnarWriter {
         self.outputs.open(self.manifest.path()).await?;
         self.outputs.write(bytes).await?;
         self.outputs.close().await?;
-        self.outputs.committed = true;
+        self.outputs.commit().await;
         Ok(ArtifactMetadata {
             format: ArtifactFormat::ColumnarSeries,
             generation: self.manifest.generation,

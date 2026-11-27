@@ -46,7 +46,7 @@ use store_api::region_request::{PathType, RegionRequirements};
 use store_api::storage::{ColumnId, RegionId};
 use tokio::sync::Semaphore;
 
-use crate::access_layer::AccessLayer;
+use crate::access_layer::{AccessLayer, AccessLayerRef};
 use crate::cache::file_cache::{FileCache, FileType, IndexKey};
 use crate::cache::{CacheManagerRef, SstMetaPreparation, prepare_sst_meta};
 use crate::config::MitoConfig;
@@ -62,7 +62,9 @@ use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::time_partition::TimePartitions;
 use crate::memtable::{MemtableBuilderProvider, ensure_json2_uses_flat_format};
-use crate::metrics::{CACHE_FILL_DOWNLOADED_FILES, CACHE_FILL_PENDING_FILES};
+use crate::metrics::{
+    CACHE_FILL_DOWNLOADED_FILES, CACHE_FILL_PENDING_FILES, WRITE_CACHE_INFLIGHT_DOWNLOAD,
+};
 use crate::read::series_candidate::is_sparse_metric_metadata;
 use crate::region::options::RegionOptions;
 use crate::region::version::{Version, VersionBuilder, VersionControl, VersionControlRef};
@@ -75,7 +77,7 @@ use crate::request::OptionOutputTx;
 use crate::schedule::scheduler::SchedulerRef;
 use crate::series_index::{IndexFilePurger, load_version_control};
 use crate::sst::FormatType;
-use crate::sst::file::{FileHandle, RegionFileId, RegionIndexId};
+use crate::sst::file::FileHandle;
 use crate::sst::file_purger::{FilePurgerRef, create_file_purger};
 use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::index::IndexBuildType;
@@ -90,6 +92,8 @@ use crate::sst::range_index::RangeIndexDeleter;
 use crate::time_provider::TimeProviderRef;
 use crate::wal::entry_reader::WalEntryReader;
 use crate::wal::{EntryId, Wal};
+
+use crate::worker::WorkerListener;
 
 const PARQUET_META_PRELOAD_CONCURRENCY: usize = 8;
 
@@ -770,7 +774,7 @@ impl RegionOpener {
         let region = Arc::new(region);
 
         maybe_load_cache(&region, config, &self.cache_manager);
-        maybe_preload_parquet_meta_cache(&region, config, &self.cache_manager);
+        maybe_preload_sst_meta_cache(&region, config, &self.cache_manager);
 
         Ok(Some(region))
     }
@@ -1164,22 +1168,70 @@ pub(crate) async fn replay_entry(
 }
 
 /// A task to load and fill the region file cache.
-pub(crate) struct RegionLoadCacheTask {
-    region: MitoRegionRef,
+pub(crate) enum RegionLoadCacheTask {
+    Open(MitoRegionRef),
+    NarthexEdit {
+        layer: AccessLayerRef,
+        files: Vec<FileHandle>,
+        listener: WorkerListener,
+    },
 }
 
 impl RegionLoadCacheTask {
-    pub(crate) fn new(region: MitoRegionRef) -> Self {
-        Self { region }
+    pub(crate) async fn fill_cache(self, file_cache: &FileCache) {
+        match self {
+            Self::Open(region) => Self::fill_region_indexes(&region, file_cache).await,
+            Self::NarthexEdit {
+                layer,
+                files,
+                listener,
+            } => {
+                for handle in files {
+                    let file = handle.meta_ref();
+                    let inventory =
+                        IndexKey::narthex_objects(file, &layer.build_region_dir(file.region_id));
+                    WRITE_CACHE_INFLIGHT_DOWNLOAD.inc();
+                    let mut downloaded = false;
+                    for (key, object) in &inventory {
+                        if !file_cache.can_retain(*key, object.file_size) {
+                            continue;
+                        }
+                        match file_cache
+                            .download_if_absent(
+                                *key,
+                                &object.path,
+                                layer.object_store(),
+                                object.file_size,
+                            )
+                            .await
+                        {
+                            Ok(new) => downloaded |= new,
+                            Err(error) => {
+                                warn!(error; "Failed to preload Narthex object {}", object.path);
+                                downloaded = false;
+                                break;
+                            }
+                        }
+                    }
+                    WRITE_CACHE_INFLIGHT_DOWNLOAD.dec();
+                    if downloaded
+                        && inventory
+                            .iter()
+                            .all(|(key, _)| file_cache.contains_key(key))
+                    {
+                        listener.on_file_cache_filled(file.file_id);
+                    }
+                }
+            }
+        }
     }
 
-    /// Fills the file cache with index files from the region.
-    pub(crate) async fn fill_cache(&self, file_cache: &FileCache) {
-        let region_id = self.region.region_id;
-        let table_dir = self.region.access_layer.table_dir();
-        let path_type = self.region.access_layer.path_type();
-        let object_store = self.region.access_layer.object_store();
-        let version_control = &self.region.version_control;
+    async fn fill_region_indexes(region: &MitoRegionRef, file_cache: &FileCache) {
+        let region_id = region.region_id;
+        let table_dir = region.access_layer.table_dir();
+        let path_type = region.access_layer.path_type();
+        let object_store = region.access_layer.object_store();
+        let version_control = &region.version_control;
 
         // Collects IndexKeys, file sizes, and max timestamps for files that need to be downloaded
         let mut files_to_download = Vec::new();
@@ -1201,11 +1253,34 @@ impl RegionLoadCacheTask {
                             files_to_download.push((
                                 puffin_key,
                                 file_meta.index_file_size,
-                                file_meta.time_range.1, // max timestamp
+                                file_meta.time_range.1,
+                                location::index_file_path(
+                                    table_dir,
+                                    file_meta.index_id(),
+                                    path_type,
+                                ),
+                                None,
                             ));
                         } else {
                             files_already_cached += 1;
                         }
+                    }
+                }
+            }
+            for handle in version.ssts.series_indexes().values() {
+                let meta = handle.meta_ref();
+                let dir = region.access_layer.build_region_dir(meta.region_id);
+                for (key, object) in IndexKey::narthex_objects(meta, &dir) {
+                    if file_cache.contains_key(&key) {
+                        files_already_cached += 1;
+                    } else {
+                        files_to_download.push((
+                            key,
+                            object.file_size,
+                            meta.time_range.1,
+                            object.path,
+                            Some(handle.clone()),
+                        ));
                     }
                 }
             }
@@ -1228,49 +1303,40 @@ impl RegionLoadCacheTask {
         let mut files_downloaded = 0;
         let mut files_skipped = 0;
 
-        for (puffin_key, file_size, max_timestamp) in files_to_download {
+        let mut remaining = files_to_download.into_iter();
+        while let Some((index_key, file_size, max_timestamp, path, _pin)) = remaining.next() {
             let current_size = file_cache.puffin_cache_size();
             let capacity = file_cache.puffin_cache_capacity();
-            let region_state = self.region.state();
+            let region_state = region.state();
             if !can_load_cache(region_state) {
                 info!(
                     "Stopping index cache by state: {:?}, region: {}, current_size: {}, capacity: {}",
                     region_state, region_id, current_size, capacity
                 );
+                files_skipped += remaining.len() + 1;
+                CACHE_FILL_PENDING_FILES.sub((remaining.len() + 1) as i64);
                 break;
             }
 
             // Checks if adding this file would exceed capacity
-            if current_size + file_size > capacity {
+            if file_size > capacity.saturating_sub(current_size) {
                 info!(
-                    "Stopping index cache preload due to capacity limit, region: {}, file_id: {}, current_size: {}, file_size: {}, capacity: {}, file_timestamp: {:?}",
-                    region_id, puffin_key.file_id, current_size, file_size, capacity, max_timestamp
+                    "Skipping index cache object due to capacity limit, region: {}, file_id: {}, current_size: {}, file_size: {}, capacity: {}, file_timestamp: {:?}",
+                    region_id, index_key.file_id, current_size, file_size, capacity, max_timestamp
                 );
-                files_skipped = (total_files - files_downloaded) as usize;
-                CACHE_FILL_PENDING_FILES.sub(total_files - files_downloaded);
-                break;
+                files_skipped += 1;
+                CACHE_FILL_PENDING_FILES.dec();
+                continue;
             }
 
-            let index_version = if let FileType::Puffin(version) = puffin_key.file_type {
-                version
-            } else {
-                unreachable!("`files_to_download` should only contains Puffin files");
-            };
-            let index_id = RegionIndexId::new(
-                RegionFileId::new(puffin_key.region_id, puffin_key.file_id),
-                index_version,
-            );
-
-            let index_remote_path = location::index_file_path(table_dir, index_id, path_type);
-
             match file_cache
-                .download(puffin_key, &index_remote_path, object_store, file_size)
+                .download(index_key, &path, object_store, file_size)
                 .await
             {
                 Ok(_) => {
                     debug!(
                         "Downloaded index file to write cache, region: {}, file_id: {}",
-                        region_id, puffin_key.file_id
+                        region_id, index_key.file_id
                     );
                     files_downloaded += 1;
                     CACHE_FILL_DOWNLOADED_FILES.inc_by(1);
@@ -1279,7 +1345,7 @@ impl RegionLoadCacheTask {
                 Err(e) => {
                     warn!(
                         e; "Failed to download index file to write cache, region: {}, file_id: {}",
-                        region_id, puffin_key.file_id
+                        region_id, index_key.file_id
                     );
                     CACHE_FILL_PENDING_FILES.dec();
                 }
@@ -1311,11 +1377,60 @@ fn maybe_load_cache(
         return;
     }
 
-    let task = RegionLoadCacheTask::new(region.clone());
+    let task = RegionLoadCacheTask::Open(region.clone());
     write_cache.load_region_cache(task);
 }
 
-/// Preloads Parquet metadata into the in-memory SST meta cache on region open.
+/// Uses only a resident manifest or a local region backend during startup.
+async fn preload_narthex_descriptor(
+    manager: &CacheManagerRef,
+    file: FileHandle,
+    region_dir: &str,
+    local_store: Option<&object_store::ObjectStore>,
+) -> Result<bool> {
+    let id = file.file_id();
+    let Some(context) = crate::cache::columnar::MetadataCache::preload(manager) else {
+        return Ok(false);
+    };
+    let series = file.meta_ref().series_window().is_some();
+    let source = if let Some(store) = local_store {
+        store.clone()
+    } else if let Some(write) = manager.write_cache() {
+        let disk = write.file_cache();
+        let kind = if series {
+            FileType::Series(None)
+        } else {
+            FileType::Samples(None)
+        };
+        if !disk.contains_key(&IndexKey::new(id.region_id(), id.file_id(), kind)) {
+            return Ok(false);
+        }
+        disk.local_store()
+    } else {
+        return Ok(false);
+    };
+    if series {
+        let handle = crate::series_index::SeriesIndexFileHandle::from_narthex(file, region_dir)?;
+        crate::series_index::columnar::reader::ColumnarReader::open_cached(
+            source,
+            handle,
+            Some(context),
+        )
+        .await?;
+    } else {
+        let handle =
+            crate::series_index::artifact::SamplesFileHandle::from_narthex(file, region_dir)?;
+        crate::series_index::samples::reader::SamplesReader::open_cached(
+            source,
+            handle,
+            Some(context),
+        )
+        .await?;
+    }
+    Ok(true)
+}
+
+/// Preloads SST metadata into the in-memory SST meta cache on region open.
 ///
 /// This improves the latency of the first query after server start by avoiding large Parquet
 /// metadata reads on demand.
@@ -1326,7 +1441,7 @@ fn maybe_load_cache(
 ///   directly from the local store.
 /// - It will not fetch metadata from remote object stores (S3/GCS/OSS/...).
 #[allow(clippy::too_many_arguments)]
-async fn preload_parquet_meta_cache_for_files(
+async fn preload_sst_meta_cache_for_files(
     region_id: RegionId,
     cache_manager: CacheManagerRef,
     sst_meta_cache_capacity: u64,
@@ -1336,10 +1451,7 @@ async fn preload_parquet_meta_cache_for_files(
     region_metadata: RegionMetadataRef,
     mut files: Vec<FileHandle>,
 ) -> usize {
-    if !cache_manager.sst_meta_cache_enabled()
-        || sst_meta_cache_capacity == 0
-        || cache_manager.sst_meta_cache_is_full()
-    {
+    if !cache_manager.sst_meta_cache_enabled() || sst_meta_cache_capacity == 0 {
         return 0;
     }
 
@@ -1350,12 +1462,28 @@ async fn preload_parquet_meta_cache_for_files(
 
     let mut loaded = 0usize;
     for file_handle in files {
-        // Stop when the protected authoritative tier is full.
-        if cache_manager.sst_meta_cache_is_full() {
-            break;
-        }
-
         let file_id = file_handle.file_id();
+        if !matches!(
+            file_handle.meta_ref().format,
+            crate::sst::file::FileFormat::Parquet
+        ) {
+            let dir = region_dir_from_table_dir(&table_dir, file_id.region_id(), path_type);
+            if preload_narthex_descriptor(
+                &cache_manager,
+                file_handle,
+                &dir,
+                allow_direct_load.then_some(&object_store),
+            )
+            .await
+            .unwrap_or(false)
+            {
+                loaded += 1;
+            }
+            continue;
+        }
+        if cache_manager.sst_meta_cache_is_full() {
+            continue;
+        }
         let mut cache_metrics = MetadataCacheMetrics::default();
         if let Some(metadata) = cache_manager
             .get_compact_sst_meta_data(file_id, PageIndexPolicy::Optional)
@@ -1468,7 +1596,7 @@ async fn preload_parquet_meta_cache_for_files(
     loaded
 }
 
-fn maybe_preload_parquet_meta_cache(
+fn maybe_preload_sst_meta_cache(
     region: &MitoRegionRef,
     config: &MitoConfig,
     cache_manager: &Option<CacheManagerRef>,
@@ -1506,6 +1634,7 @@ fn maybe_preload_parquet_meta_cache(
         let mut files = Vec::new();
         {
             let version = region.version_control.current().version;
+            files.extend(version.ssts.series_indexes().values().cloned());
             for level in version.ssts.levels() {
                 for file_handle in level.files.values() {
                     files.push(file_handle.clone());
@@ -1513,7 +1642,7 @@ fn maybe_preload_parquet_meta_cache(
             }
         }
         let preloading_start = Instant::now();
-        let loaded = preload_parquet_meta_cache_for_files(
+        let loaded = preload_sst_meta_cache_for_files(
             region_id,
             cache_manager,
             sst_meta_cache_capacity,
@@ -1528,7 +1657,7 @@ fn maybe_preload_parquet_meta_cache(
 
         if loaded > 0 {
             info!(
-                "Preloaded parquet metadata for region {}, loaded_files: {}, elapsed_ms: {}",
+                "Preloaded SST metadata for region {}, loaded_files: {}, elapsed_ms: {}",
                 region_id,
                 loaded,
                 preloading_cost.as_millis()
@@ -1586,7 +1715,7 @@ mod tests {
     use store_api::storage::{FileId, RegionId};
 
     use super::{
-        initial_pruned_entry_id, maybe_upgrade_json2_layout, preload_parquet_meta_cache_for_files,
+        initial_pruned_entry_id, maybe_upgrade_json2_layout, preload_sst_meta_cache_for_files,
         provider_from_wal_options, sanitize_region_options,
         supports_open_region_object_storage_requirement,
     };
@@ -1895,7 +2024,7 @@ mod tests {
             region.file_purger.clone(),
         );
 
-        super::RegionLoadCacheTask::new(region)
+        super::RegionLoadCacheTask::Open(region)
             .fill_cache(&write_cache.file_cache())
             .await;
         let file_cache = write_cache.file_cache();
@@ -1917,7 +2046,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_preload_parquet_meta_cache_uses_file_cache() {
+    async fn test_preload_sst_meta_cache_uses_file_cache() {
         let env = TestEnv::new().await;
 
         let local_store = ObjectStore::new(Memory::default()).unwrap();
@@ -1995,7 +2124,7 @@ mod tests {
                 .is_none()
         );
 
-        let loaded = preload_parquet_meta_cache_for_files(
+        let loaded = preload_sst_meta_cache_for_files(
             region_id,
             cache_manager.clone(),
             1024 * 1024,
@@ -2022,7 +2151,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_preload_parquet_meta_cache_skips_files_not_in_file_cache() {
+    async fn test_preload_sst_meta_cache_skips_files_not_in_file_cache() {
         let cache_manager = Arc::new(
             CacheManager::builder()
                 .sst_meta_cache_size(1024 * 1024)
@@ -2072,7 +2201,7 @@ mod tests {
                 .is_none()
         );
 
-        let loaded = preload_parquet_meta_cache_for_files(
+        let loaded = preload_sst_meta_cache_for_files(
             region_id,
             cache_manager.clone(),
             1024 * 1024,
@@ -2094,7 +2223,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_preload_parquet_meta_cache_loads_from_local_fs() {
+    async fn test_preload_sst_meta_cache_loads_from_local_fs() {
         let cache_manager = Arc::new(
             CacheManager::builder()
                 .sst_meta_cache_size(1024 * 1024)
@@ -2147,7 +2276,7 @@ mod tests {
                 .is_none()
         );
 
-        let loaded = preload_parquet_meta_cache_for_files(
+        let loaded = preload_sst_meta_cache_for_files(
             region_id,
             cache_manager.clone(),
             1024 * 1024,

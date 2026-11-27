@@ -345,9 +345,11 @@ fn series_read_request(schema: &Schema, conjuncts: &[&Expr]) -> (SeriesReadReque
             // Keep all equality filters, including contradictory ones, for exact evaluation.
             request.table_id = Some(table_id);
         }
+        request.filter_exprs.push(format!("{expr:?}"));
         request.filters.push(filter);
         accepted.push(true);
     }
+    request.filter_exprs.sort_unstable();
     (request, accepted)
 }
 
@@ -389,7 +391,7 @@ pub(crate) struct ColumnarPreparedSource {
     reservation: Arc<MemoryReservation>,
 }
 
-/// Only native index readers carry a coverage window. A failed index read can
+/// Only Narthex index readers carry a coverage window. A failed index read can
 /// schedule discovery from the corresponding pinned samples once per scan.
 #[derive(Default)]
 pub(crate) struct SeriesDiscovery {
@@ -414,9 +416,7 @@ async fn open_sidecar_sources(
             "columnar series coverage changed after series preparation",
         ));
     };
-    let cache = input
-        .cache_strategy
-        .columnar_metadata(index.cache_namespace);
+    let cache = input.cache_strategy.columnar_metadata();
     let mut samples = Vec::<Arc<dyn SamplesFormatReader>>::new();
     let assigned: HashSet<_> = files
         .iter()

@@ -16,6 +16,7 @@
 
 pub(super) mod codec;
 mod metadata;
+pub(crate) use metadata::PageReference;
 pub(crate) mod reader;
 #[cfg(test)]
 mod tests;
@@ -159,7 +160,10 @@ impl Manifest {
             .unwrap_or_else(|| format!("{}/series/{}/", self.region_id, self.generation))
     }
     pub(crate) fn part_path(&self, id: u32) -> String {
-        format!("{}part-{id}.series", self.prefix())
+        Self::part_path_in(&self.prefix(), id)
+    }
+    fn part_path_in(prefix: &str, id: u32) -> String {
+        format!("{prefix}part-{id}.series")
     }
     pub(crate) fn path(&self) -> String {
         format!("{}manifest.json", self.prefix())

@@ -64,6 +64,7 @@ const DOWNLOAD_TASK_CHANNEL_SIZE: usize = 64;
 
 /// A task to download a file in the background.
 struct DownloadTask {
+    _pin: Option<crate::sst::file::FileHandle>,
     index_key: IndexKey,
     remote_path: String,
     remote_store: ObjectStore,
@@ -85,8 +86,8 @@ impl FileCacheInner {
     /// Returns the appropriate memory index for the given file type.
     fn memory_index(&self, file_type: FileType) -> &Cache<IndexKey, IndexValue> {
         match file_type {
-            FileType::Parquet => &self.parquet_index,
-            FileType::Puffin { .. } => &self.puffin_index,
+            FileType::Parquet | FileType::Samples(_) => &self.parquet_index,
+            FileType::Puffin(_) | FileType::Series(_) => &self.puffin_index,
         }
     }
 
@@ -144,8 +145,8 @@ impl FileCacheInner {
 
             // Track sizes separately for each file type
             match key.file_type {
-                FileType::Parquet => parquet_size += size,
-                FileType::Puffin { .. } => puffin_size += size,
+                FileType::Parquet | FileType::Samples(_) => parquet_size += size,
+                FileType::Puffin(_) | FileType::Series(_) => puffin_size += size,
             }
         }
         // The metrics is a signed int gauge so we can updates it finally.
@@ -193,6 +194,8 @@ impl FileCacheInner {
         let timer = WRITE_CACHE_DOWNLOAD_ELAPSED
             .with_label_values(&[match file_type {
                 FileType::Parquet => "download_parquet",
+                FileType::Series(_) => "download_series",
+                FileType::Samples(_) => "download_samples",
                 FileType::Puffin { .. } => "download_puffin",
             }])
             .start_timer();
@@ -494,17 +497,35 @@ impl FileCache {
         let file_path = self.inner.cache_file_path(key);
         // In most cases, it will use blocking read,
         // because FileCache is normally based on local file system, which supports blocking read.
-        let bytes_result =
-            fetch_byte_ranges(&file_path, self.inner.local_store.clone(), ranges).await;
+        // The samples reader coalesces and reserves its own I/O windows.
+        let bytes_result = if matches!(key.file_type, FileType::Samples(_)) {
+            crate::sst::parquet::helper::fetch_byte_ranges_with_gap(
+                &file_path,
+                self.inner.local_store.clone(),
+                ranges,
+                0,
+            )
+            .await
+        } else {
+            fetch_byte_ranges(&file_path, self.inner.local_store.clone(), ranges).await
+        };
         match bytes_result {
-            Ok(bytes) => {
+            Ok(bytes)
+                if bytes.len() == ranges.len()
+                    && bytes
+                        .iter()
+                        .zip(ranges)
+                        .all(|(b, r)| b.len() as u64 == r.end - r.start) =>
+            {
                 CACHE_HIT
                     .with_label_values(&[key.file_type.metric_label()])
                     .inc();
                 Some(bytes)
             }
-            Err(e) => {
-                if e.kind() != ErrorKind::NotFound {
+            result => {
+                if let Err(e) = result
+                    && e.kind() != ErrorKind::NotFound
+                {
                     warn!(e; "Failed to get file for key {:?}", key);
                 }
 
@@ -527,6 +548,23 @@ impl FileCache {
         // Always delete the file from the local store.
         if let Err(e) = self.inner.local_store.delete(&file_path).await {
             warn!(e; "Failed to delete a cached file {}", file_path);
+        }
+    }
+
+    pub(crate) async fn remove_narthex(
+        &self,
+        region_id: RegionId,
+        files: &std::collections::HashSet<FileId>,
+    ) {
+        for index in [&self.inner.parquet_index, &self.inner.puffin_index] {
+            for (key, _) in index.iter() {
+                if key.region_id == region_id
+                    && files.contains(&key.file_id)
+                    && matches!(key.file_type, FileType::Samples(_) | FileType::Series(_))
+                {
+                    self.remove(*key).await;
+                }
+            }
         }
     }
 
@@ -689,6 +727,15 @@ impl FileCache {
         self.inner.contains_key(key)
     }
 
+    pub(crate) fn can_retain(&self, key: IndexKey, size: u64) -> bool {
+        size <= self
+            .inner
+            .memory_index(key.file_type)
+            .policy()
+            .max_capacity()
+            .unwrap_or(0)
+    }
+
     /// Returns the capacity of the puffin (index) cache in bytes.
     pub(crate) fn puffin_cache_capacity(&self) -> u64 {
         self.puffin_capacity
@@ -697,6 +744,30 @@ impl FileCache {
     /// Returns the current weighted size (used bytes) of the puffin (index) cache.
     pub(crate) fn puffin_cache_size(&self) -> u64 {
         self.inner.puffin_index.weighted_size()
+    }
+
+    /// Downloads the target file into write cache only when it is not cached.
+    ///
+    /// Returns `Ok(true)` if this call performs a download, or `Ok(false)` if the
+    /// file is already present in write cache and download is skipped.
+    pub(crate) async fn download_if_absent(
+        &self,
+        index_key: IndexKey,
+        remote_path: &str,
+        remote_store: &ObjectStore,
+        file_size: u64,
+    ) -> Result<bool> {
+        if self.contains_key(&index_key) {
+            debug!(
+                "Skip downloading file already in write cache, region: {}, file: {}",
+                index_key.region_id, index_key.file_id
+            );
+            return Ok(false);
+        }
+
+        self.download(index_key, remote_path, remote_store, file_size)
+            .await?;
+        Ok(true)
     }
 
     /// Downloads a file in `remote_path` from the remote object store to the local cache
@@ -725,12 +796,27 @@ impl FileCache {
         remote_store: ObjectStore,
         file_size: u64,
     ) {
+        self.queue_download(index_key, remote_path, remote_store, file_size, None);
+    }
+
+    pub(crate) fn queue_download(
+        &self,
+        index_key: IndexKey,
+        remote_path: String,
+        remote_store: ObjectStore,
+        file_size: u64,
+        pin: Option<crate::sst::file::FileHandle>,
+    ) {
         // Do nothing if background worker is disabled (channel is None)
         let Some(tx) = &self.download_task_tx else {
             return;
         };
 
+        if !self.can_retain(index_key, file_size) {
+            return;
+        }
         let task = DownloadTask {
+            _pin: pin,
             index_key,
             remote_path,
             remote_store,
@@ -756,6 +842,30 @@ pub struct IndexKey {
 }
 
 impl IndexKey {
+    /// The Narthex inventory ends with its manifest; all preceding objects are in part-ID order.
+    pub(crate) fn narthex_objects(
+        file: &crate::sst::file::FileMeta,
+        region_dir: &str,
+    ) -> Vec<(Self, crate::series_index::artifact::ArtifactObject)> {
+        let Some(objects) = file.narthex_objects(region_dir) else {
+            return Vec::new();
+        };
+        let manifest_index = objects.len() - 1;
+        objects
+            .into_iter()
+            .enumerate()
+            .map(|(i, object)| {
+                let part = (i != manifest_index).then_some(i as u32);
+                let kind = match &file.format {
+                    crate::sst::file::FileFormat::NarthexSamples(_) => FileType::Samples(part),
+                    crate::sst::file::FileFormat::NarthexSeriesIndex(_) => FileType::Series(part),
+                    _ => unreachable!(),
+                };
+                (Self::new(file.region_id, file.file_id, kind), object)
+            })
+            .collect()
+    }
+
     /// Creates a new index key.
     pub fn new(region_id: RegionId, file_id: FileId, file_type: FileType) -> IndexKey {
         IndexKey {
@@ -785,11 +895,27 @@ pub enum FileType {
     Parquet,
     /// Puffin file.
     Puffin(u64),
+    /// Immutable part, or the manifest when the part ID is absent.
+    Series(Option<u32>),
+    Samples(Option<u32>),
+}
+
+impl From<crate::sst::location::SstObjectType> for FileType {
+    fn from(kind: crate::sst::location::SstObjectType) -> Self {
+        match kind {
+            crate::sst::location::SstObjectType::Parquet => Self::Parquet,
+            crate::sst::location::SstObjectType::Puffin(version) => Self::Puffin(version),
+        }
+    }
 }
 
 impl fmt::Display for FileType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            FileType::Samples(None) => f.write_str("samples"),
+            FileType::Series(None) => f.write_str("series"),
+            FileType::Samples(Some(part)) => write!(f, "{part}.samples"),
+            FileType::Series(Some(part)) => write!(f, "{part}.series"),
             FileType::Parquet => write!(f, "parquet"),
             FileType::Puffin(version) => write!(f, "{}.puffin", version),
         }
@@ -800,25 +926,23 @@ impl FileType {
     /// Parses the file type from string.
     pub(crate) fn parse(s: &str) -> Option<FileType> {
         match s {
-            "parquet" => Some(FileType::Parquet),
-            "puffin" => Some(FileType::Puffin(0)),
-            _ => {
-                // if post-fix with .puffin, try to parse the version
-                if let Some(version_str) = s.strip_suffix(".puffin") {
-                    let version = version_str.parse::<u64>().ok()?;
-                    Some(FileType::Puffin(version))
-                } else {
-                    None
-                }
+            "series" => Some(Self::Series(None)),
+            "samples" => Some(Self::Samples(None)),
+            _ if s.ends_with(".series") => {
+                Some(Self::Series(Some(s.strip_suffix(".series")?.parse().ok()?)))
             }
+            _ if s.ends_with(".samples") => Some(Self::Samples(Some(
+                s.strip_suffix(".samples")?.parse().ok()?,
+            ))),
+            other => crate::sst::location::SstObjectType::parse(other).map(Self::from),
         }
     }
 
     /// Returns the metric label for this file type.
     fn metric_label(&self) -> &'static str {
         match self {
-            FileType::Parquet => FILE_TYPE,
-            FileType::Puffin(_) => INDEX_TYPE,
+            FileType::Parquet | FileType::Samples(_) => FILE_TYPE,
+            FileType::Puffin(_) | FileType::Series(_) => INDEX_TYPE,
         }
     }
 }

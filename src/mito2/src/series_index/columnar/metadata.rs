@@ -29,7 +29,7 @@ pub(crate) const PAGE_LIMIT: usize = 8 * 1024 * 1024;
 pub(crate) const PAGE_STORED_LIMIT: usize = PAGE_LIMIT + PAGE_TARGET;
 pub(crate) const ROOT_CAPACITY: usize = (PAGE_TARGET - 12) / 56;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct PayloadReference {
     pub(crate) offset: u64,
     pub(crate) stored: u32,
@@ -123,7 +123,7 @@ pub(crate) fn pack(
     Ok((reference, stored))
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct PageReference {
     pub(crate) first: MetricSeriesId,
     pub(crate) last: MetricSeriesId,

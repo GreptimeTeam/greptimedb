@@ -903,7 +903,7 @@ impl BloomFilterConfig {
 }
 
 /// Divide cpu num by a non-zero `divisor` and returns at least 1.
-fn divide_num_cpus(divisor: usize) -> usize {
+pub(crate) fn divide_num_cpus(divisor: usize) -> usize {
     debug_assert!(divisor > 0);
     let cores = get_total_cpu_cores();
     debug_assert!(cores > 0);

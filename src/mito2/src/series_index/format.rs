@@ -53,7 +53,13 @@ pub(crate) struct SeriesReadRequest {
     pub(crate) projection: Vec<String>,
     pub(crate) table_id: Option<u32>,
     pub(crate) ids: Option<BTreeSet<MetricSeriesId>>,
+    /// Predicates the reader applies to select rows, including when mask caching is disabled.
     pub(crate) filters: Vec<SimpleFilterEvaluator>,
+    /// Optional cache-key component for the block row mask. Supply the sorted debug strings
+    /// of the original DataFusion expressions, one per filter. Sorting makes conjunction
+    /// order irrelevant, so positions need not correspond to `filters`. Leaving this empty
+    /// for a filtered read (or providing a different count) bypasses mask caching.
+    pub(crate) filter_exprs: smallvec::SmallVec<[String; 1]>,
 }
 
 pub(crate) trait FormatReader: Send + Sync {

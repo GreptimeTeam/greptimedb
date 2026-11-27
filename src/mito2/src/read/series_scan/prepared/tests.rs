@@ -313,7 +313,6 @@ fn scan_input(
                 .collect(),
         )
         .with_series_index(Some(SeriesIndexReadContext {
-            cache_namespace: store_api::storage::FileId::random(),
             format,
             store,
             version: region.series_index_version(),
@@ -1576,7 +1575,7 @@ async fn series_artifact_read_failure_propagates() {
 }
 
 #[tokio::test]
-async fn metadata_cache_reuses_structures_and_isolates_storage() {
+async fn metadata_cache_reuses_structures_and_isolates_generations() {
     use crate::cache::{CacheManager, CacheStrategy};
     use crate::series_index::columnar::reader::ColumnarReader;
     use crate::series_index::samples::reader::SamplesReader;
@@ -1604,14 +1603,11 @@ async fn metadata_cache_reuses_structures_and_isolates_storage() {
     let strategy = CacheStrategy::EnableAll(Arc::new(
         CacheManager::builder()
             .sst_meta_cache_size(8 * 1024 * 1024)
-            .enable_columnar_meta_cache(true)
             .build(),
     ));
-    let namespace = FileId::random();
     let contexts = [
-        strategy.columnar_metadata(namespace),
-        strategy.columnar_metadata(namespace),
-        strategy.columnar_metadata(FileId::random()),
+        strategy.columnar_metadata(),
+        strategy.columnar_metadata(),
         None,
     ];
     let mut results = Vec::new();
@@ -1664,8 +1660,26 @@ async fn metadata_cache_reuses_structures_and_isolates_storage() {
         counts[1] < counts[0],
         "warm metadata should avoid reads: {counts:?}"
     );
-    assert_eq!(counts[0], counts[2], "a new storage namespace must miss");
-    assert_eq!(counts[0], counts[3], "disabled caches must read metadata");
+    assert_eq!(counts[0], counts[2], "disabled caches must read metadata");
+    // An already decoded manifest can be reused through another store without I/O.
+    let other_store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
+    SamplesReader::open_cached(other_store, samples.clone(), strategy.columnar_metadata())
+        .await
+        .unwrap();
+    // A rebuilt sidecar for the same source SST must open the new generation's manifest.
+    let (purger, _) = crate::series_index::series_index_channel(store.clone());
+    let mut next = samples.entry().clone();
+    next.artifact.generation = FileId::random();
+    let next =
+        crate::series_index::artifact::SamplesFileHandle::new(samples.file_id(), next, purger);
+    let result = SamplesReader::open_cached(store, next, strategy.columnar_metadata()).await;
+    assert!(
+        result
+            .err()
+            .unwrap()
+            .output_msg()
+            .contains("missing samples manifest")
+    );
     engine.stop().await.unwrap();
 }
 
@@ -1678,7 +1692,6 @@ async fn native_preparation_metadata_benchmark() {
     use crate::cache::{CacheManager, CacheStrategy};
     use std::time::Instant;
     use store_api::metadata::RegionMetadataBuilder;
-    use store_api::storage::FileId;
 
     // Keep wide-artifact setup small: this measures preparation, not sample writing.
     for (series_count, field_count) in [(4096, 1), (64, 1024)] {
@@ -1802,7 +1815,6 @@ async fn native_preparation_metadata_benchmark() {
         flush_region(&engine, region.region_id, None).await;
         build(&engine, &region).await;
         let store = region.series_index_store.clone().unwrap();
-        let namespace = FileId::random();
         let mut cold = Vec::new();
         let mut warm = Vec::new();
         for _ in 0..7 {
@@ -1819,7 +1831,6 @@ async fn native_preparation_metadata_benchmark() {
                     (0..metadata.column_metadatas.len()).collect(),
                 );
                 input.cache_strategy = cache.clone();
-                input.series_index.as_mut().unwrap().cache_namespace = namespace;
                 let scanner = SeriesScan::new(input, false);
                 let binding = labels(scanner.metadata());
                 let start = Instant::now();
@@ -1852,6 +1863,23 @@ async fn native_preparation_metadata_benchmark() {
         );
         engine.stop().await.unwrap();
     }
+}
+
+#[test]
+fn prefilter_distinguishes_a_tag_name_from_a_compound_predicate() {
+    use datatypes::arrow::datatypes::{DataType, Field};
+    let tag = "x IS NULL OR x";
+    let schema = Schema::new(vec![
+        Field::new("x", DataType::Utf8, true),
+        Field::new(tag, DataType::Utf8, true),
+    ]);
+    let left = col("x").is_null().or(col("x").is_null());
+    let right = Expr::Column(datafusion_common::Column::from_name(tag)).is_null();
+    assert_eq!(left.to_string(), right.to_string());
+    let (left, accepted_left) = series_read_request(&schema, &[&left]);
+    let (right, accepted_right) = series_read_request(&schema, &[&right]);
+    assert_eq!((accepted_left, accepted_right), (vec![true], vec![true]));
+    assert_ne!(left.filter_exprs, right.filter_exprs);
 }
 
 #[test]
@@ -3095,6 +3123,70 @@ async fn authoritative_narthex_preparation_without_sidecars(
         );
     }
     assert_eq!(pool.reserved(), 0);
+    engine.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn narthex_index_open_error_falls_back_to_samples() {
+    use crate::test_util::{sparse_metric_create_request, sparse_metric_put};
+
+    let failed_path = Arc::new(Mutex::new(String::new()));
+    let observed = failed_path.clone();
+    let failures = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = failures.clone();
+    let layer = MockLayerBuilder::default()
+        .reader_factory(Arc::new(move |path, _, inner| {
+            if path.trim_start_matches('/') == observed.lock().unwrap().trim_start_matches('/') {
+                counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Box::new(FailingReader { inner, fail: true })
+            } else {
+                inner
+            }
+        }))
+        .build()
+        .unwrap();
+    let mut env = TestEnv::new().await.with_mock_layer(layer);
+    let engine = env
+        .create_engine(MitoConfig {
+            experimental_enable_series_index: true,
+            experimental_series_index_min_files: 1,
+            sst_meta_cache_size: common_base::readable_size::ReadableSize(0),
+            ..Default::default()
+        })
+        .await;
+    let id = store_api::storage::RegionId::new(1024, 0);
+    engine
+        .handle_request(
+            id,
+            RegionRequest::Create(sparse_metric_create_request("narthex")),
+        )
+        .await
+        .unwrap();
+    let region = engine.get_region(id).unwrap();
+    let key = new_sparse_primary_key(&["west"], &region.metadata(), 42, 7);
+    engine
+        .handle_request(id, sparse_metric_put(key, 1000, Some(1.0)))
+        .await
+        .unwrap();
+    flush_region(&engine, id, None).await;
+    build(&engine, &region).await;
+    let version = region.version();
+    let index = version.ssts.series_indexes().values().next().unwrap();
+    let dir = region.access_layer.build_region_dir(id);
+    *failed_path.lock().unwrap() =
+        crate::series_index::SeriesIndexFileHandle::from_narthex(index.clone(), &dir)
+            .unwrap()
+            .manifest_path();
+    let stream = engine
+        .scan_to_stream(id, ScanRequest::default())
+        .await
+        .unwrap();
+    let rows = common_recordbatch::RecordBatches::try_collect(stream)
+        .await
+        .unwrap();
+    assert_eq!(1, rows.iter().map(|b| b.num_rows()).sum::<usize>());
+    assert!(rows.pretty_print().unwrap().contains("west"));
+    assert!(failures.load(std::sync::atomic::Ordering::Relaxed) > 0);
     engine.stop().await.unwrap();
 }
 

@@ -531,9 +531,9 @@ async fn test_narthex_build_uses_no_local_sidecar_budget() -> WhateverResult<()>
             ..Default::default()
         })
         .await;
-    let native = RegionId::new(1024, 0);
+    let narthex = RegionId::new(1024, 0);
     let local = RegionId::new(1025, 0);
-    for (id, format) in [(local, "flat"), (native, "narthex")] {
+    for (id, format) in [(local, "flat"), (narthex, "narthex")] {
         engine
             .handle_request(
                 id,
@@ -553,7 +553,7 @@ async fn test_narthex_build_uses_no_local_sidecar_budget() -> WhateverResult<()>
         engine
             .handle_request(id, build_series_index_request())
             .await?;
-        if id == native {
+        if id == narthex {
             assert_eq!(1, region.version().ssts.series_indexes().len());
         } else {
             assert!(region.series_index_version().disk_usage() >= budget.as_bytes());
@@ -661,12 +661,21 @@ async fn check_sparse_upsert_after_adding_nullable_tag(format: &str) -> Whatever
 #[tokio::test]
 async fn test_narthex_index_counts_rows_across_flushes() -> WhateverResult<()> {
     let mut env = TestEnv::new().await;
+    let cache_root = env.data_home().join("write-cache");
     let engine = env
-        .create_engine(MitoConfig {
-            experimental_enable_series_index: true,
-            experimental_series_index_min_files: 1,
-            ..Default::default()
-        })
+        .create_engine(
+            MitoConfig {
+                enable_refill_cache_on_read: false,
+                experimental_enable_series_index: true,
+                experimental_series_index_min_files: 1,
+                ..Default::default()
+            }
+            .enable_write_cache(
+                cache_root.to_string_lossy().into_owned(),
+                common_base::readable_size::ReadableSize::mb(64),
+                None,
+            ),
+        )
         .await;
     let id = RegionId::new(1024, 0);
     engine
@@ -690,19 +699,107 @@ async fn test_narthex_index_counts_rows_across_flushes() -> WhateverResult<()> {
         .await?;
     let version = region.version();
     let file = version.ssts.series_indexes().values().next().unwrap();
+    let disk = engine.cache_manager().write_cache().unwrap().file_cache();
+    for handle in version
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .chain(std::iter::once(file))
+    {
+        for (key, object) in crate::cache::file_cache::IndexKey::narthex_objects(
+            handle.meta_ref(),
+            &region.access_layer.build_region_dir(id),
+        ) {
+            let ranges = [0..object.file_size];
+            let cached = disk
+                .read_ranges(key, &ranges)
+                .await
+                .expect("Narthex write-through");
+            assert_eq!(
+                cached[0],
+                region
+                    .access_layer
+                    .object_store()
+                    .read(&object.path)
+                    .await
+                    .unwrap()
+                    .to_bytes()
+            );
+        }
+    }
     let handle = crate::series_index::SeriesIndexFileHandle::from_narthex(
         file.clone(),
         &region.access_layer.build_region_dir(id),
     )?;
+    let part = crate::cache::file_cache::IndexKey::new(
+        id,
+        file.meta_ref().file_id,
+        crate::cache::file_cache::FileType::Series(Some(0)),
+    );
+    let path = disk.cache_file_path(part);
+    let local = disk.local_store();
+    let mut bytes = local.read(&path).await.unwrap().to_bytes().to_vec();
+    // The first payload immediately follows the 16-byte series part header and holds TSIDs.
+    bytes[16] ^= 0xff;
+    local.write(&path, bytes).await.unwrap();
+    let strategy = crate::cache::CacheStrategy::EnableAll(engine.cache_manager());
+    let reader = crate::series_index::columnar::reader::ColumnarReader::open_cached(
+        region.access_layer.object_store().clone(),
+        handle.clone(),
+        strategy.columnar_metadata(),
+    )
+    .await?;
+    let request = crate::series_index::format::SeriesReadRequest {
+        projection: vec![
+            crate::series_index::ROW_COUNT_COLUMN.to_owned(),
+            store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME.to_owned(),
+        ],
+        ..Default::default()
+    };
+    // A damaged cached payload surfaces its checksum error without evicting the file.
+    let mut stream = reader.read(request.clone())?;
+    let error = stream.try_next().await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("series payload checksum mismatch"),
+        "{error}"
+    );
+    assert!(disk.contains_key(&part));
+    // A cold descriptor read must also surface invalid local metadata while the remote is healthy.
+    let manifest_key = crate::cache::file_cache::IndexKey::new(
+        id,
+        file.meta_ref().file_id,
+        crate::cache::file_cache::FileType::Series(None),
+    );
+    let manifest_path = disk.cache_file_path(manifest_key);
+    let mut manifest = local.read(&manifest_path).await.unwrap().to_vec();
+    manifest[0] = 0;
+    local.write(&manifest_path, manifest).await.unwrap();
+    let result = crate::series_index::columnar::reader::ColumnarReader::open_cached(
+        region.access_layer.object_store().clone(),
+        handle.clone(),
+        crate::cache::columnar::MetadataCache::maintenance(engine.cache_manager().write_cache()),
+    )
+    .await;
+    let error = result
+        .err()
+        .expect("invalid cached manifest must fail decoding");
+    assert!(
+        error
+            .to_string()
+            .contains("series manifest is not readable"),
+        "{error}"
+    );
+    assert!(disk.contains_key(&manifest_key));
+    // Read the authoritative series index to verify its stored row counts.
     let reader = crate::series_index::columnar::reader::ColumnarReader::open(
         region.access_layer.object_store().clone(),
         handle,
     )
     .await?;
-    let mut stream = reader.read(crate::series_index::format::SeriesReadRequest {
-        projection: vec![crate::series_index::ROW_COUNT_COLUMN.to_owned()],
-        ..Default::default()
-    })?;
+    let mut stream = reader.read(request)?;
     let batch = stream.try_next().await?.unwrap();
     let counts = batch
         .column(0)
@@ -821,6 +918,7 @@ async fn test_narthex_merge_existing_series_indexes() -> WhateverResult<()> {
         seed.series_indexes_to_add.push(
             crate::sst::narthex::write_series(
                 &region.access_layer,
+                None,
                 region.metadata(),
                 std::slice::from_ref(source),
                 window,

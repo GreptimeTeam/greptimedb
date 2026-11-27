@@ -108,6 +108,10 @@ impl SeriesIndexFileHandle {
         })
     }
 
+    pub(crate) fn narthex_file(&self) -> Option<&crate::sst::file::FileHandle> {
+        self.inner.narthex_file.as_ref()
+    }
+
     pub(crate) fn manifest_path(&self) -> String {
         if self.inner.narthex_file.is_some() {
             return self

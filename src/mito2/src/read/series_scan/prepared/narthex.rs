@@ -29,9 +29,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::PartitionRange;
 use store_api::storage::consts::{ReservedColumnId, SEQUENCE_COLUMN_NAME};
 
-use crate::error::{
-    ComputeArrowSnafu, DecodeSnafu, Error, NewRecordBatchSnafu, RecordBatchSnafu, Result,
-};
+use crate::error::{ComputeArrowSnafu, DecodeSnafu, NewRecordBatchSnafu, RecordBatchSnafu, Result};
 use crate::read::scan_region::StreamContext;
 use crate::read::series_scan::prepared::{SeriesDiscovery, invalid};
 use crate::series_index::ROW_COUNT_COLUMN;
@@ -125,47 +123,45 @@ pub(crate) async fn open_sources(
         {
             continue;
         }
-        let mut reader = match crate::series_index::columnar::reader::ColumnarReader::open_cached(
-            context.input.access_layer.object_store().clone(),
-            crate::series_index::SeriesIndexFileHandle::from_narthex(
-                file.clone(),
-                &context
-                    .input
-                    .access_layer
-                    .build_region_dir(file.meta_ref().region_id),
-            )?,
-            context
-                .input
-                .cache_strategy
-                .columnar_metadata(file.meta_ref().file_id),
-        )
-        .await
-        {
+        let opened = async {
+            let mut reader = crate::series_index::columnar::reader::ColumnarReader::open_cached(
+                context.input.access_layer.object_store().clone(),
+                crate::series_index::SeriesIndexFileHandle::from_narthex(
+                    file.clone(),
+                    &context
+                        .input
+                        .access_layer
+                        .build_region_dir(file.meta_ref().region_id),
+                )?,
+                context.input.cache_strategy.columnar_metadata(),
+            )
+            .await?;
+            reader.adapt_tags(context.input.region_metadata())?;
+            Ok::<_, crate::error::Error>(reader)
+        }
+        .await;
+        let reader = match opened {
             Ok(reader) => reader,
-            Err(error)
-                if error.is_object_not_found()
-                    || matches!(
-                        error,
-                        Error::InvalidMeta { .. } | Error::UnsupportedOperation { .. }
-                    ) =>
-            {
+            Err(error) => {
+                common_telemetry::warn!(
+                    ?error,
+                    ?window,
+                    "Failed to open series index, discovering keys from samples"
+                );
                 unavailable.insert(window.start);
                 continue;
             }
-            Err(error) => return Err(error),
         };
-        if reader.adapt_tags(context.input.region_metadata()).is_err() {
-            unavailable.insert(window.start);
-            continue;
-        }
         let current = windows.entry(window.start).or_insert(window);
         current.max_sequence = current.max_sequence.max(window.max_sequence);
         series.readers.push_back((Box::new(reader), Some(window)));
     }
+    series
+        .readers
+        .retain(|(_, window)| window.is_none_or(|w| !unavailable.contains(&w.start)));
     windows.retain(|start, _| !unavailable.contains(start));
     for i in indices {
         let file = &context.input.files[i];
-        let namespace = file.meta_ref().file_id;
         let reader = SamplesReader::open_cached(
             context.input.access_layer.object_store().clone(),
             SamplesFileHandle::from_narthex(
@@ -175,7 +171,7 @@ pub(crate) async fn open_sources(
                     .access_layer
                     .build_region_dir(file.meta_ref().region_id),
             )?,
-            context.input.cache_strategy.columnar_metadata(namespace),
+            context.input.cache_strategy.columnar_metadata(),
         )
         .await?;
         // Match Parquet: foreign SSTs use the destination admission sequence,

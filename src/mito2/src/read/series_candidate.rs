@@ -982,7 +982,6 @@ mod tests {
         let (purger, _receiver) = series_index_channel(store.clone());
         let handle = SeriesIndexFileHandle::new(metadata.region_id, entry.clone(), purger);
         let context = SeriesIndexReadContext {
-            cache_namespace: store_api::storage::FileId::random(),
             format: crate::config::SeriesIndexFormat::Legacy,
             store,
             version: Arc::new(SeriesIndexVersion {

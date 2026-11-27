@@ -39,7 +39,6 @@ use tokio_stream::StreamExt;
 
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
-use crate::cache::file_cache::FileType;
 use crate::config::MitoConfig;
 use crate::engine::region_hook::{RegionGcInfo, RegionHookRef};
 use crate::error::{
@@ -53,6 +52,7 @@ use crate::metrics::{
 };
 use crate::region::{MitoRegionRef, RegionRoleState};
 use crate::sst::file::{RegionFileId, RegionIndexId, delete_files, delete_indexes};
+use crate::sst::location::SstObjectType;
 use crate::sst::location::{self};
 use crate::worker::DROPPING_MARKER_FILE;
 
@@ -725,6 +725,18 @@ impl LocalGcWorker {
         )
         .await?;
 
+        if let Some(cache) = self.cache_manager.as_ref().and_then(|c| c.write_cache()) {
+            let ids: HashSet<_> = removed_files
+                .iter()
+                .filter_map(|f| match f {
+                    RemovedFile::Narthex(id) => Some(*id),
+                    _ => None,
+                })
+                .collect();
+            if !ids.is_empty() {
+                cache.file_cache().remove_narthex(region_id, &ids).await;
+            }
+        }
         for removed in removed_files {
             if let RemovedFile::Narthex(id) = removed {
                 self.access_layer
@@ -1097,7 +1109,7 @@ impl LocalGcWorker {
                 continue;
             }
 
-            let (file_id, file_type) = match location::parse_file_id_type_from_path(entry.name()) {
+            let (file_id, file_type) = match location::parse_sst_object_path(entry.name()) {
                 Ok((file_id, file_type)) => (file_id, file_type),
                 Err(err) => {
                     error!(err; "Failed to parse file id from path: {}", entry.name());
@@ -1109,7 +1121,7 @@ impl LocalGcWorker {
             };
 
             let should_delete = match file_type {
-                FileType::Parquet => {
+                SstObjectType::Parquet => {
                     let is_in_manifest = in_manifest.contains_key(&file_id);
                     let is_in_tmp_ref = referenced_ssts.contains(&file_id);
                     let is_linger = may_linger_files.contains_key(&file_id);
@@ -1132,7 +1144,7 @@ impl LocalGcWorker {
                         unknown_file_may_linger_until,
                     )
                 }
-                FileType::Puffin(version) => {
+                SstObjectType::Puffin(version) => {
                     let is_in_manifest = in_manifest.get(&file_id) == Some(&Some(version));
                     let is_in_tmp_ref = in_tmp_ref.contains(&(file_id, Some(version)));
                     let is_linger = may_linger_files
@@ -1165,12 +1177,12 @@ impl LocalGcWorker {
 
             if should_delete {
                 let removed_file = match file_type {
-                    FileType::Parquet => {
+                    SstObjectType::Parquet => {
                         // notice this cause we don't track index version for parquet files
                         // since entries comes from listing, we can't get index version from path
                         RemovedFile::File(file_id, None)
                     }
-                    FileType::Puffin(version) => {
+                    SstObjectType::Puffin(version) => {
                         GC_ORPHANED_INDEX_FILES.inc();
                         RemovedFile::Index(file_id, version)
                     }

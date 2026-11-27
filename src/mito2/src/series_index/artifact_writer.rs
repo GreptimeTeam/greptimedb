@@ -18,6 +18,7 @@ use bytes::Bytes;
 use object_store::{ObjectStore, Writer};
 use snafu::{IntoError, ResultExt};
 
+use crate::cache::write_cache::{NarthexUpload, WriteCache};
 use crate::error::{JoinSnafu, OpenDalSnafu, Result};
 use crate::series_index::columnar::{invalid, require};
 use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY};
@@ -50,10 +51,16 @@ pub(super) struct Outputs {
     pub(super) active: Option<LiveFile>,
     pub(super) paths: Vec<String>,
     pub(super) committed: bool,
+    pub(crate) upload: Option<NarthexUpload>,
 }
 impl Outputs {
     pub(super) async fn open(&mut self, path: String) -> Result<()> {
         require(self.active.is_none(), "artifact output already open")?;
+        let path = if self.upload.is_some() {
+            WriteCache::narthex_stage(&path)
+        } else {
+            path
+        };
         self.paths.push(path.clone());
         let store = self.store.clone();
         // The task owns opening: cancellation drops the returned LiveFile and aborts it.
@@ -98,10 +105,29 @@ impl Outputs {
             .await
             .context(OpenDalSnafu)?;
         file.writer = None;
+        if let Some(upload) = &mut self.upload {
+            let path = file.path.strip_prefix(WriteCache::NARTHEX_STAGE).unwrap();
+            upload.upload_closed(path).await?;
+        }
         self.active = None;
         Ok(())
     }
+    pub(crate) async fn commit(&mut self) {
+        if self.upload.is_some()
+            && let Some(dir) = self
+                .paths
+                .last()
+                .and_then(|p| crate::sst::location::parent_dir(p))
+        {
+            let _ = self.store.delete(dir).await;
+        }
+        self.committed = true;
+    }
+
     pub(super) async fn cleanup(&mut self) -> Result<()> {
+        if let Some(upload) = &mut self.upload {
+            upload.clean().await;
+        }
         let mut first_error = None;
         if let Some(file) = self.active.as_mut()
             && let Some(writer) = file.writer.as_mut()
@@ -145,6 +171,7 @@ impl Drop for Outputs {
                 active: self.active.take(),
                 paths: std::mem::take(&mut self.paths),
                 committed: true,
+                upload: self.upload.take(),
             };
             common_runtime::spawn_compact(async move {
                 if let Err(error) = owned.cleanup().await {
@@ -173,6 +200,7 @@ mod tests {
             active: None,
             paths: Vec::new(),
             committed: false,
+            upload: None,
         };
         outputs.open(format!("{dir}part-0.samples")).await.unwrap();
         outputs.write(vec![1, 2, 3]).await.unwrap();

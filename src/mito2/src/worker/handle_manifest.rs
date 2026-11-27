@@ -40,7 +40,9 @@ use crate::manifest::action::{
 };
 use crate::memtable::MemtableBuilderProvider;
 use crate::metrics::WRITE_CACHE_INFLIGHT_DOWNLOAD;
-use crate::region::opener::{sanitize_region_options, version_builder_from_manifest};
+use crate::region::opener::{
+    RegionLoadCacheTask, sanitize_region_options, version_builder_from_manifest,
+};
 use crate::region::options::RegionOptions;
 use crate::region::version::VersionControlRef;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
@@ -509,6 +511,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     edit,
                     result,
                     // we always need to restore region state after region edit
+                    preload_sst_cache,
                     update_region_state: true,
                     is_staging,
                 }),
@@ -620,9 +623,22 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     edit.series_indexes_to_remove
                         .retain(|id| !manifest.series_indexes.contains_key(&id.file_id()));
                 }
+                let preload = edit_result.preload_sst_cache.then(|| {
+                    edit.files_to_add
+                        .iter()
+                        .chain(&edit.series_indexes_to_add)
+                        .filter(|file| !matches!(file.format, file::FileFormat::Parquet))
+                        .map(|file| (file.file_id(), file.level))
+                        .collect::<Vec<_>>()
+                });
                 region
                     .version_control
                     .apply_edit(Some(edit), &[], region.file_purger.clone());
+                if let Some(files) = preload
+                    && let Some(cache) = self.cache_manager.write_cache()
+                {
+                    preload_narthex_files(&region, cache, &self.listener, files);
+                }
             }
             if edit_result.update_region_state {
                 region.switch_state_to_writable(RegionLeaderState::Editing);
@@ -1023,7 +1039,7 @@ fn prepare_region_edit(region: &MitoRegionRef, edit: &mut RegionEdit) -> Result<
         edit.series_indexes_to_add.is_empty(),
         crate::error::InvalidRequestSnafu {
             region_id,
-            reason: "only a pinned native maintenance build can publish sequence coverage",
+            reason: "only a pinned Narthex maintenance build can publish sequence coverage",
         }
     );
     edit.validate_shared_reclassification(region_id)?;
@@ -1115,7 +1131,7 @@ async fn edit_region(
     preload_sst_cache: bool,
 ) -> Result<()> {
     let region_id = region.region_id;
-    // Editing fences new native publications. Read the manifest after taking
+    // Editing fences new Narthex publications. Read the manifest after taking
     // that fence so a retired input cannot silently acknowledge invalidation.
     if !edit.series_indexes_to_remove.is_empty() {
         let manifest = region.manifest_ctx.manifest().await;
@@ -1161,6 +1177,7 @@ async fn edit_region(
         && preload_sst_cache
         && !narthex_format
     {
+        // TODO: Schedule Parquet edit preloads on the region cache worker as well.
         for file_meta in &edit.files_to_add {
             let write_cache = write_cache.clone();
             let layer = region.access_layer.clone();
@@ -1189,6 +1206,7 @@ async fn edit_region(
                 WRITE_CACHE_INFLIGHT_DOWNLOAD.add(1);
 
                 let parquet_cached = write_cache
+                    .file_cache()
                     .download_if_absent(index_key, &remote_path, layer.object_store(), file_size)
                     .await;
 
@@ -1253,6 +1271,38 @@ async fn edit_region(
             .await;
     }
     result.map(|_| ())
+}
+
+fn preload_narthex_files(
+    region: &MitoRegionRef,
+    cache: &crate::cache::write_cache::WriteCacheRef,
+    listener: &WorkerListener,
+    files: Vec<(file::RegionFileId, file::Level)>,
+) {
+    let version = region.version();
+    let files: Vec<_> = files
+        .into_iter()
+        .filter_map(|(id, level)| {
+            version
+                .ssts
+                .series_indexes()
+                .get(&id.file_id())
+                .or_else(|| {
+                    version.ssts.levels()[level as usize]
+                        .files
+                        .get(&id.file_id())
+                })
+                .filter(|handle| handle.file_id() == id)
+                .cloned()
+        })
+        .collect();
+    if !files.is_empty() {
+        cache.load_region_cache(RegionLoadCacheTask::NarthexEdit {
+            layer: region.access_layer.clone(),
+            files,
+            listener: listener.clone(),
+        });
+    }
 }
 
 #[cfg(test)]

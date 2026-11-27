@@ -1653,6 +1653,7 @@ impl Error {
             Error::OpenDal { error, .. } => error.kind() == ErrorKind::NotFound,
             Error::ManifestDeltaNotFound { .. } => true,
             Error::LoadSstMeta { source, .. }
+            | Error::ScanSeries { source, .. }
             | Error::LoadParquetPage { source, .. }
             | Error::LoadRangeResult { source, .. } => source.is_object_not_found(),
             _ => false,
