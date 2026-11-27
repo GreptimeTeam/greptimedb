@@ -2400,12 +2400,6 @@ async fn native_promql_clamp_aggregates_execute_on_native_segments() {
     }
 }
 
-/// A native rows result names each row after the metric it came from.
-///
-/// The name is part of what the statement answers, not of how a result is displayed: `sum by
-/// (__name__)` groups by the identity of the series, and an `or` reports each side's own name. An
-/// operator that computes a value of its own - a math kernel, a folding aggregate - drops the name
-/// exactly as it drops a label, so its rows answer no `__name__` label at all.
 /// Logical tables `{prefix}_a`, `{prefix}_b` and `{prefix}_c` on the physical table `{prefix}`.
 /// `a` and `b` both store `{host="x"}`, and both hold a sample at `0`; `c` stores `{host="x"}`
 /// under one more label.
@@ -2489,12 +2483,36 @@ async fn native_promql_physical_table_merges_equal_label_sets() {
         observer.clear();
         let native = native_rows(native_tql_output(&instance, &sql, true).await, None).await;
         assert_native_rows_plan(&observer);
+        // The merge runs once, above the region: a region merging too would buffer its whole
+        // answer a second time.
+        let display = |plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>| {
+            datafusion::physical_plan::displayable(plan.as_ref())
+                .indent(true)
+                .to_string()
+        };
+        let root = display(&observer.root_plan());
+        assert!(root.contains("identity=label_set"), "{expression}: {root}");
+        let regions = observer.region_plans();
+        assert!(!regions.is_empty(), "{expression}: {root}");
+        for region in &regions {
+            let region = display(region);
+            assert!(
+                !region.contains("identity=label_set"),
+                "{expression}: {region}"
+            );
+        }
         assert_eq!(physical_table_expected(query), native, "{expression}");
         let legacy = native_rows(native_tql_output(&instance, &sql, false).await, None).await;
         assert_eq!(legacy, native, "{expression}");
     }
 }
 
+/// A native rows result names each row after the metric it came from.
+///
+/// The name is part of what the statement answers, not of how a result is displayed: `sum by
+/// (__name__)` groups by the identity of the series, and an `or` reports each side's own name. An
+/// operator that computes a value of its own - a math kernel, a folding aggregate - drops the name
+/// exactly as it drops a label, so its rows answer no `__name__` label at all.
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_rows_name_each_row_after_its_metric() {
     common_telemetry::init_default_ut_logging();

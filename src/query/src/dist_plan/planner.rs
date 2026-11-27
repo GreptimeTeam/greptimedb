@@ -31,7 +31,7 @@ use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner};
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion, TreeNodeVisitor};
 use datafusion_common::{DataFusionError, TableReference};
-use datafusion_expr::{LogicalPlan, UserDefinedLogicalNode};
+use datafusion_expr::{Extension, LogicalPlan, UserDefinedLogicalNode};
 use datafusion_physical_expr::{LexOrdering, PhysicalSortExpr};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::Value;
@@ -235,11 +235,28 @@ impl ExtensionPlanner for DistExtensionPlanner {
             .config()
             .get_extension()
             .unwrap_or_else(QueryContext::arc);
+        // A source that merges label sets does so above this merge scan, where every region's
+        // answer arrives; a region running that merge too would buffer its whole answer and
+        // resolve a shared timestamp from its own share of the keys.
+        let label_set_source = match input_plan {
+            LogicalPlan::Extension(extension) => extension
+                .node
+                .as_any()
+                .downcast_ref::<promql::extension_plan::RawSeriesSource>()
+                .filter(|source| source.merges_label_sets()),
+            _ => None,
+        };
+        let region_plan = match label_set_source {
+            Some(source) => LogicalPlan::Extension(Extension {
+                node: Arc::new(source.for_regions()),
+            }),
+            None => input_plan.clone(),
+        };
         let merge_scan_plan = MergeScanExec::new(
             session_state,
             table_name,
             regions,
-            input_plan.clone(),
+            region_plan,
             schema,
             self.region_query_handler.clone(),
             query_ctx,
@@ -249,17 +266,10 @@ impl ExtensionPlanner for DistExtensionPlanner {
         )?
         .with_raw_series_disjoint(series_disjoint)?;
         let merge_scan_plan = Arc::new(merge_scan_plan) as Arc<dyn ExecutionPlan>;
-        // Regions answer their own stored series; a source that merges label sets does so here,
-        // where every region's answer arrives.
-        if let LogicalPlan::Extension(extension) = input_plan
-            && let Some(source) = extension
-                .node
-                .as_any()
-                .downcast_ref::<promql::extension_plan::RawSeriesSource>()
-        {
-            return source.merged_by_label_set(merge_scan_plan).map(Some);
+        match label_set_source {
+            Some(source) => source.merged_by_label_set(merge_scan_plan).map(Some),
+            None => Ok(Some(merge_scan_plan)),
         }
-        Ok(Some(merge_scan_plan))
     }
 }
 

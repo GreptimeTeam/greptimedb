@@ -3142,6 +3142,9 @@ impl RepartitionStream {
     /// Publishes the stored series of one label set as one series; see
     /// [`merge_raw_label_set_charging`] for which sample a shared timestamp keeps.
     fn finish_raw_label_set(&mut self, mut group: PendingGroup) -> DataFusionResult<()> {
+        if group.raw_chunks.len() == 1 {
+            return self.finish_raw_group(group);
+        }
         let workspace = MemoryConsumer::new("SeriesRepartitionRawOwner").register(&self.pool);
         let mut reserve = |bytes: usize| workspace.try_grow(bytes);
         let mut shrink = |bytes: usize| {

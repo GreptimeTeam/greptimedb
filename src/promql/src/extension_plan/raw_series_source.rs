@@ -90,8 +90,10 @@ pub struct RawSeriesSource {
     /// Whether stored series that share a label set are answered as one series; see
     /// [`Self::with_label_set_merge`].
     ///
-    /// Not part of the wire binding: a region answers its own stored series either way, and the
-    /// merge runs where every region's answer arrives, which is never a region.
+    /// Not part of the wire binding. A distributed planner hands regions the source without it
+    /// ([`Self::for_regions`]) and merges above its merge scan, where every region's answer
+    /// arrives; standalone passes the logical plan to the region without serializing it, so the
+    /// flag would otherwise reach the region too.
     merges_label_sets: bool,
     input: LogicalPlan,
     schema: DFSchemaRef,
@@ -131,6 +133,19 @@ impl RawSeriesSource {
 
     pub fn merges_label_sets(&self) -> bool {
         self.merges_label_sets
+    }
+
+    /// This source as a region runs it: the region answers its own stored series, and the label-set
+    /// merge stays with the planner above the regions.
+    pub fn for_regions(&self) -> Self {
+        Self {
+            metric_name: Arc::clone(&self.metric_name),
+            tags: self.tags.clone(),
+            fields: self.fields.clone(),
+            merges_label_sets: false,
+            input: self.input.clone(),
+            schema: Arc::clone(&self.schema),
+        }
     }
 
     /// `frames` - the physical plan delivering this source's frames from every region it reads -
