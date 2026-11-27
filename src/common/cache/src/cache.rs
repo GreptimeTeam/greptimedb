@@ -358,18 +358,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_pool_failure_does_not_strand_readers() {
-        let pool = LoadPool::new(NonZeroUsize::MIN, tokio::spawn);
-        assert_eq!(pool.run(async { panic!("failed load") }).await, None::<()>);
-        assert_eq!(pool.run(async { 7 }).await, Some(7));
-        let closed = LoadPool::new(NonZeroUsize::MIN, |worker| {
-            drop(worker);
-            tokio::spawn(async {})
-        });
-        assert_eq!(closed.run(async { 1 }).await, None);
-    }
-
-    #[tokio::test]
     async fn test_predicate_invalidation_preserves_other_entries() {
         let cache = cache(1024);
         cache

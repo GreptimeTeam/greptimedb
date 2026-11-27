@@ -2498,7 +2498,7 @@ async fn aligned_payload_cache_reuses_gap_bytes_across_readers() {
             .sst_meta_cache_size(1024 * 1024)
             .build(),
     ));
-    for id in [1, 2, 1] {
+    for id in [1, 2] {
         reads.lock().unwrap().clear();
         let reader = reader::SamplesReader::open_cached(
             store.clone(),

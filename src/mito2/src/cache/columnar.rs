@@ -476,9 +476,12 @@ mod tests {
 
     #[tokio::test]
     async fn lost_worker_reply_retries_metadata_without_caching() {
-        let strategy = CacheStrategy::EnableAll(Arc::new(
-            CacheManager::builder().sst_meta_cache_size(8192).build(),
-        ));
+        let manager = CacheManager::builder().sst_meta_cache_size(8192).build();
+        // The second load must succeed on the same worker that ran the panicking job.
+        manager
+            .narthex_load_pool
+            .get_or_init(|| common_cache::LoadPool::new(std::num::NonZeroUsize::MIN, tokio::spawn));
+        let strategy = CacheStrategy::EnableAll(Arc::new(manager));
         let cache = strategy.columnar_metadata().unwrap();
         let generation = FileId::random();
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
