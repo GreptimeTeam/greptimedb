@@ -2932,6 +2932,27 @@ async fn native_promql_otlp_delta_histogram_rates_match_legacy() {
         (outcome.accepted_data_points, outcome.rejected_data_points),
         (4, 0)
     );
+    let values = |text: &str| {
+        text.lines()
+            .filter_map(|line| line.rsplit_once(" | ")?.1.parse::<f64>().ok())
+            .collect::<Vec<_>>()
+    };
+    for (sql, expected) in [
+        (
+            "TQL EVAL (180, 240, '1m') histogram_count(increase(otlp_delta_h[2m]))",
+            [30.0, 55.0].as_slice(),
+        ),
+        (
+            "TQL EVAL (240, 240, '1m') increase(histogram_count(otlp_delta_h)[2m:1m])",
+            [55.0].as_slice(),
+        ),
+    ] {
+        let native = eval_text_rows(
+            collected(native_tql_output(&instance, sql, true).await).await,
+            ReportedName::Nothing,
+        );
+        assert_eq!(values(&native), expected, "{sql}: {native}");
+    }
     for sql in [
         "TQL EVAL (240, 240, '1m') histogram_count(rate(otlp_delta_h[3m]))",
         "TQL EVAL (240, 240, '1m') histogram_sum(increase(otlp_delta_h[3m]))",
