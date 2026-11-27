@@ -15,8 +15,10 @@
 //! Native PromQL over file-engine tables.
 //!
 //! `fe_metric` reads two CSV files whose rows are in no particular order, and one sample of series
-//! `{job="api", instance="a"}` is present in both files with different values; `fe_metric_s` reads
-//! the same files with a second-precision time index. `fe_labels` holds a tag that is `NULL` on some
+//! `{job="api", instance="a"}` is present in both files with different values; `fe_metric_s`,
+//! `fe_metric_us` and `fe_metric_ns` read the same files with a second, microsecond and nanosecond
+//! time index. `fe_sub_us` and `fe_sub_ns` read one file whose samples are less than a millisecond
+//! off whole milliseconds and from each other. `fe_labels` holds a tag that is `NULL` on some
 //! rows and `''` on others, and an integer tag. `fe_histogram` mirrors the sqlness case
 //! `promql/delta_exponential_histogram`. Expected answers are worked out by hand from Prometheus
 //! semantics, which keep one sample per timestamp per series, read an empty label as an absent one
@@ -225,6 +227,47 @@ fn metric_cases(table: &str) -> Vec<Case> {
     ]
 }
 
+/// `(offset_micros, value)` of the one series `{host="h"}` of `fe_sub_us` and `fe_sub_ns`.
+const SUB_MILLISECOND: &[(i64, f64)] = &[
+    (59_999_500, 1.0),
+    (60_000_500, 2.0),
+    (61_000_000, 4.0),
+    (61_000_200, 8.0),
+];
+
+/// Windows and lookbacks are decided on the stored time, so a bound at a whole millisecond falls
+/// between two samples that share that millisecond once truncated, and samples less than a
+/// millisecond apart stay two samples. A kernel reads the time truncated to milliseconds.
+fn sub_millisecond_cases(table: &str) -> Vec<Case> {
+    let q = |promql: &str| promql.replace("fe_sub", table);
+    let h = "host=h";
+    vec![
+        // 60.0005s is after 60s, so 59.9995s is the latest sample at 60s.
+        instant(q("fe_sub"), 60, vec![row(60, h, 1.0)]),
+        instant(
+            q("timestamp(fe_sub)"),
+            60,
+            vec![row(60, h, (BASE_SECS * 1000 + 59_999) as f64 / 1000.0)],
+        ),
+        // 61.0002s is after 61s.
+        instant(q("fe_sub"), 61, vec![row(61, h, 4.0)]),
+        instant(
+            q("timestamp(fe_sub)"),
+            62,
+            vec![row(62, h, (BASE_SECS + 61) as f64)],
+        ),
+        // (60s, 61s] holds 60.0005s and 61s.
+        instant(q("count_over_time(fe_sub[1s])"), 61, vec![row(61, h, 2.0)]),
+        // (60s, 62s] holds 60.0005s, 61s and 61.0002s.
+        instant(q("sum_over_time(fe_sub[2s])"), 62, vec![row(62, h, 14.0)]),
+        // The last two samples in (59s, 61s] are 60.0005s and 61s.
+        instant(q("idelta(fe_sub[2s])"), 61, vec![row(61, h, 2.0)]),
+        // The last two samples in (60s, 62s] share the millisecond 61000, so there is no interval
+        // to take a difference over.
+        instant(q("idelta(fe_sub[2s])"), 62, vec![]),
+    ]
+}
+
 /// `fe_labels`: `{code="200"}` holds 1 at offset 0 with `instance` NULL, 2 at 60 with `instance`
 /// `''`, and at 120 both a NULL row (3) and a `''` row (4); `{code="500", instance="x"}` holds 10,
 /// 20, 30. The first is one series without an `instance` label, whose sample at 120 is 3.
@@ -339,7 +382,12 @@ async fn create_tables(instance: &Arc<Instance>, dir: &std::path::Path) {
     std::fs::create_dir(&metric_dir).unwrap();
     write_csv(&metric_dir.join("a.csv"), FILE_A);
     write_csv(&metric_dir.join("b.csv"), FILE_B);
-    for (table, precision) in [("fe_metric", 3), ("fe_metric_s", 0)] {
+    for (table, precision) in [
+        ("fe_metric", 3),
+        ("fe_metric_s", 0),
+        ("fe_metric_us", 6),
+        ("fe_metric_ns", 9),
+    ] {
         execute(
             instance,
             &format!(
@@ -351,6 +399,34 @@ async fn create_tables(instance: &Arc<Instance>, dir: &std::path::Path) {
                     PRIMARY KEY (job, instance)
                 ) WITH (location = '{}', format = 'csv')",
                 location(&metric_dir)
+            ),
+        )
+        .await;
+    }
+
+    let sub_dir = dir.join("sub");
+    std::fs::create_dir(&sub_dir).unwrap();
+    let mut text = String::from("ts,host,val\n");
+    for (offset_micros, value) in SUB_MILLISECOND {
+        let ts =
+            chrono::DateTime::from_timestamp_micros(BASE_SECS * 1_000_000 + offset_micros).unwrap();
+        text.push_str(&format!(
+            "{},h,{value}\n",
+            ts.format("%Y-%m-%dT%H:%M:%S%.6f")
+        ));
+    }
+    std::fs::write(sub_dir.join("rows.csv"), text).unwrap();
+    for (table, precision) in [("fe_sub_us", 6), ("fe_sub_ns", 9)] {
+        execute(
+            instance,
+            &format!(
+                "CREATE EXTERNAL TABLE {table} (
+                    ts TIMESTAMP({precision}) TIME INDEX,
+                    host STRING,
+                    val DOUBLE,
+                    PRIMARY KEY (host)
+                ) WITH (location = '{}', format = 'csv')",
+                location(&sub_dir)
             ),
         )
         .await;
@@ -551,6 +627,10 @@ async fn check_native_answers(instance: &Arc<Instance>, observer: &PlanObserver)
     let cases = metric_cases("fe_metric")
         .into_iter()
         .chain(metric_cases("fe_metric_s"))
+        .chain(metric_cases("fe_metric_us"))
+        .chain(metric_cases("fe_metric_ns"))
+        .chain(sub_millisecond_cases("fe_sub_us"))
+        .chain(sub_millisecond_cases("fe_sub_ns"))
         .chain(label_cases())
         .chain(histogram_cases());
     let mut failures = Vec::new();

@@ -19,7 +19,8 @@
 //! `(tags, time index)`, which the physical optimizer provides with a `RepartitionExec`
 //! and a `SortExec` that spills under memory pressure, and cuts the sorted rows into series chunks
 //! that carry their complete labels. Numeric fields are read as `Float64` and native histogram
-//! fields as histogram samples.
+//! fields as histogram samples. Timestamps are handed over in the time index's own unit; the
+//! consumer is bound to that unit (`crate::raw_time`).
 //!
 //! A raw series holds one sample per timestamp, as Prometheus storage does. Each field is its own
 //! value series, so rows that share labels and a timestamp are reduced field by field: each field
@@ -39,13 +40,11 @@ use common_query::series_frame::{
     PendingBatching, pack_raw_series_with, raw_series_frame_schema_with_ordering,
 };
 use datafusion::arrow::array::{
-    Array, ArrayRef, AsArray, StringArray, UInt32Array, make_comparator,
+    Array, ArrayRef, AsArray, Int64Array, StringArray, UInt32Array, make_comparator,
 };
 use datafusion::arrow::buffer::Buffer;
 use datafusion::arrow::compute::{cast, concat_batches, take};
-use datafusion::arrow::datatypes::{
-    DataType, Float64Type, SchemaRef, TimeUnit, TimestampMillisecondType,
-};
+use datafusion::arrow::datatypes::{DataType, Float64Type, Int64Type, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::common::{DFSchema, DFSchemaRef};
@@ -65,6 +64,7 @@ use datatypes::compute::SortOptions;
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{FieldSpec, Samples, SeriesFields, SeriesSchema};
 use datatypes::series::{Label, SeriesLabels, SeriesOrdering};
+use datatypes::timestamp::timestamp_array_to_primitive;
 use futures::{Stream, StreamExt};
 use store_api::region_engine::{RawLabelSource, RawSeriesStream};
 
@@ -256,12 +256,9 @@ impl RowColumns {
             .map(|tag| index_of(tag))
             .collect::<DataFusionResult<Vec<_>>>()?;
         let time = index_of(time_index)?;
-        if !matches!(
-            schema.field(time).data_type(),
-            DataType::Timestamp(TimeUnit::Millisecond, _)
-        ) {
+        if !matches!(schema.field(time).data_type(), DataType::Timestamp(_, _)) {
             return Err(DataFusionError::Plan(format!(
-                "RowSeriesSource time index {time_index:?} is {}, not a millisecond timestamp",
+                "RowSeriesSource time index {time_index:?} is {}, not a timestamp",
                 schema.field(time).data_type()
             )));
         }
@@ -561,11 +558,9 @@ impl RowSeriesStream {
                 Ok(tag)
             })
             .collect::<DataFusionResult<Vec<StringArray>>>()?;
-        let time = batch
-            .column(self.columns.time)
-            .as_primitive_opt::<TimestampMillisecondType>()
-            .ok_or_else(|| {
-                DataFusionError::Execution("RowSeriesSource time index is not milliseconds".into())
+        let (time, _) =
+            timestamp_array_to_primitive(batch.column(self.columns.time)).ok_or_else(|| {
+                DataFusionError::Execution("RowSeriesSource time index is not a timestamp".into())
             })?;
         if time.null_count() > 0 {
             return Err(DataFusionError::Execution(
@@ -614,7 +609,7 @@ impl RowSeriesStream {
                 .as_ref()
                 .is_some_and(|open| open.holds(&tags, row))
             {
-                self.publish(&kept, &field_rows, time, &fields)?;
+                self.publish(&kept, &field_rows, &time, &fields)?;
                 kept.clear();
                 field_rows.iter_mut().for_each(Vec::clear);
                 self.close();
@@ -654,7 +649,7 @@ impl RowSeriesStream {
         if end < rows {
             self.tail = Some(batch.slice(end, rows - end));
         }
-        self.publish(&kept, &field_rows, time, &fields)
+        self.publish(&kept, &field_rows, &time, &fields)
     }
 
     /// Makes the samples at the rows `kept` of the current batch the open series' latest chunk;
@@ -663,7 +658,7 @@ impl RowSeriesStream {
         &mut self,
         kept: &[u32],
         field_rows: &[Vec<u32>],
-        time: &datafusion::arrow::array::TimestampMillisecondArray,
+        time: &Int64Array,
         fields: &[ArrayRef],
     ) -> DataFusionResult<()> {
         let Some(open) = &mut self.open else {
@@ -674,12 +669,8 @@ impl RowSeriesStream {
         }
         let indices = UInt32Array::from(kept.to_vec());
         let time = take(time, &indices, None)?;
-        let time = RawTimestamps::try_new(
-            time.as_primitive::<TimestampMillisecondType>()
-                .values()
-                .clone(),
-        )
-        .map_err(|error| DataFusionError::External(Box::new(error)))?;
+        let time = RawTimestamps::try_new(time.as_primitive::<Int64Type>().values().clone())
+            .map_err(|error| DataFusionError::External(Box::new(error)))?;
         let samples = fields
             .iter()
             .zip(field_rows)
@@ -784,7 +775,7 @@ impl RawSeriesStream for RowSeriesStream {
 mod tests {
     use common_query::series_frame::unpack_raw_series;
     use datafusion::arrow::array::{Float64Array, TimestampMillisecondArray};
-    use datafusion::arrow::datatypes::{Field, Schema};
+    use datafusion::arrow::datatypes::{Field, Schema, TimeUnit};
     use datafusion::datasource::memory::MemorySourceConfig;
     use datafusion::prelude::SessionContext;
     use datatypes::series::samples::SampleRef;

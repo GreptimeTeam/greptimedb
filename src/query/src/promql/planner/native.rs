@@ -406,19 +406,20 @@ impl PromPlanner {
                 input = LogicalPlan::TableScan(scan.clone());
                 scan
             }
-            // The existing plan reads a time index in another unit than milliseconds under a
-            // projection that casts or reorders it. The raw series scan reads the column as stored,
-            // so this route takes the scan below it once the engine is known; a row source reads
-            // the projection, which casts a second-precision time index to the milliseconds it is
-            // exactly.
-            None => match &input {
-                LogicalPlan::TableScan(scan) => scan.clone(),
-                LogicalPlan::Projection(projection) => match projection.input.as_ref() {
+            None => {
+                // The existing plan reads a time index in another unit than milliseconds under a
+                // projection that casts or reorders it. The raw series scan and a row source read
+                // the column as stored, so this route takes the scan below it.
+                if let LogicalPlan::Projection(projection) = &input
+                    && let LogicalPlan::TableScan(scan) = projection.input.as_ref()
+                {
+                    input = LogicalPlan::TableScan(scan.clone());
+                }
+                match &input {
                     LogicalPlan::TableScan(scan) => scan.clone(),
                     _ => return Ok(declined("selector_plan_is_not_a_table_scan")),
-                },
-                _ => return Ok(declined("selector_plan_is_not_a_table_scan")),
-            },
+                }
+            }
         };
         let table = self.table_from_source(&scan.source)?;
         let table_meta = &table.table_info().meta;
@@ -450,9 +451,6 @@ impl PromPlanner {
         {
             return Ok(declined("engine_without_raw_series_scanner"));
         }
-        if !reads_rows {
-            input = LogicalPlan::TableScan(scan.clone());
-        }
         // A row source names its series by its tag columns and the metric name by the table, so a tag
         // column named `__name__` has no label to be read as, and dropping it would merge the series
         // it tells apart.
@@ -482,10 +480,6 @@ impl PromPlanner {
                     )
                 )
             });
-        // A row source reads the time index cast to milliseconds, which truncates a finer one.
-        if reads_rows && sub_millisecond_time_index {
-            return Ok(declined("row_source_sub_millisecond_time_index"));
-        }
         // A partition column that is not a tag splits one series across regions, and a bare scan cannot
         // reconcile the fragments; a raw source can, so such a selector is admitted and its input is bound per
         // source below.
@@ -1607,12 +1601,10 @@ impl PromPlanner {
             } else if let LogicalPlan::Extension(extension) = scan
                 && let Some(source) = extension.node.as_any().downcast_ref::<RowSeriesSource>()
             {
-                // A row source reads its time index cast to milliseconds.
-                let filter =
-                    scan_time_filter(start, end, inclusive, time, ArrowTimeUnit::Millisecond);
-                *scan = bind_row_source_filters(source, filter, time)
+                let (bound, unit) = bind_row_source_filters(source, start, end, inclusive, time)
                     .context(DataFusionPlanningSnafu)?;
-                input_time_units.push(RawTimeUnit::Millisecond);
+                *scan = bound;
+                input_time_units.push(RawTimeUnit::from(unit));
             } else if let LogicalPlan::TableScan(table_scan) = scan {
                 let unit = self.scan_time_unit(table_scan)?;
                 table_scan
@@ -2369,29 +2361,39 @@ fn row_source_input(
         .context(DataFusionPlanningSnafu)
 }
 
-/// Binds the selector's time range to a row source.
+/// Binds the selector's time range, in milliseconds, to a row source, and returns the source with
+/// the unit of the time index it hands over.
 ///
-/// The range filters the source's rows. It is also pushed into a scan whose time index is already
-/// in milliseconds, where the file engine uses it to prune files and row groups.
+/// The range filters the source's rows, and is pushed into the scan, where the file engine uses it
+/// to prune files and row groups.
 fn bind_row_source_filters(
     source: &RowSeriesSource,
-    time_filter: DfExpr,
+    start: i64,
+    end: i64,
+    inclusive: bool,
     time: &str,
-) -> std::result::Result<LogicalPlan, DataFusionError> {
+) -> std::result::Result<(LogicalPlan, ArrowTimeUnit), DataFusionError> {
     use datafusion::common::tree_node::{Transformed, TreeNode};
 
-    let millis =
-        ArrowDataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Millisecond, None);
+    let unit = match source
+        .input()
+        .schema()
+        .field_with_unqualified_name(time)?
+        .data_type()
+    {
+        ArrowDataType::Timestamp(unit, _) => *unit,
+        other => {
+            return Err(DataFusionError::Internal(format!(
+                "row source time index {time:?} is {other}, not a timestamp"
+            )));
+        }
+    };
+    let time_filter = scan_time_filter(start, end, inclusive, time, unit);
     let input = source
         .input()
         .clone()
         .transform_down(|plan| match plan {
-            LogicalPlan::TableScan(mut scan)
-                if scan
-                    .projected_schema
-                    .field_with_unqualified_name(time)
-                    .is_ok_and(|field| field.data_type() == &millis) =>
-            {
+            LogicalPlan::TableScan(mut scan) => {
                 scan.filters.push(time_filter.clone());
                 Ok(Transformed::yes(LogicalPlan::TableScan(scan)))
             }
@@ -2401,7 +2403,7 @@ fn bind_row_source_filters(
     let input = LogicalPlanBuilder::from(input)
         .filter(time_filter)?
         .build()?;
-    Ok(LogicalPlan::Extension(Extension {
+    let source = LogicalPlan::Extension(Extension {
         node: Arc::new(
             datafusion::logical_expr::UserDefinedLogicalNodeCore::with_exprs_and_inputs(
                 source,
@@ -2409,7 +2411,8 @@ fn bind_row_source_filters(
                 vec![input],
             )?,
         ),
-    }))
+    });
+    Ok((source, unit))
 }
 
 /// The moment `millis` milliseconds from the Unix epoch, on whichever side of it that lands.
