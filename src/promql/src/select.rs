@@ -62,10 +62,8 @@ pub enum SortOrder {
 /// `topk(k, ...)` (`top`) or `bottomk(k, ...)` with a constant `k`.
 ///
 /// At every point each group keeps the `k` largest (or smallest) values, NaN ranking last for
-/// both; the selected samples keep their series' labels and values. Histogram samples are not
-/// ranked, as Prometheus ignores them here. Prometheus breaks ties by
-/// the order its storage returns series in, which is not a property of the series; here ties
-/// go to the series whose label set sorts first.
+/// both; histogram samples are ignored, as in Prometheus. Prometheus breaks ties by storage order;
+/// here ties go to the series whose label set sorts first.
 pub fn topk(
     k: f64,
     top: bool,
@@ -86,12 +84,9 @@ pub fn topk_at(
     series: &[Series],
 ) -> Result<Vec<Series>> {
     single_field(schema, "topk/bottomk")?;
-    // Validates the series against the schema and its grid; the walk below visits the carried
-    // positions, not the whole grid.
     grid_points(schema, series)?;
     let mut order: Vec<usize> = (0..series.len()).collect();
-    // The label pairs of a series are built once: a comparator that compared two metrics would
-    // rebuild both lists per comparison, and the groups read the same lists again.
+    // Built once per series and shared by the sort and the grouping.
     let mut label_sets: Vec<Vec<(Arc<str>, Arc<str>)>> = series
         .iter()
         .map(|item| labels_with_name(&item.metric))
@@ -104,18 +99,12 @@ pub fn topk_at(
             .or_default()
             .push(index);
     }
-    // The groups hold what they need, so the label lists are freed before the point walk.
     label_sets.clear();
 
     let mut selected: Vec<Vec<(usize, usize)>> = vec![Vec::new(); series.len()];
     let mut candidates: Vec<(usize, usize, f64)> = Vec::new();
-    // The values of one point, for the partial selection below: ranking them there leaves the
-    // candidates in member order, which is what hands ties to the earlier label set.
     let mut values: Vec<f64> = Vec::new();
     for members in groups.values() {
-        // A point no member carries holds no candidate, so only the union of the members'
-        // positions is visited: a hole in the grid never reaches the ranking. Each member reads
-        // through one forward cursor, whose rows only increase as the union walk advances.
         let mut cursors: Vec<RowCursor<'_>> = members
             .iter()
             .map(|&member| series[member].fields.as_slice()[0].cursor())
@@ -136,10 +125,7 @@ pub fn topk_at(
             let Some(k) = k_at(point)? else {
                 continue;
             };
-            // Which candidates win is the result; the order they were found in is not. The ranking
-            // is a partial selection of the k best values rather than an ordering of the whole
-            // group, and it runs on a copy of the values so that the candidates keep the member
-            // order the ties are resolved in.
+            // Select the k-th value on a copy so `candidates` stays in label order for tie-breaking.
             let k = k.min(candidates.len());
             if k == 0 {
                 continue;
@@ -150,9 +136,8 @@ pub fn topk_at(
                 values.select_nth_unstable_by(k, |a, b| rank(*a, *b, top));
                 values[k]
             });
-            // The partition splits the run of values equal to its boundary, while ties go to the
-            // earlier label set: the ones equal to the boundary inside the front are the slots left
-            // for them, and the scan below fills those slots in member order, which is label order.
+            // Values equal to the boundary inside the front are the slots left for ties; the scan
+            // fills them in label order.
             let mut tied = match boundary {
                 Some(boundary) => values[..k]
                     .iter()
@@ -182,10 +167,7 @@ pub fn topk_at(
         }
         let mut sorted = points;
         sorted.sort_unstable();
-        // One builder serves every result series, so each one starts explicitly: only
-        // `begin_series` resets the positions it accepts.
         builder.begin_series();
-        // The selected positions of one series only increase, so one cursor reads their rows.
         let mut cursor = series[index].fields.as_slice()[0].cursor();
         for (point, row) in sorted {
             builder.push(point, &[cursor_value(&mut cursor, row)?])?;
@@ -198,10 +180,9 @@ pub fn topk_at(
 /// `limitk(k, ...)` with a constant `k`.
 ///
 /// At every point each group keeps the first `k` series in input order that hold a sample there,
-/// float or histogram, with their labels and values. Prometheus takes them in the order its
-/// storage returns series: label order once a query reads several queriers (the head and a
-/// block), creation order when the TSDB head alone answers it. A caller that wants Prometheus'
-/// result over persisted data passes the series in label order.
+/// float or histogram. Prometheus uses storage order: label order across several queriers,
+/// creation order when the TSDB head alone answers. Callers pass series in label order to match
+/// Prometheus over persisted data.
 pub fn limitk(
     k: f64,
     grouping: &Grouping,
@@ -255,10 +236,8 @@ pub fn limitk(
             continue;
         }
         builder.begin_series();
-        // A series belongs to one group, whose points are visited in order.
         let mut cursor = series[index].fields.as_slice()[0].cursor();
         for (point, row) in points {
-            // The sample is moved, not computed, so it goes straight into the result.
             let sample = cursor.at(row).expect("the axis and the fields are aligned");
             builder.push_refs(point, &[sample])?;
         }
@@ -271,8 +250,8 @@ pub fn limitk(
 ///
 /// Keeps whole series: Prometheus derives an offset in `[0, 1)` from the hash of a series' labels
 /// and keeps the series when the offset is below `r`, or, for a negative `r`, at least `1 + r`.
-/// Which series are kept does not depend on the grouping, so it is not a parameter. The hash is
-/// the one of Prometheus' default `stringlabels` build; the other label builds hash differently.
+/// The result does not depend on the grouping. The hash matches Prometheus' default `stringlabels`
+/// build; other label builds hash differently.
 pub fn limit_ratio(ratio: f64, schema: &SeriesSchema, series: &[Series]) -> Result<Vec<Series>> {
     grid_points(schema, series)?;
     if ratio.is_nan() {
@@ -298,7 +277,6 @@ pub fn limit_ratio(ratio: f64, schema: &SeriesSchema, series: &[Series]) -> Resu
             item.fields.iter().map(|field| field.cursor()).collect();
         for (point, index) in item.time.positions() {
             row.clear();
-            // The samples are moved, not computed, so the row is read and pushed as it stands.
             for cursor in &mut cursors {
                 row.push(
                     cursor
@@ -337,27 +315,16 @@ fn sample_offset(metric: &SeriesLabels) -> f64 {
 
 /// `scalar(v)`: the value of the only float sample present at each point, NaN otherwise.
 ///
-/// Native histogram samples are ignored, as Prometheus' `funcScalar` ignores them: they hold no
-/// float value, and they are not an element either, so they never make a point hold more than one
-/// sample. A point whose only sample is a histogram therefore answers NaN, a histogram beside one
-/// float answers that float, and two floats answer NaN.
+/// Native histogram samples are ignored, as in Prometheus' `funcScalar`: a histogram alone answers
+/// NaN, a histogram beside one float answers that float.
 ///
-/// A scalar holds a value at every point of the grid, so its value array is written where the input
-/// is read rather than staged and rebuilt: the one buffer of values becomes the result's array, and
-/// the counts that decide between a value and a NaN are dropped before it is handed over. Building
-/// it therefore costs one `f64` and one count per point and nothing else per point -- no optional
-/// value, no row index, no second copy of the answer -- which is what the caller reserves for it.
+/// Costs one `f64` and one count per grid point; the caller reserves exactly that.
 pub fn scalar(schema: &SeriesSchema, series: &[Series]) -> Result<Series> {
     single_field(schema, "scalar")?;
     let (grid, points) = grid_and_points(schema, series)?;
-    // A point no float has reached answers the Go NaN, which is where it starts. The first float of
-    // a point writes its value there; the second takes the point back to NaN, and so does any float
-    // after it, so a point holding more than one float never reads as holding one.
     let mut values = vec![GO_NAN; points];
     let mut counts = vec![0u8; points];
     for item in series {
-        // Walk the rows this series carries: a sparse axis must not be read as its envelope, and
-        // a forward cursor keeps the read proportional to them.
         let mut field = item.fields.as_slice()[0].cursor();
         for (point, row) in item.time.positions() {
             match field.at(row).expect("the axis and the fields are aligned") {
@@ -366,17 +333,12 @@ pub fn scalar(schema: &SeriesSchema, series: &[Series]) -> Result<Series> {
                     values[point] = if *count == 0 { value } else { GO_NAN };
                     *count = count.saturating_add(1);
                 }
-                // Neither a histogram nor a position holding no sample is an element of the
-                // vector, so neither decides what the point answers.
                 SampleRef::Histogram(_) | SampleRef::Missing => {}
             }
         }
     }
-    // The counts have decided every value above; handing them back first leaves the values as the
-    // only per-point buffer alive when the answer is built.
     drop(counts);
     let fields = SeriesFields::one(Samples::from_float(Float64Array::from(values)));
-    // Every point of the grid holds a value, so the axis is the whole grid as one run.
     let time = TimeAxis::Grid(GridRange::try_new(grid, 0, points).map_err(external)?);
     let empty = SeriesLabels::try_new(None, Vec::new()).map_err(external)?;
     Series::try_new(schema, empty, time, fields).map_err(external)
@@ -388,10 +350,8 @@ pub fn scalar(schema: &SeriesSchema, series: &[Series]) -> Result<Series> {
 /// a range selector, `labels` come from its matchers as for `absent(v)`; for a subquery
 /// Prometheus derives no labels.
 ///
-/// All of it is one label set, so the result is one series. A point where one field is present and
-/// another is absent keeps its row, with a null in the field that is present; a point where every
-/// field is present contributes no row, and the axis names the runs of points that do. `None` means
-/// no point is absent in any field, so no row survives.
+/// Each field is absent on its own: a field present at a point gets a null there. `None` means
+/// every field is present at every point.
 pub fn absent(
     schema: &SeriesSchema,
     series: &[Series],
@@ -399,11 +359,9 @@ pub fn absent(
 ) -> Result<Option<Series>> {
     let points = grid_points(schema, series)?;
     let fields = schema.fields.len();
-    // Each field is absent on its own.
     let mut present = vec![false; points * fields];
     for item in series {
         for (field, samples) in item.fields.iter().enumerate() {
-            // One cursor per field, driven by the positions the axis carries.
             let mut cursor = samples.cursor();
             for (point, row) in item.time.positions() {
                 if !matches!(
@@ -450,10 +408,9 @@ pub enum MatchOp {
 /// the first equality matcher of a name sets that label, any other matcher of the name removes
 /// it, and `__name__` is skipped.
 ///
-/// Prometheus reads the matchers after TSDB's `PostingsForMatchers` has reordered them in place,
-/// moving the matchers that narrow the result before those that only subtract from it; that is
-/// the order users see whenever the storage holds data, and the order used here. It changes the
-/// result only when a name has both an equality and another matcher.
+/// The matchers are first reordered as TSDB's `PostingsForMatchers` does in place (narrowing
+/// matchers before subtracting ones), which Prometheus shows whenever storage holds data. The order
+/// matters only when a name has both an equality and another matcher.
 pub fn absent_labels(matchers: &[LabelMatcher]) -> Result<SeriesLabels> {
     let must_be_set: Vec<&str> = matchers
         .iter()
@@ -610,15 +567,10 @@ pub(crate) fn k_param(k: f64, series: usize) -> Result<Option<usize>> {
     Ok(Some(k.trunc().min(series as f64) as usize))
 }
 
-/// Validates the complete parameter series for Prometheus topk/bottomk/limitk semantics.
-///
-/// The values are read where the node holds them, in one pass. The caller keeps both the series the
-/// parameter arrived as and the values it was read into, so a second copy of the present ones would
-/// be memory neither of them is charged for.
+/// Validates the complete parameter series for Prometheus topk/bottomk/limitk semantics. Values are
+/// read in place; copying them would be unaccounted memory.
 pub(crate) fn validate_topk_parameters(values: &[Option<f64>]) -> Result<()> {
-    // A position the series decided nothing at is no parameter value, so only the present ones are
-    // read. NaN is tracked rather than folded into the bounds: it is a value Prometheus refuses
-    // outright, not the largest one, and it is refused even where every value is below 1.
+    // Prometheus refuses NaN even when every other value is below 1.
     let (mut max, mut min, mut nan) = (f64::NEG_INFINITY, f64::INFINITY, false);
     for value in values.iter().flatten() {
         if value.is_nan() {
@@ -655,7 +607,6 @@ fn group_key(metric: &SeriesLabels, grouping: &Grouping) -> GroupKey {
     group_key_from(&labels_with_name(metric), grouping)
 }
 
-/// The group `labels` belong to, for callers that already hold the series' label pairs.
 fn group_key_from(labels: &[(Arc<str>, Arc<str>)], grouping: &Grouping) -> GroupKey {
     let mut key: Vec<_> = labels
         .iter()
@@ -747,16 +698,12 @@ fn grid_points(schema: &SeriesSchema, series: &[Series]) -> Result<usize> {
     Ok(grid_and_points(schema, series)?.1)
 }
 
-/// Checks every series against `schema` and returns the grid it validated them on, with its length.
-///
-/// An operator that addresses points on the grid needs the grid itself, not just its length, and
-/// resolving it twice would let the two answers disagree.
+/// Checks every series against `schema` and returns the grid with its length.
 fn grid_and_points(schema: &SeriesSchema, series: &[Series]) -> Result<(Arc<EvalGrid>, usize)> {
     let grid = schema.eval_grid.as_ref().ok_or_else(|| {
         DataFusionError::Execution("select operators need an evaluation grid".into())
     })?;
     for item in series {
-        // Both grid axes are addressed on a grid; what matters is that it is this schema's.
         let matches = match item.time.grid() {
             Some(item_grid) => {
                 item_grid.spec() == grid.spec() && item.fields.len() == schema.fields.len()
@@ -772,26 +719,16 @@ fn grid_and_points(schema: &SeriesSchema, series: &[Series]) -> Result<(Arc<Eval
     Ok((Arc::clone(grid), grid.spec().len as usize))
 }
 
-/// The first field's value of `series` at grid `point`, looked up by position.
-///
-/// A point read: its only caller, `sort_instant`, reads one point of each instant series, so there
-/// is no walk for a cursor to follow. The row of a position is searched for, not counted from the
-/// first one, and a position the axis does not carry answers `None` rather than a row read from
-/// another offset.
+/// The first field's value of `series` at grid `point`; `None` when the axis does not carry it.
 fn value_at(series: &Series, point: usize) -> Result<Option<f64>> {
     let Some(row) = series.time.row_of(point) else {
         return Ok(None);
     };
-    // `Samples::sample` walks the chunk descriptors, not the rows, which is what a random read
-    // costs; a cursor would have to replay every row before this one.
     into_value(series.fields.as_slice()[0].sample(row))
 }
 
-/// A sample as a value for an operator that ranks or sorts reads it.
-///
-/// The callers read floats only -- `sort` drops the histogram samples before it keys a series by a
-/// value, and `topk` collects float candidates -- so a histogram here is a broken invariant rather
-/// than an input.
+/// Callers filter histograms out first (`sort` drops them, `topk` selects only float candidates),
+/// so a histogram here is a broken invariant.
 fn into_value(sample: SampleRef<'_>) -> Result<Option<f64>> {
     match sample {
         SampleRef::Missing => Ok(None),
@@ -807,36 +744,30 @@ fn cursor_value(cursor: &mut RowCursor<'_>, row: usize) -> Result<Option<f64>> {
     into_value(cursor.at(row).expect("the axis and the fields are aligned"))
 }
 
-/// How often this thread built a series' label list or compared two candidates, so a test can hold
-/// `topk` to the work it should not do rather than to the result, which every shape produces.
-/// Test-only: a decorated sort and a partial selection select the same candidates.
+/// Per-thread counts of label lists built and candidates compared, so tests can bound `topk`'s work.
 #[cfg(test)]
 pub(crate) mod calls {
     use std::cell::Cell;
 
     thread_local! {
-        /// Label lists [`super::labels_with_name`] built on this thread.
         static LABEL_LISTS: Cell<usize> = const { Cell::new(0) };
-        /// Candidate pairs [`super::rank`] looked at on this thread.
         static RANKS: Cell<usize> = const { Cell::new(0) };
     }
 
-    /// Records one label list.
     pub(crate) fn record_label_list() {
         LABEL_LISTS.with(|lists| lists.set(lists.get() + 1));
     }
 
-    /// Records one comparison of two candidates.
     pub(crate) fn record_rank() {
         RANKS.with(|ranks| ranks.set(ranks.get() + 1));
     }
 
-    /// The label lists built on this thread since the last call, which starts a new count.
+    /// Returns and resets the count.
     pub(crate) fn take_label_lists() -> usize {
         LABEL_LISTS.with(|lists| lists.replace(0))
     }
 
-    /// The candidate comparisons made on this thread since the last call, which starts a new count.
+    /// Returns and resets the count.
     pub(crate) fn take_ranks() -> usize {
         RANKS.with(|ranks| ranks.replace(0))
     }

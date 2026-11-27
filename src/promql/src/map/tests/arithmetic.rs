@@ -50,11 +50,8 @@ fn unary_negation_drops_name_and_keeps_missing_positions_and_payloads() {
     let SampleRef::Float(negated) = field.iter().nth(2).unwrap() else {
         panic!("missing negated NaN");
     };
-    // A multiplication propagates the NaN operand instead of negating it bit for bit: the sign
-    // stays the input's and the quiet bit is set, where the unary kernel this replaced flipped the
-    // sign with `-v`. IEEE leaves both of those unspecified, and eval resolves staleness by
-    // validity rather than by payload before this kernel runs, so what is pinned is what identifies
-    // the sample: the payload of a stale NaN survives the negation.
+    // Multiplication keeps the NaN's sign and sets the quiet bit (IEEE leaves both unspecified);
+    // what is pinned is that the stale NaN's payload survives.
     assert!(negated.is_nan(), "a NaN stayed a NaN: {negated}");
     const PAYLOAD: u64 = (1 << 51) - 1;
     assert_eq!(

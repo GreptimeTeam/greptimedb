@@ -38,26 +38,17 @@ pub enum Comparison {
     Bool(ComparisonOp),
 }
 
-/// Compares a vector with a constant scalar, dropping the samples that have no comparison rather
-/// than failing the query.
+/// Compares a vector with a constant scalar. Returns `None` when no sample passed, and whether a
+/// histogram sample was dropped.
 ///
-/// Prometheus compares float samples only: a histogram has no ordering against a scalar, so the
-/// position it holds answers nothing. The existing planner says so with an info and answers no
-/// value there (`NativeHistogramDrop`, `prom_token_to_binary_expr_builder` in
-/// `query::promql::planner`), which is the behaviour mirrored here. The second element of the
-/// answer reports whether a histogram was dropped, so the caller can record that info once per
-/// chunk instead of once per position.
-///
-/// The literal form of a filter: `None` still means nothing passed, so the caller hands on no
-/// value for this chunk.
+/// Histogram samples have no ordering against a scalar; like the existing planner
+/// (`NativeHistogramDrop` in `query::promql::planner`), they are dropped rather than rejected.
 pub fn map_compare_literal(
     schema: &Arc<SeriesSchema>,
     series: &Series,
     comparison: Comparison,
     scalar: ScalarOperand,
 ) -> Result<(Option<Series>, bool)> {
-    // Whatever kinds the fields carry: a histogram position is dropped, not rejected, so the axis
-    // and the schema are checked without requiring float samples.
     let time = validate_grid_series(schema, series)?;
     let mut builder = GridSeriesBuilder::try_new(schema.clone())?;
     let mut dropped_histogram = false;
@@ -106,8 +97,7 @@ impl Comparison {
 }
 
 impl std::fmt::Display for Comparison {
-    /// The operator as the query wrote it, which is how the existing planner names it in the info
-    /// it records for a dropped histogram sample.
+    /// The operator as written in the query, which names it in the dropped-histogram info.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let op = match self {
             Self::Filter(op) | Self::Bool(op) => op,
@@ -124,12 +114,8 @@ impl std::fmt::Display for Comparison {
 }
 
 impl ComparisonOp {
-    /// Whether `left op right` holds, by the same IEEE rules the kernels use.
-    ///
-    /// Public because a compiler that folds a constant comparison has to fold it with the same
-    /// answer the kernel would compute: NaN satisfies only `NotEqual`, and signed zeros compare
-    /// equal. Defining the six rules a second time is how the folded number and the evaluated one
-    /// would start to disagree.
+    /// Whether `left op right` holds. Constant folding must call this so folded and evaluated
+    /// comparisons agree.
     #[inline]
     pub fn apply(self, left: f64, right: f64) -> bool {
         match self {

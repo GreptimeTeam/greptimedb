@@ -66,6 +66,18 @@ scan per selector, each carrying a `RawSeriesSource` that answers explicit-label
 The frame schema is compared exactly at the merge scan, so its declaration and
 the region's output change together.
 
+## Comments and tests
+
+Docs on public items state the contract: inputs, guarantees, errors. Private
+comments record only what code cannot: Prometheus quirks (name the Prometheus
+function), memory-accounting preconditions, finality and ordering invariants.
+Do not restate code, narrate history ("used to", "this change"), or point at
+other comments. When a comment explains why a state cannot occur, prefer a type
+that rules it out.
+
+A new test must reach a branch that no existing test or golden case reaches.
+Kernel values belong in golden cases, not in executor tests.
+
 ## Gotchas
 
 A series closes exactly once per input series, on the chunk that says so—not
