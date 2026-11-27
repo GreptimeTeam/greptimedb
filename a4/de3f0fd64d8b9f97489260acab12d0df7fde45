@@ -1,0 +1,28 @@
+tests/perf/test_benchmark_version_comparison.py
+  s_b42cba56c4911e::t_2fcbfe73c0e4c2 47-64
+.github/workflows/tracesbench.yml
+  s_b42cba56c4911e::t_6ae5582e73cb24 30-39,131-132,184,393,406
+.github/workflows/agent-observability.yml
+  s_b42cba56c4911e::t_6ae5582e73cb24 39-48,123-124,368,374
+.github/scripts/benchmark-version-comparison.py
+  s_b42cba56c4911e::t_6ae5582e73cb24 30-49,54-55,60-61,206-207
+  s_b42cba56c4911e::t_0193f387014388 176
+.github/workflows/vmbench-long-range.yml
+  s_b42cba56c4911e::t_6ae5582e73cb24 38-47,123-124,218,228-234
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a4de3f0fd64d8b9f97489260acab12d0df7fde45",
+  "prompts": {},
+  "sessions": {
+    "s_b42cba56c4911e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a207af-50d0-7c80-bdbc-8fe4eee39295",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
