@@ -1,0 +1,19 @@
+.github/workflows/dev-build.yml
+  s_5f0853b9890b40::t_4c8b4dac6750eb 58,253,260-263
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7df66817d9cec3a346461f59e1d0c6a0825cd10c",
+  "prompts": {},
+  "sessions": {
+    "s_5f0853b9890b40": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a21bb8-eec8-7cc3-a054-0bca6e0e921c",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
