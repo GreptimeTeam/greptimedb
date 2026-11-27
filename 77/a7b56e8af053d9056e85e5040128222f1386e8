@@ -1,0 +1,24 @@
+src/mito2/src/engine/table_compaction.rs
+  s_17057bba187655::t_a9ffd32c0fa63b 18,21-22,62-102
+  s_17057bba187655::t_7de02f2ae2e442 103-104
+src/mito2/src/engine/table_compaction/tests.rs
+  s_17057bba187655::t_a9ffd32c0fa63b 16,22-23,25,28,32,42,45,113-120,126,143,1300-1381
+src/mito2/src/worker/handle_table_compaction.rs
+  s_17057bba187655::t_f94ee9ac8a7956 18-20,117-118
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "77a7b56e8af053d9056e85e5040128222f1386e8",
+  "prompts": {},
+  "sessions": {
+    "s_17057bba187655": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c56d-fbcd-75c2-86d2-c4b3f17c03dc",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
