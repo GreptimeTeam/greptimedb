@@ -774,9 +774,52 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
     /// Sets the region id that should receive query-load metrics.
     fn set_query_load_region_id(&mut self, region_id: RegionId);
 
-    fn snapshot_sequence(&self) -> Option<SequenceNumber> {
+    /// The snapshot this scan reads under, or `None` when the engine states none.
+    ///
+    /// An engine that states one reads both fields from **one** version of the region, so a
+    /// caller that reports the scan's watermark together with the region's partition
+    /// expression cannot pair an expression with a watermark measured under another one.
+    /// `None` states nothing: a caller that must report a `(region, expression, watermark)`
+    /// triple reports none for such a scanner instead of assuming a value.
+    fn snapshot_identity(&self) -> Option<ScanSnapshotIdentity> {
         None
     }
+
+    /// The sequence upper bound [`Self::snapshot_identity`] states, when it bound one at scan
+    /// open. A scan that inherited its bound from the caller (a fenced read) states none.
+    fn snapshot_sequence(&self) -> Option<SequenceNumber> {
+        self.snapshot_identity()
+            .and_then(|identity| identity.bound_sequence)
+    }
+}
+
+/// The identity of the snapshot one region scan reads under.
+///
+/// Both fields describe the same version of the region: the sequence upper bound the scan
+/// bound when it opened keeps its data inside that version, and `partition_expr` is the
+/// region's partition expression that same version states. Taking them from one snapshot is
+/// what makes a reported `(expression, watermark)` pair trustworthy: a concurrent repartition
+/// that gives the region another expression cannot pair the old expression with the new
+/// watermark, because neither is read again after the scan pinned the version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanSnapshotIdentity {
+    /// The sequence upper bound the scan **bound** when it opened, or `None` when it did not
+    /// bind one (a caller-fenced read, whose bound the caller supplies).
+    pub bound_sequence: Option<SequenceNumber>,
+    /// The region's partition expression at that snapshot, in the canonical
+    /// `PartitionExpr::as_json_str()` form a cursor and an observed slice also use.
+    ///
+    /// `None` states the region's **complete value domain** - the region has no partition
+    /// expression, so the whole domain is the only slice it has. It never means "not known".
+    pub partition_expr: Option<String>,
+    /// The creators of the files the region had visible at that snapshot, i.e. the regions whose
+    /// rows its file list may hold. Read from the version's file list in memory, so what the scan
+    /// prunes afterwards cannot hide a file from it.
+    ///
+    /// The region itself is never listed. `Some(vec![])` states the region held no file of
+    /// another region, which is a positive "nothing foreign" answer; `None` states that this
+    /// engine does not know.
+    pub visible_foreign_file_creators: Option<Vec<u64>>,
 }
 
 pub type RegionScannerRef = Box<dyn RegionScanner>;
@@ -1681,8 +1724,19 @@ impl RegionScanner for SinglePartitionScanner {
         self.properties.set_query_load_region_id(region_id);
     }
 
-    fn snapshot_sequence(&self) -> Option<SequenceNumber> {
-        self.snapshot_sequence
+    fn snapshot_identity(&self) -> Option<ScanSnapshotIdentity> {
+        Some(ScanSnapshotIdentity {
+            bound_sequence: self.snapshot_sequence,
+            // `store-api` cannot depend on `partition`, so this states the expression the
+            // metadata carries instead of canonicalizing it. An engine that partitions a region
+            // and reads it under a pinned snapshot overrides this with the identity its own scans
+            // state (see the mito engine), so this value only has to be right for an engine whose
+            // regions keep the expression they were created with.
+            partition_expr: self.metadata.partition_expr.clone(),
+            // This scanner does not hold a region file list, so it states nothing about the
+            // files instead of claiming the region holds none.
+            visible_foreign_file_creators: None,
+        })
     }
 }
 

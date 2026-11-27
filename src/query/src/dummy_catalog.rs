@@ -15,7 +15,7 @@
 //! Dummy catalog for region server.
 
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
@@ -38,14 +38,16 @@ use session::context::{QueryContext, QueryContextRef};
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::RegionEngineRef;
-use store_api::storage::{RegionId, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector};
+use store_api::storage::{
+    CursorShard, RegionId, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector,
+};
 use table::TableRef;
 use table::metadata::{TableId, TableInfoRef};
 use table::table::adapter::{dictionary_encode_string_columns, supports_pk_dictionary_encoding};
 use table::table::scan::RegionScanExec;
 
 use crate::error::{GetRegionMetadataSnafu, Result};
-use crate::options::{FlowIncrementalMode, FlowQueryExtensions};
+use crate::options::{FlowIncrementalMode, FlowQueryExtensions, FlowRepairMode};
 
 /// Resolve to the given region (specified by [RegionId]) unconditionally.
 #[derive(Clone, Debug)]
@@ -192,6 +194,20 @@ impl TableProvider for DummyTableProvider {
         {
             bind_snapshot_bound_region_seq(query_ctx, self.region_id, snapshot_sequence)
                 .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        }
+
+        // Bind what the region's scan stated about the snapshot it reads under: the partition
+        // expression it covers and the creators of the files it had visible. The engine states all
+        // of it from one version snapshot, so the expression a region read reports, the watermark
+        // it reports and the file list it started from describe the same instant: a scan that
+        // inherited a caller-fenced bound still states what it actually read under.
+        if let Some(query_ctx) = &self.query_ctx
+            && let Some(identity) = scanner.snapshot_identity()
+        {
+            query_ctx.bind_scan_partition_expr(self.region_id.as_u64(), identity.partition_expr);
+            if let Some(creators) = identity.visible_foreign_file_creators {
+                query_ctx.bind_scan_visible_file_creators(self.region_id.as_u64(), creators);
+            }
         }
 
         let query_memory_tracker = self.engine.query_memory_tracker();
@@ -365,11 +381,17 @@ struct FlowScanDecision {
     skip_sst_files: bool,
     /// Whether this source scan must enforce the exact sequence range.
     exact_sequence_range: bool,
+    /// Whether the read may cross an invalid boundary: it prunes at file granularity
+    /// and forces the file barrier as each row's sequence.
+    read_across_invalid_boundary: bool,
     /// Whether the scan reads physical row sequences and hides the rows a substitution
     /// produced, reporting the windows they occupy. Only the incremental delta asks for
     /// it: it is the read that must split an adopted file into consumed and unconsumed
     /// rows instead of trusting the handle's barrier.
     read_row_sequence: bool,
+    /// The cursor slices of every creator region, used to filter the rows of a file this
+    /// region adopted from another one. Only a physical-sequence read carries them.
+    creator_cursor_shards: Option<Arc<BTreeMap<u64, Vec<CursorShard>>>>,
 }
 
 impl FlowScanDecision {
@@ -381,7 +403,9 @@ impl FlowScanDecision {
             memtable_max_sequence: None,
             skip_sst_files: false,
             exact_sequence_range: false,
+            read_across_invalid_boundary: false,
             read_row_sequence: false,
+            creator_cursor_shards: None,
         }
     }
 }
@@ -397,7 +421,9 @@ fn decide_flow_scan(query_ctx: &QueryContext, region_id: RegionId) -> Result<Flo
             memtable_max_sequence: query_ctx.get_snapshot(region_id.as_u64()),
             skip_sst_files: false,
             exact_sequence_range: false,
+            read_across_invalid_boundary: false,
             read_row_sequence: false,
+            creator_cursor_shards: None,
         });
     };
 
@@ -410,12 +436,11 @@ fn decide_flow_scan(query_ctx: &QueryContext, region_id: RegionId) -> Result<Flo
 
     let apply_incremental = flow_extensions.validate_for_scan(region_id)?;
 
+    // A region's own memtables and files carry numbers this region allocated, but a
+    // region-level bound cannot tell which expression slice a row belongs to, so it
+    // starts after the least advanced slice (`region_cursor`, not a per-row choice).
     let memtable_min_sequence = if apply_incremental {
-        flow_extensions
-            .incremental_after_seqs
-            .as_ref()
-            .and_then(|seqs| seqs.get(&region_id.as_u64()))
-            .copied()
+        flow_extensions.region_cursor(region_id.as_u64())
     } else {
         None
     };
@@ -449,7 +474,18 @@ fn decide_flow_scan(query_ctx: &QueryContext, region_id: RegionId) -> Result<Flo
         skip_sst_files,
         exact_sequence_range: apply_incremental
             && flow_extensions.incremental_mode == Some(FlowIncrementalMode::SequenceRange),
+        // Flow repair reads are decided by the repair mode alone, never by
+        // `apply_incremental`: a fenced repair DML advances no checkpoint, yet it must
+        // still read rows an old cursor no longer explains, or recovery can never make progress.
+        read_across_invalid_boundary: flow_extensions.repair_mode
+            == Some(FlowRepairMode::Discovery),
         read_row_sequence,
+        // A physical-sequence read is the only read that compares a row of an adopted
+        // file against the domain its number came from, so it is the only one that needs
+        // the creator's cursor slices.
+        creator_cursor_shards: read_row_sequence
+            .then(|| flow_extensions.creator_cursor_shards())
+            .flatten(),
     })
 }
 
@@ -468,7 +504,9 @@ fn build_scan_request(
         skip_sst_files: decision.skip_sst_files,
         snapshot_on_scan: decision.snapshot_on_scan,
         exact_sequence_range: decision.exact_sequence_range,
+        read_across_invalid_boundary: decision.read_across_invalid_boundary,
         read_row_sequence: decision.read_row_sequence,
+        creator_cursor_shards: decision.creator_cursor_shards.clone(),
         memtable_min_sequence: decision.memtable_min_sequence,
         memtable_max_sequence: decision.memtable_max_sequence,
         ..Default::default()
@@ -666,7 +704,8 @@ mod tests {
     use crate::error::Error;
     use crate::options::{
         FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE,
-        FLOW_RETURN_REGION_SEQ, FLOW_SINK_TABLE_ID,
+        FLOW_READ_ROW_SEQUENCE, FLOW_RETURN_REGION_SEQ, FLOW_SINK_TABLE_ID,
+        encode_incremental_after_seqs,
     };
 
     #[test]
@@ -702,6 +741,19 @@ mod tests {
 
     fn test_region_id() -> RegionId {
         RegionId::new(1024, 1)
+    }
+
+    /// The identity of one half-open expression slice `k0 >= lo AND k0 < hi`, in the form
+    /// the cursor wire form carries it.
+    fn test_slice_expr(lo: u64, hi: u64) -> String {
+        use datatypes::value::Value;
+        use partition::expr::{Operand, col as partition_col};
+
+        partition_col("k0")
+            .gt_eq(Operand::Value(Value::UInt64(lo)))
+            .and(partition_col("k0").lt(Operand::Value(Value::UInt64(hi))))
+            .as_json_str()
+            .unwrap()
     }
 
     #[test]
@@ -845,6 +897,131 @@ mod tests {
         assert_eq!(request.memtable_min_sequence, Some(10));
         assert_eq!(request.memtable_max_sequence, None);
         assert!(!request.skip_sst_files);
+    }
+
+    /// The expression-keyed cursor an incremental delta carries: the holder's own rows
+    /// start after the least advanced of its expressions, and every creator's expressions
+    /// travel with the scan, because a physical read of an adopted file is filtered by the
+    /// expression the file belongs to.
+    #[test]
+    fn test_scan_request_from_slice_cursors_keeps_creator_slices() {
+        let region_id = test_region_id();
+        let creator = RegionId::new(1024, 7);
+        let narrow = test_slice_expr(0, 50);
+        let wide = test_slice_expr(50, 100);
+        let query_ctx = QueryContextBuilder::default()
+            .extensions(HashMap::from([
+                (
+                    FLOW_INCREMENTAL_MODE.to_string(),
+                    FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE.to_string(),
+                ),
+                (FLOW_READ_ROW_SEQUENCE.to_string(), "true".to_string()),
+                (
+                    FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+                    encode_incremental_after_seqs(&BTreeMap::from([
+                        (
+                            region_id.as_u64(),
+                            vec![
+                                CursorShard::new(Some(narrow.clone()), 10),
+                                CursorShard::new(Some(wide.clone()), 3),
+                            ],
+                        ),
+                        (
+                            creator.as_u64(),
+                            vec![CursorShard::new(Some(wide.clone()), 3)],
+                        ),
+                    ]))
+                    .unwrap(),
+                ),
+            ]))
+            .build();
+
+        let request = scan_request_from_query_context(region_id, &query_ctx).unwrap();
+
+        assert!(request.exact_sequence_range);
+        assert!(request.read_row_sequence);
+        assert_eq!(
+            request.memtable_min_sequence,
+            Some(3),
+            "a region-level bound starts after the least advanced slice of the region"
+        );
+        assert_eq!(
+            Some(Arc::new(BTreeMap::from([
+                (
+                    region_id.as_u64(),
+                    vec![
+                        CursorShard::new(Some(narrow), 10),
+                        CursorShard::new(Some(wide.clone()), 3)
+                    ]
+                ),
+                (creator.as_u64(), vec![CursorShard::new(Some(wide), 3)]),
+            ]))),
+            request.creator_cursor_shards
+        );
+    }
+
+    /// The region-keyed form is the same statement as one whole-domain slice per region,
+    /// which is what keeps a producer of the older shape working.
+    #[test]
+    fn test_scan_request_from_region_cursors_is_the_full_slice() {
+        let region_id = test_region_id();
+        let creator = RegionId::new(1024, 7);
+        let query_ctx = QueryContextBuilder::default()
+            .extensions(HashMap::from([
+                (
+                    FLOW_INCREMENTAL_MODE.to_string(),
+                    FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE.to_string(),
+                ),
+                (FLOW_READ_ROW_SEQUENCE.to_string(), "true".to_string()),
+                (
+                    FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+                    format!(
+                        r#"{{"{}":10,"{}":3}}"#,
+                        region_id.as_u64(),
+                        creator.as_u64()
+                    ),
+                ),
+            ]))
+            .build();
+
+        let request = scan_request_from_query_context(region_id, &query_ctx).unwrap();
+
+        assert_eq!(request.memtable_min_sequence, Some(10));
+        assert_eq!(
+            Some(Arc::new(BTreeMap::from([
+                (region_id.as_u64(), vec![CursorShard::whole_domain(10)]),
+                (creator.as_u64(), vec![CursorShard::whole_domain(3)]),
+            ]))),
+            request.creator_cursor_shards
+        );
+    }
+
+    /// A read that does not split adopted files by their physical sequences carries no
+    /// creator cursors: no other read compares a number against a foreign domain.
+    #[test]
+    fn test_scan_request_without_physical_sequence_read_carries_no_creator_cursors() {
+        let region_id = test_region_id();
+        let query_ctx = QueryContextBuilder::default()
+            .extensions(HashMap::from([
+                (
+                    FLOW_INCREMENTAL_MODE.to_string(),
+                    FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE.to_string(),
+                ),
+                (
+                    FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+                    encode_incremental_after_seqs(&BTreeMap::from([(
+                        region_id.as_u64(),
+                        vec![CursorShard::new(Some(test_slice_expr(0, 50)), 10)],
+                    )]))
+                    .unwrap(),
+                ),
+            ]))
+            .build();
+
+        let request = scan_request_from_query_context(region_id, &query_ctx).unwrap();
+
+        assert!(!request.read_row_sequence);
+        assert_eq!(None, request.creator_cursor_shards);
     }
 
     #[test]

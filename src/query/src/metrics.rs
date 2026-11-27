@@ -18,7 +18,8 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use common_recordbatch::adapter::{
-    RecordBatchMetrics, RegionWatermarkEntry, SubstitutedRange, SubstitutedRowRanges,
+    ObservedPartitionExpr, RecordBatchMetrics, RegionWatermarkEntry, SubstitutedRange,
+    SubstitutedRowRanges,
 };
 use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::warn;
@@ -30,24 +31,33 @@ use lazy_static::lazy_static;
 use prometheus::*;
 use session::context::QueryContextRef;
 
-use table::table::scan::RegionScanExec;
+use table::table::scan::{RegionScanExec, SeriesScanExec};
 
 use crate::dist_plan::MergeScanExec;
 use crate::error::Result;
 use crate::options::FlowQueryExtensions;
 
-/// Intermediate merge state for one participating region while collecting
-/// terminal correctness watermarks across merge-scan sub-stages.
+/// The key one terminal watermark statement is merged under: the region that
+/// allocated the sequences plus the identity of the partition expression the
+/// statement is about (`None` for the region's complete value domain).
+///
+/// Two statements about the same region but different expressions are statements
+/// about different value domains: a round that read one slice of a region says
+/// nothing about the other slices, so they must not be merged into one entry.
+type WatermarkKey = (u64, Option<String>);
+
+/// Intermediate merge state for one participating `(region, expression)` while
+/// collecting terminal correctness watermarks across merge-scan sub-stages.
 enum MergeState {
-    /// At least one branch reported that this region cannot prove a safe
+    /// At least one branch reported that this key cannot prove a safe
     /// checkpoint watermark for the current query round.
     Unproved,
-    /// All seen branches agree the region can advance safely to this sequence.
+    /// All seen branches agree the domain can advance safely to this sequence.
     Proved(u64),
-    /// Different proved sequences were reported for the same region. The final
+    /// Different proved sequences were reported for the same key. The final
     /// result is degraded to `None`, and the collected values are logged.
     Conflict {
-        /// Distinct proved watermark candidates reported for the region.
+        /// Distinct proved watermark candidates reported for the key.
         watermarks: Vec<u64>,
     },
 }
@@ -216,11 +226,21 @@ impl RecordBatchStream for RegionWatermarkMetricsStream {
         if !region_watermarks.is_empty() {
             metrics.region_watermarks = region_watermarks;
         }
-        // A region scan reports the rows it substituted (files whose sequences a substitution
-        // produced) through its own stream metrics, which a merge-scan sub-stage keeps per
-        // region. Both sources are joined here so the caller sees one range set per region.
-        metrics.substituted_row_ranges =
-            collect_substituted_row_ranges(self.plan.clone(), &metrics);
+        // A region scan reports the rows it substituted (adopted files whose sequences a
+        // substitution produced) through its own stream metrics, which a merge-scan
+        // sub-stage keeps per region. Both sources are joined here so the caller sees one
+        // range set per region.
+        let substituted_row_ranges = collect_substituted_row_ranges(self.plan.clone(), &metrics);
+        metrics.substituted_row_ranges = substituted_row_ranges;
+        // Which `(region, partition expression)` pairs the regions actually read travel with
+        // the same result: the owner of a `(region, slice)` cursor splits and advances its
+        // entries by exactly what this round observed.
+        metrics.observed_slices = collect_observed_slices(self.plan.clone(), &metrics);
+        // Which other regions' files the regions delivered rows from. A caller that must not
+        // count a row above its creator's proved watermark cannot recover this from the
+        // watermarks: they say what was proved, not what was read.
+        metrics.foreign_file_row_creators =
+            collect_foreign_file_row_creators(self.plan.clone(), &metrics);
         Some(metrics)
     }
 }
@@ -263,13 +283,21 @@ pub fn terminal_recordbatch_metrics_from_plan(
 ) -> Option<RecordBatchMetrics> {
     let region_watermarks = collect_region_watermarks(plan.clone());
     let own = RecordBatchMetrics::default();
-    let substituted_row_ranges = collect_substituted_row_ranges(plan, &own);
-    if region_watermarks.is_empty() && substituted_row_ranges.is_empty() {
+    let substituted_row_ranges = collect_substituted_row_ranges(plan.clone(), &own);
+    let observed_slices = collect_observed_slices(plan.clone(), &own);
+    let foreign_file_row_creators = collect_foreign_file_row_creators(plan.clone(), &own);
+    if region_watermarks.is_empty()
+        && substituted_row_ranges.is_empty()
+        && observed_slices.is_empty()
+        && foreign_file_row_creators.is_none()
+    {
         None
     } else {
         Some(RecordBatchMetrics {
             region_watermarks,
             substituted_row_ranges,
+            observed_slices,
+            foreign_file_row_creators,
             ..Default::default()
         })
     }
@@ -287,12 +315,50 @@ pub fn terminal_recordbatch_metrics_from_plan_if_requested(
     }
 }
 
+/// Collects the proved terminal watermarks of `plan`, one entry per
+/// `(region, partition expression)` the plan's scans stated.
+fn collect_region_watermarks(plan: Arc<dyn ExecutionPlan>) -> Vec<RegionWatermarkEntry> {
+    let mut merged = BTreeMap::<WatermarkKey, MergedWatermarkSlice>::new();
+    let mut stack = vec![plan];
+
+    while let Some(plan) = stack.pop() {
+        if let Some(merge_scan) = plan.downcast_ref::<MergeScanExec>()
+            && !merge_scan.is_flow_sink_scan()
+        {
+            merge_merge_scan_region_watermarks(
+                &mut merged,
+                merge_scan
+                    .regions()
+                    .iter()
+                    .map(|region_id| region_id.as_u64()),
+                merge_scan.sub_stage_metrics(),
+            );
+        }
+        stack.extend(plan.children().into_iter().cloned());
+    }
+
+    finalize_region_watermarks(merged)
+}
+
+/// The region scan a plan node reads a region through: the node itself, or the native
+/// raw-series leaf that packs one and reads through it.
+///
+/// Such a scan states what it read through its own report rather than through its stream, so
+/// every collector of those facts has to find it the same way.
+fn region_scan_of(plan: &Arc<dyn ExecutionPlan>) -> Option<&RegionScanExec> {
+    if let Some(region_scan) = plan.downcast_ref::<RegionScanExec>() {
+        return Some(region_scan);
+    }
+    plan.downcast_ref::<SeriesScanExec>()
+        .map(SeriesScanExec::region_scan)
+}
+
 /// Collects the time ranges of the rows the plan's region scans substituted.
 ///
-/// `own` carries the ranges of the stream that already reported them, every merge-scan
-/// sub-stage contributes the ranges of its own regions, and a region scan that ran in this
-/// process contributes what its partition streams stated when they ended. Ranges are unioned
-/// per region, so a row substituted by two branches is reported once.
+/// `own` carries the ranges of the stream that already reported them, a local region scan
+/// contributes what its partition streams stated when they ended, and every merge-scan
+/// sub-stage contributes the ranges of its own regions. Ranges are unioned per region, so a row
+/// substituted by two branches is reported once.
 fn collect_substituted_row_ranges(
     plan: Arc<dyn ExecutionPlan>,
     own: &RecordBatchMetrics,
@@ -313,11 +379,14 @@ fn collect_substituted_row_ranges(
 
     let mut stack = vec![plan];
     while let Some(plan) = stack.pop() {
-        // A region scan keeps the ranges its partition streams stated when they ended, which
-        // is the only source of them once the stream of a plan that ran in this process is
-        // rebuilt from the plan's figures.
-        if let Some(region_scan) = plan.downcast_ref::<RegionScanExec>() {
-            merge(region_scan.substituted_row_ranges());
+        // A scan that ran in this process keeps the ranges its partition streams stated when
+        // they ended. Its stream cannot carry them here: a `RecordBatchMetrics` rebuilt from a
+        // plan's figures holds numbers, so a range list that crossed that boundary would read
+        // as "substituted nothing".
+        if let Some(region_scan) = region_scan_of(&plan)
+            && let Some(ranges) = region_scan.substituted_row_ranges()
+        {
+            merge(ranges);
         }
         if let Some(merge_scan) = plan.downcast_ref::<MergeScanExec>()
             && !merge_scan.is_flow_sink_scan()
@@ -344,30 +413,173 @@ fn collect_substituted_row_ranges(
         .collect()
 }
 
-fn collect_region_watermarks(plan: Arc<dyn ExecutionPlan>) -> Vec<RegionWatermarkEntry> {
-    let mut merged = BTreeMap::<u64, MergeState>::new();
-    let mut stack = vec![plan];
+/// Collects the `(region, partition expression)` pairs the plan's region scans read.
+///
+/// `own` carries the slices of the stream that already reported them, a local region scan
+/// contributes what its partition streams stated when they ended, and every merge-scan
+/// sub-stage contributes the slices of its own regions. A slice reported by two branches is one
+/// slice, because it states what was read, not how often.
+fn collect_observed_slices(
+    plan: Arc<dyn ExecutionPlan>,
+    own: &RecordBatchMetrics,
+) -> Vec<ObservedPartitionExpr> {
+    let mut merged = BTreeSet::new();
+    merged.extend(own.observed_slices.iter().cloned());
 
+    let mut stack = vec![plan];
     while let Some(plan) = stack.pop() {
+        // Same as the substituted ranges: the slices a scan observed are a statement about its
+        // read, not a figure, so they are read from the scan rather than from its stream.
+        if let Some(region_scan) = region_scan_of(&plan)
+            && let Some(slices) = region_scan.observed_slices()
+        {
+            merged.extend(slices);
+        }
         if let Some(merge_scan) = plan.downcast_ref::<MergeScanExec>()
             && !merge_scan.is_flow_sink_scan()
         {
-            merge_merge_scan_region_watermarks(
-                &mut merged,
-                merge_scan
-                    .regions()
-                    .iter()
-                    .map(|region_id| region_id.as_u64()),
-                merge_scan.sub_stage_metrics(),
-            );
+            for metrics in merge_scan.sub_stage_metrics() {
+                merged.extend(metrics.observed_slices);
+            }
         }
         stack.extend(plan.children().into_iter().cloned());
     }
 
-    finalize_region_watermarks(merged)
+    merged.into_iter().collect()
 }
 
-/// Merge a batch of per-region watermark entries into the global merged state.
+/// Collects the creator regions of the adopted files the plan's region scans delivered rows
+/// from (`RecordBatchMetrics::foreign_file_row_creators`).
+///
+/// The answer is `Some` only when **every** region scan that could have read a file stated
+/// what it delivered, and the region set is then the union of their answers. A scan that
+/// reported nothing — a build that predates the field, a region whose metrics never arrived,
+/// or a plan node that never ended its stream — latches the whole answer to `None`, because an
+/// answer covering part of the read must not claim that nothing came from another region.
+/// `Some(vec![])` is an affirmative "delivered none" and survives the merge as the empty set.
+fn collect_foreign_file_row_creators(
+    plan: Arc<dyn ExecutionPlan>,
+    own: &RecordBatchMetrics,
+) -> Option<Vec<u64>> {
+    // `own` contributes when it states an answer, and is otherwise the absence of one this
+    // function cannot interpret: the stream of a distributed plan reports plan-level metrics
+    // and never a region's read, so its silence is not a scan that failed to report. A stream
+    // that *is* a region scan has a merge scan in the plan only when the plan reads a table,
+    // and then that region answers through the merge scan's sub-stage metrics.
+    let mut merged = BTreeSet::new();
+    let mut conclusive = false;
+    let mut unknown = false;
+    if let Some(creators) = own.foreign_file_row_creators.as_deref() {
+        conclusive = true;
+        merged.extend(creators.iter().copied());
+    }
+
+    let mut stack = vec![plan];
+    while let Some(plan) = stack.pop() {
+        // A region scan keeps the answer its partition streams stated when they ended, which
+        // is the only source of it once the stream of a plan that ran in this process is
+        // rebuilt from the plan's figures. Its silence is a scan that did not report, so it
+        // latches the answer unknown.
+        if let Some(region_scan) = region_scan_of(&plan) {
+            let creators = region_scan.foreign_file_row_creators();
+            merge_foreign_file_row_creators(
+                creators.as_deref(),
+                &mut merged,
+                &mut conclusive,
+                &mut unknown,
+            );
+        }
+        if let Some(merge_scan) = plan.downcast_ref::<MergeScanExec>()
+            && !merge_scan.is_flow_sink_scan()
+        {
+            let sub_stage_metrics = merge_scan.sub_stage_metrics();
+            // A merge scan with no region to read states "delivered none": unlike a node whose
+            // partitions have not run, it covers a read that happened and that read delivered
+            // nothing, so its silence here is an answer and not an absence.
+            if merge_scan.regions().is_empty() {
+                conclusive = true;
+            }
+            // A region without sub-stage metrics never reported, so the read over it is
+            // unknown even when every other region stated its answer.
+            if sub_stage_metrics.len() != merge_scan.regions().len() {
+                unknown = true;
+            }
+            for metrics in sub_stage_metrics {
+                merge_foreign_file_row_creators(
+                    metrics.foreign_file_row_creators.as_deref(),
+                    &mut merged,
+                    &mut conclusive,
+                    &mut unknown,
+                );
+            }
+        }
+        stack.extend(plan.children().into_iter().cloned());
+    }
+
+    if unknown || !conclusive {
+        None
+    } else {
+        Some(merged.into_iter().collect())
+    }
+}
+
+/// Merges one scan's answer into the plan-wide one.
+///
+/// `Some` is an answer (it accumulates and makes the merged result conclusive); `None` is the
+/// absence of one and latches the merged result to unknown.
+fn merge_foreign_file_row_creators(
+    creators: Option<&[u64]>,
+    merged: &mut BTreeSet<u64>,
+    conclusive: &mut bool,
+    unknown: &mut bool,
+) {
+    match creators {
+        Some(creators) => {
+            *conclusive = true;
+            merged.extend(creators.iter().copied());
+        }
+        None => *unknown = true,
+    }
+}
+
+/// One `(region, partition expression)` slice's merged state.
+///
+/// Two independent statements live here, because a scan states both from one version snapshot:
+/// the proof of the slice's sequence bound, and the creators of the files the region had visible
+/// when it was opened ([`RegionWatermarkEntry::visible_foreign_file_creators`]).
+#[derive(Default)]
+struct MergedWatermarkSlice {
+    /// Proof state of the slice's bound; `None` until a report states one.
+    proof: Option<MergeState>,
+    /// The creators of the files visible at open, or `None` when no report stated them or two
+    /// reports stated different sets (then the merged answer is unknown, never one of them).
+    visible_foreign_file_creators: Option<Vec<u64>>,
+}
+
+impl MergedWatermarkSlice {
+    /// Merges one statement about the creators visible at open.
+    ///
+    /// A report that states nothing adds no information, so it leaves a stated set in place. Two
+    /// reports that state different sets describe file lists that were not the same, so the
+    /// merged answer is unknown rather than either set.
+    fn merge_visible_foreign_file_creators(&mut self, incoming: Option<Vec<u64>>) {
+        let Some(incoming) = incoming else {
+            return;
+        };
+        match &self.visible_foreign_file_creators {
+            None => self.visible_foreign_file_creators = Some(incoming),
+            Some(current) if *current == incoming => {}
+            Some(_) => self.visible_foreign_file_creators = None,
+        }
+    }
+}
+
+/// Merge a batch of watermark entries into the global merged state.
+///
+/// Entries are merged per `(region, partition expression)` ([`WatermarkKey`]): an
+/// entry about one expression slice of a region is a statement about that slice only,
+/// and letting it share a key with the region's whole-domain entry would either
+/// advance a slice the round never read or forget that the region was opened.
 ///
 /// # Merge strategy: correctness over maximum
 ///
@@ -385,13 +597,26 @@ fn collect_region_watermarks(plan: Arc<dyn ExecutionPlan>) -> Vec<RegionWatermar
 /// checkpoint past rows that a competing MergeScan sub-stage has not yet
 /// scanned, causing Flow to skip data.
 fn merge_region_watermark_entries(
-    merged: &mut BTreeMap<u64, MergeState>,
+    merged: &mut BTreeMap<WatermarkKey, MergedWatermarkSlice>,
     entries: impl IntoIterator<Item = RegionWatermarkEntry>,
 ) {
     for entry in entries {
-        merged
-            .entry(entry.region_id)
-            .and_modify(|existing| match entry.watermark {
+        let RegionWatermarkEntry {
+            region_id,
+            partition_expr,
+            watermark,
+            visible_foreign_file_creators,
+        } = entry;
+        let slice = merged.entry((region_id, partition_expr)).or_default();
+        slice.merge_visible_foreign_file_creators(visible_foreign_file_creators);
+        match &mut slice.proof {
+            None => {
+                slice.proof = Some(match watermark {
+                    Some(seq) => MergeState::Proved(seq),
+                    None => MergeState::Unproved,
+                });
+            }
+            Some(existing) => match watermark {
                 None => match existing {
                     MergeState::Proved(_) => {
                         *existing = MergeState::Unproved;
@@ -413,16 +638,13 @@ fn merge_region_watermark_entries(
                         }
                     }
                 },
-            })
-            .or_insert(match entry.watermark {
-                Some(seq) => MergeState::Proved(seq),
-                None => MergeState::Unproved,
-            });
+            },
+        }
     }
 }
 
 fn merge_merge_scan_region_watermarks(
-    merged: &mut BTreeMap<u64, MergeState>,
+    merged: &mut BTreeMap<WatermarkKey, MergedWatermarkSlice>,
     regions: impl IntoIterator<Item = u64>,
     sub_stage_metrics: impl IntoIterator<Item = RecordBatchMetrics>,
 ) {
@@ -441,7 +663,9 @@ fn merge_merge_scan_region_watermarks(
     // Regions listed by a MergeScanExec participated even when no sub-stage can
     // prove a watermark. Merge missing per-scan region entries as explicit
     // `None` entries so an unproved participating branch vetoes any proof from
-    // another branch for the same region.
+    // another branch for the same region. Participation is stated for the region
+    // as a whole — no sub-stage said anything about one expression of it — so the
+    // missing entry is the region-wide one.
     merge_region_watermark_entries(
         merged,
         regions
@@ -449,28 +673,37 @@ fn merge_merge_scan_region_watermarks(
             .filter(|region_id| !proved_or_unproved_regions.contains(region_id))
             .map(|region_id| RegionWatermarkEntry {
                 region_id,
+                partition_expr: None,
                 watermark: None,
+                // No branch said anything about the region's file list.
+                visible_foreign_file_creators: None,
             }),
     );
 }
 
-fn finalize_region_watermarks(merged: BTreeMap<u64, MergeState>) -> Vec<RegionWatermarkEntry> {
+fn finalize_region_watermarks(
+    merged: BTreeMap<WatermarkKey, MergedWatermarkSlice>,
+) -> Vec<RegionWatermarkEntry> {
     merged
         .into_iter()
-        .map(|(region_id, state)| RegionWatermarkEntry {
-            region_id,
-            watermark: match state {
-                MergeState::Unproved => None,
-                MergeState::Proved(seq) => Some(seq),
-                MergeState::Conflict { watermarks } => {
-                    warn!(
-                        "Conflicting proved watermarks for region {}: {:?}; degrading to unproved",
-                        region_id, watermarks
-                    );
-                    None
-                }
+        .map(
+            |((region_id, partition_expr), slice)| RegionWatermarkEntry {
+                region_id,
+                watermark: match slice.proof.unwrap_or(MergeState::Unproved) {
+                    MergeState::Unproved => None,
+                    MergeState::Proved(seq) => Some(seq),
+                    MergeState::Conflict { watermarks } => {
+                        warn!(
+                            "Conflicting proved watermarks for region {} expression {:?}: {:?}; degrading to unproved",
+                            region_id, partition_expr, watermarks
+                        );
+                        None
+                    }
+                },
+                partition_expr,
+                visible_foreign_file_creators: slice.visible_foreign_file_creators,
             },
-        })
+        )
         .collect()
 }
 
@@ -481,6 +714,7 @@ mod tests {
 
     use api::v1::region::{RemoteDynFilterUnregister, RemoteDynFilterUpdate};
     use async_trait::async_trait;
+    use common_recordbatch::{RecordBatchStream, RecordBatches};
     use datafusion::arrow::datatypes::Schema as ArrowSchema;
     use datafusion::execution::SessionStateBuilder;
     use datafusion::physical_plan::empty::EmptyExec;
@@ -494,6 +728,9 @@ mod tests {
     use crate::dist_plan::RemoteDynFilterProducerId;
     use crate::options::{FLOW_RETURN_REGION_SEQ, FLOW_SINK_TABLE_ID};
     use crate::region_query::RegionQueryHandler;
+
+    /// The partition expression the tests of the observed slices state.
+    const PARTITION_EXPR: &str = "k0 < 10";
 
     struct NoopRegionQueryHandler;
 
@@ -540,14 +777,47 @@ mod tests {
                 .iter()
                 .map(|(region_id, watermark)| RegionWatermarkEntry {
                     region_id: *region_id,
+                    partition_expr: None,
                     watermark: *watermark,
+                    visible_foreign_file_creators: None,
                 })
                 .collect(),
             ..Default::default()
         }
     }
 
+    fn metrics_with_expression_watermarks(
+        entries: &[(u64, Option<&str>, Option<u64>)],
+    ) -> RecordBatchMetrics {
+        RecordBatchMetrics {
+            region_watermarks: entries
+                .iter()
+                .map(
+                    |(region_id, partition_expr, watermark)| RegionWatermarkEntry {
+                        region_id: *region_id,
+                        partition_expr: partition_expr.map(|expr| expr.to_string()),
+                        watermark: *watermark,
+                        visible_foreign_file_creators: None,
+                    },
+                )
+                .collect(),
+            ..Default::default()
+        }
+    }
+
     fn test_merge_scan_exec(table_id: u32, query_ctx: QueryContextRef) -> Arc<dyn ExecutionPlan> {
+        merge_scan_exec(vec![RegionId::new(table_id, 0)], query_ctx)
+    }
+
+    /// A merge scan over `regions`, with a query context that asks for nothing.
+    fn merge_scan_exec_with_regions(regions: Vec<RegionId>) -> Arc<dyn ExecutionPlan> {
+        merge_scan_exec(regions, Arc::new(QueryContextBuilder::default().build()))
+    }
+
+    fn merge_scan_exec(
+        regions: Vec<RegionId>,
+        query_ctx: QueryContextRef,
+    ) -> Arc<dyn ExecutionPlan> {
         let session_state = SessionStateBuilder::new().with_default_features().build();
         let plan = LogicalPlanBuilder::empty(false).build().unwrap();
         let schema = ArrowSchema::empty();
@@ -556,7 +826,7 @@ mod tests {
             MergeScanExec::new(
                 &session_state,
                 TableName::new("greptime", "public", "test"),
-                vec![RegionId::new(table_id, 0)],
+                regions,
                 plan,
                 &schema,
                 Arc::new(NoopRegionQueryHandler),
@@ -603,8 +873,301 @@ mod tests {
                 .region_watermarks,
             vec![RegionWatermarkEntry {
                 region_id: RegionId::new(43, 0).as_u64(),
+                partition_expr: None,
                 watermark: None,
+                visible_foreign_file_creators: None,
             }]
+        );
+    }
+
+    /// The union of what the branches stated: a creator named by two branches is one entry,
+    /// and an answer of "delivered none" survives as the empty set instead of disappearing.
+    #[test]
+    fn merge_foreign_file_row_creators_unions_the_branches() {
+        let mut merged = BTreeSet::new();
+        let mut conclusive = false;
+        let mut unknown = false;
+
+        merge_foreign_file_row_creators(Some(&[7, 9]), &mut merged, &mut conclusive, &mut unknown);
+        merge_foreign_file_row_creators(Some(&[9]), &mut merged, &mut conclusive, &mut unknown);
+        merge_foreign_file_row_creators(Some(&[]), &mut merged, &mut conclusive, &mut unknown);
+
+        assert!(conclusive);
+        assert!(!unknown);
+        assert_eq!(
+            BTreeSet::from([7, 9]),
+            merged,
+            "the delivered creators are the union of what the branches reported"
+        );
+    }
+
+    /// A branch that states nothing latches the answer to unknown: the other branches' answers
+    /// cover only part of the read, and "these are the creators" would claim the rest
+    /// delivered nothing.
+    #[test]
+    fn merge_foreign_file_row_creators_keeps_a_silent_branch_unknown() {
+        let mut merged = BTreeSet::new();
+        let mut conclusive = false;
+        let mut unknown = false;
+
+        merge_foreign_file_row_creators(Some(&[]), &mut merged, &mut conclusive, &mut unknown);
+        merge_foreign_file_row_creators(None, &mut merged, &mut conclusive, &mut unknown);
+
+        assert!(conclusive);
+        assert!(
+            unknown,
+            "one silent branch is enough to make the answer unknown"
+        );
+    }
+
+    /// A plan whose stream states the answer reports it; one whose stream states nothing
+    /// reports unknown rather than "none".
+    #[test]
+    fn collect_foreign_file_row_creators_reads_the_stream_that_reports_it() {
+        let plan: Arc<dyn ExecutionPlan> = Arc::new(EmptyExec::new(Arc::new(ArrowSchema::empty())));
+
+        let own = RecordBatchMetrics {
+            foreign_file_row_creators: Some(vec![7]),
+            ..Default::default()
+        };
+        assert_eq!(
+            Some(vec![7]),
+            collect_foreign_file_row_creators(plan.clone(), &own)
+        );
+
+        assert_eq!(
+            None,
+            collect_foreign_file_row_creators(plan, &RecordBatchMetrics::default())
+        );
+    }
+
+    /// A merge scan lists its regions, so a region that never reported its metrics makes the
+    /// whole answer unknown: the read over that region is uncovered, not empty.
+    #[test]
+    fn collect_foreign_file_row_creators_stays_unknown_when_a_region_never_reported() {
+        let query_ctx = flow_query_ctx_with_sink_table_id(42);
+        let plan = test_merge_scan_exec(43, query_ctx);
+        let own = RecordBatchMetrics {
+            foreign_file_row_creators: Some(vec![]),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            None,
+            collect_foreign_file_row_creators(plan, &own),
+            "the merge scan's one region reported no metrics, so nothing about it is proved"
+        );
+    }
+
+    /// A partition stream that states what a Mito region's stream states when it ends.
+    struct StatedStream {
+        inner: common_recordbatch::SendableRecordBatchStream,
+        terminal: RecordBatchMetrics,
+    }
+
+    impl futures::Stream for StatedStream {
+        type Item = common_recordbatch::error::Result<common_recordbatch::RecordBatch>;
+
+        fn poll_next(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            std::pin::Pin::new(&mut self.inner).poll_next(cx)
+        }
+    }
+
+    impl RecordBatchStream for StatedStream {
+        fn schema(&self) -> datatypes::schema::SchemaRef {
+            self.inner.schema()
+        }
+
+        fn output_ordering(&self) -> Option<&[common_recordbatch::OrderOption]> {
+            self.inner.output_ordering()
+        }
+
+        fn metrics(&self) -> Option<RecordBatchMetrics> {
+            Some(self.terminal.clone())
+        }
+    }
+
+    /// A `RegionScanExec` whose one partition states `terminal` when its stream ends.
+    fn stated_region_scan(terminal: RecordBatchMetrics) -> Arc<dyn ExecutionPlan> {
+        use store_api::region_engine::SinglePartitionScanner;
+
+        let mut builder = store_api::metadata::RegionMetadataBuilder::new(RegionId::new(1, 1));
+        builder
+            .push_column_metadata(store_api::metadata::ColumnMetadata {
+                column_schema: datatypes::schema::ColumnSchema::new(
+                    "field",
+                    datatypes::data_type::ConcreteDataType::float64_datatype(),
+                    true,
+                ),
+                semantic_type: api::v1::SemanticType::Field,
+                column_id: 1,
+            })
+            .push_column_metadata(store_api::metadata::ColumnMetadata {
+                column_schema: datatypes::schema::ColumnSchema::new(
+                    "ts",
+                    datatypes::data_type::ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: api::v1::SemanticType::Timestamp,
+                column_id: 2,
+            })
+            .primary_key(vec![]);
+        let metadata = Arc::new(builder.build().unwrap());
+        let batches = RecordBatches::try_new(metadata.schema.clone(), vec![]).unwrap();
+        let stream = StatedStream {
+            inner: batches.as_stream(),
+            terminal,
+        };
+        let scanner = Box::new(SinglePartitionScanner::new(
+            Box::pin(stream),
+            false,
+            metadata,
+            None,
+        ));
+        Arc::new(
+            RegionScanExec::new(scanner, store_api::storage::ScanRequest::default(), None).unwrap(),
+        )
+    }
+
+    /// Runs `plan` as a plan, through the DataFusion boundary, until its streams ended.
+    async fn drain_plan(plan: Arc<dyn ExecutionPlan>) {
+        use datafusion::prelude::SessionContext;
+        use futures::TryStreamExt;
+
+        let ctx = SessionContext::new();
+        let mut stream = plan.execute(0, ctx.task_ctx()).unwrap();
+        while stream.try_next().await.unwrap().is_some() {}
+    }
+
+    /// The terminal metrics of a scan that stated only the creators it delivered rows from.
+    fn creator_answer(creators: Option<Vec<u64>>) -> RecordBatchMetrics {
+        RecordBatchMetrics {
+            foreign_file_row_creators: creators,
+            ..Default::default()
+        }
+    }
+
+    /// A plan that runs in this process states its answer through the region scan that read the
+    /// region, not through a stream that a rebuilt `RecordBatchMetrics` could still describe.
+    #[tokio::test]
+    async fn collect_foreign_file_row_creators_reads_the_local_region_scan() {
+        // The scan answered what its stream stated.
+        let plan = stated_region_scan(creator_answer(Some(vec![7])));
+        assert_eq!(
+            None,
+            collect_foreign_file_row_creators(plan.clone(), &RecordBatchMetrics::default()),
+            "a scan whose stream has not ended states nothing"
+        );
+        drain_plan(plan.clone()).await;
+        assert_eq!(
+            Some(vec![7]),
+            collect_foreign_file_row_creators(plan.clone(), &RecordBatchMetrics::default()),
+            "the plan states what its region scan delivered"
+        );
+        assert_eq!(
+            Some(vec![7]),
+            terminal_recordbatch_metrics_from_plan(plan)
+                .expect("a conclusive creator answer is terminal metrics")
+                .foreign_file_row_creators
+        );
+
+        // A scan whose stream stated nothing stays unknown: a read that did not report must
+        // not be read as "delivered none".
+        let plan = stated_region_scan(creator_answer(None));
+        drain_plan(plan.clone()).await;
+        assert_eq!(
+            None,
+            collect_foreign_file_row_creators(plan, &RecordBatchMetrics::default()),
+            "a scan that states no answer leaves the plan's answer unknown"
+        );
+    }
+
+    /// The ranges a scan substituted and the slices it observed are statements about its read,
+    /// not figures, so they must survive the DataFusion boundary: the plan is polled to EOF as a
+    /// plan, and its stream reports only numbers. A read that substituted rows must not reach
+    /// the caller as "substituted nothing".
+    #[tokio::test]
+    async fn substituted_ranges_and_observed_slices_cross_the_datafusion_boundary() {
+        let plan = stated_region_scan(RecordBatchMetrics {
+            foreign_file_row_creators: Some(vec![]),
+            substituted_row_ranges: vec![SubstitutedRowRanges {
+                region_id: 7,
+                ranges: vec![SubstitutedRange {
+                    start_millis: 1_000,
+                    end_millis: 2_000,
+                }],
+            }],
+            observed_slices: vec![ObservedPartitionExpr::new(
+                7,
+                Some(PARTITION_EXPR.to_string()),
+            )],
+            ..Default::default()
+        });
+
+        // Nothing is stated before the read ends, so nothing is claimed.
+        assert!(
+            terminal_recordbatch_metrics_from_plan(plan.clone()).is_none(),
+            "a scan whose stream has not ended states nothing"
+        );
+
+        drain_plan(plan.clone()).await;
+
+        let metrics = terminal_recordbatch_metrics_from_plan(plan)
+            .expect("a read that substituted rows and observed slices is terminal metrics");
+        assert_eq!(
+            vec![SubstitutedRowRanges {
+                region_id: 7,
+                ranges: vec![SubstitutedRange {
+                    start_millis: 1_000,
+                    end_millis: 2_000,
+                }],
+            }],
+            metrics.substituted_row_ranges,
+            "the substituted ranges must cross the boundary, not read as \"substituted nothing\""
+        );
+        assert_eq!(
+            vec![ObservedPartitionExpr::new(
+                7,
+                Some(PARTITION_EXPR.to_string())
+            )],
+            metrics.observed_slices,
+            "the observed slices must cross the boundary"
+        );
+        assert_eq!(
+            Some(vec![]),
+            metrics.foreign_file_row_creators,
+            "the same terminal call states the creator answer as well"
+        );
+    }
+
+    /// A merge scan that lists no region read nothing, so it states "delivered none" instead of
+    /// leaving the answer unknown: the read over zero regions covers every row it could have
+    /// delivered, and that read delivered none.
+    #[test]
+    fn zero_region_merge_scan_states_delivered_none() {
+        let plan = merge_scan_exec_with_regions(vec![]);
+        assert_eq!(
+            Some(vec![]),
+            collect_foreign_file_row_creators(plan.clone(), &RecordBatchMetrics::default()),
+            "a merge scan with no region delivered no adopted row, and states so"
+        );
+        assert_eq!(
+            Some(vec![]),
+            terminal_recordbatch_metrics_from_plan(plan)
+                .expect("an affirmative creator answer is terminal metrics")
+                .foreign_file_row_creators
+        );
+
+        // A merge scan that names a region that never reported stays unknown, so the empty
+        // answer above is the zero-region read and not a blanket "silence is none".
+        let plan = merge_scan_exec_with_regions(vec![RegionId::new(43, 0)]);
+        assert_eq!(
+            None,
+            collect_foreign_file_row_creators(plan, &RecordBatchMetrics::default()),
+            "a region without sub-stage metrics leaves the answer unknown"
         );
     }
 
@@ -619,11 +1182,15 @@ mod tests {
             vec![
                 RegionWatermarkEntry {
                     region_id: 1,
+                    partition_expr: None,
                     watermark: None,
+                    visible_foreign_file_creators: None,
                 },
                 RegionWatermarkEntry {
                     region_id: 2,
+                    partition_expr: None,
                     watermark: None,
+                    visible_foreign_file_creators: None,
                 },
             ]
         );
@@ -646,7 +1213,78 @@ mod tests {
             finalize_region_watermarks(merged),
             vec![RegionWatermarkEntry {
                 region_id: 42,
+                partition_expr: None,
                 watermark: Some(7),
+                visible_foreign_file_creators: None,
+            }]
+        );
+    }
+
+    /// A statement about one partition expression of a region and a statement about the
+    /// region's complete value domain are statements about different domains: merging
+    /// them into one key would either advance a slice the round never read or forget
+    /// that the whole region was opened.
+    #[test]
+    fn merge_merge_scan_region_watermarks_keys_by_region_and_expression() {
+        let mut merged = BTreeMap::new();
+
+        merge_merge_scan_region_watermarks(
+            &mut merged,
+            [42],
+            [
+                metrics_with_expression_watermarks(&[(42, None, Some(9))]),
+                metrics_with_expression_watermarks(&[(42, Some("k0 < 10"), Some(5))]),
+                metrics_with_expression_watermarks(&[(42, Some("k0 >= 10"), Some(7))]),
+            ],
+        );
+
+        assert_eq!(
+            finalize_region_watermarks(merged),
+            vec![
+                RegionWatermarkEntry {
+                    region_id: 42,
+                    partition_expr: None,
+                    watermark: Some(9),
+                    visible_foreign_file_creators: None,
+                },
+                RegionWatermarkEntry {
+                    region_id: 42,
+                    partition_expr: Some("k0 < 10".to_string()),
+                    watermark: Some(5),
+                    visible_foreign_file_creators: None,
+                },
+                RegionWatermarkEntry {
+                    region_id: 42,
+                    partition_expr: Some("k0 >= 10".to_string()),
+                    watermark: Some(7),
+                    visible_foreign_file_creators: None,
+                },
+            ]
+        );
+    }
+
+    /// The conflict rule still applies to one and the same expression.
+    #[test]
+    fn merge_merge_scan_region_watermarks_degrades_conflicting_expression_entries() {
+        let mut merged = BTreeMap::new();
+
+        merge_merge_scan_region_watermarks(
+            &mut merged,
+            [42],
+            [
+                metrics_with_expression_watermarks(&[(42, Some("k0 < 10"), Some(5))]),
+                metrics_with_expression_watermarks(&[(42, Some("k0 < 10"), Some(6))]),
+                metrics_with_expression_watermarks(&[(42, Some("k0 < 10"), None)]),
+            ],
+        );
+
+        assert_eq!(
+            finalize_region_watermarks(merged),
+            vec![RegionWatermarkEntry {
+                region_id: 42,
+                partition_expr: Some("k0 < 10".to_string()),
+                watermark: None,
+                visible_foreign_file_creators: None,
             }]
         );
     }
@@ -668,7 +1306,9 @@ mod tests {
             finalize_region_watermarks(merged),
             vec![RegionWatermarkEntry {
                 region_id: 7,
+                partition_expr: None,
                 watermark: None,
+                visible_foreign_file_creators: None,
             }]
         );
     }
@@ -690,7 +1330,9 @@ mod tests {
             finalize_region_watermarks(merged),
             vec![RegionWatermarkEntry {
                 region_id: 9,
+                partition_expr: None,
                 watermark: None,
+                visible_foreign_file_creators: None,
             }]
         );
     }
@@ -712,7 +1354,9 @@ mod tests {
             finalize_region_watermarks(merged),
             vec![RegionWatermarkEntry {
                 region_id: 9,
+                partition_expr: None,
                 watermark: None,
+                visible_foreign_file_creators: None,
             }]
         );
     }
@@ -732,7 +1376,9 @@ mod tests {
             finalize_region_watermarks(merged),
             vec![RegionWatermarkEntry {
                 region_id: 9,
+                partition_expr: None,
                 watermark: None,
+                visible_foreign_file_creators: None,
             }]
         );
     }
@@ -752,7 +1398,9 @@ mod tests {
             finalize_region_watermarks(merged),
             vec![RegionWatermarkEntry {
                 region_id: 9,
+                partition_expr: None,
                 watermark: None,
+                visible_foreign_file_creators: None,
             }]
         );
     }
