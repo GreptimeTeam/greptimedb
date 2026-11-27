@@ -157,10 +157,8 @@ impl SamplesReader {
                 .strip_suffix("samples.idx")
                 .ok_or_else(|| invalid("invalid samples index path"))?
                 .to_owned(),
-
             generation: footer.generation,
             source_file_id: footer.source,
-
             timestamp: schema.timestamp,
             fields: schema.fields,
             files,
@@ -447,7 +445,7 @@ impl SamplesFormatReader for SamplesReader {
                                     leaf_keys.entry(key_id)
                                 {
                                     // The page-level prefetch was refused by the memory pool, or
-                                    // this series has no copy cached for the part yet. This path
+                                    // this series has no copy cached for the leaf yet. This path
                                     // reserves its own read before issuing it.
                                     let key = load_block_key(
                                         reader,
@@ -685,7 +683,7 @@ fn retained_key_bytes(length: u32) -> usize {
 
 /// Replaces the exact key that carries one series across a leaf boundary.
 ///
-/// Unlike the keys of a part's blocks, this copy outlives every per-part reservation, so it has a
+/// This copy survives traversal to the next leaf and outlives the leaf's key reservation, so it has a
 /// consumer of its own: a replacement is charged before it is made, and the previous charge goes
 /// back as soon as it is replaced or no longer needed.
 fn retain_boundary_key(
@@ -770,7 +768,7 @@ fn verified_key(entry: &[u8], length: u32) -> Result<&[u8]> {
     Ok(key)
 }
 
-/// Reads one block's exact key from the part's key area.
+/// Reads one block's exact key from the leaf's key area.
 ///
 /// The page-level prefetch serves a whole page in one read, but it is charged up front. When the
 /// scan pool cannot take that, this path reads one key at a time, so a block that fits the pool

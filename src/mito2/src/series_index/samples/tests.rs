@@ -1332,7 +1332,7 @@ async fn real_samples_reconcile_reopen_and_retire(
     engine.stop().await.unwrap();
 }
 
-/// Rewrites the stored root page so every field column carries an unknown codec, and returns a
+/// Rewrites the stored descriptor leaf so every field column carries an unknown codec, and returns a
 /// handle whose descriptor sizes match the rewritten bytes. Everything else stays valid.
 async fn unknown_field_codec(store: &ObjectStore, handle: SamplesFileHandle) -> SamplesFileHandle {
     let (_, _, page, _) = first_leaf(store, &handle).await;
@@ -1733,12 +1733,11 @@ async fn boundary_blocks_fetch_remaining_columns_only_for_selected_rows() {
     assert!(batches.is_empty());
     assert_eq!(1, creations.load(Ordering::Relaxed));
     // Anchor the timestamp read by provenance rather than by position: the timestamp chunk is
-    // the first chunk of a part, so its read starts at the payload header. Positional indexing
+    // the first chunk of a part, so its read starts at offset zero. Positional indexing
     // would silently point at the key-area read instead.
     let timestamp_read = {
         let reads = reads.lock().unwrap();
-        // Header, trailer, root, the selected block's key, then timestamps only. The other part
-        // is pruned.
+        // Only the selected block's timestamp chunk requires a payload read.
         assert_eq!(
             1,
             reads
@@ -1831,7 +1830,7 @@ async fn series_read_windows_are_bounded_and_gap_rows_are_not_returned() {
                 .count()
         );
         // The initial read-ahead window is the first read of block 0's first column: it starts
-        // at the payload header, while the header, trailer, and page reads do not. Anchor on
+        // at offset zero of the payload object. Anchor on
         // that range rather than on an index so a reordered traversal cannot point the
         // assertions below at some later window.
         let (_, window) = reads
@@ -1947,7 +1946,7 @@ async fn series_read_windows_are_bounded_and_gap_rows_are_not_returned() {
     }
 }
 
-/// Keys live in the part's key area, not in the metadata pages: a page keeps a fixed-size
+/// Keys live in the leaf's key area, not in the metadata pages: a page keeps a fixed-size
 /// reference whatever the key length is, and the area holds one copy per covered series.
 #[tokio::test]
 async fn keys_are_kept_out_of_metadata_pages() {

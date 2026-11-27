@@ -482,7 +482,12 @@ impl Block {
         let rows = c.u32()?;
         let count = c.u32()? as usize;
         require(
-            min <= max && valid_rows(rows as usize, manifest.fields.len()),
+            part.first <= id
+                && id <= part.last
+                && part.min_timestamp <= min
+                && min <= max
+                && max <= part.max_timestamp
+                && valid_rows(rows as usize, manifest.fields.len()),
             "invalid sample block bounds/count",
         )?;
         require(
