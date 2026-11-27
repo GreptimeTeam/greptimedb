@@ -12201,6 +12201,38 @@ async fn cte_native_per_series_statements_run_the_fused_plan() {
     }
 }
 
+/// A CTE over a two-field table publishes each native value column under the existing column it
+/// answers. The value columns are paired by position, and the two fields hold different values, so a
+/// swapped pair changes the rows.
+#[tokio::test(flavor = "multi_thread")]
+async fn cte_native_two_fields_keep_their_columns() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) =
+        native_test_instance(GreptimeDbStandaloneBuilder::new("cte_native_two_fields")).await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE cte_two_fields (host STRING PRIMARY KEY, ts TIMESTAMP TIME INDEX, \
+             a DOUBLE, b DOUBLE); \
+         INSERT INTO cte_two_fields VALUES \
+             ('h0', 0, 1, 100), ('h0', 1000, 2, 300), ('h0', 2000, 4, 700), ('h0', 3000, 8, 1500)",
+        QueryContext::arc(),
+    )
+    .await;
+
+    let statement =
+        "WITH tql AS (TQL EVAL (0, 3, '1s') rate(cte_two_fields[2s])) SELECT * FROM tql ORDER BY ts";
+    let legacy = native_output_text(native_tql_output(&instance, statement, false).await).await;
+    observer.clear();
+    let native = native_output_text(native_tql_output(&instance, statement, true).await).await;
+    assert!(
+        !cte_native_observed_fused(&observer).is_empty(),
+        "the statement runs the fused plan:\n{}",
+        cte_native_observed_plan_trees(&observer)
+    );
+    assert_eq!(native, legacy);
+}
+
 /// The control: without the per-request hint the CTE statement keeps the existing plan, so the rows
 /// the route is compared against above come from the plan that answered this statement before the
 /// route existed.
