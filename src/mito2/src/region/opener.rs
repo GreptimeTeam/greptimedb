@@ -46,7 +46,7 @@ use store_api::region_request::{PathType, RegionRequirements};
 use store_api::storage::{ColumnId, RegionId};
 use tokio::sync::Semaphore;
 
-use crate::access_layer::AccessLayer;
+use crate::access_layer::{AccessLayer, AccessLayerRef};
 use crate::cache::file_cache::{FileCache, FileType, IndexKey};
 use crate::cache::{CacheManagerRef, SstMetaPreparation, prepare_sst_meta};
 use crate::config::MitoConfig;
@@ -62,7 +62,9 @@ use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::time_partition::TimePartitions;
 use crate::memtable::{MemtableBuilderProvider, ensure_json2_uses_flat_format};
-use crate::metrics::{CACHE_FILL_DOWNLOADED_FILES, CACHE_FILL_PENDING_FILES};
+use crate::metrics::{
+    CACHE_FILL_DOWNLOADED_FILES, CACHE_FILL_PENDING_FILES, WRITE_CACHE_INFLIGHT_DOWNLOAD,
+};
 use crate::read::series_candidate::is_sparse_metric_metadata;
 use crate::region::options::RegionOptions;
 use crate::region::version::{Version, VersionBuilder, VersionControl, VersionControlRef};
@@ -90,6 +92,8 @@ use crate::sst::range_index::RangeIndexDeleter;
 use crate::time_provider::TimeProviderRef;
 use crate::wal::entry_reader::WalEntryReader;
 use crate::wal::{EntryId, Wal};
+
+use crate::worker::WorkerListener;
 
 const PARQUET_META_PRELOAD_CONCURRENCY: usize = 8;
 
@@ -1164,22 +1168,70 @@ pub(crate) async fn replay_entry(
 }
 
 /// A task to load and fill the region file cache.
-pub(crate) struct RegionLoadCacheTask {
-    region: MitoRegionRef,
+pub(crate) enum RegionLoadCacheTask {
+    Open(MitoRegionRef),
+    NarthexEdit {
+        layer: AccessLayerRef,
+        files: Vec<FileHandle>,
+        listener: WorkerListener,
+    },
 }
 
 impl RegionLoadCacheTask {
-    pub(crate) fn new(region: MitoRegionRef) -> Self {
-        Self { region }
+    pub(crate) async fn fill_cache(self, file_cache: &FileCache) {
+        match self {
+            Self::Open(region) => Self::fill_region_indexes(&region, file_cache).await,
+            Self::NarthexEdit {
+                layer,
+                files,
+                listener,
+            } => {
+                for handle in files {
+                    let file = handle.meta_ref();
+                    let inventory =
+                        IndexKey::narthex_objects(file, &layer.build_region_dir(file.region_id));
+                    WRITE_CACHE_INFLIGHT_DOWNLOAD.inc();
+                    let mut downloaded = false;
+                    for (key, object) in &inventory {
+                        if !file_cache.can_retain(*key, object.file_size) {
+                            continue;
+                        }
+                        match file_cache
+                            .download_if_absent(
+                                *key,
+                                &object.path,
+                                layer.object_store(),
+                                object.file_size,
+                            )
+                            .await
+                        {
+                            Ok(new) => downloaded |= new,
+                            Err(error) => {
+                                warn!(error; "Failed to preload Narthex object {}", object.path);
+                                downloaded = false;
+                                break;
+                            }
+                        }
+                    }
+                    WRITE_CACHE_INFLIGHT_DOWNLOAD.dec();
+                    if downloaded
+                        && inventory
+                            .iter()
+                            .all(|(key, _)| file_cache.contains_key(key))
+                    {
+                        listener.on_file_cache_filled(file.file_id);
+                    }
+                }
+            }
+        }
     }
 
-    /// Fills the file cache with index files from the region.
-    pub(crate) async fn fill_cache(&self, file_cache: &FileCache) {
-        let region_id = self.region.region_id;
-        let table_dir = self.region.access_layer.table_dir();
-        let path_type = self.region.access_layer.path_type();
-        let object_store = self.region.access_layer.object_store();
-        let version_control = &self.region.version_control;
+    async fn fill_region_indexes(region: &MitoRegionRef, file_cache: &FileCache) {
+        let region_id = region.region_id;
+        let table_dir = region.access_layer.table_dir();
+        let path_type = region.access_layer.path_type();
+        let object_store = region.access_layer.object_store();
+        let version_control = &region.version_control;
 
         // Collects IndexKeys, file sizes, and max timestamps for files that need to be downloaded
         let mut files_to_download = Vec::new();
@@ -1217,7 +1269,7 @@ impl RegionLoadCacheTask {
             }
             for handle in version.ssts.series_indexes().values() {
                 let meta = handle.meta_ref();
-                let dir = self.region.access_layer.build_region_dir(meta.region_id);
+                let dir = region.access_layer.build_region_dir(meta.region_id);
                 for (key, object) in IndexKey::narthex_objects(meta, &dir) {
                     if file_cache.contains_key(&key) {
                         files_already_cached += 1;
@@ -1255,7 +1307,7 @@ impl RegionLoadCacheTask {
         while let Some((index_key, file_size, max_timestamp, path, _pin)) = remaining.next() {
             let current_size = file_cache.puffin_cache_size();
             let capacity = file_cache.puffin_cache_capacity();
-            let region_state = self.region.state();
+            let region_state = region.state();
             if !can_load_cache(region_state) {
                 info!(
                     "Stopping index cache by state: {:?}, region: {}, current_size: {}, capacity: {}",
@@ -1325,7 +1377,7 @@ fn maybe_load_cache(
         return;
     }
 
-    let task = RegionLoadCacheTask::new(region.clone());
+    let task = RegionLoadCacheTask::Open(region.clone());
     write_cache.load_region_cache(task);
 }
 
@@ -1973,7 +2025,7 @@ mod tests {
             region.file_purger.clone(),
         );
 
-        super::RegionLoadCacheTask::new(region)
+        super::RegionLoadCacheTask::Open(region)
             .fill_cache(&write_cache.file_cache())
             .await;
         let file_cache = write_cache.file_cache();

@@ -456,30 +456,6 @@ impl WriteCache {
             .await
     }
 
-    /// Downloads the target file into write cache only when it is not cached.
-    ///
-    /// Returns `Ok(true)` if this call performs a download, or `Ok(false)` if the
-    /// file is already present in write cache and download is skipped.
-    pub(crate) async fn download_if_absent(
-        &self,
-        index_key: IndexKey,
-        remote_path: &str,
-        remote_store: &ObjectStore,
-        file_size: u64,
-    ) -> Result<bool> {
-        if self.file_cache.contains_key(&index_key) {
-            debug!(
-                "Skip downloading file already in write cache, region: {}, file: {}",
-                index_key.region_id, index_key.file_id
-            );
-            return Ok(false);
-        }
-
-        self.download(index_key, remote_path, remote_store, file_size)
-            .await?;
-        Ok(true)
-    }
-
     pub(crate) const NARTHEX_STAGE: &'static str = "cache/staging/narthex/";
 
     /// Staging is distinct from authoritative paths even if both stores share an FS root.
@@ -1521,6 +1497,7 @@ mod tests {
             .await;
 
         let downloaded = write_cache
+            .file_cache()
             .download_if_absent(key, "missing/path.parquet", &remote_store, 1)
             .await
             .unwrap();
@@ -1550,6 +1527,7 @@ mod tests {
             .unwrap();
 
         let downloaded = write_cache
+            .file_cache()
             .download_if_absent(key, &remote_path, &remote_store, remote_data.len() as u64)
             .await
             .unwrap();

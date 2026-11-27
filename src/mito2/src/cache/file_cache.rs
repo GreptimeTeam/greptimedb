@@ -746,6 +746,30 @@ impl FileCache {
         self.inner.puffin_index.weighted_size()
     }
 
+    /// Downloads the target file into write cache only when it is not cached.
+    ///
+    /// Returns `Ok(true)` if this call performs a download, or `Ok(false)` if the
+    /// file is already present in write cache and download is skipped.
+    pub(crate) async fn download_if_absent(
+        &self,
+        index_key: IndexKey,
+        remote_path: &str,
+        remote_store: &ObjectStore,
+        file_size: u64,
+    ) -> Result<bool> {
+        if self.contains_key(&index_key) {
+            debug!(
+                "Skip downloading file already in write cache, region: {}, file: {}",
+                index_key.region_id, index_key.file_id
+            );
+            return Ok(false);
+        }
+
+        self.download(index_key, remote_path, remote_store, file_size)
+            .await?;
+        Ok(true)
+    }
+
     /// Downloads a file in `remote_path` from the remote object store to the local cache
     /// (specified by `index_key`).
     pub(crate) async fn download(
