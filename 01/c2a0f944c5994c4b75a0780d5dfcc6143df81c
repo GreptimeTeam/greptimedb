@@ -1,0 +1,21 @@
+tests/perf/test_ci_runner_scripts.py
+  s_b42cba56c4911e::t_35d87ef41270a2 113,584-586
+.github/workflows/tracesbench.yml
+  s_b42cba56c4911e::t_35d87ef41270a2 183
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "01c2a0f944c5994c4b75a0780d5dfcc6143df81c",
+  "prompts": {},
+  "sessions": {
+    "s_b42cba56c4911e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a207af-50d0-7c80-bdbc-8fe4eee39295",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
