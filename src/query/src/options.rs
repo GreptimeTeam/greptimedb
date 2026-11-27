@@ -29,6 +29,13 @@ use crate::error::{Error, InvalidQueryContextExtensionSnafu, Result};
 pub const FLOW_INCREMENTAL_AFTER_SEQS: &str = "flow.incremental_after_seqs";
 pub const FLOW_INCREMENTAL_MODE: &str = "flow.incremental_mode";
 pub const FLOW_RETURN_REGION_SEQ: &str = "flow.return_region_seq";
+/// Reads the physical `__sequence` column of a file this region adopted from another region,
+/// instead of virtualizing every row at the handle's admission barrier. The scan then hides the
+/// rows whose number is at or below the file's own substituted cut
+/// (`FileMeta::substituted_up_to`) and reports their time ranges in `substituted_row_ranges`.
+///
+/// Only Flow's `sequence_range` incremental delta sets it.
+pub const FLOW_READ_ROW_SEQUENCE: &str = "flow.read_row_sequence";
 pub const FLOW_SINK_TABLE_ID: &str = "flow.sink_table_id";
 /// Flow scheduler binding for the logical time of one scheduled attempt.
 /// Query planning, SQL/TQL parsing, range-select rewrite and DataFusion
@@ -190,6 +197,9 @@ pub struct FlowQueryExtensions {
     pub return_region_seq: bool,
     /// Optional sink table id used to distinguish source scans from sink reads.
     pub sink_table_id: Option<TableId>,
+    /// Whether an incremental scan reads physical row sequences and hides the rows a
+    /// substitution produced (see [FLOW_READ_ROW_SEQUENCE]).
+    pub read_row_sequence: bool,
 }
 
 impl FlowQueryExtensions {
@@ -201,6 +211,7 @@ impl FlowQueryExtensions {
     pub fn parse_flow_extensions(extensions: &HashMap<String, String>) -> Result<Option<Self>> {
         let has_flow_context = extensions.contains_key(FLOW_INCREMENTAL_AFTER_SEQS)
             || extensions.contains_key(FLOW_INCREMENTAL_MODE)
+            || extensions.contains_key(FLOW_READ_ROW_SEQUENCE)
             || extensions.contains_key(FLOW_RETURN_REGION_SEQ)
             || extensions.contains_key(FLOW_SINK_TABLE_ID);
 
@@ -232,6 +243,12 @@ impl FlowQueryExtensions {
         let return_region_seq = extensions
             .get(FLOW_RETURN_REGION_SEQ)
             .map(|value| parse_bool(FLOW_RETURN_REGION_SEQ, value.as_str()))
+            .transpose()?
+            .unwrap_or(false);
+
+        let read_row_sequence = extensions
+            .get(FLOW_READ_ROW_SEQUENCE)
+            .map(|value| parse_bool(FLOW_READ_ROW_SEQUENCE, value.as_str()))
             .transpose()?
             .unwrap_or(false);
 
@@ -275,6 +292,7 @@ impl FlowQueryExtensions {
             incremental_mode,
             return_region_seq,
             sink_table_id,
+            read_row_sequence,
         }))
     }
 

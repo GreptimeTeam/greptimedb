@@ -47,6 +47,7 @@ use crate::read::last_row::FlatLastTimestampSelector;
 use crate::read::pruner::PartitionPruner;
 use crate::read::range::{RangeMeta, RowGroupIndex};
 use crate::read::scan_region::StreamContext;
+use crate::read::substituted_rows::filter_flat_batch_by_substituted_sequence;
 use crate::read::{BoxedRecordBatchStream, ScannerMetrics};
 use crate::sst::file::{FileTimeRange, RegionFileId};
 use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplyMetrics;
@@ -1532,10 +1533,10 @@ pub(crate) async fn scan_flat_file_ranges(
 /// (`__primary_key`, `__sequence`, `__op_type`), so it must be applied before any
 /// projection/compat conversion that drops internal columns.
 ///
-/// `file_sequence_trusted` is the per-file trust decision. Foreign reader
-/// batches have already been virtualized to the target-local file barrier, so
-/// they are filtered using the effective batch sequence. Local untrusted files
-/// pass through because exact capability excludes them before row filtering.
+/// `file_sequence_trusted` is the per-file trust decision. Foreign batches have already been
+/// virtualized to the target-local file barrier, so they are filtered by the effective batch
+/// sequence. A local file whose marker is unset is filtered like a trusted one only when it
+/// states a substituted cut, which already hid the rows a substitution produced.
 pub(crate) fn filter_flat_batch_by_sequence(
     record_batch: RecordBatch,
     sequence_range: Option<SequenceRange>,
@@ -1612,11 +1613,39 @@ pub fn build_flat_file_range_scan_stream(
             part_metrics.inc_build_reader_cost(build_cost);
 
             let may_compat = range.compat_batch();
+            // The substituted cut of a physical-sequence read: rows at or below it carry a
+            // number a substitution produced, so they are hidden and their time range is
+            // reported.
+            let substituted_cut = stream_ctx.input.substituted_row_ranges().and_then(|windows| {
+                stream_ctx
+                    .input
+                    .substituted_sequence_cut(range.file_handle())
+                    .map(|cut| (cut, windows))
+            });
             let file_sequence_trusted = range
                 .file_handle()
-                .is_effective_target_sequence_trusted(stream_ctx.input.region_metadata().region_id);
+                .is_effective_target_sequence_trusted(stream_ctx.input.region_metadata().region_id)
+                // A local file whose marker is unset is attributable above its substituted cut,
+                // which is applied just below.
+                || substituted_cut.is_some();
 
             while let Some(record_batch) = reader.next_batch().await? {
+                // Hides the rows a substitution produced and reports the windows they occupy,
+                // so the caller recomputes exactly those windows.
+                let record_batch = match substituted_cut {
+                    Some((cut, windows)) => {
+                        let Some(record_batch) = filter_flat_batch_by_substituted_sequence(
+                            record_batch,
+                            Some(cut),
+                            windows,
+                        )?
+                        else {
+                            continue;
+                        };
+                        record_batch
+                    }
+                    None => record_batch,
+                };
                 let Some(record_batch) = filter_flat_batch_by_sequence(
                     record_batch,
                     stream_ctx.input.sequence_range,

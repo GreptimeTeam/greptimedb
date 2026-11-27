@@ -87,6 +87,13 @@ pub struct ScanRequest {
     ///
     /// Historical `memtable_only` reads must never set this flag.
     pub exact_sequence_range: bool,
+    /// Whether this scan reads the **physical** `__sequence` column of a foreign file and hides
+    /// the rows whose number a substitution produced.
+    ///
+    /// The reader then keeps the column of any foreign file, hides the rows at or below the
+    /// file's own `FileMeta::substituted_up_to` cut, and reports their timestamp ranges as
+    /// `substituted_row_ranges`. Every other reader, compaction included, leaves this `false`.
+    pub read_row_sequence: bool,
     /// Optional hint for the distribution of time-series data.
     pub distribution: Option<TimeSeriesDistribution>,
     /// Optional hint from query-driven JSON type concretization.
@@ -180,6 +187,9 @@ impl Display for ScanRequest {
         }
         if self.exact_sequence_range {
             write!(f, "{}exact_sequence_range: true", delimiter.as_str())?;
+        }
+        if self.read_row_sequence {
+            write!(f, "{}read_row_sequence: true", delimiter.as_str())?;
         }
         if self.preserve_pk_dictionary_encoding {
             write!(

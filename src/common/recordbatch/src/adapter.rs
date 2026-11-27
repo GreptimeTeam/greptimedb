@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Display};
 use std::future::Future;
 use std::marker::PhantomData;
@@ -698,6 +699,12 @@ pub struct RecordBatchMetrics {
     /// Omitted when empty for backward compatibility.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub region_watermarks: Vec<RegionWatermarkEntry>,
+    /// Per-region time ranges of the rows a scan deliberately substituted, so the caller
+    /// recomputes those windows. An empty list means "substituted nothing", never "unknown".
+    /// Entries are ordered by region id, each region's ranges sorted and non-overlapping,
+    /// omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub substituted_row_ranges: Vec<SubstitutedRowRanges>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -705,6 +712,92 @@ pub struct RegionWatermarkEntry {
     pub region_id: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watermark: Option<u64>,
+}
+
+/// The terminal substituted-range answers of one region scan's partition streams.
+///
+/// Each partition's stream states, when it ends, which time ranges it substituted. A plan node
+/// that reads a region on several partitions of DataFusion parallelism reports through this
+/// structure, so the ranges of every partition it ran reach the caller instead of only those of
+/// the stream the node happens to hand out last.
+#[derive(Debug, Default)]
+pub struct SubstitutedRowRangesReports {
+    state: Mutex<SubstitutedRowRangesReportsState>,
+}
+
+#[derive(Debug, Default)]
+struct SubstitutedRowRangesReportsState {
+    /// The ranges each partition reported, keyed by partition.
+    reported: BTreeMap<usize, Vec<SubstitutedRowRanges>>,
+}
+
+impl SubstitutedRowRangesReports {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records the ranges `partition` reported when its stream ended.
+    pub fn record(&self, partition: usize, ranges: Vec<SubstitutedRowRanges>) {
+        if ranges.is_empty() {
+            return;
+        }
+        self.lock().reported.insert(partition, ranges);
+    }
+
+    /// Returns the ranges every reporting partition substituted, merged per region and sorted.
+    ///
+    /// Ranges are claims about rows that were read, so the answer is the union: a partition that
+    /// reported nothing substitutes nothing, and it cannot make another partition's claim vanish.
+    pub fn ranges(&self) -> Vec<SubstitutedRowRanges> {
+        let state = self.lock();
+        let mut merged = BTreeMap::<u64, BTreeSet<(i64, i64)>>::new();
+        for entry in state.reported.values().flatten() {
+            let ranges = merged.entry(entry.region_id).or_default();
+            ranges.extend(
+                entry
+                    .ranges
+                    .iter()
+                    .map(|range| (range.start_millis, range.end_millis)),
+            );
+        }
+        merged
+            .into_iter()
+            .map(|(region_id, ranges)| SubstitutedRowRanges {
+                region_id,
+                ranges: ranges
+                    .into_iter()
+                    .map(|(start_millis, end_millis)| SubstitutedRange {
+                        start_millis,
+                        end_millis,
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
+
+    /// A panic while the state is held cannot leave it inconsistent (an insert is the only
+    /// mutation), so a poisoned lock is recovered instead of failing the caller.
+    fn lock(&self) -> std::sync::MutexGuard<'_, SubstitutedRowRangesReportsState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// The time ranges a scan substituted for one region.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SubstitutedRowRanges {
+    pub region_id: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ranges: Vec<SubstitutedRange>,
+}
+
+/// One `[start, end]` range of row timestamps, in milliseconds since the Unix epoch, both ends
+/// inclusive: a caller that owns time windows must recompute every window that intersects it.
+#[derive(
+    serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord,
+)]
+pub struct SubstitutedRange {
+    pub start_millis: i64,
+    pub end_millis: i64,
 }
 
 /// Determines if a metric name represents a time measurement that should be formatted.

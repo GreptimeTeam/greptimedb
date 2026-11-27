@@ -214,6 +214,14 @@ pub struct ParquetReaderBuilder {
     expected_metadata: Option<RegionMetadataRef>,
     /// Whether this reader is for compaction.
     compaction: bool,
+    /// Keep the physical `__sequence` column of a foreign file instead of virtualizing
+    /// it at the handle's barrier.
+    ///
+    /// Used only by Flow's incremental read with `ScanRequest::read_row_sequence`,
+    /// which then hides the rows at or below the file's substituted cut. Every other
+    /// reader leaves it `false`: compaction and ordinary queries depend on the
+    /// substitution.
+    read_row_sequence: bool,
     /// Mode to pre-filter columns.
     pre_filter_mode: PreFilterMode,
     /// Whether to run the reduced-column predicate prefilter pass.
@@ -260,6 +268,7 @@ impl ParquetReaderBuilder {
             fulltext_index_appliers: [None, None],
             expected_metadata: None,
             compaction: false,
+            read_row_sequence: false,
             pre_filter_mode: PreFilterMode::All,
             enable_predicate_prefilter: true,
             postpone_time_index_filter: false,
@@ -355,6 +364,17 @@ impl ParquetReaderBuilder {
     #[must_use]
     pub fn compaction(mut self, compaction: bool) -> Self {
         self.compaction = compaction;
+        self
+    }
+
+    /// Reads the physical `__sequence` of a foreign file instead of substituting the
+    /// handle's barrier for every row.
+    ///
+    /// Only Flow's incremental read sets this; the caller hides the rows a
+    /// substitution produced (see `ScanRequest::read_row_sequence`).
+    #[must_use]
+    pub(crate) fn read_row_sequence(mut self, read_row_sequence: bool) -> Self {
+        self.read_row_sequence = read_row_sequence;
         self
     }
 
@@ -514,7 +534,13 @@ impl ParquetReaderBuilder {
             );
         }
         let file_meta = self.file_handle.meta_ref();
-        let override_sequence = if is_foreign {
+        let override_sequence = if self.read_row_sequence && is_foreign {
+            // A physical-sequence read keeps an adopted file's own column instead of the
+            // substitution below. `preserve_row_sequence` takes no part: an import only
+            // re-marks the handle and copies the bytes, and the file's own
+            // `substituted_up_to` cut is what states a substitution.
+            None
+        } else if is_foreign {
             file_meta.sequence.map(|sequence| sequence.get())
         } else if file_meta.preserve_row_sequence {
             None

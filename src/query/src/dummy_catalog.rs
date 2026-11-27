@@ -365,6 +365,11 @@ struct FlowScanDecision {
     skip_sst_files: bool,
     /// Whether this source scan must enforce the exact sequence range.
     exact_sequence_range: bool,
+    /// Whether the scan reads physical row sequences and hides the rows a substitution
+    /// produced, reporting the windows they occupy. Only the incremental delta asks for
+    /// it: it is the read that must split an adopted file into consumed and unconsumed
+    /// rows instead of trusting the handle's barrier.
+    read_row_sequence: bool,
 }
 
 impl FlowScanDecision {
@@ -376,6 +381,7 @@ impl FlowScanDecision {
             memtable_max_sequence: None,
             skip_sst_files: false,
             exact_sequence_range: false,
+            read_row_sequence: false,
         }
     }
 }
@@ -391,6 +397,7 @@ fn decide_flow_scan(query_ctx: &QueryContext, region_id: RegionId) -> Result<Flo
             memtable_max_sequence: query_ctx.get_snapshot(region_id.as_u64()),
             skip_sst_files: false,
             exact_sequence_range: false,
+            read_row_sequence: false,
         });
     };
 
@@ -426,6 +433,13 @@ fn decide_flow_scan(query_ctx: &QueryContext, region_id: RegionId) -> Result<Flo
         && memtable_min_sequence.is_some()
         && flow_extensions.incremental_mode == Some(FlowIncrementalMode::MemtableOnly);
 
+    // Only an exact incremental delta splits an adopted file by its physical
+    // sequences: without the row-level range there is no cursor to split it against,
+    // and a repair read wants every row of its windows.
+    let read_row_sequence = apply_incremental
+        && flow_extensions.read_row_sequence
+        && flow_extensions.incremental_mode == Some(FlowIncrementalMode::SequenceRange);
+
     Ok(FlowScanDecision {
         is_sink_scan: false,
         snapshot_on_scan: memtable_max_sequence.is_none()
@@ -435,6 +449,7 @@ fn decide_flow_scan(query_ctx: &QueryContext, region_id: RegionId) -> Result<Flo
         skip_sst_files,
         exact_sequence_range: apply_incremental
             && flow_extensions.incremental_mode == Some(FlowIncrementalMode::SequenceRange),
+        read_row_sequence,
     })
 }
 
@@ -453,6 +468,7 @@ fn build_scan_request(
         skip_sst_files: decision.skip_sst_files,
         snapshot_on_scan: decision.snapshot_on_scan,
         exact_sequence_range: decision.exact_sequence_range,
+        read_row_sequence: decision.read_row_sequence,
         memtable_min_sequence: decision.memtable_min_sequence,
         memtable_max_sequence: decision.memtable_max_sequence,
         ..Default::default()

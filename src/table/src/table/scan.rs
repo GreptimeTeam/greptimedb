@@ -24,7 +24,8 @@ use common_query::series_frame::{
     PendingBatching, pack_raw_series_with, raw_series_frame_schema_with_ordering,
 };
 use common_recordbatch::adapter::{
-    RecordBatchStreamAdapter, RegionQueryStatCounters, SERIES_SCAN_EXEC_NAME,
+    RecordBatchStreamAdapter, RegionQueryStatCounters, SERIES_SCAN_EXEC_NAME, SubstitutedRowRanges,
+    SubstitutedRowRangesReports,
 };
 use common_recordbatch::{
     DfRecordBatch, DfSendableRecordBatchStream, MemoryTrackedStream, QueryMemoryTracker,
@@ -90,6 +91,13 @@ pub struct RegionScanExec {
     /// Dynamic filters accepted by the scanner and applied to decoded output batches.
     /// The wrappers themselves remain live and are updated by their producers.
     pushed_dyn_filters: Arc<Mutex<Vec<Arc<dyn PhysicalExpr>>>>,
+    /// The time ranges the partition streams substituted, each stream reporting them when it
+    /// ends.
+    ///
+    /// The scanner's stream states them in its terminal metrics, and this node is what a
+    /// plan-level collector can ask after the read: a rebuilt [`RecordBatchMetrics`] carries
+    /// figures, not the ranges a region's read stated.
+    substituted_row_ranges: Arc<SubstitutedRowRangesReports>,
 }
 
 impl std::fmt::Debug for RegionScanExec {
@@ -328,6 +336,7 @@ impl RegionScanExec {
             explain_verbose: false,
             query_memory_tracker,
             pushed_dyn_filters: Arc::new(Mutex::new(Vec::new())),
+            substituted_row_ranges: Arc::new(SubstitutedRowRangesReports::new()),
         })
     }
 
@@ -402,11 +411,20 @@ impl RegionScanExec {
             explain_verbose: self.explain_verbose,
             query_memory_tracker: self.query_memory_tracker.clone(),
             pushed_dyn_filters: self.pushed_dyn_filters.clone(),
+            substituted_row_ranges: self.substituted_row_ranges.clone(),
         })
     }
 
     pub fn distribution(&self) -> Option<TimeSeriesDistribution> {
         self.distribution
+    }
+
+    /// The time ranges this node's partition streams substituted, merged per region.
+    ///
+    /// A partition states its ranges when its stream ends, so a caller asks after the read
+    /// finished; a partition that never ran contributed nothing and simply adds no range.
+    pub fn substituted_row_ranges(&self) -> Vec<SubstitutedRowRanges> {
+        self.substituted_row_ranges.ranges()
     }
 
     pub fn with_distinguish_partition_range(&self, distinguish_partition_range: bool) {
@@ -890,6 +908,7 @@ impl ExecutionPlan for SeriesScanExec {
             span,
             await_timer: None,
             dyn_filter: None,
+            substituted_range_report: None,
         }))
     }
 }
@@ -983,6 +1002,10 @@ impl ExecutionPlan for RegionScanExec {
             span,
             await_timer: None,
             dyn_filter,
+            substituted_range_report: Some(SubstitutedRangeReport {
+                reports: self.substituted_row_ranges.clone(),
+                partition,
+            }),
         }))
     }
 
@@ -1113,12 +1136,21 @@ impl DisplayAs for RegionScanExec {
     }
 }
 
+/// Where a partition stream of [`RegionScanExec`] reports the ranges it substituted when it
+/// ends.
+struct SubstitutedRangeReport {
+    reports: Arc<SubstitutedRowRangesReports>,
+    partition: usize,
+}
+
 pub struct StreamWithMetricWrapper {
     stream: SendableRecordBatchStream,
     metric: StreamMetrics,
     span: Span,
     await_timer: Option<Instant>,
     dyn_filter: Option<Arc<dyn PhysicalExpr>>,
+    /// Where this stream states the ranges it substituted, taken once the stream ended.
+    substituted_range_report: Option<SubstitutedRangeReport>,
 }
 
 impl Stream for StreamWithMetricWrapper {
@@ -1162,7 +1194,20 @@ impl Stream for StreamWithMetricWrapper {
                     Err(e) => Poll::Ready(Some(Err(DataFusionError::External(Box::new(e))))),
                 }
             }
-            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Ready(None) => {
+                // The stream is over, so the ranges its metrics state now are terminal: they
+                // describe the rows this partition substituted, which the node has to keep for
+                // a plan-level collector.
+                if let Some(report) = this.substituted_range_report.take() {
+                    let ranges = this
+                        .stream
+                        .metrics()
+                        .map(|metrics| metrics.substituted_row_ranges)
+                        .unwrap_or_default();
+                    report.reports.record(report.partition, ranges);
+                }
+                Poll::Ready(None)
+            }
             Poll::Pending => Poll::Pending,
         }
     }
