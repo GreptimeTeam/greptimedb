@@ -23,7 +23,9 @@ use mito2::sst::file::{FileFormat, FileMeta};
 use mito2::sst::file_metadata::FileMetadataInterner;
 use mito2::sst::location::region_dir_from_table_dir;
 use mito2::sst::parquet::max_row_group_decoded_size;
-use mito2::sst::parquet::metadata::{extract_primary_key_range, extract_time_range};
+use mito2::sst::parquet::metadata::{
+    DEDUPED_SST_KEY, extract_primary_key_range, extract_time_range, has_deduped_sst_marker,
+};
 use object_store::{Buffer, ObjectStore};
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::record::RowAccessor;
@@ -190,6 +192,14 @@ impl SstReplaceCommand {
             })?;
         let new_num_row_groups = parquet_meta.num_row_groups() as u64;
         validate_replacement(&old_file, new_num_rows, new_num_row_groups)?;
+        if has_deduped_sst_marker(parquet_meta) {
+            return error::IllegalConfigSnafu {
+                msg: format!(
+                    "replacement SST carries the {DEDUPED_SST_KEY} marker; run parquet-rewrite to remove it first"
+                ),
+            }
+            .fail();
+        }
 
         let source = extract_region_metadata("replacement SST", parquet_meta)?;
         let time_index = source.time_index_column();
@@ -434,15 +444,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_replace_refreshes_pruning_bounds() {
-        check_replacement(true).await;
+        check_replacement(true, false).await;
     }
 
     #[tokio::test]
     async fn test_replace_cached_delete_with_put_at_same_key_and_time() {
-        check_replacement(false).await;
+        check_replacement(false, false).await;
     }
 
-    async fn check_replacement(move_row: bool) {
+    #[tokio::test]
+    async fn test_replace_sst_rejects_marked_duplicate_rows() {
+        check_replacement(false, true).await;
+    }
+
+    async fn check_replacement(move_row: bool, marked_duplicates: bool) {
         use datafusion::prelude::{col, lit};
         use datafusion_common::ScalarValue;
         use futures::TryStreamExt;
@@ -456,6 +471,7 @@ mod tests {
         let mut donor = TestEnv::new().await;
         let region_id = RegionId::new(1, 1);
         let create = CreateRequestBuilder::new().table_dir("table").build();
+        let rows_per_file = if marked_duplicates { 3 } else { 1 };
         let schema = test_util::rows_schema(&create);
         let region_dir = region_dir_from_table_dir(&create.table_dir, region_id, create.path_type);
         let config = MitoConfig {
@@ -464,7 +480,8 @@ mod tests {
             ..Default::default()
         };
         // Two independent regions have the same schema and sequence. The target
-        // has a cached Delete and the replacement has one Put.
+        // has deletes and the replacement has puts. Use an append-mode donor for
+        // the accepted cases so its output has no deduplication claim.
         let mut paths = Vec::new();
         let (new_key, new_second) = if move_row { ("b", 2) } else { ("a", 1) };
         for (env, key, second, delete) in [
@@ -472,13 +489,17 @@ mod tests {
             (&mut donor, new_key, new_second, false),
         ] {
             let engine = env.create_engine(config.clone()).await;
+            let mut create = create.clone();
+            if !delete && !marked_duplicates {
+                create.options.insert("append_mode".into(), "true".into());
+            }
             engine
-                .handle_request(region_id, RegionRequest::Create(create.clone()))
+                .handle_request(region_id, RegionRequest::Create(create))
                 .await
                 .unwrap();
             let rows = api::v1::Rows {
                 schema: schema.clone(),
-                rows: test_util::build_rows_for_key(key, second, second + 1, 0),
+                rows: test_util::build_rows_for_key(key, second, second + rows_per_file, 0),
             };
             if delete {
                 test_util::delete_rows(&engine, region_id, rows).await;
@@ -509,6 +530,9 @@ mod tests {
             ),
         )
         .unwrap();
+        if marked_duplicates {
+            write_marked_duplicate_rows(&paths[1]);
+        }
         let command = SstReplaceCommand {
             config: config_file,
             region_id: region_id.as_u64().to_string(),
@@ -521,6 +545,12 @@ mod tests {
             verbose: false,
         };
         let previous_bytes = std::fs::read(&paths[0]).unwrap();
+        if marked_duplicates {
+            let err = command.run().await.unwrap_err();
+            assert!(err.to_string().contains(DEDUPED_SST_KEY), "{err}");
+            assert_eq!(std::fs::read(&paths[0]).unwrap(), previous_bytes);
+            return;
+        }
         command.run().await.unwrap();
         assert_eq!(std::fs::read(&paths[0]).unwrap(), previous_bytes);
         let engine = target.open_engine(config).await;
@@ -587,6 +617,34 @@ mod tests {
             }
         }
         engine.stop().await.unwrap();
+    }
+
+    fn write_marked_duplicate_rows(path: &std::path::Path) {
+        use std::fs::File;
+
+        use datatypes::arrow::array::UInt32Array;
+        use datatypes::arrow::compute::take_record_batch;
+        use parquet::arrow::ArrowWriter;
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        use parquet::file::properties::WriterProperties;
+
+        let reader = ParquetRecordBatchReaderBuilder::try_new(File::open(path).unwrap()).unwrap();
+        assert!(has_deduped_sst_marker(reader.metadata()));
+        let metadata = reader
+            .metadata()
+            .file_metadata()
+            .key_value_metadata()
+            .cloned();
+        let batch = reader.build().unwrap().next().unwrap().unwrap();
+        // Keep the row count and time/key bounds while duplicating the first Put.
+        let batch = take_record_batch(&batch, &UInt32Array::from(vec![0, 0, 2])).unwrap();
+        let props = WriterProperties::builder()
+            .set_key_value_metadata(metadata)
+            .build();
+        let mut writer =
+            ArrowWriter::try_new(File::create(path).unwrap(), batch.schema(), Some(props)).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
     }
 
     #[test]

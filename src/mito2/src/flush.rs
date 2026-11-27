@@ -447,7 +447,7 @@ impl RegionFlushTask {
                     .memtables
                     .immutables()
                     .iter()
-                    .map(|m| m.id())
+                    .map(|(mem, _)| mem.id())
                     .collect();
                 let flush_finished = FlushFinished {
                     region_id: self.region_id,
@@ -773,7 +773,7 @@ impl MemtableSstWriter {
         let mut flush_metrics = Metrics::new(self.kind.write_type());
         let partition_expr = parse_partition_expr(self.partition_expr.as_deref())?;
         let mut all_sst_infos = Vec::new();
-        for mem in memtables {
+        for (mem, _) in memtables {
             if mem.is_empty() {
                 // Skip empty memtables.
                 continue;
@@ -2460,7 +2460,7 @@ mod tests {
         assert_eq!(1, job_scheduler.num_jobs());
         // Check the new version.
         let version_data = version_control.current();
-        assert_eq!(0, version_data.version.memtables.immutables()[0].id());
+        assert_eq!(0, version_data.version.memtables.immutables()[0].0.id());
         // Schedule remaining tasks.
         let output_rxs: Vec<_> = tasks
             .into_iter()
@@ -2864,7 +2864,7 @@ mod tests {
 
         // Check the new version.
         let version_data = version_control.current();
-        assert_eq!(0, version_data.version.memtables.immutables()[0].id());
+        assert_eq!(0, version_data.version.memtables.immutables()[0].0.id());
         // Assumes the flush job is finished.
         version_control.apply_edit(
             Some(RegionEdit {

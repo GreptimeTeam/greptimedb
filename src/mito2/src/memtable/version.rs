@@ -25,22 +25,20 @@ use store_api::storage::SequenceNumber;
 
 use crate::error::Result;
 use crate::memtable::bulk::part::BulkPart;
-use crate::memtable::time_partition::TimePartitions;
+use crate::memtable::time_partition::{PartTimeRange, TimePartitions};
 use crate::memtable::{KeyValues, MemtableBuilderRef, MemtableId, MemtableRef};
-
-pub(crate) type SmallMemtableVec = SmallVec<[MemtableRef; 2]>;
 
 /// A version of current memtables in a region.
 #[derive(Debug, Clone)]
 pub(crate) struct MemtableVersion {
     /// Mutable memtable.
     pub(crate) mutable: MutableMemtablesRef,
-    /// Immutable memtables.
+    /// Immutable memtables paired with the time range of their original partition.
     ///
     /// We only allow one flush job per region but if a flush job failed, then we
     /// might need to store more than one immutable memtable on the next time we
     /// flush the region.
-    immutables: SmallMemtableVec,
+    immutables: SmallVec<[(MemtableRef, PartTimeRange); 2]>,
     /// Whether immutable memtables may contain skip-WAL writes.
     /// Flushes are serialized per region and cover all immutable memtables.
     immutable_has_skip_wal_writes: bool,
@@ -63,8 +61,8 @@ impl MemtableVersion {
         self.mutable.has_skip_wal_writes() || self.immutable_has_skip_wal_writes
     }
 
-    /// Immutable memtables.
-    pub(crate) fn immutables(&self) -> &[MemtableRef] {
+    /// Immutable memtables and their original partition time ranges.
+    pub(crate) fn immutables(&self) -> &[(MemtableRef, PartTimeRange)] {
         &self.immutables
     }
 
@@ -72,6 +70,18 @@ impl MemtableVersion {
     pub(crate) fn list_memtables(&self) -> Vec<MemtableRef> {
         let mut mems = Vec::with_capacity(self.immutables.len() + self.mutable.num_partitions());
         self.mutable.list_memtables(&mut mems);
+        mems.extend(self.immutables.iter().map(|(mem, _)| mem.clone()));
+        mems
+    }
+
+    /// Lists mutable and immutable memtables with the time range of the
+    /// partition each was created for. A memtable never holds a row outside
+    /// its partition range, even after later writes.
+    pub(crate) fn list_memtables_with_time_ranges(&self) -> Vec<(MemtableRef, PartTimeRange)> {
+        let mut mems = Vec::with_capacity(self.immutables.len() + self.mutable.num_partitions());
+        self.mutable
+            .partitions
+            .list_memtables_with_time_ranges(&mut mems);
         mems.extend_from_slice(&self.immutables);
         mems
     }
@@ -142,7 +152,7 @@ impl MemtableVersion {
         // Pushes the mutable memtable to immutable list.
         self.mutable
             .partitions
-            .list_memtables_to_small_vec(&mut immutables);
+            .list_memtables_with_time_ranges(&mut immutables);
 
         Ok(Some(MemtableVersion {
             mutable,
@@ -154,12 +164,7 @@ impl MemtableVersion {
 
     /// Removes memtables by ids from immutable memtables.
     pub(crate) fn remove_memtables(&mut self, ids: &[MemtableId]) {
-        self.immutables = self
-            .immutables
-            .iter()
-            .filter(|mem| !ids.contains(&mem.id()))
-            .cloned()
-            .collect();
+        self.immutables.retain(|(mem, _)| !ids.contains(&mem.id()));
         if self.immutables.is_empty() {
             self.immutable_has_skip_wal_writes = false;
         }
@@ -174,7 +179,7 @@ impl MemtableVersion {
     pub(crate) fn immutables_usage(&self) -> usize {
         self.immutables
             .iter()
-            .map(|mem| mem.stats().estimated_bytes)
+            .map(|(mem, _)| mem.stats().estimated_bytes)
             .sum()
     }
 
@@ -185,7 +190,7 @@ impl MemtableVersion {
             + self
                 .immutables
                 .iter()
-                .map(|mem| mem.stats().decoded_bytes())
+                .map(|(mem, _)| mem.stats().decoded_bytes())
                 .sum::<usize>()
     }
 
@@ -193,7 +198,7 @@ impl MemtableVersion {
     pub(crate) fn num_rows(&self) -> u64 {
         self.immutables
             .iter()
-            .map(|mem| mem.stats().num_rows as u64)
+            .map(|(mem, _)| mem.stats().num_rows as u64)
             .sum::<u64>()
             + self.mutable.num_rows()
     }
@@ -204,6 +209,7 @@ impl MemtableVersion {
         self.mutable.list_memtables(&mut mutables);
         self.immutables
             .iter()
+            .map(|(mem, _)| mem)
             .chain(mutables.iter())
             .filter_map(|mem| mem.stats().time_range())
             .reduce(|(min_a, max_a), (min_b, max_b)| (min_a.min(min_b), max_a.max(max_b)))
@@ -362,7 +368,11 @@ mod tests {
                 frozen.mutable.mark_skip_wal_writes();
             }
             frozen.mutable.write(&kvs).unwrap();
-            let ids: Vec<_> = frozen.immutables().iter().map(|mem| mem.id()).collect();
+            let ids: Vec<_> = frozen
+                .immutables()
+                .iter()
+                .map(|(mem, _)| mem.id())
+                .collect();
             frozen.remove_memtables(&ids);
             assert_eq!(new_skip_wal_writes, frozen.has_skip_wal_writes());
             assert_eq!(
@@ -377,7 +387,11 @@ mod tests {
                 .freeze_mutable(&metadata, Some(Duration::from_secs(5)))
                 .unwrap()
                 .unwrap();
-            let ids: Vec<_> = next_flush.immutables().iter().map(|mem| mem.id()).collect();
+            let ids: Vec<_> = next_flush
+                .immutables()
+                .iter()
+                .map(|(mem, _)| mem.id())
+                .collect();
             next_flush.remove_memtables(&ids);
             assert!(!next_flush.has_skip_wal_writes());
         }
@@ -418,7 +432,11 @@ mod tests {
             .unwrap();
         assert_eq!(2, retried.immutables().len());
         assert!(retried.has_skip_wal_writes());
-        let ids: Vec<_> = retried.immutables().iter().map(|mem| mem.id()).collect();
+        let ids: Vec<_> = retried
+            .immutables()
+            .iter()
+            .map(|(mem, _)| mem.id())
+            .collect();
         retried.remove_memtables(&ids);
         assert!(!retried.has_skip_wal_writes());
 
@@ -430,5 +448,59 @@ mod tests {
         ));
         assert!(!replacement.has_skip_wal_writes());
         assert!(frozen.has_skip_wal_writes());
+    }
+
+    #[test]
+    fn test_partition_time_ranges_follow_memtables() {
+        let metadata = memtable_util::metadata_for_test();
+        let partitions = TimePartitions::new(
+            metadata.clone(),
+            Arc::new(TimeSeriesMemtableBuilder::default()),
+            0,
+            Some(Duration::from_secs(5)),
+        );
+        let version = MemtableVersion::new(partitions);
+        for ts in [1000, 7000] {
+            let kvs = memtable_util::build_key_values(&metadata, "hello".to_string(), 0, &[ts], 1);
+            version.mutable.write(&kvs).unwrap();
+        }
+        let ranges = |version: &MemtableVersion| {
+            let mut ranges: Vec<_> = version
+                .list_memtables_with_time_ranges()
+                .into_iter()
+                .map(|(mem, range)| {
+                    let (min, max) = range.to_inclusive().unwrap();
+                    (mem.id(), min.value(), max.value())
+                })
+                .collect();
+            ranges.sort_unstable();
+            ranges
+        };
+        // The upper bound of a partition is exclusive.
+        assert_eq!(ranges(&version), [(0, 0, 4999), (1, 5000, 9999)]);
+
+        // Frozen memtables keep their partition ranges. The forked mutable
+        // memtable covers the partition of the latest row.
+        let mut frozen = version
+            .freeze_mutable(&metadata, Some(Duration::from_secs(5)))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            ranges(&frozen),
+            [(0, 0, 4999), (1, 5000, 9999), (2, 5000, 9999)]
+        );
+        let snapshot = frozen.clone();
+        frozen.remove_memtables(&[0]);
+        assert_eq!(ranges(&frozen), [(1, 5000, 9999), (2, 5000, 9999)]);
+        let [(remaining, range)] = frozen.immutables() else {
+            panic!("expected one immutable memtable after removing the first partition");
+        };
+        assert_eq!(remaining.id(), 1);
+        let (min, max) = range.to_inclusive().unwrap();
+        assert_eq!((min.value(), max.value()), (5000, 9999));
+        assert_eq!(
+            ranges(&snapshot),
+            [(0, 0, 4999), (1, 5000, 9999), (2, 5000, 9999)]
+        );
     }
 }

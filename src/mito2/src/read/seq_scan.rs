@@ -30,7 +30,8 @@ use futures::{StreamExt, TryStreamExt};
 use snafu::ensure;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
-    PartitionRange, PrepareRequest, QueryScanContext, RegionScanner, ScannerProperties,
+    PartitionRange, PrepareRequest, QueryScanContext, RegionScanner, RegionScannerRef,
+    ScannerProperties, StatisticsSplit,
 };
 use store_api::storage::TimeSeriesRowSelector;
 use tokio::sync::Semaphore;
@@ -43,7 +44,7 @@ use crate::read::last_row::FlatLastRowReader;
 use crate::read::pruner::{PartitionPruner, Pruner};
 use crate::read::range::RangeMeta;
 use crate::read::range_cache::{CachedRangeReader, build_range_cache_key};
-use crate::read::scan_region::{ScanInput, StreamContext};
+use crate::read::scan_region::{ScanInput, StatisticsSplitPlan, StreamContext};
 use crate::read::scan_util::{
     BATCH_SIZE_THRESHOLD, MIN_COMPACTION_SPLIT_ROWS, PartitionMetrics, PartitionMetricsList,
     SplitRecordBatchStream, compute_parallel_channel_size, prepare_flat_mem_stream,
@@ -72,6 +73,8 @@ pub(crate) enum FlatReadMode {
 pub struct SeqScan {
     /// Shares narthex candidate discovery across batch-output partitions.
     narthex_preparation: Option<Arc<crate::read::series_scan::prepared::Preparation>>,
+    /// Exact and residual sources prepared for a scalar COUNT, if any.
+    statistics_split: Option<StatisticsSplitPlan>,
     /// Properties of the scanner.
     properties: ScannerProperties,
     /// Context of streams.
@@ -86,7 +89,8 @@ pub struct SeqScan {
 impl SeqScan {
     /// Creates a new [SeqScan] with the given input.
     /// If `input.compaction` is true, the scanner will not attempt to split ranges.
-    pub(crate) fn new(input: ScanInput) -> Self {
+    pub(crate) fn new(mut input: ScanInput) -> Self {
+        let statistics_split = input.statistics_split.take();
         let mut properties = input.scanner_properties();
         let stream_ctx = Arc::new(StreamContext::seq_scan_ctx(input));
         properties.partitions = vec![stream_ctx.partition_ranges()];
@@ -100,11 +104,25 @@ impl SeqScan {
                 .input
                 .requires_narthex_preparation()
                 .then(|| Arc::new(crate::read::series_scan::prepared::Preparation::default())),
+            statistics_split,
             properties,
             stream_ctx,
             pruner,
             metrics_list: PartitionMetricsList::default(),
         }
+    }
+
+    /// Builds a scanner over a subset of this scan's sources. It keeps the
+    /// properties callers set after construction, such as the metric engine's
+    /// logical region and query-load attribution.
+    fn split_part(&self, input: ScanInput) -> RegionScannerRef {
+        let mut part = Self::new(input);
+        part.properties
+            .set_logical_region(self.properties.is_logical_region());
+        if let Some(region_id) = self.properties.query_load_region_id() {
+            part.properties.set_query_load_region_id(region_id);
+        }
+        Box::new(part)
     }
 
     /// Builds a stream for the query.
@@ -635,6 +653,19 @@ impl RegionScanner for SeqScan {
         "SeqScan"
     }
 
+    fn take_statistics_split(&mut self) -> Option<StatisticsSplit> {
+        if self.properties.distinguish_partition_range {
+            return None;
+        }
+        let plan = self.statistics_split.take()?;
+        let input = &self.stream_ctx.input;
+        let residual = input.with_sources(plan.remaining_files, input.memtables.clone())?;
+        Some(StatisticsSplit {
+            exact_rows: plan.exact_rows,
+            residual: self.split_part(residual),
+        })
+    }
+
     fn properties(&self) -> &ScannerProperties {
         &self.properties
     }
@@ -661,6 +692,10 @@ impl RegionScanner for SeqScan {
         if let Some(preparation) = &mut self.narthex_preparation {
             *preparation = Arc::new(crate::read::series_scan::prepared::Preparation::default());
         }
+        if self.statistics_split.is_some() && !request.preserves_ranges(&self.properties.partitions)
+        {
+            self.statistics_split = None;
+        }
         self.properties.prepare(request);
 
         self.check_scan_limit().map_err(BoxedError::new)?;
@@ -686,7 +721,9 @@ impl RegionScanner for SeqScan {
             // rather than claiming pushdown that discovery cannot honor.
             return vec![false; filter_exprs.len()];
         }
+        // Prepared counts did not see the dynamic predicate.
         self.properties.clear_exact_num_rows();
+        self.statistics_split = None;
         self.stream_ctx.add_dyn_filter_to_predicate(filter_exprs)
     }
 

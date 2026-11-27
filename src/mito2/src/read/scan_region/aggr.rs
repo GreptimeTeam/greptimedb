@@ -40,69 +40,140 @@ use crate::read::scan_region::aggr::overlap::{Extent, find_overlaps};
 use crate::read::scan_region::{ScanInput, request_preserves_rows};
 use crate::sst::file::FileHandle;
 use crate::sst::parquet::metadata::{
-    DEDUPED_SST_KEY, extract_primary_key_range, extract_time_range, has_only_puts,
+    extract_primary_key_range, extract_time_range, has_deduped_sst_marker, has_only_puts,
 };
-use crate::sst::version::SstVersion;
 
-/// Returns the exact number of rows the scan yields, or `None` if it cannot
-/// be proven. Non-append candidates use cached Parquet footers to prove
-/// file-local uniqueness and the absence of deletes.
+/// What the manifest and SST statistics prove about the row count of a
+/// hinted scalar COUNT scan.
+pub(crate) enum MetadataAggr {
+    /// The whole scan yields exactly this many rows.
+    Exact(usize),
+    /// Some files are exact; the rest of the sources must still be scanned.
+    Split(StatisticsSplitPlan),
+}
+
+/// Disjoint source sets for an exact part and a residual scan of one read view.
+pub(crate) struct StatisticsSplitPlan {
+    /// Sum of the manifest row counts of the files whose rows are all yielded
+    /// exactly once, without other sources.
+    pub(crate) exact_rows: usize,
+    /// Other files intersecting the query time range. Memtable ranges always
+    /// stay in the residual scan.
+    pub(crate) remaining_files: Vec<FileHandle>,
+}
+
+/// Classifies sources once. Non-append candidates use cached Parquet footers
+/// to prove file-local uniqueness and the absence of deletes.
 pub(crate) async fn prepare(
     input: &ScanInput,
     request: &ScanRequest,
-    ssts: &SstVersion,
-) -> Option<usize> {
-    let classification = classify(input, request)?;
-    if input.append_mode && request.filters.is_empty() {
-        return Some(classification.exact_rows);
+    allow_partial: bool,
+) -> Option<MetadataAggr> {
+    if !allow_partial && !input.memtables.is_empty() {
+        return None;
     }
-    verify_pruned_times(input, ssts).await?;
-    let check_keys =
-        classification.key_filter || (!input.append_mode && classification.exact.len() > 1);
+    let classification = classify(input, request, allow_partial)?;
+    if !allow_partial && !classification.remaining.is_empty() {
+        return None;
+    }
+    if classification.exact.is_empty()
+        && (!classification.remaining.is_empty() || !input.memtables.is_empty())
+    {
+        return None;
+    }
+    if input.append_mode && request.filters.is_empty() {
+        return resolve(input, classification, allow_partial);
+    }
+    let mut classification = classification;
+    let check_overlap =
+        !input.append_mode && classification.exact.len() + classification.remaining.len() > 1;
+    if check_overlap {
+        verify_residual_bounds(input, &classification.remaining).await?;
+    }
+    let check_keys = classification.key_filter || check_overlap;
     let check_rows = !input.append_mode;
-    futures::stream::iter(classification.exact)
+    let proven: Vec<_> = futures::stream::iter(classification.exact.iter().copied())
         .map(|index| file_evidence(input, input.files[index].clone(), check_keys, check_rows))
-        .buffer_unordered(input.max_concurrent_scan_files.max(1))
-        .try_collect::<()>()
+        .buffered(input.max_concurrent_scan_files.max(1))
+        .try_collect()
         .await
         .ok()?;
-    Some(classification.exact_rows)
+    classification.retain_exact(input, &proven);
+    resolve(input, classification, allow_partial)
 }
 
-/// Older offline replacements could retain stale manifest bounds. Never open an
-/// excluded SST for COUNT: a cold or inconsistent footer leaves the scan in place.
-async fn verify_pruned_times(input: &ScanInput, ssts: &SstVersion) -> Option<()> {
+/// Applies the footer evidence of the exact candidates.
+fn resolve(
+    input: &ScanInput,
+    classification: Classification,
+    allow_partial: bool,
+) -> Option<MetadataAggr> {
+    if classification.remaining.is_empty() && input.memtables.is_empty() {
+        return Some(MetadataAggr::Exact(classification.exact_rows));
+    }
+    if !allow_partial || classification.exact.is_empty() {
+        return None;
+    }
+    Some(MetadataAggr::Split(StatisticsSplitPlan {
+        exact_rows: classification.exact_rows,
+        remaining_files: classification
+            .remaining
+            .iter()
+            .map(|&i| input.files[i].clone())
+            .collect(),
+    }))
+}
+
+/// Reuses ordinary scan pruning for files the residual cannot read. For files
+/// it can read, a stale bound (e.g. from older offline replacement) could
+/// hide an overlap with an exact candidate. Only consult memory for these
+/// bounds and let the ordinary scan handle a cache miss.
+async fn verify_residual_bounds(input: &ScanInput, remaining: &[usize]) -> Option<()> {
     let time_id = input.region_metadata().time_index_column().column_id;
-    for id in &input.time_pruned_files {
-        let file = ssts.levels().iter().find_map(|level| level.files.get(id))?;
+    for &index in remaining {
+        let file = &input.files[index];
+        if input.can_manifest_prune_file(file) {
+            continue;
+        }
         let sst = input
             .cache_strategy
             .get_sst_meta_data_from_mem_cache(file.file_id(), PageIndexPolicy::Skip)
             .await?;
-        if !time_bounds_match(file, &sst, time_id) {
+        if !bounds_match(file, &sst, time_id, true) {
             return None;
         }
     }
     Some(())
 }
 
-fn time_bounds_match(file: &FileHandle, sst: &CachedSstMeta, time_id: ColumnId) -> bool {
+fn bounds_match(
+    file: &FileHandle,
+    sst: &CachedSstMeta,
+    time_id: ColumnId,
+    check_keys: bool,
+) -> bool {
     let region = sst.region_metadata();
     let time_index = region.time_index_column();
     let (start, end) = file.time_range();
+    let metadata = sst.parquet_metadata();
     time_index.column_id == time_id
-        && extract_time_range(&sst.parquet_metadata(), time_index).is_some_and(|(min, max)| {
+        && extract_time_range(&metadata, time_index).is_some_and(|(min, max)| {
             start.unit() == min.unit() && end.unit() == max.unit() && (start, end) == (min, max)
         })
+        && (!check_keys
+            || file
+                .raw_primary_key_range()
+                .is_none_or(|range| extract_primary_key_range(&metadata, &region) == Some(range)))
 }
 
-/// Proves the bounds and visible rows required for this exact candidate.
+/// A bounds mismatch invalidates the classification. An unproven row count
+/// can still be left to the residual scan when partial counts are supported.
 fn file_evidence(
     input: &ScanInput,
     file: FileHandle,
     check_keys: bool,
     check_rows: bool,
-) -> BoxFuture<'static, Result<(), ()>> {
+) -> BoxFuture<'static, Result<bool, ()>> {
     let time_id = input.region_metadata().time_index_column().column_id;
     let reader = input
         .access_layer
@@ -115,19 +186,10 @@ fn file_evidence(
                 file.file_id()
             );
         })?;
-        let metadata = sst.parquet_metadata();
-        if !time_bounds_match(&file, &sst, time_id) {
+        if !bounds_match(&file, &sst, time_id, check_keys) {
             return Err(());
         }
-        if check_keys
-            && let Some(range) = file.raw_primary_key_range()
-            && extract_primary_key_range(&metadata, &sst.region_metadata()) != Some(range)
-        {
-            return Err(());
-        }
-        (!check_rows || footer_proves_visible_rows(&metadata, file.num_rows()))
-            .then_some(())
-            .ok_or(())
+        Ok(!check_rows || footer_proves_visible_rows(&sst.parquet_metadata(), file.num_rows()))
     }
     .boxed()
 }
@@ -136,10 +198,7 @@ fn file_evidence(
 /// only a single physical row is independently known to be unique.
 fn footer_proves_visible_rows(metadata: &ParquetMetaData, manifest_rows: usize) -> bool {
     let footer = metadata.file_metadata();
-    let unique = manifest_rows == 1
-        || footer
-            .key_value_metadata()
-            .is_some_and(|entries| entries.iter().any(|entry| entry.key == DEDUPED_SST_KEY));
+    let unique = manifest_rows == 1 || has_deduped_sst_marker(metadata);
     unique
         && usize::try_from(footer.num_rows()) == Ok(manifest_rows)
         && metadata
@@ -156,10 +215,30 @@ fn footer_proves_visible_rows(metadata: &ParquetMetaData, manifest_rows: usize) 
 struct Classification {
     /// Indexes into `ScanInput::files` whose rows are all yielded exactly once.
     exact: Vec<usize>,
+    /// Indexes of the other files intersecting the query time range.
+    remaining: Vec<usize>,
     /// Sum of the manifest row counts of `exact`.
     exact_rows: usize,
     /// Whether the filter proof depends on key bounds.
     key_filter: bool,
+}
+
+impl Classification {
+    /// Moves the exact files without proof to `remaining`.
+    fn retain_exact(&mut self, input: &ScanInput, proven: &[bool]) {
+        debug_assert_eq!(self.exact.len(), proven.len());
+        let mut exact = Vec::with_capacity(self.exact.len());
+        for (&index, &proven) in self.exact.iter().zip(proven) {
+            if proven {
+                exact.push(index);
+            } else {
+                self.exact_rows -= input.files[index].num_rows();
+                self.remaining.push(index);
+            }
+        }
+        self.exact = exact;
+        self.remaining.sort_unstable();
+    }
 }
 
 /// A file is an exact candidate if all of the following hold:
@@ -172,11 +251,12 @@ struct Classification {
 ///
 /// Returns `None` for scans whose visible rows can differ from the sources'
 /// rows for reasons other than the files themselves.
-fn classify(input: &ScanInput, request: &ScanRequest) -> Option<Classification> {
-    if !input.memtables.is_empty()
-        || !input.allows_exact_row_count()
-        || !request_preserves_rows(request)
-    {
+fn classify(
+    input: &ScanInput,
+    request: &ScanRequest,
+    allow_partial: bool,
+) -> Option<Classification> {
+    if !input.allows_exact_row_count() || !request_preserves_rows(request) {
         return None;
     }
     let filters = AggrFilters::new(input.region_metadata(), &request.filters)?;
@@ -198,36 +278,73 @@ fn classify(input: &ScanInput, request: &ScanRequest) -> Option<Classification> 
             && input.file_time_bounds_fit(file)
             && (input.region_partition_expr.is_none() || input.should_skip_region_partition(file))
             && filters.covers(file);
-        if !candidate {
+        if !candidate && !allow_partial {
             return None;
         }
-        intersecting.push(index);
+        intersecting.push((index, candidate));
     }
-    if !input.append_mode && intersecting.len() > 1 {
-        let mapper = input.primary_key_mapper();
-        let extents: Vec<_> = intersecting
-            .iter()
-            .map(|&index| {
-                let file = &input.files[index];
-                Extent {
-                    time: file.time_range(),
-                    key: file.primary_key_range(mapper),
-                }
-            })
-            .collect();
-        if find_overlaps(&extents).contains(&true) {
-            return None;
-        }
-    }
-    let exact_rows = intersecting.iter().try_fold(0usize, |rows, &index| {
-        rows.checked_add(input.files[index].num_rows())
-    })?;
-    i64::try_from(exact_rows).ok()?;
-    Some(Classification {
-        exact: intersecting,
-        exact_rows,
+    // Append mode never merges rows, so sources cannot hide each other's rows.
+    let overlaps = if !input.append_mode && intersecting.iter().any(|&(_, candidate)| candidate) {
+        overlapping_files(input, &intersecting)
+    } else {
+        Vec::new()
+    };
+
+    let mut classification = Classification {
+        exact: Vec::new(),
+        remaining: Vec::new(),
+        exact_rows: 0,
         key_filter: filters.codec.is_some(),
-    })
+    };
+    for (position, (index, candidate)) in intersecting.into_iter().enumerate() {
+        let file = &input.files[index];
+        if candidate && !overlaps.get(position).copied().unwrap_or(false) {
+            classification.exact_rows = classification.exact_rows.checked_add(file.num_rows())?;
+            classification.exact.push(index);
+        } else {
+            classification.remaining.push(index);
+        }
+    }
+    i64::try_from(classification.exact_rows).ok()?;
+    Some(classification)
+}
+
+/// Returns, for each file in `files`, whether another file or a memtable range
+/// may hold a row with the same primary key and timestamp.
+///
+/// Uses manifest bounds for the overlap check. Preparation verifies the bounds
+/// of files that can affect the count. Files pruned by the ordinary scan use
+/// the same manifest bounds without rechecking their footers.
+///
+/// A memtable range is bounded by its container, the time range of every row
+/// it can ever yield (see [`MemRangeBuilder::container_time_range`]), not by
+/// the rows it held when it was captured: a time-series memtable keeps
+/// accepting writes into its partition and its ranges read them. A range
+/// without a known container overlaps every file. Containers carry no key
+/// bounds, so a file overlapping one in time stays residual.
+///
+/// [`MemRangeBuilder::container_time_range`]: crate::read::range::MemRangeBuilder::container_time_range
+fn overlapping_files(input: &ScanInput, files: &[(usize, bool)]) -> Vec<bool> {
+    let mapper = input.primary_key_mapper();
+    let mut extents: Vec<_> = files
+        .iter()
+        .map(|&(index, _)| {
+            let file = &input.files[index];
+            Extent {
+                time: file.time_range(),
+                key: file.primary_key_range(mapper),
+            }
+        })
+        .collect();
+    for memtable in &input.memtables {
+        match memtable.container_time_range() {
+            Some(time) => extents.push(Extent { time, key: None }),
+            None => return vec![true; files.len()],
+        }
+    }
+    let mut overlaps = find_overlaps(&extents);
+    overlaps.truncate(files.len());
+    overlaps
 }
 
 /// Static scan predicates a metadata count can absorb.
@@ -366,7 +483,12 @@ mod tests {
     use table::predicate::build_time_range_predicate;
 
     use super::*;
+    use crate::memtable::{
+        BoxedBatchIterator, BoxedRecordBatchIterator, IterBuilder, MemScanMetrics, MemtableRange,
+        MemtableRangeContext, MemtableStats,
+    };
     use crate::read::flat_projection::FlatProjectionMapper;
+    use crate::read::range::MemRangeBuilder;
     use crate::read::scan_region::PredicateGroup;
     use crate::sst::file::FileMeta;
     use crate::test_util::memtable_util::metadata_with_primary_key;
@@ -430,22 +552,101 @@ mod tests {
         )
     }
 
-    fn exact_count(input: &ScanInput, request: &ScanRequest) -> Option<usize> {
-        let classification = classify(input, request)?;
-        let deletes = WITH_DELETES.lock().unwrap();
+    /// Footer evidence for the synthetic files in these classification tests.
+    fn evidence(input: &ScanInput, classification: &Classification) -> Vec<bool> {
+        let with_deletes = WITH_DELETES.lock().unwrap();
         classification
             .exact
             .iter()
-            .all(|&i| input.append_mode || !deletes.contains(&input.files[i].meta_ref().file_id))
-            .then_some(classification.exact_rows)
+            .map(|&index| {
+                input.append_mode || !with_deletes.contains(&input.files[index].meta_ref().file_id)
+            })
+            .collect()
+    }
+
+    /// [`prepare`] with the test's footer evidence.
+    fn counted(input: &ScanInput, request: &ScanRequest) -> Option<MetadataAggr> {
+        let mut classification = classify(input, request, true)?;
+        let no_deletes = evidence(input, &classification);
+        classification.retain_exact(input, &no_deletes);
+        resolve(input, classification, true)
+    }
+
+    fn exact_count(input: &ScanInput, request: &ScanRequest) -> Option<usize> {
+        match counted(input, request)? {
+            MetadataAggr::Exact(rows) => Some(rows),
+            MetadataAggr::Split(_) => None,
+        }
+    }
+
+    fn classified(input: &ScanInput, request: &ScanRequest) -> Classification {
+        let mut classification = classify(input, request, true).unwrap();
+        let no_deletes = evidence(input, &classification);
+        classification.retain_exact(input, &no_deletes);
+        classification
+    }
+
+    struct EmptyIterBuilder;
+
+    impl IterBuilder for EmptyIterBuilder {
+        fn build(&self, _: Option<MemScanMetrics>) -> crate::error::Result<BoxedBatchIterator> {
+            Ok(Box::new(std::iter::empty()))
+        }
+
+        fn is_record_batch(&self) -> bool {
+            true
+        }
+
+        fn build_record_batch(
+            &self,
+            _: Option<(Timestamp, Timestamp)>,
+            _: Option<MemScanMetrics>,
+        ) -> crate::error::Result<BoxedRecordBatchIterator> {
+            Ok(Box::new(std::iter::empty()))
+        }
+    }
+
+    /// A memtable range holding `rows` rows within `data`, inside `container`.
+    fn memtable(data: (i64, i64), container: Option<(i64, i64)>, rows: usize) -> MemRangeBuilder {
+        let ms = |(start, end): (i64, i64)| {
+            (
+                Timestamp::new_millisecond(start),
+                Timestamp::new_millisecond(end),
+            )
+        };
+        let stats = MemtableStats {
+            time_range: Some(ms(data)),
+            num_rows: rows,
+            num_ranges: 1,
+            ..Default::default()
+        };
+        let context = Arc::new(MemtableRangeContext::new(
+            0,
+            Box::new(EmptyIterBuilder),
+            Default::default(),
+        ));
+        let builder = MemRangeBuilder::new(MemtableRange::new(context, stats.clone()), stats);
+        match container {
+            Some(container) => builder.with_container_time_range(ms(container)),
+            None => builder,
+        }
     }
 
     async fn input(files: Vec<FileHandle>, filters: &[Expr]) -> ScanInput {
+        input_with_memtables(files, filters, Vec::new()).await
+    }
+
+    async fn input_with_memtables(
+        files: Vec<FileHandle>,
+        filters: &[Expr],
+        memtables: Vec<MemRangeBuilder>,
+    ) -> ScanInput {
         let env = SchedulerEnv::new().await;
         let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
         let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
         ScanInput::builder(env.access_layer.clone(), mapper)
             .with_files(files)
+            .with_memtables(memtables)
             .with_predicate(PredicateGroup::new(&metadata, filters).unwrap())
             .with_time_range(Some(build_time_range_predicate(
                 "ts",
@@ -526,6 +727,18 @@ mod tests {
             };
             assert_eq!(exact_count(&input, &request), expected, "{request:?}");
         }
+
+        let filters = vec![k0("x")];
+        let input = input(vec![x(0, 10, 3), mixed()], &filters).await;
+        let request = ScanRequest {
+            filters,
+            ..Default::default()
+        };
+        let classification = classified(&input, &request);
+        assert_eq!(
+            (classification.exact_rows, classification.remaining.len()),
+            (3, 1)
+        );
     }
 
     #[tokio::test]
@@ -575,6 +788,52 @@ mod tests {
         input.append_mode = true;
         assert_eq!(exact_count(&input, &ScanRequest::default()), None);
     }
+    #[tokio::test]
+    async fn test_metadata_aggr_classifies_files() {
+        for (files, exact_rows, exact, remaining) in [
+            (
+                vec![file(0, 10, 3, true), file(20, 30, 2, false)],
+                3,
+                vec![0],
+                vec![1],
+            ),
+            // Without key bounds, the wide file overlaps both others in time.
+            (
+                vec![
+                    file(0, 100, 3, true),
+                    file(5, 8, 2, false),
+                    file(20, 30, 4, true),
+                ],
+                0,
+                vec![],
+                vec![0, 1, 2],
+            ),
+            (
+                vec![file(0, 10, 3, true), file(20, 30, 0, true)],
+                3,
+                vec![0],
+                vec![1],
+            ),
+            // Disjoint keys keep time-overlapping files independent.
+            (
+                vec![
+                    keyed_file(0, 10, 3, ("a", 0), ("a", 9)),
+                    keyed_file(5, 15, 4, ("b", 0), ("b", 9)),
+                    keyed_file(8, 9, 1, ("a", 5), ("a", 5)),
+                ],
+                4,
+                vec![1],
+                vec![0, 2],
+            ),
+        ] {
+            let input = input(files, &[]).await;
+            let classification = classified(&input, &ScanRequest::default());
+            assert_eq!(classification.exact_rows, exact_rows);
+            assert_eq!(classification.exact, exact);
+            assert_eq!(classification.remaining, remaining);
+        }
+    }
+
     #[test]
     fn test_metadata_aggr_reads_op_type_statistics() {
         use api::v1::OpType;
@@ -586,6 +845,8 @@ mod tests {
         use parquet::file::metadata::KeyValue;
         use parquet::file::properties::{EnabledStatistics, WriterProperties};
         use store_api::storage::consts::OP_TYPE_COLUMN_NAME;
+
+        use crate::sst::parquet::metadata::DEDUPED_SST_KEY;
 
         let put = OpType::Put as u8;
         let del = OpType::Delete as u8;
@@ -718,5 +979,76 @@ mod tests {
             input.append_mode = true;
             assert_eq!(input.scanner_properties().total_rows_is_exact(), fits);
         }
+    }
+
+    #[tokio::test]
+    async fn test_metadata_aggr_split_plan() {
+        let split = |files| async move {
+            match counted(&input(files, &[]).await, &ScanRequest::default()) {
+                Some(MetadataAggr::Split(plan)) => {
+                    Some((plan.exact_rows, plan.remaining_files.len()))
+                }
+                Some(MetadataAggr::Exact(_)) => panic!("unexpected exact count"),
+                None => None,
+            }
+        };
+        // The second file holds a deletion.
+        assert_eq!(
+            split(vec![file(0, 10, 3, true), file(20, 30, 2, false)]).await,
+            Some((3, 1))
+        );
+        // A residual file with an unknown row count is scanned as usual.
+        assert_eq!(
+            split(vec![file(0, 10, 3, true), file(20, 30, 0, false)]).await,
+            Some((3, 1))
+        );
+        // Without an exact file the scan stays unchanged.
+        assert_eq!(
+            split(vec![file(0, 10, 3, false), file(20, 30, 2, false)]).await,
+            None
+        );
+    }
+
+    /// Memtable ranges are bounded by their containers, never by the rows
+    /// they held when captured.
+    #[tokio::test]
+    async fn test_metadata_aggr_memtable_containers() {
+        let split = |memtables: Vec<MemRangeBuilder>| async move {
+            let files = vec![file(0, 10, 3, true), file(20, 30, 2, true)];
+            let input = input_with_memtables(files, &[], memtables).await;
+            match counted(&input, &ScanRequest::default()) {
+                Some(MetadataAggr::Split(plan)) => {
+                    Some((plan.exact_rows, plan.remaining_files.len()))
+                }
+                Some(MetadataAggr::Exact(_)) => panic!("memtables must stay residual"),
+                None => None,
+            }
+        };
+        // The memtable only holds a row at 0, but its container reaches 15,
+        // so a later write may land in the first file's range.
+        assert_eq!(
+            split(vec![memtable((0, 0), Some((0, 15)), 1)]).await,
+            Some((2, 1))
+        );
+        // A container disjoint from both files leaves them exact.
+        assert_eq!(
+            split(vec![memtable((40, 40), Some((40, 49)), 1)]).await,
+            Some((5, 0))
+        );
+        // Touching endpoints overlap; both bounds are inclusive.
+        assert_eq!(
+            split(vec![memtable((31, 31), Some((30, 39)), 1)]).await,
+            Some((3, 1))
+        );
+        // Without a known container no file is exact, whatever the data range.
+        assert_eq!(split(vec![memtable((40, 40), None, 1)]).await, None);
+        assert_eq!(
+            split(vec![
+                memtable((40, 40), Some((40, 49)), 1),
+                memtable((50, 50), None, 1),
+            ])
+            .await,
+            None
+        );
     }
 }
