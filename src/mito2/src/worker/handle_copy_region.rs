@@ -31,6 +31,7 @@ use crate::request::{
 };
 use crate::sst::file::{self, FileMeta};
 use crate::sst::location::region_dir_from_table_dir;
+use crate::worker::handle_reload::notify_if_fenced;
 use crate::worker::{RegionWorkerLoop, WorkerRequestWithTime, resume_queued_writes};
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -113,7 +114,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 }
                 // The worker loop opens the publish window when it applies the copied files:
                 // it is the only place that can prove no write context is in flight, so the
-                // barrier it allocates is a real admission boundary.
+                // barrier the publish allocates inside it is a real admission boundary.
                 Some(files_to_add) => {
                     if let Err(e) = worker_sender
                         .send(WorkerRequestWithTime::new(WorkerRequest::Background {
@@ -139,12 +140,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     /// Publishes the files a finished copy installed, inside the publish window it opens.
     ///
     /// The copy runs with the region writable (see [`Self::handle_copy_region_from_request`]),
-    /// so the window — and with it the admission barrier `B` — is opened here instead, in the
-    /// worker loop. The loop is the only place that can prove no write context is in flight:
-    /// `B` is therefore above every sequence already attributed to a row, and every write the
-    /// loop admits from now on is queued until the copied files are visible (see
-    /// `handle_write.rs`). `Editing` is the state of the window, so the region cannot be
-    /// looked up through `writable_region`.
+    /// so the window is opened here instead, in the worker loop. The loop is the only place that
+    /// can prove no write context is in flight: every write it admits from now on is queued until
+    /// the copied files are visible (see `handle_write.rs`), so the admission barrier the publish
+    /// allocates in the window is above every sequence already attributed to a row. `Editing` is
+    /// the state of the window, so the region cannot be looked up through `writable_region`.
     pub(crate) fn handle_copy_region_from_finished(&mut self, request: CopyRegionFromFinished) {
         let region_id = request.region_id;
         let sender = request.sender;
@@ -157,18 +157,18 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             let _ = sender.send(Err(e));
             return;
         }
-        // Allocated inside the window: no write can be admitted at or below it, and no
-        // sequence attributed to a row is above it.
-        let barrier = region.version_control.current().last_sequence + 1;
+        // The window is released in the background, so a write the release admits can reach the
+        // loop before the notification that admits the writes the window stalled. The window
+        // therefore registers them as an ordered drain, which the notification drops and handles
+        // in one turn (see `stalled_requests::add_staging_drain` and
+        // `handle_editing_window_closed`), so a later write cannot overtake them.
+        self.stalled_requests.add_staging_drain(region_id);
         let worker_sender = self.sender.clone();
         let files_to_add = request.files_to_add;
         let source_file_ids = request.source_file_ids;
 
         common_runtime::spawn_global(async move {
-            let result = Self::publish_copied_files(&region, files_to_add, barrier).await;
-            // The publish released the window on both paths, so the writes it queued can be
-            // admitted now; on success they obtain a sequence above the barrier (see
-            // `handle_editing_window_closed`).
+            let result = Self::publish_copied_files(&region, files_to_add).await;
             match result {
                 Ok(()) => {
                     let _ = sender.send(Ok(MitoCopyRegionFromResponse {
@@ -179,20 +179,27 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     let _ = sender.send(Err(e));
                 }
             }
+            // An uncertain write fenced the region for a reload, which the worker has to start.
+            notify_if_fenced(&worker_sender, &region).await;
+            // The publish released the window on both paths, so the writes it queued can be
+            // admitted now; on success they obtain a sequence above the barrier (see
+            // `handle_editing_window_closed`).
             resume_queued_writes(&worker_sender, region_id).await;
         });
     }
 
-    /// Persists the copied files at the barrier `barrier` and publishes them in one version,
-    /// then releases the publish window the worker loop opened.
+    /// Persists the copied files at the admission barrier it allocates inside the publish window,
+    /// publishes them in one version, then releases the window the worker loop opened.
     ///
-    /// The window is released to `Writable` on both paths: on success because the layout is
-    /// visible, on failure because nothing was published and the region is still writable
-    /// otherwise. The caller admits the writes the window queued.
+    /// The window is released to `Writable` once the layout is visible, and also when the publish
+    /// failed without the manifest possibly holding it. A failure that may have persisted the edit
+    /// fences the region for a reload instead: the manifest may hold the copied files at the
+    /// barrier while this instance's version does not, so a write admitted now would be attributed
+    /// a sequence at or below a committed one, and reopening the region is what makes its version
+    /// agree with the manifest again. The caller admits the writes the window queued.
     async fn publish_copied_files(
         region: &MitoRegionRef,
         mut files_to_add: Vec<FileMeta>,
-        barrier: u64,
     ) -> Result<()> {
         let region_id = region.region_id;
         // The copy filtered the files against the version it read when it started, and it ran
@@ -202,6 +209,18 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         files_to_add.retain(|file| !visible_files.contains(&file.file_id));
 
         if !files_to_add.is_empty() {
+            // Allocated inside the window, under the manifest lock that serializes it with every
+            // commit: no write can be admitted at or below it, and no sequence attributed to a
+            // row — including a tail replay whose edit landed before the window opened — is above
+            // it. A region whose sequence domain is exhausted allocates none, and releases the
+            // window so the writes it stalled are admitted again.
+            let barrier = match region.admission_barrier().await {
+                Ok(barrier) => barrier,
+                Err(e) => {
+                    Self::release_copy_window(region).await;
+                    return Err(e);
+                }
+            };
             // Backfill the barrier on the copied files in the same publish: a barrier-less
             // copy would be reported as an incomplete discovery candidate set forever, so
             // the degraded path could never make progress. The rows are virtualized at the
@@ -248,19 +267,38 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         .apply_edit(Some(edit), &[], region.file_purger.clone());
                 }
                 Err(e) => {
-                    // Nothing was published, so the region stays writable.
-                    if let Err(release) = region.end_publish_window(RegionLeaderState::Writable) {
-                        error!(release; "Failed to release the copy publish window of region {}", region_id);
+                    if e.may_have_persisted_manifest_update() {
+                        // The manifest may hold this edit — the copied files at `barrier`, with
+                        // `committed_sequence = barrier` — while this instance's version does
+                        // not. Admitting writes now would attribute sequences at or below a
+                        // boundary the manifest already committed, so the region stops serving
+                        // them and is reloaded from the manifest, which is the only way its
+                        // version learns what the edit published. The ambiguity is reported to
+                        // the caller like any other failed publish.
+                        let mut manager = region.manifest_ctx.manifest_manager.write().await;
+                        region
+                            .manifest_ctx
+                            .fence_for_reload(&mut manager, region_id)
+                            .await;
+                        return Err(e);
                     }
+                    // Nothing was published, so the region stays writable.
+                    Self::release_copy_window(region).await;
                     return Err(e);
                 }
             }
         }
 
-        if let Err(e) = region.end_publish_window(RegionLeaderState::Writable) {
-            error!(e; "Failed to release the copy publish window of region {}", region_id);
-        }
+        Self::release_copy_window(region).await;
         Ok(())
+    }
+
+    /// Releases the publish window of a copy that published nothing, so the writes the window
+    /// stalled are admitted again.
+    async fn release_copy_window(region: &MitoRegionRef) {
+        if let Err(e) = region.end_publish_window(RegionLeaderState::Writable) {
+            error!(e; "Failed to release the copy publish window of region {}", region.region_id);
+        }
     }
 
     /// Copies the files of the source region the target does not hold yet into the target's
@@ -350,8 +388,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             )
             .await?;
 
-        // The files are published at the barrier the worker loop allocates inside the
-        // publish window: no sequence is allocated here, so the copy cannot hold back the
+        // The files are published at the barrier the publish allocates inside the window the
+        // worker loop opens: no sequence is allocated here, so the copy cannot hold back the
         // writes of the region (see `handle_copy_region_from_finished`).
         Ok((Some(new_file_metas), source_file_ids))
     }

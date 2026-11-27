@@ -26,8 +26,11 @@ use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
 use crate::error::Error;
+use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
-use crate::test_util::{CreateRequestBuilder, TestEnv, build_rows, put_rows, rows_schema};
+use crate::test_util::{
+    CreateRequestBuilder, DeltaFaults, TestEnv, build_rows, put_rows, rows_schema,
+};
 
 /// A copy must publish the shared references it installs inside the publish window it
 /// holds, exactly like physically copied files. Handing them to the region edit lane
@@ -955,5 +958,310 @@ async fn test_copy_region_from_write_after_barrier_waits_for_files() {
         RegionRoleState::Leader(RegionLeaderState::Writable),
         target.state(),
         "the copy publish window must be released after the publish"
+    );
+}
+
+/// Creates a source region holding one flushed file of rows `0..5` and an empty target region.
+/// Returns the schema and both region ids of the pair.
+async fn create_copy_pair(
+    engine: &crate::engine::MitoEngine,
+) -> (Vec<api::v1::ColumnSchema>, RegionId, RegionId) {
+    let source_region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(source_region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+    put_rows(
+        engine,
+        source_region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows(0, 5),
+        },
+    )
+    .await;
+    engine
+        .handle_request(
+            source_region_id,
+            RegionRequest::Flush(RegionFlushRequest::default()),
+        )
+        .await
+        .unwrap();
+
+    let target_region_id = RegionId::new(1, 2);
+    engine
+        .handle_request(target_region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    (column_schemas, source_region_id, target_region_id)
+}
+
+/// The admission barrier of a copy must be above the committed watermark the manifest records, not
+/// just above the in-memory `last_sequence` of the version.
+///
+/// A tail replay commits the watermark its replayed rows carry before the worker applies the edit,
+/// so the manifest can record a committed sequence the version has not taken yet. A barrier
+/// allocated from the version alone would fall under rows the region has already committed, and a
+/// reader whose committed watermark reached it would prune the copied files as already consumed.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_copy_region_from_barrier_above_manifest_commit() {
+    common_telemetry::init_default_ut_logging();
+
+    let mut env = TestEnv::with_prefix("copy-region-from-manifest-barrier").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let (_schema, source_region_id, target_region_id) = create_copy_pair(&engine).await;
+
+    let target = engine.get_region(target_region_id).unwrap();
+    let last_sequence_before_copy = target.version_control.current().last_sequence;
+    // What a replay of the pending tails commits: rows the region already owns sit above the
+    // in-memory `last_sequence`, because the worker has not applied their edit yet.
+    let replayed_watermark = last_sequence_before_copy + 10;
+    let replayed_edit = RegionEdit {
+        files_to_add: vec![],
+        files_to_remove: vec![],
+        timestamp_ms: Some(chrono::Utc::now().timestamp_millis()),
+        compaction_time_window: None,
+        flushed_entry_id: None,
+        flushed_sequence: None,
+        committed_sequence: Some(replayed_watermark),
+        ..Default::default()
+    };
+    target
+        .manifest_ctx
+        .update_manifest(
+            RegionLeaderState::Writable,
+            RegionMetaActionList::with_action(RegionMetaAction::Edit(replayed_edit)),
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        last_sequence_before_copy,
+        target.version_control.current().last_sequence,
+        "the replayed edit is committed but not applied to the version yet"
+    );
+
+    engine
+        .copy_region_from(
+            target_region_id,
+            MitoCopyRegionFromRequest {
+                source_region_id,
+                parallelism: 1,
+            },
+        )
+        .await
+        .unwrap();
+
+    let barrier = target
+        .manifest_ctx
+        .manifest()
+        .await
+        .files
+        .values()
+        .next()
+        .and_then(|meta| meta.sequence.map(|sequence| sequence.get()))
+        .expect("the copy must publish its files at a barrier");
+    assert_eq!(
+        replayed_watermark + 1,
+        barrier,
+        "the barrier must be above the committed watermark the manifest records, \
+         last_sequence_before_copy: {last_sequence_before_copy}"
+    );
+    assert_eq!(
+        replayed_watermark + 1,
+        target.version_control.current().committed_sequence,
+        "the copied files are virtualized above the replayed rows"
+    );
+}
+
+/// A copy publish whose manifest write may have landed without being applied fences the region
+/// instead of leaving it writable.
+///
+/// The manifest then holds the copied files at the barrier while the version does not, so a write
+/// admitted afterwards would be attributed a sequence at or below a committed one. The reload that
+/// follows recovers the published layout, and writes resume strictly above the barrier.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_copy_region_from_uncertain_publish_fences_region() {
+    common_telemetry::init_default_ut_logging();
+
+    let faults = DeltaFaults::default();
+    let mut env = TestEnv::with_prefix("copy-region-from-uncertain-publish")
+        .await
+        .with_mock_layer(faults.layer());
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let (schema, source_region_id, target_region_id) = create_copy_pair(&engine).await;
+
+    let target = engine.get_region(target_region_id).unwrap();
+    let last_sequence_before_copy = target.version_control.current().last_sequence;
+    // The delta write lands but reports an error, like a lost response.
+    faults.lose_next_response();
+    let err = engine
+        .copy_region_from(
+            target_region_id,
+            MitoCopyRegionFromRequest {
+                source_region_id,
+                parallelism: 1,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        err.may_have_persisted_manifest_update(),
+        "the test must inject an uncertain manifest write, got: {err}"
+    );
+    assert_eq!(
+        RegionRoleState::Follower,
+        target.state(),
+        "a region whose copy publish may have landed must not stay writable"
+    );
+    assert_eq!(
+        last_sequence_before_copy,
+        target.version_control.current().last_sequence,
+        "the failed publish must not apply anything to the version"
+    );
+
+    // The worker reloads the fenced region from the manifest, which holds the copied files.
+    let reloaded = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let region = engine.get_region(target_region_id).unwrap();
+            if !region
+                .version()
+                .ssts
+                .levels()
+                .iter()
+                .all(|l| l.files.is_empty())
+            {
+                return region;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the fenced region must be reloaded with the copied files, not left stale");
+    let barrier = reloaded
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files())
+        .filter_map(|file| file.meta_ref().sequence.map(|sequence| sequence.get()))
+        .next()
+        .expect("the reloaded region must see the copied files at their barrier");
+    assert!(
+        barrier > last_sequence_before_copy,
+        "the published barrier must be above the boundary the copy allocated at, barrier: {barrier}, \
+         last_sequence_before_copy: {last_sequence_before_copy}"
+    );
+    // A reloaded region serves nothing until the route promotes it again, which is what a lease
+    // does on a real node.
+    engine
+        .set_region_role(target_region_id, RegionRole::Leader)
+        .unwrap();
+    put_rows(
+        &engine,
+        target_region_id,
+        Rows {
+            schema: schema.clone(),
+            rows: build_rows(5, 7),
+        },
+    )
+    .await;
+    assert!(
+        reloaded.version_control.current().last_sequence > barrier,
+        "a write after the reload must be attributed a sequence above the published barrier, \
+         last_sequence: {}, barrier: {barrier}",
+        reloaded.version_control.current().last_sequence
+    );
+}
+
+/// The copy window keeps the writes it stalled behind an ordered drain, which the notification of
+/// the release drops together with admitting them.
+///
+/// The drain is registered when the loop opens the window and removed only by that notification, so
+/// the test also proves it does not outlive the window: a drain left behind would stall every later
+/// write of the region. The write the window stalled must be attributed a sequence below the one a
+/// write submitted after the window closed obtains.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_copy_region_from_releases_the_write_drain() {
+    common_telemetry::init_default_ut_logging();
+
+    let mut env = TestEnv::with_prefix("copy-region-from-drain").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let (schema, source_region_id, target_region_id) = create_copy_pair(&engine).await;
+
+    let target = engine.get_region(target_region_id).unwrap();
+    let last_sequence_before_copy = target.version_control.current().last_sequence;
+
+    // Holding the manifest write lock stalls the publish after the loop opened the window.
+    let manifest_guard = target.manifest_ctx.manifest_manager.write().await;
+    let copy_engine = engine.clone();
+    let copy_task = tokio::spawn(async move {
+        copy_engine
+            .copy_region_from(
+                target_region_id,
+                MitoCopyRegionFromRequest {
+                    source_region_id,
+                    parallelism: 1,
+                },
+            )
+            .await
+    });
+    wait_until_region_state(&target, RegionLeaderState::Editing).await;
+
+    let stalled_engine = engine.clone();
+    let stalled_schema = schema.clone();
+    let stalled_write = tokio::spawn(async move {
+        put_rows(
+            &stalled_engine,
+            target_region_id,
+            Rows {
+                schema: stalled_schema,
+                rows: build_rows(5, 6),
+            },
+        )
+        .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(
+        !stalled_write.is_finished(),
+        "a write submitted inside the window must stall behind it"
+    );
+
+    drop(manifest_guard);
+    copy_task.await.unwrap().unwrap();
+    stalled_write.await.unwrap();
+    let stalled_sequence = target.version_control.current().last_sequence;
+
+    // A write submitted after the window closed is admitted without waiting for a drain that
+    // outlived it.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        put_rows(
+            &engine,
+            target_region_id,
+            Rows {
+                schema: schema.clone(),
+                rows: build_rows(6, 7),
+            },
+        ),
+    )
+    .await
+    .expect("a write after the copy must not wait for a drain that outlived the window");
+    assert!(
+        target.version_control.current().last_sequence > stalled_sequence,
+        "the write after the window must be attributed a sequence above the stalled one, \
+         stalled: {stalled_sequence}, last_sequence: {}",
+        target.version_control.current().last_sequence
+    );
+    assert!(
+        stalled_sequence > last_sequence_before_copy,
+        "the stalled write must be admitted above the published barrier, stalled: {stalled_sequence}, \
+         last_sequence_before_copy: {last_sequence_before_copy}"
     );
 }

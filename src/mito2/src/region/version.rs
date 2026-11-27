@@ -335,7 +335,10 @@ impl VersionControl {
     /// Discards all memtables while preserving persisted SST files.
     ///
     /// Like [Self::truncate] this drops rows; the rows that stay keep their own
-    /// numbers, so it publishes no sequence boundary.
+    /// numbers, so the version takes no new sequence boundary. The manifest edit that records the
+    /// discard does raise the committed watermark past the dropped rows, so a reader does not take
+    /// them for rows it has yet to consume: this version keeps its own watermark, and the one the
+    /// edit writes is recovered when the region is reopened.
     pub(crate) fn discard_unflushed(
         &self,
         discarded_entry_id: EntryId,

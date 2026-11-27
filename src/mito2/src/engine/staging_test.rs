@@ -2971,6 +2971,27 @@ async fn test_staging_exit_rejects_writes_while_end_commit_pending() {
         "the refused write must not be attributed a sequence at or below the frozen boundary"
     );
 
+    // A bulk insert is refused by the same gate: it is a write path of its own, so a gate that
+    // only covers ordinary writes would admit it.
+    let err = engine
+        .handle_request(
+            region_id,
+            RegionRequest::BulkInserts(build_bulk_insert_request(region_id, 1)),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(StatusCode::RegionBusy, err.status_code());
+    assert_eq!(RetryHint::Retryable, err.retry_hint());
+    assert!(
+        err.to_string().contains("waits for a retry"),
+        "a bulk insert must be refused by the pending end commit, got: {err}"
+    );
+    assert_eq!(
+        last_sequence_before_exit,
+        region.version_control.current().last_sequence,
+        "the refused bulk insert must not be attributed a sequence at or below the frozen boundary"
+    );
+
     // The retry re-sends the frozen payload, which publishes the imported file at `B`.
     engine
         .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Leader)
@@ -3016,6 +3037,133 @@ async fn test_staging_exit_rejects_writes_while_end_commit_pending() {
          last_sequence: {}, boundary: {}",
         region.version_control.current().last_sequence,
         boundary
+    );
+}
+
+/// A region that waits for the retry of its end-of-staging commit must not be promoted into a
+/// state that admits writes: the boundary that commit fixes may already be in the manifest, while
+/// the region's version does not hold the files it publishes. It stays `Staging`, where publishing
+/// the payload again resolves the ambiguity; a region that is no longer staging keeps the gate and
+/// waits for a reload instead, which is the only other way its version learns what the manifest
+/// holds.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_pending_end_commit_keeps_region_out_of_writable_states() {
+    common_telemetry::init_default_ut_logging();
+    let faults = DeltaFaults::default();
+    let mut env = TestEnv::with_prefix("staging-exit-pending-promotion")
+        .await
+        .with_mock_layer(faults.layer());
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1024, 0);
+    let request = CreateRequestBuilder::new().build();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    put_range(&engine, region_id, &schema, (0, 3)).await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Flush(RegionFlushRequest::default()),
+        )
+        .await
+        .unwrap();
+    enter_staging(&engine, region_id).await;
+
+    let source_region_id = RegionId::new(1024, 1);
+    engine
+        .handle_request(
+            source_region_id,
+            RegionRequest::Create(CreateRequestBuilder::new().build()),
+        )
+        .await
+        .unwrap();
+    put_range(&engine, source_region_id, &schema, (20, 22)).await;
+    flush_region(&engine, source_region_id, None).await;
+    let imported = first_file(&engine.get_region(source_region_id).unwrap()).await;
+    engine
+        .handle_request(
+            source_region_id,
+            RegionRequest::Close(RegionCloseRequest::default()),
+        )
+        .await
+        .unwrap();
+    submit_staging_edit(
+        &engine,
+        region_id,
+        imported,
+        float_range_expr("field_0", 0., 100.).as_json_str().unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    // The commit lands but its response is lost, so the region keeps the payload to retry with.
+    faults.lose_next_response();
+    let response = engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Leader)
+        .await
+        .unwrap();
+    assert!(response.is_invalid_transition(), "{response:?}");
+    assert!(region.is_staging());
+    assert!(region.staging_end_pending());
+
+    // A promotion, such as a Leader lease, must not leave staging for a writable state.
+    assert_eq!(
+        None,
+        region.set_role(RegionRole::Leader),
+        "a promotion must not leave staging while the end commit is pending"
+    );
+    assert_eq!(
+        RegionRoleState::Leader(RegionLeaderState::Staging),
+        region.state(),
+        "the region must stay staging, where the retry publishes the frozen payload"
+    );
+    assert!(
+        !region.manifest_ctx.is_reload_pending(),
+        "a staging region keeps its retry path instead of waiting for a reload"
+    );
+    assert_put_rejected(&engine, region_id, &schema).await;
+
+    // The retry is the way out: it publishes the payload and clears the gate.
+    engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Leader)
+        .await
+        .unwrap();
+    assert!(!region.staging_end_pending());
+    assert_eq!(
+        RegionRoleState::Leader(RegionLeaderState::Writable),
+        region.state()
+    );
+
+    // A region that left staging with the gate still set cannot retry the commit, so a promotion
+    // keeps it out of the writable states and asks for the reload that reconciles it.
+    let follower_region_id = RegionId::new(1024, 2);
+    engine
+        .handle_request(
+            follower_region_id,
+            RegionRequest::Create(CreateRequestBuilder::new().build()),
+        )
+        .await
+        .unwrap();
+    let follower = engine.get_region(follower_region_id).unwrap();
+    follower.set_role(RegionRole::Follower);
+    follower.manifest_ctx.set_staging_end_pending(true);
+    assert_eq!(
+        None,
+        follower.set_role(RegionRole::Leader),
+        "a promotion must not make a region writable while its end commit is pending"
+    );
+    assert_eq!(
+        RegionRoleState::Follower,
+        follower.state(),
+        "the region must stay a follower instead of admitting writes"
+    );
+    assert!(
+        follower.manifest_ctx.is_reload_pending(),
+        "the region waits for the reload that recovers what the manifest holds"
     );
 }
 

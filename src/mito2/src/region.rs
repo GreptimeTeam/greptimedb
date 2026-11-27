@@ -57,10 +57,10 @@ use crate::access_layer::AccessLayerRef;
 use crate::compaction::CompactionStateRef;
 use crate::engine::region_hook::{PendingManifestHook, RegionHookRef};
 use crate::error::{
-    EndStagingSnafu, Error, FlushableRegionStateSnafu, InvalidPartitionExprSnafu,
-    InvalidRequestSnafu, RegionBusySnafu, RegionLeaseExpiredSnafu, RegionLeaseNotReceivedSnafu,
-    RegionNotFoundSnafu, RegionStateSnafu, RegionTruncatedSnafu, Result, UnexpectedSnafu,
-    UpdateManifestSnafu,
+    EndStagingPendingSnafu, EndStagingSnafu, Error, FlushableRegionStateSnafu,
+    InvalidPartitionExprSnafu, InvalidRequestSnafu, RegionBusySnafu, RegionLeaseExpiredSnafu,
+    RegionLeaseNotReceivedSnafu, RegionNotFoundSnafu, RegionStateSnafu, RegionTruncatedSnafu,
+    Result, UnexpectedSnafu, UpdateManifestSnafu,
 };
 use crate::lease::{Deadline, NodeLease, lease_nanos};
 use crate::manifest::action::{
@@ -154,6 +154,14 @@ impl RegionRoleState {
     pub(crate) fn in_staging_session(self) -> bool {
         self == Self::Leader(RegionLeaderState::Staging)
             || self == Self::Leader(RegionLeaderState::EndingStaging)
+    }
+
+    /// Returns whether a region in this state admits ordinary writes.
+    pub(crate) fn admits_writes(self) -> bool {
+        matches!(
+            self,
+            Self::Leader(RegionLeaderState::Writable | RegionLeaderState::Staging)
+        )
     }
 
     pub(crate) fn as_str(&self) -> &'static str {
@@ -581,6 +589,37 @@ impl MitoRegion {
         self.manifest_ctx.end_publish_window(self.region_id, next)
     }
 
+    /// Returns the admission barrier a publication installs rows this region did not write at:
+    /// one above every sequence the region may already have committed.
+    ///
+    /// It reads the committed watermark of the manifest as well as the in-memory version. Another
+    /// task, a tail replay, raises the manifest's watermark before the worker applies its edit to
+    /// the version, so the in-memory `last_sequence` alone can sit below it. A barrier allocated
+    /// from that would fall under rows the region has already committed, and a reader whose
+    /// committed watermark reached the barrier would prune the published files as consumed.
+    ///
+    /// The manifest lock serializes the read with those commits: one that passed its state check
+    /// before the caller's publish window opened holds the lock already and is visible here, and
+    /// one that starts after the window opened finds the region in it and stays busy (see
+    /// [`ManifestContext::update_manifest_for_tails`]).
+    ///
+    /// **Call this inside the publish window** (see [`Self::begin_publish_window`]): the writes
+    /// the window stalls are admitted after the publish, so none of them is attributed a sequence
+    /// at or below the barrier.
+    pub(crate) async fn admission_barrier(&self) -> Result<SequenceNumber> {
+        let manifest = self.manifest_ctx.manifest().await;
+        let committed = manifest.committed_sequence.unwrap_or_default();
+        self.version_control
+            .current()
+            .last_sequence
+            .max(committed)
+            .checked_add(1)
+            .context(InvalidRequestSnafu {
+                region_id: self.region_id,
+                reason: "Region sequence exhausted",
+            })
+    }
+
     /// Opens the window of a staging exit (see [`ManifestContext::begin_ending_staging`]).
     ///
     /// The region becomes `EndingStaging` until the exit publishes the staged layout and
@@ -624,7 +663,10 @@ impl MitoRegion {
     /// Exits the staging state back to writable.
     ///
     /// You should call this method in the worker loop.
-    /// Transitions from Staging to Writable state.
+    /// Transitions from Staging to Writable state, unless the region
+    /// [waits for a retry of its end-of-staging commit](Self::staging_end_pending): that exit
+    /// fails with [EndStagingPending](crate::error::Error::EndStagingPending) and the region
+    /// stays `Staging`, which is where the payload a retry publishes is kept.
     pub fn exit_staging(&self) -> Result<()> {
         self.manifest_ctx.exit_staging(
             self.region_id,
@@ -652,6 +694,7 @@ impl MitoRegion {
             .is_ok();
         if aborted {
             self.manifest_ctx.clear_staging_partition_info();
+            self.manifest_ctx.forget_publish_window_opened_at();
         }
     }
 
@@ -804,7 +847,9 @@ impl MitoRegion {
                             "Exiting staging and demoting region {} to follower",
                             self.region_id
                         );
-                        self.exit_staging()?;
+                        // Straight to the follower, so a region that waits for the retry of its
+                        // end-of-staging commit never passes through a state that admits writes
+                        // (see `ManifestContext::exit_staging`).
                         self.set_role(RegionRole::Follower);
                         wait_for_checkpoint = true;
                     }
@@ -831,7 +876,7 @@ impl MitoRegion {
                             "Exiting staging and entering downgrade for region {}",
                             self.region_id
                         );
-                        self.exit_staging()?;
+                        // Straight to the downgrade, for the same reason as the follower above.
                         self.set_role(RegionRole::DowngradingLeader);
                         wait_for_checkpoint = true;
                     }
@@ -1322,7 +1367,11 @@ impl MitoRegion {
 
     /// Clears the staging directory after staging ended, unless the region was closed (it may be
     /// open again by now) or a new staging has begun.
-    async fn clear_ended_staging(&self) {
+    ///
+    /// This is the only clear of a finished staging session: the publish that ends staging no
+    /// longer clears under the manifest lock, so a session is cleared once, after the writes it
+    /// stalled were drained.
+    pub(crate) async fn clear_ended_staging(&self) {
         let mut manager = self.manifest_ctx.manifest_manager.write().await;
         if manager.is_stopped() || self.is_enter_staging() || self.in_staging_session() {
             return;
@@ -1334,13 +1383,19 @@ impl MitoRegion {
 
     /// Commits the staged edits as one manifest version and ends staging.
     ///
-    /// The caller must hold the manifest write lock and pass it via `manager`. The publish
-    /// runs in the publish window (see [`Self::begin_publish_window`]), the `Editing` state
-    /// that stalls writes and holds role changes back, and releases it: to `Writable` once
-    /// the staged layout is visible, or back to `Staging` when nothing was published, so the
-    /// staged edits are kept for a retry and the error is retryable. A failure that ends the
-    /// region's leadership releases it to `Follower` or `Downgrading` instead (see
-    /// [`Self::publish_staged_manifests`]).
+    /// The caller must hold the manifest write lock and pass it via `manager`. The publish runs
+    /// in the window of a staging exit, [`RegionLeaderState::EndingStaging`] (see
+    /// [`Self::begin_ending_staging`]): it stalls writes, ignores role changes until it releases
+    /// the window, and the writes it stalls are registered with the worker as an ordered drain
+    /// (see `stalled_requests::add_staging_drain`), so they are admitted in order once the
+    /// layout is visible. The release goes to `Writable` once the staged layout is visible, or
+    /// back to `Staging` when nothing was published, so the staged edits are kept for a retry and
+    /// the error is retryable. A failure that ends the region's leadership releases it to
+    /// `Follower` or `Downgrading` instead (see [`Self::publish_staged_manifests`]).
+    ///
+    /// [`RegionLeaderState::Editing`] is accepted only because a caller may have taken the plain
+    /// publication window in between (see [`Self::begin_publish_window`]); it stalls and drains
+    /// writes the same way the copy window does.
     ///
     /// A caller outside the worker loop opens the window itself, while the worker loop opens
     /// it first and then calls [`Self::exit_staging_on_success_in_window`], so that the
@@ -1462,7 +1517,8 @@ impl MitoRegion {
     ) -> Result<Option<PendingManifestHook>> {
         // A staging region stages its actions in memory and writes nothing, so the staged
         // actions are the ones recorded while the region was `Staging`. The window state is
-        // `Editing`, which is why they are asked for unconditionally.
+        // `EndingStaging` (or `Editing` when a caller took the plain window in between), neither
+        // of which stages anything, which is why they are asked for unconditionally.
         let staged_actions = match manager.staged_actions() {
             Some(actions) => actions.clone(),
             None => {
@@ -1502,8 +1558,16 @@ impl MitoRegion {
 
         // The partition-expr action is applied through the committed payload below; the staging
         // exit reads neither it nor the merged edit's origin to decide anything here.
-        let (_, merged_change, mut merged_edit) =
-            staged_actions.clone().split_region_change_and_edit();
+        //
+        // The metadata and partition actions are taken before the split consumes the staged list,
+        // so the list is not cloned just to keep them.
+        let mut persisted_actions = RegionMetaActionList::default();
+        for action in staged_actions.actions.iter() {
+            if !action.is_edit() {
+                persisted_actions.actions.push(action.clone());
+            }
+        }
+        let (_, merged_change, mut merged_edit) = staged_actions.split_region_change_and_edit();
         if let Some(change) = &merged_change {
             // In staging exit we only allow metadata-only updates. A `Change`
             // action is accepted only when column definitions are unchanged;
@@ -1540,7 +1604,15 @@ impl MitoRegion {
                 self.region_id
             );
         } else {
-            let boundary = self.version_control.current().last_sequence + 1;
+            let boundary = self
+                .version_control
+                .current()
+                .last_sequence
+                .checked_add(1)
+                .context(InvalidRequestSnafu {
+                    region_id: self.region_id,
+                    reason: "Region sequence exhausted",
+                })?;
             merged_edit.committed_sequence = Some(
                 merged_edit
                     .committed_sequence
@@ -1559,17 +1631,10 @@ impl MitoRegion {
             }
         }
 
-        // Persist the **final merged edit exactly once**: keep the metadata /
-        // partition actions in order and drop every original edit. The manifest
-        // builder inserts files by id, so leaving an original edit in the list would
-        // overwrite the barrier this publish establishes (and the reopened region
-        // would disagree with the in-memory version).
-        let mut persisted_actions = RegionMetaActionList::default();
-        for action in staged_actions.actions.iter() {
-            if !action.is_edit() {
-                persisted_actions.actions.push(action.clone());
-            }
-        }
+        // Persist the **final merged edit exactly once**: the metadata and partition actions keep
+        // their order and every original edit is dropped. The manifest builder inserts files by
+        // id, so leaving an original edit in the list would overwrite the barrier this publish
+        // establishes (and the reopened region would disagree with the in-memory version).
         persisted_actions
             .actions
             .push(RegionMetaAction::Edit(merged_edit));
@@ -1612,11 +1677,9 @@ impl MitoRegion {
             self.file_purger.clone(),
         );
 
-        // Clear all staging manifests and transit state. The window release is done by
-        // `publish_staged_manifests`, which keeps the state machine in one place.
-        if let Err(e) = manager.clear_staging_manifest_and_dir().await {
-            error!(e; "Failed to clear staging manifest dir for region {}", self.region_id);
-        }
+        // The staging directory is cleared once the caller dropped the lock and the writes the
+        // window stalled were drained (see `end_staging` and `clear_ended_staging`): clearing it
+        // here would list and delete it twice, and hold the lock for the slower clear.
 
         // Return the hook payload; the caller invokes the hook after dropping the lock.
         Ok(Some(pending))
@@ -1787,7 +1850,17 @@ pub(crate) struct ManifestContext {
     /// published files are visible, and a later reader prunes them as already consumed. The
     /// write gate therefore refuses such writes (see `MitoRegion::staging_end_pending`), which
     /// the worker reads here instead of under the manifest lock it cannot take.
+    ///
+    /// It is set only while the payload a retry publishes is kept, and only a commit of that
+    /// payload or a reload clears it: the gate above, [`Self::exit_staging`] and [`Self::set_role`]
+    /// keep a region that waits for the retry out of the states that admit writes, since the
+    /// boundary the landed payload fixes may already be committed.
     staging_end_pending: AtomicBool,
+    /// Whether a region that left staging while [`Self::staging_end_pending`] was set waits for a
+    /// reload, which is what reconciles its version with the manifest the end commit may have
+    /// written. Kept apart from [`PromotionFence::reload_pending`], which a promotion refuses
+    /// while it holds that lock.
+    staged_exit_reload_pending: AtomicBool,
     /// Optional region hook for observing manifest mutations.
     hook: Option<RegionHookRef>,
 }
@@ -1815,6 +1888,7 @@ impl ManifestContext {
             node_lease,
             staging_partition_info: Mutex::new(None),
             staging_end_pending: AtomicBool::new(false),
+            staged_exit_reload_pending: AtomicBool::new(false),
             hook,
         }
     }
@@ -1856,11 +1930,23 @@ impl ManifestContext {
         *self.staging_partition_info.lock().unwrap() = None;
     }
 
+    /// Leaves the staging state for `next_state`.
+    ///
+    /// A region that [waits for the retry of its end-of-staging commit](Self::staging_end_pending)
+    /// does not leave staging for a state that admits writes: the boundary that commit fixes may
+    /// already be in the manifest while this instance's version does not hold the files it
+    /// publishes, so a write admitted now would be attributed a sequence at or below it. The
+    /// region stays `Staging`, which is where the payload a retry publishes is kept; leaving for
+    /// `Follower` or `Downgrading` is allowed, since neither admits writes.
     pub(crate) fn exit_staging(
         &self,
         region_id: RegionId,
         next_state: RegionRoleState,
     ) -> Result<()> {
+        ensure!(
+            !(self.staging_end_pending() && next_state.admits_writes()),
+            EndStagingPendingSnafu { region_id }
+        );
         self.state
             .compare_exchange(
                 RegionRoleState::Leader(RegionLeaderState::Staging),
@@ -1943,6 +2029,12 @@ impl ManifestContext {
             .window_opened_at
             .take()
             .unwrap_or_else(Instant::now)
+    }
+
+    /// Forgets when the open window opened, for a release that does not degrade by the result of
+    /// a commit (see [`Self::end_publish_window`] and [`MitoRegion::abort_staging`]).
+    fn forget_publish_window_opened_at(&self) {
+        self.promotion_fence.lock().unwrap().window_opened_at = None;
     }
 
     /// Leaves the window opened at `ending_started_at` — [RegionLeaderState::EndingStaging] for
@@ -2040,6 +2132,9 @@ impl ManifestContext {
                 }
                 .build()
             })?;
+        // The release of a window that only restores the role state forgets when it opened, so
+        // the mark keeps meaning "a window is open" (see [`PromotionFence`]).
+        self.forget_publish_window_opened_at();
         if next == RegionLeaderState::Writable {
             self.clear_staging_partition_info();
         }
@@ -2489,9 +2584,21 @@ impl ManifestContext {
         warn!("Region {region_id} is fenced until it is reloaded");
     }
 
-    /// Returns whether the region waits for a reload, see [Self::fence_for_reload].
+    /// Marks a region that left staging while its end-of-staging commit was pending as waiting
+    /// for a reload: nothing retries that commit outside `Staging`, so reopening the region is
+    /// what recovers the layout the manifest may already hold (see [`Self::staging_end_pending`]).
+    /// The worker reloads a follower that waits for one, see `maybe_reload_region`.
+    fn request_reload(&self, region_id: RegionId) {
+        self.staged_exit_reload_pending
+            .store(true, Ordering::Release);
+        warn!("Region {region_id} waits for a reload: its end-of-staging commit may have landed");
+    }
+
+    /// Returns whether the region waits for a reload, see [Self::fence_for_reload] and
+    /// [Self::request_reload].
     pub(crate) fn is_reload_pending(&self) -> bool {
         self.promotion_fence.lock().unwrap().reload_pending
+            || self.staged_exit_reload_pending.load(Ordering::Acquire)
     }
 
     /// Ignores the promotions issued before now. The worker calls it on a reloaded instance, and
@@ -2747,7 +2854,11 @@ impl ManifestContext {
         region_id: RegionId,
         by_catchup: bool,
     ) -> bool {
-        if fence.reload_pending || fence.stopped {
+        // The caller holds the fence, so a staged exit's reload mark is read without it.
+        if fence.reload_pending
+            || fence.stopped
+            || self.staged_exit_reload_pending.load(Ordering::Acquire)
+        {
             return false;
         }
         if by_catchup {
@@ -2932,12 +3043,18 @@ impl ManifestContext {
                     );
                     return Some(RegionRoleState::Leader(RegionLeaderState::Staging));
                 }
+                // A region that waits for the retry of its end-of-staging commit stays out of
+                // the states that admit writes: the boundary that commit fixes may already be in
+                // the manifest, and only reopening the region reconciles its version with it.
+                let staged_exit_pending = self.staging_end_pending();
                 match self.state.fetch_update(|state| {
-                    if matches!(
-                        state,
-                        RegionRoleState::Follower
-                            | RegionRoleState::Leader(RegionLeaderState::Downgrading)
-                    ) {
+                    if !staged_exit_pending
+                        && matches!(
+                            state,
+                            RegionRoleState::Follower
+                                | RegionRoleState::Leader(RegionLeaderState::Downgrading)
+                        )
+                    {
                         Some(RegionRoleState::Leader(RegionLeaderState::Writable))
                     } else {
                         None
@@ -2951,6 +3068,9 @@ impl ManifestContext {
                         Some(state)
                     }
                     Err(state) => {
+                        // A staging region keeps the payload its exit retries.
+                        let keeps_retry =
+                            state == RegionRoleState::Leader(RegionLeaderState::Staging);
                         // These states already have the leader role; keep their ongoing operation.
                         if !matches!(
                             state,
@@ -2963,11 +3083,18 @@ impl ManifestContext {
                                     | RegionLeaderState::EnteringStaging
                                     | RegionLeaderState::EndingStaging
                             )
-                        ) {
+                        ) && !(staged_exit_pending && keeps_retry)
+                        {
                             warn!(
                                 "Failed to convert region {} to leader, current role state: {:?}",
                                 region_id, state
                             )
+                        }
+                        if staged_exit_pending && !keeps_retry {
+                            // Nothing retries the end commit of a region that is no longer
+                            // staging, so the reload the worker starts from this mark is what
+                            // recovers the layout the commit may have published.
+                            self.request_reload(region_id);
                         }
                         None
                     }
@@ -3055,11 +3182,15 @@ struct PromotionFence {
     /// applies. The manifest manager also knows it, but a promotion decides under this lock only.
     stopped: bool,
     /// When the publish window the region holds opened (see
-    /// [`ManifestContext::open_staging_window`]), while it is open.
+    /// [`ManifestContext::open_staging_window`]), `Some` exactly while it is open.
     ///
     /// The release compares it with [`Self::downgrade_started_at`], so a downgrade that begins
     /// during the window wins over the publication's result. It is kept under this lock because
     /// opening the window and beginning a downgrade are the two events that must not interleave.
+    /// Every release clears it: the publication that leaves staging through
+    /// [`ManifestContext::leave_ending_staging`] takes it, and the ones that only restore the
+    /// role state forget it (see [`ManifestContext::end_publish_window`] and
+    /// [`MitoRegion::abort_staging`]).
     window_opened_at: Option<Instant>,
 }
 
@@ -4225,7 +4356,6 @@ mod tests {
         );
     }
 
-
     /// The staging exit re-marks the files it makes visible at the holder's admission, but the
     /// `preserve_row_sequence` marker is judged by **ownership**: a file that stayed in the
     /// region it already belonged to keeps its marker, and a file adopted from another region
@@ -4455,6 +4585,56 @@ mod tests {
         let _hook_payload = region.end_staging_locked(&mut manager).await.unwrap();
 
         assert!(!manager.manifest().files.contains_key(&late_file.file_id));
+    }
+
+    /// The publish that ends staging leaves the session's staging directory to the release: the
+    /// clear happens once, after the manifest lock and the drain, and not again under the lock.
+    #[tokio::test]
+    async fn test_end_staging_leaves_the_staging_dir_to_the_release() {
+        let env = SchedulerEnv::new().await;
+        let region = build_test_region(&env).await;
+
+        let mut manager = region.manifest_ctx.manifest_manager.write().await;
+        region.set_staging(&mut manager).await.unwrap();
+        // A delta an older version left in the session's staging directory.
+        let object_store = region.access_layer.object_store().clone();
+        let stale_delta = format!(
+            "{}{}",
+            staging_manifest_path(manager.store().manifest_dir()),
+            delta_file(7)
+        );
+        object_store
+            .write(
+                &stale_delta,
+                RegionMetaActionList::new(vec![]).encode().unwrap(),
+            )
+            .await
+            .unwrap();
+        manager
+            .update(
+                RegionMetaActionList::new(vec![
+                    RegionMetaAction::PartitionExprChange(RegionPartitionExprChange {
+                        partition_expr: Some("expr_a".to_string()),
+                    }),
+                    RegionMetaAction::Edit(empty_edit()),
+                ]),
+                true,
+            )
+            .await
+            .unwrap();
+
+        region.end_staging_locked(&mut manager).await.unwrap();
+        assert!(
+            object_store.exists(&stale_delta).await.unwrap(),
+            "the publish must not clear the staging directory under the manifest lock"
+        );
+
+        drop(manager);
+        region.clear_ended_staging().await;
+        assert!(
+            !object_store.exists(&stale_delta).await.unwrap(),
+            "the release clears the staging directory once"
+        );
     }
 
     #[tokio::test]

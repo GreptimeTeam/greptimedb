@@ -191,6 +191,220 @@ async fn test_apply_staging_manifest_keeps_the_marker_of_a_kept_file() {
     );
 }
 
+/// A repartition can hand a file to a region that never wrote it: the file keeps the region that
+/// owns its bytes, so the staging exit re-stamps it at the holder's admission barrier and clears
+/// the numbering marker the source set. The publication must make the adopted file visible at that
+/// barrier with the same committed watermark, and invent no second boundary: the staged edit that
+/// imports it records none of its own.
+#[tokio::test]
+async fn test_apply_staging_manifest_publishes_adopted_file_at_admission_barrier() {
+    let mut env = TestEnv::with_prefix("apply-staging-adopted-file-barrier").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    // The source region owns one flushed file, numbered by its own sequence domain.
+    let source_region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(source_region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        source_region_id,
+        Rows {
+            schema: schema.clone(),
+            rows: build_rows_for_key("0", 0, 3, 0),
+        },
+    )
+    .await;
+    engine
+        .handle_request(
+            source_region_id,
+            RegionRequest::Flush(RegionFlushRequest::default()),
+        )
+        .await
+        .unwrap();
+    let source_file = {
+        let version = engine.get_region(source_region_id).unwrap().version();
+        let files = version
+            .ssts
+            .levels()
+            .iter()
+            .flat_map(|level| level.files.values())
+            .collect::<Vec<_>>();
+        assert_eq!(1, files.len());
+        let source = files[0].meta_ref().clone();
+        assert_eq!(source_region_id, source.region_id);
+        assert!(
+            source.preserve_row_sequence,
+            "a flushed file of a preserving region states its numbering"
+        );
+        source
+    };
+    engine
+        .set_region_role_state_gracefully(source_region_id, SettableRegionRoleState::StagingLeader)
+        .await
+        .unwrap();
+
+    // The target region holds a row of its own and enters staging to adopt the source layout.
+    let target_region_id = RegionId::new(1, 2);
+    let table_dir = request.table_dir.clone();
+    engine
+        .handle_request(target_region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        target_region_id,
+        Rows {
+            schema: schema.clone(),
+            rows: build_rows_for_key("1", 4, 5, 99),
+        },
+    )
+    .await;
+    let partition_expr = float_range_expr("field_0", -100.0, 100.0)
+        .as_json_str()
+        .unwrap();
+    engine
+        .handle_request(
+            target_region_id,
+            RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                    partition_expr.clone(),
+                ),
+            }),
+        )
+        .await
+        .unwrap();
+
+    let remapped = engine
+        .remap_manifests(RemapManifestsRequest {
+            region_id: source_region_id,
+            input_regions: vec![source_region_id],
+            region_mapping: [(source_region_id, vec![target_region_id])]
+                .into_iter()
+                .collect(),
+            new_partition_exprs: [(target_region_id, partition_expr.clone())]
+                .into_iter()
+                .collect(),
+        })
+        .await
+        .unwrap();
+
+    let target = engine.get_region(target_region_id).unwrap();
+    let last_sequence_before_apply = target.version_control.current().last_sequence;
+    engine
+        .handle_request(
+            target_region_id,
+            RegionRequest::ApplyStagingManifest(ApplyStagingManifestRequest {
+                partition_expr,
+                central_region_id: source_region_id,
+                manifest_path: remapped.manifest_paths[&target_region_id].clone(),
+            }),
+        )
+        .await
+        .unwrap();
+
+    let region = engine.get_region(target_region_id).unwrap();
+    // The staged import takes an admission of its own before the exit publishes; the exit merges
+    // it into the one boundary the publish records, so the published barrier is the region's
+    // committed watermark.
+    let admission = region.version_control.current().committed_sequence;
+    assert!(
+        admission > last_sequence_before_apply,
+        "the publish must admit the adopted rows above the domain the region had, \
+         admission: {admission}, last_sequence_before_apply: {last_sequence_before_apply}"
+    );
+    let adopted = region
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .map(|file| file.meta_ref().clone())
+        .find(|file| file.file_id == source_file.file_id)
+        .expect("the adopted file must be visible in the target region");
+    assert_eq!(
+        source_region_id, adopted.region_id,
+        "the file keeps the region that owns its bytes"
+    );
+    assert_eq!(
+        Some(admission),
+        adopted.sequence.map(|sequence| sequence.get()),
+        "the exit publishes the adopted file at the barrier it records"
+    );
+    assert!(
+        !adopted.preserve_row_sequence,
+        "the target never numbered those rows, so it must not trust the source numbering"
+    );
+    // The publish records that barrier as the committed watermark and invents no other boundary.
+    let manifest = region.manifest_ctx.manifest().await;
+    assert_eq!(
+        Some(admission),
+        manifest.committed_sequence,
+        "the published watermark is the admission the staged edit was re-marked at"
+    );
+    assert_eq!(
+        admission,
+        region.version_control.current().last_sequence,
+        "no write or edit is numbered above the admission before one arrives"
+    );
+
+    // A write after the apply is numbered above the published barrier.
+    put_rows(
+        &engine,
+        target_region_id,
+        Rows {
+            schema: schema.clone(),
+            rows: build_rows_for_key("2", 6, 7, 98),
+        },
+    )
+    .await;
+    assert!(
+        region.version_control.current().last_sequence > admission,
+        "a write after the apply must be numbered above the adopted barrier, \
+         last_sequence: {}, admission: {admission}",
+        region.version_control.current().last_sequence
+    );
+
+    // The adopted file is persisted with its barrier: a reopen restores it, not the source one.
+    reopen_region(
+        &engine,
+        target_region_id,
+        table_dir,
+        true,
+        Default::default(),
+    )
+    .await;
+    let reopened = engine.get_region(target_region_id).unwrap();
+    let reopened_adopted = reopened
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .map(|file| file.meta_ref().clone())
+        .find(|file| file.file_id == source_file.file_id)
+        .expect("the adopted file must survive the reopen");
+    assert_eq!(
+        Some(admission),
+        reopened_adopted.sequence.map(|sequence| sequence.get()),
+        "the reopened region restores the adopted file at the barrier it was published at"
+    );
+    assert!(
+        !reopened_adopted.preserve_row_sequence,
+        "the adopted marker stays cleared after a reopen"
+    );
+    assert_eq!(
+        source_region_id, reopened_adopted.region_id,
+        "the reopened region still records the source as the owner of the bytes"
+    );
+}
+
 fn float_range_expr(col_name: &str, start: f64, end: f64) -> PartitionExpr {
     col(col_name)
         .gt_eq(Value::Float64(start.into()))

@@ -1928,12 +1928,20 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     /// The window has already restored the region role state (writable when the publish
     /// is visible, staging when it failed), so the queued writes and the region edits
     /// queued behind the window can be handled now.
+    ///
+    /// A window opened for a publication that installs files or allocates a boundary registers
+    /// its writes as an ordered drain (see `stalled_requests::add_staging_drain`), which this
+    /// drops and drains in the same turn of the loop: a write that the release admitted after
+    /// the window closed stalls behind the drain until here, so it cannot overtake a write the
+    /// window stalled earlier.
     async fn handle_editing_window_closed(&mut self, region_id: RegionId) {
         if self.regions.get_region(region_id).is_none() {
+            self.stalled_requests.remove_staging_drain(&region_id);
             self.fail_region_stalled_requests_as_not_found(&region_id);
             self.reject_region_requests_as_not_found(region_id);
             return;
         }
+        self.stalled_requests.remove_staging_drain(&region_id);
         self.handle_region_stalled_requests(&region_id, false).await;
         self.dispatch_pending_region_requests(region_id).await;
     }
@@ -1991,6 +1999,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     // The publish released the window: drain the writes the loop stalled in
                     // it before admitting later ones, so nothing overtakes them.
                     drain.await;
+                    // The publish that ends staging leaves the staging directory to this point,
+                    // where neither the manifest lock nor the drain waits for it. A publish that
+                    // failed keeps the region staging, which the clear skips.
+                    region.clear_ended_staging().await;
                     result
                 } else {
                     region

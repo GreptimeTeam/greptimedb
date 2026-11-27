@@ -377,7 +377,9 @@ impl<S> RegionWorkerLoop<S> {
                     | RegionRoleState::Leader(RegionLeaderState::EndingStaging)) => {
                         // Both publication windows are transient: queue the write so the publish
                         // can allocate its boundary above it and the completion drains it before
-                        // starting the next queued edit.
+                        // starting the next queued edit. A window whose writes must also be
+                        // drained before the ones it admits after its release registers them as
+                        // an ordered drain itself (see `stalled_requests::add_staging_drain`).
                         debug!(
                             "Region {} is {:?}, add request to pending writes",
                             region.region_id,

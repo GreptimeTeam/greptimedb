@@ -855,8 +855,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let request_sender = self.sender.clone();
         let manifest_ctx = region.manifest_ctx.clone();
         let durability_barrier = self.wal.durability_barrier(region_id, &region.provider);
-        // Discarding unflushed data drops rows the region owned; the rows that stay
-        // keep their own numbers, so the action records no sequence boundary.
+        // Discarding unflushed data drops rows the region owned; the rows that stay keep their
+        // own numbers, so the action admits nothing at a new sequence boundary. It does raise the
+        // committed watermark to the last sequence it drops (or the region's own, whichever is
+        // higher): the dropped rows are gone rather than pending, so a reader must not take them
+        // for rows it has yet to consume.
         let commit_watermark = region.version_control.current().last_sequence;
 
         common_runtime::spawn_global(async move {
