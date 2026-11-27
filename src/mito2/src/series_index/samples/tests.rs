@@ -499,10 +499,9 @@ async fn equal_timestamps_cross_leaves_and_parts() {
     let m = metadata();
     let format = ColumnarSamplesFormat {
         block_rows: 1,
-        // One block descriptor plus header; a block now also stores its exact series key.
+        // Allow one block descriptor per leaf.
         page_bytes: 288,
         part_bytes: 42,
-        ..Default::default()
     };
     let rows: Vec<_> = (0..7)
         .map(|i| (7, 42, 100, 100 - i, 1, Some(i)))

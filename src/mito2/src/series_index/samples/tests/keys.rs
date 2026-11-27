@@ -1163,7 +1163,6 @@ async fn boundary_key_is_charged_while_it_is_alive() {
         block_rows: 1,
         part_bytes: 1,
         page_bytes: 248,
-        ..Default::default()
     };
     let label = "x".repeat(1024);
     let key = new_sparse_primary_key(&[label.as_str(), "z"], &meta, 1, 7);
