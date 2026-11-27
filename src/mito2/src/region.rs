@@ -57,10 +57,10 @@ use crate::access_layer::AccessLayerRef;
 use crate::compaction::CompactionStateRef;
 use crate::engine::region_hook::{PendingManifestHook, RegionHookRef};
 use crate::error::{
-    EndStagingSnafu, Error, FlushableRegionStateSnafu, InvalidPartitionExprSnafu,
-    InvalidRequestSnafu, RegionBusySnafu, RegionLeaseExpiredSnafu, RegionLeaseNotReceivedSnafu,
-    RegionNotFoundSnafu, RegionStateSnafu, RegionStoppedSnafu, RegionTruncatedSnafu, Result,
-    UnexpectedSnafu, UpdateManifestSnafu,
+    EndStagingSnafu, Error, FlushableRegionStateSnafu, ForeignStampedFileSnafu,
+    InvalidPartitionExprSnafu, InvalidRequestSnafu, RegionBusySnafu, RegionLeaseExpiredSnafu,
+    RegionLeaseNotReceivedSnafu, RegionNotFoundSnafu, RegionStateSnafu, RegionStoppedSnafu,
+    RegionTruncatedSnafu, Result, UnexpectedSnafu, UpdateManifestSnafu,
 };
 use crate::lease::{Deadline, NodeLease, lease_nanos};
 use crate::manifest::action::{
@@ -69,6 +69,7 @@ use crate::manifest::action::{
 use crate::manifest::manager::RegionManifestManager;
 use crate::metrics::manifest_size::RegionManifestSizeMetric;
 use crate::region::version::{VersionControlRef, VersionRef};
+use crate::remap_manifest::file_has_region_expr;
 use crate::request::{OnFailure, OptionOutputTx};
 use crate::series_index::{SeriesIndexVersion, SeriesIndexVersionControl};
 use crate::sst::file::{self, FileMeta};
@@ -2299,6 +2300,50 @@ impl ManifestContext {
             };
 
             edit.validate_shared_reclassification(manifest.metadata.region_id)?;
+            // A file records the expression of the region that created it, and a reader drops the
+            // region predicate exactly when the two agree, so admitting a file another expression
+            // stamped would make this region serve rows it cannot filter. The remap of a later
+            // repartition refuses such a file, but only after the new routes were published, so
+            // the window closes here, at the commit that admits it. The comparison is the one the
+            // remap guard applies (`file_has_region_expr`), and a file that records no expression
+            // stays admissible: legacy data, or output of an unpartitioned region. The remap
+            // guard settles such a file before a merge would recombine its rows.
+            //
+            // `is_staging` turns the check off, and only the staging apply sets it: a repartition
+            // installs the source region's files, stamped by the source, under the target's *new*
+            // expression, which the target records only when staging ends. Those staged edits
+            // land later as one `commit_staged`, which does not pass through here.
+            //
+            // The region's expression is read only for an edit that adds a stamped file, so a
+            // flush, a compaction or an alter never parses it.
+            if !is_staging
+                && edit
+                    .files_to_add
+                    .iter()
+                    .any(|file| file.partition_expr.is_some())
+            {
+                let region_expr =
+                    parse_partition_expr(manifest.metadata.partition_expr.as_deref())?;
+                for file in &edit.files_to_add {
+                    // A file with no recorded creator proves nothing about its rows, so it is
+                    // neither rejected here nor trusted by the remap guard.
+                    let Some(file_expr) = file.partition_expr.as_deref() else {
+                        continue;
+                    };
+                    ensure!(
+                        file_has_region_expr(region_expr.as_ref(), Some(file_expr)),
+                        ForeignStampedFileSnafu {
+                            region_id: manifest.metadata.region_id,
+                            file_id: file.file_id,
+                            creator_expr: file_expr.to_string(),
+                            region_expr: region_expr
+                                .as_ref()
+                                .map(ToString::to_string)
+                                .unwrap_or_else(|| "no partition expression".to_string()),
+                        }
+                    );
+                }
+            }
             // Imports may add shared references, but ordinary edits must not retire
             // or overwrite them. Table publication performs its own locked input check.
             ensure!(

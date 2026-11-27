@@ -445,6 +445,24 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Cannot add file {} to region {}: it was created under partition expression {} while the region serves {}",
+        file_id,
+        region_id,
+        creator_expr,
+        region_expr
+    ))]
+    ForeignStampedFile {
+        region_id: RegionId,
+        file_id: FileId,
+        /// The partition expression the file records, i.e. the one its creator region served.
+        creator_expr: String,
+        /// The partition expression the region serves, or a word for "none".
+        region_expr: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Files lost during remapping: old={}, new={}", old_count, new_count))]
     FilesLost {
         old_count: usize,
@@ -1677,6 +1695,7 @@ impl Error {
             | Error::RegionLeaseNotReceived { .. }
             | Error::EndStagingPending { .. }
             | Error::SerdeJson { .. }
+            | Error::ForeignStampedFile { .. }
             | Error::CompressObject { .. } => false,
             Error::OpenDal { error, .. } => !matches!(
                 error.kind(),
@@ -1813,7 +1832,7 @@ impl ErrorExt for Error {
             }
             FlushRegion { source, .. } | BuildIndexAsync { source, .. } => source.status_code(),
             IndexBuildIncomplete { .. } => StatusCode::IllegalState,
-            ForeignFilePartitionExpr { .. } => StatusCode::IllegalState,
+            ForeignFilePartitionExpr { .. } | ForeignStampedFile { .. } => StatusCode::IllegalState,
             RegionDropped { .. } => StatusCode::Cancelled,
             RegionClosed { .. } => StatusCode::Cancelled,
             StaleCompactionExecution { .. } => StatusCode::Cancelled,
