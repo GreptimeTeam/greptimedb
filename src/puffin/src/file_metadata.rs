@@ -34,6 +34,17 @@ pub struct FileMetadata {
 }
 
 impl FileMetadata {
+    /// Builds a reusable key lookup for callers reading many blobs from this footer.
+    /// The index stores one position per blob and borrows every key.
+    pub fn index_blob_keys(&self) -> BlobKeyIndex<'_> {
+        let mut positions: Vec<_> = (0..self.blobs.len()).collect();
+        positions.sort_unstable_by_key(|&index| self.blobs[index].blob_type.as_str());
+        BlobKeyIndex {
+            metadata: self,
+            positions,
+        }
+    }
+
     /// Calculates the memory usage of the file metadata in bytes.
     pub fn memory_usage(&self) -> usize {
         self.blobs
@@ -46,6 +57,36 @@ impl FileMetadata {
                 .map(|(k, v)| k.len() + v.len())
                 .sum::<usize>()
             + std::mem::size_of::<Self>()
+    }
+}
+
+/// Sorted footer positions for repeated unique-key lookups.
+pub struct BlobKeyIndex<'a> {
+    metadata: &'a FileMetadata,
+    positions: Vec<usize>,
+}
+
+impl<'a> BlobKeyIndex<'a> {
+    /// Returns the matching metadata. Repeated keys are ambiguous.
+    pub fn get(&self, key: &str) -> crate::error::Result<Option<&'a BlobMetadata>> {
+        let blobs = &self.metadata.blobs;
+        let start = self
+            .positions
+            .partition_point(|&i| blobs[i].blob_type.as_str() < key);
+        let Some(&i) = self.positions.get(start) else {
+            return Ok(None);
+        };
+        if blobs[i].blob_type != key {
+            return Ok(None);
+        }
+        if self
+            .positions
+            .get(start + 1)
+            .is_some_and(|&next| blobs[next].blob_type == key)
+        {
+            return crate::error::AmbiguousBlobSnafu { blob: key }.fail();
+        }
+        Ok(Some(&blobs[i]))
     }
 }
 

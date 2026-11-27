@@ -926,7 +926,7 @@ mod tests {
             let (key, value) = match kind {
                 IndexType::HllIndex => (datatypes::schema::HLL_KEY, r#"{"precision":10}"#),
                 IndexType::KllIndex => (datatypes::schema::KLL_KEY, r#"{"capacity":64}"#),
-                IndexType::MgIndex => (datatypes::schema::MG_KEY, r#"{"max-counters":64}"#),
+                IndexType::MgIndex => (datatypes::schema::MG_KEY, r#"{"capacity":64}"#),
                 _ => unreachable!(),
             };
             schema.mut_metadata().insert(key.into(), value.into());

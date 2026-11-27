@@ -655,10 +655,12 @@ async fn check_reader_local_metadata_reuse_without_global_cache(blob_count: usiz
     let cold_reads = reads.swap(0, Ordering::Relaxed);
     assert!(cold_reads > 0);
 
+    let index = first.index_blob_keys();
     // Metadata inspection and uncompressed lookup must reuse one footer.
     for column in 0..blob_count {
         let key = format!("column.{column}");
         let metadata = reader.blob_metadata(&key).await.unwrap().unwrap();
+        assert_eq!(index.get(&key).unwrap().unwrap(), &metadata);
         assert_eq!(7, metadata.length);
         assert_eq!(None, metadata.compression_codec);
         reader.blob(&key).await.unwrap();
@@ -746,5 +748,91 @@ async fn test_blob_metadata_rejects_duplicate_keys() {
     let error = reader.blob_metadata("duplicate").await.unwrap_err();
     assert!(matches!(error, crate::error::Error::AmbiguousBlob { .. }));
     assert!(reader.blob_metadata("missing").await.unwrap().is_none());
+    let footer = reader.metadata().await.unwrap();
+    let keys = footer.index_blob_keys();
+    assert!(matches!(
+        keys.get("duplicate"),
+        Err(crate::error::Error::AmbiguousBlob { .. })
+    ));
+    assert!(keys.get("missing").unwrap().is_none());
     check_blob(&file, "duplicate", b"first", &stager, &reader, false).await;
+}
+
+/// Reads 1024 adjacent windows from one local Puffin file. Each variant reads the same
+/// payloads in the same order. Rotate the order to distribute cache warm-up effects.
+#[tokio::test]
+#[ignore = "many-window Puffin lookup and range-read ablation"]
+#[expect(clippy::print_stdout, reason = "Benchmark emits raw timings")]
+async fn benchmark_many_window_blob_reads() {
+    use crate::file_format::reader::AsyncReader;
+    use crate::puffin_manager::file_accessor::PuffinFileAccessor;
+    use std::time::Instant;
+
+    const WINDOWS: usize = 1024;
+    const SIZE: usize = 256;
+    let (_dir, stager) = new_bounded_stager("window_reads", 1024 * 1024).await;
+    let accessor = Arc::new(MockFileAccessor::new("window_reads"));
+    let manager = FsPuffinManager::new(stager, accessor.clone());
+    let file = "windows".to_string();
+    let mut writer = manager.writer(&file).await.unwrap();
+    let keys: Vec<_> = (0..WINDOWS).map(|w| format!("sketch.hll.{w}")).collect();
+    for (i, key) in keys.iter().enumerate() {
+        put_blob(key, &[i as u8; SIZE], None, &mut writer).await;
+    }
+    writer.finish().await.unwrap();
+    for round in 0..5 {
+        for variant in 0..4 {
+            let mode = (round + variant) % 4;
+            let reader = manager.reader(&file).await.unwrap();
+            let footer = reader.metadata().await.unwrap();
+            let start = Instant::now();
+            let mut checksum = 0_u64;
+            let index = (mode > 0).then(|| footer.index_blob_keys());
+            let raw = accessor.reader(&file).await.unwrap();
+            let mut shared = reader.puffin_reader().await.unwrap();
+            let batch = if mode == 3 { 16 } else { 1 };
+            for chunk in keys.chunks(batch) {
+                if mode == 0 {
+                    let meta = reader.blob_metadata(&chunk[0]).await.unwrap().unwrap();
+                    let guard = reader.blob(&chunk[0]).await.unwrap();
+                    let blob = guard.reader().await.unwrap();
+                    checksum += u64::from(blob.read(0..meta.length as u64).await.unwrap()[0]);
+                } else {
+                    let index = index.as_ref().unwrap();
+                    let first = index.get(&chunk[0]).unwrap().unwrap();
+                    if mode == 1 {
+                        let mut single = reader.puffin_reader().await.unwrap();
+                        let blob = single.blob_reader(first).unwrap();
+                        checksum += u64::from(blob.read(0..SIZE as u64).await.unwrap()[0]);
+                    } else if mode == 2 {
+                        let blob = shared.blob_reader(first).unwrap();
+                        checksum += u64::from(blob.read(0..SIZE as u64).await.unwrap()[0]);
+                    } else {
+                        for (i, key) in chunk.iter().enumerate() {
+                            let meta = index.get(key).unwrap().unwrap();
+                            assert_eq!(meta.offset, first.offset + (i * SIZE) as i64);
+                            assert_eq!(meta.length, SIZE as i64);
+                        }
+                        let offset = first.offset as u64;
+                        let bytes = raw
+                            .read(offset..offset + (SIZE * chunk.len()) as u64)
+                            .await
+                            .unwrap();
+                        checksum += bytes
+                            .chunks_exact(SIZE)
+                            .map(|b| u64::from(b[0]))
+                            .sum::<u64>();
+                    }
+                }
+            }
+            assert_eq!(
+                checksum,
+                (0..WINDOWS).map(|i| u64::from(i as u8)).sum::<u64>()
+            );
+            println!(
+                "round={round} mode={mode} elapsed_us={}",
+                start.elapsed().as_micros()
+            );
+        }
+    }
 }
