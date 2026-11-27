@@ -4207,40 +4207,46 @@ async fn native_fused_time_partitioned_table_reads_through_a_raw_source() {
     );
 }
 
+/// A time index stored in seconds, microseconds or nanoseconds is read as stored, and the scan is
+/// bounded by literals in that unit rather than by a cast of the column.
 #[tokio::test]
-async fn native_fused_non_millisecond_time_index_falls_back() {
-    let table_provider = build_test_table_provider_with_options(
-        &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
-        1,
-        1,
-        vec![],
-        ConcreteDataType::timestamp_microsecond_datatype(),
-        false,
-        ConcreteDataType::float64_datatype(),
-        NATIVE_ENGINE,
-    )
-    .await;
-    let native =
-        build_native_fused_plan_with_provider("rate(some_metric[5m])", true, table_provider).await;
-    let fallback_provider = build_test_table_provider_with_options(
-        &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
-        1,
-        1,
-        vec![],
-        ConcreteDataType::timestamp_microsecond_datatype(),
-        false,
-        ConcreteDataType::float64_datatype(),
-        NATIVE_ENGINE,
-    )
-    .await;
-    let without_flag =
-        build_native_fused_plan_with_provider("rate(some_metric[5m])", false, fallback_provider)
-            .await;
-    assert!(!native.display_indent().to_string().contains("FusedSeries"));
-    assert_eq!(
-        native.display_indent().to_string(),
-        without_flag.display_indent().to_string()
-    );
+async fn native_fused_reads_a_non_millisecond_time_index() {
+    for (time_index, literal) in [
+        (
+            ConcreteDataType::timestamp_second_datatype(),
+            "TimestampSecond(",
+        ),
+        (
+            ConcreteDataType::timestamp_microsecond_datatype(),
+            "TimestampMicrosecond(",
+        ),
+        (
+            ConcreteDataType::timestamp_nanosecond_datatype(),
+            "TimestampNanosecond(",
+        ),
+    ] {
+        let table_provider = build_test_table_provider_with_options(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            1,
+            1,
+            vec![],
+            time_index.clone(),
+            false,
+            ConcreteDataType::float64_datatype(),
+            NATIVE_ENGINE,
+        )
+        .await;
+        let native =
+            build_native_fused_plan_with_provider("rate(some_metric[5m])", true, table_provider)
+                .await;
+        let display = native.display_indent().to_string();
+        assert!(
+            find_fused_series(&native).is_some(),
+            "{time_index:?}: {display}"
+        );
+        assert_eq!(take_reported_decline(), None, "{time_index:?}: {display}");
+        assert!(display.contains(literal), "{time_index:?}: {display}");
+    }
 }
 
 #[tokio::test]

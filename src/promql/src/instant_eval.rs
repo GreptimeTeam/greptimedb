@@ -18,7 +18,6 @@ use std::sync::Arc;
 use common_query::prometheus::is_prometheus_stale_nan;
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::SeriesLabels;
-use datatypes::series::raw::RawTimestamps;
 use datatypes::series::samples::{SampleRef, Series, SeriesFields, SeriesSchema};
 
 use crate::grid_series::{GridSeriesBuilder, label_set, render_label_set};
@@ -50,7 +49,7 @@ fn row_read() {
 /// `None` means the anchor selects nothing, which is what an anchor outside the series' data or one
 /// whose only candidate is too old or stale reports.
 pub fn select_instant_at(
-    time: &RawTimestamps,
+    time: &(impl AsRef<[i64]> + ?Sized),
     fields: &SeriesFields,
     at_ms: i64,
     lookback_ms: i64,
@@ -118,10 +117,13 @@ pub(crate) fn instant_candidate_span(
 /// Selects source rows for an aligned PromQL instant-evaluation range.
 ///
 /// Returns original logical row indices and evaluation timestamps from a complete source axis of
-/// strictly increasing milliseconds. Any provided field's stale marker suppresses selection;
-/// missing samples are not stale and remain selectable.
+/// non-decreasing milliseconds. Any provided field's stale marker suppresses selection; missing
+/// samples are not stale and remain selectable. Among rows sharing a millisecond the last one is the
+/// candidate, which is the latest sample when the axis holds the window times of a finer time index
+/// ([`crate::raw_time`]).
 ///
-/// The ordering of the axis is [`RawTimestamps`]' own guarantee, checked when it was built, so this
+/// The ordering of the axis is the caller's guarantee -
+/// [`RawTimestamps`](datatypes::series::raw::RawTimestamps) checks it when it is built - so this
 /// walks the axis once -- one cursor advance per row -- and validates nothing about it again.
 ///
 /// The two vectors it returns hold one `u64` source row index and one `i64` evaluation timestamp
@@ -130,7 +132,7 @@ pub(crate) fn instant_candidate_span(
 /// a memory reservation for those two vectors before it calls, which is what bounds an instant
 /// selection now that the kernel carries no point limit of its own.
 pub fn select_instants(
-    time: &RawTimestamps,
+    time: &(impl AsRef<[i64]> + ?Sized),
     fields: &SeriesFields,
     range: RangeInclusive<i64>,
     step_ms: i64,
@@ -154,7 +156,7 @@ pub fn select_instants(
             "InstantManipulate lookback must be non-negative".into(),
         ));
     }
-    let timestamps = time.as_buffer();
+    let timestamps = time.as_ref();
     if fields
         .as_slice()
         .iter()
@@ -234,7 +236,7 @@ pub fn select_instants(
 pub fn timestamp_of_selection(
     schema: &Arc<SeriesSchema>,
     metric: &SeriesLabels,
-    time: &RawTimestamps,
+    time: &(impl AsRef<[i64]> + ?Sized),
     fields: &SeriesFields,
     indices: &[u64],
     evaluation_timestamps: &[i64],
@@ -242,7 +244,7 @@ pub fn timestamp_of_selection(
     project_selection(
         schema,
         drop_metric_name(metric)?,
-        time,
+        time.as_ref(),
         fields,
         indices,
         evaluation_timestamps,
@@ -258,7 +260,7 @@ pub fn timestamp_of_selection(
 pub fn info_sample_times(
     schema: &Arc<SeriesSchema>,
     metric: &SeriesLabels,
-    time: &RawTimestamps,
+    time: &(impl AsRef<[i64]> + ?Sized),
     fields: &SeriesFields,
     indices: &[u64],
     evaluation_timestamps: &[i64],
@@ -266,7 +268,7 @@ pub fn info_sample_times(
     project_selection(
         schema,
         metric.clone(),
-        time,
+        time.as_ref(),
         fields,
         indices,
         evaluation_timestamps,
@@ -326,7 +328,7 @@ pub fn timestamp_of_evaluated(
 fn project_selection(
     schema: &Arc<SeriesSchema>,
     metric: SeriesLabels,
-    time: &RawTimestamps,
+    time: &[i64],
     fields: &SeriesFields,
     indices: &[u64],
     evaluation_timestamps: &[i64],
@@ -373,7 +375,7 @@ fn project_selection(
                 ));
             }
             _ => {
-                let time = time.timestamp(index).expect("checked against the axis");
+                let time = time[index];
                 row.clear();
                 for cursor in &mut cursors {
                     let sample = cursor

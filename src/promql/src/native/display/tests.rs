@@ -69,6 +69,7 @@ fn raw_input() -> NativeNode {
             output: output.clone(),
             source_index: 0,
             ordering: SeriesOrdering::KeyThenTime,
+            time_unit: Default::default(),
         }),
         output,
     }
@@ -231,6 +232,7 @@ fn an_input_reports_whether_it_is_raw_and_what_ordering_it_guarantees() {
             output: contiguous.clone(),
             source_index: 0,
             ordering: SeriesOrdering::Contiguous,
+            time_unit: Default::default(),
         }),
         output: contiguous,
     };
@@ -249,6 +251,7 @@ fn an_input_reports_whether_it_is_raw_and_what_ordering_it_guarantees() {
             output: interleaved.clone(),
             source_index: 0,
             ordering: SeriesOrdering::Interleaved,
+            time_unit: Default::default(),
         }),
         output: interleaved,
     };

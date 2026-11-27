@@ -32,6 +32,7 @@ mod metrics;
 pub mod native;
 pub mod range_array;
 pub mod range_eval;
+pub mod raw_time;
 pub mod select;
 pub mod source;
 pub mod vector_match;

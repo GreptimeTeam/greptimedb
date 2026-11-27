@@ -43,7 +43,6 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::SchemaRef;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
-use datatypes::types::TimestampType;
 use futures::{StreamExt, TryStreamExt};
 use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -523,19 +522,16 @@ impl SeriesScan {
                 name: Arc::from(output.name.as_str()),
             });
         }
-        let time_is_millis = matches!(metadata.time_index_type(), TimestampType::Millisecond(_));
         if fields.is_empty()
             || (input.append_mode && !input.requires_narthex_preparation())
             || input.series_row_selector.is_some()
-            || !time_is_millis
         {
             debug!(
-                "Raw series scan preflight rejected scan options: region_id={}, selected_fields={}, append_mode={}, row_selector={}, time_is_millis={}",
+                "Raw series scan preflight rejected scan options: region_id={}, selected_fields={}, append_mode={}, row_selector={}",
                 metadata.region_id,
                 fields.len(),
                 input.append_mode,
                 input.series_row_selector.is_some(),
-                time_is_millis,
             );
             return Ok(None);
         }

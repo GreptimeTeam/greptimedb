@@ -212,6 +212,7 @@ fn rate_tree_of(schema: Arc<SeriesSchema>) -> NativeTree {
                     output: raw.clone(),
                     source_index: 0,
                     ordering: SeriesOrdering::Contiguous,
+                    time_unit: Default::default(),
                 }),
                 output: raw,
             }),
@@ -380,6 +381,7 @@ fn binary_tree_over_sources(
                     source_index: left_source,
                     output: NativeType::Samples(Arc::clone(&raw_left)),
                     ordering: SeriesOrdering::Contiguous,
+                    time_unit: Default::default(),
                 }),
                 output: NativeType::Samples(raw_left),
             }),
@@ -400,6 +402,7 @@ fn binary_tree_over_sources(
                     source_index: right_source,
                     output: NativeType::Samples(Arc::clone(&raw_right)),
                     ordering: SeriesOrdering::Contiguous,
+                    time_unit: Default::default(),
                 }),
                 output: NativeType::Samples(raw_right),
             }),
@@ -445,6 +448,7 @@ fn mixed_raw_evaluated_tree() -> NativeTree {
             output: raw_type.clone(),
             source_index: 0,
             ordering: SeriesOrdering::Contiguous,
+            time_unit: Default::default(),
         }),
         output: raw_type,
     };
@@ -470,6 +474,7 @@ fn mixed_raw_evaluated_tree() -> NativeTree {
             output: evaluated.clone(),
             source_index: 1,
             ordering: SeriesOrdering::Contiguous,
+            time_unit: Default::default(),
         }),
         output: evaluated.clone(),
     };
@@ -514,6 +519,7 @@ fn instant_of(source_index: usize, grid: &Arc<EvalGrid>) -> NativeNode {
                     source_index,
                     output: raw.clone(),
                     ordering: SeriesOrdering::Contiguous,
+                    time_unit: Default::default(),
                 }),
                 output: raw,
             }),
@@ -1496,6 +1502,7 @@ async fn constant_topk_over_parameterized_topk_keeps_suffix_rows() {
                     source_index: 0,
                     output: raw.clone(),
                     ordering: SeriesOrdering::Contiguous,
+                    time_unit: Default::default(),
                 }),
                 output: raw,
             }),
@@ -1971,6 +1978,7 @@ fn state_tree(stage: AggregateStage, input: NativeType) -> NativeTree {
             output: child_type.clone(),
             source_index: 0,
             ordering: SeriesOrdering::Contiguous,
+            time_unit: Default::default(),
         }),
         output: child_type,
     };
@@ -2395,6 +2403,7 @@ fn canonical_producer_node() -> FusedSeries {
             output: raw.clone(),
             source_index: 0,
             ordering: SeriesOrdering::Contiguous,
+            time_unit: Default::default(),
         }),
         output: raw,
     };
@@ -4065,6 +4074,7 @@ fn instant_selecting(
                     source_index,
                     output: raw.clone(),
                     ordering: SeriesOrdering::Contiguous,
+                    time_unit: Default::default(),
                 }),
                 output: raw,
             }),
@@ -5461,6 +5471,7 @@ async fn hand_bound_fused_merge_canonicalizes_shared_labels() {
             output: raw.clone(),
             source_index: 0,
             ordering: SeriesOrdering::Contiguous,
+            time_unit: Default::default(),
         }),
         output: raw,
     };
@@ -7626,6 +7637,7 @@ fn final_root_refuses_samples_binding() {
                     })),
                     source_index: 0,
                     ordering: SeriesOrdering::Contiguous,
+                    time_unit: Default::default(),
                 }),
                 output: NativeType::Samples(Arc::new(SeriesSchema {
                     fields: raw_schema().fields.clone(),
@@ -7663,6 +7675,7 @@ fn repeated_source_with_state_and_samples_is_refused() {
         output: NativeType::AggregateState(state),
         source_index: 0,
         ordering: SeriesOrdering::Contiguous,
+        time_unit: Default::default(),
     };
     let samples_input = BoundInput {
         output: NativeType::Samples(Arc::new(SeriesSchema {
@@ -7671,6 +7684,7 @@ fn repeated_source_with_state_and_samples_is_refused() {
         })),
         source_index: 0,
         ordering: SeriesOrdering::Contiguous,
+        time_unit: Default::default(),
     };
     let error =
         super::collect_source_schemas_from_inputs(vec![&state_input, &samples_input]).unwrap_err();
@@ -7725,6 +7739,7 @@ fn series_frame_output_schema_matches_evaluated_packer() {
             output: output.clone(),
             source_index: 0,
             ordering: SeriesOrdering::Contiguous,
+            time_unit: Default::default(),
         }),
         output,
     })
@@ -9138,6 +9153,7 @@ fn a_fold_across_groups_gathers_the_state_it_reads() {
             output: output.clone(),
             source_index: 0,
             ordering: SeriesOrdering::Contiguous,
+            time_unit: Default::default(),
         }),
         output,
     };
@@ -9663,6 +9679,7 @@ fn aliased_count_tree() -> NativeTree {
                     output: raw.clone(),
                     source_index: 0,
                     ordering: SeriesOrdering::Contiguous,
+                    time_unit: Default::default(),
                 }),
                 output: raw,
             }),
@@ -9710,6 +9727,7 @@ fn summed_window_tree() -> NativeTree {
             source_index: 0,
             output: evaluated.clone(),
             ordering: SeriesOrdering::Contiguous,
+            time_unit: Default::default(),
         }),
         output: evaluated.clone(),
     };

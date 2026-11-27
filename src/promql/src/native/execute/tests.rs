@@ -273,6 +273,7 @@ fn raw_input_with_source_index_and_ordering(
             output: output.clone(),
             source_index,
             ordering,
+            time_unit: Default::default(),
         }),
         output,
     }
@@ -286,6 +287,7 @@ fn raw_input_of(count: usize) -> NativeNode {
             output: output.clone(),
             source_index: 0,
             ordering: SeriesOrdering::KeyThenTime,
+            time_unit: Default::default(),
         }),
         output,
     }
@@ -316,6 +318,7 @@ fn evaluated_input_with_source_index_and_ordering(
             output: output.clone(),
             source_index,
             ordering,
+            time_unit: Default::default(),
         }),
         output,
     }
@@ -2346,6 +2349,7 @@ fn timestamp_projection_workspace_failure_releases_runtime() {
             source_index: 0,
             output: NativeType::Samples(Arc::clone(&schema)),
             ordering: SeriesOrdering::Contiguous,
+            time_unit: Default::default(),
         }),
         output: NativeType::Samples(Arc::clone(&schema)),
     };
@@ -7216,7 +7220,12 @@ fn instant_candidate_span_covers_native_selection_at_boundaries() {
             value: InstantValue::Sample,
             output_grid: Arc::clone(&out_grid),
         };
-        let mut runtime = InstantRuntime::try_new(&schema, &selection).unwrap();
+        let mut runtime = InstantRuntime::try_new(
+            &schema,
+            &selection,
+            crate::raw_time::RawTimeUnit::Millisecond,
+        )
+        .unwrap();
         let values: Vec<_> = case
             .times
             .iter()
@@ -7676,6 +7685,7 @@ fn evaluated_input_of(count: usize, grid: Arc<EvalGrid>) -> NativeNode {
             output: output.clone(),
             source_index: 0,
             ordering: SeriesOrdering::KeyThenTime,
+            time_unit: Default::default(),
         }),
         output,
     }
@@ -13787,6 +13797,7 @@ fn a_quantile_stage_the_runtime_does_not_compute_is_named() {
             output: NativeType::AggregateState(state_schema()),
             source_index: 0,
             ordering: SeriesOrdering::Contiguous,
+            time_unit: Default::default(),
         }),
         output: NativeType::AggregateState(state_schema()),
     };
@@ -16393,6 +16404,7 @@ fn partial_final_matches_complete_over_concatenated_input() {
                         output: NativeType::AggregateState(Arc::clone(&state_schema)),
                         source_index: 0,
                         ordering: SeriesOrdering::Contiguous,
+                        time_unit: Default::default(),
                     }),
                     output: NativeType::AggregateState(Arc::clone(&state_schema)),
                 }

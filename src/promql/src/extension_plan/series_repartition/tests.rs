@@ -2837,6 +2837,7 @@ async fn fused_instant_complete_disjoint_publishes_before_other_input_eof() {
                     source_index: 0,
                     output: raw.clone(),
                     ordering: datatypes::series::SeriesOrdering::Contiguous,
+                    time_unit: Default::default(),
                 }),
                 output: raw,
             }),

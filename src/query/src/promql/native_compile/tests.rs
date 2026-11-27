@@ -5806,6 +5806,7 @@ fn validate_inputs_accepts_distinct_occurrences_sharing_a_schema() {
             source_index,
             output: NativeType::Samples(Arc::clone(&schema)),
             ordering: SeriesOrdering::KeyThenTime,
+            time_unit: Default::default(),
         }),
         output: NativeType::Samples(Arc::clone(&schema)),
     };
