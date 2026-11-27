@@ -43,12 +43,14 @@ async fn query_and_expect(instance: &Instance, sql: &str, expected: &str) {
 #[cfg(test)]
 mod test {
     use std::collections::HashMap;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use api::v1::column::Values;
     use api::v1::column_data_type_extension::TypeExt;
     use api::v1::ddl_request::Expr as DdlExpr;
     use api::v1::greptime_request::Request;
+    use api::v1::helper::{field_column_schema, row, tag_column_schema, time_index_column_schema};
+    use api::v1::meta::{ProcedureDetailResponse, ReconcileRequest, ReconcileResponse};
     use api::v1::query_request::Query;
     use api::v1::region::QueryRequest as RegionQueryRequest;
     use api::v1::{
@@ -61,30 +63,42 @@ mod test {
         DefaultPermissionChecker, Identity, Password, PermissionCheckerRef, UserProvider,
         static_user_provider_from_option,
     };
+    use catalog::process_manager::ProcessManager;
     use client::OutputData;
     use common_base::Plugins;
     use common_catalog::consts::{
         DEFAULT_CATALOG_NAME, DEFAULT_PRIVATE_SCHEMA_NAME, MITO_ENGINE,
         SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME,
     };
+    use common_meta::cache::LayeredCacheRegistryBuilder;
+    use common_meta::procedure_executor::{
+        ExecutorContext, ProcedureExecutor, ProcedureExecutorRef,
+    };
+    use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
+    use common_meta::rpc::procedure::{
+        MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
+    };
     use common_meta::rpc::router::region_distribution;
     use common_query::Output;
     use common_query::logical_plan::breakup_insert_plan;
     use common_recordbatch::RecordBatches;
     use frontend::instance::Instance;
+    use frontend::instance::builder::FrontendBuilder;
     use query::parser::QueryLanguageParser;
     use query::query_engine::DefaultSerializer;
     use rstest::rstest;
     use rstest_reuse::apply;
+    use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
     use servers::query_handler::grpc::GrpcQueryHandler;
-    use session::context::{QueryContext, QueryContextBuilder};
+    use session::context::{QueryContext, QueryContextBuilder, QueryContextRef};
     use store_api::mito_engine_options::TWCS_TIME_WINDOW;
     use store_api::storage::RegionId;
     use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
+    use tokio::sync::oneshot;
 
     use super::*;
-    use crate::standalone::GreptimeDbStandaloneBuilder;
-    use crate::test_util::execute_sql_and_expect;
+    use crate::standalone::{GreptimeDbStandalone, GreptimeDbStandaloneBuilder};
+    use crate::test_util::{execute_sql, execute_sql_and_expect};
     use crate::tests;
     use crate::tests::MockDistributedInstance;
     use crate::tests::test_util::{MockInstance, both_instances_cases, distributed, standalone};
@@ -1511,5 +1525,414 @@ CREATE TABLE {table_name} (
             .unwrap_err();
         let msg = common_error::ext::ErrorExt::output_msg(&err);
         assert!(msg.contains("auto_create_table"), "unexpected error: {msg}");
+    }
+
+    /// One row of `table` with a nanosecond timestamp, a value and string tags.
+    fn metric_row_insert(
+        table: &str,
+        ts: i64,
+        value: f64,
+        tags: &[(&str, &str)],
+    ) -> api::v1::RowInsertRequest {
+        use api::v1::value::ValueData;
+        use api::v1::{RowInsertRequest, Rows};
+
+        let mut schema = vec![
+            time_index_column_schema("greptime_timestamp", ColumnDataType::TimestampNanosecond),
+            field_column_schema("greptime_value", ColumnDataType::Float64),
+        ];
+        let mut values = vec![
+            ValueData::TimestampNanosecondValue(ts),
+            ValueData::F64Value(value),
+        ];
+        for (name, value) in tags {
+            schema.push(tag_column_schema(name, ColumnDataType::String));
+            values.push(ValueData::StringValue(value.to_string()));
+        }
+        RowInsertRequest {
+            table_name: table.to_string(),
+            rows: Some(Rows {
+                schema,
+                rows: vec![row(values)],
+            }),
+        }
+    }
+
+    fn row_inserts(inserts: Vec<api::v1::RowInsertRequest>) -> Request {
+        Request::RowInserts(api::v1::RowInsertRequests { inserts })
+    }
+
+    fn row_insert_ctx(physical_table: Option<&str>) -> QueryContextRef {
+        let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+        if let Some(physical_table) = physical_table {
+            ctx.set_extension(PHYSICAL_TABLE_PARAM, physical_table);
+        }
+        Arc::new(ctx)
+    }
+
+    async fn sorted_column_names(instance: &Instance, table: &str) -> Vec<String> {
+        let table = instance
+            .catalog_manager()
+            .table(DEFAULT_CATALOG_NAME, "public", table, None)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut names = table
+            .table_info()
+            .meta
+            .schema
+            .column_schemas()
+            .iter()
+            .map(|column| column.name.clone())
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        names
+    }
+
+    /// Holds the CREATE of `table` after the DDL executor's own existence check
+    /// until the test releases it.
+    struct CreateGate {
+        table: String,
+        started: oneshot::Sender<()>,
+        release: oneshot::Receiver<()>,
+    }
+
+    struct GatedProcedureExecutor {
+        inner: ProcedureExecutorRef,
+        gate: Mutex<Option<CreateGate>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ProcedureExecutor for GatedProcedureExecutor {
+        async fn submit_ddl_task(
+            &self,
+            ctx: ExecutorContext,
+            request: SubmitDdlTaskRequest,
+        ) -> common_meta::error::Result<SubmitDdlTaskResponse> {
+            let creates = match &request.task {
+                DdlTask::CreateTable(task) => std::slice::from_ref(task),
+                DdlTask::CreateLogicalTables(tasks) => tasks.as_slice(),
+                _ => &[],
+            };
+            let gate = {
+                let mut gate = self.gate.lock().unwrap();
+                let gated = gate.as_ref().is_some_and(|gate| {
+                    creates
+                        .iter()
+                        .any(|task| task.create_table.table_name == gate.table)
+                });
+                if gated { gate.take() } else { None }
+            };
+            if let Some(gate) = gate {
+                gate.started.send(()).unwrap();
+                gate.release.await.unwrap();
+            }
+            self.inner.submit_ddl_task(ctx, request).await
+        }
+
+        async fn migrate_region(
+            &self,
+            ctx: &ExecutorContext,
+            request: MigrateRegionRequest,
+        ) -> common_meta::error::Result<MigrateRegionResponse> {
+            self.inner.migrate_region(ctx, request).await
+        }
+
+        async fn reconcile(
+            &self,
+            ctx: &ExecutorContext,
+            request: ReconcileRequest,
+        ) -> common_meta::error::Result<ReconcileResponse> {
+            self.inner.reconcile(ctx, request).await
+        }
+
+        async fn query_procedure_state(
+            &self,
+            ctx: &ExecutorContext,
+            pid: &str,
+        ) -> common_meta::error::Result<ProcedureStateResponse> {
+            self.inner.query_procedure_state(ctx, pid).await
+        }
+
+        async fn list_procedures(
+            &self,
+            ctx: &ExecutorContext,
+        ) -> common_meta::error::Result<ProcedureDetailResponse> {
+            self.inner.list_procedures(ctx).await
+        }
+    }
+
+    /// Sends `losing` through a second frontend whose CREATE of `table` waits after
+    /// the existence check until `winning` has created the table, and returns the
+    /// result of the losing write.
+    async fn write_after_losing_create(
+        standalone: &GreptimeDbStandalone,
+        table: &str,
+        (losing, losing_ctx): (api::v1::RowInsertRequest, QueryContextRef),
+        (winning, winning_ctx): (api::v1::RowInsertRequest, QueryContextRef),
+    ) -> Output {
+        let source = standalone.fe_instance();
+        let (started, started_rx) = oneshot::channel();
+        let (release, release_rx) = oneshot::channel();
+        let procedure_executor = Arc::new(GatedProcedureExecutor {
+            inner: source.procedure_executor().clone(),
+            gate: Mutex::new(Some(CreateGate {
+                table: table.to_string(),
+                started,
+                release: release_rx,
+            })),
+        });
+        let cache_registry = Arc::new(
+            cache::with_default_composite_cache_registry(
+                LayeredCacheRegistryBuilder::default().add_cache_registry(
+                    cache::build_fundamental_cache_registry(standalone.kv_backend.clone()),
+                ),
+            )
+            .unwrap()
+            .build(),
+        );
+        let losing_frontend = FrontendBuilder::new(
+            standalone.opts.frontend_options(),
+            standalone.kv_backend.clone(),
+            cache_registry,
+            source.catalog_manager().clone(),
+            source.node_manager().clone(),
+            procedure_executor,
+            Arc::new(ProcessManager::new("losing_create".into(), None)),
+        )
+        .try_build()
+        .await
+        .unwrap();
+
+        let mut losing_write = tokio::spawn(async move {
+            GrpcQueryHandler::do_query(&losing_frontend, row_inserts(vec![losing]), losing_ctx)
+                .await
+        });
+        tokio::select! {
+            _ = started_rx => {}
+            result = &mut losing_write => panic!("the losing write finished before its CREATE: {result:?}"),
+        }
+        let output =
+            GrpcQueryHandler::do_query(source.as_ref(), row_inserts(vec![winning]), winning_ctx)
+                .await
+                .unwrap();
+        assert!(matches!(output.data, OutputData::AffectedRows(1)));
+        release.send(()).unwrap();
+        losing_write.await.unwrap().unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_row_inserts_after_losing_create() {
+        common_telemetry::init_default_ut_logging();
+        let standalone = GreptimeDbStandaloneBuilder::new("test_row_inserts_after_losing_create")
+            .build()
+            .await;
+        let output = write_after_losing_create(
+            &standalone,
+            "race_mito",
+            (
+                metric_row_insert("race_mito", 1_000_000_000, 1.0, &[("host", "a")]),
+                row_insert_ctx(None),
+            ),
+            (
+                metric_row_insert("race_mito", 2_000_000_000, 2.0, &[("region", "r")]),
+                row_insert_ctx(None),
+            ),
+        )
+        .await;
+        assert!(matches!(output.data, OutputData::AffectedRows(1)));
+
+        let expected = "\
++---------------------+----------------+------+--------+
+| greptime_timestamp  | greptime_value | host | region |
++---------------------+----------------+------+--------+
+| 1970-01-01T00:00:01 | 1.0            | a    |        |
+| 1970-01-01T00:00:02 | 2.0            |      | r      |
++---------------------+----------------+------+--------+";
+        execute_sql_and_expect(
+            standalone.fe_instance(),
+            "SELECT greptime_timestamp, greptime_value, host, region FROM race_mito ORDER BY greptime_timestamp",
+            expected,
+        )
+        .await;
+    }
+
+    /// The winner creates the logical table on a nanosecond physical table while
+    /// the losing write selected a millisecond one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_metric_row_inserts_after_losing_create() {
+        common_telemetry::init_default_ut_logging();
+        let standalone =
+            GreptimeDbStandaloneBuilder::new("test_metric_row_inserts_after_losing_create")
+                .build()
+                .await;
+        let instance = standalone.fe_instance();
+        for (table, precision) in [("race_physical_ms", 3), ("race_physical_ns", 9)] {
+            execute_sql(
+                instance,
+                &format!(
+                    "CREATE TABLE {table} (greptime_timestamp TIMESTAMP({precision}) NOT NULL, \
+                     greptime_value DOUBLE NULL, TIME INDEX (greptime_timestamp)) \
+                     ENGINE = metric WITH ('physical_metric_table' = 'true')"
+                ),
+            )
+            .await;
+        }
+        let output = write_after_losing_create(
+            &standalone,
+            "race_metric",
+            (
+                metric_row_insert("race_metric", 1_000_000_123, 1.0, &[("host", "a")]),
+                row_insert_ctx(Some("race_physical_ms")),
+            ),
+            (
+                metric_row_insert("race_metric", 2_000_000_000, 2.0, &[("region", "r")]),
+                row_insert_ctx(Some("race_physical_ns")),
+            ),
+        )
+        .await;
+        assert!(matches!(output.data, OutputData::AffectedRows(1)));
+
+        // The losing row is converted once, to the winner's unit, so it keeps its nanoseconds.
+        let expected = "\
++-------------------------------+----------------+------+--------+
+| greptime_timestamp            | greptime_value | host | region |
++-------------------------------+----------------+------+--------+
+| 1970-01-01T00:00:01.000000123 | 1.0            | a    |        |
+| 1970-01-01T00:00:02           | 2.0            |      | r      |
++-------------------------------+----------------+------+--------+";
+        execute_sql_and_expect(
+            instance,
+            "SELECT greptime_timestamp, greptime_value, host, region FROM race_metric ORDER BY greptime_timestamp",
+            expected,
+        )
+        .await;
+        assert_eq!(
+            sorted_column_names(instance, "race_metric").await,
+            ["greptime_timestamp", "greptime_value", "host", "region"]
+        );
+        assert_eq!(
+            sorted_column_names(instance, "race_physical_ns").await,
+            [
+                "__table_id",
+                "__tsid",
+                "greptime_timestamp",
+                "greptime_value",
+                "host",
+                "region"
+            ]
+        );
+    }
+
+    /// Three entries of one batch target the same new logical table, and the
+    /// later ones bring overlapping new tags.
+    #[apply(both_instances_cases)]
+    async fn test_metric_row_inserts_repeated_new_table(instance: Arc<dyn MockInstance>) {
+        let instance = instance.frontend();
+        let request = row_inserts(vec![
+            metric_row_insert("repeated_metric", 1_000_000_000, 1.0, &[("host", "a")]),
+            metric_row_insert(
+                "repeated_metric",
+                2_000_000_000,
+                2.0,
+                &[("host", "b"), ("region", "r")],
+            ),
+            metric_row_insert(
+                "repeated_metric",
+                3_000_000_000,
+                3.0,
+                &[("region", "s"), ("zone", "z")],
+            ),
+        ]);
+        let output = GrpcQueryHandler::do_query(
+            instance.as_ref(),
+            request,
+            row_insert_ctx(Some("repeated_physical")),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(output.data, OutputData::AffectedRows(3)));
+
+        let expected = "\
++---------------------+----------------+------+--------+------+
+| greptime_timestamp  | greptime_value | host | region | zone |
++---------------------+----------------+------+--------+------+
+| 1970-01-01T00:00:01 | 1.0            | a    |        |      |
+| 1970-01-01T00:00:02 | 2.0            | b    | r      |      |
+| 1970-01-01T00:00:03 | 3.0            |      | s      | z    |
++---------------------+----------------+------+--------+------+";
+        execute_sql_and_expect(
+            &instance,
+            "SELECT greptime_timestamp, greptime_value, host, region, zone FROM repeated_metric ORDER BY greptime_timestamp",
+            expected,
+        )
+        .await;
+        assert_eq!(
+            sorted_column_names(&instance, "repeated_metric").await,
+            [
+                "greptime_timestamp",
+                "greptime_value",
+                "host",
+                "region",
+                "zone"
+            ]
+        );
+        assert_eq!(
+            sorted_column_names(&instance, "repeated_physical").await,
+            [
+                "__table_id",
+                "__tsid",
+                "greptime_timestamp",
+                "greptime_value",
+                "host",
+                "region",
+                "zone"
+            ]
+        );
+    }
+
+    /// Two entries of one batch need different new tags on an existing logical
+    /// table. Both go into one ALTER, which may name each table once.
+    #[apply(both_instances_cases)]
+    async fn test_metric_row_inserts_existing_table_new_tags(instance: Arc<dyn MockInstance>) {
+        let instance = instance.frontend();
+        let ctx = row_insert_ctx(Some("existing_physical"));
+        let requests = [
+            vec![metric_row_insert(
+                "existing_metric",
+                1_000_000_000,
+                1.0,
+                &[("host", "a")],
+            )],
+            vec![
+                metric_row_insert(
+                    "existing_metric",
+                    2_000_000_000,
+                    2.0,
+                    &[("host", "b"), ("region", "r")],
+                ),
+                metric_row_insert("existing_metric", 3_000_000_000, 3.0, &[("zone", "z")]),
+            ],
+        ];
+        for request in requests {
+            GrpcQueryHandler::do_query(instance.as_ref(), row_inserts(request), ctx.clone())
+                .await
+                .unwrap();
+        }
+
+        let expected = "\
++---------------------+----------------+------+--------+------+
+| greptime_timestamp  | greptime_value | host | region | zone |
++---------------------+----------------+------+--------+------+
+| 1970-01-01T00:00:01 | 1.0            | a    |        |      |
+| 1970-01-01T00:00:02 | 2.0            | b    | r      |      |
+| 1970-01-01T00:00:03 | 3.0            |      |        | z    |
++---------------------+----------------+------+--------+------+";
+        execute_sql_and_expect(
+            &instance,
+            "SELECT greptime_timestamp, greptime_value, host, region, zone FROM existing_metric ORDER BY greptime_timestamp",
+            expected,
+        )
+        .await;
     }
 }
