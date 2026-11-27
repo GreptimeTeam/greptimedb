@@ -44,8 +44,7 @@ pub(crate) struct DecodedValue {
     value: Arc<dyn Any + Send + Sync>,
     pub(super) weight: u32,
 }
-/// Contains no artifact handle or live object-store reader. Loads run independently;
-/// the cache atomically admits a completed value after loading.
+/// Cache context for immutable native objects.
 #[derive(Clone)]
 pub(crate) struct MetadataCache {
     memory: Option<CacheManagerRef>,
@@ -341,19 +340,25 @@ impl PartArea {
                 return Ok(None);
             }
         }
+        let pooled = reservation.is_some();
+        let reader = Arc::new(NativePageReader {
+            reader: self.reader.clone(),
+            bounds: self.bounds.clone(),
+            _reservation: reservation,
+        });
         pages
             .fetch_native(
-                manager.native_admissions(),
+                manager.native_load_pool(),
                 context.namespace,
                 self.path.clone(),
                 self.bounds.clone(),
                 &relative,
-                self,
+                reader.clone(),
             )
             .await
             .map(|(bytes, stats)| {
                 // Pooled readers retain only the bytes charged to their block after this reservation drops.
-                let bytes = if reservation.is_some() {
+                let bytes = if pooled {
                     bytes
                         .iter()
                         .map(|slice| bytes::Bytes::copy_from_slice(slice))
@@ -364,19 +369,25 @@ impl PartArea {
                 Some((bytes, stats))
             })
             .map_err(|error| {
-                // Independent I/O errors have one owner. Preserve storage error kinds for
-                // discovery fallback and retry classification.
-                let error = Arc::try_unwrap(error).unwrap_or_else(std::io::Error::other);
-                match error.downcast::<object_store::Error>() {
-                    Ok(source) => crate::error::OpenDalSnafu.into_error(source),
-                    Err(error) => crate::series_index::columnar::invalid(error.to_string()),
+                if let Some(source) = super::find_shared_page_source::<crate::error::Error>(&error)
+                {
+                    crate::error::ScanSeriesSnafu.into_error(source)
+                } else {
+                    crate::series_index::columnar::invalid(error.to_string())
                 }
             })
     }
 }
 
+/// Keeps the read budget alive until a worker completes or drops this request.
+struct NativePageReader {
+    reader: ObjectReader,
+    bounds: std::ops::Range<u64>,
+    _reservation: Option<datafusion::execution::memory_pool::MemoryReservation>,
+}
+
 #[async_trait::async_trait]
-impl common_base::range_read::RangeReader for PartArea {
+impl common_base::range_read::RangeReader for NativePageReader {
     async fn metadata(&self) -> std::io::Result<common_base::range_read::Metadata> {
         Ok(common_base::range_read::Metadata {
             content_length: self.bounds.end - self.bounds.start,
@@ -386,7 +397,7 @@ impl common_base::range_read::RangeReader for PartArea {
         self.reader
             .read(self.bounds.start + range.start..self.bounds.start + range.end)
             .await
-            .map_err(std::io::Error::other)
+            .map_err(native_page_io_error)
     }
     async fn read_vec(
         &self,
@@ -399,188 +410,182 @@ impl common_base::range_read::RangeReader for PartArea {
         self.reader
             .fetch(ranges)
             .await
-            .map_err(std::io::Error::other)
+            .map_err(native_page_io_error)
     }
+}
+
+fn native_page_io_error(error: object_store::Error) -> std::io::Error {
+    std::io::Error::other(Arc::new(crate::error::OpenDalSnafu.into_error(error)))
+}
+
+// Moka shares initializer errors with current waiters without caching them.
+// Oversized values also take this path so current readers can still share them.
+enum Uncached<T> {
+    Value(Arc<T>),
+    Error(Arc<crate::error::Error>),
 }
 
 /// Loads only validated immutable structures. Identities include the generation path,
 /// object length, and the complete reference/codec context used to validate the value.
 /// Oversized entries bypass admission; disabled caches perform the same validation.
-pub(crate) async fn load<T: Send + Sync + 'static>(
+pub(crate) async fn load<T, F>(
     cache: Option<&MetadataCache>,
     identity: String,
-    weight: impl FnOnce(&T) -> usize,
-    loader: impl Future<Output = Result<T>>,
-) -> Result<Arc<T>> {
+    weight: impl FnOnce(&T) -> usize + Send + 'static,
+    loader: impl FnOnce() -> F + Clone + Send + 'static,
+) -> Result<Arc<T>>
+where
+    T: Send + Sync + 'static,
+    F: Future<Output = Result<T>> + Send + 'static,
+{
     let Some((context, manager)) = cache.and_then(|c| Some((c, c.memory.as_ref()?))) else {
-        return loader.await.map(Arc::new);
+        return loader().await.map(Arc::new);
     };
     let (Some(decoded), Some(metrics)) = (
         &manager.sst_decoded_meta_cache,
         &manager.columnar_load_metrics,
     ) else {
-        return loader.await.map(Arc::new);
+        return loader().await.map(Arc::new);
     };
-    let key = DecodedKey {
-        namespace: context.namespace,
-        identity,
-        representation: TypeId::of::<T>(),
-    };
-    let identity_size = key.identity.capacity();
-    let key = SstDecodedMetaKey::Native(key);
-    if let Some(MetaValue::Native(value)) = decoded.get(&key).await {
-        let value = value
-            .value
-            .downcast::<T>()
-            .expect("type is part of the key");
-        CACHE_HIT.with_label_values(&[COLUMNAR_META]).inc();
-        return Ok(value);
-    }
-    CACHE_MISS.with_label_values(&[COLUMNAR_META]).inc();
-    let value = Arc::new(metrics.loads.observe(loader).await?);
-    // A caller may flush buffered output while its loader is Pending, then stop
-    // polling it under downstream backpressure. Never hold a shared lock across
-    // that await: another stream may need the lock to finish the current series.
-    let retained = weight(&value).saturating_add(identity_size).saturating_add(
+    let overhead = identity.capacity().saturating_add(
         std::mem::size_of::<SstDecodedMetaKey>()
             + std::mem::size_of::<MetaValue>()
             + 2 * std::mem::size_of::<usize>(),
     );
-    if let Ok(weight) = u32::try_from(retained)
-        && u64::from(weight) <= decoded.capacity()
-    {
-        let admitted = decoded
-            .get_or_insert(
-                manager.native_admissions(),
-                key,
-                MetaValue::Native(DecodedValue {
-                    value: value.clone(),
-                    weight,
-                }),
-            )
+    let key = SstDecodedMetaKey::Native(DecodedKey {
+        namespace: context.namespace,
+        identity,
+        representation: TypeId::of::<T>(),
+    });
+    if let Some(MetaValue::Native(hit)) = decoded.get(&key).await {
+        CACHE_HIT.with_label_values(&[COLUMNAR_META]).inc();
+        return Ok(hit.value.downcast::<T>().expect("type is part of the key"));
+    }
+    CACHE_MISS.with_label_values(&[COLUMNAR_META]).inc();
+    let cache = decoded.clone();
+    let worker_metrics = metrics.clone();
+    let worker_load = loader.clone();
+    let job = async move {
+        let result = cache
+            .try_get_with_unobserved(key, async {
+                let value = Arc::new(
+                    worker_metrics
+                        .loads
+                        .observe(worker_load())
+                        .await
+                        .map_err(|e| Uncached::Error(Arc::new(e)))?,
+                );
+                let retained = weight(&value).saturating_add(overhead);
+                if let Ok(weight) = u32::try_from(retained)
+                    && u64::from(weight) <= cache.capacity()
+                {
+                    Ok(MetaValue::Native(DecodedValue { value, weight }))
+                } else {
+                    Err(Uncached::Value(value))
+                }
+            })
             .await;
-        if let MetaValue::Native(entry) = admitted {
-            return Ok(entry
+        match result {
+            Ok(MetaValue::Native(entry)) => Ok(entry
                 .value
                 .downcast::<T>()
-                .expect("type is part of the key"));
+                .expect("type is part of the key")),
+            Ok(MetaValue::Parquet(_)) => unreachable!("native key contains Parquet metadata"),
+            Err(result) => match result.as_ref() {
+                Uncached::Value(value) => Ok(value.clone()),
+                Uncached::Error(error) => {
+                    Err(crate::error::LoadSstMetaSnafu.into_error(error.clone()))
+                }
+            },
         }
+    };
+    match manager.native_load_pool().run(job).await {
+        Some(result) => result,
+        None => metrics.loads.observe(loader()).await.map(Arc::new),
     }
-    Ok(value)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::cache::CacheManager;
-    use std::hash::{DefaultHasher, Hash, Hasher};
 
-    #[rstest::rstest]
-    #[case::same_key(false)]
-    #[case::stripe_collision(true)]
     #[tokio::test]
-    async fn backpressured_load_does_not_block_other_readers(#[case] different_key: bool) {
-        let manager = CacheManager::builder().sst_meta_cache_size(8192).build();
-        let strategy = CacheStrategy::EnableAll(Arc::new(manager));
-        let cache = strategy.columnar_metadata(FileId::random()).unwrap();
-        let identity = "generation/part/page";
-        // Keep the former stripe collision as a regression case for the old loader.
-        let stripe = |identity: &str| {
-            let key = DecodedKey {
-                namespace: cache.namespace,
-                identity: identity.to_string(),
-                representation: TypeId::of::<Vec<u8>>(),
-            };
-            let mut hash = DefaultHasher::new();
-            key.hash(&mut hash);
-            hash.finish() as usize % 32
-        };
-        let other_identity = if different_key {
-            (0..)
-                .map(|i| format!("other/{i}"))
-                .find(|other| stripe(other) == stripe(identity))
-                .unwrap()
-        } else {
-            identity.to_string()
-        };
-        let (complete, pending) = tokio::sync::oneshot::channel();
-        let mut owner = Box::pin(load(
-            Some(&cache),
-            "generation/part/page".into(),
-            |_| 64,
-            async {
-                pending.await.unwrap();
-                Ok(vec![1u8, 2, 3])
-            },
-        ));
-        assert!(futures::poll!(&mut owner).is_pending());
-        // Deliver the I/O wake, but deliberately never poll its owner again until
-        // the second reader completes. This models a stream paused after a flush.
-        complete.send(()).unwrap();
-        let other = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            load(Some(&cache), other_identity, |_| 64, async {
-                Ok(vec![1u8, 2, 3])
-            }),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        assert_eq!(other.as_slice(), &[1, 2, 3]);
-        let first = owner.await.unwrap();
-        if !different_key {
-            assert!(Arc::ptr_eq(&first, &other));
-        }
-        let cached = load(Some(&cache), "generation/part/page".into(), |_| 64, async {
-            panic!("must reuse the admitted entry")
-        })
-        .await
-        .unwrap();
-        assert!(Arc::ptr_eq(&first, &cached));
-
-        let mut canceled = Box::pin(load(
-            Some(&cache),
-            "canceled".into(),
-            |_| 64,
-            std::future::pending::<Result<Vec<u8>>>(),
-        ));
-        assert!(futures::poll!(&mut canceled).is_pending());
-        drop(canceled);
-        let retry = load(Some(&cache), "canceled".into(), |_| 64, async {
-            Ok(vec![4u8])
-        })
-        .await
-        .unwrap();
-        assert_eq!(&[4], retry.as_slice());
-    }
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn concurrent_misses_share_the_admitted_value() {
+    async fn oversized_metadata_is_returned_without_retention() {
         let strategy = CacheStrategy::EnableAll(Arc::new(
             CacheManager::builder().sst_meta_cache_size(8192).build(),
         ));
         let cache = strategy.columnar_metadata(FileId::random()).unwrap();
-        let barrier = Arc::new(tokio::sync::Barrier::new(64));
-        let tasks = (0..64)
-            .map(|_| {
-                let cache = cache.clone();
-                let barrier = barrier.clone();
-                tokio::spawn(async move {
-                    load(Some(&cache), "shared-generation".into(), |_| 64, async {
-                        barrier.wait().await;
-                        Ok(vec![1_u8; 64])
-                    })
-                    .await
-                    .unwrap()
-                })
-            })
-            .collect::<Vec<_>>();
-        let values = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            futures::future::try_join_all(tasks),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        assert!(values.iter().all(|value| Arc::ptr_eq(value, &values[0])));
+        for expected in [1, 2] {
+            let value = load(
+                Some(&cache),
+                "oversized".into(),
+                |_| usize::MAX,
+                move || async move { Ok(expected) },
+            )
+            .await
+            .unwrap();
+            assert_eq!(*value, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn lost_worker_reply_retries_metadata_without_caching() {
+        let strategy = CacheStrategy::EnableAll(Arc::new(
+            CacheManager::builder().sst_meta_cache_size(8192).build(),
+        ));
+        let cache = strategy.columnar_metadata(FileId::random()).unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let loader = {
+            let calls = calls.clone();
+            move || async move {
+                let attempt = calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                assert_ne!(attempt, 0, "worker lost during metadata read");
+                Ok(attempt)
+            }
+        };
+        let read = || load(Some(&cache), "key".into(), |_| 1, loader.clone());
+        assert_eq!(*read().await.unwrap(), 1);
+        assert_eq!(*read().await.unwrap(), 2);
+        assert_eq!(*read().await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn paused_reader_shares_the_workers_load() {
+        let strategy = CacheStrategy::EnableAll(Arc::new(
+            CacheManager::builder().sst_meta_cache_size(8192).build(),
+        ));
+        let cache = strategy.columnar_metadata(FileId::random()).unwrap();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let loader = {
+            let started = started.clone();
+            let release = release.clone();
+            move || async move {
+                started.notify_one();
+                release.notified().await;
+                Ok(vec![1u8])
+            }
+        };
+        let mut first = Box::pin(load(Some(&cache), "shared".into(), |_| 1, loader));
+        assert!(futures::poll!(&mut first).is_pending());
+        started.notified().await;
+        let mut second = Box::pin(load(
+            Some(&cache),
+            "shared".into(),
+            |_| 1,
+            || async {
+                Err::<Vec<u8>, _>(crate::series_index::columnar::invalid(
+                    "duplicate storage load",
+                ))
+            },
+        ));
+        assert!(futures::poll!(&mut second).is_pending());
+        release.notify_one();
+        let other = tokio::time::timeout(std::time::Duration::from_secs(5), second)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(Arc::ptr_eq(&first.await.unwrap(), &other));
     }
 }

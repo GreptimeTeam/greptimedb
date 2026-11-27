@@ -68,7 +68,7 @@ enum PageFile {
 
 pub(crate) struct ParquetPageCache {
     page_size: u64,
-    cache: PagedCache<PageFile>,
+    cache: Arc<PagedCache<PageFile>>,
 }
 
 impl ParquetPageCache {
@@ -86,7 +86,7 @@ impl ParquetPageCache {
     fn with_ttl(capacity: u64, page_size: u64, ttl: Duration) -> Arc<Self> {
         Arc::new(Self {
             page_size,
-            cache: PagedCache::new_with_ttl(
+            cache: Arc::new(PagedCache::new_with_ttl(
                 "parquet_pages",
                 capacity,
                 page_size,
@@ -106,7 +106,7 @@ impl ParquetPageCache {
                     (usize::from(hits > 0), usize::from(misses > 0))
                 }),
                 Some(ttl),
-            ),
+            )),
         })
     }
 
@@ -156,14 +156,14 @@ impl ParquetPageCache {
         self.page_size
     }
 
-    pub(crate) async fn fetch_native<R: RangeReader>(
+    pub(crate) async fn fetch_native<R: RangeReader + 'static>(
         &self,
-        admissions: &common_cache::AdmissionPool,
+        pool: &common_cache::LoadPool,
         namespace: store_api::storage::FileId,
         path: Arc<str>,
         area: Range<u64>,
         ranges: &[Range<u64>],
-        reader: &R,
+        reader: Arc<R>,
     ) -> Result<(Vec<Bytes>, PageFetchStats), Arc<io::Error>> {
         let size = area.end - area.start;
         let key = PageFile::Native {
@@ -174,7 +174,7 @@ impl ParquetPageCache {
         };
         let result = self
             .cache
-            .fetch_independently(admissions, key, size, ranges, reader)
+            .fetch_in_pool(pool, key, size, ranges, reader)
             .await?;
         metrics::cache_page_fetch_metrics("page", &result.1);
         Ok(result)

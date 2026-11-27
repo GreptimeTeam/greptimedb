@@ -135,32 +135,56 @@ async fn start_read<F: Future>(mut future: Pin<&mut F>, reader: &Reader, count: 
 }
 
 #[tokio::test]
-async fn independent_page_miss_completes_while_another_stream_is_paused() {
+async fn pooled_pages_share_one_batch_while_first_caller_is_paused() {
     let (cache, _) = cache();
-    let pool = AdmissionPool::new(std::num::NonZeroUsize::MIN, tokio::spawn);
-    let first = Reader::gated();
+    let cache = Arc::new(cache);
+    let pool = LoadPool::new(std::num::NonZeroUsize::new(2).unwrap(), tokio::spawn);
+    let reader = Arc::new(Reader::gated());
     let ranges = [2..6, 4..5];
-    let mut paused = Box::pin(cache.fetch_independently(&pool, 1, 10, &ranges, &first));
-    start_read(paused.as_mut(), &first, 2).await;
-    first.release();
-    // Deliver the wake but keep the owner unpolled, as a backpressured query would.
-    let second = Reader::default();
-    let (loaded, stats) = tokio::time::timeout(
-        Duration::from_secs(5),
-        cache.fetch_independently(&pool, 1, 10, &ranges, &second),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(stats.independently_loaded_bytes, 8);
-    drop(paused);
-    let (warm, stats) = cache
-        .fetch_independently(&pool, 1, 10, &ranges, &second)
+    let mut first = Box::pin(cache.fetch_in_pool(&pool, 1, 10, &ranges, reader.clone()));
+    start_read(first.as_mut(), &reader, 2).await;
+    let mut second = Box::pin(cache.fetch_in_pool(&pool, 1, 10, &ranges, reader.clone()));
+    assert!(futures::poll!(&mut second).is_pending());
+    reader.release();
+    let (other, stats) = tokio::time::timeout(Duration::from_secs(5), second)
+        .await
+        .unwrap()
+        .unwrap();
+    let (original, first_stats) = first.await.unwrap();
+    assert_eq!(other, original);
+    assert_eq!(stats.loaded_bytes, 0);
+    assert_eq!(first_stats.loaded_bytes, 8);
+    assert_eq!(*reader.batches.lock().unwrap(), vec![vec![0..4, 4..8]]);
+}
+
+#[tokio::test]
+async fn closed_pool_reads_only_missing_pages_without_caching() {
+    let (cache, _) = cache();
+    let cache = Arc::new(cache);
+    let pool = LoadPool::new(std::num::NonZeroUsize::MIN, |worker| {
+        drop(worker);
+        tokio::spawn(async {})
+    });
+    let reader = Arc::new(Reader::default());
+    let ranges = [0..4, 4..8];
+    cache.fetch(1, 8, &ranges[..1], &*reader).await.unwrap();
+    let (values, stats) = cache
+        .fetch_in_pool(&pool, 1, 8, &ranges, reader.clone())
         .await
         .unwrap();
-    assert_eq!(loaded, warm);
-    assert_eq!(stats.cache_hit, 2);
-    assert_eq!(second.count(), 2);
+    assert_eq!(
+        values,
+        [
+            Bytes::from_static(&[0, 1, 2, 3]),
+            Bytes::from_static(&[4, 5, 6, 7])
+        ]
+    );
+    assert_eq!(
+        (stats.cache_hit, stats.cache_miss, stats.loaded_bytes),
+        (1, 1, 4)
+    );
+    assert_eq!(reader.count(), 2);
+    assert!(!cache.contains(&1, 1).await);
 }
 
 #[tokio::test]

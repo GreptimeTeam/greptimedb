@@ -86,6 +86,9 @@ impl ColumnarReader {
         cache: Option<MetadataCache>,
     ) -> Result<Self> {
         let identity = format!("{:?}/{:?}", handle.file_id(), handle.entry());
+        let loader_store = store.clone();
+        let loader_handle = handle.clone();
+        let loader_cache = cache.clone();
         let descriptor = metadata_cache::load(
             cache.as_ref(),
             identity,
@@ -99,9 +102,10 @@ impl ColumnarReader {
                         .map(|field| field.size() + std::mem::size_of::<usize>())
                         .sum::<usize>()
             },
-            async {
+            move || async move {
                 let reader =
-                    Self::open_descriptor(store.clone(), handle.clone(), cache.as_ref()).await?;
+                    Self::open_descriptor(loader_store, loader_handle, loader_cache.as_ref())
+                        .await?;
                 Ok((reader.manifest, reader.schema))
             },
         )
@@ -371,7 +375,7 @@ impl ColumnarReader {
         let manifest = self.manifest.clone();
         let store = self.store.clone();
         let handle = self.handle.clone();
-        let names: Vec<_> = [TSID_COLUMN, ROW_COUNT_COLUMN]
+        let names: Arc<[String]> = [TSID_COLUMN, ROW_COUNT_COLUMN]
             .into_iter()
             .map(str::to_owned)
             .chain(manifest.tags.iter().map(|tag| tag.name.clone()))
@@ -387,19 +391,21 @@ impl ColumnarReader {
                 let path: Arc<str> = manifest.part_path(part.part_id).into();
                 let size = part.file_size;
                 let reader = ObjectReader::open(cache.as_ref(), _handle.native_file(), crate::cache::file_cache::FileType::Series(Some(part.part_id)), &store, &path, size).await?;
-                let trailer = metadata_cache::load(cache.as_ref(), format!("{path}/{size}/framing"), |_| std::mem::size_of::<Trailer>(), async {
-                reader.validated(vec![0..metadata::HEADER_SIZE, size-metadata::TRAILER_SIZE..size], |framing| {
-                require(
-                    framing.len() == 2
-                        && framing[0].len() as u64 == metadata::HEADER_SIZE
-                        && framing[1].len() as u64 == metadata::TRAILER_SIZE,
-                    "series framing length mismatch",
-                )?;
-                metadata::validate_header(&framing[0])?;
-                let trailer = Trailer::decode(&framing[1], size)?;
-                    require(trailer.root.first == part.first && trailer.root.last == part.last, "series part/root bounds mismatch")?;
-                    Ok(trailer)
-                }).await
+                let framing_reader = reader.clone();
+                let expected = (part.first, part.last);
+                let trailer = metadata_cache::load(cache.as_ref(), format!("{path}/{size}/framing"), |_| std::mem::size_of::<Trailer>(), move || async move {
+                    framing_reader.validated(vec![0..metadata::HEADER_SIZE, size-metadata::TRAILER_SIZE..size], |framing| {
+                        require(
+                            framing.len() == 2
+                                && framing[0].len() as u64 == metadata::HEADER_SIZE
+                                && framing[1].len() as u64 == metadata::TRAILER_SIZE,
+                            "series framing length mismatch",
+                        )?;
+                        metadata::validate_header(&framing[0])?;
+                        let trailer = Trailer::decode(&framing[1], size)?;
+                        require((trailer.root.first, trailer.root.last) == expected, "series part/root bounds mismatch")?;
+                        Ok(trailer)
+                    }).await
                 }).await?;
                 let area = PartArea::new(reader.clone(), cache.clone(), path.clone(), metadata::HEADER_SIZE..trailer.payload_end, None);
                 let root = load_metadata_page(cache.as_ref(), &reader, (&path, size), &trailer.root, trailer.depth, trailer.payload_end, &names).await?;
@@ -486,14 +492,17 @@ async fn load_metadata_page(
     reference: &PageReference,
     depth: u32,
     payload_end: u64,
-    names: &[String],
+    names: &Arc<[String]>,
 ) -> Result<Arc<Page>> {
     let (path, size) = object;
+    let reader = reader.clone();
+    let reference = reference.clone();
+    let names = names.clone();
     metadata_cache::load(
         cache,
         format!("{path}/{size}/{reference:?}/{depth}/{payload_end}"),
         Page::retained_size,
-        async {
+        move || async move {
             if reference.payload.encoding != 1 {
                 return Err(unsupported(format!(
                     "series metadata encoding {}",
@@ -505,7 +514,7 @@ async fn load_metadata_page(
                     vec![reference.payload.offset..reference.payload.end()?],
                     |bytes| {
                         let decoded = reference.payload.unpack(&bytes[0])?;
-                        Page::decode(&decoded, reference, depth, payload_end, names)
+                        Page::decode(&decoded, &reference, depth, payload_end, &names)
                     },
                 )
                 .await
@@ -595,8 +604,8 @@ async fn load_column_chunk(
         if let Some((mut bytes, stats)) = area.cached_ranges(std::slice::from_ref(&range)).await? {
             (
                 bytes.pop().unwrap(),
-                stats.cache_miss as u64,
-                stats.independently_loaded_bytes,
+                u64::from(stats.loaded_bytes > 0),
+                stats.loaded_bytes,
             )
         } else {
             let bytes = area.reader.read(range).await.context(OpenDalSnafu)?;

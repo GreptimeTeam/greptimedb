@@ -1126,9 +1126,9 @@ pub struct CacheManager {
     disable_sst_meta_cache_on_write: bool,
     /// Cache for decoded SST metadata, used only as an acceleration tier.
     sst_decoded_meta_cache: Option<Arc<SstDecodedMetaCache>>,
-    /// Shared by decoded metadata and page admissions across native readers.
-    native_admissions: OnceLock<common_cache::AdmissionPool>,
-    /// Native readers load independently before sharing a completed entry.
+    /// Drives decoded metadata and page misses independently of query readers.
+    native_load_pool: OnceLock<common_cache::LoadPool>,
+    /// Physical loads elected for native decoded metadata.
     columnar_load_metrics: Option<Arc<common_cache::metrics::CacheMetrics>>,
     /// Cache for vectors.
     vector_cache: Option<VectorCache>,
@@ -1157,27 +1157,27 @@ pub struct CacheManager {
 
 pub type CacheManagerRef = Arc<CacheManager>;
 
-/// Internal override, read once when the engine starts its native admission pool.
-const NATIVE_ADMISSION_WORKERS_ENV: &str = "GREPTIME_NATIVE_CACHE_ADMISSION_WORKERS";
+/// Internal override, read once when the engine starts its native load pool.
+const NATIVE_LOAD_WORKERS_ENV: &str = "GREPTIME_NATIVE_CACHE_ADMISSION_WORKERS";
 
-fn native_admission_workers(value: Option<&str>) -> NonZeroUsize {
+fn native_load_workers(value: Option<&str>) -> NonZeroUsize {
     if let Some(value) = value {
         if let Ok(workers) = value.parse::<NonZeroUsize>()
             && workers.get() <= tokio::sync::Semaphore::MAX_PERMITS
         {
             return workers;
         }
-        warn!("Invalid {NATIVE_ADMISSION_WORKERS_ENV}={value:?}; using the CPU-based default");
+        warn!("Invalid {NATIVE_LOAD_WORKERS_ENV}={value:?}; using the CPU-based default");
     }
     NonZeroUsize::new(crate::config::divide_num_cpus(2)).unwrap_or(NonZeroUsize::MIN)
 }
 
 impl CacheManager {
-    fn native_admissions(&self) -> &common_cache::AdmissionPool {
-        self.native_admissions.get_or_init(|| {
-            let value = std::env::var(NATIVE_ADMISSION_WORKERS_ENV).ok();
-            common_cache::AdmissionPool::new(
-                native_admission_workers(value.as_deref()),
+    fn native_load_pool(&self) -> &common_cache::LoadPool {
+        self.native_load_pool.get_or_init(|| {
+            let value = std::env::var(NATIVE_LOAD_WORKERS_ENV).ok();
+            common_cache::LoadPool::new(
+                native_load_workers(value.as_deref()),
                 common_runtime::spawn_global,
             )
         })
@@ -1827,7 +1827,7 @@ impl CacheManagerBuilder {
             _sst_meta_size_registration: sst_meta_size_registration,
             disable_sst_meta_cache_on_write: self.disable_sst_meta_cache_on_write,
             sst_decoded_meta_cache: sst_decoded_meta_cache.map(Arc::new),
-            native_admissions: OnceLock::new(),
+            native_load_pool: OnceLock::new(),
             columnar_load_metrics,
             vector_cache,
             page_cache,
@@ -2091,12 +2091,12 @@ mod tests {
     use crate::sst::parquet::row_selection::RowGroupSelection;
 
     #[test]
-    fn test_native_admission_workers() {
+    fn test_native_load_workers() {
         let default = crate::config::divide_num_cpus(2).max(1);
-        assert_eq!(native_admission_workers(None).get(), default);
-        assert_eq!(native_admission_workers(Some("3")).get(), 3);
+        assert_eq!(native_load_workers(None).get(), default);
+        assert_eq!(native_load_workers(Some("3")).get(), 3);
         for invalid in ["0", "-1", "many", &usize::MAX.to_string()] {
-            assert_eq!(native_admission_workers(Some(invalid)).get(), default);
+            assert_eq!(native_load_workers(Some(invalid)).get(), default);
         }
     }
 

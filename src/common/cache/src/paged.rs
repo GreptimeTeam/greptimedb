@@ -30,7 +30,7 @@ use common_base::range_read::RangeReader;
 
 use crate::metrics::{CacheMetrics, CacheSizeMetric, CacheSizeRegistration};
 use crate::page::PageLayout;
-use crate::{AdmissionPool, Cache, RemovalCause, batch};
+use crate::{Cache, LoadPool, RemovalCause, batch};
 
 /// Business-level events; callers retain their existing hit/miss metric units.
 pub enum PageEvent {
@@ -54,8 +54,8 @@ pub struct PageCacheObserver {
 /// Byte accounting for one successful fetch. Hits are initial lookups, not waiters.
 #[derive(Debug, Default)]
 pub struct PageFetchStats {
-    /// Bytes read by this caller on independent native page misses.
-    pub independently_loaded_bytes: u64,
+    /// Bytes physically read by this request for missing pages.
+    pub loaded_bytes: u64,
     pub cache_hit: usize,
     pub cache_miss: usize,
     /// Requested intersections already cached; overlapping requests count repeatedly.
@@ -164,31 +164,70 @@ impl<K: Hash + Eq + Clone + Send + Sync + 'static> PagedCache<K> {
         ranges: &[Range<u64>],
         reader: &R,
     ) -> Result<(Vec<Bytes>, PageFetchStats), Arc<io::Error>> {
-        self.fetch_inner(file, file_size, ranges, reader, None)
-            .await
+        self.fetch_inner(&file, file_size, ranges, |layout, missing| {
+            self.load_missing(&file, layout, file_size, missing, reader)
+        })
+        .await
     }
 
-    /// Loads missing pages independently. A paused reader never owns another
-    /// reader's pending I/O, even when both request the same page.
-    pub async fn fetch_independently<R: RangeReader + ?Sized>(
-        &self,
-        admissions: &AdmissionPool,
+    /// Looks up resident pages inline and drives all missing pages as one
+    /// worker job, preserving vector reads and sharing concurrent page loads.
+    pub async fn fetch_in_pool<R: RangeReader + 'static>(
+        self: &Arc<Self>,
+        pool: &LoadPool,
         file: K,
         file_size: u64,
         ranges: &[Range<u64>],
-        reader: &R,
+        reader: Arc<R>,
     ) -> Result<(Vec<Bytes>, PageFetchStats), Arc<io::Error>> {
-        self.fetch_inner(file, file_size, ranges, reader, Some(admissions))
-            .await
+        let file_key = &file;
+        self.fetch_inner(
+            file_key,
+            file_size,
+            ranges,
+            move |layout, missing| async move {
+                let cache = self.clone();
+                let key = file_key.clone();
+                let worker_reader = reader.clone();
+                let ids = missing.clone();
+                if let Some(result) = pool
+                    .run(async move {
+                        cache
+                            .load_missing(&key, layout, file_size, ids, &*worker_reader)
+                            .await
+                    })
+                    .await
+                {
+                    return result;
+                }
+                // No worker can deliver this result. Read directly, without taking
+                // a Moka initializer on the query stream.
+                let spans = missing
+                    .iter()
+                    .map(|id| layout.page_range(*id).ok_or_else(invalid_request))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let buffers = reader.read_vec(&spans).await?;
+                if buffers.len() != spans.len()
+                    || buffers
+                        .iter()
+                        .zip(&spans)
+                        .any(|(buf, r)| buf.len() as u64 != r.end - r.start)
+                {
+                    return Err(invalid_request());
+                }
+                let bytes = buffers.iter().map(|buf| buf.len() as u64).sum();
+                Ok((missing.into_iter().zip(buffers).collect(), bytes))
+            },
+        )
+        .await
     }
 
-    async fn fetch_inner<R: RangeReader + ?Sized>(
+    async fn fetch_inner<F: Future<Output = Result<(Vec<(u64, Bytes)>, u64), Arc<io::Error>>>>(
         &self,
-        file: K,
+        file: &K,
         file_size: u64,
         ranges: &[Range<u64>],
-        reader: &R,
-        admissions: Option<&AdmissionPool>,
+        load: impl FnOnce(PageLayout, Vec<u64>) -> F,
     ) -> Result<(Vec<Bytes>, PageFetchStats), Arc<io::Error>> {
         if ranges.iter().any(|r| r.start > r.end || r.end > file_size) {
             return Err(invalid_request());
@@ -235,67 +274,10 @@ impl<K: Hash + Eq + Clone + Send + Sync + 'static> PagedCache<K> {
             hits: stats.cache_hit,
             misses: stats.cache_miss,
         });
-        if let Some(admissions) = admissions
-            && !missing.is_empty()
-        {
-            let spans = missing
-                .iter()
-                .map(|id| layout.page_range(*id).ok_or_else(invalid_request))
-                .collect::<Result<Vec<_>, _>>()?;
-            let buffers = reader.read_vec(&spans).await?;
-            if buffers.len() != spans.len() {
-                return Err(invalid_request());
-            }
-            for ((id, range), bytes) in missing.into_iter().zip(spans).zip(buffers) {
-                if bytes.len() as u64 != range.end - range.start {
-                    return Err(invalid_request());
-                }
-                stats.independently_loaded_bytes += bytes.len() as u64;
-                let page = self.create_cached_page(file_size, Bytes::copy_from_slice(&bytes));
-                let admitted = self
-                    .cache
-                    .get_or_insert(admissions, (file.clone(), id), page)
-                    .await;
-                pages.insert(id, admitted.bytes.clone());
-            }
-        } else if !missing.is_empty() {
-            let loads = |requests: batch::BatchSender<_, _>| {
-                missing.into_iter().map(move |id| {
-                    self.load_page((file.clone(), id), layout, file_size, requests.clone())
-                })
-            };
-            batch::load(
-                loads,
-                |ranges, replies| async move {
-                    let result = reader.read_vec(&ranges).await.and_then(|bytes| {
-                        if bytes.len() == ranges.len() {
-                            Ok(bytes)
-                        } else {
-                            Err(io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                "Invalid page response count",
-                            ))
-                        }
-                    });
-                    match result {
-                        Ok(bytes) => {
-                            for (reply, bytes) in replies.into_iter().zip(bytes) {
-                                let _ = reply.send(Ok(bytes));
-                            }
-                        }
-                        Err(error) => {
-                            let error = Arc::new(error);
-                            for reply in replies {
-                                let _ = reply.send(Err(error.clone()));
-                            }
-                        }
-                    }
-                },
-                |(id, bytes)| {
-                    pages.insert(id, bytes);
-                },
-            )
-            .await?;
+        if !missing.is_empty() {
+            let (loaded, bytes) = load(layout, missing).await?;
+            pages.extend(loaded);
+            stats.loaded_bytes = bytes;
         }
         let mut output = Vec::with_capacity(ranges.len());
         for range in ranges {
@@ -335,6 +317,57 @@ impl<K: Hash + Eq + Clone + Send + Sync + 'static> PagedCache<K> {
             output.push(assembled.freeze());
         }
         Ok((output, stats))
+    }
+
+    async fn load_missing<R: RangeReader + ?Sized>(
+        &self,
+        file: &K,
+        layout: PageLayout,
+        file_size: u64,
+        missing: Vec<u64>,
+        reader: &R,
+    ) -> Result<(Vec<(u64, Bytes)>, u64), Arc<io::Error>> {
+        let mut pages = Vec::with_capacity(missing.len());
+        let mut loaded_bytes = 0;
+        let loads = |requests: batch::BatchSender<_, _>| {
+            missing.into_iter().map(move |id| {
+                self.load_page((file.clone(), id), layout, file_size, requests.clone())
+            })
+        };
+        batch::load(
+            loads,
+            |ranges, replies| {
+                loaded_bytes += ranges.iter().map(|r| r.end - r.start).sum::<u64>();
+                async move {
+                    let result = reader.read_vec(&ranges).await.and_then(|bytes| {
+                        if bytes.len() == ranges.len() {
+                            Ok(bytes)
+                        } else {
+                            Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "Invalid page response count",
+                            ))
+                        }
+                    });
+                    match result {
+                        Ok(bytes) => {
+                            for (reply, bytes) in replies.into_iter().zip(bytes) {
+                                let _ = reply.send(Ok(bytes));
+                            }
+                        }
+                        Err(error) => {
+                            let error = Arc::new(error);
+                            for reply in replies {
+                                let _ = reply.send(Err(error.clone()));
+                            }
+                        }
+                    }
+                }
+            },
+            |page| pages.push(page),
+        )
+        .await?;
+        Ok((pages, loaded_bytes))
     }
 
     async fn load_page(

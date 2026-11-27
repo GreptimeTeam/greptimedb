@@ -59,6 +59,9 @@ impl SamplesReader {
         cache: Option<MetadataCache>,
     ) -> Result<Self> {
         let identity = format!("{:?}/{:?}", handle.file_id(), handle.entry());
+        let loader_store = store.clone();
+        let loader_handle = handle.clone();
+        let loader_cache = cache.clone();
         let descriptor = metadata_cache::load(
             cache.as_ref(),
             identity,
@@ -72,9 +75,10 @@ impl SamplesReader {
                         .map(|field| field.size() + std::mem::size_of::<usize>())
                         .sum::<usize>()
             },
-            async {
+            move || async move {
                 let reader =
-                    Self::open_descriptor(store.clone(), handle.clone(), cache.as_ref()).await?;
+                    Self::open_descriptor(loader_store, loader_handle, loader_cache.as_ref())
+                        .await?;
                 Ok((reader.manifest, reader.schema))
             },
         )
@@ -325,8 +329,9 @@ impl SamplesFormatReader for SamplesReader {
                 }).await?;
                 let size = part.file_size;
                 let metadata_started = Instant::now();
-                let trailer = metadata_cache::load(cache.as_ref(), format!("{path}/{size}/framing"), |_| std::mem::size_of::<Trailer>(), async {
-                    reader.validated(vec![0..metadata::HEADER_SIZE, size-metadata::TRAILER_SIZE..size], |framing| {
+                let framing_reader = reader.clone();
+                let trailer = metadata_cache::load(cache.as_ref(), format!("{path}/{size}/framing"), |_| std::mem::size_of::<Trailer>(), move || async move {
+                    framing_reader.validated(vec![0..metadata::HEADER_SIZE, size-metadata::TRAILER_SIZE..size], |framing| {
                         metadata::validate_header(&framing[0])?;
                         let trailer = Trailer::decode(&framing[1], size)?;
                         require(trailer.root.bounds == bounds, "sample root/part bounds mismatch")?;
@@ -801,14 +806,17 @@ async fn load_metadata_page(
     reference: &PageReference,
     depth: u32,
     areas: Areas,
-    manifest: &Manifest,
+    manifest: &Arc<Manifest>,
 ) -> Result<Arc<Page>> {
     let (path, size) = object;
+    let reader = reader.clone();
+    let reference = reference.clone();
+    let manifest = manifest.clone();
     metadata_cache::load(
         cache,
         format!("{path}/{size}/{reference:?}/{depth}/{}", areas.payload_end),
         Page::retained_size,
-        async {
+        move || async move {
             if reference.payload.encoding != 1 {
                 return Err(unsupported("sample metadata codec"));
             }
@@ -818,10 +826,10 @@ async fn load_metadata_page(
                     |bytes| {
                         Page::decode(
                             &reference.payload.unpack(&bytes[0])?,
-                            reference,
+                            &reference,
                             depth,
                             areas,
-                            manifest,
+                            &manifest,
                         )
                     },
                 )
@@ -1207,9 +1215,9 @@ async fn fetch_ranges(
     if let Some((buffers, stats)) = reader.cached_ranges(ranges).await? {
         metrics.add_elapsed("columnar_payload_fetch_wall", started.elapsed());
         *metrics.counts.entry("payload_cache_misses").or_default() += stats.cache_miss as u64;
-        *metrics.counts.entry("payload_reads").or_default() += u64::from(stats.cache_miss > 0);
+        *metrics.counts.entry("payload_reads").or_default() += u64::from(stats.loaded_bytes > 0);
         *metrics.counts.entry("payload_cache_hits").or_default() += stats.cache_hit as u64;
-        *metrics.bytes.entry("fetched").or_default() += stats.independently_loaded_bytes;
+        *metrics.bytes.entry("fetched").or_default() += stats.loaded_bytes;
         return Ok(buffers);
     }
 

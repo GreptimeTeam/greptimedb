@@ -80,6 +80,14 @@ pub(crate) fn file_indices(
     Ok(files)
 }
 
+fn unavailable_series_metadata(error: &Error) -> bool {
+    match error {
+        Error::LoadSstMeta { source, .. } => unavailable_series_metadata(source),
+        Error::InvalidMeta { .. } | Error::UnsupportedOperation { .. } => true,
+        other => other.is_object_not_found(),
+    }
+}
+
 impl SeriesDiscovery {
     pub(crate) fn fallback_to_samples(
         &mut self,
@@ -142,13 +150,7 @@ pub(crate) async fn open_sources(
         .await
         {
             Ok(reader) => reader,
-            Err(error)
-                if error.is_object_not_found()
-                    || matches!(
-                        error,
-                        Error::InvalidMeta { .. } | Error::UnsupportedOperation { .. }
-                    ) =>
-            {
+            Err(error) if unavailable_series_metadata(&error) => {
                 unavailable.insert(window.start);
                 continue;
             }
