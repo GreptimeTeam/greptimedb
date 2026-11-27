@@ -17244,17 +17244,26 @@ async fn native_promql_corpus_route_matrix() {
     );
 }
 
-/// Walks a physical plan and reports whether `name` appears, and how many times.
-fn count_plan_nodes(plan: &Arc<dyn ExecutionPlan>, name: &str) -> usize {
-    let mut count = 0;
+/// Every node of `plan` for which `predicate` holds, in the stack-based depth-first order the
+/// plan helpers below rely on.
+fn plan_nodes_where(
+    plan: &Arc<dyn ExecutionPlan>,
+    predicate: impl Fn(&Arc<dyn ExecutionPlan>) -> bool,
+) -> Vec<Arc<dyn ExecutionPlan>> {
+    let mut found = Vec::new();
     let mut stack = vec![Arc::clone(plan)];
     while let Some(node) = stack.pop() {
-        if node.name() == name {
-            count += 1;
+        if predicate(&node) {
+            found.push(Arc::clone(&node));
         }
         stack.extend(node.children().into_iter().cloned());
     }
-    count
+    found
+}
+
+/// Walks a physical plan and reports whether `name` appears, and how many times.
+fn count_plan_nodes(plan: &Arc<dyn ExecutionPlan>, name: &str) -> usize {
+    plan_nodes_where(plan, |node| node.name() == name).len()
 }
 
 /// Renders `plan` as an indented tree, so a failing boundary assertion shows what it found.
@@ -17277,14 +17286,9 @@ fn display_plan_tree(plan: &Arc<dyn ExecutionPlan>) -> String {
 
 /// The first node named `name` in `plan`, which is the boundary's own stage when there is one.
 fn find_plan_node(plan: &Arc<dyn ExecutionPlan>, name: &str) -> Option<Arc<dyn ExecutionPlan>> {
-    let mut stack = vec![Arc::clone(plan)];
-    while let Some(node) = stack.pop() {
-        if node.name() == name {
-            return Some(node);
-        }
-        stack.extend(node.children().into_iter().cloned());
-    }
-    None
+    plan_nodes_where(plan, |node| node.name() == name)
+        .first()
+        .cloned()
 }
 
 /// Every node named `name` that reads a `child_name`, in traversal order.
@@ -17296,20 +17300,13 @@ fn find_plan_nodes_over(
     name: &str,
     child_name: &str,
 ) -> Vec<Arc<dyn ExecutionPlan>> {
-    let mut found = Vec::new();
-    let mut stack = vec![Arc::clone(plan)];
-    while let Some(node) = stack.pop() {
-        if node.name() == name
+    plan_nodes_where(plan, |node| {
+        node.name() == name
             && node
                 .children()
                 .iter()
                 .any(|child| child.name() == child_name)
-        {
-            found.push(Arc::clone(&node));
-        }
-        stack.extend(node.children().into_iter().cloned());
-    }
-    found
+    })
 }
 
 /// The first node named `name` whose own child is named `child_name`.
@@ -17321,19 +17318,9 @@ fn find_plan_node_over(
     name: &str,
     child_name: &str,
 ) -> Option<Arc<dyn ExecutionPlan>> {
-    let mut stack = vec![Arc::clone(plan)];
-    while let Some(node) = stack.pop() {
-        if node.name() == name
-            && node
-                .children()
-                .iter()
-                .any(|child| child.name() == child_name)
-        {
-            return Some(node);
-        }
-        stack.extend(node.children().into_iter().cloned());
-    }
-    None
+    find_plan_nodes_over(plan, name, child_name)
+        .first()
+        .cloned()
 }
 
 /// A label rewrite that folds every series of one metric into one label set, answered from the
