@@ -23,7 +23,7 @@ use api::v1::SemanticType;
 use async_trait::async_trait;
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
-use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
+use common_recordbatch::{RecordBatch, RecordBatches, SendableRecordBatchStream};
 use common_time::Timestamp;
 use datafusion::physical_plan::display::{DisplayAs, DisplayFormatType};
 use datafusion::physical_plan::filter::FilterExec;
@@ -33,7 +33,7 @@ use datafusion::physical_plan::{ExecutionPlan, PhysicalExpr};
 use datafusion_physical_expr::expressions::{Column, IsNotNullExpr};
 use datafusion_physical_expr::{LexOrdering, PhysicalSortExpr};
 use datatypes::arrow::compute::SortOptions;
-use datatypes::schema::{ColumnSchema, SchemaRef};
+use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use store_api::metadata::{
     ColumnMetadata, RegionMetadata, RegionMetadataBuilder, RegionMetadataRef,
 };
@@ -42,7 +42,7 @@ use store_api::region_engine::{
     PartitionRange, PrepareRequest, QueryScanContext, RegionEngine, RegionRole, RegionScanner,
     RegionScannerRef, RegionStatistic, RemapManifestsRequest, RemapManifestsResponse,
     ScannerProperties, SetRegionRoleStateResponse, SettableRegionRoleState, SinglePartitionScanner,
-    SyncRegionFromRequest, SyncRegionFromResponse,
+    StatisticsSplit, SyncRegionFromRequest, SyncRegionFromResponse,
 };
 use store_api::region_request::RegionRequest;
 use store_api::storage::{ConcreteDataType, RegionId, ScanRequest, SequenceNumber};
@@ -321,14 +321,49 @@ pub(crate) fn unassigned_log_region_scan(ranges: Vec<PartitionRange>) -> Arc<dyn
     let scanner = Box::new(RangesScanner {
         metadata: log_region_metadata(),
         properties: ScannerProperties::new(vec![ranges], false, 0),
+        batches: None,
+        statistics_split: None,
     });
     Arc::new(RegionScanExec::new(scanner, ScanRequest::default(), None).unwrap())
+}
+
+/// Builds a count scan whose original row count is unknown, but whose residual
+/// has exact statistics. A scanner that can split append-mode rows may do this.
+pub(crate) fn metadata_aggr_region_scan(
+    exact_rows: usize,
+    residual_rows: usize,
+) -> Arc<dyn ExecutionPlan> {
+    let schema = Arc::new(Schema::new(vec![]));
+    let scanner = |rows, exact, statistics_split| RangesScanner {
+        metadata: log_region_metadata(),
+        properties: ScannerProperties::new(vec![vec![]], false, rows).with_exact_num_rows(exact),
+        batches: Some(
+            RecordBatches::try_new(
+                schema.clone(),
+                vec![RecordBatch::new_with_count(schema.clone(), rows).unwrap()],
+            )
+            .unwrap(),
+        ),
+        statistics_split,
+    };
+    let residual = scanner(residual_rows, Some(residual_rows), None);
+    let original = scanner(
+        exact_rows + residual_rows,
+        None,
+        Some(StatisticsSplit {
+            exact_rows,
+            residual: Box::new(residual),
+        }),
+    );
+    Arc::new(RegionScanExec::new(Box::new(original), ScanRequest::default(), None).unwrap())
 }
 
 #[derive(Debug)]
 struct RangesScanner {
     metadata: RegionMetadataRef,
     properties: ScannerProperties,
+    batches: Option<RecordBatches>,
+    statistics_split: Option<StatisticsSplit>,
 }
 
 impl DisplayAs for RangesScanner {
@@ -351,7 +386,9 @@ impl RegionScanner for RangesScanner {
     }
 
     fn schema(&self) -> SchemaRef {
-        self.metadata.schema.clone()
+        self.batches
+            .as_ref()
+            .map_or_else(|| self.metadata.schema.clone(), RecordBatches::schema)
     }
 
     fn metadata(&self) -> RegionMetadataRef {
@@ -369,7 +406,11 @@ impl RegionScanner for RangesScanner {
         _metrics: &ExecutionPlanMetricsSet,
         _partition: usize,
     ) -> Result<SendableRecordBatchStream, BoxedError> {
-        unreachable!("planning only")
+        Ok(self.batches.as_ref().expect("planning only").as_stream())
+    }
+
+    fn take_statistics_split(&mut self) -> Option<StatisticsSplit> {
+        self.statistics_split.take()
     }
 
     fn has_predicate_without_region(&self) -> bool {

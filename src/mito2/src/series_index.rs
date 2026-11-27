@@ -59,10 +59,8 @@ pub(crate) use crate::series_index::catalog::{
 pub(crate) use crate::series_index::purger::{IndexFilePurger, series_index_channel};
 pub use crate::series_index::searcher::SeriesIndexSearcher;
 pub(crate) use crate::series_index::task::{SeriesIndexTaskState, spawn_series_index_tasks};
-#[cfg(test)]
-pub(crate) use crate::series_index::version::narthex_series_entry;
 pub(crate) use crate::series_index::version::{
-    SeriesIndexFileHandle, SeriesIndexVersion, SeriesIndexVersionControl,
+    SeriesIndexFileHandle, SeriesIndexVersion, SeriesIndexVersionControl, narthex_series_entry,
 };
 pub use crate::series_index::writer::{
     SeriesIndexWriter, SeriesIndexWriterMetrics, SeriesIndexWriterOptions, series_index_schema,

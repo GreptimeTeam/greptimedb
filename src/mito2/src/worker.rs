@@ -810,8 +810,9 @@ impl<S: LogStore> WorkerStarter<S> {
         let running = Arc::new(AtomicBool::new(true));
         let (series_index_task_state, series_index_receiver) = if self.series_index_store.is_some()
         {
-            let (state, receiver) =
+            let (mut state, receiver) =
                 SeriesIndexTaskState::new(self.id, self.config.worker_channel_size);
+            state.worker = Some(sender.clone());
             (Some(Arc::new(state)), Some(receiver))
         } else {
             (None, None)
@@ -827,11 +828,13 @@ impl<S: LogStore> WorkerStarter<S> {
                 series_index_purger = Some(purger.clone());
                 spawn_series_index_tasks(
                     self.id,
+                    self.schema_metadata_manager.clone(),
                     store,
                     regions.clone(),
                     state,
                     receiver,
                     self.config.experimental_series_index_bucket_width,
+                    self.config.experimental_series_index_min_files,
                     purger,
                     purge_receiver,
                     self.series_index_disk_usage.clone(),

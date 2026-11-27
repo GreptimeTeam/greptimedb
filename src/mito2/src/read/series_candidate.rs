@@ -935,7 +935,7 @@ mod tests {
             index_uuid: FileId::random(),
             bucket_start: Timestamp::new_millisecond(0),
             bucket_end: Timestamp::new_millisecond(20),
-            source_file_ids: Vec::new(),
+            source_file_ids: Some(Vec::new()),
             min_file_sequence: 1,
             max_file_sequence: 2,
             compaction_window_secs: 1,
