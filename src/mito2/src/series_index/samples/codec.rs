@@ -20,10 +20,10 @@ pub(super) use crate::series_index::columnar::codec::{
 };
 use crate::series_index::samples::{MAX_ROWS, require, unsupported};
 
-fn zig(x: i64) -> u64 {
+pub(super) fn zig(x: i64) -> u64 {
     ((x as u64) << 1) ^ ((x >> 63) as u64)
 }
-fn unzig(x: u64) -> u64 {
+pub(super) fn unzig(x: u64) -> u64 {
     (x >> 1) ^ (0u64.wrapping_sub(x & 1))
 }
 
@@ -151,6 +151,14 @@ pub(super) fn decode_float(bytes: &[u8], rows: usize, nulls: u32) -> Result<Vec<
         (1..=MAX_ROWS).contains(&rows) && (nulls as usize) < rows,
         "invalid samples float count",
     )?;
+    decode_xor(bytes, rows, nulls as usize)
+}
+/// Decodes an [`encode_float`] body of `rows` values without the block row cap.
+///
+/// The caller bounds `rows`; allocation is still bounded by `bytes`, because every value takes
+/// at least one bitmap bit and every present value at least one byte.
+pub(super) fn decode_xor(bytes: &[u8], rows: usize, nulls: usize) -> Result<Vec<Option<u64>>> {
+    require(nulls < rows, "invalid samples value count")?;
     let mut c = Cursor::new(bytes);
     let bitmap = match c.u8()? {
         0 => {
@@ -168,7 +176,7 @@ pub(super) fn decode_float(bytes: &[u8], rows: usize, nulls: u32) -> Result<Vec<
             }
             let present: u32 = bitmap.iter().map(|b| b.count_ones()).sum();
             require(
-                present as usize + nulls as usize == rows,
+                present as usize + nulls == rows,
                 "samples validity count mismatch",
             )?;
             Some(bitmap)
@@ -177,7 +185,7 @@ pub(super) fn decode_float(bytes: &[u8], rows: usize, nulls: u32) -> Result<Vec<
     };
     let first = c.u64()?;
     require(
-        rows - nulls as usize - 1 <= c.remaining(),
+        rows - nulls - 1 <= c.remaining(),
         "sample float count exceeds bytes",
     )?;
     let mut previous = None;

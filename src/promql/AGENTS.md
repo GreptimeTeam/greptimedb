@@ -22,12 +22,13 @@ functions, vector matching and extension operators. Statement planning lives in
 ## Native execution boundary
 
 Native PromQL is an experimental, standalone evaluation route alongside the
-existing DataFusion PromQL path. It operates on one storage region, which may
-supply multiple scan partitions. Where a boundary must answer one logical
-series once, `SeriesRepartitionExec` merges that identity's fragments across
-scan partitions and recomputes a single close for it. Cross-region
-`SeriesMerge`/`Exchange` are still not implemented, so a logical series split
-across regions is not merged. Do not describe partition-local work as a global
+existing DataFusion PromQL path. A region may supply multiple scan partitions.
+Where a boundary must answer one logical series once, `SeriesRepartitionExec`
+merges that identity's fragments and recomputes a single close for it. A table
+partitioned on a non-tag column splits series across regions; the planner reads
+such a selector through `RawSeriesSource` and merges the fragments above the
+regions, keyed by the raw primary key, which every region must report
+identically for one series. Do not describe partition-local work as a global
 series merge.
 
 Vector operations use the existing vector-matching semantics; do not describe
@@ -65,6 +66,19 @@ A `FusedSeries` over more than one table stays on the frontend over one merge
 scan per selector, each carrying a `RawSeriesSource` that answers explicit-label raw frames.
 The frame schema is compared exactly at the merge scan, so its declaration and
 the region's output change together.
+
+## Comments and tests
+
+Docs on public items state the contract: inputs, guarantees, errors. Private
+comments record only what code cannot: Prometheus quirks (name the Prometheus
+function), memory-accounting preconditions, finality and ordering invariants.
+Do not restate code, narrate history ("used to", "this change"), or point at
+other comments. When a comment explains why a state cannot occur, prefer a type
+that rules it out.
+
+A new test must catch a concrete failure that existing tests and golden cases
+would miss: an unreached branch, or a wrong result on a reached one (e.g. the
+sign of a zero). Kernel values belong in golden cases, not in executor tests.
 
 ## Gotchas
 

@@ -4672,6 +4672,26 @@ mod tests {
         assert_eq!(idelta.sum, 12.0);
     }
 
+    /// Same samples as the native route's `equal_histogram_start_timestamps_are_not_a_reset`:
+    /// both routes must agree that a shared start timestamp is no reset, and that a bucket drop
+    /// under that start still is one.
+    #[test]
+    fn equal_start_timestamps_are_not_a_reset() {
+        let mut earlier = sample_histogram(2.0, 2.0, vec![1.0, 1.0]);
+        earlier.start_timestamp = Some(1500);
+        let mut dropped = sample_histogram(1.0, 1.0, vec![1.0]);
+        dropped.start_timestamp = Some(1500);
+        for (later, expected) in [(earlier.clone(), 0.0), (dropped, 1.0)] {
+            assert_eq!(
+                run_float_range_udf(
+                    NativeHistogramResets::scalar_udf(),
+                    vec![Some(earlier.clone()), Some(later)],
+                ),
+                Some(expected)
+            );
+        }
+    }
+
     #[test]
     fn extrapolated_rate_uses_start_timestamp_synthetic_zero() {
         let mut single = sample_histogram(1.0, 1.0, vec![1.0]);

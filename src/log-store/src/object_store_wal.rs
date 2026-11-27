@@ -76,6 +76,9 @@
 //! before sealing may retain extra history. Recovery reads release segments
 //! of the chain and seeds the obsolete watermarks from them, so a store
 //! opened later collects the objects of a region that is never opened again.
+//! [`ObjectStoreLogStore::unreleased_regions`] lists the regions that still
+//! hold unreleased entries, so that a caller can release those of regions
+//! that no longer need them.
 //!
 //! Recovery lists the objects, reads and verifies only the header, trailer and
 //! footer of each, and indexes the footers of the chain in sequence order to
@@ -111,4 +114,4 @@ mod store;
 
 pub use batch::entry_id;
 pub use reader::{NodeWalPrefix, ObjectStoreWalReader, ObjectStoreWalReaders, WalReadUpperBound};
-pub use store::{ObjectStoreLogStore, WalHole};
+pub use store::{ObjectStoreLogStore, UnreleasedRegions, WalHole};
