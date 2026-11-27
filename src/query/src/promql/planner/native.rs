@@ -503,9 +503,6 @@ impl PromPlanner {
         if statement_kind.is_some_and(|kind| kind != field_kind) {
             return Ok(declined("selectors_disagree_on_field_kind"));
         }
-        if reads_rows && field_kind != FieldKind::Float {
-            return Ok(declined("row_source_reads_floats_only"));
-        }
         *statement_kind = Some(field_kind);
         let series_schema = Arc::new(SeriesSchema {
             fields: fields

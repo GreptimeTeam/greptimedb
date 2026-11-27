@@ -16,7 +16,8 @@
 //!
 //! `fe_metric` reads two CSV files whose rows are in no particular order, and one sample of series
 //! `{job="api", instance="a"}` is present in both files with different values. `fe_labels` holds a tag that is `NULL` on some
-//! rows and `''` on others, and an integer tag. Expected answers are worked out by hand from Prometheus
+//! rows and `''` on others, and an integer tag. `fe_histogram` mirrors the sqlness case
+//! `promql/delta_exponential_histogram`. Expected answers are worked out by hand from Prometheus
 //! semantics, which keep one sample per timestamp per series, read an empty label as an absent one
 //! and compare label values as strings.
 
@@ -263,6 +264,51 @@ fn label_cases() -> Vec<Case> {
     ]
 }
 
+/// The statements and answers of the sqlness case `promql/delta_exponential_histogram`.
+fn histogram_cases() -> Vec<Case> {
+    let at = |secs: i64, promql: &str, value: Option<f64>| Case {
+        promql: promql.to_string(),
+        start: secs,
+        end: secs,
+        expected: value
+            .map(|value| vec![(secs * 1000, String::new(), value)])
+            .unwrap_or_default(),
+        legacy_differs: false,
+    };
+    vec![
+        at(
+            180,
+            "histogram_count(sum_over_time(fe_histogram[3m]))",
+            Some(45.0),
+        ),
+        at(
+            180,
+            "histogram_sum(sum_over_time(fe_histogram[3m]))",
+            Some(67.5),
+        ),
+        at(
+            180,
+            "histogram_count(sum_over_time(fe_histogram[3m]) / 180)",
+            Some(0.25),
+        ),
+        at(
+            180,
+            "histogram_fraction(1, 2, sum_over_time(fe_histogram[3m]))",
+            Some(1.0),
+        ),
+        at(
+            180,
+            "histogram_count(sum_over_time(fe_histogram[1m]))",
+            Some(15.0),
+        ),
+        at(
+            360,
+            "histogram_count(sum_over_time(fe_histogram[3m]))",
+            None,
+        ),
+    ]
+}
+
 fn write_csv(path: &std::path::Path, rows: &[(i64, &str, &str, f64)]) {
     let mut text = String::from("ts,job,instance,val\n");
     for (offset, job, instance, value) in rows {
@@ -342,6 +388,64 @@ async fn create_tables(instance: &Arc<Instance>, dir: &std::path::Path) {
         ),
     )
     .await;
+
+    // The fixture of `promql/delta_exponential_histogram`.
+    let histogram_file = prepare_path(&format!("{}/histogram.parquet", dir.display()));
+    execute(
+        instance,
+        "CREATE TABLE fe_histogram_source (
+            greptime_timestamp TIMESTAMP TIME INDEX,
+            histogram_schema INT, zero_threshold DOUBLE, sample_sum DOUBLE, reset_hint INT,
+            start_timestamp TIMESTAMP, count_i64 BIGINT, zero_count_i64 BIGINT,
+            absent_float DOUBLE
+        )",
+    )
+    .await;
+    execute(
+        instance,
+        "INSERT INTO fe_histogram_source VALUES
+            (60000, 0, 0.001, 15.0, 3, 0, 10, 0, NULL),
+            (120000, 0, 0.001, 30.0, 3, 60000, 20, 0, NULL),
+            (180000, 0, 0.001, 22.5, 3, 120000, 15, 0, NULL)",
+    )
+    .await;
+    execute(
+        instance,
+        &format!(
+            "COPY (
+                SELECT greptime_timestamp,
+                    named_struct(
+                        'schema', histogram_schema,
+                        'zero_threshold', zero_threshold,
+                        'sum', sample_sum,
+                        'reset_hint', reset_hint,
+                        'start_timestamp', start_timestamp,
+                        'custom_values', array_slice([sample_sum], 1, 0),
+                        'positive_span_offsets', [CAST(histogram_schema + 1 AS INT)],
+                        'positive_span_lengths', [CAST(histogram_schema + 1 AS INT)],
+                        'negative_span_offsets', array_slice([histogram_schema], 1, 0),
+                        'negative_span_lengths', array_slice([histogram_schema], 1, 0),
+                        'count_i64', count_i64,
+                        'zero_count_i64', zero_count_i64,
+                        'positive_buckets_i64', [count_i64],
+                        'negative_buckets_i64', array_slice([count_i64], 1, 0),
+                        'count_f64', absent_float,
+                        'zero_count_f64', absent_float,
+                        'positive_buckets_f64', array_slice([sample_sum], 1, 0),
+                        'negative_buckets_f64', array_slice([sample_sum], 1, 0)
+                    ) AS greptime_native_histogram
+                FROM fe_histogram_source
+            ) TO '{histogram_file}'"
+        ),
+    )
+    .await;
+    execute(
+        instance,
+        &format!(
+            "CREATE EXTERNAL TABLE fe_histogram WITH (location = '{histogram_file}', format = 'parquet')"
+        ),
+    )
+    .await;
 }
 
 async fn run(instance: &Arc<Instance>, case: &Case, native: bool) -> Result<Vec<Row>, String> {
@@ -417,7 +521,10 @@ fn same_rows(actual: &[Row], expected: &[Row]) -> bool {
 
 /// Runs every case and reports all failures together, so one run shows which shapes miss.
 async fn check_native_answers(instance: &Arc<Instance>, observer: &PlanObserver) {
-    let cases = metric_cases("fe_metric").into_iter().chain(label_cases());
+    let cases = metric_cases("fe_metric")
+        .into_iter()
+        .chain(label_cases())
+        .chain(histogram_cases());
     let mut failures = Vec::new();
     for case in cases {
         observer.take_node_names();

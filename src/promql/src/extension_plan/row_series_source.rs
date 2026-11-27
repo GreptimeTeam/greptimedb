@@ -18,7 +18,8 @@
 //! [`RowSeriesSourceExec`] requires its input hash-partitioned by the tags and sorted by
 //! `(tags, time index, fields)`, which the physical optimizer provides with a `RepartitionExec`
 //! and a `SortExec` that spills under memory pressure, and cuts the sorted rows into series chunks
-//! that carry their complete labels and `Float64` values.
+//! that carry their complete labels. Numeric fields are read as `Float64` and native histogram
+//! fields as histogram samples.
 //!
 //! A raw series holds one sample per timestamp, as Prometheus storage does. Rows that share
 //! labels and a timestamp are reduced to the first one in that order: the row whose field values,
@@ -32,6 +33,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use common_error::ext::BoxedError;
+use common_query::native_histogram::{histogram_samples_from_arrow, native_histogram_arrow_type};
 use common_query::series_frame::{
     PendingBatching, pack_raw_series_with, raw_series_frame_schema_with_ordering,
 };
@@ -263,11 +265,11 @@ impl RowColumns {
             .map(|field| {
                 let index = index_of(field)?;
                 let data_type = schema.field(index).data_type();
-                if data_type.is_integer() || data_type.is_floating() {
+                if data_type.is_integer() || data_type.is_floating() || is_histogram(data_type) {
                     Ok(index)
                 } else {
                     Err(DataFusionError::Plan(format!(
-                        "RowSeriesSource field {field:?} is {data_type}, not a float value"
+                        "RowSeriesSource field {field:?} is {data_type}, not a float or a native histogram"
                     )))
                 }
             })
@@ -308,6 +310,11 @@ impl RowColumns {
         LexOrdering::new(exprs)
             .ok_or_else(|| DataFusionError::Internal("empty RowSeriesSource ordering".into()))
     }
+}
+
+/// Whether a field column holds native histograms, which are passed on as histogram samples.
+fn is_histogram(data_type: &DataType) -> bool {
+    *data_type == native_histogram_arrow_type()
 }
 
 /// The physical node: cuts rows sorted by [`RowColumns::ordering`] into explicit-label raw series.
@@ -554,7 +561,14 @@ impl RowSeriesStream {
             .columns
             .fields
             .iter()
-            .map(|index| cast(batch.column(*index), &DataType::Float64).map_err(Into::into))
+            .map(|index| {
+                let field = batch.column(*index);
+                if is_histogram(field.data_type()) {
+                    Ok(Arc::clone(field))
+                } else {
+                    cast(field, &DataType::Float64).map_err(Into::into)
+                }
+            })
             .collect::<DataFusionResult<Vec<ArrayRef>>>()?;
 
         let mut kept = Vec::new();
@@ -616,11 +630,14 @@ impl RowSeriesStream {
         let samples = fields
             .iter()
             .map(|field| {
-                Ok(Samples::from_float(
-                    take(field, &indices, None)?
-                        .as_primitive::<Float64Type>()
-                        .clone(),
-                ))
+                let taken = take(field, &indices, None)?;
+                if is_histogram(taken.data_type()) {
+                    histogram_samples_from_arrow(taken.as_struct())
+                } else {
+                    Ok(Samples::from_float(
+                        taken.as_primitive::<Float64Type>().clone(),
+                    ))
+                }
             })
             .collect::<DataFusionResult<Vec<_>>>()?;
         let fields = SeriesFields::try_from_vec(samples)
