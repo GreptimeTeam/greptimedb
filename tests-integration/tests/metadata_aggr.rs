@@ -208,7 +208,11 @@ async fn test_metadata_count_logical_metric_skips_other_table_footers() {
     )
     .await;
     execute_sql(frontend, "ADMIN FLUSH_TABLE('physical_count')").await;
-    execute_sql(frontend, "INSERT INTO logical_a (ts, v, host) VALUES (3000, 3, 'a')").await;
+    execute_sql(
+        frontend,
+        "INSERT INTO logical_a (ts, v, host) VALUES (3000, 3, 'a')",
+    )
+    .await;
 
     let mut files = standalone
         .mito_engine
