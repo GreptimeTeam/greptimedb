@@ -12,14 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::assert_matches;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use api::v1::Rows;
 use common_base::Plugins;
+use common_error::ext::{ErrorExt, RetryHint};
 use common_recordbatch::RecordBatches;
-use store_api::region_engine::RegionEngine;
+use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{PathType, RegionCloseRequest, RegionOpenRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 
@@ -27,6 +29,7 @@ use crate::config::MitoConfig;
 use crate::engine::flush_test::MockRegionHook;
 use crate::engine::listener::AlterFlushListener;
 use crate::engine::region_hook::RegionHookRef;
+use crate::error::Error;
 use crate::test_util::{
     CheckpointTaskBlocker, CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows,
     rows_schema,
@@ -153,15 +156,28 @@ async fn test_engine_close_region_flush_on_close() {
             .is_empty()
     );
 
+    // A follower cannot flush, so the close fails and leaves the region open.
     engine
-        .handle_request(
-            region_id,
-            RegionRequest::Close(RegionCloseRequest {
-                flush_on_close: true,
-            }),
-        )
-        .await
+        .set_region_role(region_id, RegionRole::Follower)
         .unwrap();
+    let close = || {
+        RegionRequest::Close(RegionCloseRequest {
+            flush_on_close: true,
+        })
+    };
+    let err = engine.handle_request(region_id, close()).await.unwrap_err();
+    assert_eq!(RetryHint::Retryable, err.retry_hint());
+    assert_matches!(
+        err.into_inner().as_any().downcast_ref::<Error>().unwrap(),
+        Error::FlushableRegionState { .. }
+    );
+    assert!(engine.is_region_exists(region_id));
+
+    // The retry flushes once the region leads again.
+    engine
+        .set_region_role(region_id, RegionRole::Leader)
+        .unwrap();
+    engine.handle_request(region_id, close()).await.unwrap();
     assert!(!engine.is_region_exists(region_id));
 
     engine
@@ -186,6 +202,19 @@ async fn test_engine_close_region_flush_on_close() {
         .unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     assert_eq!(3, batches.iter().map(|b| b.num_rows()).sum::<usize>());
+
+    // A follower with nothing to flush still closes.
+    assert_eq!(Some(RegionRole::Follower), engine.role(region_id));
+    assert!(
+        engine
+            .get_region(region_id)
+            .unwrap()
+            .version()
+            .memtables
+            .is_empty()
+    );
+    engine.handle_request(region_id, close()).await.unwrap();
+    assert!(!engine.is_region_exists(region_id));
 }
 
 #[tokio::test]

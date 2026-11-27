@@ -31,11 +31,8 @@ use crate::histogram_eval::native::{CUSTOM_BUCKETS_SCHEMA, bound};
 
 type Buckets = Vec<(i32, f64)>;
 
-/// How often this thread built an owned histogram from a view, so a test can hold a path to the
-/// copies it should not make rather than to the shape of its arguments. Test-only: a copy and a
-/// borrow produce the same value, so a test comparing only values could not tell the two apart. The
-/// counter belongs to the calling thread, so tests running side by side cannot see each other's
-/// work.
+/// Counts owned histograms built from views on this thread, so a test can assert that a path
+/// borrows instead of copying; the values alone cannot tell the two apart.
 #[cfg(test)]
 pub(crate) mod copies {
     use std::cell::Cell;
@@ -45,13 +42,11 @@ pub(crate) mod copies {
         static MATERIALIZED: Cell<usize> = const { Cell::new(0) };
     }
 
-    /// Records one owned histogram built from a view.
     pub(crate) fn record_materialized() {
         MATERIALIZED.with(|built| built.set(built.get() + 1));
     }
 
-    /// The owned histograms built from a view on this thread since the last call, which starts a
-    /// new count.
+    /// Returns the count since the last call and resets it.
     pub(crate) fn take_materialized() -> usize {
         MATERIALIZED.with(|built| built.replace(0))
     }
@@ -63,19 +58,12 @@ pub(crate) struct FloatHistogram {
     pub(crate) reset_hint: CounterResetHint,
     /// The start timestamp of the sample this histogram was read from, in milliseconds.
     ///
-    /// It is metadata of GreptimeDB's histogram row, not part of the histogram value that
-    /// Prometheus's `FloatHistogram` models. This owned form preserves it -- [`Self::try_from_view`]
-    /// reads it off the sample and [`Self::push_to`] writes it back -- while every operation that
-    /// derives a histogram from its input ([`Self::add`], [`Self::kahan_add`], [`Self::mul`],
-    /// [`Self::div`], [`Self::compact`], [`Self::copy_to_schema`], with the constructors beside
-    /// them) clears it. [`Self::equals`] does not compare it.
-    ///
-    /// Both halves are this module's own policy and say nothing about how Prometheus propagates
-    /// these timestamps: its `FloatHistogram` does not carry the field, while its rate and reset
-    /// evaluation receives start timestamps through a separate channel. This crate's native range
-    /// kernel does not read the field; the legacy extrapolation path does, to synthesize a zero
-    /// point. So a selection that keeps the field preserves what was stored, and does not by itself
-    /// make a native rate agree with the legacy one.
+    /// GreptimeDB row metadata; Prometheus `FloatHistogram` has no such field. [`Self::try_from_view`]
+    /// reads it and [`Self::push_to`] writes it back. A histogram derived by an operation
+    /// ([`Self::add`], [`Self::kahan_add`], [`Self::sub`], [`Self::mul`], [`Self::div`],
+    /// [`Self::compact`], [`Self::copy_to_schema`], [`Self::empty_like`]) has none, and
+    /// [`Self::equals`] ignores it. The native range kernels read it to detect counter resets
+    /// ([`Self::detect_counter_reset_shifted`]) and to extrapolate `rate`/`increase` to a zero point.
     pub(crate) start_timestamp: Option<i64>,
     pub(crate) schema: i32,
     pub(crate) zero_threshold: f64,
@@ -143,10 +131,8 @@ impl FloatHistogram {
         })
     }
 
-    /// Estimates the heap held by the bucket lists, custom bounds and preserved span layout.
-    ///
-    /// A histogram can own tens of kilobytes of buckets that its struct size does not include.
-    /// Capacity slack and small header overestimates are acceptable for window reservations.
+    /// Estimated heap bytes of the bucket lists, custom bounds and span layout, for memory
+    /// reservations; may overestimate slightly.
     pub(crate) fn heap_bytes(&self) -> usize {
         fn buckets(side: &Buckets) -> usize {
             side.capacity() * std::mem::size_of::<(i32, f64)>()
@@ -170,11 +156,7 @@ impl FloatHistogram {
     }
 
     /// The spans of each side: the layout a view was read with, or the compacted layout of a
-    /// histogram this crate derived.
-    ///
-    /// [`crate::histogram_eval::legacy_bridge`] reads them to build the legacy
-    /// `NativeHistogram`, whose spans are explicit where this type keeps them in the bucket
-    /// indices.
+    /// derived histogram.
     pub(crate) fn spans(&self) -> [Vec<(i32, i32)>; 2] {
         self.layout
             .clone()
@@ -238,7 +220,6 @@ impl FloatHistogram {
 
     /// Go `Mul`.
     pub(crate) fn mul(&mut self, factor: f64) {
-        // A result this operation derived, so it carries no start timestamp of its own.
         self.start_timestamp = None;
         self.zero_count *= factor;
         self.count *= factor;
@@ -253,7 +234,6 @@ impl FloatHistogram {
 
     /// Go `Div`; dividing by zero removes every bucket.
     pub(crate) fn div(&mut self, scalar: f64) {
-        // A result this operation derived, so it carries no start timestamp of its own.
         self.start_timestamp = None;
         self.zero_count /= scalar;
         self.count /= scalar;
@@ -288,7 +268,6 @@ impl FloatHistogram {
 
     /// Go `Compact(0)`: drops empty buckets.
     pub(crate) fn compact(&mut self) {
-        // A result this operation derived, so it carries no start timestamp of its own.
         self.start_timestamp = None;
         self.positive.retain(|&(_, count)| count != 0.0);
         self.negative.retain(|&(_, count)| count != 0.0);
@@ -298,8 +277,6 @@ impl FloatHistogram {
     /// Go `CopyToSchema`; `target` must not exceed the schema.
     pub(crate) fn copy_to_schema(&self, target: i32) -> Result<Self> {
         if target == self.schema {
-            // The copy is a histogram this call produced, like the reduced one below: a start
-            // timestamp belongs to the sample that carried it, not to a value derived from it.
             return Ok(Self {
                 start_timestamp: None,
                 ..self.clone()
@@ -336,7 +313,6 @@ impl FloatHistogram {
     fn add_or_sub(&mut self, other: &Self, subtract: bool) -> Result<AddOutcome> {
         check_schemas(self, other)?;
         self.layout = None;
-        // A result this operation derived, so it carries no start timestamp of its own.
         self.start_timestamp = None;
         let mut outcome = AddOutcome {
             counter_reset_collision: self.adjust_counter_reset(other),
@@ -406,7 +382,6 @@ impl FloatHistogram {
     ) -> Result<(Self, AddOutcome)> {
         check_schemas(self, other)?;
         self.layout = None;
-        // A result this operation derived, so it carries no start timestamp of its own.
         self.start_timestamp = None;
         let mut outcome = AddOutcome {
             counter_reset_collision: self.adjust_counter_reset(other),
@@ -493,9 +468,8 @@ impl FloatHistogram {
 
     /// Go `newCompensationHistogram`: the layout of `self` with zero counts.
     ///
-    /// This is the zero compensation a fold starts from, and the only zero a compensated add may be
-    /// seeded with: an [`Self::empty_like`] histogram has no bucket indices, while the Kahan update
-    /// indexes the compensation by the value's positions.
+    /// A compensated add must start from this, not from [`Self::empty_like`]: the Kahan update
+    /// indexes the compensation by the value's bucket positions.
     pub(crate) fn new_compensation(&self) -> Self {
         Self {
             reset_hint: self.reset_hint,
@@ -663,19 +637,13 @@ impl FloatHistogram {
         bound(idx, self.schema, &self.custom_values)
     }
 
-    /// Detects a counter reset for a window whose timestamps an `offset` has already moved.
+    /// Detects a counter reset from `previous` to `self`, by start timestamp (Prometheus
+    /// `isStartTimestampReset`) or by `detect_reset`. `previous_ts` and `current_ts` are sample
+    /// times already shifted by `offset_ms`, as `range_eval` hands them.
     ///
-    /// `range_eval` hands its windows at `timestamp + offset_ms` while a histogram's start
-    /// timestamp stays on the axis the sender wrote it on, so one of the two has to move. The
-    /// window timestamps are moved back here rather than the start timestamps forward, because a
-    /// start of `0` means "the sender stated none" and moving it forward can cancel the offset
-    /// into a real instant: a start of 2500ms under `offset -2.5s` would become that `0` and stop
-    /// being read as a reset. Restoring the sample times keeps the absence meaning what it means.
-    ///
-    /// The subtraction wraps, which is what Go's `int64` arithmetic does and what
-    /// [`crate::range_eval::function::extrapolation_factor`] relies on for the same reason: real
-    /// timestamps are nowhere near the range where the two disagree, and wrapping cannot turn a
-    /// missing start timestamp into a present one.
+    /// The sample times are shifted back rather than the start timestamps forward: a start of `0`
+    /// means none was stated, and shifting could turn a real start into `0` (2500ms under
+    /// `offset -2.5s`). The subtraction wraps, like Go `int64` arithmetic.
     pub(crate) fn detect_counter_reset_shifted(
         &self,
         previous: &Self,

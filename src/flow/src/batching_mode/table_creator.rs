@@ -49,14 +49,10 @@ pub(super) fn create_table_with_expr(
                 build_by_sql_schema(plan)?
             }
         }
-        QueryType::Tql => {
-            // first try build from aggr, then from tql schema because tql query might not have aggr node
-            if let Some(table_def) = build_pk_from_aggr(plan)? {
-                table_def
-            } else {
-                build_by_tql_schema(plan)?
-            }
-        }
+        // Every string column of a PromQL answer is a label of its output series. An aggregate
+        // inside the plan does not tell which: in `m / scalar(sum(m))` it groups by time alone
+        // while the answer keeps every label of `m`.
+        QueryType::Tql => build_by_tql_schema(plan)?,
     };
     let first_time_stamp = table_def.ts_col;
     let primary_keys = table_def.pks;

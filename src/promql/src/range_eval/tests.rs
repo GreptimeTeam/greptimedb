@@ -30,8 +30,7 @@ use datatypes::series::histogram::{
 };
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{
-    DenseSamplesRef, FieldSpec, HistogramSamples, SampleRef, Samples, Series, SeriesFields,
-    SeriesSchema,
+    FieldSpec, HistogramSamples, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
 };
 use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
 use datatypes::series::{Label, SeriesLabels};
@@ -105,7 +104,7 @@ fn probe(window: FloatWindow<'_>) -> Option<f64> {
     Some((hash >> 11) as f64)
 }
 
-/// The resets of a window by scanning it, the way the kernels used to before the index.
+/// The resets of a window by scanning it, independent of the evaluator's reset index.
 fn scanned_resets(values: &[f64]) -> Vec<CounterReset> {
     (1..values.len())
         .filter(|&index| values[index] < values[index - 1])
@@ -224,14 +223,6 @@ fn random_chunks(rng: &mut StdRng, rows: &[Row], fields: usize, host: u64) -> Ve
     chunks
 }
 
-/// The absolute grid position `series` starts at.
-fn grid_start(series: &Series) -> usize {
-    series
-        .time
-        .first_position()
-        .unwrap_or_else(|| panic!("expected a grid series, got {:?}", series.time))
-}
-
 /// How many rows of `series` hold a value in any field.
 fn rows_with_a_value(series: &Series) -> usize {
     if series.time.grid().is_none() {
@@ -284,17 +275,10 @@ fn evaluate_series(evaluator: &mut RangeEvaluator, series: &Series) -> Vec<Evalu
     chunks
 }
 
-/// Folds the chunks of one series into one dense series, the way a consumer that keeps every value
-/// would, and checks the chunk protocol: absolute ranges, never going backwards, all of the same
-/// series, and one closing chunk last.
+/// Folds the chunks of one series into one dense series and checks the chunk protocol: positions
+/// never go back, every chunk has the same metric, and exactly one closing chunk comes last.
 ///
-/// The result is deliberately dense -- the gaps between chunks become null rows -- because a value
-/// comparison wants one series over the whole span. Row counts must never be read off this: doing
-/// so would hide exactly the allocation this change removes.
-///
-/// The range check is explicit rather than left to the builder, whose own ordering check only sees
-/// the rows holding a value: a closing chunk with no rows must still start at or after the end of
-/// the previous chunk, and an empty chunk at a wrong position is exactly what would pass otherwise.
+/// The result is dense (gaps become null rows), so row counts must not be read off it.
 fn fold_chunks(chunks: &[EvaluatedChunk], schema: &Arc<SeriesSchema>) -> Option<Series> {
     let metric = chunks
         .first()
@@ -311,8 +295,6 @@ fn fold_chunks(chunks: &[EvaluatedChunk], schema: &Arc<SeriesSchema>) -> Option<
         assert!(!closing, "a chunk follows the closing chunk");
         closing = chunk.is_last;
         assert_eq!(chunk.series.metric, metric, "a chunk changed the series");
-        // The chunk says which absolute positions it holds: a chunk of several runs must not be
-        // read as the envelope from its first to its last one.
         let mut first = None;
         let mut rows_run: Vec<(usize, usize)> = Vec::new();
         for (position, row) in chunk.series.time.positions() {
@@ -330,7 +312,6 @@ fn fold_chunks(chunks: &[EvaluatedChunk], schema: &Arc<SeriesSchema>) -> Option<
                 .unwrap_or(first);
             previous_end = last + 1;
         }
-        // One forward cursor per field, driven by the rows the chunk carries.
         let mut fields: Vec<_> = chunk
             .series
             .fields
@@ -353,7 +334,6 @@ fn fold_chunks(chunks: &[EvaluatedChunk], schema: &Arc<SeriesSchema>) -> Option<
                     }
                 })
                 .collect();
-            // Positions only increase across chunks, so an overlap is an error here.
             if values.iter().any(|value| value.is_some()) {
                 assert!(
                     rows[position].is_none(),
@@ -372,11 +352,8 @@ fn fold_chunks(chunks: &[EvaluatedChunk], schema: &Arc<SeriesSchema>) -> Option<
     dense_series(&rows, schema.clone(), metric)
 }
 
-/// Builds one series covering every row of `rows`, with a null where no chunk held a value.
-///
-/// This is deliberately not the builder: the builder hands out one piece per run of valued
-/// positions, and a value comparison wants a single dense series. Row counts must never be read
-/// off this -- doing so would hide exactly the allocation this change removes.
+/// Builds one dense series over `rows`, with a null where no chunk held a value. Unlike the
+/// builder, it does not skip empty rows.
 fn dense_series(
     rows: &[Option<Vec<Option<GridSample>>>],
     schema: Arc<SeriesSchema>,
@@ -858,18 +835,9 @@ fn assert_same_series(actual: Option<&Series>, expected: Option<&Series>, contex
     }
 }
 
-/// `rate` and `increase` over random input, computed twice: by the batch kernel and by the
-/// per-window path.
-///
-/// Both evaluators are built by `try_new` and differ in nothing but the dispatch shape, and both
-/// kernels reach `extrapolated_rate_of`, so the results have to be bit-identical. A difference
-/// means the batch read a different set of samples, evaluated at a different time, or corrected a
-/// different reset: a window bound that disagrees with the per-window path.
-///
-/// The rows mix gaps, stale markers, counter resets and native histogram samples, the last so
-/// that some grid points take the mixed-window fallback, where a pending batch has to flush
-/// before the point is decided on the per-window path. The random chunk splits are what make
-/// `advance` drop samples mid-series, so spans that outlived one would read shifted samples.
+/// The batch and per-window paths must agree to the bit. Histograms in the input force the
+/// mid-batch flush to the per-window path, and random chunk splits make `advance` drop samples
+/// under pending spans.
 #[test]
 fn batch_counter_functions_match_the_per_window_path_on_random_input() {
     let mut batch_calls = 0;
@@ -889,10 +857,8 @@ fn batch_counter_functions_match_the_per_window_path_on_random_input() {
             RangeEvaluator::try_new(&raw_schema(fields), grid.clone(), window, function).unwrap();
         let mut per_window =
             RangeEvaluator::try_new(&raw_schema(fields), grid.clone(), window, function).unwrap();
-        // The per-window path is the same evaluator without the batch kernel. `with_kernel`,
-        // which the other differential tests use, rejects native histogram samples, and these
-        // series carry some, so removing the batch form is the only switch that leaves the rest
-        // of the evaluation identical.
+        // The per-window path is the same evaluator with the batch kernel removed; `with_kernel`
+        // would reject the histogram samples.
         per_window.batch = None;
         // One evaluator serves several series, so state must not leak between them.
         for host in 0..3 {
@@ -927,9 +893,6 @@ fn batch_counter_functions_match_the_per_window_path_on_random_input() {
     );
 }
 
-/// A chunk of entirely present float columns is appended in bulk, and that is the path the test
-/// asserts: the per-sample loop produces the same output, so comparing values alone could not
-/// tell whether the bulk path ran.
 #[test]
 fn an_ordinary_float_chunk_is_appended_in_bulk() {
     let rows: Vec<Row> = (0..5)
@@ -949,9 +912,7 @@ fn an_ordinary_float_chunk_is_appended_in_bulk() {
     assert_eq!(evaluator.bulk_ingest_count(), 1);
 }
 
-/// A field holding native histogram samples keeps its windows on the histogram path, where the
-/// mixed-window rules decide the result. Letting such a chunk take the bulk path would drop the
-/// histograms and read the floats alone, so the chunk has to fall back to the per-sample loop.
+/// The bulk path reads floats only, so a chunk holding histograms must take the per-sample loop.
 #[test]
 fn a_chunk_with_histograms_is_not_appended_in_bulk() {
     let histogram = "0/0/0/4014000000000000/4014000000000000/1/0_1/4014000000000000///";
@@ -1040,9 +1001,6 @@ fn histogram_chunk(schema: &SeriesSchema, buckets: i32, ts: i64) -> RawSeriesChu
 }
 
 /// The single histogram sample of [`histogram_chunk`], read with `start_timestamp`.
-///
-/// A sample carries the start timestamp a scan read it with, and it is payload rather than a
-/// property of the value.
 fn histogram_chunk_from(
     schema: &SeriesSchema,
     buckets: i32,
@@ -1092,12 +1050,8 @@ fn histogram_chunk_from(
     .unwrap()
 }
 
-/// A counter histogram whose only sample in the window carries a start timestamp answers a rate.
-///
-/// The existing planner allows this with a single sample: the start timestamp is a synthetic zero
-/// inside the window, so the increase since it is the sample itself and the rate is that over the
-/// range. A window too narrow to hold that start, or a sample without one, has nothing to measure
-/// against and answers nothing - which is what the second half checks.
+/// The start timestamp of a single sample is a synthetic zero inside the window, so the sample
+/// itself is the increase. Without a start inside the window there is no answer.
 #[test]
 fn a_single_histogram_with_a_start_timestamp_answers_a_rate() {
     let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(60_000, 60_000, 1).unwrap()).unwrap());
@@ -1318,15 +1272,9 @@ fn synthetic_zero_still_extrapolates_to_the_window_end() {
         }
     }
 
-    // Two real samples, where the two spans finally differ: the sampled interval runs from the
-    // synthetic zero (3000 - 1000) while the average interval is measured between the real samples
-    // (3000 - 2000 over one step). That is 2000ms against 1000ms, so both ends fall past
-    // 1.1 * 1000ms and back to half of it, and the counter's zero point then takes the start to 0:
-    // the factor is (2000 + 0 + 500) / 2000 = 1.25. Measuring the average from the synthetic zero
-    // instead makes it 2000ms, leaves both ends inside 1.1 * 2000ms and answers 1.75 -- the swap
-    // this geometry fails on rather than passes by agreeing with itself. The zero adds its own
-    // sample back, so the count is (4 - 2) + 2 = 4, and Prometheus answers 4 * 1.25 = 5 for the
-    // increase and 4 * 1.25 / 4 = 1.25 for the rate.
+    // Sampled interval 2000ms from the synthetic zero, average interval 1000ms between the real
+    // samples: factor (2000 + 0 + 500) / 2000 = 1.25 (1.75 if the average were measured from the
+    // zero). The zero adds the first sample back: count (4 - 2) + 2 = 4, so increase 5, rate 1.25.
     for (function, expected) in [(RangeFunction::Increase, 5.0), (RangeFunction::Rate, 1.25)] {
         let mut evaluator = RangeEvaluator::try_new(
             &schema,
@@ -1383,9 +1331,7 @@ fn single_histogram_start_timestamp_is_compared_on_shifted_axis() {
     );
     let series = fold_chunks(&chunks, evaluator.output_schema()).unwrap();
     match series.fields.as_slice()[0].cursor().at(0).unwrap() {
-        // A computed rate carries no start timestamp of its own, so the shifted comparison is
-        // pinned by the value alone: this sample answers only if its start timestamp was compared
-        // after the offset moved the window, and an empty position otherwise.
+        // Answers only if the start timestamp is compared on the shifted axis.
         SampleRef::Histogram(histogram) => {
             assert!((histogram.count - 2.0 / 3.0).abs() < 1e-12);
             assert_eq!(histogram.start_timestamp, None);
@@ -1397,11 +1343,8 @@ fn single_histogram_start_timestamp_is_compared_on_shifted_axis() {
     }
 }
 
-/// Two samples sharing a start timestamp never restarted between them, even when that start is
-/// later than the earlier sample: Prometheus `isStartTimestampReset` answers false on
-/// `prevStartTimestamp == currStartTimestamp` before any other check (promql/functions.go:761).
-/// That only removes the start-timestamp evidence: a bucket drop under the same start is still a
-/// reset, because `resets()` ORs in `DetectReset`.
+/// Prometheus `isStartTimestampReset` answers false for equal start timestamps before any other
+/// check; a bucket drop under the same start is still a reset (`DetectReset`).
 #[test]
 fn equal_histogram_start_timestamps_are_not_a_reset() {
     let schema = raw_schema(1);
@@ -1435,12 +1378,8 @@ fn equal_histogram_start_timestamps_are_not_a_reset() {
     }
 }
 
-/// A first histogram whose count is negative is not extrapolated towards zero.
-///
-/// The zero point is `first.count / increase`, and a negative one would pull the sampled start
-/// *backwards* (`duration_to_zero < duration_to_start`), handing the counter time it never spent
-/// below zero. Prometheus guards it with `first.count >= 0`, which is what the histogram route now
-/// reads too: without the guard this window answers 15 instead of 24.
+/// Prometheus extrapolates towards zero only when `first.count >= 0`; without the guard this
+/// window answers 15 instead of 24.
 #[test]
 fn a_negative_first_histogram_count_is_not_extrapolated_towards_zero() {
     let schema = raw_schema(1);
@@ -1530,18 +1469,9 @@ fn describe_sample(sample: Option<SampleRef<'_>>) -> String {
     }
 }
 
-/// A function that hands back the sample it selected hands back that sample's payload.
-///
-/// `last_over_time` and `first_over_time` select a sample instead of computing one, so the
-/// histogram that leaves them is the histogram that arrived, start timestamp included. The window
-/// here holds two samples that differ in bucket count and in start timestamp, so the count and the
-/// timestamp together say which one was selected rather than only that some timestamp survived:
-/// the last sample for `last_over_time`, the first one for `first_over_time`. What this pins is
-/// that the selection passes the stored payload through; it does not pin a Prometheus result, whose
-/// histogram values carry no such field, and it does not claim that a native rate reads the field
-/// afterwards. A histogram computed from samples carries none, as
-/// `histogram_eval::tests::a_start_timestamp_belongs_to_a_read_histogram_and_not_to_a_computed_one`
-/// pins for the operations that build one.
+/// `last_over_time` and `first_over_time` pass the selected sample through, start timestamp
+/// included. The two samples differ in both count and start, so the pair identifies which one
+/// was selected.
 #[test]
 fn a_selected_histogram_keeps_its_start_timestamp() {
     let schema = raw_schema(1);
@@ -1553,9 +1483,6 @@ fn a_selected_histogram_keeps_its_start_timestamp() {
         histogram_chunk_from(&schema, 1, 0, Some(first_start), false),
         histogram_chunk_from(&schema, 2, 5_000, Some(last_start), true),
     ];
-    // The histogram of every row the function hands out, read off the output's own views: the
-    // bucket count tells the selected sample apart from any other, the start timestamp is the
-    // payload this test is about.
     let selected = |function: RangeFunction| -> Vec<(usize, f64, Option<i64>)> {
         let mut evaluator = RangeEvaluator::try_new(
             &schema,
@@ -1601,14 +1528,8 @@ fn a_selected_histogram_keeps_its_start_timestamp() {
     );
 }
 
-/// A histogram computed from a window carries no start timestamp, even when the window holds one.
-///
-/// `sum_over_time` computes a histogram rather than selecting one, so the timestamp the sample was
-/// read with is not part of the result -- the rule the histogram operations themselves follow, as
-/// `histogram_eval::tests::a_start_timestamp_belongs_to_a_read_histogram_and_not_to_a_computed_one`
-/// pins. The fold clears the field while adding, so a window holding two histograms already loses
-/// it; a window holding one must not depend on that, or whether a result carries the field would
-/// say how many samples the window held rather than what the function did.
+/// A computed histogram carries no start timestamp, even from a single-sample window, where the
+/// fold performs no add that would clear it.
 #[test]
 fn a_computed_histogram_drops_its_start_timestamp() {
     let schema = raw_schema(1);
@@ -1653,15 +1574,8 @@ fn a_computed_histogram_drops_its_start_timestamp() {
     );
 }
 
-/// A window retaining a native histogram is charged for the payload it owns, not only the slot.
-///
-/// The histogram sample below stays ahead of the second grid point's window, so the evaluator keeps
-/// it, and the two runs differ in nothing but the number of buckets on the positive side: 4 and
-/// 4096. Those buckets are `(index, count)` pairs on the heap, which no `size_of` of the struct
-/// shows -- about 64 KiB for the wider one. The property is that this payload dominates the
-/// estimate, not that it is counted to the byte: the wider histogram alone has to be reported as at
-/// least half the physical width of its buckets, and the narrow one has to stay far below that. A
-/// figure counting slots alone would report one number for both.
+/// A retained histogram is charged for its heap buckets, not only its slot: 4096 buckets must
+/// show up in the estimate where 4 do not.
 #[test]
 fn a_retained_histogram_is_charged_for_its_buckets() {
     let retained = |buckets: i32| -> usize {
@@ -1677,9 +1591,7 @@ fn a_retained_histogram_is_charged_for_its_buckets() {
                 anchor_ms: None,
                 modifier: None,
             },
-            // A function that counts the histogram, so what the row holds is a float: the two
-            // figures then differ in the payload of the retained sample alone, not in what the row
-            // boxes beside it.
+            // Counts the histogram, so the row holds a float and only the retained payload differs.
             RangeFunction::CountOverTime,
         )
         .unwrap();
@@ -1704,15 +1616,8 @@ fn a_retained_histogram_is_charged_for_its_buckets() {
     );
 }
 
-/// The payload a retained histogram is charged for is released with the sample.
-///
-/// The histogram below is most of what the evaluator holds, and it stays inside the second grid
-/// point's window: a push that only reaches the first point retains it. The chunk at 30 s is beyond
-/// the window of every later point, so the evaluation that push triggers drops the histogram while
-/// the series is still open. The estimate must come back down by its payload: one that charges at
-/// admission and never releases it would keep reporting the history of every histogram the series
-/// carried. The closing chunk then drains what is left and ends the series, so the estimate falls
-/// back to the field and row buffers' capacity, with no series identity and no histogram payload.
+/// A histogram's payload is released when a later window drops it while the series is still
+/// open, and nothing of the series is charged after the close.
 #[test]
 fn an_evicted_histogram_releases_its_payload() {
     let schema = raw_schema(1);
@@ -1764,11 +1669,7 @@ fn an_evicted_histogram_releases_its_payload() {
     );
 }
 
-/// A fixed-size window over a long series of histograms reports a fixed size.
-///
-/// Each push adds one histogram and the next point's window drops the one before it, so the
-/// payload charged at admission has to come back at eviction. A counter that only grew would make
-/// the estimate follow the length of the series instead of the window over it.
+/// A fixed window over a long series of histograms keeps a bounded estimate.
 #[test]
 fn a_fixed_window_over_histograms_keeps_the_estimate_bounded() {
     let peak_retained = |chunks: i64| -> usize {
@@ -1802,13 +1703,8 @@ fn a_fixed_window_over_histograms_keeps_the_estimate_bounded() {
     );
 }
 
-/// A batch spanning more grid points than `EVALUATION_BATCH` flushes in the middle of one
-/// evaluation, and each field's windows come from that field's own samples.
-///
-/// Both properties are invisible to value comparisons over small single-field inputs: every field
-/// sharing field 0's spans, or the mid-evaluation flush never running, would still pass the
-/// golden cases (at most 20 points, one field). The comparison is against the per-window path,
-/// which is the same kernel without batching, so a disagreement is the batching's fault alone.
+/// More grid points than `EVALUATION_BATCH` and several fields: the golden cases (at most 20
+/// points, one field) reach neither the mid-evaluation flush nor per-field spans.
 #[test]
 fn a_batch_spanning_fields_and_the_flush_threshold_matches_the_per_window_path() {
     let points = 600;
@@ -1820,10 +1716,8 @@ fn a_batch_spanning_fields_and_the_flush_threshold_matches_the_per_window_path()
         anchor_ms: None,
         modifier: None,
     };
-    // Counter-like values, each field resetting at a different point, growing at a different
-    // rate, and missing at a different interval. The gaps are what make the fields' windows
-    // differ: a field reading another field's windows would then get a different number, which a
-    // shared dense layout would hide.
+    // Each field resets, grows and misses samples at its own interval, so the fields' windows
+    // differ.
     let mut totals = [0.0f64; 3];
     let rows: Vec<Row> = (0..points)
         .map(|index| {
@@ -1874,9 +1768,6 @@ fn a_batch_spanning_fields_and_the_flush_threshold_matches_the_per_window_path()
         .unwrap()
         .expect("the series completes");
 
-    // Fold the chunk back into one series first: a chunk's range reports the positions its push
-    // decided, which can include leading and trailing positions holding no value, while the
-    // comparison is against the trimmed series the per-window path produced.
     let schema = batch.output_schema();
     let batched = fold_chunks(std::slice::from_ref(&batched), schema);
     let expected = expand(&expected.series);
@@ -1887,12 +1778,7 @@ fn a_batch_spanning_fields_and_the_flush_threshold_matches_the_per_window_path()
     );
 }
 
-/// A window holding a native histogram sample keeps its grid point on the per-window path, since
-/// the batch kernel reads the floats alone and cannot reproduce the mixed-window rules.
-///
-/// The series is laid out so every grid point's window contains the histogram: three samples
-/// 10 s apart with the histogram on the first, and a window reaching 30 s back, so a window
-/// covering any grid point reaches timestamp 0.
+/// Every window here holds the histogram at 0 s, so no grid point may take the batch path.
 #[test]
 fn a_histogram_window_keeps_rate_on_the_per_window_path() {
     let histogram = "0/0/0/4014000000000000/4014000000000000/1/0_1/4014000000000000///";
@@ -1971,9 +1857,7 @@ fn empty_input_and_series_without_results() {
     };
     probe_evaluator(1, grid(0, 10, 4), window).finish().unwrap();
 
-    // A series whose samples all miss the grid still closes, and its closing chunk says the whole
-    // grid was decided: every point is a settled missing value, not a point still waiting. A
-    // settled point that holds no value is reported by the close itself, not by a row.
+    // A series whose samples all miss the grid still closes, on an empty chunk.
     let mut evaluator = probe_evaluator(1, grid(0, 10, 4), window);
     let after_grid = chunk(&[(31, vec![Some(1.0)])], 1, 0, true);
     let closed = evaluator
@@ -1988,8 +1872,7 @@ fn empty_input_and_series_without_results() {
         "no point of the grid holds a value"
     );
     assert!(all_missing(&closed.series));
-    // A series whose only sample is stale does the same: the row is dropped, the points behind it
-    // are decided.
+    // So does a series whose only sample is stale.
     let only_stale = chunk(&[(5, vec![Some(stale())])], 1, 1, true);
     let closed = evaluator
         .push(&only_stale)
@@ -2004,11 +1887,6 @@ fn empty_input_and_series_without_results() {
     evaluator.finish().unwrap();
 }
 
-/// A push that completes nothing must not hand out a chunk.
-///
-/// A position that settles to no value is not a row, so a push that settled only such positions
-/// has no run to hand out. Emitting an empty chunk instead would report progress the push did not
-/// make, and a consumer that keys on chunks would see a decision that never happened.
 #[test]
 fn a_push_that_completes_nothing_hands_out_no_chunk() {
     let window = RangeWindow {
@@ -2018,16 +1896,13 @@ fn a_push_that_completes_nothing_hands_out_no_chunk() {
         modifier: None,
     };
     let mut evaluator = probe_evaluator(1, grid(10, 10, 3), window);
-    // The only sample sits inside the first window, so the first point cannot be settled yet: no
-    // position is completed and the push has nothing to report.
+    // The only sample sits inside the first window, so no point is decided yet.
     let partial = chunk(&[(5, vec![Some(1.0)])], 1, 0, false);
     assert!(
         evaluator.push(&partial).unwrap().is_none(),
         "a push that completed no position must not hand out a chunk"
     );
 
-    // The closing push hands out the one position of the grid that holds a value, and that same
-    // chunk is the close: nothing follows it. The two positions without a value cost no row.
     let mut chunks = Vec::new();
     chunks.extend(
         evaluator
@@ -2053,9 +1928,7 @@ fn a_push_that_completes_nothing_hands_out_no_chunk() {
     evaluator.finish().unwrap();
 }
 
-/// A series whose last sample is behind the end of the grid still closes, on a chunk holding no
-/// positions: the remaining points have no values, and only the closing chunk tells the consumer
-/// that the series is over rather than still waiting for input.
+/// A series whose remaining points hold no value closes on an empty chunk after its last run.
 #[test]
 fn a_series_that_ends_early_still_closes() {
     let window = RangeWindow {
@@ -2076,9 +1949,7 @@ fn a_series_that_ends_early_still_closes() {
         (0, 2)
     );
 
-    // The last sample lies past every remaining window, so points 2 to 4 are decided to hold no
-    // value. They cost no row: the close is what reports that they are settled, and it starts
-    // where the last handed-out run ended.
+    // The last sample lies past every remaining window, so points 2 to 4 hold no value.
     let last = chunk(&[(45, vec![Some(3.0)])], 1, 0, true);
     let closed = evaluator.push(&last).unwrap().expect("a series closes");
     assert!(closed.is_last);
@@ -2090,68 +1961,7 @@ fn a_series_that_ends_early_still_closes() {
     assert_eq!(rows_with_a_value(&closed.series), 0);
 }
 
-/// A stretch of decided positions holding no value costs no row, and does not delay the close.
-///
-/// The positions are settled as soon as the sampler pushes past them, but settling them allocates
-/// nothing: a consumer learns they hold no value from the run that follows them, or from the
-/// close when nothing follows.
-#[test]
-fn decided_missing_positions_cost_no_rows_and_do_not_delay_the_close() {
-    // `rate` over a one-second window on grid 0,1,2,3,4s.
-    let window = RangeWindow {
-        range_ms: 1_000,
-        offset_ms: 0,
-        anchor_ms: None,
-        modifier: None,
-    };
-    let mut evaluator = RangeEvaluator::try_new(
-        &raw_schema(1),
-        grid(0, 1_000, 5),
-        window,
-        RangeFunction::Rate,
-    )
-    .unwrap();
-
-    // A: samples at -0.5s and 0s decide the point at 0s.
-    let a = chunk(
-        &[(-500, vec![Some(1.0)]), (0, vec![Some(2.0)])],
-        1,
-        0,
-        false,
-    );
-    let first = evaluator.push(&a).unwrap().expect("point 0 is decided");
-    assert!(!first.is_last);
-    assert_eq!((chunk_run(&first).start(), chunk_run(&first).len()), (0, 1));
-
-    // B settles 1s and 2s: neither yields a rate, and neither point can change once a sample at
-    // 4s arrives, since that sample lies past both windows. Nothing is handed out, because a
-    // position holding no value is not a row -- and the series has not ended, so there is no
-    // close to report yet.
-    let b = chunk(&[(2_000, vec![Some(3.0)])], 1, 0, false);
-    assert!(
-        evaluator.push(&b).unwrap().is_none(),
-        "settled positions holding no value are not rows"
-    );
-
-    // C closes the series. 3s and 4s hold no rate either, so the close carries the progress: it
-    // starts where the last row ended and holds none.
-    let c = chunk(&[(4_000, vec![Some(4.0)])], 1, 0, true);
-    let mut chunks = vec![first];
-    chunks.extend(evaluator.push(&c).unwrap());
-    let last = chunks.last().expect("a series always closes");
-    assert!(last.is_last);
-    assert_eq!((chunk_run(last).start(), chunk_run(last).len()), (1, 0));
-
-    // Folding the chunks reproduces the one point that holds a value; the empty stretch cost no
-    // row at any point along the way.
-    let folded = fold_chunks(&chunks, evaluator.output_schema()).expect("the series completed");
-    assert_eq!(folded.metric, output_metric(RangeFunction::Rate, 0));
-    assert_eq!((grid_start(&folded), rows_with_a_value(&folded)), (0, 1));
-}
-
-/// The closing chunk of a series is labelled like the chunks before it, including the metadata
-/// labels a function drops: `rate` removes `__name__`, and a consumer that keyed series by label
-/// set would see the same series split in two if the closing chunk kept it.
+/// An empty closing chunk drops `__name__` like the chunks before it.
 #[test]
 fn the_closing_chunk_is_labelled_like_the_chunks_before_it() {
     let window = RangeWindow {
@@ -2171,8 +1981,6 @@ fn the_closing_chunk_is_labelled_like_the_chunks_before_it() {
     assert!(!handed.is_last);
     assert_eq!(handed.series.metric.name(), None);
 
-    // The last sample is past every remaining window, so the close reports the settled positions
-    // that hold no value, and it must be labelled the same as the chunk before it.
     let last = chunk(&[(45, vec![Some(5.0)])], 1, 0, true);
     let mut chunks = vec![handed];
     chunks.extend(evaluator.push(&last).unwrap());
@@ -2195,11 +2003,8 @@ fn chunk_run(chunk: &EvaluatedChunk) -> &GridRange {
         .expect("this chunk was expected to cover a single run")
 }
 
-/// The `(start, len)` of every run of every chunk handed out, in order.
-///
-/// One chunk may carry several runs, separated by stretches holding no value; each is reported on
-/// its own, so a test comparing chunk boundaries always sees the positions that hold a value. A
-/// chunk holding no row at all reports the position it closes at, with a length of zero.
+/// The `(start, len)` of every run of every chunk, in order; an empty chunk reports
+/// `(position, 0)`.
 fn chunk_ranges(chunks: &[EvaluatedChunk]) -> Vec<(usize, usize)> {
     let mut ranges = Vec::new();
     for chunk in chunks {
@@ -2244,8 +2049,7 @@ fn one_ms() -> RangeWindow {
     }
 }
 
-/// Two samples a million positions apart cost two rows: a position holding no value is not a
-/// row, so the empty stretch between them is never materialised.
+/// Two samples a million positions apart cost two rows.
 #[test]
 fn a_huge_gap_costs_one_row_per_value() {
     let mut evaluator = pinpoint(one_ms());
@@ -2271,50 +2075,9 @@ fn a_huge_gap_costs_one_row_per_value() {
     evaluator.finish().unwrap();
 }
 
-/// A series whose first value comes late is addressed at that position: nothing is allocated for
-/// the positions before it.
+/// The blank stretch skipped across pushes costs no row, and the value after it is kept.
 #[test]
-fn a_very_late_first_value_allocates_nothing_before_it() {
-    let mut evaluator = pinpoint(one_ms());
-    let chunks = collect_chunks(
-        &mut evaluator,
-        &[chunk(&[(999_000, vec![Some(1.0)])], 1, 0, true)],
-    );
-
-    assert_eq!(chunk_ranges(&chunks), vec![(999_000, 1)]);
-    assert_eq!(total_rows(&chunks), 1);
-    assert!(chunks[0].is_last);
-    evaluator.finish().unwrap();
-}
-
-/// A series whose last value comes early closes on the value it has: the positions after it are
-/// settled and hold nothing, which the close reports without a row for any of them.
-#[test]
-fn a_very_early_last_value_closes_without_rows_for_the_rest() {
-    let mut evaluator = pinpoint(one_ms());
-    let first = chunk(&[(0, vec![Some(1.0)])], 1, 0, false);
-    let mut chunks = vec![evaluator.push(&first).unwrap().expect("point 0 is decided")];
-    assert!(!chunks[0].is_last);
-    chunks.extend(
-        evaluator
-            .push(&chunk(&[(5, vec![Some(2.0)])], 1, 0, true))
-            .unwrap(),
-    );
-
-    assert_eq!(chunk_ranges(&chunks), vec![(0, 1), (5, 1)]);
-    assert_eq!(
-        total_rows(&chunks),
-        2,
-        "the two positions holding a value, and no others"
-    );
-    assert!(chunks.last().unwrap().is_last);
-    evaluator.finish().unwrap();
-}
-
-/// A push that advances over a long blank stretch hands out nothing for it, and a later push still
-/// yields its own value: skipping the stretch loses no sample.
-#[test]
-fn a_blank_stretch_hands_out_nothing_and_loses_the_next_value() {
+fn a_blank_stretch_hands_out_nothing_and_keeps_the_next_value() {
     let mut evaluator = pinpoint(one_ms());
     let mut chunks = Vec::new();
     chunks.extend(
@@ -2347,94 +2110,6 @@ fn a_blank_stretch_hands_out_nothing_and_loses_the_next_value() {
     evaluator.finish().unwrap();
 }
 
-/// A series with no value anywhere still closes, exactly once, on a chunk holding no rows.
-#[test]
-fn a_series_without_any_result_closes_once() {
-    // The only sample lies before the grid, so no window contains it.
-    let mut evaluator = probe_evaluator(1, grid(5, 1, 1_000_000), one_ms());
-    let mut chunks = Vec::new();
-    chunks.extend(
-        evaluator
-            .push(&chunk(&[(0, vec![Some(1.0)])], 1, 0, true))
-            .unwrap(),
-    );
-
-    assert_eq!(chunks.len(), 1, "a series closes exactly once");
-    assert!(chunks[0].is_last);
-    assert_eq!(chunk_ranges(&chunks), vec![(0, 0)]);
-    assert_eq!(total_rows(&chunks), 0);
-    evaluator.finish().unwrap();
-}
-
-/// A valued prefix followed by an all-empty remainder still closes, and the remainder costs no
-/// row.
-#[test]
-fn a_valued_prefix_and_an_empty_remainder_still_close() {
-    let mut evaluator = pinpoint(one_ms());
-    let mut chunks = vec![
-        evaluator
-            .push(&chunk(&[(3, vec![Some(1.0)])], 1, 0, false))
-            .unwrap()
-            .expect("point 3 is decided"),
-    ];
-    assert_eq!(chunk_ranges(&chunks), vec![(3, 1)]);
-    assert!(!chunks[0].is_last);
-
-    // The last row is stale, so it is dropped and the remainder holds no value at all.
-    let last = chunk(&[(900_000, vec![Some(stale())])], 1, 0, true);
-    chunks.extend(evaluator.push(&last).unwrap());
-
-    assert_eq!(chunk_ranges(&chunks), vec![(3, 1), (4, 0)]);
-    assert_eq!(total_rows(&chunks), 1, "the remainder holds no rows");
-    assert!(chunks.last().unwrap().is_last);
-    evaluator.finish().unwrap();
-}
-
-/// Folding the chunks of a sparse series gives the same series as folding the same samples with a
-/// row for every position holding no value: a missing position and an uncovered one mean the same
-/// thing to a consumer.
-#[test]
-fn a_sparse_series_folds_like_the_same_data_with_explicit_nulls() {
-    let grid = grid(0, 1_000, 40);
-    let window = RangeWindow {
-        range_ms: 3_000,
-        offset_ms: 0,
-        anchor_ms: None,
-        modifier: None,
-    };
-    let rows = [
-        (0, vec![Some(1.0)]),
-        (1_000, vec![Some(2.0)]),
-        (2_000, vec![Some(3.0)]),
-        (20_000, vec![Some(4.0)]),
-        (21_000, vec![Some(5.0)]),
-        (39_000, vec![Some(6.0)]),
-    ];
-    let mut evaluator = probe_evaluator(1, grid.clone(), window);
-    let chunks = collect_chunks(&mut evaluator, &[chunk(&rows, 1, 0, true)]);
-    let folded = fold_chunks(&chunks, evaluator.output_schema()).expect("the series completed");
-
-    let expected = reference(&rows, &grid, window, 1, true, true);
-    let spread = expected.iter().filter(|row| row[0].is_some()).count();
-    assert_eq!(
-        total_rows(&chunks),
-        spread,
-        "a row per position holding a value, and none for the rest"
-    );
-    assert_eq!(
-        expand(&folded),
-        expected,
-        "the sparse result equals the one written as null rows"
-    );
-    evaluator.finish().unwrap();
-}
-
-/// The runs of one evaluated series share the evaluator's retained samples: a window reaching
-/// back across the gap to an earlier run reads both.
-///
-/// This is what makes a sparse inner result usable. Closing the series after its first run, or
-/// promoting each run to a series of its own, would leave the window at 10ms reading 3 alone
-/// instead of 2 + 3.
 #[test]
 fn a_window_reads_across_the_gap_between_runs_of_one_series() {
     let inner = grid(0, 1, 11);
@@ -2480,8 +2155,7 @@ fn a_window_reads_across_the_gap_between_runs_of_one_series() {
     evaluator.finish().unwrap();
 }
 
-/// The samples decide the rows, not the input chunking: the same logical data split at different
-/// boundaries folds to the same series over the same number of rows.
+/// The same data split at different chunk boundaries folds to the same series and row count.
 #[test]
 fn raw_chunk_boundaries_do_not_change_the_rows() {
     let grid = grid(0, 1_000, 40);
@@ -2514,8 +2188,6 @@ fn raw_chunk_boundaries_do_not_change_the_rows() {
         }
         let folded = fold_chunks(&chunks, evaluator.output_schema()).expect("the series completed");
         assert_eq!(expand(&folded), expected, "split {split:?} differs");
-        // No run ever spans a position holding no value, whatever the chunking: the rows of a run
-        // are consecutive grid positions, and the positions between two runs are the empty ones.
         for (start, len) in chunk_ranges(&chunks) {
             assert!(
                 len <= 3,
@@ -2525,9 +2197,6 @@ fn raw_chunk_boundaries_do_not_change_the_rows() {
         outcomes.push(total_rows(&chunks));
         evaluator.finish().unwrap();
     }
-    // Which chunk a run lands in follows the input boundaries, since a push has to hand its
-    // decided positions out before the next one changes them. What must not depend on chunking is
-    // the number of rows: an empty position never costs one.
     assert!(
         outcomes.windows(2).all(|pair| pair[0] == pair[1]),
         "chunking changed the rows handed out: {outcomes:?}"
@@ -2535,8 +2204,7 @@ fn raw_chunk_boundaries_do_not_change_the_rows() {
     assert_eq!(outcomes, vec![expected_rows; outcomes.len()]);
 }
 
-/// Values and nulls alternating: one row per value and one chunk per value, which is what this
-/// design costs for data that never holds two consecutive positions.
+/// Values and nulls alternating: one row and one run per value, all in one chunk.
 #[test]
 fn alternating_values_and_nulls_hand_out_one_row_per_value() {
     let mut evaluator = probe_evaluator(1, grid(0, 1, 10), one_ms());
@@ -2564,54 +2232,7 @@ fn alternating_values_and_nulls_hand_out_one_row_per_value() {
     evaluator.finish().unwrap();
 }
 
-/// Values and nulls alternating over 200,000 positions: 100,000 valued positions cost 100,000
-/// rows, not one per position, and each value is its own run.
-///
-/// The run count is the accepted cost of this design; the row count is what must not regress.
-#[test]
-fn interleaved_values_over_a_long_grid_cost_one_row_per_value() {
-    const GRID: u64 = 200_000;
-    let mut evaluator = probe_evaluator(1, grid(0, 1, GRID), one_ms());
-    let rows: Vec<Row> = (0..GRID)
-        .map(|index| {
-            let value = (index % 2 == 0).then_some(index as f64);
-            (index as i64, vec![value])
-        })
-        .collect();
-    let chunks = collect_chunks(&mut evaluator, &[chunk(&rows, 1, 0, true)]);
-
-    assert_eq!(
-        total_rows(&chunks),
-        (GRID / 2) as usize,
-        "one row per valued position, never one per position"
-    );
-    assert_eq!(
-        chunks.len(),
-        1,
-        "the whole series is decided by one push, so it arrives as one chunk"
-    );
-    assert!(chunks.last().unwrap().is_last);
-    assert_eq!(chunks.iter().filter(|chunk| chunk.is_last).count(), 1);
-    let runs: Vec<(usize, usize)> = chunks[0]
-        .series
-        .time
-        .runs()
-        .map(|run| (run.position, run.len))
-        .collect();
-    assert_eq!(
-        runs.len(),
-        (GRID / 2) as usize,
-        "every valued position is its own run"
-    );
-    for (start, len) in runs {
-        assert_eq!(len, 1, "every valued position is its own run");
-        assert_eq!(start % 2, 0, "only even positions hold a value");
-    }
-    evaluator.finish().unwrap();
-}
-
-/// An anchored selector broadcasts one value over every grid point, so every position holds one:
-/// the result is a single contiguous piece, not one piece per position.
+/// An `@`-anchored result fills every grid point, so it is one contiguous run.
 #[test]
 fn an_anchored_replay_stays_one_contiguous_piece() {
     let window = RangeWindow {
@@ -2643,8 +2264,7 @@ fn an_anchored_replay_stays_one_contiguous_piece() {
     }
 }
 
-/// Fields of one run stay row-aligned: a field with no value at a position another field fills
-/// keeps a null row there. That null is the layout, not a bridged gap.
+/// Fields of one run stay row-aligned: a field missing where another holds a value keeps a null.
 #[test]
 fn a_run_keeps_its_fields_aligned_and_nulls_only_the_missing_one() {
     let mut evaluator = probe_evaluator(2, grid(0, 1, 6), one_ms());
@@ -2871,8 +2491,7 @@ fn retains_only_samples_later_windows_need() {
     }
 }
 
-/// A counter whose every window contains resets, so the index holds entries the way a real
-/// counter does, still releases them as the samples they reach back to are dropped.
+/// Resets are released with the samples they reach back to.
 #[test]
 fn reset_index_is_released_with_the_samples_it_reaches_back_to() {
     let window = RangeWindow {
@@ -2890,8 +2509,6 @@ fn reset_index_is_released_with_the_samples_it_reaches_back_to() {
         evaluator
             .push(&chunk(piece, 1, 0, (index + 1) * 100 == rows.len()))
             .unwrap();
-        // Resets are released with the samples behind the next window, so they stay bounded by
-        // the same window plus one grid step the samples do, one reset per 10 samples.
         assert!(
             evaluator.fields[0].resets.len() <= 6,
             "{} resets after {} chunks: the index kept history no window can reach",
@@ -2901,11 +2518,8 @@ fn reset_index_is_released_with_the_samples_it_reaches_back_to() {
     }
 }
 
-/// The reset index, not a rescan of the window, decides which samples a window corrects. The
-/// samples are laid out so each rule is visible point by point: a reset is the first sample of a
-/// later chunk, a reset's predecessor sits exactly on a window's left edge and must not count,
-/// and a reset enters a window whole. The reported resets are compared instead of the function's
-/// output so a wrong position cannot hide inside a float's last bits.
+/// Pins each reset-index rule point by point: a reset as the first sample of a later chunk, a
+/// predecessor exactly on a window's left edge (not counted), and a reset entering a window whole.
 #[test]
 fn counter_resets_follow_the_window_and_survive_chunking() {
     // A counter that drops at index 3 (20 -> 5) and again at index 6 (25 -> 7), one sample per
@@ -2971,10 +2585,8 @@ fn counter_resets_follow_the_window_and_survive_chunking() {
     };
 
     // Windows (10 s, 30 s], (20 s, 40 s], (30 s, 50 s] and (40 s, 60 s].
-    // The first holds 20 and 5, so the reset at index 3 corrects it. The second's left edge is
-    // the sample before that reset, which a left-open window excludes, so the same reset must not
-    // count there. The fourth holds 25 and 7, corrected by the reset at index 6. The second field
-    // never corrects anything.
+    // The first holds 20 and 5 (reset at index 3). The second's left edge is the sample before
+    // that reset, so it does not count there. The fourth holds 25 and 7 (reset at index 6).
     let expected = [
         (vec![20_000, 30_000], vec![20.0], vec![]),
         (vec![30_000, 40_000], vec![], vec![]),
@@ -2998,9 +2610,7 @@ fn counter_resets_follow_the_window_and_survive_chunking() {
         );
     }
 
-    // The same samples pushed as a second series through the same evaluator: no buffer, cursor or
-    // index state of the first series may survive, so the second series reports exactly the same
-    // windows and resets.
+    // A second series through the same evaluator must report the same: no state may leak.
     recorded.lock().unwrap().clear();
     for (start, end) in pieces {
         let closed = end == rows.len();
@@ -3032,9 +2642,7 @@ fn recorded_of(expected: &[(Vec<i64>, Vec<f64>, Vec<f64>)]) -> Vec<(Vec<i64>, Ve
         .collect()
 }
 
-/// Missing samples shift which neighbours a reset sits between, and the shift differs per
-/// field. The resets each window reports are checked position by position instead of through a
-/// function's output, so a field paying for another field's resets shows up directly.
+/// Missing samples change which neighbours a reset sits between, independently per field.
 #[test]
 fn nulls_change_the_reset_positions_of_each_field_independently() {
     let rows: Vec<Row> = vec![
@@ -3079,8 +2687,7 @@ fn nulls_change_the_reset_positions_of_each_field_independently() {
     }
 
     // Field 0 never sees the missing 15, so 20 is followed directly by 5 and it resets once.
-    // Field 1 keeps the 15 and resets twice: 20 -> 15 and 15 -> 5. Both fields report their own
-    // resets even though they share a window and a chunk.
+    // Field 1 keeps the 15 and resets twice: 20 -> 15 and 15 -> 5.
     let reported = reported.lock().unwrap().clone();
     assert_eq!(reported.len(), 10, "five grid points, two fields");
     let expected = [
@@ -3096,9 +2703,8 @@ fn nulls_change_the_reset_positions_of_each_field_independently() {
     }
 }
 
-/// A random evaluated series on `grid`; values may carry the stale bit pattern, which computed
-/// input keeps as an ordinary NaN. The rows hold holes, so the series carries one run per stretch
-/// of positions holding a value.
+/// A random evaluated series on `grid`, with holes; values may carry the stale bit pattern, which
+/// computed input keeps as an ordinary NaN.
 fn random_evaluated(
     rng: &mut StdRng,
     grid: &Arc<EvalGrid>,
@@ -3219,8 +2825,6 @@ fn subquery_series_match_references() {
         )
         .unwrap();
         let expected = reference(&rows, &outer, window, fields, false, true);
-        // The same logical series arrives as a prefix and its closing rows, as a stream delivers
-        // it: the runs of both deliveries are folded together for the comparison.
         let evaluated = deliver_as_a_stream(&mut probe, &schema, &series, &mut rng);
         assert!(evaluated.last().expect("the input closes").is_last);
         let result = fold_chunks(&evaluated, probe.output_schema());
@@ -3639,8 +3243,8 @@ fn quantile_picks_the_signed_zero_go_picks() {
     }
 }
 
-/// Chunks after the last grid point are only validated, so nothing accumulates and the outcome
-/// does not depend on where the series is split.
+/// Samples past the last window are not retained, but a sample whose offset overflows still
+/// fails the series.
 #[test]
 fn samples_after_the_last_window_are_validated_but_not_retained() {
     let window = RangeWindow {
@@ -4085,9 +3689,8 @@ fn evaluated_schema(grid: &Arc<EvalGrid>) -> Arc<SeriesSchema> {
     })
 }
 
-/// A delivery holding no position decides nothing, so inside a series it is refused: it cannot be
-/// told from a stall, and the caller would wait for a result that is not coming. The same empty
-/// delivery carrying `is_last` is the series' close, and the identity initialises and closes.
+/// An empty evaluated delivery is an error unless it is `last`, where it opens and closes the
+/// series.
 #[test]
 fn an_empty_delivery_closes_only_when_it_is_last() {
     let outer = grid(0, 10, 4);
@@ -4099,7 +3702,6 @@ fn an_empty_delivery_closes_only_when_it_is_last() {
             .unwrap();
     execution_error(mid_series.push_series(&empty, false));
 
-    // The identity never produced a value, so the only chunk it hands out is the empty close.
     let mut evaluator =
         RangeEvaluator::try_new(&schema, outer.clone(), one_ms(), RangeFunction::SumOverTime)
             .unwrap();
@@ -4170,46 +3772,6 @@ fn a_valued_prefix_composes_with_an_empty_closing_chunk() {
     );
 }
 
-/// The empty closing chunk an evaluator produces is legal input for the next one: a pipeline that
-/// composes two evaluators must not reject its own output.
-#[test]
-fn an_empty_chunk_from_one_evaluator_closes_the_next() {
-    let outer = grid(0, 1_000, 4);
-    // A sample far past the grid closes a series whose every window stays empty, so the only chunk
-    // the evaluator hands out is the empty close.
-    let rows = [(100_000, vec![Some(1.0)])];
-    let mut upstream = probe_evaluator(1, outer.clone(), one_ms());
-    let produced = collect_chunks(&mut upstream, &[chunk(&rows, 1, 0, true)]);
-    upstream.finish().unwrap();
-    let closed = produced.last().expect("the series closes");
-    assert!(closed.is_last);
-    assert!(
-        closed.series.time.is_empty(),
-        "the closing chunk carries no row"
-    );
-
-    let schema = evaluated_schema(&outer);
-    let mut downstream =
-        RangeEvaluator::try_new(&schema, outer.clone(), one_ms(), RangeFunction::SumOverTime)
-            .unwrap();
-    let chunk = downstream
-        .push_series(&closed.series, true)
-        .unwrap()
-        .expect("the downstream series still closes");
-    assert!(chunk.is_last);
-    assert!(chunk.series.time.is_empty());
-    downstream.finish().unwrap();
-}
-
-// ---------------------------------------------------------------------------------------------
-// Acceptance: a fragmented result, end to end through the evaluator.
-//
-// These tests pin the observable shape of a sparse result as well as its values: one series per
-// logical output, one row per position that holds a value, and an axis that names where those rows
-// sit. The dense matrices they compare against are built by this module's reference and are never
-// fed back into the evaluator.
-// ---------------------------------------------------------------------------------------------
-
 /// A window of one step over a grid of `step_ms`: the point at `t` reads the sample sitting
 /// exactly on `t`, so a kernel that reports its last sample reports the input value unchanged.
 fn one_step_window(step_ms: i64) -> RangeWindow {
@@ -4221,97 +3783,7 @@ fn one_step_window(step_ms: i64) -> RangeWindow {
     }
 }
 
-/// A: a million-position grid holding two values, one a long way into the grid.
-///
-/// The span between them costs neither a row nor a field sample: the axis carries two rows and
-/// names two runs, and the shared grid -- one timestamp buffer for every result of the query -- is
-/// what turns a row into an instant.
-#[test]
-fn a_million_position_grid_with_two_values_is_one_series_of_two_rows() {
-    const SPAN: u64 = 1_000_000;
-    let grid = grid(0, 1_000, SPAN);
-    // `last_over_time` over a one-step window reports the sample sitting on the point.
-    let mut evaluator = RangeEvaluator::try_new(
-        &raw_schema(1),
-        grid.clone(),
-        one_step_window(1_000),
-        RangeFunction::LastOverTime,
-    )
-    .unwrap();
-    let rows = [(10_000, vec![Some(1.0)]), (900_000_000, vec![Some(2.0)])];
-    let chunks = collect_chunks(&mut evaluator, &[chunk(&rows, 1, 0, true)]);
-
-    // One series, not a piece per run: a push hands its decided rows over in one `Series`.
-    assert_eq!(
-        chunks.len(),
-        1,
-        "one push decides the whole series, so it arrives as one chunk, got {}",
-        chunks.len()
-    );
-    let closing = &chunks[0];
-    assert!(
-        closing.is_last,
-        "a one-push series closes on its only chunk"
-    );
-    let series = &closing.series;
-    assert_eq!(
-        run_ranges_of(closing),
-        vec![(10, 1), (900_000, 1)],
-        "two values a million positions apart are two runs"
-    );
-    assert_eq!(
-        series.time.len(),
-        2,
-        "the axis carries two rows, not the span"
-    );
-    assert_eq!(
-        series.fields.len(),
-        1,
-        "the evaluator kept its input's field"
-    );
-    let field = &series.fields.as_slice()[0];
-    assert_eq!(field.len(), 2, "the field holds one sample per carried row");
-    let values = match field.dense() {
-        Some(DenseSamplesRef::Float(values)) => values,
-        _ => panic!("the field is one dense float array"),
-    };
-    assert_eq!(
-        values.len(),
-        2,
-        "the value buffer is sized by the values, not by the span"
-    );
-    assert_eq!(values.values().as_ref(), &[1.0, 2.0]);
-
-    // What the axis does carry is the shared grid: every result of the query addresses rows on it.
-    assert_eq!(
-        series.time.grid().expect("a grid series").spec().len as usize,
-        SPAN as usize,
-        "the grid really holds a million positions"
-    );
-    assert_eq!(
-        series.time.timestamps().unwrap().len(),
-        2,
-        "the axis hands out two timestamps, not one per grid position"
-    );
-    assert_eq!(series.time.timestamp(0), Some(10_000));
-    assert_eq!(series.time.timestamp(1), Some(900_000_000));
-
-    // The reference: the result expands to a million slots, and exactly the two valued positions
-    // carry anything.
-    let expanded = expand(series);
-    assert_eq!(expanded.len(), SPAN as usize);
-    assert_eq!(
-        expanded.iter().filter(|row| row[0].is_some()).count(),
-        2,
-        "only the two pushed positions hold a value"
-    );
-    assert_eq!(expanded[10], vec![Some(1.0)]);
-    assert_eq!(expanded[900_000], vec![Some(2.0)]);
-    evaluator.finish().unwrap();
-}
-
-/// B: every position valued, so the result is one contiguous run and keeps the fast path: the
-/// axis is a `TimeAxis::Grid`, not a span list of one element.
+/// Every position valued: the axis is a single `GridRange`, not a run list of one element.
 #[test]
 fn a_contiguous_result_still_takes_the_single_range_fast_path() {
     const POINTS: u64 = 8;
@@ -4344,219 +3816,6 @@ fn a_contiguous_result_still_takes_the_single_range_fast_path() {
     evaluator.finish().unwrap();
 }
 
-/// B: alternating valued and missing positions: one series whose axis names one run per value, and
-/// one delivery for the whole series rather than one per run.
-///
-/// The measured numbers are 8 runs for 16 positions, handed out by 1 chunk.
-#[test]
-fn alternating_values_and_holes_arrive_in_one_delivery_over_many_runs() {
-    const POINTS: usize = 16;
-    let grid = grid(0, 1_000, POINTS as u64);
-    let mut evaluator = RangeEvaluator::try_new(
-        &raw_schema(1),
-        grid.clone(),
-        one_step_window(1_000),
-        RangeFunction::LastOverTime,
-    )
-    .unwrap();
-    // Every even position holds a value, every odd one holds none.
-    let rows: Vec<Row> = (0..POINTS)
-        .map(|index| {
-            let value = (index % 2 == 0).then_some(index as f64);
-            (index as i64 * 1_000, vec![value])
-        })
-        .collect();
-    let chunks = collect_chunks(&mut evaluator, &[chunk(&rows, 1, 0, true)]);
-
-    assert_eq!(chunks.len(), 1, "one push decides the whole series");
-    let series = &chunks[0].series;
-    let runs = run_ranges_of(&chunks[0]);
-    let expected: Vec<(usize, usize)> = (0..POINTS).step_by(2).map(|index| (index, 1)).collect();
-    assert_eq!(
-        runs, expected,
-        "every valued position is its own run, at its own absolute position"
-    );
-    assert_eq!(runs.len(), POINTS / 2, "8 runs over 16 positions");
-    assert!(
-        chunks.len() * 4 <= runs.len(),
-        "deliveries ({}) must stay far below the runs ({}): one delivery per run would be the \
-         envelope strategy this change removes",
-        chunks.len(),
-        runs.len()
-    );
-    assert_eq!(series.time.len(), POINTS / 2, "one row per value");
-    assert_eq!(chunks.iter().filter(|chunk| chunk.is_last).count(), 1);
-    evaluator.finish().unwrap();
-}
-
-/// B: the same positions delivered as one series with holes and as several pushes of the same
-/// logical series give the same dense result.
-///
-/// A stream hands a series over in pieces, so where the piece boundaries fall must not decide the
-/// answer: only the axis does.
-#[test]
-fn a_series_with_holes_and_the_same_positions_in_several_pushes_expand_alike() {
-    let outer = grid(0, 1_000, 16);
-    let schema = evaluated_schema(&outer);
-    let window = one_step_window(1_000);
-    let labels = Labels::from([("job".to_string(), "x".to_string())]);
-    let points = Points::from([
-        (0, f64::to_bits(1.0)),
-        (1, f64::to_bits(2.0)),
-        (3, f64::to_bits(4.0)),
-        (8, f64::to_bits(8.0)),
-        (9, f64::to_bits(16.0)),
-        (15, f64::to_bits(32.0)),
-    ]);
-
-    // One series, holes as explicit nulls between the valued positions.
-    let holed = series_of(&schema, &labels, &points).expect("six positions hold a value");
-    assert_eq!(
-        holed.time.len(),
-        16,
-        "the fixture spans the whole grid with nulls"
-    );
-    let mut one_push =
-        RangeEvaluator::try_new(&schema, outer.clone(), window, RangeFunction::LastOverTime)
-            .unwrap();
-    let whole = fold_chunks(
-        &evaluate_series(&mut one_push, &holed),
-        one_push.output_schema(),
-    )
-    .expect("the series completed");
-    one_push.finish().unwrap();
-    let expected = expand(&whole);
-    assert_eq!(
-        expected.iter().filter(|row| row[0].is_some()).count(),
-        6,
-        "the one-piece result carries the six values"
-    );
-
-    // The same positions as a fragmented axis, delivered in three pushes of the one series.
-    let sparse = sparse_series(&schema, &labels, &points).expect("six positions hold a value");
-    assert_eq!(
-        sparse.time.len(),
-        6,
-        "the fragmented fixture carries six rows"
-    );
-    assert_eq!(
-        sparse.time.runs().count(),
-        4,
-        "positions 0-1, 3, 8-9 and 15 are four runs"
-    );
-    let cuts = [1, 3];
-    let mut delivered =
-        RangeEvaluator::try_new(&schema, outer.clone(), window, RangeFunction::LastOverTime)
-            .unwrap();
-    let mut chunks: Vec<EvaluatedChunk> = Vec::new();
-    let mut start = 0;
-    for end in cuts
-        .iter()
-        .copied()
-        .chain(std::iter::once(sparse.time.len()))
-    {
-        let piece = rows_of(&schema, &sparse, start, end - start);
-        chunks.extend(
-            delivered
-                .push_series(&piece, end == sparse.time.len())
-                .unwrap(),
-        );
-        start = end;
-    }
-    assert!(
-        chunks.len() >= 2,
-        "the pushes hand out more than one chunk, got {}",
-        chunks.len()
-    );
-    assert!(chunks.last().expect("a closing chunk").is_last);
-    let several = fold_chunks(&chunks, delivered.output_schema()).expect("the series completed");
-    delivered.finish().unwrap();
-
-    assert_eq!(
-        expand(&several),
-        expected,
-        "where a push ends changed the answer"
-    );
-}
-
-/// E (5): the input chunk boundaries do not change the evaluated rows.
-///
-/// Runs compare only across the variants whose settled axis is genuinely the same: a push settles
-/// the points it decides, so the same logical data split differently may hand a run over as two
-/// adjacent spans. What must not depend on the split is the set of carried positions, which is
-/// what the expanded matrix compares.
-#[test]
-fn input_chunk_boundaries_do_not_change_the_evaluated_rows() {
-    let grid = grid(0, 1_000, 12);
-    let window = one_step_window(1_000);
-    let rows = [
-        (0, vec![Some(1.0)]),
-        (1_000, vec![Some(2.0)]),
-        (3_000, vec![Some(4.0)]),
-        (4_000, vec![Some(8.0)]),
-        (10_000, vec![Some(16.0)]),
-    ];
-    let splits: [&[usize]; 3] = [&[], &[2], &[1, 3, 4]];
-    let mut expanded = Vec::new();
-    let mut covered = Vec::new();
-    for split in splits {
-        let mut evaluator = RangeEvaluator::try_new(
-            &raw_schema(1),
-            grid.clone(),
-            window,
-            RangeFunction::LastOverTime,
-        )
-        .unwrap();
-        let mut chunks = Vec::new();
-        let mut start = 0;
-        for end in split.iter().copied().chain(std::iter::once(rows.len())) {
-            let piece = chunk(&rows[start..end], 1, 0, end == rows.len());
-            chunks.extend(evaluator.push(&piece).unwrap());
-            start = end;
-        }
-        let folded = fold_chunks(&chunks, evaluator.output_schema()).expect("the series completed");
-        // The split decides how many chunks a run is handed out in, never which positions hold a
-        // value: compare those, and the dense matrix, not the raw span count.
-        let mut positions: Vec<usize> = chunk_ranges(&chunks)
-            .into_iter()
-            .filter(|(_, len)| *len > 0)
-            .flat_map(|(start, len)| start..start + len)
-            .collect();
-        positions.sort_unstable();
-        covered.push(positions);
-        expanded.push(expand(&folded));
-        evaluator.finish().unwrap();
-    }
-    assert_eq!(covered[0], vec![0, 1, 3, 4, 10], "split {:?}", splits[0]);
-    assert_eq!(
-        covered[1], covered[0],
-        "split {:?} moved the valued positions",
-        splits[1]
-    );
-    assert_eq!(
-        covered[2], covered[0],
-        "split {:?} moved the valued positions",
-        splits[2]
-    );
-    assert_eq!(expanded[1], expanded[0], "split {:?}", splits[1]);
-    assert_eq!(expanded[2], expanded[0], "split {:?}", splits[2]);
-    // The one-piece variant's axis is the maximal-run one, so its runs are pinned exactly.
-    assert_eq!(
-        expanded[0]
-            .iter()
-            .enumerate()
-            .filter(|(_, row)| row[0].is_some())
-            .map(|(index, _)| index)
-            .collect::<Vec<_>>(),
-        vec![0, 1, 3, 4, 10]
-    );
-}
-
-/// G: a series hands its rows out before it ends.
-///
-/// The chunks of a prefix arrive with `is_last` still false, and the positions they carry are a
-/// prefix of the positions the whole series ends up holding: a consumer can act on them without
-/// waiting for the last chunk of the input.
 #[test]
 fn a_prefix_hands_out_its_rows_before_the_series_ends() {
     let grid = grid(0, 1_000, 12);
@@ -4582,7 +3841,6 @@ fn a_prefix_hands_out_its_rows_before_the_series_ends() {
         "the series keeps going, so the prefix chunk does not close it"
     );
     let mut chunks = vec![first];
-    assert_eq!(chunks.len(), 1, "one push hands out one chunk");
     assert_eq!(
         run_ranges_of(&chunks[0]),
         vec![(0, 2)],
@@ -4602,7 +3860,6 @@ fn a_prefix_hands_out_its_rows_before_the_series_ends() {
         Some((3, 1))
     );
 
-    // The one-piece form of the same input: the prefix must be a prefix of it.
     let mut one_piece = RangeEvaluator::try_new(
         &raw_schema(1),
         grid.clone(),
@@ -4678,11 +3935,6 @@ fn dense_sum_over_time(rows: &[Row], grid: &EvalGrid, window: RangeWindow) -> De
         .collect()
 }
 
-/// G: a window at a later run reads the samples of an earlier run of the same series.
-///
-/// The two runs arrive in two deliveries, and the single outer point's window reaches back across
-/// the hole to the first delivery's sample. A run-local read would report 3 + 4 = 7; the window
-/// holds 2 + 3 + 4 = 9.
 #[test]
 fn a_window_at_a_later_run_reads_the_earlier_run() {
     let inner = grid(0, 1_000, 20);
@@ -4756,10 +4008,6 @@ fn a_window_at_a_later_run_reads_the_earlier_run() {
     evaluator.finish().unwrap();
 }
 
-/// G: a fragmented prefix closed by an empty chunk equals the one-piece result.
-///
-/// The prefix carries several runs, so it is a genuinely sparse delivery; the empty chunk only
-/// ends the series. Delivering the same rows in one piece must give the same values.
 #[test]
 fn a_fragmented_prefix_closed_by_an_empty_chunk_equals_one_piece() {
     let outer = grid(0, 1_000, 8);
@@ -4780,7 +4028,6 @@ fn a_fragmented_prefix_closed_by_an_empty_chunk_equals_one_piece() {
         "positions 0-1, 3 and 6 are three runs"
     );
 
-    // One piece: the whole sparse series in one delivery.
     let mut one_piece =
         RangeEvaluator::try_new(&schema, outer.clone(), window, RangeFunction::LastOverTime)
             .unwrap();
@@ -4791,7 +4038,6 @@ fn a_fragmented_prefix_closed_by_an_empty_chunk_equals_one_piece() {
     .expect("the series completed");
     one_piece.finish().unwrap();
 
-    // A prefix, then the empty chunk that closes the series.
     let mut composed =
         RangeEvaluator::try_new(&schema, outer.clone(), window, RangeFunction::LastOverTime)
             .unwrap();
@@ -4843,50 +4089,8 @@ fn a_fragmented_prefix_closed_by_an_empty_chunk_equals_one_piece() {
     composed.finish().unwrap();
 }
 
-/// G: a series none of whose samples falls into any window produces nothing, so the only chunk it
-/// hands out is the empty closing one.
-#[test]
-fn a_series_outside_every_window_closes_on_an_empty_chunk() {
-    let inner = grid(0, 1_000, 20);
-    let schema = Arc::new(SeriesSchema {
-        fields: raw_schema(1).fields.clone(),
-        eval_grid: Some(inner.clone()),
-    });
-    // The one outer point sits at 0ms and its window looks back one step, so a sample at 15ms
-    // decides nothing.
-    let outer = grid(0, 1_000, 1);
-    let mut evaluator = RangeEvaluator::try_new(
-        &schema,
-        outer.clone(),
-        one_step_window(1_000),
-        RangeFunction::SumOverTime,
-    )
-    .unwrap();
-    let labels = Labels::from([("job".to_string(), "x".to_string())]);
-    let input = mixed_series(
-        &schema,
-        &labels,
-        &Points::from([(15, f64::to_bits(7.0))]),
-        &std::collections::BTreeMap::new(),
-    )
-    .expect("position 15 holds a value");
-    let chunks = evaluate_series(&mut evaluator, &input);
-
-    assert_eq!(chunks.len(), 1, "the identity hands out one chunk");
-    let closing = &chunks[0];
-    assert!(closing.is_last, "the one chunk closes the series");
-    assert!(
-        closing.series.time.is_empty(),
-        "nothing was decided, so the chunk carries no row: {:?}",
-        closing.series.time
-    );
-    assert_eq!(chunks.iter().filter(|chunk| chunk.is_last).count(), 1);
-    evaluator.finish().unwrap();
-}
-
-/// G: two evaluators composed -- the first one's chunks fed into the second as its input -- agree
-/// with the dense reference of the same two stages, and with handing the first stage's result to
-/// the second in one piece.
+/// Two chained evaluators, the first streaming its chunks into the second, agree with the dense
+/// reference of both stages and with a one-piece hand-over.
 #[test]
 fn two_composed_evaluators_agree_with_the_dense_reference() {
     let inner = grid(0, 1_000, 24);
@@ -4961,7 +4165,6 @@ fn two_composed_evaluators_agree_with_the_dense_reference() {
     let streamed = fold_chunks(&chunks, composed.output_schema()).expect("the series completed");
     composed.finish().unwrap();
 
-    // The one-piece form: stage one's result handed to a fresh stage two in a single delivery.
     let mut one_piece = RangeEvaluator::try_new(
         &input_schema,
         outer.clone(),
@@ -5180,9 +4383,8 @@ fn smoothed_delta_with_histogram(
     Ok(chunks)
 }
 
-/// The smoothed point at 61s is decided by the float at 61s, before a histogram at 62s inside its
-/// extended window arrives. The histogram is still refused, however the input is chunked, rather
-/// than refused in one chunk and swallowed after the point was handed over in another.
+/// A histogram at 62s inside the extended window of the already decided point at 61s is refused
+/// however the input is chunked.
 #[test]
 fn a_smoothed_window_refuses_a_histogram_whatever_the_chunking() {
     for one_chunk in [true, false] {
@@ -5302,12 +4504,8 @@ fn histogram_chunk_with(
     .unwrap()
 }
 
-/// `offset` moves a window's timestamps without moving the stored start timestamps, so a reset
-/// check that reads the two on different axes answers differently for the same two samples.
-///
-/// Both queries below read the window `{2s, 3s}` of the same series: the first because it is
-/// evaluated at 3s, the second because `offset 2m` moves it there. A start timestamp of 2.5s on the
-/// second sample lies inside that window on both, and a counter restart is what it means on both.
+/// `offset` shifts sample timestamps but not stored start timestamps; the reset check must
+/// compare them on one axis. Both queries read the same window `{2s, 3s}`.
 #[test]
 fn offset_does_not_change_the_counter_reset_a_window_reports() {
     let schema = raw_schema(1);
@@ -5349,84 +4547,7 @@ fn offset_does_not_change_the_counter_reset_a_window_reports() {
     }
 }
 
-/// A comparison over a histogram drops the positions it holds instead of failing the query.
-///
-/// Prometheus compares float samples only, and the existing planner states the same rule by
-/// answering no value for a histogram while recording an info (`NativeHistogramDrop`). The float
-/// sample beside it in the same series still answers, which is what separates dropping a sample
-/// from dropping the chunk.
-#[test]
-fn comparing_a_mixed_series_with_a_scalar_drops_only_the_histogram_positions() {
-    let schema = Arc::new(SeriesSchema {
-        fields: raw_schema(1).fields.clone(),
-        eval_grid: Some(grid(1_000, 2_000, 2)),
-    });
-    // One field over two positions: a float at 1s and a histogram at 3s.
-    let mut histogram = FloatHistogram::try_from_view(&HistogramView {
-        schema: 0,
-        zero_threshold: 0.0,
-        zero_count: 0.0,
-        count: 7.0,
-        sum: 7.0,
-        reset_hint: CounterResetHint::Unknown,
-        start_timestamp: None,
-        custom_values: &[],
-        positive: BucketSideView {
-            span_offsets: &[0],
-            span_lengths: &[1],
-            buckets: &[7.0],
-        },
-        negative: BucketSideView {
-            span_offsets: &[],
-            span_lengths: &[],
-            buckets: &[],
-        },
-    })
-    .unwrap();
-    histogram.compact();
-    let mut builder = GridSeriesBuilder::try_new(Arc::clone(&schema)).unwrap();
-    builder.push(0, &[Some(2.0)]).unwrap();
-    builder
-        .push_samples(1, &[Some(GridSample::Histogram(Box::new(histogram)))])
-        .unwrap();
-    let series = builder.finish(metric(0)).unwrap().unwrap();
-
-    let (output, dropped) = crate::map::map_compare_literal(
-        &schema,
-        &series,
-        crate::map::Comparison::Filter(crate::map::ComparisonOp::Greater),
-        crate::map::ScalarOperand::Right(0.0),
-    )
-    .unwrap();
-    assert!(
-        dropped,
-        "the histogram position was not reported as dropped"
-    );
-    let output = output.expect("the float sample passed the filter");
-    let kept = output
-        .time
-        .positions()
-        .filter_map(
-            |(point, row)| match output.fields.as_slice()[0].cursor().at(row) {
-                Some(SampleRef::Float(value)) => Some((point, value)),
-                _ => None,
-            },
-        )
-        .collect::<Vec<_>>();
-    assert_eq!(
-        kept,
-        vec![(0, 2.0)],
-        "only the float position survives the comparison"
-    );
-}
-
-/// `resets` counts the restarts the payload alone does not show, as the existing planner does.
-///
-/// The existing planner's `NativeHistogramRangeFloatKind::Resets` counts three things: a gauge to
-/// counter edge (a gauge does not continue a counter), a start timestamp inside the window (a
-/// restarted counter whose counts already grew again), and the payload's own drop. Counting only
-/// the payload makes an aggregate over `resets` answer 0 where the existing plan answers 1, which
-/// is a regression: before this route admitted histograms the statement kept the existing plan.
+/// `resets` counts a start timestamp inside the window as a restart even when the counts grew.
 #[test]
 fn resets_counts_a_start_timestamp_restart_the_counts_do_not_show() {
     let schema = raw_schema(1);
@@ -5451,8 +4572,7 @@ fn resets_counts_a_start_timestamp_restart_the_counts_do_not_show() {
         }
     };
 
-    // Counts grow from 6 to 7, so the payload shows no reset; the second sample's start of 2.5s
-    // lies inside the window, which is the restart the existing planner counts.
+    // Counts grow from 6 to 7, but the second sample's start of 2.5s lies inside the window.
     assert_eq!(
         resets(&[
             histogram_chunk_hinted(&schema, 2_000, 6.0, CounterResetHint::Unknown, None, false),
@@ -5469,10 +4589,8 @@ fn resets_counts_a_start_timestamp_restart_the_counts_do_not_show() {
         "a start timestamp inside the window is a reset even when the counts grew"
     );
 
-    // The same counts across a gauge-to-counter edge: Prometheus counts no reset there, and the
-    // golden case `resets 25000 0` pins that. The existing planner counts one, so this is a place
-    // where the two routes deliberately differ — the golden decides, because reproducing the
-    // existing planner's count would make this route answer what Prometheus does not.
+    // A gauge-to-counter edge is no reset in Prometheus (golden case `resets 25000 0`), unlike
+    // the legacy planner.
     assert_eq!(
         resets(&[
             histogram_chunk_hinted(&schema, 2_000, 6.0, CounterResetHint::Gauge, None, false),
@@ -5507,12 +4625,8 @@ fn resets_counts_a_start_timestamp_restart_the_counts_do_not_show() {
     );
 }
 
-/// An `offset` that cancels a start timestamp onto zero must not turn it into "no start".
-///
-/// A start of `0` on the stored histogram means the sender stated none, so the check reads it as
-/// absent. Moving a real start forward by a negative offset could land it exactly on that marker:
-/// 2500ms under `offset -2.5s` becomes 0. Restoring the sample times instead of moving the start
-/// keeps the two meanings apart, which is what this pins.
+/// A stored start of `0` means "no start". A real start of 2500ms under `offset -2.5s` lands on
+/// 0 when shifted and must still read as a start.
 #[test]
 fn an_offset_that_cancels_a_start_timestamp_still_reads_it_as_a_reset() {
     let schema = raw_schema(1);
@@ -5553,11 +4667,8 @@ fn an_offset_that_cancels_a_start_timestamp_still_reads_it_as_a_reset() {
     );
 }
 
-/// `irate` reads the counter reset its two points witness, start timestamps included.
-///
-/// The existing planner's `idelta_value` is this query's oracle: it uses `detect_counter_reset`,
-/// not the payload-only `detect_reset`. A restarted counter whose counts happen to grow again is
-/// therefore a reset, and the answer is the last sample rather than their difference.
+/// `irate` treats a start-timestamp restart as a reset and answers the last sample, as the
+/// legacy planner's `idelta_value` does.
 #[test]
 fn irate_reads_a_reset_the_start_timestamp_witnesses() {
     let schema = raw_schema(1);
@@ -5565,8 +4676,7 @@ fn irate_reads_a_reset_the_start_timestamp_witnesses() {
         &schema,
         grid(3_000, 1_000, 1),
         RangeWindow {
-            // The window `(2000, 3000]` holds both samples: `irate` reads the last two points of
-            // its window, so both have to be inside it.
+            // The window `(2000, 3000]` holds both samples.
             range_ms: 2_000,
             offset_ms: 0,
             anchor_ms: None,
@@ -5594,12 +4704,7 @@ fn irate_reads_a_reset_the_start_timestamp_witnesses() {
     }
 }
 
-/// A `rate` over gauge histograms reports the flavor warning into the collector the evaluator was
-/// given.
-///
-/// This is the warning the HTTP response is supposed to carry, checked at the point that decides
-/// it rather than end to end: the kernel recording nothing and the channel losing it look the same
-/// from an HTTP assertion, and only this test separates them.
+/// A `rate` over gauge histograms records the flavor warning in the evaluator's collector.
 #[test]
 fn rate_over_gauge_histograms_records_the_flavor_warning() {
     let schema = raw_schema(1);
