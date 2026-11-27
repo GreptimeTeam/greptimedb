@@ -52,9 +52,9 @@ use store_api::metric_engine_consts::{
 
 use crate::error::Result;
 #[cfg(test)]
-pub(crate) use crate::series_index::catalog::{RangeIndexEntry, SeriesIndexEntry};
+pub(crate) use crate::series_index::catalog::RangeIndexEntry;
 pub(crate) use crate::series_index::catalog::{
-    delete_catalogs, load_version_control, series_index_path,
+    SeriesIndexEntry, delete_catalogs, load_version_control, series_index_path,
 };
 pub(crate) use crate::series_index::purger::{IndexFilePurger, series_index_channel};
 pub use crate::series_index::searcher::SeriesIndexSearcher;

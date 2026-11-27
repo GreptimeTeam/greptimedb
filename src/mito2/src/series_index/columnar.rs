@@ -16,6 +16,7 @@
 
 pub(super) mod codec;
 mod metadata;
+pub(crate) use metadata::PageReference;
 pub(crate) mod reader;
 #[cfg(test)]
 mod tests;

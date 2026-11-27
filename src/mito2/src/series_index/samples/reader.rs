@@ -31,7 +31,10 @@ use object_store::ObjectStore;
 use snafu::ResultExt;
 use tokio::sync::OnceCell;
 
-use crate::cache::columnar::{self as metadata_cache, MetadataCache, ObjectReader, PartArea};
+use crate::cache::columnar::{
+    self as metadata_cache, ManifestEntry, MetadataCache, MetadataIdentity, MetadataPart,
+    ObjectReader, PartArea,
+};
 use crate::error::{ComputeArrowSnafu, NewRecordBatchSnafu, OpenDalSnafu, Result};
 use crate::metrics::ColumnarReadMetrics;
 use crate::series_index::artifact::{ArtifactFormat, SamplesFileHandle};
@@ -59,7 +62,10 @@ impl SamplesReader {
         handle: SamplesFileHandle,
         cache: Option<MetadataCache>,
     ) -> Result<Self> {
-        let identity = format!("{:?}/{:?}", handle.file_id(), handle.entry());
+        let identity = MetadataIdentity::Manifest {
+            file: handle.file_id(),
+            entry: ManifestEntry::Samples(handle.shared_entry()),
+        };
         let loader_store = store.clone();
         let loader_handle = handle.clone();
         let loader_cache = cache.clone();
@@ -324,9 +330,10 @@ impl SamplesFormatReader for SamplesReader {
                     ObjectReader::open(cache.as_ref(), handle.narthex_file(), crate::cache::file_cache::FileType::Samples(Some(part.part_id)), &store, &path, part.file_size).await
                 }).await?;
                 let size = part.file_size;
+                let object = MetadataPart { generation: manifest.generation, part_id: part.part_id, size };
                 let metadata_started = Instant::now();
                 let framing_reader = reader.clone();
-                let trailer = metadata_cache::load(cache.as_ref(), format!("{path}/{size}/framing"), |_| std::mem::size_of::<Trailer>(), move || async move {
+                let trailer = metadata_cache::load(cache.as_ref(), MetadataIdentity::SamplesTrailer { part: object, bounds }, |_| std::mem::size_of::<Trailer>(), move || async move {
                     let framing = framing_reader.fetch(vec![0..metadata::HEADER_SIZE, size-metadata::TRAILER_SIZE..size]).await.context(OpenDalSnafu)?;
                     metadata::validate_header(&framing[0])?;
                     let trailer = Trailer::decode(&framing[1], size)?;
@@ -336,7 +343,7 @@ impl SamplesFormatReader for SamplesReader {
                 let payload = PartArea::new(reader.clone(), cache.clone(), manifest.generation, part.part_id, metadata::HEADER_SIZE..trailer.payload_end);
                 let key_area = trailer.areas().keys;
                 let keys = PartArea::new(reader.clone(), cache.clone(), manifest.generation, part.part_id, key_area.start..key_area.end);
-                let root = load_metadata_page(cache.as_ref(), reader, (&path, size), &trailer.root, trailer.depth, trailer.areas(), &manifest).await?;
+                let root = load_metadata_page(cache.as_ref(), reader, object, &trailer.root, trailer.depth, trailer.areas(), &manifest).await?;
                 metrics.add_elapsed("columnar_metadata_wall", metadata_started.elapsed());
                 let (mut active, children) = match root.as_ref() { Page::Leaf(_) => (Some(root.clone()), Vec::new()), Page::Internal(children) => (None, children.clone()) };
                 let mut children = children.into_iter(); let mut row_count = 0u64; let mut block_count = 0u64;
@@ -354,7 +361,7 @@ impl SamplesFormatReader for SamplesReader {
                         let Some(child) = children.next() else { break; };
                         if !matches(child.bounds, &request, ids.as_ref()) { adjacent = false; continue; }
                         let started = Instant::now();
-                        let page = load_metadata_page(cache.as_ref(), reader, (&path, size), &child, 1, trailer.areas(), &manifest).await?;
+                        let page = load_metadata_page(cache.as_ref(), reader, object, &child, 1, trailer.areas(), &manifest).await?;
                         metrics.add_elapsed("columnar_metadata_wall", started.elapsed());
                         page
                     };
@@ -784,19 +791,23 @@ fn matches(
 async fn load_metadata_page(
     cache: Option<&MetadataCache>,
     reader: &ObjectReader,
-    object: (&str, u64),
+    part: MetadataPart,
     reference: &PageReference,
     depth: u32,
     areas: Areas,
     manifest: &Arc<Manifest>,
 ) -> Result<Arc<Page>> {
-    let (path, size) = object;
     let reader = reader.clone();
-    let reference = reference.clone();
+    let reference = *reference;
     let manifest = manifest.clone();
     metadata_cache::load(
         cache,
-        format!("{path}/{size}/{reference:?}/{depth}/{}", areas.payload_end),
+        MetadataIdentity::SamplesPage {
+            part,
+            reference,
+            depth,
+            areas,
+        },
         Page::retained_size,
         move || async move {
             if reference.payload.encoding != 1 {

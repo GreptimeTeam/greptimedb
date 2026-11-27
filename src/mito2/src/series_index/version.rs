@@ -84,7 +84,7 @@ impl SeriesIndexFileHandle {
         Self {
             inner: Arc::new(SeriesIndexFileHandleInner {
                 file_id: RegionFileId::new(region_id, entry.index_uuid),
-                entry,
+                entry: Arc::new(entry),
                 deleted: AtomicBool::new(false),
                 purger: Some(purger),
                 narthex_file: None,
@@ -100,7 +100,7 @@ impl SeriesIndexFileHandle {
         Ok(Self {
             inner: Arc::new(SeriesIndexFileHandleInner {
                 file_id: file.file_id(),
-                entry,
+                entry: Arc::new(entry),
                 deleted: AtomicBool::new(false),
                 purger: None,
                 narthex_file: Some(file),
@@ -142,6 +142,10 @@ impl SeriesIndexFileHandle {
         &self.inner.entry
     }
 
+    pub(crate) fn shared_entry(&self) -> Arc<SeriesIndexEntry> {
+        self.inner.entry.clone()
+    }
+
     pub(crate) fn mark_deleted(&self) {
         self.inner.deleted.store(true, Ordering::Release);
     }
@@ -149,7 +153,7 @@ impl SeriesIndexFileHandle {
 
 struct SeriesIndexFileHandleInner {
     file_id: RegionFileId,
-    entry: SeriesIndexEntry,
+    entry: Arc<SeriesIndexEntry>,
     deleted: AtomicBool,
     purger: Option<IndexFilePurger>,
     narthex_file: Option<crate::sst::file::FileHandle>,

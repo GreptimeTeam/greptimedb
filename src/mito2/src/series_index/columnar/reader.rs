@@ -29,7 +29,10 @@ use mito_codec::row_converter::{SparseOffsetsCache, SparsePrimaryKeyCodec};
 use object_store::ObjectStore;
 use snafu::ResultExt;
 
-use crate::cache::columnar::{self as metadata_cache, MetadataCache, ObjectReader, PartArea};
+use crate::cache::columnar::{
+    self as metadata_cache, ManifestEntry, MetadataCache, MetadataIdentity, MetadataPart,
+    ObjectReader, PartArea,
+};
 use crate::error::{NewRecordBatchSnafu, OpenDalSnafu, RecordBatchSnafu, Result};
 use crate::metrics::ColumnarReadMetrics;
 use crate::series_index::artifact::ArtifactFormat;
@@ -85,7 +88,10 @@ impl ColumnarReader {
         handle: SeriesIndexFileHandle,
         cache: Option<MetadataCache>,
     ) -> Result<Self> {
-        let identity = format!("{:?}/{:?}", handle.file_id(), handle.entry());
+        let identity = MetadataIdentity::Manifest {
+            file: handle.file_id(),
+            entry: ManifestEntry::Series(handle.shared_entry()),
+        };
         let loader_store = store.clone();
         let loader_handle = handle.clone();
         let loader_cache = cache.clone();
@@ -385,10 +391,11 @@ impl ColumnarReader {
                 let timer = metrics.timer("columnar_series_metadata_wall");
                 let path = manifest.part_path(part.part_id);
                 let size = part.file_size;
+                let object = MetadataPart { generation: manifest.generation, part_id: part.part_id, size };
                 let reader = ObjectReader::open(cache.as_ref(), _handle.narthex_file(), crate::cache::file_cache::FileType::Series(Some(part.part_id)), &store, &path, size).await?;
                 let framing_reader = reader.clone();
                 let expected = (part.first, part.last);
-                let trailer = metadata_cache::load(cache.as_ref(), format!("{path}/{size}/framing"), |_| std::mem::size_of::<Trailer>(), move || async move {
+                let trailer = metadata_cache::load(cache.as_ref(), MetadataIdentity::SeriesTrailer { part: object, first: expected.0, last: expected.1 }, |_| std::mem::size_of::<Trailer>(), move || async move {
                     let framing = framing_reader.fetch(vec![0..metadata::HEADER_SIZE, size-metadata::TRAILER_SIZE..size]).await.context(OpenDalSnafu)?;
                     require(
                         framing.len() == 2
@@ -402,7 +409,7 @@ impl ColumnarReader {
                     Ok(trailer)
                 }).await?;
                 let area = PartArea::new(reader.clone(), cache.clone(), manifest.generation, part.part_id, metadata::HEADER_SIZE..trailer.payload_end);
-                let root = load_metadata_page(cache.as_ref(), &reader, (&path, size), &trailer.root, trailer.depth, trailer.payload_end, &names).await?;
+                let root = load_metadata_page(cache.as_ref(), &reader, object, &trailer.root, trailer.depth, trailer.payload_end, &names).await?;
                 drop(timer);
                 let (mut active, children) = match root.as_ref() {
                     Page::Leaf(_) => (Some(root.clone()), Vec::new()),
@@ -416,7 +423,7 @@ impl ColumnarReader {
                         let Some(child) = child_iter.next() else { break; };
                         if !matches_range(child.first, child.last, &request) { continue; }
                         let timer = metrics.timer("columnar_series_metadata_wall");
-                        let page = load_metadata_page(cache.as_ref(), &reader, (&path, size), &child, 1, trailer.payload_end, &names).await?;
+                        let page = load_metadata_page(cache.as_ref(), &reader, object, &child, 1, trailer.payload_end, &names).await?;
                         drop(timer);
                         page
                     };
@@ -482,19 +489,23 @@ fn matches_statistics(block: &Block, filters: &[SimpleFilterEvaluator]) -> bool 
 async fn load_metadata_page(
     cache: Option<&MetadataCache>,
     reader: &ObjectReader,
-    object: (&str, u64),
+    part: MetadataPart,
     reference: &PageReference,
     depth: u32,
     payload_end: u64,
     names: &Arc<[String]>,
 ) -> Result<Arc<Page>> {
-    let (path, size) = object;
     let reader = reader.clone();
-    let reference = reference.clone();
+    let reference = *reference;
     let names = names.clone();
     metadata_cache::load(
         cache,
-        format!("{path}/{size}/{reference:?}/{depth}/{payload_end}"),
+        MetadataIdentity::SeriesPage {
+            part,
+            reference,
+            depth,
+            payload_end,
+        },
         Page::retained_size,
         move || async move {
             if reference.payload.encoding != 1 {

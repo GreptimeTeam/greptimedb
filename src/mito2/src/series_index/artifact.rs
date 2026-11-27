@@ -126,7 +126,7 @@ pub(crate) struct SamplesFileHandle(Arc<SamplesFileInner>);
 #[derive(Debug)]
 struct SamplesFileInner {
     file_id: RegionFileId,
-    entry: SamplesEntry,
+    entry: Arc<SamplesEntry>,
     retired: AtomicBool,
     lifetime: SamplesLifetime,
 }
@@ -141,7 +141,7 @@ impl SamplesFileHandle {
     pub(crate) fn new(file_id: RegionFileId, entry: SamplesEntry, purger: IndexFilePurger) -> Self {
         Self(Arc::new(SamplesFileInner {
             file_id,
-            entry,
+            entry: Arc::new(entry),
             retired: AtomicBool::new(false),
             lifetime: SamplesLifetime::Sidecar(purger),
         }))
@@ -166,7 +166,7 @@ impl SamplesFileHandle {
         let file_id = file.file_id();
         Ok(Self(Arc::new(SamplesFileInner {
             file_id,
-            entry: SamplesEntry {
+            entry: Arc::new(SamplesEntry {
                 file_id: file_id.file_id(),
                 artifact: ArtifactMetadata {
                     format: ArtifactFormat::ColumnarSamples,
@@ -177,7 +177,7 @@ impl SamplesFileHandle {
                 source_file_ids: Vec::new(),
                 window: None,
                 source_windows: Default::default(),
-            },
+            }),
             retired: AtomicBool::new(false),
             lifetime: SamplesLifetime::Narthex(file),
         })))
@@ -220,6 +220,10 @@ impl SamplesFileHandle {
 
     pub(crate) fn entry(&self) -> &SamplesEntry {
         &self.0.entry
+    }
+
+    pub(crate) fn shared_entry(&self) -> Arc<SamplesEntry> {
+        self.0.entry.clone()
     }
 
     pub(crate) fn mark_deleted(&self) {

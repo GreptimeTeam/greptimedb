@@ -20,6 +20,7 @@ mod histogram;
 mod metadata;
 #[cfg(test)]
 pub(crate) use histogram::tests::{TestHistogram, histogram_array};
+pub(crate) use metadata::{Areas, Bounds, PageReference};
 pub(crate) mod reader;
 #[cfg(test)]
 mod tests;

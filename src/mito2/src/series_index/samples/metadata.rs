@@ -45,8 +45,8 @@ pub(super) fn descriptor_bytes(columns: usize) -> usize {
     BLOCK_FIXED_BYTES + 44 * columns
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(super) struct PayloadReference {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct PayloadReference {
     pub offset: u64,
     pub stored: u32,
     pub decoded: u32,
@@ -147,8 +147,8 @@ pub(super) fn pack(
     Ok((reference, stored))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct Bounds {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct Bounds {
     pub first: MetricSeriesId,
     pub last: MetricSeriesId,
     pub min: i64,
@@ -191,8 +191,8 @@ impl Bounds {
         Ok(result)
     }
 }
-#[derive(Debug, Clone)]
-pub(super) struct PageReference {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct PageReference {
     pub bounds: Bounds,
     pub payload: PayloadReference,
 }
@@ -287,15 +287,15 @@ pub(super) const KEY_CHECKSUM_BYTES: u64 = std::mem::size_of::<u64>() as u64;
 /// the part, not by `PAGE_LIMIT`. Every copy is followed by its checksum. Because blocks are
 /// ordered by exact key, every block of one series is adjacent and shares a single copy of the
 /// key, which makes an equal [`KeyRef`] mean "the same exact series".
-#[derive(Debug, Clone, Copy)]
-pub(super) struct KeyArea {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct KeyArea {
     pub start: u64,
     pub end: u64,
 }
 
 /// The three regions of one part, in file order: column payloads, exact series keys, pages.
-#[derive(Debug, Clone, Copy)]
-pub(super) struct Areas {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct Areas {
     /// End of the column payload area and start of the key area.
     pub payload_end: u64,
     /// The key area every block descriptor references.

@@ -1669,6 +1669,42 @@ async fn metadata_cache_reuses_structures_and_isolates_storage() {
     );
     assert_eq!(counts[0], counts[2], "a new storage namespace must miss");
     assert_eq!(counts[0], counts[3], "disabled caches must read metadata");
+    // The same generation can be presented with a different catalog entry. A warm
+    // descriptor must still reject coverage or inventory that disagrees with the manifest.
+    let (purger, _) = crate::series_index::series_index_channel(store.clone());
+    let mut coverage = series.entry().clone();
+    coverage.max_file_sequence ^= 1;
+    let changed = crate::series_index::SeriesIndexFileHandle::new(
+        series.file_id().region_id(),
+        coverage,
+        purger.clone(),
+    );
+    let result = ColumnarReader::open_cached(
+        store.clone(),
+        changed,
+        strategy.columnar_metadata(namespace),
+    )
+    .await;
+    assert!(
+        result
+            .err()
+            .unwrap()
+            .output_msg()
+            .contains("coverage mismatch")
+    );
+    let mut inventory = samples.entry().clone();
+    inventory.artifact.file_size += 1;
+    let changed =
+        crate::series_index::artifact::SamplesFileHandle::new(samples.file_id(), inventory, purger);
+    let result =
+        SamplesReader::open_cached(store, changed, strategy.columnar_metadata(namespace)).await;
+    assert!(
+        result
+            .err()
+            .unwrap()
+            .output_msg()
+            .contains("objects/size mismatch")
+    );
     engine.stop().await.unwrap();
 }
 
