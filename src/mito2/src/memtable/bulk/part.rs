@@ -68,7 +68,9 @@ use crate::error::{
 use crate::memtable::bulk::context::{BulkIterContext, BulkIterContextRef};
 use crate::memtable::bulk::part_reader::EncodedBulkPartIter;
 use crate::memtable::time_series::{ValueBuilder, Values};
-use crate::memtable::{BoxedRecordBatchIterator, MemScanMetrics, MemtableStats};
+use crate::memtable::{
+    BoxedRecordBatchIterator, CreatorSliceCursors, MemScanMetrics, MemtableStats,
+};
 use crate::sst::SeriesEstimator;
 use crate::sst::index::IndexOutput;
 use crate::sst::parquet::flat_format::primary_key_column_index;
@@ -1343,6 +1345,7 @@ impl EncodedBulkPart {
         &self,
         context: BulkIterContextRef,
         sequence: Option<SequenceRange>,
+        creator_slices: Option<CreatorSliceCursors>,
         mem_scan_metrics: Option<MemScanMetrics>,
     ) -> Result<Option<BoxedRecordBatchIterator>> {
         // Compute skip_fields for row group pruning from the configured pre-filter mode.
@@ -1363,7 +1366,8 @@ impl EncodedBulkPart {
             row_groups_to_read,
             sequence,
             mem_scan_metrics,
-        )?;
+        )?
+        .with_creator_slices(creator_slices);
         Ok(Some(Box::new(iter) as BoxedRecordBatchIterator))
     }
 }
@@ -1918,6 +1922,7 @@ impl MultiBulkPart {
         &self,
         context: BulkIterContextRef,
         sequence: Option<SequenceRange>,
+        creator_slices: Option<CreatorSliceCursors>,
         mem_scan_metrics: Option<MemScanMetrics>,
     ) -> Result<Option<BoxedRecordBatchIterator>> {
         if self.batches.is_empty() {
@@ -1936,7 +1941,8 @@ impl MultiBulkPart {
             sequence,
             self.series_count,
             mem_scan_metrics,
-        );
+        )
+        .with_creator_slices(creator_slices);
         Ok(Some(Box::new(iter) as BoxedRecordBatchIterator))
     }
 
@@ -2241,6 +2247,7 @@ mod tests {
                 ),
                 None,
                 None,
+                None,
             )
             .unwrap()
             .expect("expect at least one row group");
@@ -2301,7 +2308,7 @@ mod tests {
             .unwrap(),
         );
         let reader = part
-            .read(context, None, None)
+            .read(context, None, None, None)
             .unwrap()
             .expect("expect at least one row group");
         let mut total_rows_read = 0;
@@ -2335,7 +2342,7 @@ mod tests {
             )
             .unwrap(),
         );
-        assert!(part.read(context, None, None).unwrap().is_none());
+        assert!(part.read(context, None, None, None).unwrap().is_none());
 
         check_prune_row_group(&part, None, 310);
 
@@ -3584,7 +3591,7 @@ mod tests {
             .unwrap(),
         );
         let reader = multi
-            .read(context, None, None)
+            .read(context, None, None, None)
             .unwrap()
             .expect("should have results");
         let total_rows: usize = reader.map(|r| r.unwrap().num_rows()).sum();
@@ -3603,7 +3610,7 @@ mod tests {
             )
             .unwrap(),
         );
-        assert!(multi.read(context, None, None).unwrap().is_none());
+        assert!(multi.read(context, None, None, None).unwrap().is_none());
 
         // No predicate => all 6 rows.
         let context = Arc::new(
@@ -3617,7 +3624,7 @@ mod tests {
             .unwrap(),
         );
         let reader = multi
-            .read(context, None, None)
+            .read(context, None, None, None)
             .unwrap()
             .expect("should have results");
         let total_rows: usize = reader.map(|r| r.unwrap().num_rows()).sum();

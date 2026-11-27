@@ -17,13 +17,20 @@
 //! A physical-sequence read (`ScanRequest::read_row_sequence`) drops every row whose number is
 //! at or below the file's own substituted cut
 //! ([`FileMeta::substituted_up_to`](crate::sst::file::FileMeta::substituted_up_to)) and records
-//! the timestamps of the dropped rows here, so the caller recomputes those windows.
+//! the timestamps of the dropped rows here, so the caller recomputes those windows. The same
+//! read records which `(region, partition expression)` pairs it read
+//! ([`ObservedPartitionExprs`]). Every read — physical-sequence or full — records which other
+//! regions' files it delivered rows from ([`ForeignFileRowCreators`]).
 
+use std::collections::BTreeSet;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
-use common_recordbatch::adapter::{RecordBatchMetrics, SubstitutedRange, SubstitutedRowRanges};
+use common_recordbatch::adapter::{
+    ObservedPartitionExpr, RecordBatchMetrics, SubstitutedRange, SubstitutedRowRanges,
+};
 use common_recordbatch::{OrderOption, RecordBatchStream, SendableRecordBatchStream};
 use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
@@ -32,10 +39,11 @@ use datatypes::arrow::compute::filter_record_batch;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::schema::SchemaRef;
 use futures::Stream;
+use partition::expr::PartitionExpr;
 use snafu::ResultExt;
 use store_api::storage::SequenceNumber;
 
-use crate::error::{ComputeArrowSnafu, Result};
+use crate::error::{ComputeArrowSnafu, Result, SerializePartitionExprSnafu};
 use crate::read::timestamp_array_to_i64_slice;
 use crate::sst::parquet::flat_format::{sequence_column_index, time_index_column_index};
 
@@ -96,6 +104,120 @@ impl SubstitutedRowsAccumulator {
                 })
                 .collect(),
         }]
+    }
+}
+
+/// Accumulates the partition expressions of the regions a physical-sequence read observed, one
+/// [`ObservedPartitionExpr`] per `(region, partition expression)` pair.
+///
+/// Shared by every reader of one scan and deduplicated on insert.
+#[derive(Debug, Default)]
+pub(crate) struct ObservedPartitionExprs {
+    slices: Mutex<BTreeSet<ObservedPartitionExpr>>,
+}
+
+pub(crate) type ObservedPartitionExprsRef = Arc<ObservedPartitionExprs>;
+
+impl ObservedPartitionExprs {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records that rows of `(region_id, partition_expr)` were read.
+    ///
+    /// The expression is stored as its canonical identity (`PartitionExpr::as_json_str()`),
+    /// which is the form a cursor entry carries. `None` is the region's complete value domain.
+    pub(crate) fn record(
+        &self,
+        region_id: u64,
+        partition_expr: Option<&PartitionExpr>,
+    ) -> Result<()> {
+        let partition_expr = partition_expr
+            .map(|expr| expr.clone().canonicalize().as_json_str())
+            .transpose()
+            .context(SerializePartitionExprSnafu)?;
+        // A poisoned lock cannot leave the set inconsistent (an insert is the only
+        // mutation), so it is recovered instead of failing the scan.
+        self.slices
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(ObservedPartitionExpr::new(region_id, partition_expr));
+        Ok(())
+    }
+
+    /// Returns the observed pairs, sorted and deduplicated.
+    pub(crate) fn entries(&self) -> Vec<ObservedPartitionExpr> {
+        self.slices
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .cloned()
+            .collect()
+    }
+}
+
+/// Accumulates the creator regions of the adopted files this scan delivered rows from, i.e.
+/// the regions that created a file whose rows reached this scan's output.
+///
+/// Shared by every reader of one scan and deduplicated on insert.
+#[derive(Debug, Default)]
+pub(crate) struct ForeignFileRowCreators {
+    creators: Mutex<BTreeSet<u64>>,
+    /// Set when rows reached this scan's output without passing a reader that records them,
+    /// so the recorded set does not describe everything the scan delivered.
+    replay_unknown: AtomicBool,
+}
+
+pub(crate) type ForeignFileRowCreatorsRef = Arc<ForeignFileRowCreators>;
+
+impl ForeignFileRowCreators {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records that at least one row of a file `creator_region_id` created survived this
+    /// region's own row filters and entered the scan's output.
+    ///
+    /// The evidence is reported per creator region rather than per file because a caller can
+    /// only act on the creator: the numbers in the row are the creator's, and it is the
+    /// creator's watermark that has to cover them.
+    pub(crate) fn record(&self, creator_region_id: u64) {
+        // A poisoned lock cannot leave the set inconsistent (an insert is the only
+        // mutation), so it is recovered instead of failing the scan.
+        self.creators
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(creator_region_id);
+    }
+
+    /// Records that this scan delivered rows this accumulator cannot speak for, so its answer
+    /// is unknown instead of "delivered none".
+    ///
+    /// A range result replayed from the range cache, or read from a range another scan's
+    /// source produced, was decoded by a reader of that other scan: no file of this scan's
+    /// read was opened, so nothing here names the creators of the rows it delivered. The rows
+    /// are real, and a consumer must not hear that none of them came from another region.
+    pub(crate) fn record_replay_unknown(&self) {
+        self.replay_unknown.store(true, Ordering::Relaxed);
+    }
+
+    /// Returns the recorded creator regions, sorted and deduplicated.
+    pub(crate) fn entries(&self) -> Vec<u64> {
+        self.creators
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .copied()
+            .collect()
+    }
+
+    /// Returns the answer this scan states: the creator regions whose rows it delivered, or
+    /// `None` when it cannot say which those were.
+    pub(crate) fn answer(&self) -> Option<Vec<u64>> {
+        if self.replay_unknown.load(Ordering::Relaxed) {
+            return None;
+        }
+        Some(self.entries())
     }
 }
 
@@ -207,7 +329,8 @@ fn to_time_unit(unit: datatypes::arrow::datatypes::TimeUnit) -> TimeUnit {
     }
 }
 
-/// Wraps a scan stream so its terminal metrics carry what the scan substituted.
+/// Wraps a scan stream so its terminal metrics carry what the scan substituted and read, and
+/// which adopted files it delivered rows from.
 ///
 /// Mirrors how a region reports its snapshot watermark: the proof travels with the
 /// result instead of a side channel, so a caller that stops reading early never
@@ -215,22 +338,28 @@ fn to_time_unit(unit: datatypes::arrow::datatypes::TimeUnit) -> TimeUnit {
 pub(crate) struct SubstitutedRowRangesStream {
     stream: SendableRecordBatchStream,
     ranges: Option<SubstitutedRowsAccumulatorRef>,
+    observed_slices: Option<ObservedPartitionExprsRef>,
+    foreign_file_row_creators: Option<ForeignFileRowCreatorsRef>,
     region_id: u64,
 }
 
 impl SubstitutedRowRangesStream {
-    /// Wraps `stream`, or returns it unchanged when the scan reports no range.
+    /// Wraps `stream`, or returns it unchanged when the scan reports none of the three.
     pub(crate) fn wrap(
         stream: SendableRecordBatchStream,
         ranges: Option<SubstitutedRowsAccumulatorRef>,
+        observed_slices: Option<ObservedPartitionExprsRef>,
+        foreign_file_row_creators: Option<ForeignFileRowCreatorsRef>,
         region_id: u64,
     ) -> SendableRecordBatchStream {
-        if ranges.is_none() {
+        if ranges.is_none() && observed_slices.is_none() && foreign_file_row_creators.is_none() {
             return stream;
         }
         Box::pin(Self {
             stream,
             ranges,
+            observed_slices,
+            foreign_file_row_creators,
             region_id,
         })
     }
@@ -256,6 +385,19 @@ impl RecordBatchStream for SubstitutedRowRangesStream {
             if !substituted.is_empty() {
                 metrics.substituted_row_ranges = substituted;
             }
+        }
+        if let Some(observed) = &self.observed_slices {
+            let slices = observed.entries();
+            if !slices.is_empty() {
+                metrics.observed_slices = slices;
+            }
+        }
+        // An answer, not an absence: this read states which adopted files it delivered rows
+        // from even when that is none, so the caller can tell "delivered none" from the
+        // unknown an earlier build's payload states. A read that replayed a range states
+        // nothing, because it did not open the files that produced the rows.
+        if let Some(creators) = &self.foreign_file_row_creators {
+            metrics.foreign_file_row_creators = creators.answer();
         }
         Some(metrics)
     }

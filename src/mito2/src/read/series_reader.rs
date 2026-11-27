@@ -465,6 +465,11 @@ async fn build_uncached_series_partition_range(
                 continue;
             }
 
+            // Only this region's own `(C, H]` and the file's trust decision bound these
+            // rows: a physical row-sequence read needs the creator's cursor slice and the
+            // substituted cut of an adopted file as well, which this per-series path cannot
+            // apply, so such a read is refused when the scan is built
+            // (`ScanRegion::series_scan`) instead of being approximated here.
             let stream = scan_series_file_ranges(
                 part_metrics.clone(),
                 ranges,

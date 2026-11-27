@@ -30,7 +30,8 @@ use futures::{StreamExt, TryStreamExt};
 use snafu::ensure;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
-    PartitionRange, PrepareRequest, QueryScanContext, RegionScanner, ScannerProperties,
+    PartitionRange, PrepareRequest, QueryScanContext, RegionScanner, ScanSnapshotIdentity,
+    ScannerProperties,
 };
 use store_api::storage::TimeSeriesRowSelector;
 use tokio::sync::Semaphore;
@@ -419,11 +420,15 @@ impl SeqScan {
             input.mapper.output_schema(),
             Box::pin(record_batch_stream),
         ));
-        // The rows this scan hid (a physical-sequence read only) travel with the result, so the
-        // caller learns which time windows it has to recompute.
+        // The rows this scan hid, the slices it read (both a physical-sequence read only) and
+        // the other regions' files it delivered rows from travel with the result, so the
+        // caller learns which windows it has to recompute, which cursor slices it consumed
+        // and which adopted files reached its output.
         Ok(SubstitutedRowRangesStream::wrap(
             stream,
             input.substituted_row_ranges_ref(),
+            input.observed_slices_ref(),
+            input.foreign_file_row_creators_ref(),
             input.region_metadata().region_id.as_u64(),
         ))
     }
@@ -671,8 +676,8 @@ impl RegionScanner for SeqScan {
         self.properties.set_query_load_region_id(region_id);
     }
 
-    fn snapshot_sequence(&self) -> Option<u64> {
-        self.stream_ctx.input.snapshot_sequence
+    fn snapshot_identity(&self) -> Option<ScanSnapshotIdentity> {
+        Some(self.stream_ctx.input.snapshot_identity())
     }
 }
 
