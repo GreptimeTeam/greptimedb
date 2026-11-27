@@ -350,6 +350,18 @@ impl DedupStrategy for LastNonNull {
 
         // The next batch has the same key and timestamp.
 
+        if !self.last_fields.filter_deleted
+            && !self.last_fields.contains_deletion
+            && batch.op_types().get_data(0).unwrap() == OpType::Delete as u8
+        {
+            // Keeps the delete as a barrier, so readers don't fill null fields of the
+            // merged row from rows it deleted.
+            let buffer = std::mem::replace(buffer, batch);
+            let merged = self.last_fields.merge_last_non_null(buffer, metrics)?;
+            metrics.dedup_cost += start.elapsed();
+            return Ok(merged);
+        }
+
         metrics.num_unselected_rows += 1;
         // We assumes each batch doesn't contain duplicate rows so we only need to check the first row.
         if batch.num_rows() == 1 {
@@ -714,6 +726,27 @@ mod tests {
             &[OpType::Put],
             &[(Some(1), Some(11))],
         )];
+        assert_eq!(&expect, &actual[..]);
+    }
+
+    #[test]
+    fn test_last_non_null_iter_keep_delete_under_put() {
+        // The delete must stay in the output, otherwise a reader that merges this
+        // memtable with an older SST fills the Put's null fields from the deleted row.
+        let input = [new_batch_multi_fields(
+            b"k1",
+            &[1, 1, 1],
+            &[13, 12, 11],
+            &[OpType::Put, OpType::Delete, OpType::Put],
+            &[(Some(1), None), (None, None), (Some(11), Some(21))],
+        )];
+        let iter = input.into_iter().map(Ok);
+        let iter = LastNonNullIter::new(iter);
+        let actual: Vec<_> = iter.map(|batch| batch.unwrap()).collect();
+        let expect = [
+            new_batch_multi_fields(b"k1", &[1], &[13], &[OpType::Put], &[(Some(1), None)]),
+            new_batch_multi_fields(b"k1", &[1], &[12], &[OpType::Delete], &[(None, None)]),
+        ];
         assert_eq!(&expect, &actual[..]);
     }
 
