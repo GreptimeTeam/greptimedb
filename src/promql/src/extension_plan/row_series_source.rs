@@ -1,0 +1,857 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Raw series frames built from the ordinary rows of a table whose engine has no raw series scanner.
+//!
+//! Such an engine returns rows in storage order, with no per-series grouping and no deduplication.
+//! [`RowSeriesSourceExec`] requires its input hash-partitioned by the tags and sorted by
+//! `(tags, time index, fields)`, which the physical optimizer provides with a `RepartitionExec`
+//! and a `SortExec` that spills under memory pressure, and cuts the sorted rows into series chunks
+//! that carry their complete labels.
+//!
+//! A raw series holds one sample per timestamp, as Prometheus storage does. Rows that share
+//! labels and a timestamp are reduced to the first one in that order: the row whose field values,
+//! read in field order, sort lowest, with nulls last and NaN above every number. The rule only
+//! depends on the rows, not on the files or the order they were read in.
+
+use std::collections::VecDeque;
+use std::fmt::{self, Formatter};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+
+use common_error::ext::BoxedError;
+use common_query::series_frame::{
+    PendingBatching, pack_raw_series_with, raw_series_frame_schema_with_ordering,
+};
+use datafusion::arrow::array::{Array, ArrayRef, AsArray, StringArray, UInt32Array};
+use datafusion::arrow::buffer::Buffer;
+use datafusion::arrow::compute::{cast, take};
+use datafusion::arrow::datatypes::{
+    DataType, Float64Type, SchemaRef, TimeUnit, TimestampMillisecondType,
+};
+use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::common::tree_node::TreeNodeRecursion;
+use datafusion::common::{DFSchema, DFSchemaRef};
+use datafusion::error::{DataFusionError, Result as DataFusionResult};
+use datafusion::execution::context::TaskContext;
+use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
+use datafusion::physical_expr::{
+    EquivalenceProperties, LexOrdering, OrderingRequirements, PhysicalExpr, PhysicalSortExpr,
+};
+use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion::physical_plan::expressions::Column as ColumnExpr;
+use datafusion::physical_plan::{
+    DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, InputDistributionRequirements,
+    Partitioning, PlanProperties, SendableRecordBatchStream,
+};
+use datatypes::compute::SortOptions;
+use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
+use datatypes::series::samples::{FieldSpec, Samples, SeriesFields, SeriesSchema};
+use datatypes::series::{Label, SeriesLabels, SeriesOrdering};
+use futures::{Stream, StreamExt};
+use store_api::region_engine::{RawLabelSource, RawSeriesStream};
+
+/// Each output partition hands over one series after another. The key order is the sort's, which
+/// is not the order of any storage key, so nothing stronger is declared.
+const ORDERING: SeriesOrdering = SeriesOrdering::Contiguous;
+
+/// The label the metric name is reported under; it is never a column of the rows.
+const METRIC_NAME: &str = "__name__";
+
+/// The logical node: rows of one table bound to one metric's raw series.
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub struct RowSeriesSource {
+    metric_name: Arc<str>,
+    /// The tag columns that name a series, without `__name__`.
+    tags: Vec<String>,
+    time_index: String,
+    /// The field columns each frame carries, in the order the tree reading them was compiled with.
+    fields: Vec<String>,
+    input: LogicalPlan,
+    schema: DFSchemaRef,
+}
+
+impl RowSeriesSource {
+    pub const fn name() -> &'static str {
+        "RowSeriesSource"
+    }
+
+    pub fn try_new(
+        metric_name: Arc<str>,
+        tags: Vec<String>,
+        time_index: String,
+        fields: Vec<String>,
+        input: LogicalPlan,
+    ) -> DataFusionResult<Self> {
+        let tags = tags
+            .into_iter()
+            .filter(|tag| tag != METRIC_NAME)
+            .collect::<Vec<_>>();
+        let schema = Arc::new(DFSchema::try_from(
+            frame_schema(&series_schema(&fields))?.as_ref().clone(),
+        )?);
+        Ok(Self {
+            metric_name,
+            tags,
+            time_index,
+            fields,
+            input,
+            schema,
+        })
+    }
+
+    pub fn input(&self) -> &LogicalPlan {
+        &self.input
+    }
+
+    /// The physical node over `input`, which yields the rows this node was planned over.
+    ///
+    /// The node declares the distribution and ordering it reads, so the physical optimizer puts
+    /// the hash repartition and the sort below it.
+    pub fn to_execution_plan(
+        &self,
+        input: Arc<dyn ExecutionPlan>,
+    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        Ok(Arc::new(RowSeriesSourceExec::try_new(
+            input,
+            Arc::clone(&self.metric_name),
+            self.tags.clone(),
+            self.time_index.clone(),
+            self.fields.clone(),
+        )?))
+    }
+}
+
+fn series_schema(fields: &[String]) -> Arc<SeriesSchema> {
+    Arc::new(SeriesSchema {
+        fields: fields
+            .iter()
+            .map(|name| FieldSpec {
+                name: Arc::from(name.as_str()),
+            })
+            .collect::<Vec<_>>()
+            .into(),
+        eval_grid: None,
+    })
+}
+
+fn frame_schema(series: &SeriesSchema) -> DataFusionResult<SchemaRef> {
+    raw_series_frame_schema_with_ordering(series, &RawLabelSource::Explicit, ORDERING)
+}
+
+impl PartialOrd for RowSeriesSource {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        // The schema is derived from the fields, so it adds nothing to the order.
+        (
+            &self.metric_name,
+            &self.tags,
+            &self.time_index,
+            &self.fields,
+        )
+            .partial_cmp(&(
+                &other.metric_name,
+                &other.tags,
+                &other.time_index,
+                &other.fields,
+            ))
+            .and_then(|ordering| match ordering {
+                std::cmp::Ordering::Equal => self.input.partial_cmp(&other.input),
+                ordering => Some(ordering),
+            })
+    }
+}
+
+impl UserDefinedLogicalNodeCore for RowSeriesSource {
+    fn name(&self) -> &str {
+        Self::name()
+    }
+
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![&self.input]
+    }
+
+    fn schema(&self) -> &DFSchemaRef {
+        &self.schema
+    }
+
+    fn expressions(&self) -> Vec<Expr> {
+        Vec::new()
+    }
+
+    fn fmt_for_explain(&self, f: &mut Formatter) -> fmt::Result {
+        write!(
+            f,
+            "RowSeriesSource: metric={}, tags=[{}], time_index={}, fields=[{}]",
+            self.metric_name,
+            self.tags.join(", "),
+            self.time_index,
+            self.fields.join(", ")
+        )
+    }
+
+    fn with_exprs_and_inputs(
+        &self,
+        _exprs: Vec<Expr>,
+        mut inputs: Vec<LogicalPlan>,
+    ) -> DataFusionResult<Self> {
+        if inputs.len() != 1 {
+            return Err(DataFusionError::Internal(
+                "RowSeriesSource should have exactly one input".to_string(),
+            ));
+        }
+        Ok(Self {
+            metric_name: Arc::clone(&self.metric_name),
+            tags: self.tags.clone(),
+            time_index: self.time_index.clone(),
+            fields: self.fields.clone(),
+            input: inputs.swap_remove(0),
+            schema: Arc::clone(&self.schema),
+        })
+    }
+}
+
+/// Positions of the columns a row series reads, in the input schema.
+#[derive(Debug, Clone)]
+struct RowColumns {
+    tags: Vec<usize>,
+    time: usize,
+    fields: Vec<usize>,
+}
+
+impl RowColumns {
+    fn resolve(
+        schema: &SchemaRef,
+        tags: &[String],
+        time_index: &str,
+        fields: &[String],
+    ) -> DataFusionResult<Self> {
+        let index_of = |name: &str| {
+            schema.index_of(name).map_err(|_| {
+                DataFusionError::Plan(format!(
+                    "RowSeriesSource input has no column {name:?}: {schema:?}"
+                ))
+            })
+        };
+        let tags = tags
+            .iter()
+            .map(|tag| {
+                let index = index_of(tag)?;
+                match schema.field(index).data_type() {
+                    DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => Ok(index),
+                    DataType::Dictionary(_, value)
+                        if matches!(
+                            value.as_ref(),
+                            DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+                        ) =>
+                    {
+                        Ok(index)
+                    }
+                    other => Err(DataFusionError::Plan(format!(
+                        "RowSeriesSource tag {tag:?} is {other}, not a string"
+                    ))),
+                }
+            })
+            .collect::<DataFusionResult<Vec<_>>>()?;
+        let time = index_of(time_index)?;
+        if !matches!(
+            schema.field(time).data_type(),
+            DataType::Timestamp(TimeUnit::Millisecond, _)
+        ) {
+            return Err(DataFusionError::Plan(format!(
+                "RowSeriesSource time index {time_index:?} is {}, not a millisecond timestamp",
+                schema.field(time).data_type()
+            )));
+        }
+        let fields = fields
+            .iter()
+            .map(|field| {
+                let index = index_of(field)?;
+                let data_type = schema.field(index).data_type();
+                if data_type.is_integer() || data_type.is_floating() {
+                    Ok(index)
+                } else {
+                    Err(DataFusionError::Plan(format!(
+                        "RowSeriesSource field {field:?} is {data_type}, not a float value"
+                    )))
+                }
+            })
+            .collect::<DataFusionResult<Vec<_>>>()?;
+        Ok(Self { tags, time, fields })
+    }
+
+    fn column(schema: &SchemaRef, index: usize) -> Arc<dyn PhysicalExpr> {
+        Arc::new(ColumnExpr::new(schema.field(index).name(), index))
+    }
+
+    fn tag_exprs(&self, schema: &SchemaRef) -> Vec<Arc<dyn PhysicalExpr>> {
+        self.tags
+            .iter()
+            .map(|index| Self::column(schema, *index))
+            .collect()
+    }
+
+    /// `(tags ASC NULLS FIRST, time ASC, fields ASC NULLS LAST)`: series are contiguous, time is
+    /// ascending within each, and the first row of a duplicated timestamp is the one kept.
+    fn ordering(&self, schema: &SchemaRef) -> DataFusionResult<LexOrdering> {
+        let key = |index: usize, nulls_first: bool| {
+            PhysicalSortExpr::new(
+                Self::column(schema, index),
+                SortOptions {
+                    descending: false,
+                    nulls_first,
+                },
+            )
+        };
+        let exprs = self
+            .tags
+            .iter()
+            .map(|index| key(*index, true))
+            .chain(std::iter::once(key(self.time, true)))
+            .chain(self.fields.iter().map(|index| key(*index, false)))
+            .collect::<Vec<_>>();
+        LexOrdering::new(exprs)
+            .ok_or_else(|| DataFusionError::Internal("empty RowSeriesSource ordering".into()))
+    }
+}
+
+/// The physical node: cuts rows sorted by [`RowColumns::ordering`] into explicit-label raw series.
+#[derive(Debug)]
+pub struct RowSeriesSourceExec {
+    input: Arc<dyn ExecutionPlan>,
+    metric_name: Arc<str>,
+    tags: Vec<String>,
+    time_index: String,
+    fields: Vec<String>,
+    columns: RowColumns,
+    /// The order `input` has to arrive in, over `input`'s schema.
+    ordering: LexOrdering,
+    series_schema: Arc<SeriesSchema>,
+    properties: Arc<PlanProperties>,
+}
+
+impl RowSeriesSourceExec {
+    fn try_new(
+        input: Arc<dyn ExecutionPlan>,
+        metric_name: Arc<str>,
+        tags: Vec<String>,
+        time_index: String,
+        fields: Vec<String>,
+    ) -> DataFusionResult<Self> {
+        let columns = RowColumns::resolve(&input.schema(), &tags, &time_index, &fields)?;
+        let ordering = columns.ordering(&input.schema())?;
+        let series_schema = series_schema(&fields);
+        let frame_schema = frame_schema(&series_schema)?;
+        let properties = Arc::new(PlanProperties::new(
+            EquivalenceProperties::new(frame_schema),
+            Partitioning::UnknownPartitioning(input.properties().partitioning.partition_count()),
+            EmissionType::Incremental,
+            Boundedness::Bounded,
+        ));
+        Ok(Self {
+            input,
+            metric_name,
+            tags,
+            time_index,
+            fields,
+            columns,
+            ordering,
+            series_schema,
+            properties,
+        })
+    }
+}
+
+impl DisplayAs for RowSeriesSourceExec {
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter) -> fmt::Result {
+        write!(
+            f,
+            "RowSeriesSourceExec: metric={}, tags=[{}], fields=[{}]",
+            self.metric_name,
+            self.tags.join(", "),
+            self.fields.join(", ")
+        )
+    }
+}
+
+impl ExecutionPlan for RowSeriesSourceExec {
+    fn name(&self) -> &str {
+        "RowSeriesSourceExec"
+    }
+
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.properties
+    }
+
+    /// Every row of a series has to reach the partition that cuts it.
+    fn input_distribution_requirements(&self) -> InputDistributionRequirements {
+        let schema = self.input.schema();
+        let distribution = if self.columns.tags.is_empty() {
+            Distribution::SinglePartition
+        } else {
+            Distribution::KeyPartitioned(self.columns.tag_exprs(&schema))
+        };
+        InputDistributionRequirements::new(vec![distribution])
+    }
+
+    fn required_input_ordering(&self) -> Vec<Option<OrderingRequirements>> {
+        vec![Some(OrderingRequirements::from(self.ordering.clone()))]
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.input]
+    }
+
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> DataFusionResult<TreeNodeRecursion>,
+    ) -> DataFusionResult<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        mut children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        if children.len() != 1 {
+            return Err(DataFusionError::Plan(format!(
+                "RowSeriesSourceExec requires one child, got {}",
+                children.len()
+            )));
+        }
+        Ok(Arc::new(Self::try_new(
+            children.swap_remove(0),
+            Arc::clone(&self.metric_name),
+            self.tags.clone(),
+            self.time_index.clone(),
+            self.fields.clone(),
+        )?))
+    }
+
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> DataFusionResult<SendableRecordBatchStream> {
+        let rows = self.input.execute(partition, context)?;
+        let tag_names = self
+            .tags
+            .iter()
+            .map(|tag| Arc::from(tag.as_str()))
+            .collect();
+        pack_raw_series_with(
+            Box::pin(RowSeriesStream {
+                input: Some(rows),
+                columns: self.columns.clone(),
+                metric_name: Arc::clone(&self.metric_name),
+                tag_names,
+                schema: Arc::clone(&self.series_schema),
+                open: None,
+                ready: VecDeque::new(),
+            }),
+            PendingBatching::Immediate,
+        )
+    }
+}
+
+/// The series the stream is cutting.
+struct OpenSeries {
+    /// The tag values of the series; `None` is a null, which carries no label.
+    values: Vec<Option<String>>,
+    primary_key: Buffer,
+    labels: SeriesLabels,
+    last_time: Option<i64>,
+    /// The latest chunk of this series. It is published once the stream knows whether another
+    /// chunk follows, which decides its `is_last`.
+    held: Option<RawSeriesChunk>,
+}
+
+impl OpenSeries {
+    fn try_new(
+        metric_name: &Arc<str>,
+        tag_names: &[Arc<str>],
+        tags: &[StringArray],
+        row: usize,
+    ) -> DataFusionResult<Self> {
+        let values = tags
+            .iter()
+            .map(|tag| tag.is_valid(row).then(|| tag.value(row).to_string()))
+            .collect::<Vec<_>>();
+        // A null and an empty string are two stored series, as they are for a primary key; the
+        // key keeps them apart even though neither yields a non-empty label.
+        let mut key = Vec::new();
+        for value in &values {
+            match value {
+                None => key.push(0),
+                Some(value) => {
+                    key.push(1);
+                    key.extend_from_slice(&(value.len() as u64).to_le_bytes());
+                    key.extend_from_slice(value.as_bytes());
+                }
+            }
+        }
+        let labels = tag_names
+            .iter()
+            .zip(&values)
+            .filter_map(|(name, value)| {
+                value.as_ref().map(|value| Label {
+                    name: Arc::clone(name),
+                    value: Arc::from(value.as_str()),
+                })
+            })
+            .collect();
+        let labels = SeriesLabels::try_new(Some(Arc::clone(metric_name)), labels)
+            .map_err(|error| DataFusionError::External(Box::new(error)))?;
+        Ok(Self {
+            values,
+            primary_key: Buffer::from_vec(key),
+            labels,
+            last_time: None,
+            held: None,
+        })
+    }
+
+    fn holds(&self, tags: &[StringArray], row: usize) -> bool {
+        self.values
+            .iter()
+            .zip(tags)
+            .all(|(value, tag)| match (value, tag.is_valid(row)) {
+                (None, valid) => !valid,
+                (Some(value), true) => value == tag.value(row),
+                (Some(_), false) => false,
+            })
+    }
+}
+
+/// Cuts one sorted partition into raw series chunks, one chunk per series per input batch.
+struct RowSeriesStream {
+    input: Option<SendableRecordBatchStream>,
+    columns: RowColumns,
+    metric_name: Arc<str>,
+    tag_names: Vec<Arc<str>>,
+    schema: Arc<SeriesSchema>,
+    open: Option<OpenSeries>,
+    ready: VecDeque<RawSeriesChunk>,
+}
+
+impl RowSeriesStream {
+    fn cut(&mut self, batch: &RecordBatch) -> DataFusionResult<()> {
+        if batch.num_rows() == 0 {
+            return Ok(());
+        }
+        let tags = self
+            .columns
+            .tags
+            .iter()
+            .map(|index| {
+                Ok(cast(batch.column(*index), &DataType::Utf8)?
+                    .as_string::<i32>()
+                    .clone())
+            })
+            .collect::<DataFusionResult<Vec<StringArray>>>()?;
+        let time = batch
+            .column(self.columns.time)
+            .as_primitive_opt::<TimestampMillisecondType>()
+            .ok_or_else(|| {
+                DataFusionError::Execution("RowSeriesSource time index is not milliseconds".into())
+            })?;
+        if time.null_count() > 0 {
+            return Err(DataFusionError::Execution(
+                "RowSeriesSource time index holds a null".into(),
+            ));
+        }
+        let fields = self
+            .columns
+            .fields
+            .iter()
+            .map(|index| cast(batch.column(*index), &DataType::Float64).map_err(Into::into))
+            .collect::<DataFusionResult<Vec<ArrayRef>>>()?;
+
+        let mut kept = Vec::new();
+        for row in 0..batch.num_rows() {
+            let time_value = time.value(row);
+            if !self
+                .open
+                .as_ref()
+                .is_some_and(|open| open.holds(&tags, row))
+            {
+                self.publish(&kept, time, &fields)?;
+                kept.clear();
+                self.close();
+                self.open = Some(OpenSeries::try_new(
+                    &self.metric_name,
+                    &self.tag_names,
+                    &tags,
+                    row,
+                )?);
+            }
+            if let Some(open) = &mut self.open {
+                match open.last_time {
+                    // A later row of a timestamp already kept: the sort put the kept one first.
+                    Some(last) if last == time_value => continue,
+                    Some(last) if last > time_value => {
+                        return Err(DataFusionError::Execution(
+                            "RowSeriesSource input is not sorted by time within a series".into(),
+                        ));
+                    }
+                    _ => open.last_time = Some(time_value),
+                }
+            }
+            kept.push(row as u32);
+        }
+        self.publish(&kept, time, &fields)
+    }
+
+    /// Makes the rows `kept` of the current batch the open series' latest chunk.
+    fn publish(
+        &mut self,
+        kept: &[u32],
+        time: &datafusion::arrow::array::TimestampMillisecondArray,
+        fields: &[ArrayRef],
+    ) -> DataFusionResult<()> {
+        let Some(open) = &mut self.open else {
+            return Ok(());
+        };
+        if kept.is_empty() {
+            return Ok(());
+        }
+        let indices = UInt32Array::from(kept.to_vec());
+        let time = take(time, &indices, None)?;
+        let time = RawTimestamps::try_new(
+            time.as_primitive::<TimestampMillisecondType>()
+                .values()
+                .clone(),
+        )
+        .map_err(|error| DataFusionError::External(Box::new(error)))?;
+        let samples = fields
+            .iter()
+            .map(|field| {
+                Ok(Samples::from_float(
+                    take(field, &indices, None)?
+                        .as_primitive::<Float64Type>()
+                        .clone(),
+                ))
+            })
+            .collect::<DataFusionResult<Vec<_>>>()?;
+        let fields = SeriesFields::try_from_vec(samples)
+            .map_err(|error| DataFusionError::External(Box::new(error)))?;
+        let chunk = RawSeriesChunk::try_new(
+            &self.schema,
+            open.primary_key.clone(),
+            Some(open.labels.clone()),
+            time,
+            fields,
+            false,
+        )
+        .map_err(|error| DataFusionError::External(Box::new(error)))?;
+        if let Some(previous) = open.held.replace(chunk) {
+            self.ready.push_back(previous);
+        }
+        Ok(())
+    }
+
+    /// Ends the open series: its held chunk is its last one.
+    fn close(&mut self) {
+        if let Some(mut last) = self.open.take().and_then(|open| open.held) {
+            last.is_last = true;
+            self.ready.push_back(last);
+        }
+    }
+}
+
+fn boxed(error: DataFusionError) -> BoxedError {
+    BoxedError::new(common_query::error::Error::from(error))
+}
+
+impl Stream for RowSeriesStream {
+    type Item = Result<RawSeriesChunk, BoxedError>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        loop {
+            if let Some(chunk) = this.ready.pop_front() {
+                return Poll::Ready(Some(Ok(chunk)));
+            }
+            let Some(input) = this.input.as_mut() else {
+                return Poll::Ready(None);
+            };
+            match input.poll_next_unpin(cx) {
+                Poll::Ready(Some(Ok(batch))) => {
+                    if let Err(error) = this.cut(&batch) {
+                        this.input = None;
+                        return Poll::Ready(Some(Err(boxed(error))));
+                    }
+                }
+                Poll::Ready(Some(Err(error))) => {
+                    this.input = None;
+                    return Poll::Ready(Some(Err(boxed(error))));
+                }
+                Poll::Ready(None) => {
+                    this.input = None;
+                    this.close();
+                }
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+}
+
+impl RawSeriesStream for RowSeriesStream {
+    fn schema(&self) -> &Arc<SeriesSchema> {
+        &self.schema
+    }
+
+    fn label_source(&self) -> &RawLabelSource {
+        &RawLabelSource::Explicit
+    }
+
+    fn label_decode_spec(&self) -> Option<&datatypes::series::frame::LabelDecodeSpec> {
+        None
+    }
+
+    fn ordering(&self) -> SeriesOrdering {
+        ORDERING
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use common_query::series_frame::unpack_raw_series;
+    use datafusion::arrow::array::{Float64Array, TimestampMillisecondArray};
+    use datafusion::arrow::datatypes::{Field, Schema};
+    use datafusion::datasource::memory::MemorySourceConfig;
+    use datafusion::prelude::SessionContext;
+    use datatypes::series::samples::SampleRef;
+    use futures::TryStreamExt;
+
+    use super::*;
+
+    fn batch(schema: &SchemaRef, rows: &[(Option<&str>, i64, f64)]) -> RecordBatch {
+        RecordBatch::try_new(
+            Arc::clone(schema),
+            vec![
+                Arc::new(StringArray::from(
+                    rows.iter().map(|row| row.0).collect::<Vec<_>>(),
+                )),
+                Arc::new(TimestampMillisecondArray::from(
+                    rows.iter().map(|row| row.1).collect::<Vec<_>>(),
+                )),
+                Arc::new(Float64Array::from(
+                    rows.iter().map(|row| row.2).collect::<Vec<_>>(),
+                )),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// `(labels, timestamps, values, is_last)` per chunk.
+    type Chunk = (Vec<(String, String)>, Vec<i64>, Vec<f64>, bool);
+
+    async fn cut(batches: Vec<Vec<(Option<&str>, i64, f64)>>) -> Vec<Chunk> {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("host", DataType::Utf8, true),
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("val", DataType::Float64, true),
+        ]));
+        let batches = batches
+            .iter()
+            .map(|rows| batch(&schema, rows))
+            .collect::<Vec<_>>();
+        let input = MemorySourceConfig::try_new_exec(&[batches], schema, None).unwrap();
+        let exec = RowSeriesSourceExec::try_new(
+            input,
+            Arc::from("cpu"),
+            vec!["host".to_string()],
+            "ts".to_string(),
+            vec!["val".to_string()],
+        )
+        .unwrap();
+        let frames = exec.execute(0, SessionContext::new().task_ctx()).unwrap();
+        unpack_raw_series(frames, None)
+            .unwrap()
+            .map_ok(|chunk| {
+                let labels = chunk.metric.as_ref().unwrap();
+                assert_eq!(labels.name(), Some("cpu"));
+                let values = chunk
+                    .fields
+                    .get(0)
+                    .unwrap()
+                    .iter()
+                    .map(|sample| match sample {
+                        SampleRef::Float(value) => value,
+                        _ => panic!("expected a float sample"),
+                    });
+                (
+                    labels
+                        .tags()
+                        .iter()
+                        .map(|label| (label.name.to_string(), label.value.to_string()))
+                        .collect(),
+                    chunk.time.as_buffer().to_vec(),
+                    values.collect(),
+                    chunk.is_last,
+                )
+            })
+            .try_collect()
+            .await
+            .unwrap()
+    }
+
+    fn host(value: &str) -> Vec<(String, String)> {
+        vec![("host".to_string(), value.to_string())]
+    }
+
+    /// A series that continues into the next batch closes only on its last chunk, and a duplicated
+    /// timestamp split across two batches keeps the row that sorted first.
+    #[tokio::test]
+    async fn series_close_once_across_batches_and_keep_one_sample_per_timestamp() {
+        let chunks = cut(vec![
+            vec![(Some("a"), 1, 10.0), (Some("a"), 2, 20.0)],
+            vec![
+                (Some("a"), 2, 21.0),
+                (Some("a"), 3, 30.0),
+                (Some("b"), 1, 5.0),
+            ],
+            vec![(Some("b"), 2, 6.0)],
+        ])
+        .await;
+        assert_eq!(
+            chunks,
+            vec![
+                (host("a"), vec![1, 2], vec![10.0, 20.0], false),
+                (host("a"), vec![3], vec![30.0], true),
+                (host("b"), vec![1], vec![5.0], false),
+                (host("b"), vec![2], vec![6.0], true),
+            ]
+        );
+    }
+
+    /// A null tag carries no label and an empty one does, so they are two series, as two primary
+    /// keys are; neither merges into the other.
+    #[tokio::test]
+    async fn null_and_empty_tags_are_distinct_series() {
+        let chunks = cut(vec![vec![(None, 1, 1.0), (Some(""), 1, 2.0)]]).await;
+        assert_eq!(
+            chunks,
+            vec![
+                (vec![], vec![1], vec![1.0], true),
+                (host(""), vec![1], vec![2.0], true),
+            ]
+        );
+    }
+}

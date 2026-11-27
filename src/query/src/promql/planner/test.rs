@@ -4942,16 +4942,15 @@ async fn native_fused_metric_table_without_logical_metadata_falls_back() {
     );
 }
 
-/// A table whose engine has no raw-series scanner keeps the existing plan.
+/// A file-engine table has no raw-series scanner, so each selector reads it through a
+/// `RowSeriesSource`, which sorts the table's rows into series.
 ///
-/// A file-engine table answers an ordinary read with a `SinglePartitionScanner`, whose
-/// `raw_series_schema` is the trait's default `None`. Offering the native route to such a table
-/// would build the node and then fail in physical planning, because the logical plan is fixed by
-/// then; declining here is what keeps the query answering.
+/// The file engine's scan filters only prune, so the source reads its rows through a `Filter`
+/// that holds the selector's matchers and time range, as the existing planner applies them.
 #[tokio::test]
-async fn native_fused_engine_without_raw_series_falls_back() {
+async fn native_fused_file_engine_reads_through_a_row_source() {
     let native = build_native_fused_plan_with_provider(
-        "rate(some_metric[5m])",
+        "rate(some_metric{tag_0=\"a\"}[5m])",
         true,
         build_test_table_provider_with_options(
             &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
@@ -4966,36 +4965,24 @@ async fn native_fused_engine_without_raw_series_falls_back() {
         .await,
     )
     .await;
-    let without_flag = build_native_fused_plan_with_provider(
-        "rate(some_metric[5m])",
-        false,
-        build_test_table_provider_with_options(
-            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
-            1,
-            1,
-            vec![],
-            ConcreteDataType::timestamp_millisecond_datatype(),
-            false,
-            ConcreteDataType::float64_datatype(),
-            FILE_ENGINE,
-        )
-        .await,
-    )
-    .await;
+    let fused = find_fused_series(&native).expect("a file-engine table runs natively");
+    let [LogicalPlan::Extension(source)] = fused.inputs().as_slice() else {
+        panic!("expected one row source below the fused node: {native}");
+    };
+    let source = source
+        .node
+        .as_any()
+        .downcast_ref::<promql::extension_plan::RowSeriesSource>()
+        .unwrap_or_else(|| panic!("expected a RowSeriesSource: {native}"));
+    let LogicalPlan::Filter(filter) = source.input() else {
+        panic!("the row source must filter its rows: {native}");
+    };
+    let predicate = filter.predicate.to_string();
+    assert!(predicate.contains("tag_0 = Utf8(\"a\")"), "{predicate}");
+    assert!(predicate.contains("timestamp <="), "{predicate}");
     assert!(
-        find_fused_series(&native).is_none(),
-        "a file-engine table must not reach the native route"
-    );
-    assert_eq!(
-        native.display_indent().to_string(),
-        without_flag.display_indent().to_string(),
-        "a file-engine table must keep the existing plan"
-    );
-    // The refusal is reported with its cause, not a bare Ok(None).
-    assert_eq!(
-        take_reported_decline(),
-        Some("engine_without_raw_series_scanner"),
-        "the refusal names the engine's missing raw-series scanner"
+        matches!(filter.input.as_ref(), LogicalPlan::TableScan(_)),
+        "{native}"
     );
 }
 

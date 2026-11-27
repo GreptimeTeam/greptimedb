@@ -268,6 +268,7 @@ pub struct GreptimeDbClusterBuilder {
     shared_home_dir: Option<Arc<TempDir>>,
     meta_selector: Option<SelectorRef>,
     plugins: Plugins,
+    frontend_plugins: Plugins,
     datanode_plugins: Arc<dyn Fn(DatanodeId) -> Plugins + Send + Sync>,
     local_file_access: LocalFileAccess,
     event_recorder_options: EventRecorderOptions,
@@ -310,6 +311,7 @@ impl GreptimeDbClusterBuilder {
             shared_home_dir: None,
             meta_selector: None,
             plugins: Plugins::default(),
+            frontend_plugins: Plugins::default(),
             datanode_plugins: Arc::new(|_| Plugins::default()),
             local_file_access: LocalFileAccess::default(),
             event_recorder_options: EventRecorderOptions::default(),
@@ -402,7 +404,15 @@ impl GreptimeDbClusterBuilder {
         self
     }
 
-    /// Configure the frontend COPY sandbox for filesystem integration tests.
+    /// Plugins installed on the frontend instance only.
+    #[must_use]
+    pub fn with_frontend_plugins(mut self, plugins: Plugins) -> Self {
+        self.frontend_plugins = plugins;
+        self
+    }
+
+    /// Configure the frontend COPY and datanode external-table sandbox for filesystem
+    /// integration tests.
     pub fn with_local_file_access(mut self, access: LocalFileAccess) -> Self {
         self.local_file_access = access;
         self
@@ -717,7 +727,8 @@ impl GreptimeDbClusterBuilder {
         let mut builder = DatanodeBuilder::new(opts.clone(), plugins, meta_backend);
         builder
             .with_cache_registry(layered_cache_registry.clone())
-            .with_meta_client(meta_client);
+            .with_meta_client(meta_client)
+            .with_local_file_access(self.local_file_access.clone());
         let mut datanode = builder.build().await.unwrap();
 
         datanode.start_heartbeat().await.unwrap();
@@ -780,6 +791,7 @@ impl GreptimeDbClusterBuilder {
             fe_opts.create_process_manager(None),
         )
         .with_local_file_access(self.local_file_access.clone())
+        .with_plugin(self.frontend_plugins.clone())
         .with_local_cache_invalidator(cache_registry)
         .try_build()
         .await

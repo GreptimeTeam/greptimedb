@@ -34,7 +34,8 @@ use table::table::scan::{RegionScanExec, SeriesScanExec};
 
 use crate::extension_plan::{
     Absent, EmptyMetric, FusedSeries, HistogramFold, InstantManipulate, RangeManipulate,
-    RawSeriesSource, ScalarCalculate, SeriesDivide, SeriesNormalize, UnionDistinctOn,
+    RawSeriesSource, RowSeriesSource, ScalarCalculate, SeriesDivide, SeriesNormalize,
+    UnionDistinctOn,
 };
 
 pub struct PromExtensionPlanner;
@@ -88,6 +89,8 @@ impl ExtensionPlanner for PromExtensionPlanner {
                 session.config_options().execution.target_partitions,
             )
             .map(Some)
+        } else if let Some(node) = node.as_any().downcast_ref::<RowSeriesSource>() {
+            node.to_execution_plan(physical_inputs[0].clone()).map(Some)
         } else {
             Ok(None)
         }

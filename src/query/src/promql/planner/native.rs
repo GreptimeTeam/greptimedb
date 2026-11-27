@@ -35,7 +35,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use common_catalog::consts::{METRIC_ENGINE, MITO_ENGINE, MITO2_ENGINE};
+use common_catalog::consts::{FILE_ENGINE, METRIC_ENGINE, MITO_ENGINE, MITO2_ENGINE};
 use common_query::native_histogram::native_histogram_value_type;
 use common_query::prelude::OTLP_AGGREGATION_TEMPORALITY_LABEL;
 use common_query::series_frame::raw_series_frame_schema_with_ordering;
@@ -44,7 +44,9 @@ use datafusion::arrow::datatypes::DataType as ArrowDataType;
 use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::DataFusionError;
 use datafusion::logical_expr::UserDefinedLogicalNode;
-use datafusion::logical_expr::{EmptyRelation, Extension, LogicalPlan, TableScanBuilder, Union};
+use datafusion::logical_expr::{
+    EmptyRelation, Extension, LogicalPlan, LogicalPlanBuilder, TableScanBuilder, Union,
+};
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::Expr as DfExpr;
 use datafusion_expr::Expr;
@@ -55,7 +57,8 @@ use datatypes::series::time::EvalGrid;
 use futures::future::BoxFuture;
 use promql::extension_plan::{
     FieldKind, FusedOutputFormat, FusedSeries, FusedSeriesBinding, FusedSeriesExec, InputLocality,
-    RawSeriesSource, input_locality, keys_survive_metadata_drop, matching_operands_drop_key,
+    RawSeriesSource, RowSeriesSource, input_locality, keys_survive_metadata_drop,
+    matching_operands_drop_key,
 };
 use promql::native::plan::{
     AggregateKind, BoundAggregate, BoundInput, BoundVectorOp, NativeExpr, NativeNode, NativeTree,
@@ -425,13 +428,27 @@ impl PromPlanner {
         );
         // An engine without a raw-series scanner has no frame to give this node, and by the time the physical
         // planner asks, the logical plan is already this node: the refusal there is a planning error, not a
-        // fallback. So the engine is checked here. A file-engine table is the concrete case, since its
-        // `SinglePartitionScanner` leaves `raw_series_schema` at the default `None`. A metric-engine selector is
-        // admitted through its verified logical rewrite.
-        if !supports_native_raw_series(&table_meta.engine)
-            || (table_meta.engine == METRIC_ENGINE_NAME && !has_verified_metric_rewrite)
+        // fallback. So the engine is checked here. A file-engine table reads through a `RowSeriesSource`
+        // instead, which sorts its ordinary rows into series. A metric-engine selector is admitted through
+        // its verified logical rewrite.
+        let reads_rows = table_meta.engine == FILE_ENGINE;
+        if !reads_rows
+            && (!supports_native_raw_series(&table_meta.engine)
+                || (table_meta.engine == METRIC_ENGINE_NAME && !has_verified_metric_rewrite))
         {
             return Ok(declined("engine_without_raw_series_scanner"));
+        }
+        // A row source names a series by its tag values as text, so a tag of another type, whose text
+        // form the region would choose, keeps the existing plan.
+        if reads_rows
+            && tags.iter().any(|tag| {
+                table_meta
+                    .schema
+                    .column_schema_by_name(tag)
+                    .is_none_or(|column| !column.data_type.is_string())
+            })
+        {
+            return Ok(declined("row_source_tag_is_not_a_string"));
         }
         // The region's raw-series preflight refuses these, and the physical layer turns that
         // refusal into an error, so decline this route here instead.
@@ -498,6 +515,9 @@ impl PromPlanner {
         if statement_kind.is_some_and(|kind| kind != field_kind) {
             return Ok(declined("selectors_disagree_on_field_kind"));
         }
+        if reads_rows && field_kind != FieldKind::Float {
+            return Ok(declined("row_source_reads_floats_only"));
+        }
         *statement_kind = Some(field_kind);
         let series_schema = Arc::new(SeriesSchema {
             fields: fields
@@ -517,6 +537,20 @@ impl PromPlanner {
             table_scan.filters.append(&mut filters);
         } else {
             return Ok(declined("selector_plan_is_not_a_table_scan"));
+        }
+        if reads_rows {
+            input = LogicalPlan::Extension(Extension {
+                node: Arc::new(
+                    RowSeriesSource::try_new(
+                        Arc::from(metric.as_str()),
+                        tags.clone(),
+                        time.clone(),
+                        fields.clone(),
+                        input,
+                    )
+                    .context(DataFusionPlanningSnafu)?,
+                ),
+            });
         }
         Ok(Some((
             input,
@@ -1511,6 +1545,10 @@ impl PromPlanner {
                         .context(DataFusionPlanningSnafu)?;
                     *child = Arc::new(LogicalPlan::Extension(Extension { node: replacement }));
                 }
+            } else if let LogicalPlan::Extension(extension) = scan
+                && let Some(source) = extension.node.as_any().downcast_ref::<RowSeriesSource>()
+            {
+                *scan = bind_row_source_filters(source, filter).context(DataFusionPlanningSnafu)?;
             } else if let LogicalPlan::TableScan(table_scan) = scan {
                 table_scan.filters.push(filter);
             } else if let LogicalPlan::EmptyRelation(_) = scan {
@@ -2189,15 +2227,46 @@ fn reads_presence(expr: &PromExpr) -> bool {
 /// explicit-label frames rather than a bare region scan.
 ///
 /// A discovered selector is that shape: a single metric is one [`RawSeriesSource`], several are a
-/// `Union` of them, and each names the metric it reads. Wrapping either again would nest a source in
-/// a source.
+/// `Union` of them, and each names the metric it reads. A selector over a file-engine table is one
+/// [`RowSeriesSource`]. Wrapping any of them again would nest a source in a source.
 fn is_sourced_plan(plan: &LogicalPlan) -> bool {
     matches!(plan, LogicalPlan::Union(_))
         || matches!(
             plan,
             LogicalPlan::Extension(extension)
                 if extension.node.as_any().is::<RawSeriesSource>()
+                    || extension.node.as_any().is::<RowSeriesSource>()
         )
+}
+
+/// Binds the selector's time range to a row source and applies every scan filter to its rows.
+///
+/// The scan filters of a file-engine table only prune files and row groups, so the rows are
+/// filtered again above the scan, as the existing planner does for the same selector.
+fn bind_row_source_filters(
+    source: &RowSeriesSource,
+    time_filter: DfExpr,
+) -> std::result::Result<LogicalPlan, DataFusionError> {
+    let LogicalPlan::TableScan(mut table_scan) = source.input().clone() else {
+        return Err(DataFusionError::Internal(
+            "RowSeriesSource input is not a TableScan".into(),
+        ));
+    };
+    table_scan.filters.push(time_filter);
+    let predicate = datafusion_expr::utils::conjunction(table_scan.filters.clone())
+        .ok_or_else(|| DataFusionError::Internal("RowSeriesSource scan has no filter".into()))?;
+    let input = LogicalPlanBuilder::from(LogicalPlan::TableScan(table_scan))
+        .filter(predicate)?
+        .build()?;
+    Ok(LogicalPlan::Extension(Extension {
+        node: Arc::new(
+            datafusion::logical_expr::UserDefinedLogicalNodeCore::with_exprs_and_inputs(
+                source,
+                vec![],
+                vec![input],
+            )?,
+        ),
+    }))
 }
 
 /// The moment `millis` milliseconds from the Unix epoch, on whichever side of it that lands.
