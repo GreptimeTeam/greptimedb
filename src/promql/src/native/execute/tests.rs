@@ -12576,8 +12576,9 @@ fn a_name_preserving_window_leaves_the_collision_to_the_merge_above_the_broadcas
 }
 
 /// Literal arithmetic over a name-dropping window keeps only the positions it was handed:
-/// multiplication scales histograms, while unsupported arithmetic drops their samples without
-/// dropping floats or the series close. The window already checks the identities and positions.
+/// multiplication scales histograms, while unsupported arithmetic drops their samples - a dropped
+/// sample is no row, which is what the existing plan answers for the same statement - and neither
+/// drops floats or the series close. The window already checks the identities and positions.
 #[test]
 fn a_histogram_window_under_literal_arithmetic_never_expands_occupancy() {
     let grid = grid(0, 60_000, 4);
@@ -12638,20 +12639,17 @@ fn a_histogram_window_under_literal_arithmetic_never_expands_occupancy() {
             vec![(0, Some(6.0)), (1, None), (3, Some(10.0))],
             false,
         ),
+        // The histogram position the operator has no form for is a dropped sample, so it is no
+        // row: only the floats it scaled keep the positions they were handed, and a field that
+        // dropped every position answers no row at all.
         (
             BinaryOp::Add,
             false,
             mixed,
-            vec![(0, Some(5.0)), (1, None), (3, Some(7.0))],
+            vec![(0, Some(5.0)), (3, Some(7.0))],
             true,
         ),
-        (
-            BinaryOp::Add,
-            false,
-            histograms,
-            vec![(0, None), (2, None)],
-            true,
-        ),
+        (BinaryOp::Add, false, histograms, vec![], true),
     ] {
         let root = if literal_left {
             broadcast_left(2.0, window(), op, false)

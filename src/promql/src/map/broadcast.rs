@@ -19,10 +19,11 @@ use datatypes::series::SeriesLabels;
 use datatypes::series::samples::{FieldSpec, SampleRef, Series, SeriesSchema};
 use datatypes::series::time::TimeAxis;
 
-use crate::grid_series::GridSeriesBuilder;
+use crate::grid_series::{GridSample, GridSeriesBuilder};
+use crate::histogram_eval::float_histogram::FloatHistogram;
 use crate::map::{
-    ArithmeticOp, Comparison, MathOp, drop_metric_name, float_sample, validate_float_series,
-    validate_grid_series,
+    ArithmeticOp, Comparison, MathOp, drop_metric_name, float_sample, is_float_series,
+    validate_float_series, validate_grid_series,
 };
 
 /// A time-varying, unlabelled single-field scalar, with explicit operand direction.
@@ -60,6 +61,128 @@ pub fn map_arithmetic_series(
         |left, right, _| Some(op.calculate(left, right)),
     )?;
     Ok(output)
+}
+
+/// Applies arithmetic between vector fields and a time-varying scalar to float **and** histogram
+/// samples.
+///
+/// A float series takes [`map_arithmetic_series`] unchanged, so the kernel that answered it stays
+/// the one that answers it. A field holding histogram samples is traversed sample by sample, under
+/// the rule [`map_arithmetic_literal`](crate::map::map_arithmetic_literal) applies to a constant
+/// scalar: a histogram is scaled by a factor on either side and divided by a divisor on its right,
+/// and a position the operator has no histogram form for is dropped - which is what Prometheus does
+/// with a histogram under an operator it has no meaning for, rather than failing the query. The
+/// second element of the answer reports whether such a position was dropped so the caller can say
+/// so.
+///
+/// Shares [`map_arithmetic_series`]'s alignment and row-keeping contract: the scalar must be
+/// unlabelled and single-field on the same grid, the two axes are aligned by intersecting their
+/// runs, and the output covers the positions both carry.
+pub fn map_arithmetic_series_with_histograms(
+    schema: &Arc<SeriesSchema>,
+    vector: &Series,
+    op: ArithmeticOp,
+    scalar: ScalarSeriesOperand<'_>,
+) -> Result<(Option<Series>, bool)> {
+    if is_float_series(vector) {
+        return Ok((map_arithmetic_series(schema, vector, op, scalar)?, false));
+    }
+    let vector_time = validate_grid_series(schema, vector)?;
+    let (scalar_series, scalar_left) = match scalar {
+        ScalarSeriesOperand::Left(scalar) => (scalar, true),
+        ScalarSeriesOperand::Right(scalar) => (scalar, false),
+    };
+    let scalar_time = validate_scalar(schema, scalar_series)?;
+    let metric = drop_metric_name(&vector.metric)?;
+    let mut builder = GridSeriesBuilder::try_new(schema.clone())?;
+    // The shared runs carry both compact rows, so each operand reads its own field from the row its
+    // own axis assigns to the position, as the float kernel above does.
+    let mut scalar_samples = scalar_series.fields.as_slice()[0].cursor();
+    let mut field_samples = vector
+        .fields
+        .iter()
+        .map(|field| field.cursor())
+        .collect::<Vec<_>>();
+    let mut row = Vec::with_capacity(field_samples.len());
+    let mut dropped_histogram = false;
+    for pair in vector_time.intersect_runs(scalar_time) {
+        for offset in 0..pair.len {
+            let scalar = float_sample(
+                scalar_samples
+                    .at(pair.other_row + offset)
+                    .expect("the shared run lies inside the scalar axis"),
+            );
+            row.clear();
+            for field in &mut field_samples {
+                let sample = field
+                    .at(pair.row + offset)
+                    .expect("the shared run lies inside the vector axis");
+                row.push(scale_by_scalar(
+                    sample,
+                    scalar,
+                    op,
+                    scalar_left,
+                    &mut dropped_histogram,
+                )?);
+            }
+            builder.push_samples(pair.position + offset, &row)?;
+        }
+    }
+    Ok((builder.finish(metric)?, dropped_histogram))
+}
+
+/// One sample of a mixed vector met by a time-varying scalar.
+///
+/// A float takes the operation's own arithmetic with the scalar on the side the query wrote it. A
+/// histogram takes the histogram forms
+/// [`map_arithmetic_literal`](crate::map::map_arithmetic_literal) answers: scaling by a factor on
+/// either side, and dividing by a divisor on its right. Every other pair has no histogram form and
+/// answers nothing, which the caller reports.
+fn scale_by_scalar(
+    sample: SampleRef<'_>,
+    scalar: Option<f64>,
+    op: ArithmeticOp,
+    scalar_left: bool,
+    dropped: &mut bool,
+) -> Result<Option<GridSample>> {
+    let Some(scalar) = scalar else {
+        // A missing scalar point is a hole in the result, as in the float kernel.
+        return Ok(None);
+    };
+    Ok(match sample {
+        SampleRef::Missing => None,
+        SampleRef::Float(value) => Some(GridSample::Float(if scalar_left {
+            op.calculate(scalar, value)
+        } else {
+            op.calculate(value, scalar)
+        })),
+        SampleRef::Histogram(view) => {
+            let scaled = match (op, scalar_left) {
+                (ArithmeticOp::Multiply, _) => {
+                    let mut histogram = FloatHistogram::try_from_view(&view)?;
+                    histogram.mul(scalar);
+                    Some(histogram)
+                }
+                (ArithmeticOp::Divide, false) => {
+                    let mut histogram = FloatHistogram::try_from_view(&view)?;
+                    histogram.div(scalar);
+                    Some(histogram)
+                }
+                // `scalar / histogram` and every other operator have no histogram form.
+                _ => None,
+            };
+            match scaled {
+                Some(mut histogram) => {
+                    histogram.compact();
+                    Some(GridSample::Histogram(Box::new(histogram)))
+                }
+                None => {
+                    *dropped = true;
+                    None
+                }
+            }
+        }
+    })
 }
 
 /// Compares against a time-varying scalar. Filter keeps vector values and labels; bool emits

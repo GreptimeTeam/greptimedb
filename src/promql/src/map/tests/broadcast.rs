@@ -614,3 +614,115 @@ fn parameterized_math_skips_histogram_samples() {
     .unwrap();
     assert_eq!(run_floats(&output, 0), vec![((2, 1), vec![Some(1.5)])]);
 }
+
+/// A per-point scalar reaches histogram samples through the forms a constant one does.
+///
+/// The fixture histogram is `count = zero_count = 1` and `sum = 0`, so scaling and dividing are
+/// visible in its count alone. A histogram has no form under `scalar / histogram`, and the position
+/// is dropped rather than failing the query - with the float field beside it still mapped, which is
+/// what says the drop is per position and not per chunk.
+#[test]
+fn a_time_varying_scalar_scales_histograms_and_drops_the_pairs_it_cannot_answer() {
+    let batch = histogram_batch();
+    let histograms =
+        Samples::try_from_histogram(UInt32Array::from(vec![Some(0), Some(0)]), batch).unwrap();
+    let two_fields = Arc::new(schema(&["float", "histograms"]));
+    let input = series(
+        &two_fields,
+        2,
+        vec![floats(&[Some(1.0), Some(2.0)]), histograms],
+    );
+    let scale = scalar(&two_fields, 2, floats(&[Some(4.0), Some(2.0)]));
+    let scaled = |left: bool, op: ArithmeticOp| {
+        map_arithmetic_series_with_histograms(
+            &two_fields,
+            &input,
+            op,
+            if left {
+                ScalarSeriesOperand::Left(&scale)
+            } else {
+                ScalarSeriesOperand::Right(&scale)
+            },
+        )
+        .unwrap()
+    };
+    let histogram_counts = |result: &Series| {
+        result.fields.as_slice()[1]
+            .iter()
+            .map(|sample| match sample {
+                SampleRef::Histogram(view) => (view.count, view.zero_count),
+                SampleRef::Missing => (f64::NAN, f64::NAN),
+                SampleRef::Float(_) => panic!("a histogram field stays a histogram field"),
+            })
+            .collect::<Vec<_>>()
+    };
+
+    // A histogram is scaled by the factor on either side, and the floats are mapped as usual.
+    for left in [false, true] {
+        let (output, dropped) = scaled(left, ArithmeticOp::Multiply);
+        let output = mapped(output);
+        assert!(!dropped, "a histogram has a form for multiplication");
+        assert_eq!(
+            vec![(4.0, 4.0), (2.0, 2.0)],
+            histogram_counts(&output),
+            "left = {left}"
+        );
+        assert_eq!(
+            run_floats(&output, 0),
+            vec![((2, 2), vec![Some(4.0), Some(4.0)])]
+        );
+        assert!(output.metric.name().is_none());
+    }
+    // Only a divisor on the histogram's right has a form: `4 / h` drops the histogram position and
+    // reports it, while the float field beside it keeps its own value.
+    let (output, dropped) = scaled(false, ArithmeticOp::Divide);
+    let output = mapped(output);
+    assert!(!dropped);
+    assert_eq!(vec![(0.25, 0.25), (0.5, 0.5)], histogram_counts(&output));
+    let (output, dropped) = scaled(true, ArithmeticOp::Divide);
+    let output = mapped(output);
+    assert!(
+        dropped,
+        "`scalar / histogram` is reported as a dropped sample"
+    );
+    assert!(
+        histogram_counts(&output)
+            .iter()
+            .all(|(count, _)| count.is_nan()),
+        "the histogram positions answer nothing"
+    );
+    assert_eq!(
+        run_floats(&output, 0),
+        vec![((2, 2), vec![Some(4.0), Some(1.0)])],
+        "the float field is still evaluated with the scalar on its left"
+    );
+
+    // A float series takes the float kernel unchanged: the histogram-capable entry point answers
+    // exactly what the float one does.
+    let floats_only = Arc::new(schema(&["value"]));
+    let input = series(&floats_only, 2, vec![floats(&[Some(1.0), None])]);
+    let scalar_series = scalar(&floats_only, 2, floats(&[Some(4.0), Some(2.0)]));
+    let (mixed, dropped) = map_arithmetic_series_with_histograms(
+        &floats_only,
+        &input,
+        ArithmeticOp::Subtract,
+        ScalarSeriesOperand::Left(&scalar_series),
+    )
+    .unwrap();
+    assert!(!dropped);
+    assert_eq!(
+        run_floats(
+            &mapped(
+                map_arithmetic_series(
+                    &floats_only,
+                    &input,
+                    ArithmeticOp::Subtract,
+                    ScalarSeriesOperand::Left(&scalar_series),
+                )
+                .unwrap()
+            ),
+            0
+        ),
+        run_floats(&mapped(mixed), 0)
+    );
+}

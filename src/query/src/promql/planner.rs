@@ -2728,6 +2728,76 @@ impl PromPlanner {
         Ok(Matchers::new(matchers))
     }
 
+    /// The field columns `field_matchers` select from `field_columns`, in the order the table lists
+    /// them in `field_columns`.
+    ///
+    /// `=` and `!=` name one column each, which the table must carry: naming a column it does not
+    /// have is an error rather than an empty answer. `=~` and `!~` keep or drop the columns they
+    /// match. A selection no opt-in matcher narrowed starts from every column, which is what makes
+    /// `!=` and `!~` drop-only, so a `=~` matching nothing keeps every column and an opt-out-only
+    /// selection that drops them all answers no field at all.
+    ///
+    /// Both planner paths resolve a `__field__` matcher through here: the existing plan builds its
+    /// projection from the answer, and the native route reads exactly the fields it names.
+    fn field_columns_selected_by(
+        field_matchers: &[Matcher],
+        field_columns: &[String],
+    ) -> Result<Vec<String>> {
+        let col_set = field_columns.iter().collect::<HashSet<_>>();
+        let mut result_set = HashSet::new();
+        let mut reverse_set = HashSet::new();
+        for matcher in field_matchers {
+            match &matcher.op {
+                MatchOp::Equal => {
+                    if col_set.contains(&matcher.value) {
+                        let _ = result_set.insert(matcher.value.clone());
+                    } else {
+                        return Err(ColumnNotFoundSnafu {
+                            col: matcher.value.clone(),
+                        }
+                        .build());
+                    }
+                }
+                MatchOp::NotEqual => {
+                    if col_set.contains(&matcher.value) {
+                        let _ = reverse_set.insert(matcher.value.clone());
+                    } else {
+                        return Err(ColumnNotFoundSnafu {
+                            col: matcher.value.clone(),
+                        }
+                        .build());
+                    }
+                }
+                MatchOp::Re(regex) => {
+                    for col in field_columns {
+                        if regex.is_match(col) {
+                            let _ = result_set.insert(col.clone());
+                        }
+                    }
+                }
+                MatchOp::NotRe(regex) => {
+                    for col in field_columns {
+                        if regex.is_match(col) {
+                            let _ = reverse_set.insert(col.clone());
+                        }
+                    }
+                }
+            }
+        }
+        if result_set.is_empty() {
+            result_set = col_set.into_iter().cloned().collect();
+        }
+        for col in reverse_set {
+            let _ = result_set.remove(&col);
+        }
+
+        Ok(field_columns
+            .iter()
+            .filter(|col| result_set.contains(*col))
+            .cloned()
+            .collect())
+    }
+
     async fn selector_to_series_normalize_plan(
         &mut self,
         offset_duration: Millisecond,
@@ -2756,68 +2826,12 @@ impl PromPlanner {
 
         // make a projection plan if there is any `__field__` matcher
         if let Some(field_matchers) = &self.ctx.field_column_matcher {
-            let col_set = self.ctx.field_columns.iter().collect::<HashSet<_>>();
-            // opt-in set
-            let mut result_set = HashSet::new();
-            // opt-out set
-            let mut reverse_set = HashSet::new();
-            for matcher in field_matchers {
-                match &matcher.op {
-                    MatchOp::Equal => {
-                        if col_set.contains(&matcher.value) {
-                            let _ = result_set.insert(matcher.value.clone());
-                        } else {
-                            return Err(ColumnNotFoundSnafu {
-                                col: matcher.value.clone(),
-                            }
-                            .build());
-                        }
-                    }
-                    MatchOp::NotEqual => {
-                        if col_set.contains(&matcher.value) {
-                            let _ = reverse_set.insert(matcher.value.clone());
-                        } else {
-                            return Err(ColumnNotFoundSnafu {
-                                col: matcher.value.clone(),
-                            }
-                            .build());
-                        }
-                    }
-                    MatchOp::Re(regex) => {
-                        for col in &self.ctx.field_columns {
-                            if regex.is_match(col) {
-                                let _ = result_set.insert(col.clone());
-                            }
-                        }
-                    }
-                    MatchOp::NotRe(regex) => {
-                        for col in &self.ctx.field_columns {
-                            if regex.is_match(col) {
-                                let _ = reverse_set.insert(col.clone());
-                            }
-                        }
-                    }
-                }
-            }
-            // merge two set
-            if result_set.is_empty() {
-                result_set = col_set.into_iter().cloned().collect();
-            }
-            for col in reverse_set {
-                let _ = result_set.remove(&col);
-            }
+            let field_columns =
+                Self::field_columns_selected_by(field_matchers, &self.ctx.field_columns)?;
 
-            // mask the field columns in context using computed result set
-            self.ctx.field_columns = self
-                .ctx
-                .field_columns
-                .drain(..)
-                .filter(|col| result_set.contains(col))
-                .collect();
-
-            let exprs = result_set
-                .into_iter()
-                .map(|col| DfExpr::Column(Column::new_unqualified(col)))
+            let exprs = field_columns
+                .iter()
+                .map(|col| DfExpr::Column(Column::new_unqualified(col.as_str())))
                 .chain(self.create_tag_column_exprs()?)
                 .chain(
                     self.ctx
@@ -2828,6 +2842,9 @@ impl PromPlanner {
                 )
                 .chain(Some(self.create_time_index_column_expr()?))
                 .collect::<Vec<_>>();
+
+            // mask the field columns in context using the computed selection
+            self.ctx.field_columns = field_columns;
 
             // reuse this variable for simplicity
             table_scan = LogicalPlanBuilder::from(table_scan)

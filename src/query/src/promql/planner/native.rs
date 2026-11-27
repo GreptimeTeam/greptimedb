@@ -59,8 +59,8 @@ use promql::extension_plan::{
 };
 use promql::native::plan::{
     AggregateKind, BoundAggregate, BoundInput, BoundVectorOp, NativeExpr, NativeNode, NativeTree,
-    NativeType, aggregate_state_binding, binary_output_field_kind, fused_output_tags,
-    native_tree_supported, uniform_field_kind,
+    NativeType, aggregate_state_binding, binary_output_field_kind, broadcast_output_field_kind,
+    fused_output_tags, native_tree_supported, uniform_field_kind,
 };
 use promql::native::segment::{
     self, NATIVE_ORDERING, canonical_boundary_stages, canonical_local_prefix,
@@ -86,11 +86,12 @@ use store_api::region_engine::RawLabelSource;
 
 use crate::promql::error::{DataFusionPlanningSnafu, DuplicateOutputColumnsSnafu, Result};
 use crate::promql::native_compile::{
-    InfoInput, bind_evaluated_binary, compile_selectors_with_grid, compile_statement_with_grid,
-    info_input, statement_grid, subquery_child_grid,
+    InfoInput, bind_evaluated_binary, bind_evaluated_broadcast, compile_selectors_with_grid,
+    compile_statement_with_grid, info_input, statement_grid, subquery_child_grid,
 };
 use crate::promql::planner::{
-    DEFAULT_FIELD_COLUMN, DEFAULT_TIME_INDEX_COLUMN, GrownStack, PromPlanner,
+    DB_COLUMN_MATCHER, DEFAULT_FIELD_COLUMN, DEFAULT_TIME_INDEX_COLUMN, FIELD_COLUMN_MATCHER,
+    GrownStack, PromPlanner, SCHEMA_COLUMN_MATCHER,
 };
 use crate::query_engine::QueryEngineState;
 
@@ -320,6 +321,9 @@ impl PromPlanner {
     async fn prepare_one_scan(
         &mut self,
         matchers: Matchers,
+        // The rows the selector's alternatives keep, one conjunction per group; empty when the
+        // selector states none. See [`AlternativeFilters`].
+        alternative_groups: &[Matchers],
         under_rate_or_increase: bool,
         // The expression this statement asks for. Its shape, not the catalog type of a field, is what says
         // whether the existing plan reports a `Float64` for a numeric field the raw scan reads as one.
@@ -335,11 +339,27 @@ impl PromPlanner {
             return Ok(declined("selector_without_table_or_time_index"));
         };
         let tags = self.ctx.tag_columns.clone();
-        let fields = self.ctx.field_columns.clone();
-        // A `__field__` matcher narrows the field set in a projection the existing planner builds, and the
-        // raw series scan below this node has no equivalent: it reports every field the scan carries.
-        if self.ctx.field_column_matcher.is_some() || fields.is_empty() {
-            return Ok(declined("field_selector_without_raw_series_equivalent"));
+        // The fields this input reads. A `__field__` matcher selects among the table's field columns,
+        // and the selection is resolved exactly as the existing plan resolves it - `=` and `!=` name
+        // one column, `=~` and `!~` keep or drop the columns they match - so both routes read the
+        // same fields, in the same order. A matcher naming a column the table does not carry is an
+        // error there, so that selection is left to the existing plan rather than answered here.
+        let reads_a_field_selection = self.ctx.field_column_matcher.is_some();
+        let fields = match &self.ctx.field_column_matcher {
+            Some(field_matchers) => {
+                let Ok(fields) =
+                    Self::field_columns_selected_by(field_matchers, &self.ctx.field_columns)
+                else {
+                    return Ok(declined("field_selector_names_a_column_the_table_lacks"));
+                };
+                fields
+            }
+            None => self.ctx.field_columns.clone(),
+        };
+        // A selection no field is left of has no column to read a value from, so it keeps the
+        // existing plan.
+        if fields.is_empty() {
+            return Ok(declined("selector_reads_no_field"));
         }
         // Delta samples are increments: the existing planner sums them for `increase` and
         // divides by the range for `rate`, while the native tree assumes cumulative samples.
@@ -372,38 +392,45 @@ impl PromPlanner {
             Some((mut scan, predicate, _)) => {
                 // Preserve logical field order and the table restriction on the direct
                 // physical scan.
-                let source_schema = scan.source.schema();
-                let Some(mut ordered_projection) = fields
-                    .iter()
-                    .map(|field| source_schema.index_of(field).ok())
-                    .collect::<Option<Vec<_>>>()
+                let Some(projection) =
+                    field_first_projection(&scan, &fields, &self.ctx.field_columns)
                 else {
                     return Ok(declined("field_missing_from_source_schema"));
                 };
-                let original_projection = scan.projection.as_ref();
-                let selected_indices = original_projection
-                    .cloned()
-                    .unwrap_or_else(|| (0..source_schema.fields().len()).collect());
-                for index in selected_indices {
-                    let is_field = fields
-                        .iter()
-                        .any(|field| field == source_schema.field(index).name());
-                    if !is_field && !ordered_projection.contains(&index) {
-                        ordered_projection.push(index);
-                    }
-                }
                 scan.filters.push(predicate);
                 scan = TableScanBuilder::from(scan)
-                    .with_projection(Some(ordered_projection))
+                    .with_projection(Some(projection))
                     .build()
                     .context(DataFusionPlanningSnafu)?;
                 input = LogicalPlan::TableScan(scan.clone());
                 scan
             }
-            None => match &input {
-                LogicalPlan::TableScan(scan) => scan.clone(),
-                _ => return Ok(declined("selector_plan_is_not_a_table_scan")),
-            },
+            None => {
+                let LogicalPlan::TableScan(plain) = &input else {
+                    return Ok(declined("selector_plan_is_not_a_table_scan"));
+                };
+                let plain = plain.clone();
+                // A plain scan reads every column of its table, so a `__field__` selection is what
+                // narrows it: the raw series scan below this node reports the field columns of the
+                // schema it is handed, and the frame this input declares carries exactly the fields
+                // the selection names. A selection is the whole field set only when it names one, so
+                // a selector carrying no `__field__` matcher keeps the scan it was given.
+                if !reads_a_field_selection {
+                    plain
+                } else {
+                    let Some(projection) =
+                        field_first_projection(&plain, &fields, &self.ctx.field_columns)
+                    else {
+                        return Ok(declined("field_missing_from_source_schema"));
+                    };
+                    let scan = TableScanBuilder::from(plain)
+                        .with_projection(Some(projection))
+                        .build()
+                        .context(DataFusionPlanningSnafu)?;
+                    input = LogicalPlan::TableScan(scan.clone());
+                    scan
+                }
+            }
         };
         let table = self.table_from_source(&scan.source)?;
         let table_meta = &table.table_info().meta;
@@ -509,6 +536,7 @@ impl PromPlanner {
         // because only the compiler knows whether this occurrence reads a window or one
         // instant.
         let mut filters = Self::matchers_to_expr(matchers, input.schema())?;
+        filters.extend(alternative_conjuncts(alternative_groups, input.schema())?);
         if let LogicalPlan::TableScan(table_scan) = &mut input {
             table_scan.filters.append(&mut filters);
         } else {
@@ -631,10 +659,14 @@ impl PromPlanner {
 
     /// Combines two native operands without a legacy join.
     ///
-    /// Each operand is planned the way the whole expression is and bound as one evaluated series frame.
-    /// What admits the pair is the composition itself: the two grids must agree, and the matching, its
-    /// cardinality, its fill values and the output column's kind must all be ones the kernels answer. A
+    /// Each vector operand is planned the way the whole expression is and bound as one evaluated series
+    /// frame. What admits the pair is the composition itself: the two grids must agree, and the matching,
+    /// its cardinality, its fill values and the output column's kind must all be ones the kernels answer. A
     /// shape they refuse declines to the existing plan rather than to an error.
+    ///
+    /// A scalar operand - `2`, `time()` - is the one side that is not a frame: Prometheus broadcasts it
+    /// over the vector it meets, so it enters the node as the compiled scalar rather than as an input. See
+    /// [`Self::native_scalar_operand`].
     ///
     /// Only a binary expression composes, and only its own two operands are offered below.
     async fn try_plan_native_composed_binary(
@@ -664,47 +696,38 @@ impl PromPlanner {
         // Each attempt restores context even when a scan or compiler fails, and the second operand
         // starts from the same context the first one did.
         let saved = self.ctx.clone();
-        let left = self
-            .try_plan_native(
-                &binary.lhs,
-                query_engine_state,
-                FusedOutputFormat::SeriesFrame,
-            )
-            .await;
-        self.ctx = saved.clone();
-        let Some(NativePlanned::Frame(left)) = left? else {
-            return Ok(declined("left_operand_is_not_a_frame"));
-        };
-        let right = self
-            .try_plan_native(
-                &binary.rhs,
-                query_engine_state,
-                FusedOutputFormat::SeriesFrame,
-            )
-            .await;
-        self.ctx = saved;
-        let Some(NativePlanned::Frame(right)) = right? else {
-            return Ok(declined("right_operand_is_not_a_frame"));
-        };
-        if left.grid.spec() != right.grid.spec() {
-            return Ok(declined("operand_grids_differ"));
+        // A scalar operand carries one value per grid point and no labels, so Prometheus broadcasts
+        // it over the vector it meets instead of matching series between the two: `2` and `time()`
+        // are sides this composition answers, not frames it could pair. Only the vector sides are
+        // offered to the attempts below; the scalar one is bound after them, because its binding is
+        // checked against the grid the frame it meets answers on.
+        let is_scalar = |operand: &PromExpr| operand.value_type() == ValueType::Scalar;
+        let (left_scalar, right_scalar) = (is_scalar(&binary.lhs), is_scalar(&binary.rhs));
+        // Two scalars answer one value and no series at all, so there is no frame for a composition
+        // to publish. The whole-statement attempt above already decided that shape, and it is the
+        // one that reports why.
+        if left_scalar && right_scalar {
+            return Ok(None);
         }
-        let NativeFramePlan {
-            plan: left_plan,
-            output: left_output,
-            tags: left_tags,
-            kind: left_kind,
-            time: left_time,
-            grid: left_grid,
-        } = left;
-        let NativeFramePlan {
-            plan: right_plan,
-            output: right_output,
-            tags: right_tags,
-            kind: right_kind,
-            ..
-        } = right;
-        let source_tags = [left_tags, right_tags];
+        let mut frames: [Option<NativeFramePlan>; 2] = [None, None];
+        for (index, operand) in [&binary.lhs, &binary.rhs].into_iter().enumerate() {
+            if is_scalar(operand) {
+                continue;
+            }
+            let planned = self
+                .try_plan_native(operand, query_engine_state, FusedOutputFormat::SeriesFrame)
+                .await;
+            self.ctx = saved.clone();
+            let Some(NativePlanned::Frame(frame)) = planned? else {
+                return Ok(declined(if index == 0 {
+                    "left_operand_is_not_a_frame"
+                } else {
+                    "right_operand_is_not_a_frame"
+                }));
+            };
+            frames[index] = Some(frame);
+        }
+        self.ctx = saved;
         let evaluated = |source_index, output: &NativeType| NativeNode {
             expr: NativeExpr::Input(BoundInput {
                 source_index,
@@ -713,27 +736,202 @@ impl PromPlanner {
             }),
             output: output.clone(),
         };
-        let tree = match bind_evaluated_binary(
-            binary,
-            evaluated(0, &left_output),
-            evaluated(1, &right_output),
-        ) {
+        let [left_frame, right_frame] = frames;
+        let (tree, children, source_tags, time, grid, kinds) = match (left_frame, right_frame) {
+            // Two frames are matched by their labels over the grid both answer on.
+            (Some(left), Some(right)) => {
+                if left.grid.spec() != right.grid.spec() {
+                    return Ok(declined("operand_grids_differ"));
+                }
+                let NativeFramePlan {
+                    plan: left_plan,
+                    output: left_output,
+                    tags: left_tags,
+                    kind: left_kind,
+                    time: left_time,
+                    grid: left_grid,
+                } = left;
+                let NativeFramePlan {
+                    plan: right_plan,
+                    output: right_output,
+                    tags: right_tags,
+                    kind: right_kind,
+                    ..
+                } = right;
+                let tree = match bind_evaluated_binary(
+                    binary,
+                    evaluated(0, &left_output),
+                    evaluated(1, &right_output),
+                ) {
+                    Ok(tree) => tree,
+                    Err(DataFusionError::NotImplemented(_)) => {
+                        return Ok(declined("no_kernel_for_the_operator_pair"));
+                    }
+                    Err(error) => return Err(error).context(DataFusionPlanningSnafu),
+                };
+                (
+                    tree,
+                    vec![left_plan, right_plan],
+                    vec![left_tags, right_tags],
+                    left_time,
+                    left_grid,
+                    (Some(left_kind), Some(right_kind)),
+                )
+            }
+            // One side is a scalar, so the operation is a broadcast over the frame side: it keeps
+            // that frame's labels and its fields, and it pairs no series. The scalar enters as the
+            // node the compiler binds for it rather than as a child, which is why the frame is the
+            // node's only input however the expression was written.
+            (left, right) => {
+                let Some(frame) = left.or(right) else {
+                    // Two scalars, which the check above already answered.
+                    return Ok(declined("composition_has_no_frame_operand"));
+                };
+                let scalar_expr = if left_scalar {
+                    &binary.lhs
+                } else {
+                    &binary.rhs
+                };
+                let Some(scalar) = self.native_scalar_operand(scalar_expr, &frame.grid)? else {
+                    // The scalar operand recorded why it is not one this route binds.
+                    return Ok(None);
+                };
+                let NativeFramePlan {
+                    plan,
+                    output,
+                    tags,
+                    kind,
+                    time,
+                    grid,
+                } = frame;
+                let vector = evaluated(0, &output);
+                let (left, right) = if left_scalar {
+                    (scalar, vector)
+                } else {
+                    (vector, scalar)
+                };
+                // A scalar is one float per grid point and carries no field, so the pair answers the
+                // frame's own kind where the operator has a kernel for it - `hist * 2` stays a
+                // histogram - and the empty float layout everywhere else, which is the same answer
+                // the whole-statement attempt declares for the same pair: `None` is the scalar
+                // side, and `publish_native_composition` reads the kind through the same rule a
+                // whole compiled tree does.
+                let kinds = if left_scalar {
+                    (None, Some(kind))
+                } else {
+                    (Some(kind), None)
+                };
+                let tree = match bind_evaluated_broadcast(binary, left, right) {
+                    Ok(tree) => tree,
+                    Err(DataFusionError::NotImplemented(_)) => {
+                        return Ok(declined("no_kernel_for_the_operator_pair"));
+                    }
+                    Err(error) => return Err(error).context(DataFusionPlanningSnafu),
+                };
+                (tree, vec![plan], vec![tags], time, grid, kinds)
+            }
+        };
+        Self::publish_native_composition(
+            expr,
+            format,
+            tree,
+            &source_tags,
+            children,
+            time,
+            grid,
+            kinds,
+        )
+    }
+
+    /// The scalar node a composition broadcasts over its vector side, or `None` when this route
+    /// does not bind one.
+    ///
+    /// A scalar is one value per grid point and carries no labels, so it is not a frame: Prometheus
+    /// broadcasts it over the vector it meets rather than matching series between the two, which is
+    /// what `v * 2` and `v / time()` mean. The node is the one the compiler binds for the operand
+    /// alone, so a composition and a whole tree cannot disagree about what that scalar is.
+    ///
+    /// `grid` is the grid the frame side answers on: a broadcast is point-wise, so a scalar bound on
+    /// any other grid is a shape this composition does not answer. An operand that reads data -
+    /// `scalar(sum(x))` - is a tree of its own rather than a value bound here, and keeps the existing
+    /// plan.
+    fn native_scalar_operand(
+        &self,
+        expr: &PromExpr,
+        grid: &Arc<EvalGrid>,
+    ) -> Result<Option<NativeNode>> {
+        let Some(stmt) = self.native_statement(expr) else {
+            return Ok(declined("scalar_operand_has_no_evaluation_grid"));
+        };
+        let Ok(statement) = statement_grid(&stmt) else {
+            return Ok(declined("statement_grid_unavailable"));
+        };
+        if statement.spec() != grid.spec() {
+            return Ok(declined("operand_grids_differ"));
+        }
+        let tree = match compile_statement_with_grid(&stmt, statement) {
             Ok(tree) => tree,
+            // A selector inside the operand is read by a tree of its own, which this binding is not:
+            // the operand is compiled as a statement that reads no data.
             Err(DataFusionError::NotImplemented(_)) => {
-                return Ok(declined("no_kernel_for_the_operator_pair"));
+                return Ok(declined("scalar_operand_has_no_kernel"));
             }
             Err(error) => return Err(error).context(DataFusionPlanningSnafu),
         };
+        // The operand is put beside evaluated samples, so it has to be one value per grid point on
+        // the same grid: a tree answering something else is not the side of a broadcast.
+        let evaluated = matches!(
+            &tree.root().output,
+            NativeType::Scalar(scalar) if scalar.spec() == grid.spec()
+        );
+        if !evaluated {
+            return Ok(declined("scalar_operand_is_not_a_scalar"));
+        }
+        Ok(Some(tree.root().clone()))
+    }
+
+    /// Publishes a bound composition as one node over `children`.
+    ///
+    /// `kinds` are the kinds the operation pairs, in the order the operands were written, with
+    /// `None` for a scalar side - which is a float per grid point and carries no field of its own.
+    /// Two frames read the arithmetic result's kind, and a scalar beside one frame reads
+    /// [`broadcast_output_field_kind`]: the same rule a whole compiled tree applies to the same
+    /// pair, which is what keeps `hist * 2` a histogram, `hist > 2` the histogram column it filters
+    /// and `2 / hist` the empty float layout while `hist + 2`, a pair with no sample to emit,
+    /// declares that layout too. `source_tags` names the labels of each child, so the output labels
+    /// of the node follow the operands it actually reads.
+    #[allow(clippy::too_many_arguments)]
+    fn publish_native_composition(
+        expr: &PromExpr,
+        format: FusedOutputFormat,
+        tree: NativeTree,
+        source_tags: &[Vec<String>],
+        children: Vec<LogicalPlan>,
+        time: String,
+        grid: Arc<EvalGrid>,
+        kinds: (Option<FieldKind>, Option<FieldKind>),
+    ) -> Result<Option<NativePlanned>> {
         let NativeExpr::Binary { matching, .. } = &tree.root().expr else {
             return Ok(declined("bound_root_is_not_the_binary"));
         };
-        let Some(root_kind) = binary_output_field_kind(
-            left_kind,
-            right_kind,
-            matching.op,
-            matching.return_bool,
-            matching.fill,
-        ) else {
+        let kind = match kinds {
+            (Some(left), Some(right)) => binary_output_field_kind(
+                left,
+                right,
+                matching.op,
+                matching.return_bool,
+                matching.fill,
+            ),
+            (Some(vector), None) => {
+                broadcast_output_field_kind(false, vector, matching.op, matching.return_bool)
+            }
+            (None, Some(vector)) => {
+                broadcast_output_field_kind(true, vector, matching.op, matching.return_bool)
+            }
+            // Two scalars are not a composition: the whole-statement attempt answers that shape.
+            (None, None) => None,
+        };
+        let Some(root_kind) = kind else {
             return Ok(declined("no_output_kind_for_the_pair"));
         };
         if !native_tree_supported(&tree) {
@@ -747,7 +945,7 @@ impl PromPlanner {
         let metadata = match format {
             FusedOutputFormat::PlainRows => None,
             FusedOutputFormat::SeriesFrame => {
-                let Some(tags) = fused_output_tags(tree.root(), &source_tags) else {
+                let Some(tags) = fused_output_tags(tree.root(), source_tags) else {
                     return Ok(declined("composition_has_no_output_labels"));
                 };
                 Some((tree.root().output.clone(), tags))
@@ -755,13 +953,8 @@ impl PromPlanner {
         };
         let output_schema = match format {
             FusedOutputFormat::PlainRows => {
-                let Some(schema) = Self::fused_root_schema(
-                    &expression,
-                    &tree,
-                    &source_tags,
-                    &left_time,
-                    root_kind,
-                )?
+                let Some(schema) =
+                    Self::fused_root_schema(&expression, &tree, source_tags, &time, root_kind)?
                 else {
                     return Ok(declined("composition_has_no_value_columns"));
                 };
@@ -785,12 +978,12 @@ impl PromPlanner {
             Arc::from(expression.as_str()),
             tree,
             FusedSeriesBinding {
-                grid: Arc::clone(&left_grid),
-                time_index: left_time.clone(),
+                grid: Arc::clone(&grid),
+                time_index: time.clone(),
                 tags: Vec::new(),
                 metric_name: None,
             },
-            vec![left_plan, right_plan],
+            children,
             output_schema,
             format,
         ) else {
@@ -799,9 +992,7 @@ impl PromPlanner {
         let plan = LogicalPlan::Extension(Extension {
             node: Arc::new(node),
         });
-        Ok(Some(native_planned(
-            plan, metadata, root_kind, left_time, left_grid,
-        )))
+        Ok(Some(native_planned(plan, metadata, root_kind, time, grid)))
     }
 
     /// Plans `prom_expr` as one native node, or returns `None` to keep the existing plan.
@@ -896,9 +1087,11 @@ impl PromPlanner {
                 }
                 Err(error) => return Err(error).context(DataFusionPlanningSnafu),
             };
-            // A frame operand is an evaluated sample root: a composition matches series, and a
-            // scalar root - `2`, `time()` - carries one value and no labels, so those keep the
-            // existing plan rather than becoming a frame the matcher cannot pair.
+            // A frame is an evaluated sample root: a frame consumer decodes series, and a scalar
+            // root - `2`, `time()` - carries one value and no labels. A composition that meets a
+            // scalar binds it as the scalar it is instead of asking for a frame here
+            // ([`Self::native_scalar_operand`]); the shape this refuses is a scalar published as a
+            // frame, which no consumer of one could read.
             let evaluated = matches!(
                 &tree.root().output,
                 NativeType::Samples(schema) if schema.eval_grid.is_some()
@@ -980,17 +1173,22 @@ impl PromPlanner {
             let mut statement_kind: Option<FieldKind> = None;
             for (selector, under_rate_or_increase) in &selectors {
                 self.ctx = original_context.clone();
-                // These matchers are alternatives the one scan below the node cannot represent, so the
-                // query keeps the plan the existing path builds for it.
-                if !selector.matchers.or_matchers.is_empty() {
-                    return Ok(declined("or_matchers_have_no_single_raw_scan"));
-                }
+                // A selector's matchers can be alternatives: `{a="1" or a="2"}` keeps the rows either
+                // group keeps. The groups are row filters over one table, so the one scan below the node
+                // states them as one predicate; see [`AlternativeFilters`]. A group that names another
+                // table than another has no such scan, and the query keeps the plan the existing path
+                // builds for it.
+                let Some(alternatives) = AlternativeFilters::of_selector(selector) else {
+                    return Ok(declined("or_matchers_name_different_tables"));
+                };
                 // A selector that names no metric is answered by enumerating the schema's logical metric
                 // tables: one input per metric, each reading its own region, so every series keeps the
                 // identity the expression itself cannot name.
                 if discovers_metric_name(selector) {
-                    let name_matchers = selector.matchers.find_matchers(METRIC_NAME);
-                    let mut ordinary_matchers = selector.matchers.clone();
+                    // The groups' own matchers narrow rows rather than names, so the tables a nameless
+                    // selector may read are the ones its shared matchers name.
+                    let name_matchers = alternatives.shared.find_matchers(METRIC_NAME);
+                    let mut ordinary_matchers = alternatives.shared.clone();
                     ordinary_matchers
                         .matchers
                         .retain(|matcher| matcher.name != METRIC_NAME);
@@ -1052,13 +1250,20 @@ impl PromPlanner {
                             .all(|matcher| matcher.is_match(&table.table_info().name))
                     });
                     // A label a table does not carry reads as the empty string on every one of its
-                    // rows, so a matcher that rejects the empty string cannot match anything there.
+                    // rows, so a matcher that rejects the empty string cannot match anything there. A
+                    // table is a candidate while the shared matchers keep it and one alternative still
+                    // keeps rows in it.
                     metrics.retain(|table| {
                         let schema = table.schema();
-                        matchers.matchers.iter().all(|matcher| {
-                            matcher.is_match("")
-                                || schema.column_schema_by_name(&matcher.name).is_some()
-                        })
+                        let keeps = |matchers: &Matchers| {
+                            matchers.matchers.iter().all(|matcher| {
+                                matcher.is_match("")
+                                    || schema.column_schema_by_name(&matcher.name).is_some()
+                            })
+                        };
+                        keeps(&matchers)
+                            && (alternatives.groups.is_empty()
+                                || alternatives.groups.iter().any(keeps))
                     });
                     metrics.sort_by_key(|table| table.table_info().name.clone());
                     if metrics.len() > MAX_DISCOVERED_METRICS {
@@ -1122,6 +1327,7 @@ impl PromPlanner {
                         )) = self
                             .prepare_one_scan(
                                 matchers.clone(),
+                                &alternatives.groups,
                                 *under_rate_or_increase,
                                 &stmt.expr,
                                 &mut logical_scan_id,
@@ -1223,7 +1429,7 @@ impl PromPlanner {
                     continue;
                 }
                 let matchers =
-                    match self.preprocess_label_matchers(&selector.matchers, &selector.name) {
+                    match self.preprocess_label_matchers(&alternatives.shared, &selector.name) {
                         Ok(m) => m,
                         Err(_) => return Ok(declined("selector_matchers_cannot_be_preprocessed")),
                     };
@@ -1252,6 +1458,7 @@ impl PromPlanner {
                 let Some(one) = self
                     .prepare_one_scan(
                         matchers,
+                        &alternatives.groups,
                         *under_rate_or_increase,
                         &stmt.expr,
                         &mut logical_scan_id,
@@ -2516,7 +2723,128 @@ pub(crate) fn same_table_scans<'a>(plans: impl IntoIterator<Item = &'a LogicalPl
 /// that reads the whole schema at once.
 const MAX_DISCOVERED_METRICS: usize = 1024;
 
+/// The rows a selector's `or` alternatives keep, over the matchers those alternatives share.
+///
+/// `{a="1" or a="2"}` keeps the rows either group keeps. Both are row filters over one table, and a
+/// scan filters with one conjunction, so the groups are composed into that scan's predicate rather
+/// than read as one scan each: [`alternative_conjuncts`] adds their disjunction below the shared
+/// matchers. Reading them as separate scans would report a series both groups keep twice and would
+/// hand the statement its rows in group order instead of the series order every other selector
+/// answers in; the existing plan reports such a series once.
+///
+/// The matchers that choose *what* is read rather than *which rows* match are the groups' to agree
+/// on. `__name__`, `__schema__` and `__database__` name the table, so a group that disagrees with
+/// another reads another table, which no one scan states - that selector answers `None` and keeps the
+/// plan the existing path builds. `__field__` names columns, and a selection is a set of them, so the
+/// groups' selections are unioned into the one selection every group's rows are read from.
+#[derive(Debug, Clone)]
+struct AlternativeFilters {
+    /// The matchers every group carries: the table the selector names and the columns it reads.
+    shared: Matchers,
+    /// One conjunction of row filters per group, in the order the selector states them. A selector
+    /// with no alternatives has none, and keeps filtering with [`Self::shared`] alone.
+    groups: Vec<Matchers>,
+}
+
+impl AlternativeFilters {
+    /// Splits `selector`'s matchers into the ones its groups share and the rows each group keeps.
+    ///
+    /// `None` when the groups name different tables or databases, which one scan cannot read.
+    fn of_selector(selector: &VectorSelector) -> Option<Self> {
+        if selector.matchers.or_matchers.is_empty() {
+            return Some(Self {
+                shared: selector.matchers.clone(),
+                groups: Vec::new(),
+            });
+        }
+        // The matchers before the first `or` hold for every group, so they are part of the selection
+        // rather than of any one group's rows.
+        let mut fields = Vec::new();
+        let mut selection = Vec::new();
+        let mut base_rows = Vec::new();
+        for matcher in &selector.matchers.matchers {
+            match matcher.name.as_str() {
+                FIELD_COLUMN_MATCHER => fields.push(matcher.clone()),
+                METRIC_NAME | SCHEMA_COLUMN_MATCHER | DB_COLUMN_MATCHER => {
+                    selection.push(matcher.clone())
+                }
+                _ => base_rows.push(matcher.clone()),
+            }
+        }
+        let base_selection = selection.clone();
+        let mut groups: Vec<Matchers> = Vec::with_capacity(selector.matchers.or_matchers.len());
+        for group in &selector.matchers.or_matchers {
+            let mut group_selection = Vec::new();
+            let mut rows = base_rows.clone();
+            for matcher in group {
+                match matcher.name.as_str() {
+                    FIELD_COLUMN_MATCHER => fields.push(matcher.clone()),
+                    METRIC_NAME | SCHEMA_COLUMN_MATCHER | DB_COLUMN_MATCHER => {
+                        group_selection.push(matcher.clone())
+                    }
+                    _ => rows.push(matcher.clone()),
+                }
+            }
+            // A group that names a table of its own reads a second table, which this scan cannot
+            // union. A group that repeats the shared name is the same table named twice.
+            if group_selection != base_selection {
+                return None;
+            }
+            // Two groups that keep the same rows are one alternative: stating both would keep every
+            // row of theirs twice.
+            let rows = Matchers::new(rows);
+            if !groups.contains(&rows) {
+                groups.push(rows);
+            }
+        }
+        selection.extend(fields);
+        Some(Self {
+            shared: Matchers::new(selection),
+            groups,
+        })
+    }
+}
+
+/// The conjuncts a selector's alternatives add to its scan: the disjunction of the groups' own
+/// conjunctions, or one group's conjuncts when the selector states one alternative.
+///
+/// A group with no row filter of its own keeps every row the shared matchers keep, so its disjunction
+/// with the other groups keeps everything and nothing narrows the scan.
+fn alternative_conjuncts(groups: &[Matchers], schema: &DFSchemaRef) -> Result<Vec<DfExpr>> {
+    let conjunctions = groups
+        .iter()
+        .map(|group| {
+            Ok(PromPlanner::matchers_to_expr(group.clone(), schema)?
+                .into_iter()
+                .reduce(|left, right| left.and(right)))
+        })
+        .collect::<Result<Vec<Option<DfExpr>>>>()?;
+    match conjunctions.len() {
+        // A selector with no alternatives filters with its shared matchers alone.
+        0 => Ok(Vec::new()),
+        // One alternative is the conjunction it states.
+        1 => Ok(conjunctions.into_iter().flatten().collect()),
+        _ => {
+            // An alternative that keeps every row the shared matchers keep is one without a
+            // condition, and its disjunction with the others keeps everything.
+            if conjunctions.iter().any(Option::is_none) {
+                return Ok(Vec::new());
+            }
+            Ok(conjunctions
+                .into_iter()
+                .flatten()
+                .reduce(|left, right| left.or(right))
+                .into_iter()
+                .collect())
+        }
+    }
+}
+
 /// Whether a selector names no single table and has to enumerate the schema's metric tables.
+///
+/// The matchers of a selector's `or` alternatives are row filters, so a group that names no table of
+/// its own still narrows by them: a nameless selector needs discovery whatever form its matchers
+/// take.
 ///
 /// Exported so the authorization layer can ask the same question before it authorizes what the
 /// planner will scan; the two answers have to agree.
@@ -2528,13 +2856,22 @@ pub fn discovers_metric_name(selector: &VectorSelector) -> bool {
     let has_exact_name_matcher = name_matchers.len() == 1 && !has_non_equal_name_matcher;
     selector.name.is_none()
         && !has_exact_name_matcher
-        && selector.matchers.or_matchers.is_empty()
         && (name_matchers.len() > 1
             || has_non_equal_name_matcher
-            || selector.matchers.matchers.iter().any(|matcher| {
-                !["__schema__", "__database__", "__field__", METRIC_NAME]
+            || selector
+                .matchers
+                .matchers
+                .iter()
+                .chain(selector.matchers.or_matchers.iter().flatten())
+                .any(|matcher| {
+                    ![
+                        SCHEMA_COLUMN_MATCHER,
+                        DB_COLUMN_MATCHER,
+                        FIELD_COLUMN_MATCHER,
+                        METRIC_NAME,
+                    ]
                     .contains(&matcher.name.as_str())
-            }))
+                }))
 }
 
 /// Whether `node` holds an operation whose answer depends on the order its input arrives in.
@@ -3111,6 +3448,43 @@ fn metric_scan_and_table_id(
         return None;
     };
     Some((scan.clone(), filter.predicate.clone(), *table_id))
+}
+
+/// The scan projection that reads `fields`, followed by every column of the scan that is not a
+/// field.
+///
+/// The raw series scan reports one field per field column of the schema it is handed, so the field
+/// columns a scan projects are the fields the native node below it reads, in that order. The columns
+/// beside the fields - the tags, the time index, the tsid - are what a frame is built from and what
+/// the scan's own filters read, so they are kept. `table_fields` is the table's own field columns,
+/// which is what tells a field column apart from a column of another kind: a field column `fields`
+/// does not name is dropped rather than read beside the selection, since the frame this input
+/// declares holds the selection and nothing else. A field that is not a column of the scan's source
+/// answers `None`: this route has nothing to bind it to.
+fn field_first_projection(
+    scan: &datafusion::logical_expr::TableScan,
+    fields: &[String],
+    table_fields: &[String],
+) -> Option<Vec<usize>> {
+    let source_schema = scan.source.schema();
+    // Preserve logical field order and the table restriction on the direct physical scan.
+    let mut projection = fields
+        .iter()
+        .map(|field| source_schema.index_of(field).ok())
+        .collect::<Option<Vec<_>>>()?;
+    let read_indices = scan
+        .projection
+        .clone()
+        .unwrap_or_else(|| (0..source_schema.fields().len()).collect());
+    for index in read_indices {
+        let is_field = table_fields
+            .iter()
+            .any(|field| field == source_schema.field(index).name());
+        if !is_field && !projection.contains(&index) {
+            projection.push(index);
+        }
+    }
+    Some(projection)
 }
 
 #[cfg(test)]

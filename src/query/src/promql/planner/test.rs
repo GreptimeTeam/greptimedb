@@ -56,7 +56,7 @@ use promql::native::plan::{
     AggregateKind, AggregateStage, BoundVectorOp, Grouping, NativeExpr, NativeNode, NativeType,
     ParameterizedOp, unifies_its_own_contributions,
 };
-use promql::vector_match::{Cardinality, MatchingLabels};
+use promql::vector_match::{Cardinality, FillValues, MatchingLabels};
 use promql_parser::label::{Labels, METRIC_NAME};
 use promql_parser::parser;
 use session::context::{MetricDiscoveryScope, QueryContext, QueryContextRef};
@@ -2820,18 +2820,18 @@ async fn native_named_selector_over_a_missing_table_plans_as_an_empty_input() {
         }
     }
 
-    // A `__field__` matcher still declines over a table this route can read: the matcher narrows the
-    // field set of the scan below the node, and the raw series scan reports every field the scan
-    // carries. That refusal is about the scan, not about the table existing - a missing table has no
-    // field set to narrow and is admitted as the empty input, which
-    // `native_missing_table_with_a_field_matcher_answers_the_empty_vector` asserts beside its rows.
+    // A `__field__` matcher narrows the scan to the fields it names, so a table this route can read
+    // is admitted with that projection - the tree's declared field layout is then exactly what the
+    // scan below it reports. `native_field_selector_reads_the_fields_it_names` covers which fields
+    // each operator selects; here the point is that a table that exists is no longer refused for
+    // the scan's field set alone.
     let query = r#"x{__field__="field_0"}"#;
     let plan =
         build_native_fused_plan_with_provider(query, true, named_missing_table_provider().await)
             .await;
     assert!(
-        find_fused_series(&plan).is_none(),
-        "`{query}` claimed a field layout its scan does not report: {plan:?}"
+        find_fused_series(&plan).is_some(),
+        "`{query}` narrows the scan to the field it names: {plan:?}"
     );
 }
 
@@ -4801,19 +4801,46 @@ async fn native_offer_is_counted_once_per_statement() {
     );
 }
 
-/// A propagated matcher is offered once for the operand it rewrote, and nothing below it.
+/// Every table scan the plan carries, in the order the plan lists them.
+fn table_scans(plan: &LogicalPlan) -> Vec<datafusion::logical_expr::TableScan> {
+    fn visit(plan: &LogicalPlan, scans: &mut Vec<datafusion::logical_expr::TableScan>) {
+        if let LogicalPlan::TableScan(scan) = plan {
+            scans.push(scan.clone());
+        }
+        for input in plan.inputs() {
+            visit(input, scans);
+        }
+    }
+
+    let mut scans = Vec::new();
+    visit(plan, &mut scans);
+    scans
+}
+
+/// The `tag_0 = "x"` matcher the statements below state, as the predicate a scan carries for it.
 ///
-/// `matching_filters::propagate` writes a matcher into an operand's scan, which makes that operand
-/// an expression the offer spent at its parent never compiled: that offer read the statement as it
-/// was written, and the matcher reached the scan afterwards. The rewrite is therefore offered of
-/// its own, and the offer it is handed is spent again by the rewritten operand's own subtree,
-/// exactly as this one was. So `N` operators below the rewrite buy one offer - not `N`, and not the
-/// `N` positions times `N` subtrees an unconditional re-offer would compile.
+/// The planner builds a selector's matcher into the scan it binds (`PromPlanner::matchers_to_expr`),
+/// so asserting on the predicate itself says the matcher reached the scan, rather than that a
+/// rendering of the plan happens to contain a piece of it.
+fn tag_0_is_x() -> DfExpr {
+    let value = DfExpr::Literal(ScalarValue::Utf8(Some("x".to_string())), None);
+    DfExpr::Column(Column::from_name("tag_0")).eq(value)
+}
+
+/// A statement is offered to the native route once, whatever the depth of the operand below it.
+///
+/// The offer compiles the whole tree below it, so `N` operators under a binary buy one offer - not
+/// `N`, and not the `N` positions times `N` subtrees an unconditional re-offer would compile.
+///
+/// The native composition plans both operands as they were written, so the matcher the statement
+/// states filters the scan that states it and reaches no other: propagating a matching-label matcher
+/// into the other operand is the existing binary planner's work
+/// (`matching_filters::propagate`), which this route does not do. Both routes answer the same rows,
+/// because the match filters on `tag_0` either way; only how much each scan reads differs.
 #[tokio::test]
 async fn native_offer_counts_a_propagated_operand_once() {
-    // The same match with the rewritten operand two operators deep and six deep: the matcher
-    // crosses in both, and the four extra operators are the operand's subtree rather than more
-    // expressions to offer.
+    // The same match with the operand under it two operators deep and six deep: the four extra
+    // operators are that operand's subtree rather than more expressions to offer.
     let shallow = "((some_metric * 2) * 2) / on(tag_0) \
                    some_metric{tag_0=\"x\",__field__=\"field_0\"}";
     let deep = "((((((some_metric * 2) * 2) * 2) * 2) * 2) * 2) / on(tag_0) \
@@ -4822,23 +4849,33 @@ async fn native_offer_counts_a_propagated_operand_once() {
     for query in [shallow, deep] {
         let _ = take_native_attempts();
         let plan = build_native_fused_plan(query, true).await;
-        let display = plan.display_indent().to_string();
-        // The count below is only a bound if the matcher really crossed to the other operand.
-        assert!(
-            display.contains("some_metric.tag_0 = Utf8(\"x\")"),
-            "{query}: the matcher reached the other operand's scan: {display}"
+        // One scan per operand, and the matcher the statement states is a filter of exactly the one
+        // that states it: the other operand reads without it on this route.
+        let scans = table_scans(&plan);
+        assert_eq!(
+            2,
+            scans.len(),
+            "`{query}` reads one scan per operand: {}",
+            plan.display_indent()
+        );
+        assert_eq!(
+            1,
+            scans
+                .iter()
+                .filter(|scan| scan.filters.contains(&tag_0_is_x()))
+                .count(),
+            "`{query}`: the stated matcher filters its own scan and no other: {}",
+            plan.display_indent()
         );
         counts.push(take_native_attempts());
     }
-    // Seven offers either way: the statement, its root's own retry under the legacy-only
-    // `__field__` matcher, the frame operands the composed attempts beside those two read, and the
-    // propagated operand itself. The four operators that make the deep statement deeper are inside
-    // that operand's subtree, so they buy no offer of their own - an offer that was not spent again
-    // by the rewrite would compile each of them, and the deep statement would cost four more.
+    // One offer either way - the statement's own, spent once by a tree that compiles both operands.
+    // A route that re-offered its subtree per operator would compile each of the four operators the
+    // deep statement adds, so the deep answer would be five rather than one.
     assert_eq!(
-        (7, 7),
+        (1, 1),
         (counts[0], counts[1]),
-        "a propagated operand is offered once whatever its depth: seven offers at both depths"
+        "a statement is offered once, whatever the depth of the operand below it"
     );
 }
 
@@ -4850,18 +4887,28 @@ fn propagation_query(depth: usize) -> String {
     format!("{operand} / on(tag_0) some_metric{{tag_0=\"x\",__field__=\"field_0\"}}")
 }
 
-/// How a statement of [`propagation_query`] plans: whether a native node answers the rewritten
-/// operand, and whether the propagated matcher reached the other operand's scan.
+/// How a statement of [`propagation_query`] plans: whether a native node answers it, and whether
+/// the matcher the statement states became a filter of the scan it binds.
+///
+/// The native composition plans both operands as they were written, so the matcher filters the scan
+/// that states it and is propagated into no other - propagating a matching-label matcher into the
+/// other operand is the existing binary planner's rewrite
+/// (`matching_filters::propagate`), which this route does not perform. Both routes answer the same
+/// rows, because the match filters on `tag_0` either way; only how much each scan reads differs.
 async fn propagation_route(depth: usize) -> (bool, bool) {
     let plan = build_native_fused_plan(&propagation_query(depth), true).await;
-    let display = plan.display_indent().to_string();
     (
         find_fused_series(&plan).is_some(),
-        display.contains("some_metric.tag_0 = Utf8(\"x\")"),
+        table_scans(&plan)
+            .iter()
+            .filter(|scan| scan.filters.contains(&tag_0_is_x()))
+            .count()
+            == 1,
     )
 }
 
-/// A chain under a propagated matcher plans on the stack a query worker has, however deep it is.
+/// A chain beside a matcher-carrying operand plans on the stack a query worker has, however deep
+/// it is.
 ///
 /// The planner recurses once per operator and charges every level's frame to the stack of the level
 /// above it, so a chain of constant multiplications deep enough - eight operators was enough on a
@@ -4896,7 +4943,7 @@ fn a_deep_propagated_operand_plans_within_a_worker_stack() {
     assert_eq!(
         (true, true),
         route,
-        "the rewritten operand is native and the matcher reached the other operand's scan"
+        "the statement is native and the matcher it states filters the scan it binds"
     );
 }
 
@@ -5195,30 +5242,159 @@ async fn native_fused_float64_field_is_accepted() {
     );
 }
 
-/// Alternative (`or`) matchers keep the existing plan.
+/// Alternative (`or`) matchers over one table read through the one scan below the node.
 ///
-/// `a{x="1" or x="2"}` names alternative matchers, which the one scan below the node cannot
-/// represent. These queries are only asserted to fall back: what the existing plan answers for
-/// them is its own question, not one this route claims to have fixed.
+/// `a{x="1" or x="2"}` keeps the rows either group keeps, and both groups are row filters over the
+/// same table: the scan states them as the disjunction of their conjunctions. The groups are not
+/// scans of their own, so a series both groups keep is read once and the statement keeps the series
+/// order every other selector answers in.
 #[tokio::test]
-async fn native_fused_or_matchers_fall_back() {
-    for query in [
-        r#"some_metric{tag_0="a" or tag_0="b"}"#,
-        r#"rate(some_metric{tag_0="a" or tag_0="b"}[5m])"#,
+async fn native_fused_or_matchers_read_one_scan() {
+    let native = build_native_fused_plan(r#"some_metric{tag_0="a" or tag_0="b"}"#, true).await;
+    assert!(
+        find_fused_series(&native).is_some(),
+        "alternative matchers over one table keep the native route: {}",
+        native.display_indent()
+    );
+    let scan = find_metric_physical_scan(&native).expect("the fused route keeps the table scan");
+    let filters = scan
+        .filters
+        .iter()
+        .map(|filter| format!("{filter:?}"))
+        .collect::<Vec<_>>();
+    assert!(
+        filters.iter().any(|filter| {
+            filter.contains("Or") && filter.contains("\"a\"") && filter.contains("\"b\"")
+        }),
+        "the scan filters with the disjunction of the two alternatives: {filters:?}"
+    );
+
+    // A range function over the same selector folds it like a selector without alternatives.
+    let rate =
+        build_native_fused_plan(r#"rate(some_metric{tag_0="a" or tag_0="b"}[5m])"#, true).await;
+    assert!(
+        find_fused_series(&rate).is_some(),
+        "a rate over alternative matchers keeps the native route: {}",
+        rate.display_indent()
+    );
+
+    // Two groups that keep the same rows are one alternative: the plan is the one their rows state
+    // once, not two filters that would report every row twice.
+    let repeated = build_native_fused_plan(r#"some_metric{tag_0="a" or tag_0="a"}"#, true).await;
+    let once = build_native_fused_plan(r#"some_metric{tag_0="a"}"#, true).await;
+    assert_eq!(
+        repeated.display_indent().to_string(),
+        once.display_indent().to_string(),
+        "a repeated alternative is stated once"
+    );
+}
+
+/// A `__field__` alternative selects the columns it names, and the groups' selections are one
+/// selection: a scan reads one field set, so the fields of every group are the fields it reads.
+#[tokio::test]
+async fn native_field_selector_reads_the_fields_either_alternative_names() {
+    for (query, expected) in [
+        (
+            r#"some_metric{__field__="field_0" or __field__="field_1"}"#,
+            vec!["field_0", "field_1"],
+        ),
+        // A group with no row filter of its own keeps every row the shared matchers keep, and the
+        // other group's rows are part of that answer.
+        (
+            r#"some_metric{__field__="field_2", tag_0="a" or __field__="field_0"}"#,
+            vec!["field_0", "field_2"],
+        ),
     ] {
-        let native = build_native_fused_plan(query, true).await;
-        let without_flag = build_native_fused_plan(query, false).await;
+        let native = build_native_fused_plan_with_provider(
+            query,
+            true,
+            native_field_selector_provider().await,
+        )
+        .await;
+        let display = native.display_indent().to_string();
         assert!(
-            find_fused_series(&native).is_none(),
-            "`{query}` names alternative matchers: {}",
-            native.display_indent()
+            find_fused_series(&native).is_some(),
+            "`{query}` keeps the native route: {display}"
         );
+        let selection = scan_projected_field_names(&native);
         assert_eq!(
-            native.display_indent().to_string(),
-            without_flag.display_indent().to_string(),
-            "`{query}` must keep the existing plan"
+            Some(expected),
+            selection,
+            "`{query}` reads the fields its groups name: {display}"
         );
     }
+}
+
+/// Alternatives that name different tables keep the existing plan.
+///
+/// `__name__`, `__schema__` and `__database__` choose the table a selector reads rather than the
+/// rows it keeps, so a group that names another one than another reads a second table - which the
+/// one scan below the node cannot state.
+#[tokio::test]
+async fn native_fused_or_matchers_over_two_tables_fall_back() {
+    // A `__schema__` alternative names a table per group, and the existing plan states none of them:
+    // it plans the selector in the schema the statement runs in, so the two routes plan one query.
+    let query = r#"some_metric{__schema__="alpha" or __schema__="beta"}"#;
+    let native = build_native_fused_plan(query, true).await;
+    let without_flag = build_native_fused_plan(query, false).await;
+    assert!(
+        find_fused_series(&native).is_none(),
+        "`{query}` names a table per alternative: {}",
+        native.display_indent()
+    );
+    assert_eq!(
+        native.display_indent().to_string(),
+        without_flag.display_indent().to_string(),
+        "`{query}` must keep the existing plan"
+    );
+    assert_eq!(
+        Some("or_matchers_name_different_tables"),
+        take_reported_decline(),
+        "`{query}` reports the alternatives as the reason the existing plan answers"
+    );
+
+    // A `__name__` alternative is a table per group as well. The existing plan refuses more than one
+    // name matcher in a selector, so these assert this route's own refusal: what the existing plan
+    // answers for them stays its own question.
+    for query in [
+        r#"{__name__="alpha_total" or __name__="beta_total"}"#,
+        r#"{__name__="alpha_total", tag_0="a" or __name__="beta_total", tag_0="b"}"#,
+    ] {
+        assert_eq!(
+            Some("or_matchers_name_different_tables"),
+            reported_native_decline(query).await,
+            "`{query}` names a table per alternative"
+        );
+    }
+}
+
+/// The reason the native route reports for `query`, for a query whose existing plan is not built:
+/// the refusal is recorded before that plan is.
+async fn reported_native_decline(query: &str) -> Option<&'static str> {
+    let provider = build_test_table_provider_with_options(
+        &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+        1,
+        1,
+        vec![],
+        ConcreteDataType::timestamp_millisecond_datatype(),
+        false,
+        ConcreteDataType::float64_datatype(),
+        NATIVE_ENGINE,
+    )
+    .await;
+    // Nothing is reported until this query is planned, so a reason left by another test cannot be
+    // read as this one's.
+    let _ = take_reported_decline();
+    let eval_stmt = build_eval_stmt(query);
+    let _ = PromPlanner::stmt_to_plan_with_annotations(
+        provider,
+        &eval_stmt,
+        &build_query_engine_state(),
+        None,
+        true,
+    )
+    .await;
+    take_reported_decline()
 }
 
 /// A `rate`/`increase` over a delta-temporality table keeps the existing plan, which sums each
@@ -6106,9 +6282,9 @@ async fn native_composed_binary_admits_complex_operands() {
 /// A composed binary that meets a shape its kernels refuse keeps the existing plan.
 ///
 /// Admission is the composition's own: an operand the native compiler cannot bind, a value that is
-/// not a frame, or a pair whose output column cannot carry both operands' kinds declines here
-/// exactly as it would on the whole statement. None of these may turn into a planning error,
-/// because the existing route answers them.
+/// neither a frame nor a scalar it can bind, or a pair whose output column cannot carry both
+/// operands' kinds declines here exactly as it would on the whole statement. None of these may turn
+/// into a planning error, because the existing route answers them.
 #[tokio::test]
 async fn native_composed_binary_declines_to_the_existing_plan() {
     // An operand that is not a frame leaves the statement's own wrapper in place: the pair is
@@ -6117,11 +6293,12 @@ async fn native_composed_binary_declines_to_the_existing_plan() {
     // existing path too, because a refused chain of n operators would otherwise compile its
     // subtrees again at every operator.
     for query in [
-        // A scalar root is not a frame: composing it by vector matching would broadcast it as if it
-        // were a one-series vector, which is not what the query asked for.
-        "(hist * on(tag_0) floats) * 2",
-        // Neither is a scalar function, however it is written.
-        "(hist * on(tag_0) floats) / time()",
+        // A scalar this route cannot bind is one that reads data: `scalar(sum(floats))` is a tree
+        // over a scan rather than a value bound on the statement's grid, and a broadcast over the
+        // vector it meets would have to run that tree first.
+        "(hist * on(tag_0) floats) / scalar(sum(floats))",
+        // The same shape written without the fold around it.
+        "(hist * on(tag_0) floats) * scalar(floats)",
         // A comparison between a histogram and a float is not a refusal: its two sides pair no
         // sample, so the column is the empty float layout and the statement composes.
         // `native_fused_mixed_comparison_answers_the_empty_float_layout` states that shape, and
@@ -9316,32 +9493,237 @@ async fn native_metric_discovery_name_rewrite_canonicalizes_by_name() {
     );
 }
 
-/// A propagated matcher re-plans a scalar operand of the other side natively, and the native
-/// output name includes the matcher it now carries. The outer legacy binary must read the field
-/// columns the re-planned operand publishes, not the ones captured before propagation.
+/// A `__field__` operand beside a scalar-multiplied one keeps the matcher it was written with, and
+/// the scan it binds is narrowed to the field it names.
+///
+/// The statement is one native tree, so no outer binary reads the operand's output: what the plan
+/// says is that the selector's own matcher became a filter of the scan it binds, and that the scan
+/// projects the selected field. The matcher is not propagated into the scalar-multiplied operand
+/// beside it - that is the existing binary planner's rewrite
+/// (`matching_filters::propagate`), which this route does not perform. The two routes answer the
+/// same rows, because the match filters on `tag_0` either way; only how much each scan reads
+/// differs.
 #[tokio::test]
 async fn native_fused_rewritten_scalar_operand_uses_rewritten_field_columns() {
     let query = r#"(some_metric * 2) / on(tag_0) some_metric{tag_0="x",__field__="field_0"}"#;
     let plan = build_native_fused_plan(query, true).await;
     let display = plan.display_indent().to_string();
-    assert!(
-        display.contains(r#"some_metric{tag_0="x"} * 2"#),
-        "the re-planned scalar operand publishes its rewritten expression name: {display}"
+    let scans = table_scans(&plan);
+    assert_eq!(2, scans.len(), "one scan per operand: {display}");
+    assert_eq!(
+        1,
+        scans
+            .iter()
+            .filter(|scan| scan.filters.contains(&tag_0_is_x()))
+            .count(),
+        "the matcher filters the scan of the operand that states it and no other: {display}"
+    );
+    // That scan reads the field the selection names, not every field of the table.
+    assert_eq!(
+        Some(vec!["field_0"]),
+        scan_projected_field_names(&plan),
+        "the narrowed scan reads the selected field: {display}"
     );
 }
 
-#[tokio::test]
-async fn native_fused_preparation_decline_preserves_legacy_plan() {
-    let query = "absent(vector(1)) + on(tag_0) some_metric{tag_0=\"x\",__field__=\"field_0\"}";
-    let native = build_native_fused_plan(query, true).await;
-    let legacy = build_native_fused_plan(query, false).await;
+/// `some_metric` with three `Float64` fields - `field_0` to `field_2` - so a `__field__` matcher
+/// has a selection to narrow, in the order the table lists them.
+async fn native_field_selector_provider() -> DfTableSourceProvider {
+    build_test_table_provider_with_options(
+        &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+        1,
+        3,
+        vec![],
+        ConcreteDataType::timestamp_millisecond_datatype(),
+        false,
+        ConcreteDataType::float64_datatype(),
+        NATIVE_ENGINE,
+    )
+    .await
+}
 
-    assert!(!native.display_indent().to_string().contains("FusedSeries"));
-    assert_eq!(
-        native.display_indent_schema().to_string(),
-        legacy.display_indent_schema().to_string(),
-        "a native preparation decline must leave legacy planning context unchanged"
-    );
+/// Whether `field` holds sample values.
+///
+/// The native route declares one output column per field, and the sample kind is what identifies
+/// such a column: every other column of a frame is the time index or a tag.
+fn is_value_column(field: &Field) -> bool {
+    field.data_type() == &ArrowDataType::Float64
+        || field.data_type() == &native_histogram_value_type().as_arrow_type()
+}
+
+/// The field columns the narrowed scan of the plan projects, in the order it reads them.
+///
+/// The raw series scan below a native node reports one field per field column of the scan it reads,
+/// so the field columns a scan projects are the fields the node below it reads. A `__field__`
+/// matcher is what narrows a scan's projection, so a scan the route left alone - the one of a
+/// selector carrying no such matcher - projects nothing and says nothing about a selection; a plan
+/// holding several scans is answered by the first narrowed one it carries.
+fn scan_projected_field_names(plan: &LogicalPlan) -> Option<Vec<&str>> {
+    fn visit<'a>(plan: &'a LogicalPlan, selection: &mut Option<Vec<&'a str>>) {
+        if let LogicalPlan::TableScan(scan) = plan
+            && scan.projection.is_some()
+        {
+            let fields = scan
+                .projected_schema
+                .fields()
+                .iter()
+                .filter(|field| is_value_column(field))
+                .map(|field| field.name().as_str())
+                .collect::<Vec<_>>();
+            selection.get_or_insert(fields);
+        }
+        for input in plan.inputs() {
+            visit(input, selection);
+        }
+    }
+
+    let mut selection = None;
+    visit(plan, &mut selection);
+    selection
+}
+
+/// How many value columns the plan publishes, which is one per field it declares.
+fn value_field_count(plan: &LogicalPlan) -> usize {
+    plan.schema()
+        .fields()
+        .iter()
+        .filter(|field| is_value_column(field))
+        .count()
+}
+
+/// A `__field__` operand of a composition plans natively - as a matcher-propagated scalar operand
+/// of a binary, and as the source-free composition's own selection - so the statement runs as one
+/// native tree instead of keeping the existing plan.
+#[tokio::test]
+async fn native_field_selector_operand_of_a_composition_plans_natively() {
+    for query in [
+        r#"(some_metric * 2) / on(tag_0) some_metric{tag_0="x",__field__="field_0"}"#,
+        r#"absent(vector(1)) + on(tag_0) some_metric{tag_0="x",__field__="field_0"}"#,
+    ] {
+        let provider = native_field_selector_provider().await;
+        let native = build_native_fused_plan_with_provider(query, true, provider).await;
+        let display = native.display_indent().to_string();
+        assert!(
+            count_fused_nodes(&native) > 0,
+            "`{query}` keeps the existing plan instead of running natively: {display}"
+        );
+        assert!(
+            !display.contains("PromSeriesNormalize"),
+            "`{query}` reads through a native node and not the existing normalization: {display}"
+        );
+        // The selection reaches the plan as the scan's projection, so the operand reads one field.
+        assert_eq!(
+            Some(vec!["field_0"]),
+            scan_projected_field_names(&native),
+            "`{query}`: {display}"
+        );
+
+        let legacy = build_native_fused_plan_with_provider(
+            query,
+            false,
+            native_field_selector_provider().await,
+        )
+        .await;
+        assert_eq!(
+            value_field_count(&native),
+            value_field_count(&legacy),
+            "`{query}` publishes the fields the existing plan publishes: {}",
+            legacy.display_indent()
+        );
+    }
+}
+
+/// A `__field__` matcher selects what a native selector reads, under every operator the existing
+/// plan supports, and in the same field order.
+///
+/// The raw series scan below a native node reports one field per field column of the scan it reads,
+/// so the selection reaches the plan as the scan's projection and the frame the node declares
+/// carries exactly those fields.
+#[tokio::test]
+async fn native_field_selector_reads_the_fields_it_names() {
+    for (query, expected) in [
+        (r#"some_metric{__field__="field_1"}"#, vec!["field_1"]),
+        (
+            r#"some_metric{__field__!="field_1"}"#,
+            vec!["field_0", "field_2"],
+        ),
+        (
+            r#"some_metric{__field__=~"field_(0|2)"}"#,
+            vec!["field_0", "field_2"],
+        ),
+        (r#"some_metric{__field__!~"field_(0|2)"}"#, vec!["field_1"]),
+        // The fields keep the table's order, whatever order the matchers are stated in.
+        (
+            r#"some_metric{__field__="field_2", __field__="field_0"}"#,
+            vec!["field_0", "field_2"],
+        ),
+        // A `=~` that matches no field keeps every field, as the existing plan does.
+        (
+            r#"some_metric{__field__=~"nope.*"}"#,
+            vec!["field_0", "field_1", "field_2"],
+        ),
+    ] {
+        let native = build_native_fused_plan_with_provider(
+            query,
+            true,
+            native_field_selector_provider().await,
+        )
+        .await;
+        let display = native.display_indent().to_string();
+        assert_eq!(
+            Some(expected.clone()),
+            scan_projected_field_names(&native),
+            "`{query}`: {display}"
+        );
+        let legacy = build_native_fused_plan_with_provider(
+            query,
+            false,
+            native_field_selector_provider().await,
+        )
+        .await;
+        assert_eq!(
+            value_field_count(&native),
+            value_field_count(&legacy),
+            "`{query}` publishes the fields the existing plan publishes: {}",
+            legacy.display_indent()
+        );
+    }
+
+    // A matcher naming a column the table does not carry is an error in the existing plan, and a
+    // selection that keeps no field at all has no value to read: neither is this route's to answer,
+    // so the route names the refusal and the existing plan answers - with a plan or with its own
+    // error, which is why these are planned without unwrapping one.
+    for (query, refusal) in [
+        (
+            r#"some_metric{__field__="nonexistent"}"#,
+            "field_selector_names_a_column_the_table_lacks",
+        ),
+        (
+            r#"some_metric{__field__!="nonexistent"}"#,
+            "field_selector_names_a_column_the_table_lacks",
+        ),
+        (
+            r#"some_metric{__field__="field_0", __field__!="field_0"}"#,
+            "selector_reads_no_field",
+        ),
+    ] {
+        take_reported_decline();
+        let native = plan_or_refusal(query, true, native_field_selector_provider().await).await;
+        assert_eq!(
+            Some(refusal),
+            take_reported_decline(),
+            "`{query}`: the route names why the selection is not its to answer"
+        );
+        assert_eq!(
+            0,
+            native.as_ref().map_or(0, count_fused_nodes),
+            "`{query}` keeps the existing plan: {}",
+            native.as_ref().map_or_else(
+                || "the existing plan refuses it".to_string(),
+                |plan| plan.display_indent().to_string()
+            )
+        );
+    }
 }
 
 /// A subquery is planned natively: it is a window over an evaluated input, which the split and
@@ -12699,17 +13081,23 @@ async fn a_segmented_histogram_answer_crosses_its_collected_boundary() {
 /// The gate cannot look at the root alone: `sum(h) * 2` has a binary root and the fold sits below
 /// it, so the value entering each aggregate is what decides. A scalar multiple of a histogram - a
 /// negation included - is a histogram, which this route's binary kernel answers, so those
-/// statements run and publish the histogram column. The shapes whose state cannot cross keep the
-/// existing plan instead, which `a_histogram_aggregate_the_split_declines_keeps_the_existing_plan`
-/// pins.
+/// statements run and publish the histogram column. What the column carries is the kind the
+/// statement's own operator answers rather than the kind the fold's state carries: `avg(h) + 1`
+/// pairs a histogram with a float, which no kernel covers, so it pairs no sample and declares the
+/// empty float layout the existing plan declares for it - while the fold itself still runs as the
+/// split. The shapes whose state cannot cross keep the existing plan instead, which
+/// `a_histogram_aggregate_the_split_declines_keeps_the_existing_plan` pins.
 #[tokio::test]
 async fn a_histogram_fold_is_admitted_below_a_pointwise_operator() {
-    for query in [
-        "sum(some_metric)",
-        "sum(some_metric) * 2",
-        "sum(some_metric) / 2",
-        "avg(some_metric) + 1",
-        "-sum(some_metric)",
+    let histogram_type = native_histogram_value_type().as_arrow_type();
+    for (query, expected) in [
+        ("sum(some_metric)", histogram_type.clone()),
+        ("sum(some_metric) * 2", histogram_type.clone()),
+        ("sum(some_metric) / 2", histogram_type.clone()),
+        ("-sum(some_metric)", histogram_type.clone()),
+        // A pair no kernel covers answers no sample at all, so the column is the empty float layout
+        // the existing plan declares for the same statement.
+        ("avg(some_metric) + 1", ArrowDataType::Float64),
     ] {
         // A metric-engine table, whose tag columns are all nullable: the fixture the statements
         // below ran against before the drop's proof changed, and the one this test pins.
@@ -12718,17 +13106,18 @@ async fn a_histogram_fold_is_admitted_below_a_pointwise_operator() {
         let display = plan.display_indent_schema().to_string();
         let final_node = find_final_split(&plan)
             .unwrap_or_else(|| panic!("{query} kept the existing plan: {display}"));
-        // Named after the expression now, so the histogram type is what identifies the column.
-        let histogram_type = native_histogram_value_type().as_arrow_type();
+        // Named after the expression now, so the type is what identifies the column.
         let fields = final_node.schema().fields();
         let field = fields
             .iter()
-            .find(|field| field.data_type() == &histogram_type)
+            .find(|field| {
+                field.data_type() == &ArrowDataType::Float64 || field.data_type() == &histogram_type
+            })
             .unwrap_or_else(|| panic!("{query} published no field column: {display}"));
         assert_eq!(
-            &histogram_type,
+            &expected,
             field.data_type(),
-            "{query} answered something other than the histogram it folded: {display}"
+            "{query} declared something other than what its operator answers: {display}"
         );
     }
 }
@@ -18083,6 +18472,104 @@ async fn native_composed_binary_admits_a_source_free_frame_operand() {
     );
 }
 
+/// A scalar operand is broadcast over the vector it meets, not matched as a second frame.
+///
+/// `(hist * on(tag_0) floats) * 2` is not one whole tree: its two selectors carry different field
+/// kinds, which no single column can declare, so the statement composes. The right side of that
+/// composition is `2`, which carries one value per grid point and no labels - Prometheus broadcasts
+/// it over the vector it meets - so it enters the node as the compiled scalar rather than as a
+/// second frame the matcher would have to pair. The pair keeps the vector's labels, reads the
+/// vector's one input, and answers the kind the operator produces: a histogram multiplied by a
+/// float is a histogram.
+#[tokio::test]
+async fn native_composed_binary_broadcasts_a_scalar_operand() {
+    for (query, scalar_on_the_left, histogram) in [
+        ("(hist * on(tag_0) floats) * 2", false, true),
+        ("(hist * on(tag_0) floats) / time()", false, true),
+        ("2 * (hist * on(tag_0) floats)", true, true),
+    ] {
+        let plan =
+            build_native_fused_plan_with_provider(query, true, native_mixed_kind_provider().await)
+                .await;
+        let display = plan.display_indent().to_string();
+        assert!(!display.contains("Join:"), "{query}: {display}");
+        let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {display}"));
+        let NativeExpr::Binary {
+            left,
+            right,
+            matching,
+        } = &fused.tree().root().expr
+        else {
+            panic!("{query}: the statement root is the broadcast: {display}");
+        };
+        // The scalar side carries no labels, so the pair matches nothing and fills nothing.
+        assert!(
+            matches!(matching.labels, MatchingLabels::Ignoring(ref names) if names.is_empty())
+                && matching.cardinality == Cardinality::OneToOne
+                && matching.fill == FillValues::default(),
+            "{query}: a broadcast pairs no series: {display}"
+        );
+        let (vector, scalar) = if scalar_on_the_left {
+            (right, left)
+        } else {
+            (left, right)
+        };
+        assert!(
+            matches!(vector.expr, NativeExpr::Input(_)),
+            "{query}: the frame side is the node's one input: {display}"
+        );
+        assert!(
+            matches!(
+                scalar.expr,
+                NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. }
+            ),
+            "{query}: the scalar side is the compiled scalar: {display}"
+        );
+        // The scalar is not a child: only the frame side reads an input.
+        assert_eq!(1, fused.children().len(), "{query}: {display}");
+        assert_eq!(
+            &if histogram {
+                native_histogram_value_type().as_arrow_type()
+            } else {
+                ArrowDataType::Float64
+            },
+            native_value_field(fused, query).data_type(),
+            "{query}: the pair answers the vector's kind: {display}"
+        );
+    }
+}
+
+/// A statement whose scalar side is read from data keeps the existing plan.
+///
+/// `scalar(sum(floats))` is a tree over a scan rather than a value this composition can bind, so the
+/// pair declines to the existing plan, exactly as it did before a scalar could compose at all.
+#[tokio::test]
+async fn native_composed_binary_declines_a_scalar_operand_that_reads_data() {
+    let query = "(hist * on(tag_0) floats) / scalar(sum(floats))";
+    let plan =
+        build_native_fused_plan_with_provider(query, true, native_mixed_kind_provider().await)
+            .await;
+    let display = plan.display_indent().to_string();
+    assert!(
+        find_fused_series(&plan).is_none(),
+        "`{query}` has no composed answer: {display}"
+    );
+    let legacy = PromPlanner::stmt_to_plan_with_annotations(
+        native_mixed_kind_provider().await,
+        &build_eval_stmt(query),
+        &build_query_engine_state(),
+        None,
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        legacy.display_indent().to_string(),
+        display,
+        "`{query}` must keep the existing plan"
+    );
+}
+
 /// A composition descends a parsed expression, so a deep one ends.
 ///
 /// Every operand offered below is a strict part of the expression it came from, which is what bounds
@@ -18186,12 +18673,13 @@ fn a_deep_native_composition_plans_within_a_worker_stack() {
 /// A refused operand leaves the planner's selector state where it found it.
 ///
 /// The composed attempt writes the context while it prepares each operand's scan, so a refusal - here
-/// the left operand plans and the scalar `2` is no frame - must restore it before the refusal is
-/// returned. The same planner then plans another expression natively, from the same context.
+/// the left operand plans and the right one is a scalar that reads data, which this binding does not
+/// take - must restore it before the refusal is returned. The same planner then plans another
+/// expression natively, from the same context.
 #[tokio::test]
 async fn native_composed_binary_restores_the_context_after_a_refused_operand() {
     let state = build_query_engine_state();
-    let stmt = build_eval_stmt("(hist * on(tag_0) floats) / 2");
+    let stmt = build_eval_stmt("(hist * on(tag_0) floats) / scalar(sum(floats))");
     let mut planner = PromPlanner {
         table_provider: native_mixed_kind_provider().await,
         ctx: PromPlannerContext::from_eval_stmt(&stmt).unwrap(),
@@ -18206,7 +18694,7 @@ async fn native_composed_binary_restores_the_context_after_a_refused_operand() {
         .unwrap();
     assert!(
         refused.is_none(),
-        "a scalar operand is no frame, so the pair declines"
+        "a scalar that reads data is no operand of this composition, so the pair declines"
     );
     assert_eq!(
         before,
@@ -18387,5 +18875,72 @@ async fn native_missing_table_named_after_its_own_columns_answers_the_empty_vect
         .unwrap_or_else(|error| panic!("`{query}` is not planned at all: {error}"));
         let (_, batches) = execute(plan, &state).await;
         assert_eq!(0, batch_rows(&batches), "`{query}`: {batches:?}");
+    }
+}
+/// A histogram beside a literal scalar declares the kind its operator answers, as the existing plan
+/// does for the same statement.
+///
+/// A scalar carries no field, so the column is what the operator makes of the vector's samples and
+/// not the vector's own kind in every case: `bool` answers `1` or `0` whatever it read, which is a
+/// float, so `hist > bool 2` declares the empty float layout the existing plan declares - the
+/// kernel drops every histogram a float is compared with, and the statement answers no row. A
+/// comparison without `bool` only filters, so `hist > 2` keeps the histogram column. Arithmetic
+/// answers the kind the kernel emits: `hist * 2`, `2 * hist` and `hist / 2` scale the histogram and
+/// stay histograms, while `2 / hist` and `hist + 2` pair no sample at all and declare the empty
+/// float layout the existing plan declares for them.
+///
+/// Both routes are read off the plan, because the column a statement publishes is the plan's own
+/// schema: the native one is the fused node's, and the existing one is the plan the same statement
+/// is built by when the native route is off.
+#[tokio::test]
+async fn native_histogram_scalar_broadcasts_declare_the_operators_kind() {
+    let histogram = native_histogram_value_type().as_arrow_type();
+    for (query, expected) in [
+        ("hist > bool 2", ArrowDataType::Float64),
+        ("hist > 2", histogram.clone()),
+        ("hist * 2", histogram.clone()),
+        ("2 * hist", histogram.clone()),
+        ("hist / 2", histogram.clone()),
+        ("2 / hist", ArrowDataType::Float64),
+        ("hist + 2", ArrowDataType::Float64),
+        // A composed operand answers the same kinds: the scalar is bound over the frame the
+        // composition read, and that pair follows the rule a whole tree follows.
+        ("(hist * on(tag_0) floats) > bool 2", ArrowDataType::Float64),
+        ("(hist * on(tag_0) floats) > 2", histogram.clone()),
+        ("2 / (hist * on(tag_0) floats)", ArrowDataType::Float64),
+    ] {
+        let plan =
+            build_native_fused_plan_with_provider(query, true, native_mixed_kind_provider().await)
+                .await;
+        let fused = find_fused_series(&plan)
+            .unwrap_or_else(|| panic!("{query} left the native route: {plan}"));
+        assert_eq!(
+            &expected,
+            native_value_field(fused, query).data_type(),
+            "{query} native value column: {plan}"
+        );
+        let legacy = PromPlanner::stmt_to_plan_with_annotations(
+            native_mixed_kind_provider().await,
+            &build_eval_stmt(query),
+            &build_query_engine_state(),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        let legacy_types = legacy
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.data_type().clone())
+            .collect::<Vec<_>>();
+        let legacy_type = legacy_types
+            .iter()
+            .find(|data_type| **data_type == ArrowDataType::Float64 || **data_type == histogram)
+            .unwrap_or_else(|| panic!("{query} existing plan publishes no value column: {legacy}"));
+        assert_eq!(
+            &expected, legacy_type,
+            "{query} existing value column: {legacy}"
+        );
     }
 }

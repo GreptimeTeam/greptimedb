@@ -692,6 +692,97 @@ fn binary_comparison_names_a_mixed_pair_as_a_float() {
     }
 }
 
+/// A broadcast answers the kind its operator states for the vector side, not the vector's own kind
+/// in every case.
+///
+/// A scalar carries no field, so what the column holds is what the operator makes of the vector's
+/// samples: `bool` answers `1` or `0` (`Float`), a comparison without it filters and keeps the
+/// vector's kind - which is why `hist > 2` still declares a histogram column, empty because the
+/// kernel pairs no histogram with a float - and arithmetic answers the arithmetic result, which is
+/// a histogram for `hist * 2`, `2 * hist` and `hist / 2` and the empty float layout for the
+/// directions no kernel covers (`2 / hist`, `hist + 2`). The whole-tree walk and a composition both
+/// read this rule, so the two cannot declare the same statement's column differently.
+#[test]
+fn a_broadcast_declares_the_kind_its_operator_answers() {
+    use super::broadcast_output_field_kind;
+    use crate::extension_plan::FieldKind::{Float, Histogram};
+
+    for (scalar_on_left, op, return_bool, vector, expected) in [
+        // `bool` rewrites the value, so the column is a float whatever it read.
+        (false, BinaryOp::Gt, true, Histogram, Float),
+        (true, BinaryOp::Gt, true, Histogram, Float),
+        (false, BinaryOp::Eq, true, Histogram, Float),
+        (false, BinaryOp::Gt, true, Float, Float),
+        // A comparison without `bool` only filters, so the column keeps the vector's kind.
+        (false, BinaryOp::Gt, false, Histogram, Histogram),
+        (true, BinaryOp::Lt, false, Histogram, Histogram),
+        (false, BinaryOp::Le, false, Float, Float),
+        // Arithmetic answers what the float-and-vector pair emits.
+        (false, BinaryOp::Mul, false, Histogram, Histogram),
+        (true, BinaryOp::Mul, false, Histogram, Histogram),
+        (false, BinaryOp::Div, false, Histogram, Histogram),
+        (true, BinaryOp::Div, false, Histogram, Float),
+        (false, BinaryOp::Add, false, Histogram, Float),
+        (false, BinaryOp::Sub, false, Histogram, Float),
+        (false, BinaryOp::Mod, false, Histogram, Float),
+        (false, BinaryOp::Pow, false, Histogram, Float),
+        (false, BinaryOp::Atan2, false, Histogram, Float),
+        (false, BinaryOp::Mul, false, Float, Float),
+        (true, BinaryOp::Div, false, Float, Float),
+    ] {
+        assert_eq!(
+            broadcast_output_field_kind(scalar_on_left, vector, op, return_bool),
+            Some(expected),
+            "{} {op:?} bool={return_bool} {vector:?}",
+            if scalar_on_left { "2" } else { "hist" }
+        );
+    }
+
+    // The tree-level walk reads that same rule, so a statement's column is declared from the shape
+    // of its tree: `hist > bool 2` is a float, `hist > 2` keeps the histogram, and `2 / hist` - a
+    // pair no sample can come out of - is the empty float layout `hist + 2` declares.
+    let out = grid(0, 60_000, 1);
+    let histogram = instant_sample(input_on(Arc::clone(&out)), Arc::clone(&out));
+    for (scalar_on_left, op, return_bool, expected) in [
+        (false, BinaryOp::Gt, true, Float),
+        (false, BinaryOp::Gt, false, Histogram),
+        (false, BinaryOp::Div, false, Histogram),
+        (true, BinaryOp::Div, false, Float),
+        (false, BinaryOp::Mul, false, Histogram),
+        (true, BinaryOp::Mul, false, Histogram),
+        (false, BinaryOp::Add, false, Float),
+    ] {
+        let scalar = scalar_on(2.0, Arc::clone(&out));
+        let (left, right) = if scalar_on_left {
+            (scalar, histogram.clone())
+        } else {
+            (histogram.clone(), scalar)
+        };
+        let node = NativeNode {
+            expr: NativeExpr::Binary {
+                left: Box::new(left),
+                right: Box::new(right),
+                matching: BinaryMatching {
+                    op,
+                    return_bool,
+                    ..add()
+                },
+            },
+            output: histogram.output.clone(),
+        };
+        assert_eq!(
+            node.output_field_kind(Some(FieldKind::Histogram)),
+            Some(expected),
+            "{} {op:?} bool={return_bool}",
+            if scalar_on_left {
+                "2 op hist"
+            } else {
+                "hist op 2"
+            }
+        );
+    }
+}
+
 /// A whole-vector operation answers either the series it selected or a value it computed.
 ///
 /// `topk`, `bottomk`, `limitk`, `limit_ratio` and the `sort`s hand on the samples they read under

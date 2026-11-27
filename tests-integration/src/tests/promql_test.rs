@@ -2400,6 +2400,227 @@ async fn native_promql_clamp_aggregates_execute_on_native_segments() {
     }
 }
 
+/// The alternative (`or`) matchers of one table run natively, and a series several alternatives
+/// keep is reported once.
+///
+/// A group of matchers is a row filter and every group of one selector filters the same table, so the
+/// scan below the node states them as the disjunction of their conjunctions. The existing plan states
+/// none of them - `native_or_pair{host="a" or host="b"}` carries no `host` filter there, so it reads
+/// every series of the table, and the cases below hold that difference: `native_or_pair` carries a
+/// series no alternative names, which this route drops and the existing plan answers.
+/// `native_or_overlap` holds the one series both of its alternatives keep, which both routes report
+/// once.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_or_matchers_over_one_table_match_legacy() {
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_or_matchers").with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE native_or_phy (ts TIMESTAMP TIME INDEX, v DOUBLE) \
+             ENGINE=metric WITH (\"physical_metric_table\" = \"\"); \
+         CREATE TABLE native_or_pair (host STRING NULL, ts TIMESTAMP NOT NULL, v DOUBLE NULL, \
+             TIME INDEX (ts), PRIMARY KEY (host)) \
+             ENGINE=metric WITH (on_physical_table = 'native_or_phy'); \
+         CREATE TABLE native_or_overlap (host STRING NULL, ts TIMESTAMP NOT NULL, v DOUBLE NULL, \
+             TIME INDEX (ts), PRIMARY KEY (host)) \
+             ENGINE=metric WITH (on_physical_table = 'native_or_phy'); \
+         INSERT INTO native_or_pair (host, ts, v) VALUES ('a', 0, 2), ('b', 0, 4), ('c', 0, 8); \
+         INSERT INTO native_or_overlap (host, ts, v) VALUES ('a', 0, 6); \
+         CREATE TABLE native_or_two_fields (host STRING NULL, ts TIMESTAMP NOT NULL, \
+             f0 DOUBLE NULL, f1 DOUBLE NULL, TIME INDEX (ts), PRIMARY KEY (host)); \
+         INSERT INTO native_or_two_fields (host, ts, f0, f1) \
+             VALUES ('a', 0, 1, NULL), ('b', 0, NULL, 3)",
+        QueryContext::arc(),
+    )
+    .await;
+
+    // Two alternatives over one tag keep the rows either group keeps, and a repeated alternative is
+    // one filter rather than a second reading of the same rows.
+    for (query, expected) in [
+        (
+            r#"native_or_pair{host="a" or host="b"}"#,
+            vec![(0, "a".to_string(), 2.0), (0, "b".to_string(), 4.0)],
+        ),
+        (
+            r#"native_or_pair{host="a" or host="b" or host="a"}"#,
+            vec![(0, "a".to_string(), 2.0), (0, "b".to_string(), 4.0)],
+        ),
+    ] {
+        let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+        observer.clear();
+        let native = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
+        assert_native_rows_plan(&observer);
+        let legacy = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
+        assert_eq!(expected, native, "{query}");
+        // A known difference: the existing plan pushes no alternative down, so it also answers `c`.
+        let mut legacy_expected = expected.clone();
+        legacy_expected.push((0, "c".to_string(), 8.0));
+        assert_eq!(legacy_expected, legacy, "{query}");
+    }
+
+    // Two alternatives that both keep one series: the series is read once, as the existing plan
+    // answers it, not once per alternative.
+    let query = r#"native_or_overlap{host=~"a" or host="a"}"#;
+    let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+    observer.clear();
+    let native = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
+    assert_native_rows_plan(&observer);
+    let legacy = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
+    assert_eq!(vec![(0, "a".to_string(), 6.0)], native, "{query}");
+    assert_eq!(legacy, native, "{query}");
+
+    // A `__field__` alternative names columns rather than rows, so the groups' selections are one
+    // selection: a selection both forms name reads the same fields.
+    let query = r#"native_or_pair{__field__="v" or __field__="v"}"#;
+    let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+    observer.clear();
+    let native = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
+    assert_native_rows_plan(&observer);
+    let legacy = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
+    assert_eq!(
+        vec![
+            (0, "a".to_string(), 2.0),
+            (0, "b".to_string(), 4.0),
+            (0, "c".to_string(), 8.0),
+        ],
+        native,
+        "{query}"
+    );
+    assert_eq!(native, legacy, "{query}");
+
+    // A metric table carries one field column, so the form two different fields state is planned on a
+    // plain table: the fields either group names are the fields the scan reads, which is the
+    // selection stating both of them once. The value columns are named after the expression, so the
+    // two statements name them differently; the positions and the values are what a selection
+    // decides.
+    observer.clear();
+    let both = positional_rows(
+        native_tql_output(
+            &instance,
+            r#"TQL EVAL (0, 0, '1s') native_or_two_fields{__field__="f0" or __field__="f1"}"#,
+            true,
+        )
+        .await,
+    )
+    .await;
+    assert_native_rows_plan(&observer);
+    let stated = positional_rows(
+        native_tql_output(
+            &instance,
+            r#"TQL EVAL (0, 0, '1s') native_or_two_fields{__field__="f0", __field__="f1"}"#,
+            true,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        stated, both,
+        "the fields either alternative names are the fields the scan reads"
+    );
+    assert_eq!(2, both.len(), "both series answer one row each: {both:?}");
+
+    // A selector that names no metric reads the metric tables the discovery scope allows, and each
+    // of them is filtered by the alternatives.
+    let mut ctx = QueryContext::with_db_name(None);
+    ctx.set_extension(QUERY_PARALLELISM_HINT, "4".to_string());
+    ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, "true".to_string());
+    ctx.set_metric_discovery_scope(MetricDiscoveryScope::allowed([(
+        DEFAULT_CATALOG_NAME.to_string(),
+        DEFAULT_SCHEMA_NAME.to_string(),
+        "native_or_pair".to_string(),
+    )]));
+    observer.clear();
+    let output = instance
+        .do_query(
+            r#"TQL EVAL (0, 0, '1s') {host="a" or host="b"}"#,
+            Arc::new(ctx),
+        )
+        .await
+        .remove(0)
+        .unwrap();
+    let rows = native_rows(output, None).await;
+    assert_native_rows_plan(&observer);
+    // The name column's position among the labels is the rows layout's, not this test's; the label
+    // set each row reports is what the alternatives decide.
+    let labels = rows
+        .iter()
+        .map(|(time, labels, value)| {
+            let mut parts = labels.split(',').collect::<Vec<_>>();
+            parts.sort_unstable();
+            (*time, parts.join(","), *value)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        vec![
+            (0, "__name__=native_or_pair,host=a".to_string(), 2.0),
+            (0, "__name__=native_or_pair,host=b".to_string(), 4.0),
+        ],
+        labels,
+        "a nameless selector filters every table its alternatives keep"
+    );
+
+    // Alternatives that name different schemas name different tables, so the existing plan answers
+    // the same rows instead of this route planning them.
+    let query = r#"native_or_pair{__schema__="alpha" or __schema__="beta"}"#;
+    let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+    observer.clear();
+    let native = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
+    let display = datafusion::physical_plan::displayable(observer.root_plan().as_ref())
+        .indent(true)
+        .to_string();
+    assert!(
+        !display.contains("FusedSeriesExec"),
+        "{query} names a table per alternative: {display}"
+    );
+    let legacy = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
+    assert_eq!(legacy, native, "{query}");
+}
+
+/// Every row of a rows answer, rendered by column position.
+///
+/// Two statements that read the same series name their value columns after the expression they
+/// state, so comparing what they answer compares the values their rows carry rather than the names
+/// the columns were given.
+async fn positional_rows(output: Output) -> Vec<Vec<String>> {
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!("TQL EVAL returns record batches"),
+    };
+    let mut rows = batches
+        .iter()
+        .flat_map(|batch| {
+            (0..batch.num_rows())
+                .map(|row| {
+                    batch
+                        .columns()
+                        .iter()
+                        .map(|column| {
+                            let values = cast(column.as_ref(), &DataType::Utf8).unwrap();
+                            let values = values.as_any().downcast_ref::<StringArray>().unwrap();
+                            if values.is_null(row) {
+                                "NULL".to_string()
+                            } else {
+                                values.value(row).to_string()
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    rows.sort();
+    rows
+}
+
 /// A native rows result names each row after the metric it came from.
 ///
 /// The name is part of what the statement answers, not of how a result is displayed: `sum by
@@ -4584,6 +4805,14 @@ async fn native_promql_composed_binary_canonical_operand() {
 /// `(Histogram, Float)` as unsupported and skips it without keeping the left element, so its one
 /// column is the empty float layout both routes answer with no rows.
 ///
+/// The same holds for a histogram beside a literal scalar, and what that column *is* follows the
+/// operator rather than the histogram it read: `bool` answers `1` or `0` whatever it compared, so
+/// `kind_hist > bool 2` declares `Float64`; a comparison without `bool` only filters, so it keeps
+/// the histogram column; arithmetic keeps the histogram where a kernel scales one - `hist * 2`,
+/// `2 * hist`, `hist / 2` - and declares the empty float layout for the directions that pair nothing
+/// at all, `2 / hist` and `hist + 2`, as the existing plan does for them. Both the type and the rows
+/// are compared here, on both routes.
+///
 /// The observer says which route ran - the native one while the option is on, the existing plan
 /// when it is off - and the rows are compared with the existing plan's.
 #[tokio::test(flavor = "multi_thread")]
@@ -4591,6 +4820,7 @@ async fn native_promql_kind_rules_match_legacy() {
     use api::greptime_proto::io::prometheus::write::v2::histogram::{Count, ZeroCount};
     use api::greptime_proto::io::prometheus::write::v2::{Histogram, Sample};
     use axum::body::{Body, to_bytes};
+    use common_query::native_histogram::native_histogram_arrow_type;
     use http::Request;
     use prost::Message;
     use servers::prom_remote_write::v2::test_util as remote_write_v2;
@@ -4716,6 +4946,399 @@ async fn native_promql_kind_rules_match_legacy() {
         native_rows,
         "{comparison} must answer the existing plan's rows"
     );
+
+    // A histogram broadcast over a literal scalar declares the kind its operator answers, on both
+    // routes. A scalar carries no field, so the column is what the operator makes of the histogram
+    // and not the histogram's own type in every case: `bool` answers `1` or `0` whatever it read,
+    // which is a float, while a comparison without `bool` only filters and keeps the histogram
+    // column. Both of those pairs emit nothing here - the kernel pairs no histogram with a float at
+    // all - so the answers are the empty columns this block compares, type included.
+    let empty_answers = [
+        ("kind_hist > bool 2", DataType::Float64),
+        ("kind_hist > 2", native_histogram_arrow_type()),
+        ("2 / kind_hist", DataType::Float64),
+        ("kind_hist + 2", DataType::Float64),
+    ];
+    for (expression, expected) in empty_answers {
+        let sql = format!("TQL EVAL (0, 600, '600s') {expression}");
+        observer.clear();
+        let native = native_tql_output(&instance, &sql, true).await;
+        assert!(
+            observer.fused().is_some(),
+            "{expression} did not run natively: {:#?}",
+            observer.root_plan()
+        );
+        let (native_type, native_rows) = native_answer_value_column(native, expression).await;
+        assert_eq!(&expected, &native_type, "{expression} native value column");
+        assert_eq!(0, native_rows, "{expression} pairs no histogram sample");
+        observer.clear();
+        let legacy = native_tql_output(&instance, &sql, false).await;
+        assert!(
+            observer.fused().is_none(),
+            "{expression} must keep the existing plan when the native route is off"
+        );
+        let (legacy_type, legacy_rows) = native_answer_value_column(legacy, expression).await;
+        assert_eq!(
+            &expected, &legacy_type,
+            "{expression} existing value column"
+        );
+        assert_eq!(
+            legacy_rows, native_rows,
+            "{expression} must answer the existing plan's rows"
+        );
+    }
+
+    // Arithmetic keeps the histogram for the directions that scale one - `hist * 2`, `2 * hist` and
+    // `hist / 2` - and the values are the existing plan's, row for row. `2 / hist` has no kernel at
+    // all, so it declares the empty float layout above rather than the histogram it reads.
+    for (expression, scale) in [
+        ("kind_hist * 2", 2.0),
+        ("2 * kind_hist", 2.0),
+        ("kind_hist / 2", 0.5),
+    ] {
+        let sql = format!("TQL EVAL (0, 600, '600s') {expression}");
+        observer.clear();
+        let native = native_tql_output(&instance, &sql, true).await;
+        assert!(
+            observer.fused().is_some(),
+            "{expression} did not run natively: {:#?}",
+            observer.root_plan()
+        );
+        let (native_type, _) = native_answer_value_column(native, expression).await;
+        assert_eq!(
+            native_histogram_arrow_type(),
+            native_type,
+            "{expression} stays a histogram column"
+        );
+        observer.clear();
+        let native = native_tql_output(&instance, &sql, true).await;
+        let native_rows = histogram_label_rows(native).await;
+        assert_eq!(
+            vec![
+                (0, vec!["job=api".to_string()], 4.0 * scale, 8.0 * scale),
+                (
+                    600_000,
+                    vec!["job=api".to_string()],
+                    4.0 * scale,
+                    8.0 * scale
+                ),
+            ],
+            native_rows,
+            "{expression} scales the histogram it read"
+        );
+        observer.clear();
+        let legacy = native_tql_output(&instance, &sql, false).await;
+        assert!(
+            observer.fused().is_none(),
+            "{expression} must keep the existing plan when the native route is off"
+        );
+        assert_eq!(
+            histogram_label_rows(legacy).await,
+            native_rows,
+            "{expression} must answer the existing plan's rows row for row"
+        );
+    }
+}
+
+/// The declared type of a PromQL answer's value column, and how many rows the answer holds.
+///
+/// The answer publishes its time index first, its value next and its labels after it, so the value
+/// is the one column that is neither a timestamp nor a label. The declaration is read off the
+/// execution plan the answer ran, because an answer with no row carries no batch to read it from.
+/// Both routes declare the same column for the statement, and comparing the declarations is the
+/// point: a histogram answer and the empty float layout an unsupported pair keeps are what a reader
+/// tells apart by this type.
+async fn native_answer_value_column(output: Output, query: &str) -> (DataType, usize) {
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!("PromQL answers record batches"),
+    };
+    let rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
+    // An answer with no row carries no batch to read the declaration from, so it comes from the
+    // plan the answer ran; a batch that does carry rows names the same columns.
+    let schema = match output.meta.plan {
+        Some(plan) => plan.schema(),
+        None => Arc::clone(batches.schema().arrow_schema()),
+    };
+    let value = schema
+        .fields()
+        .iter()
+        .find(|field| {
+            !matches!(
+                field.data_type(),
+                DataType::Timestamp(..) | DataType::Utf8 | DataType::Dictionary(_, _)
+            )
+        })
+        .unwrap_or_else(|| panic!("{query} declares a value column: {schema:?}"));
+    (value.data_type().clone(), rows)
+}
+
+/// A scalar operand broadcasts over the vector it meets on both routes, row for row.
+///
+/// `(scalar_hist * on(job) scalar_float) * 2` is not one whole tree: its two selectors carry
+/// different field kinds, which no single column declares, so the statement composes - and its right
+/// side is a scalar. Prometheus broadcasts a scalar over the vector it meets rather than matching
+/// series between the two, so the pair keeps that vector's labels and answers the kind the operator
+/// produces: a histogram multiplied by a float is a histogram, and dividing one by `time()` is
+/// another. The existing plan answers the same statements through its own machinery, so its rows are
+/// what says the broadcast computes the same values.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_composed_scalar_operand_matches_legacy() {
+    use api::greptime_proto::io::prometheus::write::v2::histogram::{Count, ZeroCount};
+    use api::greptime_proto::io::prometheus::write::v2::{Histogram, Sample};
+    use axum::body::{Body, to_bytes};
+    use http::Request;
+    use prost::Message;
+    use servers::prom_remote_write::v2::test_util as remote_write_v2;
+    use servers::prom_store::snappy_compress;
+    use tower::ServiceExt;
+
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_composed_scalar").with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    let server = crate::test_util::build_test_prom_server(instance.clone(), false, None).build();
+    let router = server.build(server.make_app()).unwrap();
+    // One histogram metric and one float metric, both written through the remote-write endpoint so
+    // the two tables carry the same column layout: a difference in the answers is then a difference
+    // in the answer rather than in the fixture.
+    for request in [
+        remote_write_v2::request_with_labels_and_histograms(
+            vec![("__name__", "scalar_hist"), ("job", "api"), ("host", "a")],
+            [600_000, 1_200_000]
+                .into_iter()
+                .map(|timestamp| Histogram {
+                    timestamp,
+                    count: Some(Count::CountInt(4)),
+                    zero_count: Some(ZeroCount::ZeroCountInt(4)),
+                    sum: 8.0,
+                    ..Default::default()
+                })
+                .collect(),
+        ),
+        remote_write_v2::request_with_labels_and_samples(
+            vec![("__name__", "scalar_float"), ("job", "api"), ("host", "a")],
+            [(600_000, 2.0), (1_200_000, 3.0)]
+                .into_iter()
+                .map(|(timestamp, value)| Sample {
+                    timestamp,
+                    value,
+                    ..Default::default()
+                })
+                .collect(),
+        ),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/v1/prometheus/write")
+                    .header("Content-Encoding", "snappy")
+                    .header(
+                        "Content-Type",
+                        "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+                    )
+                    .body(Body::from(
+                        snappy_compress(&request.encode_to_vec()).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            204,
+            "{:?}",
+            to_bytes(response.into_body(), usize::MAX).await.unwrap()
+        );
+    }
+
+    // The histogram side is `count = 4, sum = 8` at both steps and the float side is `2` then `3`,
+    // so the match answers `8/16` and then `12/24`. A one-to-one match narrows the labels to the
+    // ones it matched on, which is why every row carries `job` alone: `host` is not a label of the
+    // answer, and the scalar broadcast neither adds nor drops one.
+    let histogram_matches = [
+        // A scalar scales the histogram it is broadcast over.
+        (
+            "(scalar_hist * on(job) scalar_float) * 2",
+            vec![
+                (600_000, vec!["job=api".to_string()], 16.0, 32.0),
+                (1_200_000, vec!["job=api".to_string()], 24.0, 48.0),
+            ],
+        ),
+        // A scalar function is broadcast the same way: `time()` is the step in seconds, which is
+        // `600` and `1200` here. The product is a histogram, so the divisor meets histogram samples
+        // one point at a time.
+        (
+            "(scalar_hist * on(job) scalar_float) / time()",
+            vec![
+                (
+                    600_000,
+                    vec!["job=api".to_string()],
+                    8.0 / 600.0,
+                    16.0 / 600.0,
+                ),
+                (
+                    1_200_000,
+                    vec!["job=api".to_string()],
+                    12.0 / 1200.0,
+                    24.0 / 1200.0,
+                ),
+            ],
+        ),
+    ];
+    for (expression, expected) in histogram_matches {
+        let sql = format!("TQL EVAL (600, 1200, '600s') {expression}");
+        observer.clear();
+        let native = native_tql_output(&instance, &sql, true).await;
+        assert!(
+            observer.fused().is_some(),
+            "{expression} did not run natively: {:#?}",
+            observer.root_plan()
+        );
+        let native_rows = histogram_label_rows(native).await;
+        assert_eq!(expected, native_rows, "{expression}");
+        observer.clear();
+        let legacy = native_tql_output(&instance, &sql, false).await;
+        assert!(
+            observer.fused().is_none(),
+            "{expression} must keep the existing plan when the native route is off"
+        );
+        assert_eq!(
+            histogram_label_rows(legacy).await,
+            native_rows,
+            "{expression} must answer the existing plan's rows row for row"
+        );
+    }
+
+    // The same broadcast on one frame: `scalar_hist * time()` is a whole tree, and its histogram
+    // side is scaled point by point.
+    let whole_tree = "scalar_hist * time()";
+    let sql = format!("TQL EVAL (600, 1200, '600s') {whole_tree}");
+    observer.clear();
+    let native = native_tql_output(&instance, &sql, true).await;
+    assert!(
+        observer.fused().is_some(),
+        "{whole_tree} did not run natively: {:#?}",
+        observer.root_plan()
+    );
+    let native_rows = histogram_label_rows(native).await;
+    assert_eq!(
+        vec![
+            (
+                600_000,
+                vec!["host=a".to_string(), "job=api".to_string()],
+                2_400.0,
+                4_800.0
+            ),
+            (
+                1_200_000,
+                vec!["host=a".to_string(), "job=api".to_string()],
+                4_800.0,
+                9_600.0
+            ),
+        ],
+        native_rows,
+        "{whole_tree}"
+    );
+    observer.clear();
+    let legacy = native_tql_output(&instance, &sql, false).await;
+    assert!(
+        observer.fused().is_none(),
+        "{whole_tree} must keep the existing plan when the native route is off"
+    );
+    assert_eq!(
+        histogram_label_rows(legacy).await,
+        native_rows,
+        "{whole_tree} must answer the existing plan's rows row for row"
+    );
+
+    // A scalar over a float metric that needs no composition still runs natively, and a composed
+    // operand of one - `(x * 2) * 2` - keeps its own node and its own values.
+    let float_expression = "(scalar_float * 2) * 2";
+    let sql = format!("TQL EVAL (600, 1200, '600s') {float_expression}");
+    observer.clear();
+    let native = native_tql_output(&instance, &sql, true).await;
+    assert!(
+        observer.fused().is_some(),
+        "{float_expression} did not run natively: {:#?}",
+        observer.root_plan()
+    );
+    let native_rows = native_rows_value(native).await;
+    observer.clear();
+    let legacy = native_tql_output(&instance, &sql, false).await;
+    assert!(
+        observer.fused().is_none(),
+        "{float_expression} must keep the existing plan when the native route is off"
+    );
+    assert_eq!(
+        vec![
+            (600_000, "api".to_string(), 8.0),
+            (1_200_000, "api".to_string(), 12.0)
+        ],
+        native_rows,
+        "{float_expression}"
+    );
+    assert_eq!(
+        native_rows_value(legacy).await,
+        native_rows,
+        "{float_expression} must answer the existing plan's rows row for row"
+    );
+}
+
+/// The `(time, job, value)` rows of a labelled float answer.
+///
+/// The time index is found by type rather than by name: the two routes name the column differently
+/// (the existing plan answers `ts`, a native rows layout answers its own time index), and the
+/// values, not the names, are what this comparison is about.
+async fn native_rows_value(output: Output) -> Vec<(i64, String, f64)> {
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!("TQL EVAL returns record batches"),
+    };
+    let mut rows = Vec::new();
+    for batch in batches.iter() {
+        let time = batch
+            .columns()
+            .iter()
+            .find(|column| {
+                matches!(
+                    column.data_type(),
+                    DataType::Timestamp(TimeUnit::Millisecond, _)
+                )
+            })
+            .expect("a PromQL result carries its time index");
+        let time = cast(time.as_ref(), &DataType::Int64).unwrap();
+        let time = time.as_any().downcast_ref::<Int64Array>().unwrap();
+        let job = batch
+            .column_by_name("job")
+            .expect("the answer carries the label it matched on");
+        let job = cast(job.as_ref(), &DataType::Utf8).unwrap();
+        let job = job.as_any().downcast_ref::<StringArray>().unwrap();
+        let values = batch
+            .columns()
+            .iter()
+            .filter(|column| column.data_type() == &DataType::Float64)
+            .collect::<Vec<_>>();
+        assert_eq!(values.len(), 1, "expected one Float64 value column");
+        let values = values[0].as_any().downcast_ref::<Float64Array>().unwrap();
+        for row in 0..batch.num_rows() {
+            rows.push((
+                time.value(row),
+                job.value(row).to_string(),
+                values.value(row),
+            ));
+        }
+    }
+    rows.sort_by_key(|row| row.0);
+    rows
 }
 
 /// A float function above a split `sum` over native histograms runs natively and answers what the
@@ -13765,30 +14388,43 @@ async fn native_promql_answers_a_numeric_field_where_the_shape_publishes_a_float
     ] {
         let sql = format!("TQL EVAL (2, 2, '1s') {query}");
         observer.clear();
-        native_run_ignoring_the_answer(&instance, &sql, true).await;
+        let native = native_text_or_error(&instance, &sql, true).await;
         assert!(
             observer.fused().is_none(),
             "`{query}`: a string field has no raw representation"
         );
+        let legacy = native_text_or_error(&instance, &sql, false).await;
+        assert_eq!(
+            native, legacy,
+            "`{query}`: a text column is a value column, not a label, so the route answers what \
+             the existing plan answers - a table of it, or the refusal the existing plan states"
+        );
     }
 }
 
-/// Runs a TQL statement and drops whatever it answered.
+/// Runs a TQL statement and answers its printed table, or the error it failed with.
 ///
 /// A statement the existing planner refuses is answered by that refusal - `sum` of a string has no
 /// fold - and the route must not replace it with an answer of its own, so a test that only means to
 /// hold the route to the existing plan must not unwrap the answer.
-async fn native_run_ignoring_the_answer(instance: &Arc<Instance>, sql: &str, enabled: bool) {
-    let Ok(output) = instance
+async fn native_text_or_error(instance: &Arc<Instance>, sql: &str, enabled: bool) -> String {
+    let output = match instance
         .do_query(sql, native_query_context(enabled, 4))
         .await
         .remove(0)
-    else {
-        return;
+    {
+        Ok(output) => output,
+        Err(error) => return format!("{error:?}"),
     };
-    if let OutputData::Stream(stream) = output.data {
-        let _ = collect_batches(stream).await;
-    }
+    let batches = match output.data {
+        OutputData::Stream(stream) => match collect_batches(stream).await {
+            Ok(batches) => batches,
+            Err(error) => return format!("{error:?}"),
+        },
+        OutputData::RecordBatches(batches) => batches,
+        _ => return "the statement answered no record batches".to_string(),
+    };
+    batches.pretty_print().unwrap()
 }
 
 /// An arithmetic operator casts both operands, but the cast is the operator's, so it reaches whatever
