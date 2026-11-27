@@ -15,10 +15,10 @@
 //! The native fused-series route of the PromQL planner.
 //!
 //! [`PromPlanner::try_plan_native_fused`] offers the whole statement to the native compiler and,
-//! when it is accepted, plans it as [`FusedSeries`] nodes over the selectors' table scans. A tree
-//! that folds across series is split into a `Partial` producer, a `SeriesRepartitionExec`, and a
-//! `Final` consumer, because a region holds only part of a group. Any shape the compiler or this
-//! route cannot bind faithfully returns `None`, and the existing planner plans it.
+//! when it is accepted, plans it as [`FusedSeries`] nodes over the selectors' table scans.
+//! For splittable aggregates, a `Partial` producer sends state through `SeriesRepartitionExec`
+//! to a `Final` consumer. Aggregates without mergeable state, such as `quantile`, can still be
+//! planned over segments. If the native route declines the statement, the existing planner handles it.
 //!
 //! The row output schema is the time index, then the value fields, then the tags: the same shape a
 //! `SeriesNormalize` output has. A statement that reads no data is planned as one node without a

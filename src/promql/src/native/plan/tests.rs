@@ -1141,6 +1141,14 @@ fn an_instant_selection_cannot_read_interleaved_input() {
             .contains("interleaved chunks cannot be fed to it"),
         "{error}"
     );
+    // The map itself is well-typed; only validating its input finds the interleaved scan.
+    let error = NativeTree::try_new(map_over(node)).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("interleaved chunks cannot be fed to it"),
+        "{error}"
+    );
 }
 
 #[test]

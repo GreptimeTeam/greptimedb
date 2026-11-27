@@ -75,8 +75,9 @@ Do not restate code, narrate history ("used to", "this change"), or point at
 other comments. When a comment explains why a state cannot occur, prefer a type
 that rules it out.
 
-A new test must reach a branch that no existing test or golden case reaches.
-Kernel values belong in golden cases, not in executor tests.
+A new test must catch a concrete failure that existing tests and golden cases
+would miss: an unreached branch, or a wrong result on a reached one (e.g. the
+sign of a zero). Kernel values belong in golden cases, not in executor tests.
 
 ## Gotchas
 
