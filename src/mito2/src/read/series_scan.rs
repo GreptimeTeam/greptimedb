@@ -640,6 +640,13 @@ impl SeriesScan {
             0,
             &self.metrics_list,
         );
+        // The counters are registered by the shared preparation, which runs once per scan,
+        // so building the handle for each caller costs nothing.
+        let sample_metrics = self
+            .stream_ctx
+            .input
+            .sample
+            .map(|_| prepared::SeriesSampleMetrics::new(metrics_set));
         Box::pin(async move {
             let Some((preparation, prepared_columnar)) = preparation? else {
                 return Ok(None);
@@ -649,7 +656,15 @@ impl SeriesScan {
                 return Ok(None);
             }
             state
-                .prepare(stream_ctx, ranges, labels, preparation, metrics, scan_pool)
+                .prepare(
+                    stream_ctx,
+                    ranges,
+                    labels,
+                    preparation,
+                    metrics,
+                    sample_metrics,
+                    scan_pool,
+                )
                 .await
                 .map(Some)
         })
@@ -1530,6 +1545,11 @@ impl SeriesCandidateDistributor {
                 // Candidate series this sample dropped before they were assigned any read.
                 MetricBuilder::new(&self.metrics_set)
                     .counter("candidate_series_sample_dropped", self.partitions.len()),
+                // Series that reached the sample out of the series this scan discovered,
+                // and the ones it kept. Candidates are discovered before the bound is
+                // applied, so the total is the series the scan would read without it.
+                MetricBuilder::new(&self.metrics_set).global_counter("sample_series_total"),
+                MetricBuilder::new(&self.metrics_set).global_counter("sample_series_kept"),
             )
         });
         let mut chunked = false;
@@ -1538,10 +1558,12 @@ impl SeriesCandidateDistributor {
                 part_metrics.on_finish();
                 return Ok(());
             }
-            if let Some((tsid_max, dropped)) = &sample {
+            if let Some((tsid_max, dropped, total, kept)) = &sample {
                 let num_candidates = batch.len();
                 batch.retain(|series| series.tsid < *tsid_max);
                 dropped.add(num_candidates - batch.len());
+                total.add(num_candidates);
+                kept.add(batch.len());
                 if batch.is_empty() {
                     continue;
                 }

@@ -22,7 +22,10 @@ use api::v1::{ColumnDataType, ColumnSchema, Rows};
 use common_error::ext::ErrorExt;
 use common_query::series_frame::unpack_raw_series;
 use datafusion::execution::TaskContext;
-use datafusion::physical_plan::{ExecutionPlan, metrics::ExecutionPlanMetricsSet};
+use datafusion::physical_plan::{
+    ExecutionPlan,
+    metrics::{ExecutionPlanMetricsSet, MetricsSet},
+};
 use datafusion_expr::{col, lit};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::series::SeriesOrdering;
@@ -3611,6 +3614,49 @@ async fn series_sampling_prunes_blocks_and_keeps_whole_series() {
 
     assert_sampled_subset(&full, &sampled, 0.15..=0.38);
 
+    // The scan node reports the same coverage: the series the artifacts hold and the ones
+    // the sample kept, both counted as series, never as series-index blocks.
+    let (sampled_rows, sampled_metrics) =
+        read_series_rows_with_metrics(&engine, region.region_id, sampled_request.clone()).await;
+    let series_total = reported(&sampled_metrics, "sample_series_total")
+        .expect("a sampled scan reports the series it could read");
+    let series_kept = reported(&sampled_metrics, "sample_series_kept")
+        .expect("a sampled scan reports the series it kept");
+    let observed = series_kept as f64 / series_total as f64;
+    println!(
+        "series sample metrics: sample_series_total={series_total:?}, \
+         sample_series_kept={series_kept:?}, kept ratio={observed:.3}"
+    );
+    assert_eq!(
+        series_of(&full).len(),
+        series_total,
+        "the artifacts hold exactly the series an unsampled scan returns"
+    );
+    assert!(
+        series_kept < series_total,
+        "the sample keeps a proper subset: {series_kept} of {series_total}"
+    );
+    assert!(
+        (0.15..=0.38).contains(&observed),
+        "the reported kept fraction matches the rows the scan returned: {observed}"
+    );
+    assert_eq!(
+        series_of(&sampled).len(),
+        series_kept,
+        "the reported kept series are the series the scan returned"
+    );
+    assert_eq!(
+        series_of(&sampled),
+        series_of(&sampled_rows),
+        "the same request reads the same series twice"
+    );
+
+    // A scan without a sample reports neither name, not even a zero.
+    let (_, full_metrics) =
+        read_series_rows_with_metrics(&engine, region.region_id, full_request.clone()).await;
+    assert_eq!(None, reported(&full_metrics, "sample_series_kept"));
+    assert_eq!(None, reported(&full_metrics, "sample_series_total"));
+
     // A memtable version of every series must never split a sampled series: a series keeps
     // its SST rows and its memtable row together, or it disappears entirely.
     for i in 0..SERIES {
@@ -3658,6 +3704,17 @@ async fn read_series_rows(
     region_id: store_api::storage::RegionId,
     request: ScanRequest,
 ) -> Vec<(u64, i64, f64)> {
+    read_series_rows_with_metrics(engine, region_id, request)
+        .await
+        .0
+}
+
+/// Reads the raw series and the plan metrics the scan node reported for them.
+async fn read_series_rows_with_metrics(
+    engine: &MitoEngine,
+    region_id: store_api::storage::RegionId,
+    request: ScanRequest,
+) -> (Vec<(u64, i64, f64)>, MetricsSet) {
     let scanner = engine.handle_query(region_id, request).await.unwrap();
     let binding = labels(scanner.metadata());
     let ctx = QueryScanContext::default();
@@ -3675,7 +3732,12 @@ async fn read_series_rows(
         }
     }
     collected.sort_unstable_by_key(|row| (row.0, row.1));
-    collected
+    (collected, metrics.clone_inner())
+}
+
+/// Returns a reported counter by its name, or `None` if the scan never registered it.
+fn reported(metrics: &MetricsSet, name: &str) -> Option<usize> {
+    metrics.sum_by_name(name).map(|value| value.as_usize())
 }
 
 fn series_of(rows: &[(u64, i64, f64)]) -> std::collections::BTreeSet<u64> {

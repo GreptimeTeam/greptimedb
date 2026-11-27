@@ -63,6 +63,14 @@ pub(crate) struct SeriesReadRequest {
 pub(crate) trait FormatReader: Send + Sync {
     fn schema(&self) -> SchemaRef;
     fn read(&self, request: SeriesReadRequest) -> Result<BoxStream<'static, Result<RecordBatch>>>;
+
+    /// Returns how many series this artifact stores, if the format records it.
+    ///
+    /// The count comes from the artifact's own metadata, so a reader reports the series
+    /// it holds before any range or sample pruning skips a block.
+    fn num_series(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// Builds and opens immutable series-index artifacts.

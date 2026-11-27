@@ -25,12 +25,13 @@ use api::v1::Rows;
 use api::v1::helper::row;
 use api::v1::value::ValueData;
 use common_recordbatch::RecordBatches;
+use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
 use datafusion_expr::{Expr, col, lit};
 use datatypes::arrow::array::{ArrayRef, Float64Array, StringArray, TimestampMillisecondArray};
 use datatypes::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use datatypes::arrow::record_batch::RecordBatch as DfRecordBatch;
 use mito_codec::row_converter::build_primary_key_codec;
-use store_api::region_engine::RegionEngine;
+use store_api::region_engine::{QueryScanContext, RegionEngine, RegionScanner};
 use store_api::region_request::RegionRequest;
 use store_api::storage::{PkSample, RegionId, ScanRequest};
 
@@ -40,6 +41,7 @@ use crate::engine::MitoEngine;
 use crate::manifest::action::RegionEdit;
 use crate::memtable::bulk::part::{BulkPart, convert_bulk_part};
 use crate::metrics::PK_SAMPLE_STATS;
+use crate::read::scan_region::Scanner;
 use crate::sst::file::FileMeta;
 use crate::sst::parquet::WriteOptions;
 use crate::sst::{FlatSchemaOptions, FormatType, to_flat_sst_arrow_schema};
@@ -128,6 +130,50 @@ async fn read_keys(
         timestamps.sort_unstable();
     }
     keys
+}
+
+/// Scans `request` and returns the plan metrics the scan node reported.
+///
+/// The counters are read from the scan handle itself, which is the same
+/// `ExecutionPlanMetricsSet` `EXPLAIN ANALYZE` scrapes, so an assertion here covers the
+/// figure a user sees.
+async fn scan_metrics(
+    engine: &MitoEngine,
+    region_id: RegionId,
+    request: ScanRequest,
+) -> MetricsSet {
+    let scanner = engine.scanner(region_id, request).await.unwrap();
+    let ctx = QueryScanContext::default();
+    let metrics = ExecutionPlanMetricsSet::default();
+    let partitions = match &scanner {
+        Scanner::Seq(scan) => scan.properties().num_partitions().max(1),
+        Scanner::Unordered(scan) => scan.properties().num_partitions().max(1),
+        Scanner::Series(_) => panic!("a classic table does not scan through the series index"),
+    };
+    for partition in 0..partitions {
+        let stream = match &scanner {
+            Scanner::Seq(scan) => scan.scan_partition(&ctx, &metrics, partition).unwrap(),
+            Scanner::Unordered(scan) => scan.scan_partition(&ctx, &metrics, partition).unwrap(),
+            Scanner::Series(_) => unreachable!("checked above"),
+        };
+        // Drain the stream: metrics that count the plan are reported as the scan runs.
+        RecordBatches::try_collect(stream).await.unwrap();
+    }
+    metrics.clone_inner()
+}
+
+/// Returns a reported counter by its name, or `None` if the scan never registered it.
+fn reported(metrics: &MetricsSet, name: &str) -> Option<usize> {
+    metrics.sum_by_name(name).map(|value| value.as_usize())
+}
+
+/// The sample coverage counters of one scan, in the order they are asserted.
+fn sample_counters(metrics: &MetricsSet) -> (Option<usize>, Option<usize>, Option<usize>) {
+    (
+        reported(metrics, "sample_rows_total"),
+        reported(metrics, "sample_rows_in_kept_files"),
+        reported(metrics, "sample_rows_unaccounted"),
+    )
 }
 
 fn key_rows(keys: impl Iterator<Item = usize>, ts: i64) -> Vec<api::v1::Row> {
@@ -556,6 +602,43 @@ async fn test_pk_sample_without_key_predicate_is_unchanged() {
         "about a quarter of the table: {ratio}"
     );
 
+    // The scan node reports what the sample covered: the 400 rows of the key order and
+    // the 100 held by the file the interval keeps. No file lacks statistics, so nothing
+    // is unaccounted.
+    let (rows_total, rows_in_kept_files, unaccounted) =
+        sample_counters(&scan_metrics(&engine, region_id, quarter_sample(vec![])).await);
+    println!(
+        "quarter sample metrics: sample_rows_total={rows_total:?}, \
+         sample_rows_in_kept_files={rows_in_kept_files:?}, \
+         sample_rows_unaccounted={unaccounted:?}"
+    );
+    assert_eq!(Some(FILES * KEYS_PER_FILE), rows_total);
+    assert_eq!(Some(KEYS_PER_FILE), rows_in_kept_files);
+    assert_ne!(
+        rows_total, rows_in_kept_files,
+        "the sample keeps a proper subset"
+    );
+    assert_eq!(None, unaccounted, "every file carries key statistics");
+
+    // A scan without a sample reports none of these names, not even a zero.
+    let unsampled = scan_metrics(&engine, region_id, ScanRequest::default()).await;
+    assert_eq!((None, None, None), sample_counters(&unsampled));
+    assert_eq!(
+        None,
+        reported(&unsampled, "sample_rows_unaccounted"),
+        "an unsampled scan must not report sample coverage"
+    );
+    assert_eq!(
+        None,
+        reported(&unsampled, "sample_series_kept"),
+        "a classic scan never reports series coverage"
+    );
+    assert_eq!(
+        None,
+        reported(&unsampled, "sample_series_total"),
+        "a classic scan never reports series coverage"
+    );
+
     // An empty filter list and a key filter that keeps every file plan the same
     // interval, so both are equivalent to no predicate at all.
     for filters in [
@@ -576,6 +659,117 @@ async fn test_pk_sample_without_key_predicate_is_unchanged() {
             "the interval must not depend on a filter that keeps every file"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// The row figure counts files, so it bounds the rows kept instead of counting them.
+// ---------------------------------------------------------------------------
+
+/// `sample_rows_in_kept_files` counts whole files, so a boundary that falls inside a file
+/// it cuts through makes the figure exceed the rows the scan returns.
+///
+/// The interval always ends at the maximum key of the last file of the step-function
+/// chain, so it cannot cut a chain file: only a file the chain leaves out, because its
+/// range overlaps another candidate, can straddle the end. Here `dense` holds `t0000`
+/// ..=`t0099` and `wide` holds `t0050`..=`t0149`; the chain therefore keeps `dense` alone
+/// and a half sample ends at `t0099`, halfway through `wide`. Both files are kept files,
+/// so both row counts enter the figure, while the scan returns the 100 rows of `dense`
+/// plus the 50 rows of `wide` that are inside the interval.
+///
+/// The region scanner registers no `output_rows` of its own (the table crate's
+/// `RegionScanExec` wrapper does), so the rows the sample returns are counted here.
+#[tokio::test]
+#[allow(clippy::print_stdout)] // The two figures and their gap are this test's evidence.
+async fn test_pk_sample_counts_whole_files_of_a_boundary_it_cuts_through() {
+    let _guard = lock_pk_sample_stats().await;
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(one_file_per_flush_config()).await;
+    let region_id = RegionId::new(1024, 10);
+    let schema = create_empty_region(&engine, region_id).await;
+
+    // The key-disjoint file the interval is inverted against: 100 rows, one per key.
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: schema.clone(),
+            rows: key_rows(0..KEYS_PER_FILE, 1000),
+        },
+    )
+    .await;
+    flush_region(&engine, region_id, Some(ROW_GROUP_ROWS)).await;
+    // A second file whose range starts inside the first one's: the chain drops it, so the
+    // interval ends at `t0099`, inside this file's keys.
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema,
+            rows: key_rows(KEYS_PER_FILE / 2..KEYS_PER_FILE + KEYS_PER_FILE / 2, 2000),
+        },
+    )
+    .await;
+    flush_region(&engine, region_id, Some(ROW_GROUP_ROWS)).await;
+
+    let request = ScanRequest {
+        filters: vec![],
+        pk_sample: Some(PkSample { num: 1, den: 2 }),
+        ..Default::default()
+    };
+
+    // The rows the sample really returns: all of `dense` plus the half of `wide` that is
+    // inside the interval.
+    let sampled = read_keys(&engine, region_id, request.clone()).await;
+    let sampled_rows: usize = sampled.values().map(|ts| ts.len()).sum();
+
+    let before = counters();
+    let metrics = scan_metrics(&engine, region_id, request).await;
+    let after = counters();
+
+    let (rows_total, rows_in_kept_files, unaccounted) = sample_counters(&metrics);
+    println!(
+        "a half sample over a file it cuts through: sample_rows_in_kept_files=\
+         {rows_in_kept_files:?}, rows returned {sampled_rows}, sample_rows_total=\
+         {rows_total:?}, sample_rows_unaccounted={unaccounted:?}"
+    );
+
+    // The fixture is what it claims: the interval prunes no file, and it keeps exactly the
+    // keys `t0000`..=`t0099`, which is half of `wide`.
+    assert_eq!(
+        0,
+        delta(&before, &after, "files_pruned"),
+        "both files overlap the interval, so both are kept files"
+    );
+    assert_eq!(
+        fixture_keys(0..KEYS_PER_FILE),
+        sampled.keys().cloned().collect::<BTreeSet<_>>(),
+        "the interval ends at `t0099`, inside the key range of the wide file"
+    );
+    assert_eq!(
+        KEYS_PER_FILE + KEYS_PER_FILE / 2,
+        sampled_rows,
+        "the whole dense file plus the half of the wide file inside the interval"
+    );
+    assert_eq!(
+        Some(2 * KEYS_PER_FILE),
+        rows_total,
+        "both files can be ordered by key"
+    );
+    assert_eq!(None, unaccounted, "every file carries key statistics");
+
+    // Both files are kept files, so both row counts are summed: the figure is an upper
+    // bound of the rows returned, and not a tight one.
+    assert_eq!(Some(2 * KEYS_PER_FILE), rows_in_kept_files);
+    assert!(
+        rows_in_kept_files.unwrap() >= sampled_rows,
+        "the file-level figure must not under-count the kept rows: \
+         {rows_in_kept_files:?} < {sampled_rows}"
+    );
+    assert_ne!(
+        Some(sampled_rows),
+        rows_in_kept_files,
+        "a boundary that falls inside a file must make the figure exceed the rows returned"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -867,6 +1061,29 @@ async fn test_pk_sample_keeps_rows_of_files_without_key_statistics() {
     );
     assert_eq!(KEYS_PER_FILE + 10, sampled_rows, "no row is lost");
     assert_eq!(1, files_without_stats, "the unknown file is only counted");
+
+    // The plan reports the two files it could order (200 rows, 100 of them kept) and the
+    // rows of the file it could not: the sample keeps those whole, so they are outside
+    // what the interval accounts for.
+    let (rows_total, rows_in_kept_files, unaccounted) =
+        sample_counters(&scan_metrics(&engine, region_id, quarter_sample(vec![])).await);
+    println!(
+        "mixed statistics metrics: sample_rows_total={rows_total:?}, \
+         sample_rows_in_kept_files={rows_in_kept_files:?}, \
+         sample_rows_unaccounted={unaccounted:?}"
+    );
+    assert_eq!(Some(2 * KEYS_PER_FILE), rows_total);
+    assert_eq!(Some(KEYS_PER_FILE), rows_in_kept_files);
+    assert_eq!(
+        Some(10),
+        unaccounted,
+        "the interval cannot account for the 10 rows of the file without key statistics"
+    );
+    assert_eq!(
+        sampled_rows,
+        rows_in_kept_files.unwrap() + unaccounted.unwrap(),
+        "the kept rows plus the unaccounted ones are the rows the sample returned"
+    );
     // Only the known file above the interval is pruned; the unknown file cannot be.
     assert_eq!(1, files_pruned);
     assert!(

@@ -28,6 +28,7 @@ use common_error::ext::BoxedError;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_time::Timestamp;
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool, MemoryReservation};
+use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilder};
 use datafusion_expr::{Expr, utils::split_conjunction};
 use datatypes::arrow::array::{
     Array, ArrayRef, BinaryArray, BooleanArray, DictionaryArray, StringArray, UInt32Array,
@@ -76,6 +77,39 @@ fn invalid(reason: impl Into<String>) -> Error {
     .build()
 }
 
+/// Where a sampled series scan reports how many series it kept.
+///
+/// Every caller may build one, but only [`Self::record`] registers the counters, and the
+/// preparation it is passed to runs once per scan: a scan without a sample, or one whose
+/// preparation never ran, therefore never shows these names, not even with a `0` value.
+#[derive(Clone)]
+pub(crate) struct SeriesSampleMetrics {
+    metrics_set: ExecutionPlanMetricsSet,
+}
+
+impl SeriesSampleMetrics {
+    pub(crate) fn new(metrics_set: &ExecutionPlanMetricsSet) -> Self {
+        Self {
+            metrics_set: metrics_set.clone(),
+        }
+    }
+
+    /// Reports the series the sample kept out of the series the artifacts hold.
+    ///
+    /// `total` is `None` when an artifact cannot report how many series it stores: the
+    /// kept fraction is then unknown, and it is not derived from block counts.
+    fn record(&self, kept: u64, total: Option<u64>) {
+        MetricBuilder::new(&self.metrics_set)
+            .global_counter("sample_series_kept")
+            .add(kept as usize);
+        if let Some(total) = total {
+            MetricBuilder::new(&self.metrics_set)
+                .global_counter("sample_series_total")
+                .add(total as usize);
+        }
+    }
+}
+
 /// Errors are shared too: a failed execution must not restart discovery in another partition.
 #[derive(Default)]
 pub(crate) struct Preparation {
@@ -107,6 +141,7 @@ impl Preparation {
                     RawLabelSource::Explicit,
                     raw,
                     metrics,
+                    None,
                     scan_pool,
                 )
                 .await
@@ -123,6 +158,7 @@ impl Preparation {
         Ok(source.clone())
     }
 
+    #[allow(clippy::too_many_arguments)] // One more handle than the scan context carries.
     pub(crate) async fn prepare(
         &self,
         context: Arc<StreamContext>,
@@ -130,6 +166,7 @@ impl Preparation {
         labels: RawLabelSource,
         raw: RawScanPreparation,
         metrics: PartitionMetrics,
+        sample_metrics: Option<SeriesSampleMetrics>,
         scan_pool: Arc<dyn MemoryPool>,
     ) -> std::result::Result<Arc<dyn PreparedSeriesSource>, BoxedError> {
         // Per caller, including time awaiting another partition's shared preparation.
@@ -141,10 +178,18 @@ impl Preparation {
         let result = self
             .source
             .get_or_init(|| async {
-                ColumnarPreparedSource::prepare(context, ranges, labels, raw, metrics, scan_pool)
-                    .await
-                    .map(Arc::new)
-                    .map_err(Arc::new)
+                ColumnarPreparedSource::prepare(
+                    context,
+                    ranges,
+                    labels,
+                    raw,
+                    metrics,
+                    sample_metrics,
+                    scan_pool,
+                )
+                .await
+                .map(Arc::new)
+                .map_err(Arc::new)
             })
             .await;
         drop(acquire_timer);
@@ -471,6 +516,7 @@ impl ColumnarPreparedSource {
         labels: RawLabelSource,
         raw: RawScanPreparation,
         metrics: PartitionMetrics,
+        sample_metrics: Option<SeriesSampleMetrics>,
         scan_pool: Arc<dyn MemoryPool>,
     ) -> Result<Self> {
         let has_indexes = context.input.requires_narthex_preparation()
@@ -482,6 +528,7 @@ impl ColumnarPreparedSource {
                 labels.clone(),
                 raw.clone(),
                 metrics.clone(),
+                sample_metrics.clone(),
                 scan_pool.clone(),
                 use_indexes,
             )
@@ -494,12 +541,14 @@ impl ColumnarPreparedSource {
         }
     }
 
+    #[allow(clippy::too_many_arguments)] // One more handle than the scan context carries.
     async fn prepare_from_snapshot(
         context: Arc<StreamContext>,
         ranges: Vec<PartitionRange>,
         labels: RawLabelSource,
         raw: RawScanPreparation,
         metrics: PartitionMetrics,
+        sample_metrics: Option<SeriesSampleMetrics>,
         scan_pool: Arc<dyn MemoryPool>,
         use_indexes: bool,
     ) -> Result<Self> {
@@ -515,6 +564,20 @@ impl ColumnarPreparedSource {
             narthex::open_sources(&context, &ranges, &scan_pool, use_indexes).await?
         } else {
             open_sidecar_sources(&context, &ranges).await?
+        };
+        // The artifacts state how many series they store, so the sample's kept fraction is
+        // measured against every series the scan could return - including those of the
+        // series-index blocks the sample skips whole, which never reach the loop below.
+        // The count is per artifact, so a series stored by two of them counts twice; an
+        // artifact that does not state its series leaves the total unknown, not guessed.
+        let sample_series_total = if sample_metrics.is_some() && !series.is_empty() {
+            series
+                .iter()
+                .map(|reader| reader.num_series())
+                .collect::<Option<Vec<_>>>()
+                .map(|counts| counts.into_iter().sum::<u64>())
+        } else {
+            None
         };
         preparation_metrics.add_elapsed("columnar_prepare_coverage", started.elapsed());
         preparation_metrics
@@ -870,6 +933,9 @@ impl ColumnarPreparedSource {
         let mut candidates: Vec<_> = candidates.into_values().collect();
         candidates.sort_unstable_by(|a, b| a.key.as_slice().cmp(b.key.as_slice()));
         preparation_metrics.add_elapsed("columnar_prepare_sort", started.elapsed());
+        if let Some(sample_metrics) = &sample_metrics {
+            sample_metrics.record(candidates.len() as u64, sample_series_total);
+        }
         Ok(Self {
             context,
             labels,

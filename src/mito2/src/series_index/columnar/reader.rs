@@ -243,6 +243,17 @@ impl FormatReader for ColumnarReader {
         self.schema.clone()
     }
 
+    fn num_series(&self) -> Option<u64> {
+        // One row of the artifact is one series, and a part records how many it holds,
+        // so the manifest totals them without reading a block page.
+        Some(
+            self.manifest
+                .files
+                .iter()
+                .fold(0_u64, |total, part| total.saturating_add(part.num_series)),
+        )
+    }
+
     fn read(&self, request: SeriesReadRequest) -> Result<BoxStream<'static, Result<RecordBatch>>> {
         let schema = self.schema();
         let mut projection = Vec::new();

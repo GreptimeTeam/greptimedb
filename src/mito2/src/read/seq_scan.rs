@@ -427,6 +427,14 @@ impl SeqScan {
         let metrics = self.new_partition_metrics(ctx.explain_verbose, metrics_set, partition);
         let input = &self.stream_ctx.input;
 
+        // The coverage of a primary-key sample describes the whole scan, so it is
+        // reported once instead of once per partition.
+        if partition == 0
+            && let Some(stats) = &input.pk_sample_stats
+        {
+            stats.record(metrics_set);
+        }
+
         let batch_stream = self.scan_flat_batch_in_partition(partition, metrics.clone(), ctx)?;
         let record_batch_stream = ConvertBatchStream::new(
             batch_stream,

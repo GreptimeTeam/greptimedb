@@ -68,7 +68,7 @@ use crate::memtable::{MemtableRange, RangesOptions};
 use crate::metrics::READ_SST_COUNT;
 use crate::read::compat::{self, FlatCompatBatch};
 use crate::read::flat_projection::FlatProjectionMapper;
-use crate::read::pk_sample::{PkSampleFileStat, PkSampleInterval};
+use crate::read::pk_sample::{PkSampleFileStat, PkSampleInterval, PkSampleStats};
 use crate::read::range::{FileRangeBuilder, MemRangeBuilder, RangeMeta, RowGroupIndex};
 use crate::read::range_cache::{ScanRequestFingerprint, implied_time_range_from_exprs};
 use crate::read::read_columns::ReadColumns;
@@ -607,7 +607,10 @@ impl ScanRegion {
     /// Fails closed when no candidate file carries key statistics: without a key
     /// order there is no interval to choose, and silently reading every row would
     /// return more than the requested fraction without telling the caller.
-    fn plan_pk_sample(&self, files: &[FileHandle]) -> Result<Option<PkSampleInterval>> {
+    fn plan_pk_sample(
+        &self,
+        files: &[FileHandle],
+    ) -> Result<Option<(PkSampleInterval, PkSampleStats)>> {
         let Some(sample) = self.request.pk_sample else {
             return Ok(None);
         };
@@ -617,6 +620,7 @@ impl ScanRegion {
         let key_predicate = self.key_predicate();
         let mut stats = Vec::with_capacity(files.len());
         let mut files_without_stats = 0;
+        let mut rows_without_stats = 0_u64;
         let mut files_outside_key_predicate = 0;
         for file in files {
             // A file the key predicate excludes contributes no row to this query,
@@ -630,6 +634,9 @@ impl ScanRegion {
             }
             let Some((min, max)) = file.primary_key_range(&mapper) else {
                 files_without_stats += 1;
+                // The scan keeps every row of this file, so its rows are outside the
+                // interval the metrics account for.
+                rows_without_stats = rows_without_stats.saturating_add(file.meta_ref().num_rows);
                 continue;
             };
             ensure!(
@@ -706,7 +713,14 @@ impl ScanRegion {
             files_outside_key_predicate,
             plan.files_without_stats
         );
-        Ok(Some(interval))
+        Ok(Some((
+            interval,
+            PkSampleStats {
+                rows_total: plan.rows_total,
+                rows_covered: plan.rows_covered,
+                rows_without_stats,
+            },
+        )))
     }
 
     /// Returns the filters that constrain the primary key.
@@ -792,7 +806,11 @@ impl ScanRegion {
             };
         // The primary-key sample turns the requested fraction into one interval of the
         // encoded key over the files this scan would read, before any range is built.
-        let pk_sample = self.plan_pk_sample(&files)?;
+        // Its coverage travels with the scan so the scan node can report it.
+        let (pk_sample, pk_sample_stats) = match self.plan_pk_sample(&files)? {
+            Some((interval, stats)) => (Some(interval), Some(stats)),
+            None => (None, None),
+        };
         if sst_min_sequence.is_some() && sequence_range.is_some() {
             return SequenceRangeUnsupportedSnafu {
                 region_id: self.region_id(),
@@ -910,6 +928,7 @@ impl ScanRegion {
             .with_distribution(self.request.distribution)
             .with_sample(self.request.sample)
             .with_pk_sample(pk_sample)
+            .with_pk_sample_stats(pk_sample_stats)
             .with_explain_flat_format(
                 self.version.options.sst_format == Some(crate::sst::FormatType::Flat),
             )
@@ -1294,6 +1313,9 @@ pub struct ScanInput {
     /// Resolved interval of encoded primary keys kept by a classic-table sample.
     /// `None` when the scan is unsampled, or when no file carries key statistics.
     pub(crate) pk_sample: Option<PkSampleInterval>,
+    /// What the resolved interval covers, in rows, as the scan node reports it.
+    /// `None` when the scan is unsampled, so an unsampled scan has no sample metric.
+    pub(crate) pk_sample_stats: Option<PkSampleStats>,
     /// Whether the region's configured SST format is flat.
     explain_flat_format: bool,
     /// Snapshot upper bound bound at scan open and propagated back to the caller.
@@ -1377,6 +1399,7 @@ impl ScanInput {
                 distribution: None,
                 sample: None,
                 pk_sample: None,
+                pk_sample_stats: None,
                 explain_flat_format: false,
                 snapshot_sequence: None,
                 sequence_range: None,
@@ -1744,6 +1767,12 @@ impl ScanInputBuilder {
     #[must_use]
     pub(crate) fn with_pk_sample(mut self, pk_sample: Option<PkSampleInterval>) -> Self {
         self.input.pk_sample = pk_sample;
+        self
+    }
+
+    /// Adds the coverage of the [`ScanInput::pk_sample`] this scan plans.
+    pub(crate) fn with_pk_sample_stats(mut self, stats: Option<PkSampleStats>) -> Self {
+        self.input.pk_sample_stats = stats;
         self
     }
 

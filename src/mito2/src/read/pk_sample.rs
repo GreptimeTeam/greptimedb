@@ -28,6 +28,7 @@
 //! those two levels prune.
 
 use bytes::Bytes;
+use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilder};
 use datatypes::arrow::array::{Array, BinaryArray, BooleanArray};
 use datatypes::arrow::compute::cast;
 use datatypes::arrow::datatypes::DataType;
@@ -85,12 +86,60 @@ pub(crate) struct PkSamplePlan {
     /// In-range files without primary-key statistics. They cannot be ordered by
     /// key, so the scan keeps them whole (over-sampling) and counts them.
     pub files_without_stats: usize,
-    /// Rows the interval is estimated to cover.
+    /// Rows of the files the interval overlaps, summed by file: a file that only one
+    /// boundary of the interval cuts through still counts whole.
     pub rows_covered: u64,
     /// Rows the request asks for, `num/den` of `rows_total`.
     pub rows_target: u64,
     /// Rows of the files the step function was built from.
     pub rows_total: u64,
+}
+
+/// What a planned primary-key sample covers, in rows, for the scan's metrics.
+///
+/// The figures are the ones [`plan_from_stats`] derived from the manifest row counts
+/// of the files this scan reads, plus the row counts of the in-range files it could
+/// not order. They describe the sample this scan runs, not the fraction of the
+/// request, so `EXPLAIN ANALYZE` reports the coverage the plan actually chose.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct PkSampleStats {
+    /// Rows of the candidate files the sample could order by key, summed from their
+    /// manifest row counts. Files the key predicate excludes are not counted, files
+    /// without encoded-key statistics are counted by `rows_without_stats` instead, and a
+    /// file whose key range overlaps another candidate is still counted although the
+    /// step function the interval is inverted against leaves it out.
+    pub rows_total: u64,
+    /// Upper bound of the rows the sample keeps, at file granularity: the manifest
+    /// `num_rows` of every file whose key range the interval overlaps, summed. A file the
+    /// interval covers only in part still contributes all of its rows, so this is not the
+    /// number of rows the scan returns; the scan node's `output_rows` is.
+    pub rows_covered: u64,
+    /// Rows held by in-range files without encoded-key statistics. Such a file cannot
+    /// be placed on the key axis, so the sample never prunes the file and the interval
+    /// does not account for its rows. Its row groups are still pruned by their own key
+    /// statistics, so this is an upper bound of the rows the file contributes.
+    pub rows_without_stats: u64,
+}
+
+impl PkSampleStats {
+    /// Reports the sample as counters of the scan node, once per sampled scan.
+    ///
+    /// The counters are registered here, so an unsampled scan never shows these names,
+    /// not even with a `0` value. They are figures of the whole scan, not of one
+    /// partition, so the caller reports them from a single partition.
+    pub(crate) fn record(&self, metrics_set: &ExecutionPlanMetricsSet) {
+        MetricBuilder::new(metrics_set)
+            .global_counter("sample_rows_total")
+            .add(self.rows_total as usize);
+        MetricBuilder::new(metrics_set)
+            .global_counter("sample_rows_in_kept_files")
+            .add(self.rows_covered as usize);
+        if self.rows_without_stats > 0 {
+            MetricBuilder::new(metrics_set)
+                .global_counter("sample_rows_unaccounted")
+                .add(self.rows_without_stats as usize);
+        }
+    }
 }
 
 /// Chooses the key interval covering about `num/den` of the rows of `files`.
@@ -187,6 +236,9 @@ pub(crate) fn plan_from_stats(
     let rows_covered = interval
         .as_ref()
         .map(|interval| {
+            // File granularity: the files are the only unit with a row count here, so a
+            // file the interval cuts through contributes all of its rows. That is why the
+            // counter name says "in kept files" instead of "kept".
             stats
                 .iter()
                 .filter(|file| interval.overlaps(&file.min, &file.max))

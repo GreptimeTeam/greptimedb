@@ -18,6 +18,44 @@ use datafusion::physical_plan::metrics::{
     Count, ExecutionPlanMetricsSet, MetricBuilder, ScopedTimerGuard, Time, Timestamp,
 };
 
+// Sample coverage of a region scan that carries a sample.
+//
+// The figures are registered on the scan node's `ExecutionPlanMetricsSet` by the region
+// scanner, and only when the scan actually samples: an unsampled scan never shows these
+// names, not even with a `0` value. `EXPLAIN ANALYZE` therefore reports them with the
+// rest of the node's metrics, in the JSON `metrics` object and in the text
+// `metrics=[...]` list. All of them count rows or series, never blocks.
+//
+// - `sample_rows_total`: rows of the candidate SST files a classic-table primary-key
+//   sample could order by key, summed from their manifest row counts. Its premise: a
+//   candidate is a file the key predicate does not exclude, so files the predicate
+//   prunes contribute no row and are not counted; files without encoded-key statistics
+//   are not counted either (they show up in `sample_rows_unaccounted`); and a file whose
+//   key range overlaps another candidate is still counted although the step function the
+//   interval is chosen from leaves it out. The figure therefore bounds the rows the
+//   interval was inverted against, and can exceed it when candidate ranges overlap.
+// - `sample_rows_in_kept_files`: upper bound of the rows the sample keeps, at file
+//   granularity: the manifest `num_rows` of every file whose key range the interval
+//   overlaps, summed. A file the interval covers only in part still contributes all of
+//   its rows, so whenever a boundary of the interval falls inside a file the figure
+//   over-counts. It never under-counts the rows the sample keeps from the key order,
+//   because every row inside the interval lies in a file the interval overlaps; the rows
+//   of files without key statistics are not part of it and are counted by
+//   `sample_rows_unaccounted` instead. For the exact number of kept rows read the same
+//   node's existing `output_rows`, which with no further filter is the number of rows the
+//   scan returns.
+// - `sample_rows_unaccounted`: rows held by in-range files without encoded-key
+//   statistics. Such a file cannot be placed on the key axis, so the sample never prunes
+//   the file and the interval does not account for its rows; its row groups are still
+//   pruned by their own key statistics, so this too is an upper bound of the rows the
+//   file contributes. Absent when there is no such file.
+// - `sample_series_kept`: metric series the series sample kept, i.e. the series the scan
+//   reads.
+// - `sample_series_total`: metric series the sample decided on, counted before its
+//   `tsid` bound is applied: the series the series-index artifacts hold for the scanned
+//   ranges, or the candidates the scan discovered. Absent when the artifacts cannot
+//   state how many series they hold.
+
 /// This metrics struct is used to record and hold metrics like memory usage
 /// of result batch in [`crate::table::scan::StreamWithMetricWrapper`]
 /// during query execution.
