@@ -256,24 +256,13 @@ struct IncomingRecord {
     ends_package: bool,
 }
 
-/// The last row kept from a series, as the identity a repeated sample would repeat.
+/// The last kept `(primary key, timestamp)`, carried across records so a tie split by a boundary
+/// collapses.
 type LastKeptRow = Option<(Buffer, i64)>;
 
-/// Drops the rows that repeat the `(primary key, timestamp)` an earlier row of the same series
-/// already carries, keeping that earlier row.
-///
-/// An append-mode region keeps every row it was given, so one series can hold several rows for one
-/// timestamp. A raw series chunk cannot carry them: its time axis is strictly increasing, so a
-/// second sample at a kept timestamp is not expressible. The rows of one series reach this stream in
-/// the region's merge order, which orders a tie by descending sequence, so the first row of a tie is
-/// the row written last - the row a deduplicating scan keeps and the row the existing PromQL plan
-/// collapses a tie to. Keeping that row is therefore what makes an append-mode answer agree with the
-/// existing plan's, and it is why the rows are collapsed here instead of further up: every layer
-/// above receives chunks, where the rows of a tie no longer exist separately.
-///
-/// `last_kept` carries the last kept row across the records of this stream, because a batch boundary
-/// can split one tie over two of them. Rows arrive sorted by `(primary key, timestamp)`, so a
-/// repeated row only ever follows the row it repeats.
+/// Drops a row that repeats the `(primary key, timestamp)` an earlier row of its series kept: an
+/// append-mode tie keeps its first row, the one written last, which is also the row the existing
+/// PromQL plan reads.
 fn collapse_repeated_samples(
     record: RecordBatch,
     last_kept: &mut LastKeptRow,
@@ -316,12 +305,11 @@ fn collapse_repeated_samples(
         });
         if !repeated {
             match &mut *last_kept {
-                // A later row of the same series moves the timestamp it reaches.
                 Some((kept, kept_timestamp)) if kept.as_slice() == key => {
                     *kept_timestamp = timestamp;
                 }
-                // A new series never repeats the row before it, whatever its timestamp: one copy of
-                // the key per series is all this state pays.
+                // A new series never repeats the row before it, whatever its timestamp: rows arrive
+                // sorted by `(primary key, timestamp)`, so the single slot suffices.
                 slot => {
                     *slot = Some((Buffer::from(key), timestamp));
                 }
@@ -495,8 +483,7 @@ pub(crate) fn make_stream(
                     break;
                 }
             }
-            // Predicates are applied first, so the row kept here is the first row of the tie the
-            // answer is read from, exactly as the existing PromQL plan reads it.
+            // After the predicates, so the row kept is the first row of the tie that survives them.
             if append_mode {
                 record = match collapse_repeated_samples(record, &mut last_kept) {
                     Ok(record) => record,

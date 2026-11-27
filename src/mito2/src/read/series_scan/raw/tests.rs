@@ -701,12 +701,7 @@ async fn upstream_error_is_terminal_after_yielded_prefix_without_flushing_pendin
     assert!(output.next().await.is_none());
 }
 
-/// An append-mode region keeps both rows of a repeated timestamp, and the raw stream answers the
-/// one sample the chunk can carry by keeping the row the existing plan reads: the first row of the
-/// tie, which the region's merge order puts first because it is the row written last.
-///
-/// The tie is written twice - once inside one record and once across a record boundary - because a
-/// batch boundary is not a series boundary and both splits reach this stream.
+/// A repeated `(key, timestamp)` answers as the row written last, in and across a record.
 #[tokio::test]
 async fn append_mode_collapses_repeated_timestamps_to_the_newest_row() {
     let mut output = convert_append(

@@ -2317,17 +2317,9 @@ async fn native_result_rows(output: Output) -> Vec<(i64, String, f64)> {
     native_rows(output, Some("host")).await
 }
 
-/// An append-mode table keeps every row it is given, and the native route answers it like the
-/// existing plan instead of declining it.
-///
-/// The table below writes one series and timestamp twice: `native_append` holds `(a, 1000)` with
-/// both `1` and `5`. An append-mode region dedups nothing, so the merge order decides what that
-/// timestamp reads as - descending sequence, which puts the row written last first - and both routes
-/// answer `5`. A raw series chunk carries one sample per timestamp, so the region collapses the tie
-/// into that row; the existing plan collapses it in its own manipulation node, keeping the same one.
-///
-/// Every statement is compared row by row against the existing plan, and the bare selector's rows
-/// are spelled out: the tie reads as the last write, at the instant it was written.
+/// An append-mode table writes one series and timestamp twice - `(a, 1000)` as both `1` and `5` -
+/// and both routes answer `5`: the merge order puts the row written last first, so the raw stream
+/// and the existing plan collapse the tie to it.
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_append_mode_table_answers_like_legacy() {
     common_telemetry::init_default_ut_logging();
@@ -12829,14 +12821,10 @@ async fn native_promql_answers_a_selection_that_depends_on_input_order() {
 
 /// A `limitk` over more than one input answers natively, keeping `k` series the data holds.
 ///
-/// `limitk` keeps the first `k` series of each group *in input order*, and a node over more than one
-/// input reads its inputs in whichever order the gather finishes them. Prometheus defines the
-/// operation as keeping *any* `k` series of a group, so which ones that gather hands over first is a
-/// freedom the statement already grants: the route answers the shape rather than refusing the tree,
-/// and the three facts asserted below are the ones the definition promises - the statement answers,
-/// it answers `k` series, and every series it answers carries a value the data holds. Which two of
-/// the three hosts survive is deliberately not asserted, and the answer is deliberately not compared
-/// against the existing plan's: that choice is the engine's, here as in Prometheus.
+/// A node over more than one input reads its inputs in the order the gather finishes them, and
+/// Prometheus defines `limitk` as keeping *any* `k` series of a group, so which ones arrive first
+/// is a freedom the statement already grants. Which two of the three hosts survive is therefore not
+/// asserted, and the answer is not compared against the plan's: that choice is the engine's.
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_answers_a_limitk_over_more_than_one_input() {
     common_telemetry::init_default_ut_logging();
@@ -12870,28 +12858,24 @@ async fn native_promql_answers_a_limitk_over_more_than_one_input() {
     .await;
 
     // The ranking reads the sum of two tables, so the tree holds two inputs and the `limitk` above
-    // them is exactly the shape the order of its input would decide for. It answers natively rather
-    // than falling back: the existing planner has no kernel for the operation at all, so a refusal
-    // here would not be a plan the statement already had but an error.
+    // them is the shape the order would decide for. It answers natively: the existing planner has
+    // no kernel for `limitk`, so a refusal would be an error rather than a plan it already had.
     let query = "limitk(2, native_limitk_left + on(host) native_limitk_right)";
     let sql = format!("TQL EVAL (0, 0, '1s') {query}");
     observer.clear();
-    // Reading the answer is the "no error" assertion: `native_tql_output` unwraps the statement's
-    // output, so a statement that reported one would fail the test here instead of answering rows.
+    // Reading the answer is the "no error" assertion: `native_tql_output` unwraps the output.
     let rows = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
     assert_eq!(
         observer.take().name(),
         "FusedSeriesExec",
         "{query}: the route answers it natively"
     );
-    // Three hosts hold a sample and `k` is two, so the answer is `k` series rather than the input.
     assert_eq!(
         rows.len(),
         2,
         "{query}: `limitk` keeps `k` series, not the whole input: {rows:?}"
     );
-    // Every series it answers is one the data holds: each value is the two tables' sum at that host,
-    // which the same binary computes without the ranking over it.
+    // Every series it answers is one the unranked sum holds, computed without the ranking over it.
     let unranked = "TQL EVAL (0, 0, '1s') native_limitk_left + on(host) native_limitk_right";
     let all = native_result_rows(native_tql_output(&instance, unranked, true).await).await;
     assert_eq!(all.len(), 3, "`{unranked}`: every host holds a sample");
@@ -13609,10 +13593,8 @@ async fn native_promql_declines_a_cast_over_an_integer_fold() {
     // The integer sum is 1, and the cast is 1.0 whichever side of it the answer is read from: the
     // existing plan sums the two `BIGINT`s exactly, so that is the answer these shapes keep.
     //
-    // A wrapper does not make the fold go away: `abs` keeps the type it is given, so `abs` of the
-    // integer sum is that integer, and `ceil` casts the answer of the aggregate rather than the
-    // samples it folded. The walk that decides this therefore descends into a call's arguments; a
-    // shape it stopped at would be admitted and the raw scan would answer the rounded sum.
+    // A wrapper does not make the fold go away: `abs` keeps the type it is given and `ceil` casts
+    // the answer of the aggregate, so the walk has to descend into a call's arguments.
     for (query, expected) in [
         (format!("sum({TABLE}) * 1"), 1.0),
         (format!("sum({TABLE}) + 1"), 2.0),
@@ -13620,8 +13602,7 @@ async fn native_promql_declines_a_cast_over_an_integer_fold() {
         (format!("abs(sum({TABLE})) * 1"), 1.0),
         (format!("abs(sum({TABLE})) + 1"), 2.0),
         (format!("abs(abs(sum({TABLE}))) * 1"), 1.0),
-        // A division over a call: `ceil` rounds the answer of the aggregate rather than the samples it
-        // folded, and the division above it casts that rounded sum.
+        // A division over a call: `ceil` casts the aggregate's answer, not the samples it folded.
         (format!("ceil(sum({TABLE})) / 2"), 0.5),
     ] {
         let sql = format!("TQL EVAL (0, 0, '1m') {query}");
@@ -13644,9 +13625,8 @@ async fn native_promql_declines_a_cast_over_an_integer_fold() {
         );
     }
 
-    // `clamp_max` is a wrapper as well, and the existing plan has no kernel for it: the statement is
-    // the existing plan's, whatever that plan answers, so the route must not replace it with one of
-    // its own. The fold is the first argument, which the walk has to reach.
+    // `clamp_max` wraps the fold in its first argument, and the existing plan has no kernel for it:
+    // the statement stays the existing plan's rather than becoming one of the route's own.
     let sql = format!("TQL EVAL (0, 0, '1m') clamp_max(sum({TABLE}), 10) * 1");
     observer.clear();
     native_run_ignoring_the_answer(&instance, &sql, true).await;
@@ -13656,10 +13636,9 @@ async fn native_promql_declines_a_cast_over_an_integer_fold() {
          integer fold"
     );
 
-    // The inner fold is a float fold here, so the outer cast reaches values that were floats already:
-    // the route takes the statement and answers the existing plan's rows. A wrapper around such a
-    // fold is admitted for the same reason, which is what separates it from the wrapped integer fold
-    // above.
+    // The inner fold is a float fold, so the outer cast reaches values that were floats already:
+    // the route takes the statement. A wrapper around such a fold is admitted for the same reason,
+    // which separates it from the wrapped integer fold above.
     for query in [
         format!("sum(rate({TABLE}[5m]))"),
         format!("abs(sum(rate({TABLE}[5m]))) * 1"),

@@ -4243,12 +4243,8 @@ async fn native_fused_non_millisecond_time_index_falls_back() {
     );
 }
 
-/// An append-mode table is served by the fused node, not handed back to the existing plan.
-///
-/// The table keeps one row per write, so one primary key can hold two rows for one timestamp. The
-/// region's raw series stream collapses such a tie into the row the existing plan reads - the last
-/// one written - so the fused answer is the existing plan's answer and declining the route would
-/// only cost the table its fused plan.
+/// An append-mode table is served by the fused node, not handed back to the existing plan: its raw
+/// series stream collapses a repeated timestamp to the row the existing plan reads, so both agree.
 #[tokio::test]
 async fn native_fused_append_mode_table_still_plans_fused_series() {
     let table_provider = build_test_table_provider_with_options(
@@ -8777,17 +8773,14 @@ async fn native_fused_quantile_parameter_over_a_second_table() {
 /// An argument that ranks its series in input order plans natively.
 ///
 /// `scalar()` hands the fold one value per grid point, so the `limitk` inside the argument ranks the
-/// argument's own source, and a tree over more than one input reads its inputs in whichever order the
-/// gather finishes them. Prometheus defines `limitk` as keeping *any* `k` series of a group, so which
-/// ones that gather hands over first is a freedom the statement already grants: the ranking's answer
-/// is one Prometheus accepts whichever series it names, and a tree holding one is answered here like
-/// any other. The gate that used to refuse such a tree read the fold's argument as well as the vector
-/// it folds, so the order-independent argument below pins that the walk is gone rather than bypassed.
+/// argument's own source, and a tree over more than one input reads its inputs in whichever order
+/// the gather finishes them. That freedom is Prometheus's, not the schedule's: `limitk` keeps
+/// *any* `k` series of a group, and the order-independent argument below pins that the old gate is
+/// gone rather than bypassed.
 ///
-/// The plan is asserted on the native attempt alone rather than on the plan the statement gets: the
-/// existing planner binds a `quantile` argument only as a literal and answers a per-point one with
-/// `Invalid function argument for quantile`, so these trees have no other route - the statement is
-/// answered natively or not at all.
+/// The plan is asserted on the native attempt alone: the existing planner binds a `quantile`
+/// argument only as a literal, so these trees have no other route - the statement is answered
+/// natively or not at all.
 #[tokio::test]
 async fn native_fused_plans_an_order_dependent_quantile_argument() {
     let state = build_query_engine_state();

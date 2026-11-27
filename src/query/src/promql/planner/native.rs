@@ -433,11 +433,8 @@ impl PromPlanner {
         {
             return Ok(declined("engine_without_raw_series_scanner"));
         }
-        // The region's raw-series preflight refuses a time index that is not a millisecond
-        // timestamp, and the physical layer turns that refusal into an error, so decline this route
-        // here instead. An append-mode table is not refused: the region keeps one row per write,
-        // and its raw series stream collapses a repeated timestamp into the sample the existing
-        // plan reads, so this route answers it like any other table.
+        // The region's raw-series preflight refuses a non-millisecond time index, and the physical
+        // layer turns that refusal into an error, so decline this route here instead.
         let time_index_type = table_meta
             .schema
             .timestamp_column()
@@ -1744,12 +1741,11 @@ impl PromPlanner {
         {
             return Ok(declined("histogram_aggregate_needs_state_this_route_lacks"));
         }
-        // A tree holding a selection of its input's series - `limitk` - is answered here even though
-        // the node above more than one input reads its inputs' partitions in the order they became
-        // ready: Prometheus defines `limitk` as keeping *any* `k` series of a group, so which ones
-        // arrive first is a freedom the statement already grants. No other operation is left to that
-        // order - a shape whose own selection or fold would be is refused where it is bound, by
-        // [`native_tree_supported`] or by its node's `validate`.
+        // A tree over more than one input reads its inputs' partitions in the order they became
+        // ready, but Prometheus defines `limitk` as keeping *any* `k` series of a group, so which
+        // ones arrive first is a freedom the statement already grants. No other operation is left
+        // to that order: a shape whose own selection or fold would be is refused where it is
+        // bound, by `native_tree_supported` or by its node's `validate`.
         //
         // The native output schema can name only compiled value fields, the time index and the tag
         // columns a source declares, and `source_tags` declares the metric name of every occurrence of
@@ -3001,11 +2997,9 @@ fn published_values(statement: &PromExpr, field_type: &ArrowDataType) -> Publish
 /// what that bound admits: the fold it applies is already a float fold, which is
 /// [`publishes_float_values`] of the aggregate itself.
 ///
-/// The walk descends through every node that hands its child's answer on unchanged, because a fold one
-/// wrapper down is the same fold to the cast above it: `abs` keeps the type it is given, so
-/// `abs(sum(integer_field)) * 1` casts the integer sum the existing plan computed, exactly as
-/// `sum(integer_field) * 1` does. A node this walk does not know is a decline, not an admit, which is
-/// why the arms are written out rather than reached through a catch-all.
+/// The walk descends through every node that hands its child's answer on unchanged: a fold one
+/// wrapper down is the same fold to the cast above it, since `abs` keeps the type it is given. A
+/// node the walk does not know is a decline, not an admit, hence the arms rather than a catch-all.
 ///
 /// A bare selector and a literal are the samples themselves, so the cast reaches the same sample the
 /// scan casts and no fold happens in between.
@@ -3017,18 +3011,14 @@ fn folds_before_cast(statement: &PromExpr, field_type: &ArrowDataType) -> bool {
             folds_before_cast(&binary.lhs, field_type) || folds_before_cast(&binary.rhs, field_type)
         }
         PromExpr::Unary(unary) => folds_before_cast(&unary.expr, field_type),
-        // A call hands on what its arguments answer: the math functions keep the type they are given, so
-        // the answer of `abs` over an integer fold is that integer, and a range function casts the
-        // window's values itself rather than a fold under it. So the arguments decide - `rate(m[5m])`
-        // reads a selector and folds nothing, while `abs(sum(integer_field))` folds one call deep, and
-        // `clamp_max(sum(integer_field), 10)` folds in its first argument.
+        // A call hands on what its arguments answer: the math functions keep the type they are
+        // given, and a range function casts the window's values itself, so `abs(sum(x))` folds one
+        // call deep while `rate(m[5m])` folds nothing.
         PromExpr::Call(call) => call
             .args
             .args
             .iter()
             .any(|arg| folds_before_cast(arg, field_type)),
-        // An extension node is how this crate wraps a statement for `EXPLAIN`/`ANALYZE`, and it hands
-        // on the answer of the expression it wraps: its children decide, exactly as a call's do.
         PromExpr::Extension(extension) => extension
             .expr
             .children()
@@ -3038,10 +3028,8 @@ fn folds_before_cast(statement: &PromExpr, field_type: &ArrowDataType) -> bool {
         // `Int64`, and the ranking aggregates report the samples they were given. None of them is a
         // `Float64`, so the cast above one of them is the late cast this refuses.
         PromExpr::Aggregate(_) => !publishes_float_values(statement, field_type),
-        // A selector is the samples themselves, and a matrix selector wraps a vector selector rather
-        // than an expression, so neither folds anything.
+        // A matrix selector wraps a vector selector, not an expression: neither folds anything.
         PromExpr::VectorSelector(_) | PromExpr::MatrixSelector(_) => false,
-        // A literal is one value the cast can reach.
         PromExpr::NumberLiteral(_) | PromExpr::StringLiteral(_) => false,
     }
 }
