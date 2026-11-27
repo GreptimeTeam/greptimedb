@@ -13397,6 +13397,15 @@ async fn native_promql_casts_integer_samples_before_folding() {
     )
     .await;
 
+    // Without this the data might not cross 2^53, and both routes would answer the same sum.
+    let sql = format!("TQL EVAL (0, 0, '1m') sum({TABLE})");
+    let legacy = native_answer(native_tql_output(&instance, &sql, false).await).await;
+    assert_eq!(
+        legacy.rows,
+        vec![(0, Default::default(), vec!["1".to_string()])],
+        "the existing plan sums the `BIGINT`s exactly"
+    );
+
     for (query, expected) in [
         (format!("sum({TABLE})"), 0.0),
         (format!("sum({TABLE}) + 1"), 1.0),
