@@ -12220,8 +12220,7 @@ async fn cte_native_two_fields_keep_their_columns() {
     )
     .await;
 
-    let statement =
-        "WITH tql AS (TQL EVAL (0, 3, '1s') rate(cte_two_fields[2s])) SELECT * FROM tql ORDER BY ts";
+    let statement = "WITH tql AS (TQL EVAL (0, 3, '1s') rate(cte_two_fields[2s])) SELECT * FROM tql ORDER BY ts";
     let legacy = native_output_text(native_tql_output(&instance, statement, false).await).await;
     observer.clear();
     let native = native_output_text(native_tql_output(&instance, statement, true).await).await;
