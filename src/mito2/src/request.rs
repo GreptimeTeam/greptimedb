@@ -1085,6 +1085,7 @@ impl WorkerRequest {
             input_regions,
             region_mapping,
             new_partition_exprs,
+            validate_only,
         }: store_api::region_engine::RemapManifestsRequest,
     ) -> Result<(WorkerRequest, Receiver<Result<HashMap<RegionId, String>>>)> {
         let (sender, receiver) = oneshot::channel();
@@ -1105,6 +1106,7 @@ impl WorkerRequest {
             input_regions,
             region_mapping,
             new_partition_exprs,
+            validate_only,
             sender,
         };
 
@@ -1583,7 +1585,15 @@ impl RegionEditRequest {
     }
 }
 
-/// Notifies the regin the result of editing region.
+/// Whether the worker needs to install the edit in the in-memory version.
+#[derive(Debug)]
+pub(crate) enum RegionEditOutcome {
+    Written,
+    #[cfg(feature = "enterprise")]
+    AlreadyApplied,
+}
+
+/// Notifies the region of the result of editing its manifest.
 #[derive(Debug)]
 pub(crate) struct RegionEditResult {
     /// Region id.
@@ -1595,7 +1605,7 @@ pub(crate) struct RegionEditResult {
     /// Region edit to apply.
     pub(crate) edit: RegionEdit,
     /// Result from the manifest manager.
-    pub(crate) result: std::result::Result<(), Arc<Error>>,
+    pub(crate) result: std::result::Result<RegionEditOutcome, Arc<Error>>,
     /// Whether region state need to be set to Writable after handling this request.
     pub(crate) update_region_state: bool,
     /// The region is in staging mode before handling this request.
@@ -1648,6 +1658,8 @@ pub(crate) struct RemapManifestsRequest {
     pub(crate) region_mapping: HashMap<RegionId, Vec<RegionId>>,
     /// New partition expressions for the new regions.
     pub(crate) new_partition_exprs: HashMap<RegionId, PartitionExpr>,
+    /// Only verify the ownership rule of [`Self::region_id`] instead of remapping.
+    pub(crate) validate_only: bool,
     /// Sender for the result of the remap operation.
     ///
     /// The result is a map from region IDs to their corresponding staging manifest paths.

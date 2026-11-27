@@ -35,12 +35,14 @@ impl InstructionHandler for RemapManifestHandler {
             input_regions,
             region_mapping,
             new_partition_exprs,
+            validate_only,
         } = request;
         info!(
-            "Datanode received remap manifest request, region_id: {}, input_regions: {}, target_regions: {}",
+            "Datanode received remap manifest request, region_id: {}, input_regions: {}, target_regions: {}, validate_only: {}",
             region_id,
             input_regions.len(),
-            new_partition_exprs.len()
+            new_partition_exprs.len(),
+            validate_only
         );
         let Some(leader) = ctx.region_server.is_region_leader(region_id) else {
             warn!("Region: {} is not found", region_id);
@@ -65,6 +67,7 @@ impl InstructionHandler for RemapManifestHandler {
         let reply = match ctx
             .region_server
             .remap_manifests(RemapManifestsRequest {
+                validate_only,
                 region_id,
                 input_regions,
                 region_mapping,
@@ -131,6 +134,7 @@ mod tests {
             .handle(
                 &handler_context,
                 RemapManifest {
+                    validate_only: false,
                     region_id,
                     input_regions: vec![],
                     region_mapping: HashMap::new(),
@@ -161,6 +165,7 @@ mod tests {
             .handle(
                 &handler_context,
                 RemapManifest {
+                    validate_only: false,
                     region_id,
                     input_regions: vec![],
                     region_mapping: HashMap::new(),
@@ -225,6 +230,7 @@ mod tests {
             .handle(
                 &handler_context,
                 RemapManifest {
+                    validate_only: false,
                     region_id,
                     input_regions: vec![region_id, region_id2],
                     region_mapping: HashMap::from([
@@ -249,6 +255,7 @@ mod tests {
             .handle(
                 &handler_context,
                 RemapManifest {
+                    validate_only: false,
                     region_id,
                     input_regions: vec![region_id],
                     region_mapping: HashMap::from([
