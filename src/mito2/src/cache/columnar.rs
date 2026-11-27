@@ -314,11 +314,10 @@ impl PartArea {
         &self,
         ranges: &[std::ops::Range<u64>],
     ) -> Result<Option<(Vec<bytes::Bytes>, common_cache::paged::PageFetchStats)>> {
-        let Some((context, pages)) = self
-            .cache
-            .as_ref()
-            .and_then(|c| Some((c, c.memory.as_ref()?.page_cache.as_ref()?)))
-        else {
+        let Some((context, manager, pages)) = self.cache.as_ref().and_then(|c| {
+            let manager = c.memory.as_ref()?;
+            Some((c, manager, manager.page_cache.as_ref()?))
+        }) else {
             return Ok(None);
         };
         let relative = ranges
@@ -344,6 +343,7 @@ impl PartArea {
         }
         pages
             .fetch_native(
+                manager.native_admissions(),
                 context.namespace,
                 self.path.clone(),
                 self.bounds.clone(),
@@ -451,6 +451,7 @@ pub(crate) async fn load<T: Send + Sync + 'static>(
     {
         let admitted = decoded
             .get_or_insert(
+                manager.native_admissions(),
                 key,
                 MetaValue::Native(DecodedValue {
                     value: value.clone(),

@@ -14,12 +14,66 @@
 
 use std::borrow::Borrow;
 use std::hash::Hash;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures::FutureExt;
+use futures::future::BoxFuture;
+use tokio::sync::{Mutex, Notify, mpsc};
 
 use crate::metrics::{CacheMetrics, CacheSizeMetric, CacheSizeRegistration};
+
+/// Bounded workers shared by caches that admit independently loaded values.
+pub struct AdmissionPool {
+    jobs: mpsc::Sender<BoxFuture<'static, ()>>,
+    space: Arc<Notify>,
+}
+
+impl AdmissionPool {
+    /// Starts a fixed number of workers and buffers up to one job per worker.
+    /// Dropping the pool closes the queue and lets the workers exit.
+    pub fn new(
+        workers: NonZeroUsize,
+        mut spawn: impl FnMut(BoxFuture<'static, ()>) -> tokio::task::JoinHandle<()>,
+    ) -> Self {
+        let (jobs, receiver) = mpsc::channel::<BoxFuture<'static, ()>>(workers.get());
+        let receiver = Arc::new(Mutex::new(receiver));
+        let space = Arc::new(Notify::new());
+        for _ in 0..workers.get() {
+            let space = space.clone();
+            let receiver = receiver.clone();
+            spawn(Box::pin(async move {
+                loop {
+                    let job = receiver.lock().await.recv().await;
+                    let Some(job) = job else { break };
+                    space.notify_waiters();
+                    job.await;
+                }
+            }));
+        }
+        Self { jobs, space }
+    }
+
+    async fn reserve(&self) -> Option<mpsc::Permit<'_, BoxFuture<'static, ()>>> {
+        loop {
+            // Subscribe before checking capacity so a concurrent dequeue wakes us.
+            // An async channel reservation could grant the only free slot to a
+            // paused reader. Reserve only in the poll that actually submits the job.
+            let space = self.space.notified();
+            match self.jobs.try_reserve() {
+                Ok(slot) => return Some(slot),
+                Err(mpsc::error::TrySendError::Closed(_)) => return None,
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    tokio::select! {
+                        _ = space => (),
+                        _ = self.jobs.closed() => return None,
+                    }
+                }
+            }
+        }
+    }
+}
 
 /// Reason for releasing an entry from the cache.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,20 +220,17 @@ where
     }
 
     /// Atomically admits an already-loaded value or returns the resident one.
-    /// Pending admission runs on the current Tokio runtime so other readers
-    /// can finish while this caller is paused.
-    pub async fn get_or_insert(&self, key: K, value: V) -> V {
+    /// Only pool workers enter Moka admission, so a backpressured reader never
+    /// holds a per-key waiter while waiting for queue space or its result.
+    pub async fn get_or_insert(&self, pool: &AdmissionPool, key: K, value: V) -> V {
+        let Some(slot) = pool.reserve().await else {
+            // The worker runtime has shut down. The caller already has the value.
+            return value;
+        };
         let cache = self.inner.clone();
-        let mut admission =
-            Box::pin(async move { cache.get_with(key, std::future::ready(value)).await });
-        if let Some(resident) = admission.as_mut().now_or_never() {
-            return resident;
-        }
-
-        // Moka can yield while holding its per-key waiter. Drive the rest of
-        // admission even if downstream stops polling this reader.
-        let (task, result) = admission.remote_handle();
-        tokio::spawn(task);
+        let (job, result) =
+            async move { cache.get_with(key, std::future::ready(value)).await }.remote_handle();
+        slot.send(job.boxed());
         result.await
     }
 
@@ -234,8 +285,6 @@ where
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use tokio::sync::Notify;
-
     use super::*;
 
     // This is also a compile-time contract for generic callers crossing async-trait boundaries.
@@ -262,20 +311,34 @@ mod tests {
         assert_eq!(future.await.as_deref().map(String::as_str), Some("value"));
     }
 
-    #[tokio::test]
-    async fn paused_admission_does_not_block_same_key_caller() {
-        let release = Arc::new(Notify::new());
-        let gate = release.clone();
+    fn gated_admission_cache(
+        gate: Arc<Notify>,
+        started: mpsc::UnboundedSender<&'static str>,
+    ) -> Cache<&'static str, Arc<usize>> {
         let inner = moka::future::Cache::builder()
             .max_capacity(1024)
+            .weigher(move |key: &&'static str, value: &Arc<usize>| {
+                if **value != 0 {
+                    started.send(*key).unwrap();
+                }
+                1
+            })
             .async_eviction_listener(move |_, _, _| gate.clone().notified_owned().boxed())
             .build();
-        let cache = Cache {
+        Cache {
             inner,
             capacity: 1024,
             size_registration: None,
             metrics: None,
-        };
+        }
+    }
+
+    #[tokio::test]
+    async fn paused_admission_does_not_block_same_key_caller() {
+        let pool = AdmissionPool::new(NonZeroUsize::MIN, tokio::spawn);
+        let (started, mut admissions) = mpsc::unbounded_channel();
+        let release = Arc::new(Notify::new());
+        let cache = gated_admission_cache(release.clone(), started);
         cache.insert("key", Arc::new(0)).await;
 
         // Invalidation removes the entry but holds Moka's per-key write lock
@@ -284,11 +347,17 @@ mod tests {
         assert!(futures::poll!(&mut removal).is_pending());
         assert!(cache.get("key").await.is_none());
         let value = Arc::new(1);
-        let mut first = Box::pin(cache.get_or_insert("key", value.clone()));
+        let mut first = Box::pin(cache.get_or_insert(&pool, "key", value.clone()));
         assert!(futures::poll!(&mut first).is_pending());
-        let mut second = Box::pin(cache.get_or_insert("key", Arc::new(2)));
+        tokio::time::timeout(Duration::from_secs(5), admissions.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut second = Box::pin(cache.get_or_insert(&pool, "key", Arc::new(2)));
         assert!(futures::poll!(&mut second).is_pending());
 
+        let mut parked = Box::pin(cache.get_or_insert(&pool, "parked", Arc::new(3)));
+        assert!(futures::poll!(&mut parked).is_pending());
         release.notify_one();
         removal.await;
         // Poll only the second caller until it has the first caller's value.
@@ -296,8 +365,61 @@ mod tests {
             .await
             .unwrap();
         assert!(Arc::ptr_eq(&value, &other));
+        // The parked queue sender must not own the next free slot.
+        let later = tokio::time::timeout(
+            Duration::from_secs(5),
+            cache.get_or_insert(&pool, "later", Arc::new(4)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(*later, 4);
+        drop(parked);
+        assert!(cache.get("parked").await.is_none());
         assert!(Arc::ptr_eq(&value, &first.await));
         assert!(Arc::ptr_eq(&value, &cache.get("key").await.unwrap()));
+    }
+
+    #[tokio::test]
+    async fn admission_pool_bounds_concurrent_keys_and_queued_jobs() {
+        let pool = AdmissionPool::new(NonZeroUsize::new(2).unwrap(), tokio::spawn);
+        let release = Arc::new(Notify::new());
+        let (started, mut admissions) = mpsc::unbounded_channel();
+        let cache = gated_admission_cache(release.clone(), started);
+        let keys = ["a", "b", "c", "d", "e", "f"];
+        for key in keys {
+            cache.insert(key, Arc::new(0)).await;
+        }
+        // Hold each key's write lock so workers cannot finish their admissions.
+        let mut removals = Box::pin(futures::future::join_all(
+            keys.map(|key| cache.invalidate(key)),
+        ));
+        assert!(futures::poll!(&mut removals).is_pending());
+        let mut loads = Box::pin(futures::future::join_all(
+            keys.map(|key| cache.get_or_insert(&pool, key, Arc::new(1))),
+        ));
+        assert!(futures::poll!(&mut loads).is_pending());
+        for _ in 0..2 {
+            tokio::time::timeout(Duration::from_secs(5), admissions.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        // Two jobs are running, two more fit in the queue, and the rest wait
+        // outside Moka. Poll all callers again to fill the vacated slots.
+        assert!(futures::poll!(&mut loads).is_pending());
+        assert_eq!(pool.jobs.capacity(), 0);
+        assert!(admissions.try_recv().is_err());
+        let mut cancelled = Box::pin(cache.get_or_insert(&pool, "cancelled", Arc::new(1)));
+        assert!(futures::poll!(&mut cancelled).is_pending());
+        drop(cancelled);
+
+        release.notify_waiters();
+        removals.await;
+        let values = tokio::time::timeout(Duration::from_secs(5), loads)
+            .await
+            .unwrap();
+        assert_eq!(values, vec![Arc::new(1); keys.len()]);
+        assert!(cache.get("cancelled").await.is_none());
     }
 
     #[tokio::test]

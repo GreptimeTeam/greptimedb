@@ -22,5 +22,5 @@ pub mod metrics;
 pub mod page;
 pub mod paged;
 
-pub use cache::{Cache, RemovalCause};
+pub use cache::{AdmissionPool, Cache, RemovalCause};
 pub use sync_cache::SyncCache;

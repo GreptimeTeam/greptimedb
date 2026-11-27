@@ -26,7 +26,8 @@ pub(crate) mod range_cache;
 pub(crate) mod test_util;
 pub(crate) mod write_cache;
 
-use std::sync::{Arc, Weak};
+use std::num::NonZeroUsize;
+use std::sync::{Arc, OnceLock, Weak};
 use std::{io, mem};
 
 use bytes::Bytes;
@@ -1125,6 +1126,8 @@ pub struct CacheManager {
     disable_sst_meta_cache_on_write: bool,
     /// Cache for decoded SST metadata, used only as an acceleration tier.
     sst_decoded_meta_cache: Option<Arc<SstDecodedMetaCache>>,
+    /// Shared by decoded metadata and page admissions across native readers.
+    native_admissions: OnceLock<common_cache::AdmissionPool>,
     /// Native readers load independently before sharing a completed entry.
     columnar_load_metrics: Option<Arc<common_cache::metrics::CacheMetrics>>,
     /// Cache for vectors.
@@ -1155,6 +1158,12 @@ pub struct CacheManager {
 pub type CacheManagerRef = Arc<CacheManager>;
 
 impl CacheManager {
+    fn native_admissions(&self) -> &common_cache::AdmissionPool {
+        const WORKERS: NonZeroUsize = NonZeroUsize::new(4).unwrap();
+        self.native_admissions
+            .get_or_init(|| common_cache::AdmissionPool::new(WORKERS, common_runtime::spawn_global))
+    }
+
     /// Returns a builder to build the cache.
     pub fn builder() -> CacheManagerBuilder {
         CacheManagerBuilder::default()
@@ -1799,6 +1808,7 @@ impl CacheManagerBuilder {
             _sst_meta_size_registration: sst_meta_size_registration,
             disable_sst_meta_cache_on_write: self.disable_sst_meta_cache_on_write,
             sst_decoded_meta_cache: sst_decoded_meta_cache.map(Arc::new),
+            native_admissions: OnceLock::new(),
             columnar_load_metrics,
             vector_cache,
             page_cache,

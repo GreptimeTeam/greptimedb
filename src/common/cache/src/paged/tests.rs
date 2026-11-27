@@ -137,16 +137,17 @@ async fn start_read<F: Future>(mut future: Pin<&mut F>, reader: &Reader, count: 
 #[tokio::test]
 async fn independent_page_miss_completes_while_another_stream_is_paused() {
     let (cache, _) = cache();
+    let pool = AdmissionPool::new(std::num::NonZeroUsize::MIN, tokio::spawn);
     let first = Reader::gated();
     let ranges = [2..6, 4..5];
-    let mut paused = Box::pin(cache.fetch_independently(1, 10, &ranges, &first));
+    let mut paused = Box::pin(cache.fetch_independently(&pool, 1, 10, &ranges, &first));
     start_read(paused.as_mut(), &first, 2).await;
     first.release();
     // Deliver the wake but keep the owner unpolled, as a backpressured query would.
     let second = Reader::default();
     let (loaded, stats) = tokio::time::timeout(
         Duration::from_secs(5),
-        cache.fetch_independently(1, 10, &ranges, &second),
+        cache.fetch_independently(&pool, 1, 10, &ranges, &second),
     )
     .await
     .unwrap()
@@ -154,7 +155,7 @@ async fn independent_page_miss_completes_while_another_stream_is_paused() {
     assert_eq!(stats.independently_loaded_bytes, 8);
     drop(paused);
     let (warm, stats) = cache
-        .fetch_independently(1, 10, &ranges, &second)
+        .fetch_independently(&pool, 1, 10, &ranges, &second)
         .await
         .unwrap();
     assert_eq!(loaded, warm);

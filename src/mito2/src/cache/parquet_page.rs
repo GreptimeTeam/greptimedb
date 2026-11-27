@@ -158,6 +158,7 @@ impl ParquetPageCache {
 
     pub(crate) async fn fetch_native<R: RangeReader>(
         &self,
+        admissions: &common_cache::AdmissionPool,
         namespace: store_api::storage::FileId,
         path: Arc<str>,
         area: Range<u64>,
@@ -173,7 +174,7 @@ impl ParquetPageCache {
         };
         let result = self
             .cache
-            .fetch_independently(key, size, ranges, reader)
+            .fetch_independently(admissions, key, size, ranges, reader)
             .await?;
         metrics::cache_page_fetch_metrics("page", &result.1);
         Ok(result)
